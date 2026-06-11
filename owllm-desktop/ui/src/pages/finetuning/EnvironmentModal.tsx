@@ -13,6 +13,7 @@
 // and reopening the dialog reconnects to the live progress instead of
 // snapping back to an Install button.
 import React from "react";
+import { invoke } from "@tauri-apps/api/core";
 import {
   EnvProfile,
   EnvProfileState,
@@ -44,6 +45,12 @@ export default function EnvironmentModal({
   const [profiles, setProfiles] = React.useState<EnvProfile[]>([]);
   const [status, setStatus] = React.useState<Record<string, EnvProfileState | null>>({});
   const [openLog, setOpenLog] = React.useState<string | null>(null);
+  // WSL readiness — environments build inside WSL, so if it has no Linux user
+  // (root-only, the "closed the first-run window" case) or isn't installed,
+  // we surface a banner that routes to the guided setup instead of letting the
+  // install fail or silently land under /root.
+  const [wslStage, setWslStage] = React.useState<string | null>(null);
+  const [wslDetail, setWslDetail] = React.useState<string>("");
   // Re-render whenever the module-level install store changes (it owns the
   // streaming install so it survives navigation away from this page).
   const [, force] = React.useReducer((x: number) => x + 1, 0);
@@ -61,6 +68,13 @@ export default function EnvironmentModal({
   const refreshAll = React.useCallback(async (ps: EnvProfile[]) => {
     await Promise.all(ps.map((p) => refreshOne(p.name)));
   }, [refreshOne]);
+
+  React.useEffect(() => {
+    if (!open) return;
+    invoke<{ stage: string; detail: string }>("wsl_setup_status")
+      .then((s) => { setWslStage(s.stage); setWslDetail(s.detail); })
+      .catch(() => { setWslStage(null); });
+  }, [open]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -164,6 +178,36 @@ export default function EnvironmentModal({
               </span>
             )}
           </div>
+
+          {/* WSL not fully set up (commonly: installed but no Linux user yet,
+              because the first-run window was closed). Environments build
+              inside WSL, so route the user to the guided setup first. */}
+          {wslStage && wslStage !== "ready" && wslStage !== "unsupported" && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+              background: "rgba(255,179,0,0.10)", border: "1px solid rgba(255,179,0,0.45)",
+              borderRadius: 10, padding: "10px 12px",
+            }}>
+              <div style={{ flex: 1, minWidth: 220, color: "#ffcf99", fontSize: 12.5, lineHeight: 1.5 }}>
+                <b style={{ color: "#ffb74d" }}>WSL needs a quick setup first.</b>{" "}
+                {wslStage === "needsUser"
+                  ? "Ubuntu is installed but has no Linux user yet — create your account so environments install under your home (not root)."
+                  : (wslDetail || "Finish WSL setup before installing an environment.")}
+              </div>
+              <button
+                onClick={() => {
+                  onClose();
+                  window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "home" } }));
+                  setTimeout(() => window.dispatchEvent(new CustomEvent("owllm:open-wsl-setup")), 200);
+                }}
+                style={{
+                  padding: "8px 14px", borderRadius: 9, border: "none",
+                  background: "linear-gradient(180deg, #ffb74d, #f59e0b)",
+                  color: "#241a05", fontSize: 12.5, fontWeight: 800, cursor: "pointer",
+                }}
+              >🐧 Set up WSL</button>
+            </div>
+          )}
 
           {/* Until the first status probe resolves, the cards below show
               ghosted buttons + a "checking…" pill so we never flash a wrong

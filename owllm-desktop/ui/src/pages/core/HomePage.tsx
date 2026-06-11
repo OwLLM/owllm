@@ -493,8 +493,15 @@ export default function HomePage() {
   const ready = getCachedReadiness();
   const readyLoading = isReadinessLoading();
   const refreshReady = () => { fetchReadiness(true); };
-  // Guided WSL setup modal — opened from the WSL row when it's not ready.
+  // Guided WSL setup modal — opened from the WSL row when it's not ready,
+  // and from other pages (e.g. the Environment popup) via the
+  // `owllm:open-wsl-setup` event after they navigate Home.
   const [wslSetupOpen, setWslSetupOpen] = useState(false);
+  useEffect(() => {
+    const open = () => setWslSetupOpen(true);
+    window.addEventListener("owllm:open-wsl-setup", open);
+    return () => window.removeEventListener("owllm:open-wsl-setup", open);
+  }, []);
   // Build the four display rows from the live signal. While loading
   // (ready === null) show neutral "Checking…" rows.
   const reqRows: StatusRow[] = ready

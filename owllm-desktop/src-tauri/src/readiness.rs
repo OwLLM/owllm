@@ -18,7 +18,7 @@
 
 use serde::Serialize;
 
-use crate::{env_manager, hardware, paths, wsl};
+use crate::{env_manager, hardware, paths};
 
 #[derive(Serialize, Clone, Default)]
 pub struct ReadinessRow {
@@ -49,20 +49,50 @@ pub async fn app_readiness() -> Result<AppReadiness, String> {
 }
 
 fn probe_wsl() -> ReadinessRow {
-    let s = wsl::wsl_status();
-    if s.available {
-        let detail = s
-            .default_distro
-            .clone()
-            .or_else(|| s.distros.first().cloned())
-            .unwrap_or_else(|| "installed".to_string());
-        ReadinessRow { ok: true, warn: false, detail }
-    } else {
-        ReadinessRow {
+    // Delegate to the guided-setup probe so this row reflects the SAME stages
+    // the "Set up WSL" dialog acts on. The old check returned ok=true the
+    // moment any distro existed — even a root-only one with no Linux user —
+    // which hid the Set-up button and left the user with no path to create
+    // their account. Now a missing user / Python / pending reboot shows as a
+    // warn so the button appears and routes straight to the right step.
+    let st = crate::wsl_setup::wsl_setup_status();
+    let distro = st.default_distro.clone().unwrap_or_else(|| "Ubuntu".to_string());
+    match st.stage.as_str() {
+        "ready" => ReadinessRow {
+            ok: true,
+            warn: false,
+            detail: st.default_user.map(|u| format!("{distro} · {u}")).unwrap_or(distro),
+        },
+        "needsUser" => ReadinessRow {
+            ok: false,
+            warn: true,
+            detail: "Ubuntu installed — no Linux user yet · Set up WSL".to_string(),
+        },
+        "needsPython" => ReadinessRow {
+            ok: false,
+            warn: true,
+            detail: "Ubuntu installed — needs Python · Set up WSL".to_string(),
+        },
+        "needsReboot" => ReadinessRow {
+            ok: false,
+            warn: true,
+            detail: "Installed — reboot to finish · Set up WSL".to_string(),
+        },
+        "virtualizationOff" => ReadinessRow {
             ok: false,
             warn: false,
-            detail: "Not installed — run `wsl --install`".to_string(),
-        }
+            detail: "Enable virtualization in BIOS · Set up WSL".to_string(),
+        },
+        "unsupported" => ReadinessRow {
+            ok: true,
+            warn: false,
+            detail: "Not required on this OS".to_string(),
+        },
+        _ => ReadinessRow {
+            ok: false,
+            warn: false,
+            detail: "Not installed · Set up WSL".to_string(),
+        },
     }
 }
 

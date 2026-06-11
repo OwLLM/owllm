@@ -567,6 +567,45 @@ async fn run_install(
         bw
     };
 
+    // 0) Make sure Python/uv exist in the distro. On a fresh Ubuntu (or one
+    //    where the user never ran the guided setup) neither is present and
+    //    venv creation would die with a cryptic "python3 not found". Detect
+    //    it and apt-install python3-venv + uv AS ROOT, streamed, before
+    //    going further — so the env install is self-sufficient instead of
+    //    sending the user back to a separate setup step.
+    let have_py = {
+        let d = distro.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::wsl::run_in_distro(
+                &d,
+                "if command -v uv >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1; then echo HAVE; else echo MISSING; fi",
+            )
+        })
+        .await
+        .map_err(|e| format!("join: {e}"))?
+        .map(|o| o.contains("HAVE"))
+        .unwrap_or(false)
+    };
+    if !have_py {
+        let _ = channel.send(InstallEvent::Step {
+            label: "Preparing Python in WSL (first-time setup — apt + uv)".into(),
+        });
+        let provision = "set -e; export DEBIAN_FRONTEND=noninteractive; \
+             apt-get update -y; \
+             apt-get install -y python3 python3-pip python3-venv curl ca-certificates; \
+             export UV_INSTALL_DIR=/usr/local/bin; \
+             (curl -LsSf https://astral.sh/uv/install.sh | sh) || echo '(uv install skipped — offline?)'; \
+             python3 --version"
+            .to_string();
+        let argv = vec![
+            "-d".into(), distro.clone(), "-u".into(), "root".into(), "--".into(),
+            "bash".into(), "-lc".into(), provision,
+        ];
+        run_subprocess(channel, wsl, &argv, None)
+            .await
+            .map_err(|e| format!("preparing Python in WSL failed: {e}. Open Set up WSL on the Home page to finish provisioning."))?;
+    }
+
     // 1) Create the venv (uv preferred, python3-venv fallback).
     let _ = channel.send(InstallEvent::Step { label: format!("Creating venv in WSL: {env}") });
     let mk = format!(

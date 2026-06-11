@@ -16,9 +16,15 @@
 // (src-tauri/src/hardware.rs) — no Python, no console popups.
 // Software requirements remain placeholders until they have their
 // own native probes (Python interpreter / PyTorch / CUDA / deps).
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useReducer, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import WslSetupModal from "./WslSetupModal";
+import {
+  fetchReadiness,
+  getCachedReadiness,
+  isReadinessLoading,
+  subscribeReadiness,
+} from "./readinessStore";
 
 type GpuInfo = {
   index: number;
@@ -477,13 +483,16 @@ export default function HomePage() {
   // Python/PyTorch/CUDA/Deps rows that printed the same fake versions on
   // every machine and described a host-Python world the app no longer
   // uses (fine-tuning runs in a WSL/uv env now).
-  const [ready, setReady] = useState<AppReadiness | null>(null);
-  const refreshReady = () => {
-    invoke<AppReadiness>("app_readiness")
-      .then(setReady)
-      .catch(() => setReady(null));
-  };
-  useEffect(() => { refreshReady(); }, []);
+  // Cached at module scope (readinessStore) so navigating back to Home is
+  // instant: we probe ONCE per session and only re-check when the user
+  // presses Refresh or finishes a setup action. `forceReady` re-renders
+  // this component when the shared cache changes.
+  const [, forceReady] = useReducer((x: number) => x + 1, 0);
+  useEffect(() => subscribeReadiness(forceReady), []);
+  useEffect(() => { fetchReadiness(false); }, []);
+  const ready = getCachedReadiness();
+  const readyLoading = isReadinessLoading();
+  const refreshReady = () => { fetchReadiness(true); };
   // Guided WSL setup modal — opened from the WSL row when it's not ready.
   const [wslSetupOpen, setWslSetupOpen] = useState(false);
   // Build the four display rows from the live signal. While loading
@@ -624,7 +633,31 @@ export default function HomePage() {
         </GridPanel>
 
         <GridPanel accent="var(--accent-strong)">
-          <PanelHeader icon="⚙️" label="Software Requirements & Setup" />
+          <PanelHeader
+            icon="⚙️"
+            label="Software Requirements & Setup"
+            action={
+              <button
+                data-ui="RefreshReadyBtn"
+                onClick={refreshReady}
+                disabled={readyLoading}
+                title="Re-check WSL / GPU / environment / runtime"
+                style={{
+                  background: "var(--bg-elevated)",
+                  border: "1px solid var(--accent-strong)",
+                  borderRadius: 12,
+                  padding: "8px 15px",
+                  color: "var(--fg-strong)",
+                  fontSize: 13,
+                  fontWeight: 700,
+                  cursor: readyLoading ? "wait" : "pointer",
+                  opacity: readyLoading ? 0.6 : 1,
+                }}
+              >
+                {readyLoading ? "⏳ Checking…" : "🔄 Refresh"}
+              </button>
+            }
+          />
           {/* Four LIVE readiness signals (readiness.rs): WSL, GPU+CUDA
               driver, fine-tuning env, llama runtime. ⚠️ = optional/degraded
               (e.g. CPU-only, env not set up yet); ❌ = missing + needed. */}

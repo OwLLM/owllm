@@ -141,7 +141,14 @@ symphonia-adapter-libopus = "0.1"
 # above the user's browser when they alt-tab away). Single function
 # call, no need for the heavier `windows` crate.
 [target.'cfg(target_os = "windows")'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    # DPAPI (CryptProtectData/Unprotect) for at-rest encryption of the WSL
+    # password, tied to the Windows user account. LocalFree (in
+    # Win32_Foundation) frees the blob DPAPI allocates.
+    "Win32_Security_Cryptography",
+] }
 
 [dev-dependencies]
 tempfile = "3"

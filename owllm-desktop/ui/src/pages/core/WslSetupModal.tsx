@@ -13,13 +13,18 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 type WslSetupStatus = {
-  stage: "virtualizationOff" | "needsInstall" | "needsPython" | "ready" | "unsupported";
+  stage: "virtualizationOff" | "needsInstall" | "needsReboot" | "needsUser" | "needsPython" | "ready" | "unsupported";
   virtualizationEnabled: boolean;
   distroInstalled: boolean;
   defaultDistro: string | null;
+  userReady: boolean;
+  defaultUser: string | null;
   pythonReady: boolean;
+  awaitingReboot: boolean;
   detail: string;
 };
+
+type WslAccount = { username: string | null; hasPassword: boolean };
 
 type SetupEvent =
   | { kind: "started" }
@@ -41,6 +46,12 @@ export default function WslSetupModal({
   const [log, setLog] = useState<string[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
+  // WSL Linux account form (created non-interactively so the user never sees
+  // the Ubuntu first-run console). Pre-filled with a sensible default; saved
+  // encrypted (DPAPI) on the Windows side.
+  const [username, setUsername] = useState("owllm");
+  const [password, setPassword] = useState("owllm");
+  const [showPw, setShowPw] = useState(false);
 
   const refresh = useCallback(async () => {
     setErr(null);
@@ -57,6 +68,10 @@ export default function WslSetupModal({
     if (open) {
       setLog([]);
       refresh();
+      // Pre-fill the account form from any saved account.
+      invoke<WslAccount>("wsl_setup_get_account")
+        .then((a) => { if (a.username) setUsername(a.username); })
+        .catch(() => { /* no saved account yet */ });
     }
   }, [open, refresh]);
 
@@ -111,8 +126,34 @@ export default function WslSetupModal({
     }
   };
 
+  const ensureUser = async () => {
+    if (!username.trim()) { setErr("Choose a username."); return; }
+    if (!password.trim()) { setErr("Choose a password."); return; }
+    setBusy("user");
+    setErr(null);
+    setLog((l) => [...l, `Creating Linux user “${username}”…`]);
+    try {
+      await invoke<WslAccount>("wsl_setup_ensure_user", { username, password });
+      setLog((l) => [...l, "✓ User created and set as the default. Saved (encrypted)."]);
+      await refresh();
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const reboot = async () => {
     try { await invoke("wsl_reboot"); } catch (e) { setErr(String(e)); }
+  };
+
+  const fieldStyle: React.CSSProperties = {
+    padding: "8px 10px",
+    background: "var(--bg-input)",
+    border: "1px solid var(--border-strong)",
+    borderRadius: 8,
+    color: "var(--fg)",
+    fontSize: 13,
   };
 
   const btn = (label: string, onClick: () => void, opts?: { primary?: boolean; disabled?: boolean }) => (
@@ -180,12 +221,66 @@ export default function WslSetupModal({
             </div>
             <p style={{ color: "var(--fg)", fontSize: 14, lineHeight: 1.6 }}>
               One click installs everything automatically. Windows will show a <b>UAC prompt</b> —
-              approve it. The installer may ask you to <b>reboot</b>; do that, then come back and
-              click <b>Re-check</b>.
+              approve it. When it finishes, <b>reboot once</b> so Windows can turn on the Virtual
+              Machine Platform, then come back here. We create the Linux user for you afterwards —
+              you won't see a confusing Ubuntu console.
             </p>
             <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
               {btn(busy === "install" ? "Launching…" : "🚀 Install WSL + Ubuntu", install, { primary: true })}
-              {btn("⟳ Reboot now", reboot)}
+            </div>
+          </div>
+        );
+      case "needsReboot":
+        return (
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "#FF9800" }}>
+              🔄 Reboot to finish installing WSL
+            </div>
+            <p style={{ color: "var(--fg)", fontSize: 14, lineHeight: 1.6 }}>
+              WSL was installed, but Windows needs <b>one restart</b> to switch on the Virtual
+              Machine Platform. Until you reboot, Linux features stay unavailable and may feel slow.
+              Save your work, then reboot — when you're back, open this dialog and the rest happens
+              automatically.
+            </p>
+            <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+              {btn("🔄 Reboot now", reboot, { primary: true })}
+              {btn(busy ? "Working…" : "⟳ Re-check", refresh)}
+            </div>
+          </div>
+        );
+      case "needsUser":
+        return (
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--fg-strong)" }}>
+              Create your Linux user
+            </div>
+            <p style={{ color: "var(--fg)", fontSize: 14, lineHeight: 1.6 }}>
+              Ubuntu is installed but has no user account yet. Pick a name and password — we
+              create the account for you (no console window) and remember it <b>encrypted</b> on
+              this PC. The defaults below are fine; change them if you like.
+            </p>
+            <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: 10, alignItems: "center", margin: "12px 0", maxWidth: 420 }}>
+              <label style={{ color: "var(--fg-muted)", fontSize: 13 }}>Username</label>
+              <input
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                spellCheck={false} autoCapitalize="off" autoCorrect="off"
+                style={fieldStyle}
+              />
+              <label style={{ color: "var(--fg-muted)", fontSize: 13 }}>Password</label>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  type={showPw ? "text" : "password"}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  spellCheck={false}
+                  style={{ ...fieldStyle, flex: 1 }}
+                />
+                {btn(showPw ? "Hide" : "Show", () => setShowPw((v) => !v))}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 4 }}>
+              {btn(busy === "user" ? "Creating…" : "👤 Create user", ensureUser, { primary: true, disabled: !username.trim() || !password.trim() })}
             </div>
           </div>
         );

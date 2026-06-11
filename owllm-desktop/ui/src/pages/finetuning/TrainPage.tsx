@@ -597,13 +597,37 @@ export default function TrainPage() {
       <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Card 1: Base Model — main.py:14651-14695 */}
         <div data-ui="cfgCard" style={cfgCard}>
-          <div style={cardTitle}>🤖  BASE MODEL</div>
-          <div style={{ color: "#8595ad", fontSize: 11, lineHeight: 1.4, marginBottom: 4 }}>
-            These are HuggingFace <b>training</b> bases — a different format from your
-            Chat/Server <b>GGUF</b> models, which can't be fine-tuned directly. Pick one;
-            it downloads automatically when you press Start.
+          {/* Title row: title + hover info (ⓘ) on the left, the Environment
+              button on the right. The "these are HuggingFace bases…" note now
+              lives in the tooltip so the card stays compact. */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={cardTitle}>🤖  BASE MODEL</span>
+            <InfoTip>
+              These are HuggingFace <b>training</b> bases — a different format from your
+              Chat/Server <b>GGUF</b> models, which can't be fine-tuned directly. Pick one;
+              it downloads automatically when you press Start.
+            </InfoTip>
+            <span style={{ flex: 1 }} />
+            <button
+              data-ui="train_open_env"
+              onClick={() => setEnvModalOpen(true)}
+              title="Fine-tuning environments — install / check what's ready"
+              style={{
+                flexShrink: 0,
+                display: "flex", alignItems: "center", gap: 6,
+                borderRadius: 9, border: "1px solid var(--accent-strong)",
+                background: "var(--bg-elevated)", color: "var(--fg-strong)",
+                cursor: "pointer", padding: "6px 10px",
+              }}
+            >
+              <span style={{ fontSize: 15, lineHeight: 1 }}>🐧</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }}>Environment</span>
+              <span style={{
+                fontSize: 10, fontWeight: 700, color: envPill.color,
+                border: `1px solid ${envPill.color}`, borderRadius: 999, padding: "1px 7px",
+              }}>{envPill.text}</span>
+            </button>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "stretch" }}>
           <select
             data-ui="train_base_model"
             value={customBase ? "__custom__" : baseModel}
@@ -612,7 +636,7 @@ export default function TrainPage() {
               if (v === "__custom__") { setCustomBase(true); }
               else { setCustomBase(false); setBaseModel(v); }
             }}
-            style={{ ...inputStyle, flex: 1 }}
+            style={inputStyle}
           >
             <optgroup label="Downloaded (ready to train)">
               {baseOptions.filter((m) => isDownloaded(m)).map((m) => (
@@ -629,26 +653,6 @@ export default function TrainPage() {
             </optgroup>
             <option value="__custom__">✏️ Custom HuggingFace id…</option>
           </select>
-          <button
-            data-ui="train_open_env"
-            onClick={() => setEnvModalOpen(true)}
-            title="Fine-tuning environments — install / check what's ready"
-            style={{
-              flexShrink: 0, width: 142,
-              display: "flex", flexDirection: "column",
-              alignItems: "center", justifyContent: "center", gap: 2,
-              borderRadius: 10, border: "1px solid var(--accent-strong)",
-              background: "var(--bg-elevated)", color: "var(--fg-strong)",
-              cursor: "pointer", padding: "8px",
-            }}
-          >
-            <span style={{ fontSize: 20, lineHeight: 1 }}>🐧</span>
-            <span style={{ fontSize: 12.5, fontWeight: 700 }}>Environment</span>
-            <span style={{ fontSize: 10.5, fontWeight: 700, color: envPill.color }}>
-              {envPill.text}
-            </span>
-          </button>
-          </div>
           {customBase && (
             <input
               data-ui="train_base_model_custom"
@@ -1201,6 +1205,42 @@ function AbliterateInfoModal({ onClose }: { onClose: () => void }) {
         </div>
       </div>
     </div>
+  );
+}
+
+// Small hover-tooltip: an ⓘ glyph that reveals a styled popup on hover.
+// Replaces the always-on info paragraph under the Base Model title so the
+// card stays compact. Pure CSS hover (no state) — the popup is absolutely
+// positioned and toggled via opacity/pointer-events.
+function InfoTip({ children }: { children: React.ReactNode }) {
+  const [hover, setHover] = React.useState(false);
+  return (
+    <span
+      style={{ position: "relative", display: "inline-flex" }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <span
+        style={{
+          width: 16, height: 16, borderRadius: 8, fontSize: 11, fontWeight: 700,
+          display: "inline-flex", alignItems: "center", justifyContent: "center",
+          background: "rgba(var(--accent-rgb),0.20)", border: "1px solid rgba(var(--accent-rgb),0.45)",
+          color: "#9cc3ff", cursor: "help",
+        }}
+      >ⓘ</span>
+      <span
+        role="tooltip"
+        style={{
+          position: "absolute", top: "130%", left: 0, zIndex: 50, width: 280,
+          background: "var(--bg-elevated)", border: "1px solid rgba(var(--accent-rgb),0.45)",
+          borderRadius: 8, padding: "10px 12px", boxShadow: "0 12px 32px rgba(0,0,0,0.5)",
+          color: "#c4ccda", fontSize: 11, lineHeight: 1.5, fontWeight: 400, letterSpacing: 0,
+          opacity: hover ? 1 : 0, pointerEvents: "none",
+          transform: hover ? "translateY(0)" : "translateY(-4px)",
+          transition: "opacity 0.15s ease, transform 0.15s ease",
+        }}
+      >{children}</span>
+    </span>
   );
 }
 

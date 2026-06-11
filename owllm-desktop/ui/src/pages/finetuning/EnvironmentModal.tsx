@@ -116,6 +116,9 @@ export default function EnvironmentModal({
       : "⬇ Install";
 
   const busyAnywhere = anyInstalling();
+  // Every env has had its status probe resolve at least once. Until then we
+  // ghost the action buttons rather than show a premature "Install".
+  const allChecked = profiles.length > 0 && profiles.every((p) => p.name in status);
 
   return (
     <div
@@ -126,6 +129,7 @@ export default function EnvironmentModal({
         display: "flex", alignItems: "center", justifyContent: "center",
       }}
     >
+      <style>{`@keyframes owllm-spin { to { transform: rotate(360deg); } }`}</style>
       <div style={{
         width: "min(720px, 94%)", maxHeight: "88%",
         background: "var(--bg-panel)",
@@ -161,15 +165,37 @@ export default function EnvironmentModal({
             )}
           </div>
 
+          {/* Until the first status probe resolves, the cards below show
+              ghosted buttons + a "checking…" pill so we never flash a wrong
+              "not installed" for an env that's actually ready. */}
+          {profiles.length > 0 && !allChecked && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8,
+              color: "#d9b24a", fontSize: 12.5, fontWeight: 700,
+            }}>
+              <span style={{
+                width: 13, height: 13, borderRadius: "50%",
+                border: "2px solid rgba(217,178,74,0.35)", borderTopColor: "#d9b24a",
+                display: "inline-block", animation: "owllm-spin 0.7s linear infinite",
+              }} />
+              Checking which environments are installed…
+            </div>
+          )}
+
           {profiles.length === 0 && (
             <div style={{ color: "var(--fg-muted)", fontSize: 13 }}>No environments available.</div>
           )}
 
           {profiles.map((p) => {
             const s = status[p.name] ?? null;
+            const known = p.name in status; // has the status probe resolved?
             const busy = isInstalling(p.name);
             const inst = getEnvInstallState(p.name);
-            const pill = busy ? { text: "installing…", color: "#d9b24a" } : envStateLabel(s);
+            const pill = busy
+              ? { text: "installing…", color: "#d9b24a" }
+              : !known
+                ? { text: "checking…", color: "var(--fg-muted)" }
+                : envStateLabel(s);
             const isSel = p.name === selected;
             return (
               <div key={p.name} style={{
@@ -194,25 +220,27 @@ export default function EnvironmentModal({
                 <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10, flexWrap: "wrap" }}>
                   <button
                     onClick={() => install(p.name)}
-                    disabled={busyAnywhere}
+                    disabled={busyAnywhere || !known}
                     style={{
                       padding: "8px 14px", borderRadius: 9, border: "none",
                       background: "linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent))",
                       color: "var(--accent-fg)", fontSize: 13, fontWeight: 700,
-                      cursor: busyAnywhere ? "wait" : "pointer", opacity: busyAnywhere && !busy ? 0.5 : 1,
+                      cursor: !known ? "wait" : busyAnywhere ? "wait" : "pointer",
+                      opacity: !known ? 0.45 : busyAnywhere && !busy ? 0.5 : 1,
                     }}
-                  >{actionLabel(s, busy)}</button>
+                  >{!known ? "Checking…" : actionLabel(s, busy)}</button>
 
                   <button
                     onClick={() => onSelect(p.name)}
-                    disabled={isSel}
+                    disabled={isSel || !known}
                     title="Use this environment for training runs"
                     style={{
                       padding: "8px 14px", borderRadius: 9,
                       border: `1px solid ${isSel ? "rgba(var(--accent-rgb),0.6)" : "var(--border-strong)"}`,
                       background: isSel ? "rgba(var(--accent-rgb),0.14)" : "var(--bg-elevated)",
                       color: "var(--fg-strong)", fontSize: 13, fontWeight: 700,
-                      cursor: isSel ? "default" : "pointer",
+                      cursor: isSel || !known ? "default" : "pointer",
+                      opacity: !known ? 0.45 : 1,
                     }}
                   >{isSel ? "✓ Used for training" : "Use for training"}</button>
 

@@ -20,6 +20,7 @@ mod audio;
 mod bootstrap;
 mod bridges;
 mod code;
+mod crypt;
 mod data_layer;
 mod dialog;
 mod directives;
@@ -284,6 +285,9 @@ pub fn run() {
             wsl_setup::wsl_setup_status,
             wsl_setup::wsl_setup_install,
             wsl_setup::wsl_setup_provision_python,
+            wsl_setup::wsl_setup_ensure_user,
+            wsl_setup::wsl_setup_get_account,
+            wsl_setup::wsl_setup_reveal_password,
             wsl_setup::wsl_reboot,
             github::github_status,
             github::github_connect,

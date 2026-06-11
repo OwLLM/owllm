@@ -20,8 +20,8 @@
 //   "api/claude-opus-4-7"     — Anthropic API key only
 //   "openai/<id>" same shape
 //   "auto/cheapest" etc       — Auto routing
-import { useEffect, useRef, useState } from "react";
-import { getCloudCatalogue, type CloudModelDef } from "./cloudCatalogue";
+import { useEffect, useReducer, useRef, useState } from "react";
+import { getCloudCatalogue, subscribeCloudCatalogue, type CloudModelDef } from "./cloudCatalogue";
 
 export type ModelInfo = {
   model_id: string;
@@ -298,6 +298,11 @@ export default function ModelPicker({
   localOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  // Re-render when the cloud catalogue changes (the async remote refresh
+  // landing, or a localStorage override edit) so newly-added models appear
+  // without an app restart.
+  const [, forceCat] = useReducer((x: number) => x + 1, 0);
+  useEffect(() => subscribeCloudCatalogue(() => forceCat()), []);
   /// Trigger bounding rect captured at open time so the popover can
   /// render with position:fixed and ESCAPE any parent overflow:hidden
   /// (TeamInfoCard clips otherwise — that's the bug the user hit).

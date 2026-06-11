@@ -162,8 +162,22 @@ pub struct AccountsStatus {
 
 /// Probe what's connected right now. Cheap — runs on the AccountsPage
 /// 3-second poll loop. Never returns the secret values themselves.
+/// Probe what's connected right now. ASYNC + spawn_blocking: the CLI
+/// detection shells out (which/npm/CLI probes — slow on Windows), and a
+/// SYNC Tauri command runs on the event-loop thread shared by ALL windows.
+/// On the AccountsPage's 3-second poll that froze the whole UI for the
+/// duration of those subprocess spawns; changing page mid-probe left the
+/// app "Not Responding", which made Windows draw a ghost frame (the stray
+/// "OwLLM Overlay Frame" title bar the user saw). Moving the work off the
+/// main thread keeps the UI responsive during the probe.
 #[tauri::command]
-pub fn accounts_status() -> AccountsStatus {
+pub async fn accounts_status() -> AccountsStatus {
+    tokio::task::spawn_blocking(accounts_status_blocking)
+        .await
+        .unwrap_or_default()
+}
+
+fn accounts_status_blocking() -> AccountsStatus {
     let map = load_secrets();
     AccountsStatus {
         anthropic_api_key: map

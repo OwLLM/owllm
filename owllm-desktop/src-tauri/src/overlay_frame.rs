@@ -26,6 +26,25 @@ const CONTENT_OFFSET_Y: i32 = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
 const OVERLAY_EXTRA_W: u32 = EXTRA_RIGHT + 2 * (SHIFT_OUT as u32) + 2 * CORNER_OUTSET as u32;
 const OVERLAY_EXTRA_H: u32 = EXTRA_TOP as u32 + EXTRA_BOTTOM + 2 * (SHIFT_OUT as u32) + 2 * CORNER_OUTSET as u32;
 
+/// Turn off Windows' "ghost window" feature for this process.
+///
+/// When a top-level window stops pumping messages for a moment (e.g. a
+/// synchronous command briefly blocks the shared event loop), the DWM
+/// normally replaces it with a faded "(Not Responding)" GHOST window that
+/// has a default title bar + min/max/close. For our decorative overlay
+/// (transparent, decorations:false) that ghost shows up as a stray framed
+/// window titled "OwLLM Overlay Frame" floating over the app. Disabling
+/// ghosting means a transient freeze just pauses repaint in place — no
+/// stray frame. Call once at startup. Safe to call unconditionally.
+#[cfg(target_os = "windows")]
+pub fn disable_window_ghosting() {
+    use windows_sys::Win32::UI::WindowsAndMessaging::DisableProcessWindowsGhosting;
+    unsafe { DisableProcessWindowsGhosting() };
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn disable_window_ghosting() {}
+
 pub fn enabled() -> bool {
     std::env::var("OWLLM_OVERLAY_FRAME")
         .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))

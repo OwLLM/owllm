@@ -111,16 +111,32 @@ const PROVIDERS: CloudProvider[] = [
 let _remote: Partial<CloudCatalogue> | null = null;
 let _localCache: Partial<CloudCatalogue> | null | undefined = undefined;
 
+// Subscribers (e.g. the open ModelPicker) re-render when the catalogue
+// changes. Without this, the async remote refresh updates `_remote` but no
+// component knows — so a brand-new remote model (Fable 5) only appeared on
+// the NEXT app launch, once it was cached + applied synchronously. Now it
+// shows the same session the fetch completes.
+const _listeners = new Set<() => void>();
+function _emit(): void { for (const l of _listeners) l(); }
+
+/// Subscribe to catalogue changes; returns an unsubscribe fn.
+export function subscribeCloudCatalogue(cb: () => void): () => void {
+  _listeners.add(cb);
+  return () => { _listeners.delete(cb); };
+}
+
 /// Hook for the remote signed registry. Call once at startup with the
 /// fetched partial catalogue; merge precedence is remote > local > bundled.
 export function setRemoteCloudCatalogue(cat: Partial<CloudCatalogue> | null): void {
   _remote = cat;
+  _emit();
 }
 
 /// Drop the cached localStorage override so a settings-pane edit takes
 /// effect without an app reload.
 export function invalidateCloudCatalogueCache(): void {
   _localCache = undefined;
+  _emit();
 }
 
 function loadLocalOverride(): Partial<CloudCatalogue> | null {
@@ -188,7 +204,7 @@ function remoteUrl(): string {
 export function applyCachedRemoteCatalogue(): void {
   try {
     const raw = localStorage.getItem(REMOTE_CACHE_KEY);
-    if (raw) _remote = JSON.parse(raw) as Partial<CloudCatalogue>;
+    if (raw) { _remote = JSON.parse(raw) as Partial<CloudCatalogue>; _emit(); }
   } catch (e) {
     console.warn("[cloudCatalogue] bad cached remote catalogue", e);
   }
@@ -210,6 +226,7 @@ export async function refreshRemoteCatalogue(
       return false;
     }
     _remote = parsed as Partial<CloudCatalogue>;
+    _emit(); // tell open pickers to re-render with the new models
     try { localStorage.setItem(REMOTE_CACHE_KEY, JSON.stringify(parsed)); } catch { /* quota */ }
     return true;
   } catch (e) {

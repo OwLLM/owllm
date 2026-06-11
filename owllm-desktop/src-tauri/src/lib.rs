@@ -58,6 +58,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // Kill Windows' "ghost window" so a brief main-thread stall never
+            // pops a stray "(Not Responding)" frame over the overlay chrome.
+            overlay_frame::disable_window_ghosting();
             // One-time copy of LLM/data/* into %APPDATA%\OwLLM Desktop\
             // for users coming from the pre-restructure layout. Idempotent —
             // gated by a sentinel file inside the new root, so subsequent

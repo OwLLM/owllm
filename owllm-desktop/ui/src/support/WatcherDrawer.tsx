@@ -103,6 +103,12 @@ export default function WatcherDrawer({
   const pendingCloud = React.useRef<string | null>(null);
   const historyRef = React.useRef<HistoryItem[]>([]);
   const abortRef = React.useRef<AbortController | null>(null);
+  // ALL hooks live up here, before the `if (!open) return null` early
+  // return — a hook below it changes the hook count between renders and
+  // crashes React with error #310 (caught by the release smoke test).
+  const lastCapture = React.useRef<WindowCapture | null>(null);
+  const reportPreview = React.useRef<{ json: string; png: string | null } | null>(null);
+  const [reportArmed, setReportArmed] = React.useState(false);
 
   React.useEffect(() => {
     if (!open) return;
@@ -198,7 +204,8 @@ export default function WatcherDrawer({
   // they live in the same WebView surface). The preview is shown before
   // anything could ever join a report; nothing is sent anywhere. The last
   // capture is kept so "Report a bug" can offer to attach it.
-  const lastCapture = React.useRef<WindowCapture | null>(null);
+  // (lastCapture/reportPreview/reportArmed hooks are declared ABOVE the
+  // early return with the other hooks — see the hooks block.)
   const captureApp = async () => {
     say("Capture current app", "you");
     setBusy(true);
@@ -332,9 +339,6 @@ export default function WatcherDrawer({
   // Bug report (Slice 6): describe → assemble → REDACT → preview → explicit
   // save. Default path is PRIVATE: a local export bundle — nothing is
   // transmitted anywhere; the user shares the folder however they choose.
-  const reportPreview = React.useRef<{ json: string; png: string | null } | null>(null);
-  const [reportArmed, setReportArmed] = React.useState(false);
-
   const reportBug = async () => {
     if (reportArmed && reportPreview.current) {
       // Second click = explicit consent to SAVE the previewed bundle.

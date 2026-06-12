@@ -36,6 +36,7 @@ import ServerPage from "./pages/core/ServerPage";
 import BridgesPage from "./pages/agentic/BridgesPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
+import AccountSyncModal from "./pages/core/AccountSyncModal";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -1021,6 +1022,10 @@ export default function AppShell() {
       )}
       <TutorialRecorder enabled={true} />
       <FirstRunWizardMount />
+      {/* Account/Sync onboarding — self-gates to first run + the
+          `owllm:open-sync` event. Invites GitHub sign-in so chats/settings
+          follow the user across devices (their own private owllm-vault). */}
+      <AccountSyncModal />
     </>
   );
 }

@@ -43,6 +43,7 @@ mod readiness;
 mod recommendations;
 mod server;
 mod skill_library;
+mod support;
 mod github;
 mod sandbox;
 mod slack;
@@ -255,6 +256,7 @@ pub fn run() {
             paths::paths_debug,
             paths::llama_server_path,
             readiness::app_readiness,
+            support::support_snapshot,
             env_manager::env_profiles_list,
             env_manager::env_profile_status,
             env_manager::env_profile_install,

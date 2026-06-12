@@ -37,6 +37,7 @@ import BridgesPage from "./pages/agentic/BridgesPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
 import AccountSyncModal from "./pages/core/AccountSyncModal";
+import WatcherDrawer from "./support/WatcherDrawer";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -285,8 +286,12 @@ const FRAME_BG     = "var(--bg-header)";
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
 
-function HybridFrame({ children, outerW, outerH }: {
+function HybridFrame({ children, outerW, outerH, onOwlClick, showWatcherHint }: {
   children: React.ReactNode; outerW: number; outerH: number;
+  /// The Watcher (P0-8): the top-center owl badge is the support entry point.
+  onOwlClick?: () => void;
+  /// Periodic "The Watcher" satellite label around the owl (until first open).
+  showWatcherHint?: boolean;
 }) {
   // Invert the legacy formula: with `outerW = parent_w + EXTRA_RIGHT
   // + 2*so + 2*CORNER_OUTSET`, solve for parent_w given the live
@@ -371,7 +376,46 @@ function HybridFrame({ children, outerW, outerH }: {
       <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TL, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TR, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BL, pointerEvents:"none" }} />
-      <img src={`${ICONS}/owl_studio_square.png`} style={{ position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H, pointerEvents:"none" }} />
+      {/* The Watcher (P0-8): the owl badge is the unlabeled support entry
+          point. Clickable, but visually unchanged — discovery comes from
+          the periodic satellite label below + a hover tooltip. */}
+      <img
+        src={`${ICONS}/owl_studio_square.png`}
+        onClick={onOwlClick}
+        title={onOwlClick ? "The Watcher — OWLLM's support assistant" : undefined}
+        style={{
+          position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H,
+          pointerEvents: onOwlClick ? "auto" : "none",
+          cursor: onOwlClick ? "pointer" : undefined,
+        }}
+      />
+      {showWatcherHint && (
+        <>
+          <style>{`
+            @keyframes owllm-watcher-orbit {
+              0%   { opacity: 0; transform: translate(-18px, 6px) scale(0.92); }
+              12%  { opacity: 1; transform: translate(0, 0) scale(1); }
+              50%  { opacity: 1; transform: translate(10px, -4px) scale(1); }
+              88%  { opacity: 1; transform: translate(20px, 2px) scale(1); }
+              100% { opacity: 0; transform: translate(34px, 8px) scale(0.92); }
+            }
+          `}</style>
+          <div style={{
+            position:"absolute",
+            left: badgeX + BADGE_W - 26,
+            top: badgeY + Math.round(BADGE_H * 0.42),
+            padding: "3px 10px", borderRadius: 999,
+            background: "rgba(var(--accent-rgb),0.22)",
+            border: "1px solid rgba(var(--accent-rgb),0.65)",
+            color: "var(--fg-strong)", fontSize: 11.5, fontWeight: 800,
+            letterSpacing: 0.4, whiteSpace: "nowrap",
+            pointerEvents: "none",
+            animation: "owllm-watcher-orbit 6s ease-in-out 1 both",
+          }}>
+            The Watcher
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -385,6 +429,7 @@ type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, onOpenServer,
+  onWatcher, watcherHint,
 }: {
   mode: ActiveMode;
   setMode: (m: ActiveMode) => void;
@@ -394,6 +439,11 @@ function ModeBar({
   accentKey: AccentKey;
   onPickAccent: (k: AccentKey) => void;
   onOpenServer: () => void;
+  /// The Watcher (P0-8): in overlay-frame mode the decorative owl window is
+  /// click-through, so the centered OWLLM title (directly beneath the owl)
+  /// doubles as the summon point.
+  onWatcher?: () => void;
+  watcherHint?: boolean;
 }) {
   // The header is always the dark blue band so the cyan frame +
   // OWLLM title read consistently across themes. Buttons therefore
@@ -515,10 +565,15 @@ function ModeBar({
           off-axis. */}
       <div />
 
-      {/* OWLLM title — absolutely positioned to the window centre.
-          Pointer events disabled so it doesn't intercept drag clicks. */}
+      {/* OWLLM title — absolutely positioned to the window centre. When a
+          Watcher callback is wired (P0-8) the title is the summon point —
+          the owl chrome above it is a click-through window, so this is the
+          closest clickable surface to "the top-center owl". Without the
+          callback, pointer events stay off so drag clicks pass through. */}
       <div
         data-ui="AppTitle"
+        onClick={onWatcher}
+        title={onWatcher ? "The Watcher — OWLLM's support assistant" : undefined}
         style={{
           position: "absolute",
           left: "50%",
@@ -529,9 +584,38 @@ function ModeBar({
           fontSize: 35, fontWeight: 700, color: "var(--bg-header-fg)",
           letterSpacing: 2, lineHeight: "54px",
           textAlign: "center",
-          pointerEvents: "none",
+          pointerEvents: onWatcher ? "auto" : "none",
+          cursor: onWatcher ? "pointer" : undefined,
         }}
       >OWLLM</div>
+      {watcherHint && (
+        <>
+          <style>{`
+            @keyframes owllm-watcher-orbit {
+              0%   { opacity: 0; transform: translate(-14px, 4px) scale(0.92); }
+              12%  { opacity: 1; transform: translate(0, 0) scale(1); }
+              50%  { opacity: 1; transform: translate(8px, -3px) scale(1); }
+              88%  { opacity: 1; transform: translate(16px, 2px) scale(1); }
+              100% { opacity: 0; transform: translate(28px, 6px) scale(0.92); }
+            }
+          `}</style>
+          <div style={{
+            position: "absolute",
+            left: "50%", top: "50%",
+            transform: "translate(64px, -50%)",
+            padding: "2px 9px", borderRadius: 999,
+            background: "rgba(var(--accent-rgb),0.22)",
+            border: "1px solid rgba(var(--accent-rgb),0.65)",
+            color: "var(--bg-header-fg)", fontSize: 11, fontWeight: 800,
+            letterSpacing: 0.4, whiteSpace: "nowrap",
+            pointerEvents: "none",
+            animation: "owllm-watcher-orbit 6s ease-in-out 1 both",
+            zIndex: 5,
+          }}>
+            The Watcher ↑
+          </div>
+        </>
+      )}
 
       <SysInfoBlock onOpenServer={onOpenServer} />
       <WindowControls />
@@ -800,6 +884,33 @@ export default function AppShell() {
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
   const theme = useTheme();
 
+  // The Watcher (P0-8): summoned from the top-center owl. A small animated
+  // "The Watcher" satellite label appears periodically around the owl to
+  // suggest the click — and stops forever once the user has opened it.
+  const [watcherOpen, setWatcherOpen] = useState<boolean>(false);
+  const [watcherHint, setWatcherHint] = useState<boolean>(false);
+  useEffect(() => {
+    try { if (localStorage.getItem("owllm:watcher:discovered") === "1") return; } catch { return; }
+    let hideTimer: number | undefined;
+    const tick = () => {
+      try { if (localStorage.getItem("owllm:watcher:discovered") === "1") return; } catch { return; }
+      setWatcherHint(true);
+      hideTimer = window.setTimeout(() => setWatcherHint(false), 6500);
+    };
+    const first = window.setTimeout(tick, 8000); // first nudge shortly after launch
+    const iv = window.setInterval(tick, 60_000); // then once per minute
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(iv);
+      if (hideTimer !== undefined) window.clearTimeout(hideTimer);
+    };
+  }, []);
+  const openWatcher = () => {
+    try { localStorage.setItem("owllm:watcher:discovered", "1"); } catch { /* ignore */ }
+    setWatcherHint(false);
+    setWatcherOpen(true);
+  };
+
   useEffect(() => {
     if (!isTauri()) return;
     invoke<boolean>("overlay_frame_enabled")
@@ -955,6 +1066,8 @@ export default function AppShell() {
             accentKey={theme.accentKey}
             onPickAccent={theme.setAccentKey}
             onOpenServer={() => setServerModalOpen(true)}
+            onWatcher={openWatcher}
+            watcherHint={watcherHint && overlayFrame}
           />
           {/* SubTabs always render — Qt's page list is unconditional.
               The earlier `mode !== 'finetuning'` guard hid the row when
@@ -1001,7 +1114,13 @@ export default function AppShell() {
       <ResizeEdges />
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
-        : <HybridFrame outerW={vp.w} outerH={vp.h}>{appContent}</HybridFrame>}
+        : <HybridFrame outerW={vp.w} outerH={vp.h} onOwlClick={openWatcher} showWatcherHint={watcherHint}>{appContent}</HybridFrame>}
+      <WatcherDrawer
+        open={watcherOpen}
+        onClose={() => setWatcherOpen(false)}
+        mode={mode}
+        activeKey={activeKey}
+      />
       {serverModalOpen && (
         <PageModal
           title="🖧 Server Control"

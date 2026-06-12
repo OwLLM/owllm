@@ -130,13 +130,21 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
   // safe object shape so one tool can never poison the whole array.
   // mcp:<server>:<tool> → mcp__server__tool to satisfy the OpenAI name regex
   // (^[a-zA-Z0-9_-]+$); reversed by unmangleMcpName on the way out.
-  for (const m of activeMcp) {
+  // Server-level quarantine (P1-5): a tool whose NAME can't be advertised
+  // has no safe rewrite (it must round-trip for execution) and would poison
+  // the grammar for every tool — drop that server's tools with a loud
+  // notice; everything else keeps working.
+  const { ok: advertisable, quarantined } = partitionMcpTools(activeMcp);
+  announceQuarantine(quarantined);
+  for (const m of advertisable) {
     const safeName = m.qualifiedName.replace(/:/g, "__");
     out.push({
       type: "function",
       function: {
         name: safeName,
-        description: m.description || `MCP tool ${m.qualifiedName}`,
+        description: typeof m.description === "string" && m.description
+          ? m.description
+          : `MCP tool ${m.qualifiedName}`,
         parameters: sanitizeToolParameters(m.inputSchema).schema,
       },
     });
@@ -245,15 +253,22 @@ export type McpToolReportRow = {
   disabled: boolean;
   schemaChanged: boolean;
   schemaReason: string;
+  /// Whole-server quarantine (P1-5): this tool is NOT advertised because
+  /// its server shipped unadvertisable tool names.
+  quarantined: boolean;
+  quarantineReason: string;
 };
 
 /// Build the advertising report for the MCP page (master switch + per-tool
-/// toggles + schema-gate verdicts). Read-only; does not mutate settings.
+/// toggles + schema-gate verdicts + quarantine). Read-only.
 export async function getMcpToolReport(): Promise<McpToolReportRow[]> {
   const tools = await listAvailableMcpTools();
   const disabled = getDisabledMcpTools();
+  const { quarantined } = partitionMcpTools(tools);
+  const qByServer = new Map(quarantined.map((q) => [q.server, q.reason]));
   return tools.map((m) => {
     const gate = sanitizeToolParameters(m.inputSchema);
+    const qReason = qByServer.get(m.server) ?? "";
     return {
       qualifiedName: m.qualifiedName,
       server: m.server,
@@ -262,6 +277,8 @@ export async function getMcpToolReport(): Promise<McpToolReportRow[]> {
       disabled: disabled.has(m.qualifiedName),
       schemaChanged: gate.changed,
       schemaReason: gate.reason,
+      quarantined: qReason !== "",
+      quarantineReason: qReason,
     };
   });
 }
@@ -273,13 +290,73 @@ export function unmangleMcpName(name: string): string {
   return name.startsWith("mcp__") ? name.replace(/__/g, ":") : name;
 }
 
-type AggregatedMcpTool = {
+export type AggregatedMcpTool = {
   qualifiedName: string;
   server: string;
   tool: string;
   description: string;
   inputSchema: unknown;
 };
+
+// ---- MCP server quarantine (P1-5) ----------------------------------------
+//
+// The schema gate above fixes what's FIXABLE (bad inputSchema → safe shape).
+// A tool whose NAME can't be advertised is different: the OpenAI tools array
+// requires ^[a-zA-Z0-9_-]+$ and the name must round-trip back through
+// unmangleMcpName to execute — there is no safe rewrite. One such tool
+// poisons the grammar for EVERY tool (the model stops emitting native calls
+// entirely). A server shipping unadvertisable names is quarantined as a
+// unit — its tools are dropped with a clear notice — and every other
+// server's tools keep working.
+
+export type McpQuarantine = { server: string; reason: string; tools: number };
+
+const OPENAI_TOOL_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/// Split aggregated MCP tools into advertisable ones and per-server
+/// quarantine notices. Pure — unit-probed.
+export function partitionMcpTools(
+  tools: AggregatedMcpTool[],
+): { ok: AggregatedMcpTool[]; quarantined: McpQuarantine[] } {
+  const byServer = new Map<string, AggregatedMcpTool[]>();
+  for (const t of tools) {
+    const s = typeof t?.server === "string" ? t.server : "";
+    if (!byServer.has(s)) byServer.set(s, []);
+    byServer.get(s)!.push(t);
+  }
+  const ok: AggregatedMcpTool[] = [];
+  const quarantined: McpQuarantine[] = [];
+  for (const [server, ts] of byServer) {
+    let reason: string | null = null;
+    if (!server.trim()) {
+      reason = "server reported no name";
+    } else {
+      for (const t of ts) {
+        const qn = t?.qualifiedName;
+        const mangled = typeof qn === "string" ? qn.replace(/:/g, "__") : "";
+        if (!OPENAI_TOOL_NAME_RE.test(mangled)) {
+          reason = `tool name ${JSON.stringify(String(qn ?? ""))} can't be advertised (must be letters/digits/_/- and round-trip back for execution)`;
+          break;
+        }
+      }
+    }
+    if (reason) quarantined.push({ server, reason, tools: ts.length });
+    else ok.push(...ts);
+  }
+  return { ok, quarantined };
+}
+
+/// Surface a quarantine loudly (console + a window event the MCP page /
+/// status surfaces can listen to). Never throws.
+function announceQuarantine(quarantined: McpQuarantine[]): void {
+  for (const q of quarantined) {
+    const msg = `MCP server '${q.server}' quarantined — ${q.tools} tool(s) NOT advertised: ${q.reason}. Other tools keep working.`;
+    try { console.warn(`[mcp] ${msg}`); } catch { /* never break the turn */ }
+    try {
+      window.dispatchEvent(new CustomEvent("owllm:mcp:quarantine", { detail: q }));
+    } catch { /* non-browser context */ }
+  }
+}
 
 async function listAvailableMcpTools(): Promise<AggregatedMcpTool[]> {
   try {

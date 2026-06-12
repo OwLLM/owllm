@@ -20,6 +20,8 @@ import {
   githubStatus,
   githubConnect,
   githubDisconnect,
+  githubDeviceStart,
+  githubDevicePoll,
   vaultEnsure,
   vaultStatus,
   GITHUB_TOKEN_URL,
@@ -49,6 +51,10 @@ export default function AccountSyncModal() {
   const [err, setErr] = React.useState<string | null>(null);
   const [vault, setVault] = React.useState<VaultStatus | null>(null);
   const [vaultMsg, setVaultMsg] = React.useState<string>("");
+  // Device Flow ("Sign in with GitHub" — no token paste).
+  const [device, setDevice] = React.useState<{ userCode: string; verificationUri: string } | null>(null);
+  const [showTokenFallback, setShowTokenFallback] = React.useState(false);
+  const pollAlive = React.useRef(false);
 
   // First-run auto-open + manual reopen.
   React.useEffect(() => {
@@ -96,7 +102,47 @@ export default function AccountSyncModal() {
 
   const close = () => {
     try { localStorage.setItem(SEEN_KEY, "1"); } catch { /* ignore */ }
+    pollAlive.current = false; // stop any in-flight device-flow polling
+    setDevice(null);
     setOpen(false);
+  };
+
+  // Device Flow: ask GitHub for a code, open the browser, then poll until the
+  // user authorizes. No token to create or paste.
+  const startDeviceFlow = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const d = await githubDeviceStart();
+      setDevice({ userCode: d.userCode, verificationUri: d.verificationUri });
+      openExternal(d.verificationUri);
+      pollAlive.current = true;
+      const poll = async () => {
+        if (!pollAlive.current) return;
+        let r;
+        try { r = await githubDevicePoll(d.deviceCode); }
+        catch (e) { setErr(String(e)); setBusy(false); setDevice(null); pollAlive.current = false; return; }
+        if (!pollAlive.current) return;
+        if (r.status === "authorized") {
+          pollAlive.current = false;
+          setDevice(null); setBusy(false);
+          setStatus({ connected: true, login: r.login });
+          await ensureVault();
+          return;
+        }
+        if (r.status === "denied" || r.status === "expired" || r.status === "error") {
+          pollAlive.current = false;
+          setDevice(null); setBusy(false);
+          setErr(r.detail || (r.status === "expired" ? "The code expired — try again."
+            : r.status === "denied" ? "Authorization was declined." : "Sign-in failed."));
+          return;
+        }
+        const next = (r.status === "slowDown" ? d.interval + 5 : d.interval) * 1000;
+        setTimeout(poll, next);
+      };
+      setTimeout(poll, d.interval * 1000);
+    } catch (e) {
+      setErr(String(e)); setBusy(false);
+    }
   };
 
   const connect = async () => {
@@ -140,6 +186,7 @@ export default function AccountSyncModal() {
         display: "flex", alignItems: "center", justifyContent: "center",
       }}
     >
+      <style>{`@keyframes owllm-spin { to { transform: rotate(360deg); } }`}</style>
       <div style={{
         width: "min(560px, 94%)", maxHeight: "90%",
         background: "var(--bg-panel)",
@@ -219,46 +266,86 @@ export default function AccountSyncModal() {
                 </button>
               </div>
             </div>
+          ) : device ? (
+            // Device Flow in progress — show the code to enter in the browser.
+            <div style={{
+              background: "var(--bg-card)", border: "1px solid rgba(var(--accent-rgb),0.5)",
+              borderRadius: 10, padding: "14px",
+            }}>
+              <div style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.5 }}>
+                We opened <b>github.com/login/device</b> in your browser. Enter this code and
+                click <b>Authorize</b>:
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "12px 0" }}>
+                <div style={{
+                  fontFamily: "Consolas, monospace", fontSize: 26, fontWeight: 800, letterSpacing: 4,
+                  color: "var(--fg-strong)", background: "var(--bg-input)",
+                  border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 16px",
+                }}>{device.userCode}</div>
+                <button onClick={() => navigator.clipboard?.writeText(device.userCode)} style={ghostBtn}>Copy</button>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{
+                  width: 13, height: 13, borderRadius: "50%",
+                  border: "2px solid rgba(var(--accent-rgb),0.35)", borderTopColor: "var(--accent)",
+                  display: "inline-block", animation: "owllm-spin 0.7s linear infinite",
+                }} />
+                <span style={{ fontSize: 12, color: "var(--fg-muted)" }}>Waiting for you to authorize…</span>
+                <div style={{ flex: 1 }} />
+                <button onClick={() => openExternal(device.verificationUri)} style={ghostBtn}>Open page</button>
+                <button onClick={() => { pollAlive.current = false; setDevice(null); setBusy(false); }} style={ghostBtn}>Cancel</button>
+              </div>
+            </div>
           ) : (
             <div style={{
               background: "var(--bg-card)", border: "1px solid var(--border)",
               borderRadius: 10, padding: "14px",
             }}>
-              <div style={{ fontSize: 13.5, fontWeight: 700, color: "var(--fg-strong)", marginBottom: 8 }}>
-                Sign in with GitHub — two clicks:
-              </div>
-              <button onClick={() => openExternal(GITHUB_TOKEN_URL)} style={{ ...stepBtn, marginBottom: 8 }}>
-                ① Create a token on GitHub →
+              <button onClick={startDeviceFlow} disabled={busy} style={{ ...primaryBtn, width: "100%", padding: "12px", fontSize: 14.5 }}>
+                {busy ? "Starting…" : "🔗 Sign in with GitHub"}
               </button>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input
-                  type={showToken ? "text" : "password"}
-                  value={token}
-                  onChange={(e) => setToken(e.target.value)}
-                  placeholder="② Paste the token here (ghp_…)"
-                  spellCheck={false} autoCapitalize="off" autoCorrect="off"
-                  style={{
-                    flex: 1, padding: "9px 11px", borderRadius: 8,
-                    background: "var(--bg-input)", border: "1px solid var(--border-strong)",
-                    color: "var(--fg)", fontSize: 13,
-                  }}
-                  onKeyDown={(e) => { if (e.key === "Enter") connect(); }}
-                />
-                <button onClick={() => setShowToken((v) => !v)} style={ghostBtn}>
-                  {showToken ? "Hide" : "Show"}
-                </button>
+              <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.5 }}>
+                Opens GitHub in your browser — click Authorize and you’re in. Nothing to paste.
               </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
-                <button onClick={connect} disabled={busy} style={primaryBtn}>
-                  {busy ? "Connecting…" : "🔗 Connect GitHub"}
-                </button>
+              <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
                 <button onClick={close} style={ghostBtn}>Maybe later</button>
+                <div style={{ flex: 1 }} />
+                <button
+                  onClick={() => setShowTokenFallback((v) => !v)}
+                  style={{ background: "none", border: "none", color: "var(--fg-muted)", fontSize: 11.5, cursor: "pointer", textDecoration: "underline" }}
+                >{showTokenFallback ? "Hide token option" : "Prefer to paste a token?"}</button>
               </div>
-              <div style={{ fontSize: 11, color: "var(--fg-muted)", marginTop: 10, lineHeight: 1.5 }}>
-                Use a classic token with the <b>repo</b> scope (or a fine-grained token with
-                Contents read/write). The token is stored only on this device — it never
-                leaves it except to talk to GitHub.
-              </div>
+              {showTokenFallback && (
+                <div style={{ marginTop: 12, borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+                  <button onClick={() => openExternal(GITHUB_TOKEN_URL)} style={{ ...stepBtn, marginBottom: 8 }}>
+                    ① Create a token on GitHub →
+                  </button>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    <input
+                      type={showToken ? "text" : "password"}
+                      value={token}
+                      onChange={(e) => setToken(e.target.value)}
+                      placeholder="② Paste the token here (ghp_…)"
+                      spellCheck={false} autoCapitalize="off" autoCorrect="off"
+                      style={{
+                        flex: 1, padding: "9px 11px", borderRadius: 8,
+                        background: "var(--bg-input)", border: "1px solid var(--border-strong)",
+                        color: "var(--fg)", fontSize: 13,
+                      }}
+                      onKeyDown={(e) => { if (e.key === "Enter") connect(); }}
+                    />
+                    <button onClick={() => setShowToken((v) => !v)} style={ghostBtn}>
+                      {showToken ? "Hide" : "Show"}
+                    </button>
+                    <button onClick={connect} disabled={busy} style={primaryBtn}>
+                      {busy ? "…" : "Connect"}
+                    </button>
+                  </div>
+                  <div style={{ fontSize: 11, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.5 }}>
+                    Classic token with the <b>repo</b> scope. Stored only on this device.
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

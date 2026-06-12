@@ -299,6 +299,8 @@ pub fn run() {
             github::github_status,
             github::github_connect,
             github::github_disconnect,
+            github::github_device_start,
+            github::github_device_poll,
             vault::vault_status,
             vault::vault_ensure,
             vault::vault_read_remote_state,

@@ -38,6 +38,32 @@ export async function githubDisconnect(distro?: string | null): Promise<void> {
   await invoke("github_disconnect", { distro: distro ?? null });
 }
 
+// ---- OAuth Device Flow ("Sign in with GitHub" — no token paste) ----------
+
+/// Public OAuth App client id (safe to embed — Device Flow uses no secret).
+/// Owned by the OWLLM org; Device Flow enabled.
+export const GITHUB_CLIENT_ID = "Ov23lilBGQ0Di6rzrrSX";
+
+export type DeviceCodeStart = {
+  userCode: string;
+  verificationUri: string;
+  deviceCode: string;
+  interval: number;
+  expiresIn: number;
+};
+export type DevicePollResult = {
+  status: "pending" | "slowDown" | "authorized" | "denied" | "expired" | "error";
+  login: string | null;
+  detail: string | null;
+};
+
+export async function githubDeviceStart(): Promise<DeviceCodeStart> {
+  return invoke<DeviceCodeStart>("github_device_start", { clientId: GITHUB_CLIENT_ID });
+}
+export async function githubDevicePoll(deviceCode: string): Promise<DevicePollResult> {
+  return invoke<DevicePollResult>("github_device_poll", { clientId: GITHUB_CLIENT_ID, deviceCode });
+}
+
 // ---- Sync vault (the user's private owllm-vault repo) --------------------
 
 export type VaultStatus = {

@@ -242,9 +242,13 @@ pub fn run_in_distro_script(distro: &str, script: &str) -> Result<String, String
     Ok(if stderr.trim().is_empty() { stdout } else { format!("{stdout}\n{stderr}") })
 }
 
-/// List installed distros. `wsl.exe -l -q` emits UTF-16LE; we strip null
-/// bytes to recover the ASCII names rather than pulling in a UTF-16 decoder.
-fn list_distros_once() -> Vec<String> {
+/// One `wsl.exe -l -q` call. Returns (distro names, definitive_none).
+/// `definitive_none` is true ONLY when we KNOW there are no distros — either
+/// wsl.exe isn't installed (spawn failed) or it printed "has no installed
+/// distributions". An empty list WITHOUT that signal means a transient/cold
+/// result (the WSL service is still warming up), which the retry loop handles.
+/// wsl.exe emits UTF-16LE, so we strip nulls.
+fn list_distros_once() -> (Vec<String>, bool) {
     let mut cmd = std::process::Command::new("wsl.exe");
     cmd.arg("-l").arg("-q");
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -253,27 +257,41 @@ fn list_distros_once() -> Vec<String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let Ok(out) = cmd.output() else { return Vec::new() };
-    let raw: Vec<u8> = out.stdout.into_iter().filter(|&b| b != 0).collect();
-    String::from_utf8_lossy(&raw)
+    // Spawn failure = wsl.exe not present = genuinely no WSL → definitive.
+    let Ok(out) = cmd.output() else { return (Vec::new(), true) };
+    let raw: Vec<u8> = out.stdout.iter().copied().filter(|&b| b != 0).collect();
+    let names: Vec<String> = String::from_utf8_lossy(&raw)
         .lines()
         .map(|l| l.trim().trim_end_matches('\r').to_string())
         .filter(|l| !l.is_empty())
-        .collect()
+        .collect();
+    let err = decode_wsl(&out.stderr).to_lowercase();
+    let definitive_none = err.contains("no installed distribution");
+    (names, definitive_none)
 }
 
-/// Robust distro list. The FIRST `wsl.exe` call after a reboot can transiently
-/// fail (the WSL service is cold-starting), returning an empty list even though
-/// distros are installed — which made the Code page flash "no isolation engine".
-/// Retry once on empty before believing WSL is absent. If wsl.exe genuinely
-/// isn't installed, both calls return fast (no process), so the cost is nil.
+/// Robust distro list. The first wsl.exe calls right after a reboot OR an app
+/// UPGRADE-restart can transiently return empty while the WSL service cold-
+/// starts — which then got cached as "WSL not installed" even though it's fine.
+/// We retry on a TRANSIENT empty (with backoff, up to ~2s) but bail instantly
+/// when we KNOW there are no distros (wsl.exe missing / "no installed
+/// distributions"), so a genuinely WSL-less PC pays no delay.
 fn list_distros() -> Vec<String> {
-    let first = list_distros_once();
-    if !first.is_empty() {
-        return first;
+    const BACKOFFS_MS: [u64; 4] = [0, 350, 700, 1100];
+    for (i, delay) in BACKOFFS_MS.iter().enumerate() {
+        if *delay > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(*delay));
+        }
+        let (names, definitive_none) = list_distros_once();
+        if !names.is_empty() {
+            return names;
+        }
+        if definitive_none {
+            return Vec::new(); // truly none — don't waste time retrying
+        }
+        let _ = i;
     }
-    std::thread::sleep(std::time::Duration::from_millis(400));
-    list_distros_once()
+    Vec::new()
 }
 
 /// The default distro's name, read from inside it ($WSL_DISTRO_NAME) so it's
@@ -374,33 +392,49 @@ pub fn wsl_isolation_set(enabled: bool, distro: Option<String>) -> Result<WslIso
 /// its Linux path and the Windows UNC path the UI uses as the workspace.
 #[tauri::command]
 pub fn wsl_create_project(name: String, distro: Option<String>) -> Result<WslProject, String> {
+    // Resolve a REAL Linux distro (skip docker-desktop etc.), not the raw
+    // default — a Docker WSL distro has no bash/realpath/wslpath and the
+    // create would fail.
     let distro = distro
-        .or_else(|| wsl_status().default_distro)
-        .ok_or_else(|| "no WSL distro available — install Ubuntu first".to_string())?;
+        .filter(|d| !d.trim().is_empty())
+        .or_else(best_linux_distro)
+        .ok_or_else(|| "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string())?;
     let safe = sanitize_project_name(&name);
     if safe.is_empty() {
         return Err("invalid project name".to_string());
     }
-    // mkdir, then print the resolved Linux path and the Windows UNC path.
+    // mkdir, then print the resolved Linux + Windows UNC paths behind SENTINELS
+    // so a login-shell banner (MOTD / profile.d output) can't be mistaken for
+    // the path — the old positional parse (line 1 / line 2) silently grabbed
+    // banner text and produced a broken project. We scan for the markers.
     let script = format!(
-        "mkdir -p ~/owllm/{n} && realpath ~/owllm/{n} && wslpath -w ~/owllm/{n}",
+        "mkdir -p ~/owllm/{n}; printf 'OWLLM_LINUX=%s\\n' \"$(realpath ~/owllm/{n})\"; printf 'OWLLM_UNC=%s\\n' \"$(wslpath -w ~/owllm/{n})\"",
         n = safe
     );
     let out = run_wsl_capture(&distro, &script)?;
-    let mut lines = out.lines().map(str::trim).filter(|l| !l.is_empty());
-    let linux_path = lines.next().ok_or_else(|| "wsl returned no path".to_string())?.to_string();
-    let unc_path = lines
-        .next()
-        .ok_or_else(|| "wsl returned no UNC path".to_string())?
-        .trim_end_matches('\\')
-        .to_string();
+    let mut linux_path = String::new();
+    let mut unc_path = String::new();
+    for line in out.lines() {
+        let l = line.trim();
+        if let Some(v) = l.strip_prefix("OWLLM_LINUX=") {
+            linux_path = v.trim().to_string();
+        } else if let Some(v) = l.strip_prefix("OWLLM_UNC=") {
+            unc_path = v.trim().trim_end_matches('\\').to_string();
+        }
+    }
+    if linux_path.is_empty() || unc_path.is_empty() {
+        return Err(format!(
+            "couldn't create the WSL project (distro {distro}). Output: {}",
+            out.trim().chars().take(240).collect::<String>()
+        ));
+    }
     Ok(WslProject { name: safe, distro, linux_path, unc_path })
 }
 
 /// List existing isolated projects under ~/owllm in the distro.
 #[tauri::command]
 pub fn wsl_list_projects(distro: Option<String>) -> Result<Vec<WslProject>, String> {
-    let distro = match distro.or_else(|| wsl_status().default_distro) {
+    let distro = match distro.filter(|d| !d.trim().is_empty()).or_else(best_linux_distro) {
         Some(d) => d,
         None => return Ok(Vec::new()),
     };

@@ -16,7 +16,7 @@
 // (src-tauri/src/hardware.rs) — no Python, no console popups.
 // Software requirements remain placeholders until they have their
 // own native probes (Python interpreter / PyTorch / CUDA / deps).
-import React, { useEffect, useReducer, useState } from "react";
+import React, { useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import WslSetupModal from "./WslSetupModal";
 import { openSyncOnboarding } from "./AccountSyncModal";
@@ -495,6 +495,18 @@ export default function HomePage() {
   const ready = getCachedReadiness();
   const readyLoading = isReadinessLoading();
   const refreshReady = () => { fetchReadiness(true); };
+
+  // Self-heal a post-upgrade cold start: if WSL reads as not-ready on the
+  // first probe (the WSL service is still warming after the app restarted),
+  // force ONE re-check a few seconds later before trusting "not installed".
+  const wslRetried = useRef(false);
+  useEffect(() => {
+    if (ready && !ready.wsl.ok && !wslRetried.current) {
+      wslRetried.current = true;
+      const t = setTimeout(() => fetchReadiness(true), 4000);
+      return () => clearTimeout(t);
+    }
+  }, [ready]);
 
   // GitHub / sync account state for the top sign-in bar. Reloads on mount
   // (HomePage remounts on tab switch, so returning after sign-in refreshes).

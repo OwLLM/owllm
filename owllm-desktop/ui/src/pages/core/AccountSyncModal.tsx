@@ -55,6 +55,12 @@ export default function AccountSyncModal() {
   const [device, setDevice] = React.useState<{ userCode: string; verificationUri: string } | null>(null);
   const [showTokenFallback, setShowTokenFallback] = React.useState(false);
   const pollAlive = React.useRef(false);
+  // True while a device-flow sign-in is in progress (code on screen / starting).
+  // Used to keep the popup OPEN so switching to the browser to enter the code
+  // doesn't dismiss it (the bug: backdrop/Esc closed it and lost the code).
+  const inFlow = busy || !!device;
+  const inFlowRef = React.useRef(false);
+  React.useEffect(() => { inFlowRef.current = inFlow; }, [inFlow]);
 
   // First-run auto-open + manual reopen.
   React.useEffect(() => {
@@ -68,6 +74,9 @@ export default function AccountSyncModal() {
 
   React.useEffect(() => {
     if (!open) return;
+    // Fresh open → clear any stale state so a previous interrupted attempt
+    // can't leave the button stuck on "Starting…".
+    setBusy(false); setErr(null); setDevice(null); pollAlive.current = false;
     githubStatus().then((s) => {
       setStatus(s);
       // Already connected on a prior session → make sure the vault exists
@@ -94,7 +103,9 @@ export default function AccountSyncModal() {
   };
 
   React.useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
+    // Esc closes — but NOT while a device-flow is mid-sign-in (so it survives
+    // the trip to the browser). Cancel/✕ still work to abort.
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape" && !inFlowRef.current) close(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -104,6 +115,7 @@ export default function AccountSyncModal() {
     try { localStorage.setItem(SEEN_KEY, "1"); } catch { /* ignore */ }
     pollAlive.current = false; // stop any in-flight device-flow polling
     setDevice(null);
+    setBusy(false); // never leave the button stuck on "Starting…"
     setOpen(false);
   };
 
@@ -114,6 +126,9 @@ export default function AccountSyncModal() {
     try {
       const d = await githubDeviceStart();
       setDevice({ userCode: d.userCode, verificationUri: d.verificationUri });
+      // Auto-copy the code so the user can just paste it in the browser —
+      // no need to alt-tab back to read it off this popup.
+      try { await navigator.clipboard?.writeText(d.userCode); } catch { /* ok */ }
       openExternal(d.verificationUri);
       pollAlive.current = true;
       const poll = async () => {
@@ -179,7 +194,7 @@ export default function AccountSyncModal() {
 
   return (
     <div
-      onMouseDown={(e) => { if (e.target === e.currentTarget) close(); }}
+      onMouseDown={(e) => { if (e.target === e.currentTarget && !inFlow) close(); }}
       style={{
         position: "fixed", inset: 0, zIndex: 9800,
         background: "rgba(0,0,0,0.66)",
@@ -278,8 +293,9 @@ export default function AccountSyncModal() {
               borderRadius: 10, padding: "14px",
             }}>
               <div style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.5 }}>
-                We opened <b>github.com/login/device</b> in your browser. Enter this code and
-                click <b>Authorize</b>:
+                We opened <b>github.com/login/device</b> in your browser and <b>copied your code</b> —
+                just <b>paste</b> it there and click <b>Authorize</b>. This window stays open; you
+                don’t need to come back to it.
               </div>
               <div style={{ display: "flex", alignItems: "center", gap: 10, margin: "12px 0" }}>
                 <div style={{

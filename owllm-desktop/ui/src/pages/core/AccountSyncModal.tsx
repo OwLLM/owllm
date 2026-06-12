@@ -20,8 +20,11 @@ import {
   githubStatus,
   githubConnect,
   githubDisconnect,
+  vaultEnsure,
+  vaultStatus,
   GITHUB_TOKEN_URL,
   type GithubStatus,
+  type VaultStatus,
 } from "../agentic/github";
 
 const SEEN_KEY = "owllm:sync-onboard-seen";
@@ -44,6 +47,8 @@ export default function AccountSyncModal() {
   const [showToken, setShowToken] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
+  const [vault, setVault] = React.useState<VaultStatus | null>(null);
+  const [vaultMsg, setVaultMsg] = React.useState<string>("");
 
   // First-run auto-open + manual reopen.
   React.useEffect(() => {
@@ -56,8 +61,29 @@ export default function AccountSyncModal() {
   }, []);
 
   React.useEffect(() => {
-    if (open) githubStatus().then(setStatus).catch(() => setStatus(null));
+    if (!open) return;
+    githubStatus().then((s) => {
+      setStatus(s);
+      // Already connected on a prior session → make sure the vault exists
+      // (idempotent), and reflect its real state.
+      if (s.connected) ensureVault();
+    }).catch(() => setStatus(null));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
+
+  // Create-if-missing + clone the private owllm-vault, updating the UI.
+  const ensureVault = async () => {
+    setVaultMsg("Setting up your private vault…");
+    try {
+      const v = await vaultEnsure();
+      setVault(v);
+      setVaultMsg(v.cloned ? "" : "Vault created — finishing local setup…");
+    } catch (e) {
+      // Non-fatal: sign-in still worked; surface the reason.
+      setVault(await vaultStatus());
+      setVaultMsg(`Couldn't finish vault setup: ${String(e)}`);
+    }
+  };
 
   React.useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") close(); };
@@ -78,6 +104,8 @@ export default function AccountSyncModal() {
       const res = await githubConnect(token.trim());
       setStatus({ connected: true, login: res.login });
       setToken("");
+      // Create + clone the private vault right away so the promise is real.
+      await ensureVault();
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -167,12 +195,23 @@ export default function AccountSyncModal() {
                 ✓ Signed in as @{login}
               </div>
               <div style={{ fontSize: 12.5, color: "var(--fg-muted)", marginTop: 4, lineHeight: 1.5 }}>
-                GitHub is connected. Your chats, settings and agent teams will sync to a private{" "}
-                <code>owllm-vault</code> repo on <code>github.com/{login}</code> so they’re ready
-                on every device you sign in on.
+                {vault?.cloned ? (
+                  <>Your private vault <code>{login}/owllm-vault</code> is ready on this device.
+                  Your chats, settings and agent teams sync here.</>
+                ) : vaultMsg ? (
+                  <>{vaultMsg}</>
+                ) : (
+                  <>GitHub is connected. Your chats, settings and agent teams will sync to a
+                  private <code>owllm-vault</code> repo on <code>github.com/{login}</code>.</>
+                )}
               </div>
-              <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+              <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
                 <button onClick={close} style={primaryBtn}>Done</button>
+                {vault?.repoUrl && (
+                  <button onClick={() => openExternal(vault.repoUrl!)} style={ghostBtn}>
+                    View on GitHub
+                  </button>
+                )}
                 <button onClick={disconnect} disabled={busy} style={ghostBtn}>
                   {busy ? "…" : "Disconnect"}
                 </button>

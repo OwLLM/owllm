@@ -38,6 +38,30 @@ export async function githubDisconnect(distro?: string | null): Promise<void> {
   await invoke("github_disconnect", { distro: distro ?? null });
 }
 
+// ---- Sync vault (the user's private owllm-vault repo) --------------------
+
+export type VaultStatus = {
+  connected: boolean;
+  login: string | null;
+  repoExists: boolean;
+  cloned: boolean;
+  path: string | null;
+  repoUrl: string | null;
+};
+
+export async function vaultStatus(): Promise<VaultStatus> {
+  try {
+    return await invoke<VaultStatus>("vault_status");
+  } catch {
+    return { connected: false, login: null, repoExists: false, cloned: false, path: null, repoUrl: null };
+  }
+}
+
+/// Create (if missing) + clone the private owllm-vault repo. Idempotent.
+export async function vaultEnsure(): Promise<VaultStatus> {
+  return invoke<VaultStatus>("vault_ensure");
+}
+
 /// Deep link to create a token with the right scope pre-selected. Classic PAT
 /// with `repo` scope works everywhere (private clone + push); fine-grained
 /// tokens also work with Contents read/write on the target repos.

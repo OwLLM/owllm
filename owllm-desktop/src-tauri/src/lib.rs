@@ -47,6 +47,7 @@ mod github;
 mod sandbox;
 mod slack;
 mod telegram;
+mod vault;
 mod webhook;
 mod wsl;
 mod wsl_setup;
@@ -295,6 +296,8 @@ pub fn run() {
             github::github_status,
             github::github_connect,
             github::github_disconnect,
+            vault::vault_status,
+            vault::vault_ensure,
             sandbox::sandbox_status,
             sandbox::sandbox_create_project,
             sandbox::sandbox_list_projects,

@@ -581,6 +581,45 @@ fn win_to_mnt(p: &str) -> Result<String, String> {
 pub struct SyncResult {
     pub synced: Vec<String>,
     pub found_on_host: Vec<String>,
+    /// Per-credential mirror status — one row per provider (P1-2): what
+    /// mirrored, what didn't, and why, instead of two bare lists the user
+    /// has to diff mentally.
+    pub report: Vec<MirrorStatus>,
+}
+
+#[derive(serde::Serialize, Clone, Debug, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MirrorStatus {
+    /// codex | claude | gemini | kimi | keys
+    pub provider: String,
+    pub on_host: bool,
+    pub in_sandbox: bool,
+    /// Human-readable outcome ("mirrored", "did NOT land — …", "not logged in …").
+    pub detail: String,
+}
+
+/// Pure mapping: (found-on-host set, landed-in-sandbox set) → one status row
+/// per provider. Unit-tested; shared wording for every sync surface.
+#[cfg_attr(not(windows), allow(dead_code))] // sync is WSL/Windows-only today
+fn build_mirror_report(found_on_host: &[String], synced: &[String]) -> Vec<MirrorStatus> {
+    const PROVIDERS: [&str; 5] = ["codex", "claude", "gemini", "kimi", "keys"];
+    PROVIDERS
+        .iter()
+        .map(|p| {
+            let on_host = found_on_host.iter().any(|s| s == p);
+            let in_sandbox = synced.iter().any(|s| s == p);
+            let what = if *p == "keys" { "API keys" } else { "login" };
+            let detail = match (on_host, in_sandbox) {
+                (true, true) => "mirrored into the sandbox".to_string(),
+                (true, false) => format!(
+                    "{what} found on Windows but did NOT land in the sandbox — check the WSL distro (Set up WSL on Home), then Sync logins again"
+                ),
+                (false, true) => "present in the sandbox (no Windows copy — synced earlier or logged in inside the distro)".to_string(),
+                (false, false) => format!("no {what} on Windows — log in there first, then sync"),
+            };
+            MirrorStatus { provider: p.to_string(), on_host, in_sandbox, detail }
+        })
+        .collect()
 }
 
 #[cfg(windows)]
@@ -665,7 +704,9 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
     if !env_lines.trim().is_empty() {
         found_on_host.push("keys".into());
     }
-    Ok(SyncResult { synced: parse("SYNCED:"), found_on_host })
+    let synced = parse("SYNCED:");
+    let report = build_mirror_report(&found_on_host, &synced);
+    Ok(SyncResult { synced, found_on_host, report })
 }
 
 /// Which provider logins are present INSIDE the sandbox right now (codex/claude/
@@ -774,12 +815,6 @@ fn sync_logins_impl(_distro: Option<String>) -> Result<SyncResult, String> {
     Err("login sync is currently implemented for WSL (Windows) only".to_string())
 }
 
-#[cfg(not(windows))]
-#[derive(serde::Serialize, Clone, Debug)]
-pub struct SyncResult {
-    pub synced: Vec<String>,
-    pub found_on_host: Vec<String>,
-}
 
 /// Mirror host logins into the sandbox. Returns what synced AND what was
 /// found on the Windows host, so the UI can explain the outcome precisely.
@@ -791,6 +826,45 @@ pub fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mirror_report_covers_every_state() {
+        let found = vec!["codex".to_string(), "claude".to_string(), "keys".to_string()];
+        let synced = vec!["claude".to_string(), "gemini".to_string(), "keys".to_string()];
+        let r = build_mirror_report(&found, &synced);
+        assert_eq!(r.len(), 5, "one row per provider");
+        let get = |p: &str| r.iter().find(|m| m.provider == p).unwrap();
+        // found + synced → mirrored
+        assert!(get("claude").detail.contains("mirrored"));
+        assert!(get("keys").detail.contains("mirrored"));
+        // found + NOT synced → loud failure with a next step
+        let codex = get("codex");
+        assert!(codex.on_host && !codex.in_sandbox);
+        assert!(codex.detail.contains("did NOT land"), "{}", codex.detail);
+        // not found + synced → present from an earlier sync
+        assert!(get("gemini").detail.contains("present in the sandbox"));
+        // not found + not synced → actionable "log in first"
+        assert!(get("kimi").detail.contains("log in"), "{}", get("kimi").detail);
+    }
+
+    /// Live probe (real WSL + whatever logins exist on this machine):
+    ///   cargo test --lib -- --ignored --nocapture probe_sync_logins_report
+    /// Runs the real sync and asserts the report is complete + consistent.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn probe_sync_logins_report() {
+        let r = sync_logins_impl(None).expect("sync runs");
+        eprintln!("== live sync report ==");
+        for m in &r.report {
+            eprintln!("{:>7}: host={} sandbox={} — {}", m.provider, m.on_host, m.in_sandbox, m.detail);
+        }
+        assert_eq!(r.report.len(), 5);
+        for m in &r.report {
+            assert_eq!(m.on_host, r.found_on_host.contains(&m.provider), "{} host flag", m.provider);
+            assert_eq!(m.in_sandbox, r.synced.contains(&m.provider), "{} sandbox flag", m.provider);
+        }
+    }
 
     #[cfg(windows)]
     #[test]

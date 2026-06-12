@@ -52,10 +52,27 @@ export async function sandboxProvision(): Promise<string> {
   return invoke<string>("sandbox_provision");
 }
 
+/// Per-credential mirror outcome (P1-2): deterministic + observable —
+/// what mirrored, what didn't, and why.
+export type MirrorStatus = {
+  provider: string;
+  onHost: boolean;
+  inSandbox: boolean;
+  detail: string;
+};
+
 /// What a login sync did: `synced` = providers now present INSIDE the
 /// sandbox; `found_on_host` = providers detected on the Windows side (the
-/// source). Both reported so the UI can explain the outcome precisely.
-export type SyncResult = { synced: string[]; found_on_host: string[] };
+/// source); `report` = one status row per provider with the why.
+export type SyncResult = { synced: string[]; found_on_host: string[]; report: MirrorStatus[] };
+
+/// Render the per-credential report as display lines ("✓ claude — mirrored…").
+export function mirrorReportLines(r: SyncResult): string[] {
+  return (r.report ?? []).map((m) => {
+    const icon = m.inSandbox ? "✓" : m.onHost ? "✗" : "·";
+    return `${icon} ${m.provider} — ${m.detail}`;
+  });
+}
 
 /// Mirror the host's CLI logins (codex/claude/gemini) + API keys into the
 /// sandbox so isolated agents are authenticated. WSL (Windows) only for now.

@@ -26,7 +26,7 @@ import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, type G
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
   sandboxProvision, sandboxLoginStatus, sandboxConvertProject,
-  engineLabel, type SandboxStatus, type SandboxProject,
+  engineLabel, mirrorReportLines, type SandboxStatus, type SandboxProject,
 } from "./isolation";
 
 type Msg = {
@@ -429,13 +429,15 @@ export default function CodePage() {
     setStatus("Mirroring your Windows logins into the sandbox…");
     try {
       const r = await sandboxSyncLogins(wslStat?.defaultDistro ?? null);
-      setStatus(
-        r.synced.length
-          ? `✓ Synced into sandbox: ${r.synced.join(", ")} — isolated agents are authenticated.`
-          : r.found_on_host.length
-            ? `Found on Windows: ${r.found_on_host.join(", ")}, but nothing landed in the sandbox. Is the WSL Ubuntu set up? Try again or reinstall the toolchain.`
-            : "Nothing to sync — no CLI is logged in and no API keys are saved on this PC's Windows side (Accounts → Connect)."
-      );
+      // Per-credential report (P1-2): every provider's mirror status + why,
+      // instead of a single summary the user has to interpret.
+      const lines = mirrorReportLines(r);
+      const summary = r.synced.length
+        ? `✓ Synced into sandbox: ${r.synced.join(", ")} — isolated agents are authenticated.`
+        : r.found_on_host.length
+          ? `⚠ Found on Windows: ${r.found_on_host.join(", ")}, but nothing landed in the sandbox.`
+          : "Nothing to sync — no CLI is logged in and no API keys are saved on this PC's Windows side (Accounts → Connect).";
+      setStatus(lines.length ? `${summary}\n${lines.join("\n")}` : summary);
     } catch (e) {
       setStatus(`Login sync failed: ${e}`);
     }
@@ -1234,8 +1236,11 @@ export default function CodePage() {
         </div>
       </div>
 
-      {/* Status line */}
-      <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
+      {/* Status line — expands to multiple lines for the per-credential
+          sync report (P1-2); stays a single ellipsized line otherwise. */}
+      <div style={status.includes("\n")
+        ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
+        : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
 
       {/* Composer */}
       <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>

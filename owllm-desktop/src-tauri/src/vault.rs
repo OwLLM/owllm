@@ -168,12 +168,14 @@ fn clone_vault(token: &str, login: &str, dir: &std::path::Path) -> Result<(), St
     }
     let dir_s = dir.to_string_lossy().to_string();
     let plain = format!("https://github.com/{login}/{VAULT_REPO}.git");
-    if run_git(&["clone", "--depth", "1", &plain, &dir_s], None).is_ok() {
+    // Full clone (the vault is tiny text) so commit/push stay simple — shallow
+    // clones complicate pushes.
+    if run_git(&["clone", &plain, &dir_s], None).is_ok() {
         return Ok(());
     }
     // Fallback: embed the token for this clone (the helper wasn't usable).
     let auth = format!("https://{login}:{token}@github.com/{login}/{VAULT_REPO}.git");
-    run_git(&["clone", "--depth", "1", &auth, &dir_s], None)?;
+    run_git(&["clone", &auth, &dir_s], None)?;
     // Reset the remote to the tokenless URL so the token isn't left in
     // .git/config — the helper (or a future re-embed) handles auth on push.
     let _ = run_git(&["remote", "set-url", "origin", &plain], Some(dir));
@@ -210,6 +212,87 @@ pub async fn vault_status() -> VaultStatus {
     })
     .await
     .unwrap_or_default()
+}
+
+/// The clone's current branch (GitHub auto_init defaults to `main`).
+fn current_branch(dir: &std::path::Path) -> String {
+    run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(dir))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "HEAD")
+        .unwrap_or_else(|| "main".to_string())
+}
+
+/// Read the LATEST remote sync blob (`state/local.json`) WITHOUT touching the
+/// working tree — `git show origin/<branch>:state/local.json` after a fetch.
+/// Returns None when the file doesn't exist yet (fresh vault). The JS layer
+/// decides whether to adopt it (last-write-wins by timestamp).
+#[tauri::command]
+pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Ok(None);
+    }
+    tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+        let branch = current_branch(&dir);
+        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
+        match run_git(&["show", &format!("origin/{branch}:state/local.json")], Some(&dir)) {
+            Ok(contents) => Ok(Some(contents)),
+            Err(_) => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Write the sync blob, commit, integrate remote (ours wins on conflict — the
+/// JS layer already resolved which side is newer), and push.
+#[tauri::command]
+pub async fn vault_write_state(json: String) -> Result<(), String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Err("vault not set up on this device yet".to_string());
+    }
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let branch = current_branch(&dir);
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&state_dir).map_err(|e| format!("mkdir state: {e}"))?;
+        std::fs::write(state_dir.join("local.json"), json.as_bytes())
+            .map_err(|e| format!("write state: {e}"))?;
+        run_git(&["add", "-A"], Some(&dir))?;
+        // Commit; "nothing to commit" is fine (returns Err — ignore).
+        let _ = run_git(&["commit", "-m", "owllm sync"], Some(&dir));
+        // Integrate any remote commits before pushing; -X ours keeps our
+        // just-written blob on conflict (JS already decided newer-wins).
+        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
+        let _ = run_git(
+            &["merge", "-X", "ours", "--no-edit", &format!("origin/{branch}")],
+            Some(&dir),
+        );
+        run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(&dir))
+            .map(|_| ())
+            .map_err(|e| format!("push failed: {e}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Fast-forward the local clone to origin after the JS layer has adopted the
+/// remote blob into localStorage — keeps future commits clean/linear.
+#[tauri::command]
+pub async fn vault_align() -> Result<(), String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Ok(());
+    }
+    tokio::task::spawn_blocking(move || {
+        let branch = current_branch(&dir);
+        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
+        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?;
+    Ok(())
 }
 
 /// Ensure the private vault repo exists AND is cloned locally. Idempotent:

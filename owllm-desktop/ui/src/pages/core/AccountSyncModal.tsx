@@ -78,6 +78,8 @@ export default function AccountSyncModal() {
       const v = await vaultEnsure();
       setVault(v);
       setVaultMsg(v.cloned ? "" : "Vault created — finishing local setup…");
+      // Kick off sync now so they don't have to restart.
+      if (v.cloned) { import("../../runtime/vaultSync").then((m) => m.onVaultConnected()).catch(() => {}); }
     } catch (e) {
       // Non-fatal: sign-in still worked; surface the reason.
       setVault(await vaultStatus());

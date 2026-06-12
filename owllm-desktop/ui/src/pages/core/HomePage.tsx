@@ -525,6 +525,19 @@ export default function HomePage() {
   // WSL not ready → offer the guided setup (install Ubuntu + Python, or
   // the one-time BIOS step). The Coder still works on the host meanwhile.
   const wslNeedsSetup = !!ready && !ready.wsl.ok;
+  // Local LLM runtime (llama.cpp) missing → one-click install the
+  // local-inference module instead of making the user discover that it
+  // only auto-installs when you first start a model. module_install picks
+  // the cuda/cpu variant from the detected hardware.
+  const runtimeNeedsSetup = !!ready && !ready.runtime.ok;
+  const [installingEngine, setInstallingEngine] = useState(false);
+  const installEngine = () => {
+    setInstallingEngine(true);
+    invoke("module_install", { id: "local-inference" })
+      .then(() => refreshReady())
+      .catch((e) => console.error("engine install failed", e))
+      .finally(() => setInstallingEngine(false));
+  };
 
   return (
     <div style={{ padding: "30px 40px", height: "100%", overflow: "auto" }}>
@@ -714,6 +727,28 @@ export default function HomePage() {
                 }}
               >
                 🛠️ Set up Fine-tuning Environment
+              </button>
+            )}
+            {runtimeNeedsSetup && (
+              <button
+                data-ui="InstallEngineBtn"
+                onClick={installEngine}
+                disabled={installingEngine}
+                title="Download + install the local llama.cpp inference engine for your GPU"
+                style={{
+                  minHeight: 42,
+                  padding: "10px 18px",
+                  borderRadius: 12,
+                  border: "2px solid var(--accent-strong)",
+                  background: "var(--bg-elevated)",
+                  color: "var(--fg-strong)",
+                  fontSize: 15,
+                  fontWeight: 700,
+                  cursor: installingEngine ? "wait" : "pointer",
+                  opacity: installingEngine ? 0.6 : 1,
+                }}
+              >
+                {installingEngine ? "⏳ Installing engine…" : "🦙 Install LLM engine"}
               </button>
             )}
           </div>

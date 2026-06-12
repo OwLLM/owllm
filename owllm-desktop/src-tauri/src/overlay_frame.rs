@@ -227,10 +227,42 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
 }
 
 fn start_sync_loop(main: WebviewWindow, overlay: WebviewWindow) {
-    std::thread::spawn(move || loop {
-        if sync_once(&main, &overlay).is_err() {
-            break;
+    std::thread::spawn(move || {
+        // A single transient failure must NOT kill the follow. Reading the
+        // main window's position/size/visibility can briefly error while it's
+        // mid-move or the webview is momentarily busy; the old code did
+        // `if is_err() { break }`, so one hiccup froze the frame at a stale
+        // spot forever (the "stuck outside / not following" bug). Now we keep
+        // going on errors and only give up once main has been unreachable for
+        // a sustained stretch (≈ window really gone), not a momentary glitch.
+        let mut consecutive_err: u32 = 0;
+        loop {
+            match sync_once(&main, &overlay) {
+                Ok(()) => consecutive_err = 0,
+                Err(_) => {
+                    consecutive_err += 1;
+                    if consecutive_err > 150 {
+                        // ~5s of continuous failure → main is gone; stop.
+                        break;
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(33));
         }
-        std::thread::sleep(Duration::from_millis(33));
     });
+}
+
+/// Immediately re-glue the overlay to the main window. Called from the
+/// RunEvent loop on main's Moved/Resized so the frame tracks drags/resizes
+/// precisely instead of trailing the 33ms poll. Best-effort + cheap.
+pub fn sync_now(app: &tauri::AppHandle) {
+    if !enabled() {
+        return;
+    }
+    if let (Some(main), Some(overlay)) = (
+        app.get_webview_window("main"),
+        app.get_webview_window(OVERLAY_LABEL),
+    ) {
+        let _ = sync_once(&main, &overlay);
+    }
 }

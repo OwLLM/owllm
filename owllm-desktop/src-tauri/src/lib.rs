@@ -327,6 +327,17 @@ pub fn run() {
             // doesn't run if the runtime is force-killed before the
             // Child is dropped.
             match event {
+                // Keep the decorative overlay frame glued to the main window
+                // as it moves/resizes — event-driven so it tracks drags
+                // precisely instead of trailing the 33ms poll (which could
+                // also leave it visibly stuck after a transient hiccup).
+                tauri::RunEvent::WindowEvent {
+                    label,
+                    event: tauri::WindowEvent::Moved(_) | tauri::WindowEvent::Resized(_),
+                    ..
+                } if label == "main" => {
+                    overlay_frame::sync_now(app);
+                }
                 tauri::RunEvent::WindowEvent {
                     label,
                     event: tauri::WindowEvent::CloseRequested { .. },

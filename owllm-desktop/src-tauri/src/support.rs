@@ -175,6 +175,38 @@ fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// Save a bug-report bundle LOCALLY (the private default — no backend is
+/// configured, so nothing is transmitted anywhere). Writes report.json and
+/// the optional screenshot into %USERPROFILE%\OwLLM\bug-reports\<stamp>\
+/// and returns that folder. The caller has already shown the user the
+/// exact redacted contents (preview-before-anything is mandatory).
+#[tauri::command]
+pub async fn support_export_report(
+    report_json: String,
+    png_base64: Option<String>,
+) -> Result<String, String> {
+    use base64::Engine as _;
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .ok_or_else(|| "no home directory".to_string())?;
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let dir = std::path::PathBuf::from(home)
+        .join("OwLLM")
+        .join("bug-reports")
+        .join(format!("report-{stamp}"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    std::fs::write(dir.join("report.json"), report_json.as_bytes())
+        .map_err(|e| format!("write report.json: {e}"))?;
+    if let Some(b64) = png_base64.filter(|s| !s.is_empty()) {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .map_err(|e| format!("decode screenshot: {e}"))?;
+        std::fs::write(dir.join("screenshot.png"), bytes)
+            .map_err(|e| format!("write screenshot.png: {e}"))?;
+    }
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub async fn support_snapshot(app: tauri::AppHandle) -> Result<SupportSnapshot, String> {
     let readiness = crate::readiness::app_readiness().await.unwrap_or_default();

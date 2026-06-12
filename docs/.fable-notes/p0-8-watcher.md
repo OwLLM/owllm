@@ -99,10 +99,24 @@ pick a model; RTX 4090 + CUDA 12.6 detected; if it crashed on load tell
 me the model — broken GGUF / OOM / port conflict"). Exactly the spec's
 likely-cause + fix + bug-or-not + repro shape.
 
-## Remaining slices
+## Slice 6 — bug report bundle (shipped 2026-06-13) → P0-8 COMPLETE
 
-- Slice 6: send report (private path default, preview + consent,
-  redaction; local export bundle when no backend configured). The
-  building blocks all exist now: snapshot + capture + activity stats +
-  AI summary; what's left is the redactor, the bundle assembly/preview,
-  and the local-export default.
+Flow: type a description → "Report a bug" assembles {description, page,
+snapshot, activity, last AI summary, optional capture} → `redactForReport`
+scrubs it BEFORE the preview (keys/tokens by prefix, JWTs, bearer
+headers, telegram bot tokens, home-path usernames — capture-group
+replacement preserves JSON escaping) → the FULL redacted JSON is shown →
+the button arms to "💾 Save report bundle" → second click writes
+report.json + screenshot.png to %USERPROFILE%\OwLLM\bug-reports\<stamp>\
+(support_export_report). Nothing is ever transmitted — the private
+"backend" is a local folder the user shares deliberately. Probe: 13
+redactor assertions (every secret class scrubbed, benign diagnostics
+intact, output still valid JSON).
+
+## P0-8 status: all six slices shipped
+
+Possible polish later (not blockers): render the orbit hint screenshot-
+verified (logic shipped, only tooltip was visually confirmed); a
+configurable private endpoint as an alternative to local export; the
+quarantine/crash log tail in the bundle; auto-attach a fresh capture at
+report time.

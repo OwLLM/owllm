@@ -10,6 +10,7 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getActivity, clearActivity, activityLines } from "./activityStats";
+import { redactForReport } from "./redact";
 // Model discovery + dispatch: the SAME machinery the rest of the app uses
 // (shared ModelPicker catalogue + the shared dispatch paths) — never a
 // parallel model list (P0-8 Slice 5).
@@ -195,12 +196,15 @@ export default function WatcherDrawer({
 
   // User-approved capture of the APP WINDOW ONLY (in-app modals included —
   // they live in the same WebView surface). The preview is shown before
-  // anything could ever join a report; nothing is sent anywhere.
+  // anything could ever join a report; nothing is sent anywhere. The last
+  // capture is kept so "Report a bug" can offer to attach it.
+  const lastCapture = React.useRef<WindowCapture | null>(null);
   const captureApp = async () => {
     say("Capture current app", "you");
     setBusy(true);
     try {
       const c = await invoke<WindowCapture>("support_capture_window");
+      lastCapture.current = c;
       say(
         `Here's the capture (${c.width}×${c.height}, this window only — not included: ${c.notCaptured}). ` +
         "It stays on this device unless you attach it to a report later.",
@@ -325,12 +329,72 @@ export default function WatcherDrawer({
     }
   };
 
-  const reportBug = () => {
-    say("Report a bug", "you");
-    say(
-      "The full bug reporter (screenshot + diagnostics + preview before sending) ships in an upcoming update. " +
-      "For now: run “Check my setup” above and screenshot it together with what went wrong — that's exactly what I'll package for you soon.",
-    );
+  // Bug report (Slice 6): describe → assemble → REDACT → preview → explicit
+  // save. Default path is PRIVATE: a local export bundle — nothing is
+  // transmitted anywhere; the user shares the folder however they choose.
+  const reportPreview = React.useRef<{ json: string; png: string | null } | null>(null);
+  const [reportArmed, setReportArmed] = React.useState(false);
+
+  const reportBug = async () => {
+    if (reportArmed && reportPreview.current) {
+      // Second click = explicit consent to SAVE the previewed bundle.
+      setBusy(true);
+      try {
+        const dir = await invoke<string>("support_export_report", {
+          reportJson: reportPreview.current.json,
+          pngBase64: reportPreview.current.png,
+        });
+        say(`Saved the report bundle to:\n${dir}\n\nNothing was transmitted — share that folder with the OWLLM team however you prefer (or delete it).`);
+      } catch (e) {
+        say(`Saving the report failed: ${e}`);
+      } finally {
+        reportPreview.current = null;
+        setReportArmed(false);
+        setBusy(false);
+      }
+      return;
+    }
+    const description = draft.trim();
+    if (!description) {
+      say("Report a bug", "you");
+      say("Type what went wrong in the box below (what you did, what you expected, what happened), then press “Report a bug” again. I'll assemble a redacted bundle and show you EXACTLY what it contains before anything is saved.");
+      return;
+    }
+    say(`Report a bug: ${description}`, "you");
+    setBusy(true);
+    setDraft("");
+    try {
+      const snapshot = await invoke<SupportSnapshot>("support_snapshot").catch(() => null);
+      const lastAi = [...entries].reverse().find((e) => e.from === "watcher" && !e.imageDataUrl)?.text ?? null;
+      const bundle = {
+        kind: "owllm-bug-report",
+        createdAt: new Date().toISOString(),
+        appVersion: snapshot?.appVersion ?? "?",
+        page: { activeKey, mode },
+        description,
+        assistantSummary: lastAi,
+        snapshot,
+        activity: getActivity(),
+        screenshotAttached: lastCapture.current != null,
+      };
+      // Redact BEFORE preview — secrets must not even reach the preview.
+      const json = redactForReport(JSON.stringify(bundle, null, 2));
+      reportPreview.current = { json, png: lastCapture.current?.pngBase64 ?? null };
+      setReportArmed(true);
+      const shown = json.length > 5000 ? `${json.slice(0, 5000)}\n… (${json.length - 5000} more chars — the full text is what gets saved)` : json;
+      say(
+        "Here is EXACTLY what the report bundle contains (already redacted — keys, tokens and home paths are scrubbed):\n\n" +
+        shown +
+        (lastCapture.current ? "\n\n+ the app capture you took (preview above)." : "\n\nNo screenshot attached — use “Capture current app” first if you want one.") +
+        "\n\nPress “Report a bug” again to SAVE this as a local bundle (nothing is sent anywhere), or just keep chatting to discard it.",
+        "watcher",
+        lastCapture.current ? `data:image/png;base64,${lastCapture.current.pngBase64}` : undefined,
+      );
+    } catch (e) {
+      say(`I couldn't assemble the report: ${e}`);
+    } finally {
+      setBusy(false);
+    }
   };
 
   const actionBtn: React.CSSProperties = {
@@ -427,7 +491,12 @@ export default function WatcherDrawer({
             title="No model? A tiny Gemma-class support model (under 1 GB) runs on almost anything — download it on the Models page."
           >📦 Get a model</button>
           <button style={actionBtn} disabled={busy} onClick={wipeActivity} title="Wipe the local activity counters">🧹 Clear</button>
-          <button style={actionBtn} disabled={busy} onClick={reportBug}>🐞 Report a bug</button>
+          <button
+            style={reportArmed ? { ...actionBtn, background: "linear-gradient(180deg, #ffb74d, #f59e0b)", color: "#241a05", fontWeight: 800 } : actionBtn}
+            disabled={busy}
+            onClick={reportBug}
+            title="Assembles a redacted bundle (description + diagnostics + activity + optional capture), shows you exactly what's in it, and only saves locally on a second click. Nothing is ever auto-sent."
+          >{reportArmed ? "💾 Save report bundle" : "🐞 Report a bug"}</button>
         </div>
       </div>
     </div>

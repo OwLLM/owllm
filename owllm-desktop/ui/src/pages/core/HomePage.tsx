@@ -19,6 +19,8 @@
 import React, { useEffect, useReducer, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import WslSetupModal from "./WslSetupModal";
+import { openSyncOnboarding } from "./AccountSyncModal";
+import { githubStatus } from "../agentic/github";
 import {
   fetchReadiness,
   getCachedReadiness,
@@ -493,6 +495,17 @@ export default function HomePage() {
   const ready = getCachedReadiness();
   const readyLoading = isReadinessLoading();
   const refreshReady = () => { fetchReadiness(true); };
+
+  // GitHub / sync account state for the top sign-in bar. Reloads on mount
+  // (HomePage remounts on tab switch, so returning after sign-in refreshes).
+  const [account, setAccount] = useState<{ connected: boolean; login: string | null }>({ connected: false, login: null });
+  useEffect(() => {
+    let dead = false;
+    const load = () => { githubStatus().then((s) => { if (!dead) setAccount(s); }).catch(() => {}); };
+    load();
+    window.addEventListener("focus", load);
+    return () => { dead = true; window.removeEventListener("focus", load); };
+  }, []);
   // Guided WSL setup modal — opened from the WSL row when it's not ready,
   // and from other pages (e.g. the Environment popup) via the
   // `owllm:open-wsl-setup` event after they navigate Home.
@@ -550,6 +563,40 @@ export default function HomePage() {
           gap: 28,
         }}
       >
+        {/* Account / sync bar — sign in with GitHub so chats & settings
+            follow you across devices. Opens the onboarding popup. */}
+        <button
+          data-ui="SyncAccountBar"
+          onClick={openSyncOnboarding}
+          title={account.connected ? "Manage sync / account" : "Sign in to sync your chats & settings across devices"}
+          style={{
+            display: "flex", alignItems: "center", gap: 12,
+            padding: "12px 18px", borderRadius: 14, cursor: "pointer", textAlign: "left",
+            border: `1px solid ${account.connected ? "rgba(34,197,94,0.45)" : "var(--accent-strong)"}`,
+            background: account.connected ? "rgba(34,197,94,0.08)" : "var(--bg-elevated)",
+            color: "var(--fg)",
+          }}
+        >
+          <span style={{ fontSize: 22, lineHeight: 1 }}>{account.connected ? "☁️" : "🦉"}</span>
+          <span style={{ flex: 1 }}>
+            {account.connected ? (
+              <>
+                <span style={{ fontWeight: 800, color: "#22c55e" }}>Synced as @{account.login}</span>
+                <span style={{ color: "var(--fg-muted)", fontSize: 12.5 }}> — your chats &amp; settings follow you across devices</span>
+              </>
+            ) : (
+              <>
+                <span style={{ fontWeight: 800, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
+                <span style={{ color: "var(--fg-muted)", fontSize: 12.5 }}> — take your chats, settings &amp; agent teams to every device</span>
+              </>
+            )}
+          </span>
+          <span style={{
+            fontSize: 12.5, fontWeight: 800,
+            color: account.connected ? "#22c55e" : "var(--accent)",
+          }}>{account.connected ? "Manage →" : "Sign in →"}</span>
+        </button>
+
         {/* Square, image-only launcher tiles. Three equal columns that
             stretch to the full window width (1fr each) so the row never
             leaves dead space on the sides; each tile stays square via

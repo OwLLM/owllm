@@ -53,11 +53,27 @@ screenshot first, then aim.
   HybridFrame era; the overlay window itself is transparent:true. DON'T
   touch either.
 
+## Slice 3 — app-window capture (shipped 2026-06-13)
+
+`support_capture_window`: PrintWindow + PW_RENDERFULLCONTENT (0x2) into a
+top-down 32bpp DIB, BGRA→RGBA, PNG-encode (`png` crate, new dep), base64
+over IPC. Live-probed: clicked the button in the running app — the
+preview rendered showing the app WITH the open Watcher modal inside it
+(modal-over-app capture proven), plus the honest "not captured: overlay
+chrome; other windows/monitors never" note.
+
+Gotchas:
+- `PrintWindow` lives in `windows_sys::Win32::Storage::Xps`, NOT
+  UI::WindowsAndMessaging. Feature: "Win32_Storage_Xps".
+- GDI alpha is garbage — force 0xFF per pixel or the PNG renders blotchy.
+- Copy the DIB bits out BEFORE DeleteObject/DeleteDC.
+- Non-Windows returns an explicit "attach an OS screenshot instead" error
+  (the documented fallback messaging).
+
 ## Remaining slices
 
-- Slice 3: app-window screenshot (PrintWindow incl. modals) — the probe
-  technique above is half the implementation.
-- Slice 4: local activity counters.
+- Slice 4: local activity counters (view/clear; product telemetry only).
 - Slice 5: model choice + AI diagnosis (reuse ModelPicker discovery; tiny
-  Gemma <1GB fallback offer).
-- Slice 6: send report (private path default, preview + consent, redaction).
+  Gemma <1GB fallback offer; show provider before cloud use).
+- Slice 6: send report (private path default, preview + consent,
+  redaction; local export bundle when no backend configured).

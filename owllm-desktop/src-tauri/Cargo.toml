@@ -100,6 +100,10 @@ serde_yaml = "0.9"
 # trigger reinstalls atomically. SHA-256 is overkill for a 20-line
 # YAML but it's the same hash the rest of the app uses elsewhere.
 sha2 = "0.10"
+# PNG encoder for The Watcher's window capture (support.rs). Pure Rust,
+# encode-only use; BMP-over-IPC would be ~6 MB per shot, PNG is ~10×
+# smaller and renders directly in an <img> data URL preview.
+png = "0.17"
 # Cross-platform pseudo-terminal for the in-app CLI terminal that
 # replaces the pop-out CMD window during subscription-CLI login.
 # Uses ConPTY on Windows 10+/11 (no extra dep) and forkpty on Unix.
@@ -148,6 +152,12 @@ windows-sys = { version = "0.59", features = [
     # password, tied to the Windows user account. LocalFree (in
     # Win32_Foundation) frees the blob DPAPI allocates.
     "Win32_Security_Cryptography",
+    # GDI window capture for The Watcher's bug-report screenshot
+    # (support.rs: PrintWindow + DIB readback of the app window — catches
+    # in-app modals because they live in the same webview surface).
+    # PrintWindow itself lives under Storage_Xps in windows-sys.
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
 ] }
 
 [dev-dependencies]

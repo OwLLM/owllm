@@ -25,7 +25,9 @@ type SupportSnapshot = {
   modules: string[];
 };
 
-type Entry = { from: "watcher" | "you"; text: string };
+type Entry = { from: "watcher" | "you"; text: string; imageDataUrl?: string };
+
+type WindowCapture = { pngBase64: string; width: number; height: number; notCaptured: string };
 
 /// Human blurbs for the page the user is looking at — keyed by activeKey.
 const PAGE_BLURBS: Record<string, string> = {
@@ -75,8 +77,8 @@ export default function WatcherDrawer({
 
   if (!open) return null;
 
-  const say = (text: string, from: Entry["from"] = "watcher") =>
-    setEntries((es) => [...es, { from, text }]);
+  const say = (text: string, from: Entry["from"] = "watcher", imageDataUrl?: string) =>
+    setEntries((es) => [...es, { from, text, imageDataUrl }]);
 
   const whatPage = () => {
     say("What page am I on?", "you");
@@ -111,6 +113,27 @@ export default function WatcherDrawer({
       }
     } catch (e) {
       say(`I couldn't read the app state: ${e}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // User-approved capture of the APP WINDOW ONLY (in-app modals included —
+  // they live in the same WebView surface). The preview is shown before
+  // anything could ever join a report; nothing is sent anywhere.
+  const captureApp = async () => {
+    say("Capture current app", "you");
+    setBusy(true);
+    try {
+      const c = await invoke<WindowCapture>("support_capture_window");
+      say(
+        `Here's the capture (${c.width}×${c.height}, this window only — not included: ${c.notCaptured}). ` +
+        "It stays on this device unless you attach it to a report later.",
+        "watcher",
+        `data:image/png;base64,${c.pngBase64}`,
+      );
+    } catch (e) {
+      say(`I couldn't capture the window: ${e}`);
     } finally {
       setBusy(false);
     }
@@ -171,13 +194,23 @@ export default function WatcherDrawer({
               background: e.from === "you" ? "rgba(var(--accent-rgb),0.16)" : "var(--bg-card)",
               border: `1px solid ${e.from === "you" ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"}`,
               color: "var(--fg)",
-            }}>{e.text}</div>
+            }}>
+              {e.text}
+              {e.imageDataUrl && (
+                <img
+                  src={e.imageDataUrl}
+                  alt="app capture preview"
+                  style={{ display: "block", marginTop: 8, maxWidth: "100%", borderRadius: 8, border: "1px solid var(--border-strong)" }}
+                />
+              )}
+            </div>
           ))}
         </div>
 
         <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
           <button style={actionBtn} disabled={busy} onClick={whatPage}>📍 What page am I on?</button>
           <button style={actionBtn} disabled={busy} onClick={checkSetup}>{busy ? "⏳ Checking…" : "🩺 Check my setup"}</button>
+          <button style={actionBtn} disabled={busy} onClick={captureApp} title="Captures THIS app window only (in-app popups included). Never other windows or monitors. Shown to you first; nothing is sent.">📸 Capture current app</button>
           <button style={actionBtn} disabled={busy} onClick={reportBug}>🐞 Report a bug</button>
         </div>
       </div>

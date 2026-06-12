@@ -389,6 +389,25 @@ export type ServerStatus = {
 };
 export type DispatchPhase = "idle" | "planning" | "dispatching" | "integrating" | "done";
 
+/// Why can't we reach the local llama-server? Ask the supervisor before
+/// surfacing a generic network error: a crashed server carries a NAMED
+/// cause (OOM / broken GGUF, classified from its stderr in server.rs) in
+/// server_status.message (P1-4 legibility). Falls back to the given
+/// message when the supervisor says the server is fine (true network
+/// issue) or can't be reached itself.
+async function localServerFailureMessage(fallback: string): Promise<string> {
+  try {
+    const s = await invoke<ServerStatus>("server_status");
+    if (!s.running) {
+      if (s.message && /crash|ended unexpectedly/i.test(s.message)) {
+        return `The local model server crashed. ${s.message}`;
+      }
+      return "The local model server is not running — load a model on the Server page, wait for ready, then retry.";
+    }
+  } catch { /* supervisor unavailable — fall through */ }
+  return fallback;
+}
+
 // ---------- Backend shapes (for team/role loading) ----------
 export type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
 export type AgentRoleBackend    = { id: string; path: string; built_in: boolean; data: any };
@@ -1293,7 +1312,14 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         });
       } catch (e: any) {
         if (p.signal.aborted) throw e;
-        if (Date.now() >= loadDeadline) throw new Error(`network error after ${LOAD_RETRY_MS / 1000}s budget: ${String(e?.message ?? e)}`);
+        if (Date.now() >= loadDeadline) {
+          // Can't reach the server at all. Ask the supervisor WHY before
+          // surfacing a generic network error — a crashed llama-server
+          // (OOM / broken GGUF) has a named cause in server_status (P1-4).
+          // Only for the LOCAL server; a remote endpoint has no supervisor.
+          const generic = `network error after ${LOAD_RETRY_MS / 1000}s: ${String(e?.message ?? e)}`;
+          throw new Error(infer.remote ? generic : await localServerFailureMessage(generic));
+        }
         try {
           window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
             detail: { elapsedSec: Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000), port: p.port, reason: `network: ${String(e?.message ?? e).slice(0, 80)}` },
@@ -1304,15 +1330,22 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       }
       if (resp.ok) break;
       const errBody = await resp.text().catch(() => "");
-      if ((resp.status === 503 || resp.status === 502) && Date.now() < loadDeadline) {
-        const elapsedSec = Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000);
-        try {
-          window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
-            detail: { elapsedSec, port: p.port, reason: `${resp.status}: ${(errBody.slice(0, 80)) || "loading"}` },
-          }));
-        } catch {}
-        await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
-        continue;
+      if (resp.status === 503 || resp.status === 502) {
+        if (Date.now() < loadDeadline) {
+          const elapsedSec = Math.round((Date.now() - (loadDeadline - LOAD_RETRY_MS)) / 1000);
+          try {
+            window.dispatchEvent(new CustomEvent("owllm:llama:loading", {
+              detail: { elapsedSec, port: p.port, reason: `${resp.status}: ${(errBody.slice(0, 80)) || "loading"}` },
+            }));
+          } catch {}
+          await new Promise(r => setTimeout(r, LOAD_RETRY_DELAY));
+          continue;
+        }
+        // Still 503 after the whole retry budget → the model is genuinely
+        // still WARMING UP (cold load), not crashed — say so by name (P1-4).
+        throw new Error(
+          `The local model is still warming up after ${LOAD_RETRY_MS / 1000}s (llama-server says it's loading). ` +
+          `Very large models can take longer — watch the Server page and retry once it shows ready.`);
       }
       throw new Error(`llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`);
     }

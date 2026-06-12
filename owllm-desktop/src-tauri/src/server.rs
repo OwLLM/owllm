@@ -103,6 +103,50 @@ struct Inner {
     model_id: Option<String>,
     port: Option<u16>,
     message: String,
+    /// Rolling tail of the child's stderr — shared with the reader task.
+    /// On crash, server_status classifies the cause from here (OOM vs
+    /// broken GGUF vs other) far more precisely than the exit code alone.
+    stderr_tail: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+}
+
+/// Classify a llama-server crash from its stderr tail. Returns the named
+/// cause + remediation, or None when the output matches nothing known.
+/// Patterns gathered from real llama.cpp failures (CUDA + Vulkan builds).
+fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
+    let t = stderr_tail.to_lowercase();
+    // GPU/host memory exhaustion — the model (or its KV cache) didn't fit.
+    if t.contains("out of memory")
+        || t.contains("outofdevicememory")
+        || t.contains("cudamalloc failed")
+        || t.contains("cuda_malloc")
+        || t.contains("failed to allocate")
+        || t.contains("not enough memory")
+        || t.contains("erroroutofdevicememory")
+    {
+        return Some((
+            "oom",
+            "The model didn't fit in memory (GPU/RAM OOM). Try a smaller quant (e.g. Q4_K_M), \
+             fewer GPU layers, a smaller context size, or close other GPU apps.",
+        ));
+    }
+    // Broken / incompatible model file.
+    if t.contains("invalid magic")
+        || t.contains("gguf_init_from_file")
+        || t.contains("unknown model architecture")
+        || t.contains("unknown architecture")
+        || t.contains("error loading model")
+        || t.contains("failed to load model")
+        || t.contains("unsupported model")
+        || t.contains("tensor") && t.contains("not found")
+    {
+        return Some((
+            "bad_model",
+            "The model file appears broken or incompatible with this llama.cpp build. \
+             Re-download the GGUF (it may be truncated), or update the local-inference module \
+             if the model is newer than the engine.",
+        ));
+    }
+    None
 }
 
 #[tauri::command]
@@ -121,15 +165,27 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
         // Transition from running -> dead: overwrite the stale
         // "Starting on http://..." message so the UI shows the truth.
         inner.child = None;
-        inner.message = match exit_code {
-            Some(0) => "Stopped cleanly.".to_string(),
+        // FIRST try to classify from what llama-server actually printed —
+        // stderr names the cause (OOM vs broken GGUF) where the exit code
+        // is ambiguous (both often die with the same NTSTATUS).
+        let stderr_cause = inner
+            .stderr_tail
+            .as_ref()
+            .and_then(|t| t.lock().ok().map(|v| v.join("\n")))
+            .and_then(|tail| classify_crash(&tail).map(|(_, msg)| msg));
+        inner.message = match (exit_code, stderr_cause) {
+            (Some(0), _) => "Stopped cleanly.".to_string(),
+            (code, Some(cause)) => format!(
+                "Crashed{}. {cause} See log for the full trace.",
+                code.map(|c| format!(" (exit code {c})")).unwrap_or_default()
+            ),
             // Decode Windows NTSTATUS-style codes that surface as
             // signed i32 from Tokio's exit_status — these are by far
             // the most common llama-server crashes the user hits and
             // a bare exit code is impossible to act on without
             // googling. We surface the friendly cause + remediation
             // inline so the user knows the next step.
-            Some(code) => {
+            (Some(code), None) => {
                 let hint = crash_hint_for(code);
                 if let Some(h) = hint {
                     format!("Crashed (exit code {code}). {h} See log for full trace.")
@@ -137,7 +193,7 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
                     format!("Crashed (exit code {code}). Check the log for details.")
                 }
             }
-            None => "Process ended unexpectedly. Check the log for details.".to_string(),
+            (None, None) => "Process ended unexpectedly. Check the log for details.".to_string(),
         };
     } else if !alive && inner.message.is_empty() {
         inner.message = "Not running.".to_string();
@@ -292,11 +348,21 @@ pub async fn server_start(
             }
         });
     }
+    let stderr_tail = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     if let Some(stderr) = child.stderr.take() {
         let app = app.clone();
+        let tail = stderr_tail.clone();
         tokio::spawn(async move {
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                // Keep a rolling tail so a crash can be classified (OOM vs
+                // broken GGUF) from what llama-server actually said.
+                if let Ok(mut t) = tail.lock() {
+                    t.push(line.clone());
+                    if t.len() > 120 {
+                        t.remove(0);
+                    }
+                }
                 let _ = app.emit(
                     "server-log",
                     ServerLogEvent {
@@ -308,6 +374,7 @@ pub async fn server_start(
         });
     }
 
+    inner.stderr_tail = Some(stderr_tail);
     inner.child = Some(child);
     inner.model_id = Some(model_id.clone());
     inner.port = Some(port);
@@ -516,6 +583,79 @@ fn list_vulkan_devices(exe: &std::path::Path) -> Vec<(u32, String)> {
 /// in the Server tab status. Built around what the user actually
 /// hits on Windows; non-matches fall through to the generic
 /// "Check the log for details." message.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_cuda_oom() {
+        // Real llama.cpp CUDA OOM shape.
+        let tail = "ggml_backend_cuda_buffer_type_alloc_buffer: allocating 23028.00 MiB on device 0: cudaMalloc failed: out of memory\nllama_model_load: error loading model: unable to allocate CUDA0 buffer";
+        let (kind, msg) = classify_crash(tail).expect("classified");
+        assert_eq!(kind, "oom");
+        assert!(msg.contains("smaller quant"));
+    }
+
+    #[test]
+    fn classifies_vulkan_oom() {
+        let tail = "ggml_vulkan: Device memory allocation of size 18253611008 failed.\nggml_vulkan: vk::Device::allocateMemory: ErrorOutOfDeviceMemory";
+        let (kind, _) = classify_crash(tail).expect("classified");
+        assert_eq!(kind, "oom");
+    }
+
+    #[test]
+    fn classifies_broken_gguf() {
+        // Real llama.cpp corrupt-file shape.
+        let tail = "gguf_init_from_file: invalid magic characters 'Junk'\nllama_model_load: error loading model: llama_model_loader: failed to load model from C:\\models\\broken.gguf";
+        let (kind, msg) = classify_crash(tail).expect("classified");
+        assert_eq!(kind, "bad_model");
+        assert!(msg.contains("Re-download"));
+    }
+
+    #[test]
+    fn classifies_unknown_architecture() {
+        let tail = "llama_model_load: error loading model: unknown model architecture: 'qwen3next'";
+        let (kind, _) = classify_crash(tail).expect("classified");
+        assert_eq!(kind, "bad_model");
+    }
+
+    #[test]
+    fn clean_log_classifies_as_none() {
+        let tail = "llama_new_context_with_model: graph splits = 2\nmain: server is listening on http://127.0.0.1:8080";
+        assert!(classify_crash(tail).is_none());
+    }
+
+    /// Live probe (needs the local-inference module installed): feed the REAL
+    /// llama-server a deliberately corrupt GGUF, capture its stderr, and
+    /// assert the classifier names it. Run:
+    ///   cargo test --lib -- --ignored --nocapture probe_broken_gguf
+    #[test]
+    #[ignore]
+    fn probe_broken_gguf_named_by_classifier() {
+        let exe = crate::paths::llama_server_exe().expect("llama-server installed");
+        let dir = std::env::temp_dir().join("owllm_p14_probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("broken.gguf");
+        std::fs::write(&bad, b"Junk_this_is_not_a_gguf_file_____").unwrap();
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("-m").arg(&bad).arg("--port").arg("18181");
+        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000);
+        }
+        let out = cmd.output().expect("spawn llama-server");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let merged = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), stderr);
+        eprintln!("== llama-server said ==\n{}", merged.trim());
+        assert!(!out.status.success(), "corrupt gguf should not start");
+        let (kind, msg) = classify_crash(&merged).expect("crash classified");
+        eprintln!("== classified: {kind} — {msg}");
+        assert_eq!(kind, "bad_model");
+    }
+}
+
 fn crash_hint_for(code: i32) -> Option<&'static str> {
     // Tokio's exit_status returns the unsigned NTSTATUS as a signed
     // i32, so 0xC000_0005 surfaces as -1_073_741_819, etc. Match on

@@ -388,47 +388,6 @@ function GridPanel({ children, accent }: {
   );
 }
 
-// One-time welcome splash. It used to sit permanently in the grid
-// centre, covering the Refresh button and the Software Requirements
-// header. Now it greets on mount, then fades + scales away and
-// unmounts after ~2.4s so it never obscures the live panels. Always
-// pointer-events:none so it can't eat clicks even mid-fade.
-//
-// The greeting is the owllm_main.png brand art (full resolution) instead
-// of the old text circle — same timing/behaviour, just the brand image.
-function WelcomeCircle() {
-  const [phase, setPhase] = useState<"shown" | "fading" | "gone">("shown");
-  useEffect(() => {
-    const t1 = setTimeout(() => setPhase("fading"), 1600);
-    const t2 = setTimeout(() => setPhase("gone"), 2400);
-    return () => { clearTimeout(t1); clearTimeout(t2); };
-  }, []);
-  if (phase === "gone") return null;
-  const fading = phase === "fading";
-  return (
-    <img
-      src={`${ICONS}/owllm_main.png`}
-      alt="Welcome to OWLLM"
-      style={{
-        position: "absolute",
-        left: "50%",
-        top: "50%",
-        transform: fading
-          ? "translate(-50%, -50%) scale(1.08)"
-          : "translate(-50%, -50%) scale(1)",
-        opacity: fading ? 0 : 1,
-        transition: "opacity 0.8s ease, transform 0.8s ease",
-        // Full native resolution (owl_hero.png is 500×500).
-        width: 500,
-        height: "auto",
-        maxWidth: "70%",
-        pointerEvents: "none",
-        zIndex: 2,
-      }}
-    />
-  );
-}
-
 export default function HomePage() {
   // Live hardware from native Rust (src-tauri/src/hardware.rs). The
   // command always returns Ok with a default if probing fails, so we
@@ -815,8 +774,6 @@ export default function HomePage() {
           </div>
         </GridPanel>
         </div>
-
-        <WelcomeCircle />
       </div>
 
       <WslSetupModal

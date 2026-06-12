@@ -21,6 +21,7 @@ import {
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
+import { isolationBadge } from "./isolationBadge";
 import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, type GithubStatus } from "./github";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
@@ -1106,19 +1107,23 @@ export default function CodePage() {
         <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
         <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
-        <span
-          title={isolatedNow
-            ? "Isolated: tools run inside Linux (WSL) and cannot touch your Windows files."
-            : "Not isolated: tools run on Windows (write-jail + dangerous-command guard still apply)."}
-          style={{
-            fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, whiteSpace: "nowrap",
-            background: isolatedNow ? "rgba(127,240,197,0.15)" : "rgba(255,217,122,0.15)",
-            color: isolatedNow ? "#7ff0c5" : "#ffd97a",
-            border: `1px solid ${isolatedNow ? "#7ff0c5" : "#ffd97a"}55`,
-          }}
-        >
-          {isolatedNow ? "🛡 Isolated" : "⚠ Not isolated"}
-        </span>
+        {/* Honest isolation badge (P1-1, shared helper): turns LOUD red when
+            isolation is enabled but this workspace runs on the host. */}
+        {(() => {
+          const iso = isolationBadge(workspace, isolation.enabled);
+          return (
+            <span
+              title={iso.title}
+              style={{
+                fontSize: 11, fontWeight: iso.hostFallback ? 800 : 700, padding: "3px 8px",
+                borderRadius: 6, whiteSpace: "nowrap",
+                background: iso.bg, color: iso.color, border: `1px solid ${iso.border}`,
+              }}
+            >
+              {iso.text}
+            </span>
+          );
+        })()}
         {isolatedNow && (
           <button
             onClick={syncLogins}

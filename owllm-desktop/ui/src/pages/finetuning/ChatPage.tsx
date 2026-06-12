@@ -47,6 +47,8 @@ import {
   type ToolExecResult,
 } from "../agentic/localTools";
 import { canonicalizeNativeCalls, type RawNativeCall } from "../agentic/toolNormalizer";
+import { isolationBadge } from "../agentic/isolationBadge";
+import { wslIsolationGet } from "../agentic/wslIsolation";
 import { samplingFor } from "../agentic/modelProfiles";
 import { streamChatCompletion, providerFor, type HistoryItem } from "../agentic/dispatch";
 import { chatRuntime } from "../../runtime/chatRuntime";
@@ -285,10 +287,17 @@ export default function ChatPage() {
   // shell land in a sandbox under the user's home (not the install dir).
   // Used as the cwd for local tools AND the Claude CLI's allowed dir.
   const scratchDirRef = useRef<string>("");
+  // Honest isolation badge (P1-1): chat_scratch_dir silently falls back to a
+  // HOST directory when isolation is on but WSL fails — the badge derives
+  // from the returned path (the same predicate the Rust shell router uses),
+  // so that fallback becomes visible instead of silent.
+  const [scratchDir, setScratchDir] = useState<string>("");
+  const [isolationRequested, setIsolationRequested] = useState<boolean>(false);
   useEffect(() => {
     invoke<string>("chat_scratch_dir")
-      .then((d) => { scratchDirRef.current = d; })
+      .then((d) => { scratchDirRef.current = d; setScratchDir(d); })
       .catch((e) => console.warn("chat_scratch_dir failed", e));
+    wslIsolationGet().then((i) => setIsolationRequested(!!i.enabled)).catch(() => {});
   }, []);
 
   // Resizable right settings/log panel — width is a PERCENTAGE of the
@@ -1678,7 +1687,24 @@ export default function ChatPage() {
               ))}
               <button onClick={() => setSlashOpen((v) => !v)} title="Slash commands" style={miniComposerBtn}>/</button>
               <button onClick={() => setDraft((d) => `${d}${d.endsWith(" ") || !d ? "" : " "}#file `)} title="Add context mention" style={miniComposerBtn}>#</button>
-              <label title="Enable tool calls in Agent mode" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 6, color: "var(--fg-muted)", fontSize: 11, fontWeight: 700 }}>
+              {/* Honest isolation badge: where this chat's tools actually run
+                  (scratch dir path truth — flips loud red when isolation is on
+                  but the scratch dir fell back to the host). */}
+              {toolsEnabled && scratchDir && (() => {
+                const iso = isolationBadge(scratchDir, isolationRequested);
+                return (
+                  <span
+                    title={`${iso.title}\n\nTools run in: ${scratchDir}`}
+                    style={{
+                      marginLeft: "auto", display: "inline-flex", alignItems: "center",
+                      height: 22, padding: "0 8px", borderRadius: 6, fontSize: 10.5,
+                      fontWeight: iso.hostFallback ? 800 : 700, whiteSpace: "nowrap",
+                      background: iso.bg, color: iso.color, border: `1px solid ${iso.border}`,
+                    }}
+                  >{iso.text}</span>
+                );
+              })()}
+              <label title="Enable tool calls in Agent mode" style={{ marginLeft: toolsEnabled && scratchDir ? 0 : "auto", display: "inline-flex", alignItems: "center", gap: 6, color: "var(--fg-muted)", fontSize: 11, fontWeight: 700 }}>
                 <input type="checkbox" checked={toolsEnabled} onChange={(e) => setToolsEnabled(e.target.checked)} />
                 Tools
               </label>

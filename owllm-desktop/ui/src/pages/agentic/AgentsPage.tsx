@@ -55,6 +55,8 @@ import {
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput } from "./localTools";
+import { isolationBadge } from "./isolationBadge";
+import { wslIsolationGet } from "./wslIsolation";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
 
 // Native tool_call shape harvested by consumeOpenAISse from
@@ -434,7 +436,7 @@ function LocationRow({
   teams, pickedTeamId, onPickTeam,
   location, onChangeLocation, onBrowse,
   trustWrites, onToggleTrustWrites,
-  bridgeOn,
+  bridgeOn, isolationRequested,
   onNewProject, onRenameProject, onDeleteProject,
 }: {
   projects: ProjectRow[];
@@ -449,6 +451,7 @@ function LocationRow({
   trustWrites: boolean;
   onToggleTrustWrites: () => void;
   bridgeOn: boolean;
+  isolationRequested: boolean;
   onNewProject: () => void;
   onRenameProject: () => void;
   onDeleteProject: () => void;
@@ -474,6 +477,20 @@ function LocationRow({
         Trust writes
       </label>
       <span data-ui="SandboxBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:sandboxBg, color:sandboxColor, border:`1px solid ${sandboxBorder}`, borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>{sandboxText}</span>
+      {/* Honest OS-isolation badge (P1-1): derived from the location path —
+          the same predicate the Rust shell router uses — so it cannot lie.
+          LOUD red when isolation is requested but this location runs on the
+          host (sandbox failed/unavailable). */}
+      {(() => {
+        const iso = isolationBadge(location, isolationRequested);
+        return (
+          <span
+            data-ui="IsolationBadge"
+            title={iso.title}
+            style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:iso.bg, color:iso.color, border:`1px solid ${iso.border}`, borderRadius:6, fontSize:11, fontWeight: iso.hostFallback ? 800 : 600, whiteSpace:"nowrap" }}
+          >{iso.text}</span>
+        );
+      })()}
       <button
         data-ui="BridgeBadge"
         type="button"
@@ -6284,6 +6301,13 @@ export default function AgentsPage() {
   });
 
   const [locationOverride, setLocationOverride] = useState<string>("");
+  // Whether the user has isolation switched on — drives the honest
+  // isolation badge: host location + isolation requested = loud red
+  // "HOST — NOT isolated" (P1-1), because the run would NOT be sandboxed.
+  const [isolationRequested, setIsolationRequested] = useState<boolean>(false);
+  useEffect(() => {
+    wslIsolationGet().then((i) => setIsolationRequested(!!i.enabled)).catch(() => {});
+  }, []);
   const [trustWritesOverride, setTrustWritesOverride] = useState<boolean | null>(null);
   /// Optional override of the project's team_default_model_id. When
   /// null we render the saved value; when non-null we render this and
@@ -8607,6 +8631,7 @@ export default function AgentsPage() {
         trustWrites={trustWrites}
         onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
         bridgeOn={bridgeOn}
+        isolationRequested={isolationRequested}
         onNewProject={onNewProject}
         onRenameProject={onRenameProject}
         onDeleteProject={onDeleteProject}

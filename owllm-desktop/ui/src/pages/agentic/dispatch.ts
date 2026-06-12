@@ -733,25 +733,130 @@ export function buildCriticPrompt(
 // ---------- Dispatch parser ----------
 export type Dispatch = { agentName: string; instruction: string };
 
-export function parseDispatches(text: string, team: Team, exclude: string): Dispatch[] {
-  const known = new Set(team.agents.map(a => a.name));
+/// A dispatch line whose @name resolved to NO team member, with the nearest
+/// real name as a suggestion. Surfaced to the user AND fed back to the
+/// orchestrator (P1-3: fail loud, never silently drop a specialist).
+export type UnresolvedDispatch = { name: string; instruction: string; suggestion: string | null };
+
+export type DispatchParse = { dispatches: Dispatch[]; unresolved: UnresolvedDispatch[] };
+
+/// Structural team shape the parser needs — keeps it shareable with
+/// AgentsPage's own Team type (§0.4: ONE parser, not two drifting copies).
+type TeamLike = { agents: Array<{ name: string }> };
+
+/// Levenshtein distance — small inputs (agent names), no need for anything fancier.
+function editDistance(a: string, b: string): number {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = Array.from({ length: n + 1 }, (_, j) => j);
+  for (let i = 1; i <= m; i++) {
+    const cur = [i];
+    for (let j = 1; j <= n; j++) {
+      cur[j] = Math.min(
+        prev[j] + 1,
+        cur[j - 1] + 1,
+        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+    prev = cur;
+  }
+  return prev[n];
+}
+
+/// Normalize an agent name for tolerant matching: lowercase, strip
+/// separators/punctuation. "Data-Analyst." → "dataanalyst".
+function normName(s: string): string {
+  return s.toLowerCase().replace(/[\s._\-]+/g, "");
+}
+
+/// Resolve a model-emitted @name to a real team member. Steps: exact →
+/// case-insensitive → normalized (case + punctuation + separators) →
+/// fuzzy (edit distance ≤ 2 on the normalized form, but never more than
+/// half the name — "codr" finds "coder"; "designer" must NOT find "coder").
+/// Returns the canonical team name, or null.
+function resolveAgentName(raw: string, teamNames: string[]): string | null {
+  if (teamNames.includes(raw)) return raw;
+  const lower = raw.toLowerCase();
+  const ci = teamNames.find(n => n.toLowerCase() === lower);
+  if (ci) return ci;
+  const norm = normName(raw);
+  if (!norm) return null;
+  const nn = teamNames.find(n => normName(n) === norm);
+  if (nn) return nn;
+  let best: { name: string; d: number } | null = null;
+  for (const n of teamNames) {
+    const d = editDistance(norm, normName(n));
+    if (best === null || d < best.d) best = { name: n, d };
+  }
+  if (best && best.d <= 2 && best.d <= Math.floor(normName(best.name).length / 2)) {
+    return best.name;
+  }
+  return null;
+}
+
+/// Nearest team name for a "did you mean …?" hint (looser than resolution).
+function nearestAgentName(raw: string, teamNames: string[]): string | null {
+  const norm = normName(raw);
+  let best: { name: string; d: number } | null = null;
+  for (const n of teamNames) {
+    const d = editDistance(norm, normName(n));
+    if (best === null || d < best.d) best = { name: n, d };
+  }
+  return best && best.d <= 3 ? best.name : null;
+}
+
+/// Tolerant dispatch parse. Accepts `@coder: task`, `- @Coder: task`,
+/// `1. @ coder : task`, `**@coder:** task`, fuzzy names (`@codr:`), and
+/// reports every line that named NO resolvable agent in `unresolved` so the
+/// caller can fail loud instead of dropping it (P1-3).
+export function parseDispatchesDetailed(text: string, team: TeamLike, exclude: string): DispatchParse {
+  const teamNames = team.agents.map(a => a.name);
   const lines = text.split(/\r?\n/);
-  const out: Dispatch[] = [];
-  const re = /^[\s\-\d.*•]*@([A-Za-z0-9._\-]+)\s*[:：]\s*(.+)$/;
+  const dispatches: Dispatch[] = [];
+  const unresolved: UnresolvedDispatch[] = [];
+  // `@ name` (optional space), list/bold/quote prefixes, fullwidth colon,
+  // and leading markdown bold asterisks stripped off the instruction.
+  const re = /^[\s\-\d.*•>]*@\s*([A-Za-z0-9._\-]+)\s*\**\s*[:：]\s*(.+)$/;
   for (const raw of lines) {
     const m = raw.trim().match(re);
     if (!m) continue;
     const name = m[1];
+    const instruction = m[2].replace(/^[\s*]+/, "").trim();
+    if (!instruction) continue;
     // critical_thinker is a synthetic agent (not in team.agents); it's
     // routed via extractUserInputRequest's CRITIC_DISPATCH_RE branch
     // instead. Skip here so we don't fall through to the unknown-agent
-    // drop-on-floor path.
+    // path.
     if (/^critical[_\s-]?thinker$/i.test(name)) continue;
-    if (!known.has(name)) continue;
-    if (name === exclude) continue;
-    out.push({ agentName: name, instruction: m[2].trim() });
+    const resolved = resolveAgentName(name, teamNames);
+    if (resolved === null) {
+      unresolved.push({ name, instruction, suggestion: nearestAgentName(name, teamNames) });
+      continue;
+    }
+    if (resolved === exclude) continue; // orchestrator never self-dispatches
+    dispatches.push({ agentName: resolved, instruction });
   }
-  return out;
+  return { dispatches, unresolved };
+}
+
+export function parseDispatches(text: string, team: TeamLike, exclude: string): Dispatch[] {
+  return parseDispatchesDetailed(text, team, exclude).dispatches;
+}
+
+/// One model-visible correction message for unresolved dispatch lines —
+/// fed back to the orchestrator so it can re-emit with real names.
+export function unresolvedCorrectionMessage(unresolved: UnresolvedDispatch[], team: TeamLike, exclude: string): string {
+  const roster = team.agents.map(a => a.name).filter(n => n !== exclude).join(", ");
+  const lines = unresolved.map(u =>
+    `- "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""}`);
+  return [
+    "[dispatch error — fix and re-emit]",
+    "These dispatch lines named agents that do not exist, so NOTHING was dispatched for them:",
+    ...lines,
+    `Your team is exactly: ${roster}.`,
+    "Re-emit the dispatch lines now, one per line, as `@<exact-agent-name>: <instruction>`. Do not apologize or explain.",
+  ].join("\n");
 }
 
 export function stripDispatchDirectives(text: string): string {
@@ -2270,7 +2375,52 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
 
   // Push parsed dispatches into the orchestrator's Thought log so the
   // routing decision is visible separately from the user-facing reply.
-  const dispatches = parseDispatches(orchReply, team, orch.name);
+  let parse = parseDispatchesDetailed(orchReply, team, orch.name);
+
+  // Unresolved @names: fail LOUD (P1-3). Surface each one to the user, and
+  // when they cost us dispatches, feed a correction back to the orchestrator
+  // for ONE re-emit round instead of silently under-delivering.
+  if (parse.unresolved.length > 0) {
+    for (const u of parse.unresolved) {
+      hooks.onThought(orch.name, {
+        role: "system",
+        color: "#ff8c8c",
+        text: `⚠ "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""} (line NOT dispatched)`,
+      });
+    }
+    if (parse.dispatches.length === 0) {
+      const correction = unresolvedCorrectionMessage(parse.unresolved, team, orch.name);
+      liveHistory.push({ role: "assistant", content: orchReply });
+      liveHistory.push({ role: "user", content: correction });
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      hooks.onAgentStart(orch.name);
+      hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+      try {
+        orchReply = await streamChatCompletion(
+          port, orchModel, orchProvider,
+          orchPrompt, correction,
+          tempFor(orch, 0.3), signal,
+          (delta) => hooks.onLogDelta(orch.name, delta),
+          projectCwd, liveHistory, autoApprove,
+          (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
+          roleByName.get(orch.base)?.toolAllowlist,
+          undefined,
+          getClaudeSession(projectId, orch.name),
+        );
+      } finally {
+        hooks.onAgentEnd(orch.name);
+      }
+      parse = parseDispatchesDetailed(orchReply, team, orch.name);
+      for (const u of parse.unresolved) {
+        hooks.onThought(orch.name, {
+          role: "system",
+          color: "#ff8c8c",
+          text: `⚠ still unresolved after correction: "@${u.name}:"${u.suggestion ? ` (nearest: '${u.suggestion}')` : ""}`,
+        });
+      }
+    }
+  }
+  const dispatches = parse.dispatches;
   for (const d of dispatches) {
     hooks.onThought(orch.name, {
       role: "dispatch",
@@ -2280,9 +2430,19 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   }
 
   // No specialists fired → the orchestrator's reply IS the final
-  // answer. Strip stray directives (defensive) and return.
+  // answer. Strip stray directives (defensive) and return. If lines were
+  // dropped as unresolved, say so instead of pretending this was a clean
+  // solo answer.
   if (dispatches.length === 0) {
     const clean = stripDispatchDirectives(orchReply).trim() || orchReply;
+    if (parse.unresolved.length > 0) {
+      const names = parse.unresolved.map(u => `@${u.name}`).join(", ");
+      hooks.onLog(orch.name, {
+        role: "system",
+        color: "#ff8c8c",
+        text: `⚠ ${parse.unresolved.length} dispatch line(s) named unknown agents (${names}) and did NOT run — the answer below was produced without specialists.`,
+      });
+    }
     hooks.onAgentReply(orch.name, clean);
     hooks.onPhase("done");
     return clean;

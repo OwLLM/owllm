@@ -48,6 +48,8 @@ import {
   streamLocalChat,
   runCodexCliStream,
   ensureCliWarm,
+  parseDispatchesDetailed,
+  unresolvedCorrectionMessage,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -5222,23 +5224,10 @@ function buildSpecialistPrompt(
 
 type Dispatch = { agentName: string; instruction: string };
 
-function parseDispatches(text: string, team: Team, exclude: string): Dispatch[] {
-  const known = new Set(team.agents.map(a => a.name));
-  const lines = text.split(/\r?\n/);
-  const out: Dispatch[] = [];
-  // Accept `@coder: do X`, `- @coder: do X`, ` 1. @coder: do X` etc.
-  const re = /^[\s\-\d.*•]*@([A-Za-z0-9._\-]+)\s*[:：]\s*(.+)$/;
-  for (const raw of lines) {
-    const m = raw.trim().match(re);
-    if (!m) continue;
-    const name = m[1];
-    if (/^critical[_\s-]?thinker$/i.test(name)) continue;
-    if (!known.has(name)) continue;
-    if (name === exclude) continue;          // orchestrator never self-dispatches
-    out.push({ agentName: name, instruction: m[2].trim() });
-  }
-  return out;
-}
+// The dispatch parser is SHARED with dispatch.ts (parseDispatchesDetailed) —
+// one tolerant, fail-loud implementation instead of two drifting copies
+// (§0.4 / P1-3). It resolves case/punctuation/fuzzy name variants and
+// reports unresolved @names so the loop can surface + correct them.
 
 type StreamHandler = (delta: string) => void;
 type HistoryItem = { role: "user" | "assistant"; content: string };
@@ -7963,7 +7952,51 @@ export default function AgentsPage() {
       ]);
 
       // ----- Phase 2: parse + dispatch -----
-      const dispatches = parseDispatches(orchReply, activeTeam, orch.name);
+      let parse = parseDispatchesDetailed(orchReply, activeTeam, orch.name);
+
+      // Unresolved @names: fail LOUD (P1-3) — surface each one, and when
+      // they cost us ALL dispatches, feed a correction back to the
+      // orchestrator for ONE re-emit round instead of silently
+      // under-delivering.
+      if (parse.unresolved.length > 0) {
+        for (const u of parse.unresolved) {
+          appendThought(orch.name, {
+            role: "system", color: "#ff8c8c",
+            text: `⚠ "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""} (line NOT dispatched)`,
+          });
+        }
+        if (parse.dispatches.length === 0) {
+          const correction = unresolvedCorrectionMessage(parse.unresolved, activeTeam, orch.name);
+          appendLog("system", { role: "system", color: "#ff8c8c", text: `⚠ Dispatch lines named unknown agents — asking the orchestrator to re-emit with real names.` });
+          addActive(orch.name);
+          appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+          try {
+            orchReply = await streamChatCompletion(
+              port, orchModel, providerFor(orchModel),
+              orchPrompt,
+              correction,
+              tempFor(orch, 0.3), ctrl.signal,
+              (delta) => streamLog(orch.name, delta),
+              projectCwd,
+              undefined, undefined,
+              (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+              undefined,
+              undefined,
+              getClaudeSession(selectedProjectId, orch.name),
+            );
+          } finally {
+            removeActive(orch.name);
+          }
+          parse = parseDispatchesDetailed(orchReply, activeTeam, orch.name);
+          for (const u of parse.unresolved) {
+            appendThought(orch.name, {
+              role: "system", color: "#ff8c8c",
+              text: `⚠ still unresolved after correction: "@${u.name}:"${u.suggestion ? ` (nearest: '${u.suggestion}')` : ""}`,
+            });
+          }
+        }
+      }
+      const dispatches = parse.dispatches;
 
       // Drop the parsed directives into the orchestrator's THOUGHT
       // log — that's the routing decision, not part of the user-
@@ -7992,7 +8025,9 @@ export default function AgentsPage() {
       // chat — instead of silently treating it as "done".
       if (dispatches.length === 0) {
         const clean = stripDispatchDirectives(orchReply).trim();
-        const noteText = "🚫 0 dispatches parsed — orchestrator answered solo. Specialists DID NOT run. If you expected the team to fan out, the orchestrator's reply is missing `@<agent>: instruction` lines (check the Reply tab). Try rephrasing with an explicit goal that requires file edits / shell / external systems.";
+        const noteText = parse.unresolved.length > 0
+          ? `🚫 0 dispatches ran — the orchestrator's dispatch lines named agents that don't exist (${parse.unresolved.map(u => "@" + u.name).join(", ")}) and a correction round didn't fix it. Specialists DID NOT run.`
+          : "🚫 0 dispatches parsed — orchestrator answered solo. Specialists DID NOT run. If you expected the team to fan out, the orchestrator's reply is missing `@<agent>: instruction` lines (check the Reply tab). Try rephrasing with an explicit goal that requires file edits / shell / external systems.";
         appendThought(orch.name, { role: "system", color: "#ff8c8c", text: noteText });
         appendLog("system", { role: "system", color: "#ff8c8c", text: noteText });
         setSupChat(prev => [

@@ -47,6 +47,7 @@ import {
   clearAllClaudeSessions,
   streamLocalChat,
   runCodexCliStream,
+  ensureCliWarm,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -5596,6 +5597,8 @@ async function streamAnthropic(
     if (!status?.claude_cli) {
       throw new Error("Claude Code CLI not detected — run `claude /login` first.");
     }
+    // Refresh the CLI token once per session (cold-start 401 fix).
+    await ensureCliWarm("claude_cli");
     // Stream via claude_cli_stream when the consumer wants live
     // thought traffic (AgentsPage Thought tab); fall back to one-shot
     // --print blob otherwise. Session-id conflicts get swallowed +
@@ -5645,6 +5648,7 @@ async function streamAnthropic(
     try {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (status?.claude_cli) {
+        await ensureCliWarm("claude_cli");
         if (onThought) {
           return await runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
@@ -5812,6 +5816,8 @@ async function streamOpenAI(
   // failed with "No OPENAI_API_KEY saved" even when a Codex subscription was
   // logged in — codex was the one provider left stubbed to the API path.
   if (route.forceSub === true) {
+    // Refresh the Codex CLI token once per session (cold-start 401 fix).
+    await ensureCliWarm("codex_cli");
     const convo = (history ?? [])
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
       .join("\n\n");

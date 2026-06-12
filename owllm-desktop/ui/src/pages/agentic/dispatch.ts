@@ -811,6 +811,31 @@ type StreamHandler = (delta: string) => void;
 export type ThoughtHandler = (channel: string, role: string, delta: string) => void;
 type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
 
+// One-time-per-session token warm-up for subscription CLIs.
+//
+// THE BUG THIS FIXES: the Claude/Codex CLI's FIRST authenticated call after
+// app start can return "API Error: 401 Invalid authentication credentials"
+// while it refreshes its OAuth access token in the background; the NEXT call
+// succeeds. That's exactly why clicking "Test" on the Accounts page (a
+// throwaway `claude --print ok`) made the first real chat work — Test
+// absorbed the cold-start 401 and refreshed the token. We now do that
+// warm-up automatically before the first subscription dispatch of each
+// backend, so the user never has to hit Test first.
+const _warmedCli = new Set<string>();
+export async function ensureCliWarm(backend: "claude_cli" | "codex_cli"): Promise<void> {
+  if (_warmedCli.has(backend)) return;
+  _warmedCli.add(backend); // mark BEFORE awaiting so a slow warm can't double-fire
+  try {
+    // Same minimal CLI round-trip the Accounts "Test" button runs; it
+    // refreshes the token as a side effect. Best-effort — if it fails we
+    // still attempt the real call (which may itself succeed or surface a
+    // clearer error).
+    await invoke("accounts_test_probe_live", { backend });
+  } catch {
+    /* ignore — warm-up is best-effort */
+  }
+}
+
 // ---------- Attachment helpers ----------
 
 export function imageAttachments(atts?: Attachment[]): Attachment[] {
@@ -1329,6 +1354,9 @@ async function streamAnthropic(
     if (!status?.claude_cli) {
       throw new Error("Claude Code CLI not detected — run `claude /login` first.");
     }
+    // Refresh the CLI token once per session so the first chat doesn't hit
+    // the cold-start 401 (what "Test" on the Accounts page worked around).
+    await ensureCliWarm("claude_cli");
     // Stream when the consumer wants thought traffic (AgentsPage); fall
     // back to one-shot --print blob otherwise (the bridge runner that
     // doesn't display a Thought tab).
@@ -1354,6 +1382,7 @@ async function streamAnthropic(
     try {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (status?.claude_cli) {
+        await ensureCliWarm("claude_cli");
         if (onThought) {
           return await runWithSessionRetry((sid) => runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
@@ -1529,6 +1558,9 @@ async function streamOpenAI(
   // was connected (this WAS the "chat page asks me for the API key" bug).
   // `api/` models and the default still use the HTTP API-key path below.
   if (route.forceSub === true) {
+    // Refresh the Codex CLI token once per session (same cold-start 401
+    // fix as Claude — see ensureCliWarm).
+    await ensureCliWarm("codex_cli");
     // Fold prior turns into the prompt so the CLI has conversation context.
     const convo = (history ?? [])
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)

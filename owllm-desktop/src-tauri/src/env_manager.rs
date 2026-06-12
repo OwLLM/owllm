@@ -314,19 +314,24 @@ async fn status_impl(profile: EnvProfile) -> Result<EnvProfileState, String> {
         };
         let env = wsl_backend::env_dir(&home, &profile.name);
         let python_exe = format!("{env}/bin/python");
-        // One round-trip: report the python's existence + the stamped hash.
+        // One round-trip: report the python's existence + the stamped hash,
+        // behind SENTINELS — a login-shell banner (MOTD / profile.d output)
+        // can precede the script's output, so positional line parsing would
+        // misread a banner line as the OK marker / hash (§0.5 discipline).
         let q = crate::wsl::sh_quote;
         let script = format!(
-            "if [ -x {py} ]; then printf 'OK\\n'; cat {hf} 2>/dev/null; else printf 'NONE\\n'; fi",
+            "if [ -x {py} ]; then printf 'OWLLM_PY=OK\\n'; printf 'OWLLM_HASH=%s\\n' \"$(cat {hf} 2>/dev/null)\"; else printf 'OWLLM_PY=NONE\\n'; fi",
             py = q(&python_exe),
             hf = q(&format!("{env}/.owllm_manifest.sha256")),
         );
         let out = crate::wsl::run_in_distro(&distro, &script).unwrap_or_default();
-        let mut lines = out.lines().map(str::trim);
-        if lines.next() != Some("OK") {
+        let find = |key: &str| -> Option<String> {
+            out.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+        };
+        if find("OWLLM_PY=").as_deref() != Some("OK") {
             return Ok(EnvProfileState::NotInstalled);
         }
-        let installed_hash = lines.next().unwrap_or("").trim().to_string();
+        let installed_hash = find("OWLLM_HASH=").unwrap_or_default();
         let current_hash = profile_hash(&profile);
         if installed_hash != current_hash {
             return Ok(EnvProfileState::Stale { python_exe, installed_hash, current_hash });
@@ -415,10 +420,17 @@ mod wsl_backend {
         })
     }
     /// Absolute `$HOME` inside the distro (e.g. /home/mc) — so the env
-    /// paths we hand back are absolute, not `$HOME`-relative.
+    /// paths we hand back are absolute, not `$HOME`-relative. Sentinel-
+    /// parsed: a login-shell banner can precede the output, so the first
+    /// line is not trustworthy (§0.5 discipline).
     pub fn wsl_home(distro: &str) -> Result<String, String> {
-        let out = crate::wsl::run_in_distro(distro, "printf %s \"$HOME\"")?;
-        let h = out.lines().next().unwrap_or("").trim().to_string();
+        let out = crate::wsl::run_in_distro(distro, "printf 'OWLLM_HOME=%s\\n' \"$HOME\"")?;
+        let h = out
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("OWLLM_HOME="))
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if h.is_empty() {
             return Err("could not resolve $HOME inside WSL".into());
         }
@@ -1092,4 +1104,16 @@ async fn uninstall_impl(name: String) -> Result<(), String> {
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    // Live probe (needs a real WSL distro): cargo test --lib -- --ignored probe_
+    #[test]
+    #[ignore]
+    fn probe_wsl_home_is_sentinel_parsed() {
+        let distro = crate::wsl::best_linux_distro().expect("a real Linux distro");
+        let home = super::wsl_backend::wsl_home(&distro).expect("resolve $HOME");
+        assert!(home.starts_with('/'), "got {home:?}");
+    }
 }

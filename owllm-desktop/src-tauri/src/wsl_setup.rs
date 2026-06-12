@@ -364,7 +364,16 @@ echo USER_OK
             user = username,
             pw = pw_b64,
         );
-        run_root_capture(distro, &script)?;
+        let out = run_root_capture(distro, &script)?;
+        // Verify the sentinel rather than trusting a zero exit alone — a
+        // banner-printing or partially-executed script must not pass as
+        // "user created".
+        if !out.contains("USER_OK") {
+            return Err(format!(
+                "user setup did not complete. Output: {}",
+                out.trim().chars().take(240).collect::<String>()
+            ));
+        }
         // Terminate so /etc/wsl.conf [user] default takes effect.
         let _ = std::process::Command::new("wsl.exe")
             .args(["--terminate", distro])
@@ -374,29 +383,11 @@ echo USER_OK
     }
 
     /// Run a bash script as root in the distro via stdin (immune to the
-    /// Windows→wsl command-line quoting hazards), capturing output.
+    /// Windows→wsl command-line quoting hazards), capturing output. Delegates
+    /// to the shared runner so wsl.exe's UTF-16LE error messages are decoded
+    /// (`decode_wsl`) instead of rendering as mojibake.
     fn run_root_capture(distro: &str, script: &str) -> Result<String, String> {
-        use std::io::Write;
-        let mut cmd = std::process::Command::new("wsl.exe");
-        cmd.arg("-d").arg(distro).arg("-u").arg("root").arg("--").arg("bash").arg("-ls");
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
-        cmd.creation_flags(CREATE_NO_WINDOW);
-        let mut child = cmd.spawn().map_err(|e| format!("spawn wsl: {e}"))?;
-        {
-            let mut stdin = child.stdin.take().ok_or_else(|| "no stdin".to_string())?;
-            stdin.write_all(script.as_bytes()).map_err(|e| format!("write script: {e}"))?;
-        }
-        let out = child.wait_with_output().map_err(|e| format!("wait wsl: {e}"))?;
-        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        if !out.status.success() {
-            return Err(format!(
-                "wsl exited {}: {}",
-                out.status.code().unwrap_or(-1),
-                if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
-            ));
-        }
-        Ok(stdout)
+        crate::wsl::run_in_distro_script_user(distro, Some("root"), script)
     }
 
     /// apt-install python3 + pip + venv and uv inside the distro, AS ROOT

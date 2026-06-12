@@ -330,13 +330,17 @@ pub fn shell_argv(_cwd: Option<&str>, _command: &str) -> Option<(String, Vec<Str
 #[cfg(windows)]
 fn status_impl() -> SandboxStatus {
     let w = crate::wsl::wsl_status();
+    // Report the distro the sandbox will actually use (best_linux_distro —
+    // never docker-desktop); fall back to the raw default for display when
+    // only system distros exist.
+    let default_target = crate::wsl::best_linux_distro().or(w.default_distro);
     SandboxStatus {
         available: w.available,
         kind: "wsl".into(),
         strong: true,
         beta: false,
         targets: w.distros,
-        default_target: w.default_distro,
+        default_target,
     }
 }
 
@@ -581,9 +585,14 @@ pub struct SyncResult {
 
 #[cfg(windows)]
 fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
+    // Resolve a REAL Linux distro (skip docker-desktop etc.) so the logins
+    // land in the SAME distro projects and envs run in — syncing into the raw
+    // default on a Docker-default machine puts the creds where nothing reads
+    // them (and busybox has no bash to run the script anyway).
     let distro = distro
-        .or_else(|| crate::wsl::wsl_status().default_distro)
-        .ok_or_else(|| "no WSL distro installed — isolation needs Ubuntu (run `wsl --install`).".to_string())?;
+        .filter(|d| !d.trim().is_empty())
+        .or_else(crate::wsl::best_linux_distro)
+        .ok_or_else(|| "no Ubuntu/Linux distro in WSL — isolation needs Ubuntu (set it up on the Home page).".to_string())?;
     let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
 
     // Build the API-key env file: every saved provider key becomes an
@@ -664,7 +673,12 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
 /// New-project dialog to show account status, and to confirm a sync landed.
 #[cfg(windows)]
 fn login_status_impl(distro: Option<String>) -> Vec<String> {
-    let Some(distro) = distro.or_else(|| crate::wsl::wsl_status().default_distro) else {
+    // Same distro resolution as sync_logins_impl — status must be read from
+    // the distro the sync writes into, not the raw default.
+    let Some(distro) = distro
+        .filter(|d| !d.trim().is_empty())
+        .or_else(crate::wsl::best_linux_distro)
+    else {
         return Vec::new();
     };
     let script = "s=''; \
@@ -701,27 +715,46 @@ pub fn sandbox_login_status(distro: Option<String>) -> Vec<String> {
 #[cfg(windows)]
 fn convert_impl(current: String) -> Result<SandboxProject, String> {
     let q = crate::wsl::sh_quote;
+    // Verify the copy via a SENTINEL in the output, not the exit code alone —
+    // login-shell noise can't fake `OWLLM_COPIED=1`, and a mangled/empty
+    // script that "succeeds" without copying anything is caught (§0.5).
+    let assert_copied = |out: &str| -> Result<(), String> {
+        if out.lines().any(|l| l.trim() == "OWLLM_COPIED=1") {
+            Ok(())
+        } else {
+            Err(format!(
+                "project copy did not complete. Output: {}",
+                out.trim().chars().take(240).collect::<String>()
+            ))
+        }
+    };
     if let Some((d, linux)) = crate::wsl::parse_wsl_unc(&current) {
         // isolated → host
         let name = linux.trim_end_matches('/').rsplit('/').next().unwrap_or("project").to_string();
         let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
         let dest_win = format!("{home}\\OwLLM-Projects\\{name}");
         let dest_mnt = win_to_mnt(&dest_win)?;
-        let script = format!("mkdir -p {dst} && cp -rf {src}/. {dst}/ && echo OK",
+        let script = format!("mkdir -p {dst} && cp -rf {src}/. {dst}/ && echo OWLLM_COPIED=1",
             src = q(linux.trim_end_matches('/')), dst = q(&dest_mnt));
-        crate::wsl::run_in_distro(&d, &script)?;
+        let out = crate::wsl::run_in_distro(&d, &script)?;
+        assert_copied(&out)?;
         Ok(SandboxProject { name, path: dest_win.clone(), inner_path: dest_win, kind: "none".into() })
     } else {
         // host → isolated
-        let distro = crate::wsl::wsl_status().default_distro
-            .ok_or_else(|| "no WSL distro".to_string())?;
         let base = current.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("project");
-        // create_impl on Windows delegates to wsl_create_project, which sanitizes.
+        // create_impl on Windows delegates to wsl_create_project, which both
+        // sanitizes the name and resolves a REAL Linux distro. Run the copy in
+        // the distro the project was actually created in (parsed back from its
+        // UNC path) — resolving the raw default here used to copy in a
+        // DIFFERENT distro (docker-desktop) than the one holding the project.
         let p = create_impl(base.to_string())?;
+        let (distro, _) = crate::wsl::parse_wsl_unc(&p.path)
+            .ok_or_else(|| format!("created project has a non-WSL path: {}", p.path))?;
         let src_mnt = win_to_mnt(&current)?;
-        let script = format!("cp -rf {src}/. {dst}/ && echo OK",
+        let script = format!("cp -rf {src}/. {dst}/ && echo OWLLM_COPIED=1",
             src = q(src_mnt.trim_end_matches('/')), dst = q(&p.inner_path));
-        crate::wsl::run_in_distro(&distro, &script)?;
+        let out = crate::wsl::run_in_distro(&distro, &script)?;
+        assert_copied(&out)?;
         Ok(p)
     }
 }

@@ -319,6 +319,7 @@ mod tests {
                 project_id: "p1".into(),
                 auto_approve: false,
             },
+            ..Default::default()
         };
         let s = serde_json::to_string(&original).unwrap();
         let back: BridgeConfigs = serde_json::from_str(&s).unwrap();

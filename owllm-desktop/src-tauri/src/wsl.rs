@@ -85,7 +85,7 @@ pub struct WslToolchain {
 /// "WSL check failed" the user saw). Stripping null bytes recovers the ASCII
 /// from UTF-16LE and is harmless for genuine UTF-8 (which has no interior
 /// nulls).
-fn decode_wsl(bytes: &[u8]) -> String {
+pub(crate) fn decode_wsl(bytes: &[u8]) -> String {
     if bytes.contains(&0) {
         let stripped: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
         String::from_utf8_lossy(&stripped).into_owned()
@@ -156,36 +156,6 @@ pub fn wsl_program_command(
 
 // ---- internal command runners --------------------------------------------
 
-/// Run a bash script in the given distro (optionally as a specific user, e.g.
-/// "root" for passwordless apt) and capture stdout+stderr. Errors on a nonzero
-/// exit. Synchronous; callers are commands or run on a blocking context. Always
-/// uses CREATE_NO_WINDOW so no console flashes.
-fn run_wsl_user(distro: &str, user: Option<&str>, script: &str) -> Result<String, String> {
-    let mut cmd = std::process::Command::new("wsl.exe");
-    cmd.arg("-d").arg(distro);
-    if let Some(u) = user {
-        cmd.arg("-u").arg(u);
-    }
-    cmd.arg("--").arg("bash").arg("-lc").arg(script);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let out = cmd.output().map_err(|e| format!("spawn wsl: {e}"))?;
-    let stdout = decode_wsl(&out.stdout);
-    let stderr = decode_wsl(&out.stderr);
-    if !out.status.success() {
-        return Err(format!(
-            "wsl exited {}: {}",
-            out.status.code().unwrap_or(-1),
-            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
-        ));
-    }
-    Ok(if stderr.trim().is_empty() { stdout } else { format!("{stdout}\n{stderr}") })
-}
-
 fn run_wsl_capture(distro: &str, script: &str) -> Result<String, String> {
     // Pipe the script to bash over STDIN rather than passing it as a
     // `-lc "<script>"` argument. Any script with nested quotes (the login
@@ -212,9 +182,25 @@ pub fn run_in_distro(distro: &str, script: &str) -> Result<String, String> {
 /// quotes (the login sync) can't be mangled into an empty/garbled command.
 /// Returns combined stdout(+stderr). Errors on nonzero exit.
 pub fn run_in_distro_script(distro: &str, script: &str) -> Result<String, String> {
+    run_in_distro_script_user(distro, None, script)
+}
+
+/// Same as `run_in_distro_script`, but optionally as a specific Linux user
+/// (e.g. "root" — WSL allows `-u root` with no password, so apt needs no sudo
+/// prompt). All in-distro script execution funnels through here so every
+/// caller gets the stdin piping + UTF-16LE decode for free.
+pub fn run_in_distro_script_user(
+    distro: &str,
+    user: Option<&str>,
+    script: &str,
+) -> Result<String, String> {
     use std::io::Write;
     let mut cmd = std::process::Command::new("wsl.exe");
-    cmd.arg("-d").arg(distro).arg("--").arg("bash").arg("-ls");
+    cmd.arg("-d").arg(distro);
+    if let Some(u) = user {
+        cmd.arg("-u").arg(u);
+    }
+    cmd.arg("--").arg("bash").arg("-ls");
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
@@ -464,7 +450,10 @@ pub fn wsl_list_projects(distro: Option<String>) -> Result<Vec<WslProject>, Stri
 /// would NOT run correctly in the distro, so it doesn't count as installed.
 #[tauri::command]
 pub fn wsl_toolchain_status(distro: Option<String>) -> WslToolchain {
-    let Some(distro) = distro.or_else(|| wsl_status().default_distro) else {
+    // Resolve a REAL Linux distro (skip docker-desktop etc.), never the raw
+    // default — probing a busybox distro reports everything missing and the
+    // UI then provisions into the wrong place.
+    let Some(distro) = distro.filter(|d| !d.trim().is_empty()).or_else(best_linux_distro) else {
         return WslToolchain::default();
     };
     let script = "for c in node uv git claude codex gemini; do \
@@ -496,11 +485,17 @@ pub fn wsl_toolchain_status(distro: Option<String>) -> WslToolchain {
 /// credentials can't be copied from the Windows install.
 #[tauri::command]
 pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
+    // Resolve a REAL Linux distro (skip docker-desktop etc.) — apt/npm don't
+    // exist in a busybox system distro, so provisioning the raw default dies
+    // with exit 127 on Docker-default machines.
     let distro = distro
-        .or_else(|| wsl_status().default_distro)
-        .ok_or_else(|| "no WSL distro available — install WSL first".to_string())?;
-    // Heredoc-free script (single bash -lc arg). `|| true` on the optional
-    // pieces so a CLI npm hiccup doesn't fail the whole provision.
+        .filter(|d| !d.trim().is_empty())
+        .or_else(best_linux_distro)
+        .ok_or_else(|| "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string())?;
+    // Piped via STDIN (run_in_distro_script_user), NOT as a `-lc "<script>"`
+    // arg — the gh-install line has nested quotes that the Windows→wsl.exe
+    // command-line handoff can mangle. `|| true` on the optional pieces so a
+    // CLI npm hiccup doesn't fail the whole provision.
     let script = "set -e; export DEBIAN_FRONTEND=noninteractive; \
                   apt-get update -y; \
                   apt-get install -y nodejs npm git curl ca-certificates; \
@@ -513,9 +508,17 @@ pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
                      echo \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" > /etc/apt/sources.list.d/github-cli.list && \
                      apt-get update -y && apt-get install -y gh )) || true; \
                   echo PROVISION_DONE";
-    tokio::task::spawn_blocking(move || run_wsl_user(&distro, Some("root"), script))
-        .await
-        .map_err(|e| format!("join error: {e}"))?
+    let out = tokio::task::spawn_blocking(move || {
+        run_in_distro_script_user(&distro, Some("root"), script)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+    if !out.contains("PROVISION_DONE") {
+        let chars: Vec<char> = out.trim().chars().collect();
+        let tail: String = chars[chars.len().saturating_sub(240)..].iter().collect();
+        return Err(format!("provisioning did not complete. Output tail: {tail}"));
+    }
+    Ok(out)
 }
 
 /// Install WSL itself on a PC that doesn't have it. `wsl --install` needs admin
@@ -570,5 +573,73 @@ mod tests {
             build_wsl_bash_script("/home/mc/owllm/p", "echo hi | tr a-z A-Z"),
             "cd '/home/mc/owllm/p' && (echo hi | tr a-z A-Z)"
         );
+    }
+
+    // ---- live probes (need a real WSL distro; run explicitly) -------------
+    //
+    //   wsl --shutdown            # cold-start the service first for realism
+    //   cargo test --lib -- --ignored probe_
+    //
+    // These exercise the §0.5 discipline against the machine's actual WSL:
+    // cold-service retry, system-distro skipping, root stdin runner, and
+    // banner-proof sentinel parsing.
+
+    #[test]
+    #[ignore]
+    fn probe_status_detects_distros_when_cold() {
+        let s = wsl_status();
+        assert!(s.available, "WSL should be detected even on a cold service");
+        assert!(
+            s.distros.iter().any(|d| !is_system_distro(d)),
+            "expected a real Linux distro in {:?}",
+            s.distros
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_best_distro_skips_system_distros() {
+        let d = best_linux_distro().expect("a real Linux distro");
+        assert!(!is_system_distro(&d), "best_linux_distro returned {d}");
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_root_stdin_runner() {
+        let d = best_linux_distro().expect("a real Linux distro");
+        let out = run_in_distro_script_user(&d, Some("root"), "id -u").expect("run as root");
+        assert!(
+            out.lines().any(|l| l.trim() == "0"),
+            "expected uid 0 in output: {out:?}"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_sentinel_parse_survives_banner() {
+        // Emulate an MOTD banner ahead of the sentinel — exactly what corrupts
+        // positional line parsing on banner-printing distros.
+        let d = best_linux_distro().expect("a real Linux distro");
+        let out = run_in_distro_script(
+            &d,
+            "echo 'Welcome to Ubuntu 24.04 (fake MOTD banner)'; printf 'OWLLM_LINUX=%s\\n' \"$HOME\"",
+        )
+        .expect("script runs");
+        let got = out
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("OWLLM_LINUX=").map(str::to_string))
+            .expect("sentinel found despite banner");
+        assert!(got.starts_with('/'), "sentinel value not a path: {got}");
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_create_project_resolves_real_distro() {
+        let p = wsl_create_project("owllm_probe_p05".to_string(), None).expect("create");
+        assert!(!is_system_distro(&p.distro), "project landed in {}", p.distro);
+        assert!(p.linux_path.starts_with('/'));
+        assert!(p.unc_path.to_lowercase().contains("wsl"));
+        // cleanup
+        let _ = run_in_distro(&p.distro, "rm -rf ~/owllm/owllm_probe_p05");
     }
 }

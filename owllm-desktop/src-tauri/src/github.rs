@@ -95,10 +95,13 @@ fn configure_sandbox(
     email: &str,
     token: &str,
 ) -> Result<bool, String> {
+    // Resolve a REAL Linux distro (skip docker-desktop etc.) so the git
+    // credentials land in the same distro the sandboxed agents run in.
     let distro = distro
         .map(|s| s.to_string())
-        .or_else(|| crate::wsl::wsl_status().default_distro)
-        .ok_or_else(|| "no WSL distro available".to_string())?;
+        .filter(|d| !d.trim().is_empty())
+        .or_else(crate::wsl::best_linux_distro)
+        .ok_or_else(|| "no Ubuntu/Linux distro in WSL available".to_string())?;
     let q = crate::wsl::sh_quote;
     let script = format!(
         "set -e; git config --global credential.helper store; \
@@ -348,7 +351,12 @@ pub async fn github_disconnect(distro: Option<String>) -> Result<(), String> {
     let _ = crate::accounts::accounts_delete_secret("GITHUB_LOGIN".to_string());
 
     tokio::task::spawn_blocking(move || {
-        if let Some(d) = distro.or_else(|| crate::wsl::wsl_status().default_distro) {
+        // Scrub from the REAL Linux distro (where configure_sandbox wrote the
+        // credentials), not the raw default, or the scrub misses them.
+        if let Some(d) = distro
+            .filter(|d| !d.trim().is_empty())
+            .or_else(crate::wsl::best_linux_distro)
+        {
             let _ = crate::wsl::run_in_distro(
                 &d,
                 "rm -f \"$HOME/.git-credentials\"; \

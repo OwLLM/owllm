@@ -17,8 +17,10 @@ import { invoke } from "@tauri-apps/api/core";
 import {
   EnvProfile,
   EnvProfileState,
+  EnvDoctorReport,
   listEnvProfiles,
   envProfileStatus,
+  envProfileDoctor,
   envStateLabel,
 } from "./envProfiles";
 import {
@@ -45,6 +47,11 @@ export default function EnvironmentModal({
   const [profiles, setProfiles] = React.useState<EnvProfile[]>([]);
   const [status, setStatus] = React.useState<Record<string, EnvProfileState | null>>({});
   const [openLog, setOpenLog] = React.useState<string | null>(null);
+  // Doctor: per-env diagnosis report + which env is mid-diagnosis. Targeted
+  // probes with NAMED failures (e.g. "torch 2.5.1 doesn't support sm_120") —
+  // Repair is the normal install button (atomic, hardware-adaptive reinstall).
+  const [doctor, setDoctor] = React.useState<Record<string, EnvDoctorReport | null>>({});
+  const [diagnosing, setDiagnosing] = React.useState<string | null>(null);
   // WSL readiness — environments build inside WSL, so if it has no Linux user
   // (root-only, the "closed the first-run window" case) or isn't installed,
   // we surface a banner that routes to the guided setup instead of letting the
@@ -119,7 +126,29 @@ export default function EnvironmentModal({
 
   const install = (name: string) => {
     setOpenLog(name);
+    setDoctor((m) => ({ ...m, [name]: null })); // stale diagnosis after a reinstall
     startEnvInstall(name); // idempotent + survives navigation
+  };
+
+  const diagnose = async (name: string) => {
+    setDiagnosing(name);
+    try {
+      const r = await envProfileDoctor(name);
+      setDoctor((m) => ({ ...m, [name]: r }));
+    } catch (e) {
+      setDoctor((m) => ({
+        ...m,
+        [name]: {
+          profile: name,
+          checks: [],
+          healthy: false,
+          repairRecommended: false,
+          diagnosis: `Doctor failed to run: ${e}`,
+        },
+      }));
+    } finally {
+      setDiagnosing(null);
+    }
   };
 
   const actionLabel = (s: EnvProfileState | null, busy: boolean) =>
@@ -288,6 +317,18 @@ export default function EnvironmentModal({
                     }}
                   >{isSel ? "✓ Used for training" : "Use for training"}</button>
 
+                  <button
+                    onClick={() => (doctor[p.name] ? setDoctor((m) => ({ ...m, [p.name]: null })) : diagnose(p.name))}
+                    disabled={diagnosing !== null || busy}
+                    title="Run targeted checks: venv, GPU, torch-vs-GPU architecture, every package"
+                    style={{
+                      padding: "8px 12px", borderRadius: 9, border: "1px solid var(--border-strong)",
+                      background: "var(--bg-elevated)", color: "var(--fg)", fontSize: 12.5, fontWeight: 700,
+                      cursor: diagnosing !== null || busy ? "wait" : "pointer",
+                      opacity: diagnosing !== null && diagnosing !== p.name ? 0.5 : 1,
+                    }}
+                  >{diagnosing === p.name ? "⏳ Checking…" : doctor[p.name] ? "Hide checks" : "🩺 Diagnose"}</button>
+
                   {inst.log.length > 0 && (
                     <button
                       onClick={() => setOpenLog((v) => (v === p.name ? null : p.name))}
@@ -305,6 +346,43 @@ export default function EnvironmentModal({
                     </span>
                   )}
                 </div>
+
+                {doctor[p.name] && (
+                  <div style={{
+                    marginTop: 10, border: "1px solid var(--border)", borderRadius: 8,
+                    background: "rgba(0,0,0,0.22)", padding: "10px 12px",
+                  }}>
+                    <div style={{
+                      fontSize: 12.5, fontWeight: 800, marginBottom: 8,
+                      color: doctor[p.name]!.healthy ? "#7ff0c5" : "#f08a7f",
+                    }}>
+                      {doctor[p.name]!.healthy ? "✓ " : "✗ "}{doctor[p.name]!.diagnosis}
+                    </div>
+                    {doctor[p.name]!.checks.map((c) => (
+                      <div key={c.id} style={{ display: "flex", gap: 8, fontSize: 11.5, lineHeight: 1.7, alignItems: "baseline" }}>
+                        <span style={{ width: 14, color: c.ok ? (c.warn ? "#d9b24a" : "#7ff0c5") : "#f08a7f" }}>
+                          {c.ok ? (c.warn ? "⚠" : "✓") : "✗"}
+                        </span>
+                        <span style={{ minWidth: 130, fontWeight: 700, color: "var(--fg-strong)" }}>{c.label}</span>
+                        <span style={{ color: "var(--fg-muted)", wordBreak: "break-word", flex: 1 }}>
+                          {c.detail}
+                          {c.fix && <span style={{ color: "#ffcf99" }}> — {c.fix}</span>}
+                        </span>
+                      </div>
+                    ))}
+                    {doctor[p.name]!.repairRecommended && !busy && (
+                      <button
+                        onClick={() => install(p.name)}
+                        disabled={busyAnywhere}
+                        style={{
+                          marginTop: 8, padding: "8px 14px", borderRadius: 9, border: "none",
+                          background: "linear-gradient(180deg, #ffb74d, #f59e0b)", color: "#241a05",
+                          fontSize: 12.5, fontWeight: 800, cursor: busyAnywhere ? "wait" : "pointer",
+                        }}
+                      >🔧 Repair now (reinstall, matched to your hardware)</button>
+                    )}
+                  </div>
+                )}
 
                 {openLog === p.name && inst.log.length > 0 && (
                   <pre style={{

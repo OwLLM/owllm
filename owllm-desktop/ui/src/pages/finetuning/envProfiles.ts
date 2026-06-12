@@ -47,6 +47,30 @@ export const envProfileStatus = (name: string) =>
 export const envProfileUninstall = (name: string) =>
   invoke<void>("env_profile_uninstall", { name });
 
+// Mirrors Rust DoctorCheck / EnvDoctorReport (#[serde(rename_all="camelCase")]).
+export type DoctorCheck = {
+  id: string;
+  label: string;
+  ok: boolean;
+  warn: boolean;
+  detail: string;
+  fix?: string | null;
+};
+
+export type EnvDoctorReport = {
+  profile: string;
+  checks: DoctorCheck[];
+  healthy: boolean;
+  repairRecommended: boolean;
+  diagnosis: string;
+};
+
+/// Run the environment doctor: targeted probes (sandbox, uv, venv, GPU,
+/// torch-vs-GPU-architecture, every package) with named diagnoses. Repair is
+/// the existing install/reinstall (hardware-adaptive + atomic).
+export const envProfileDoctor = (name: string) =>
+  invoke<EnvDoctorReport>("env_profile_doctor", { name });
+
 /// Kick off an install and stream progress. Resolves when the install
 /// finishes (or rejects on failure — the Failed event also fires first).
 export function installEnvProfile(

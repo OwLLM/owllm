@@ -259,6 +259,7 @@ pub fn run() {
             env_manager::env_profile_status,
             env_manager::env_profile_install,
             env_manager::env_profile_uninstall,
+            env_manager::env_profile_doctor,
             finetuning::train_start,
             finetuning::train_stop,
             finetuning::train_status,

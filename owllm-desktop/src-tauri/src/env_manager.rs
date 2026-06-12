@@ -1106,14 +1106,725 @@ async fn uninstall_impl(name: String) -> Result<(), String> {
     .map_err(|e| format!("join error: {e}"))?
 }
 
-#[cfg(all(test, windows))]
+// ---- environment doctor -----------------------------------------------------
+//
+// `env_profile_status` answers "is it installed and current?"; the doctor
+// answers "WHY is it broken, by name, and what fixes it?". It runs targeted
+// probes — sandbox present, uv present, venv present, GPU visible, torch
+// importable, torch build matches the GPU architecture, every profile package
+// importable, manifest drift — and maps each failure to a named diagnosis +
+// fix. Repair is the existing atomic, hardware-adaptive reinstall
+// (`env_profile_install` already resolves cu-index / Blackwell builds), so
+// the doctor never needs its own install path.
+
+/// One targeted probe result.
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct DoctorCheck {
+    /// Stable id: sandbox | uv | venv | gpu | python | torch | <package> | manifest
+    pub id: String,
+    pub label: String,
+    pub ok: bool,
+    /// Degraded-but-not-fatal (no GPU, optional package missing, update available).
+    pub warn: bool,
+    pub detail: String,
+    /// Actionable fix for a failed check, when one exists.
+    pub fix: Option<String>,
+}
+
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct EnvDoctorReport {
+    pub profile: String,
+    pub checks: Vec<DoctorCheck>,
+    /// No fatal check failed.
+    pub healthy: bool,
+    /// One click on Repair (= the existing reinstall) fixes the fatal problem(s).
+    pub repair_recommended: bool,
+    /// One-line named diagnosis of the first fatal problem (or all-clear).
+    pub diagnosis: String,
+}
+
+/// Raw probe inputs the platform impls gather; `build_doctor_report` turns
+/// them into named diagnoses. Split so the mapping is pure + unit-testable.
+#[derive(Default, Debug)]
+struct DoctorProbes {
+    /// A usable Linux sandbox/host for the env (WSL real-Linux distro on
+    /// Windows; always true on native Linux/macOS).
+    sandbox_ok: bool,
+    sandbox_detail: String,
+    uv_ok: bool,
+    /// venv python path when the venv exists.
+    venv_python: Option<String>,
+    /// Max GPU compute capability (major*10+minor), None = no NVIDIA GPU.
+    gpu_cc: Option<u32>,
+    /// Parsed OWLLM_DOCTOR JSON from the in-venv diagnostic run.
+    py: Option<serde_json::Value>,
+    /// Stamped manifest hash, when readable.
+    installed_hash: Option<String>,
+}
+
+/// Python module to import for a package spec (pip name → import name).
+fn import_name(pkg: &str) -> String {
+    pkg.replace('-', "_")
+}
+
+/// The in-venv diagnostic script. Catches everything; emits ONE sentinel
+/// line `OWLLM_DOCTOR=<json>` so login-shell banners can't corrupt it (§0.5).
+fn doctor_script(profile: &EnvProfile) -> String {
+    let modules: Vec<String> = profile
+        .packages
+        .iter()
+        .filter(|p| p.name != "torch")
+        .map(|p| format!("\"{}\"", import_name(&p.name)))
+        .collect();
+    format!(
+        r#"import json
+out = {{}}
+def run(k, f):
+    try:
+        out[k] = {{"ok": True, "v": f()}}
+    except Exception as e:
+        out[k] = {{"ok": False, "err": "%s: %s" % (type(e).__name__, e)}}
+def torch_info():
+    import torch
+    d = {{"version": str(torch.__version__), "cuda": torch.version.cuda, "available": bool(torch.cuda.is_available())}}
+    try:
+        d["arches"] = [str(a) for a in torch.cuda.get_arch_list()]
+    except Exception:
+        d["arches"] = []
+    if d["available"]:
+        try:
+            cc = torch.cuda.get_device_capability(0)
+            d["device_cc"] = cc[0] * 10 + cc[1]
+            d["device"] = str(torch.cuda.get_device_name(0))
+        except Exception:
+            pass
+    return d
+run("torch", torch_info)
+def imp(m):
+    mod = __import__(m)
+    return str(getattr(mod, "__version__", "present"))
+for m in [{mods}]:
+    run(m, lambda m=m: imp(m))
+print("OWLLM_DOCTOR=" + json.dumps(out))
+"#,
+        mods = modules.join(", ")
+    )
+}
+
+/// Highest sm_XX in torch's compiled arch list (ignores compute_XX PTX
+/// entries — torch's own "not compatible" warning keys off the sm list).
+fn max_sm_arch(arches: &[String]) -> Option<u32> {
+    arches
+        .iter()
+        .filter_map(|a| a.strip_prefix("sm_").and_then(|n| n.parse::<u32>().ok()))
+        .max()
+}
+
+/// Pure mapping: raw probes → named diagnoses. Unit-tested below.
+fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorReport {
+    const FIX_REPAIR: &str = "Click Repair — it reinstalls the environment with builds matched to your hardware.";
+    let mut checks: Vec<DoctorCheck> = Vec::new();
+    let push = |checks: &mut Vec<DoctorCheck>, id: &str, label: &str, ok: bool, warn: bool, detail: String, fix: Option<&str>| {
+        checks.push(DoctorCheck {
+            id: id.into(),
+            label: label.into(),
+            ok,
+            warn,
+            detail,
+            fix: fix.map(|s| s.to_string()),
+        });
+    };
+
+    // 1) Sandbox (WSL distro on Windows / host elsewhere).
+    push(
+        &mut checks,
+        "sandbox",
+        "Linux environment",
+        p.sandbox_ok,
+        false,
+        p.sandbox_detail.clone(),
+        (!p.sandbox_ok).then_some("Open “Set up WSL” on the Home page to install Ubuntu."),
+    );
+    if p.sandbox_ok {
+        // 2) uv — the installer's load-bearing tool. Missing uv doesn't break
+        //    an already-installed env, so it's a warning, not fatal.
+        push(
+            &mut checks,
+            "uv",
+            "uv package manager",
+            true,
+            !p.uv_ok,
+            if p.uv_ok { "present".into() } else { "missing — Repair installs it automatically".into() },
+            None,
+        );
+
+        // 3) venv present.
+        let venv_ok = p.venv_python.is_some();
+        push(
+            &mut checks,
+            "venv",
+            "Environment venv",
+            venv_ok,
+            false,
+            p.venv_python.clone().unwrap_or_else(|| "not installed".into()),
+            (!venv_ok).then_some("Click Install to create the environment."),
+        );
+
+        // 4) GPU visibility (informational: CPU training works, just slow).
+        push(
+            &mut checks,
+            "gpu",
+            "NVIDIA GPU",
+            true,
+            p.gpu_cc.is_none(),
+            match p.gpu_cc {
+                Some(cc) => format!("compute capability {}.{}", cc / 10, cc % 10),
+                None => "no NVIDIA GPU visible — training would run on CPU (slow)".into(),
+            },
+            None,
+        );
+
+        if venv_ok {
+            match &p.py {
+                None => push(
+                    &mut checks,
+                    "python",
+                    "Environment Python",
+                    false,
+                    false,
+                    "the diagnostic run failed — the venv's Python can't execute".into(),
+                    Some(FIX_REPAIR),
+                ),
+                Some(py) => {
+                    // 5) torch — the named failure modes.
+                    let t = py.get("torch");
+                    let t_ok = t.and_then(|t| t.get("ok")).and_then(|v| v.as_bool()).unwrap_or(false);
+                    if !t_ok {
+                        let err = t
+                            .and_then(|t| t.get("err"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown import error");
+                        let named = if err.contains("No module named") {
+                            "torch is not installed in this environment".to_string()
+                        } else if err.contains("libcud")
+                            || err.contains("cannot open shared object")
+                            || err.contains("undefined symbol")
+                        {
+                            format!("torch's CUDA libraries are broken ({err})")
+                        } else {
+                            format!("torch failed to import ({err})")
+                        };
+                        push(&mut checks, "torch", "PyTorch", false, false, named, Some(FIX_REPAIR));
+                    } else {
+                        // The script stores torch_info's dict under "v".
+                        let null = serde_json::Value::Null;
+                        let t = t.and_then(|t| t.get("v")).unwrap_or(&null);
+                        let version = t.get("version").and_then(|v| v.as_str()).unwrap_or("?");
+                        let cuda = t.get("cuda").and_then(|v| v.as_str());
+                        let available = t.get("available").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let arches: Vec<String> = t
+                            .get("arches")
+                            .and_then(|v| v.as_array())
+                            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        let max_sm = max_sm_arch(&arches);
+                        if cuda.is_none() {
+                            // CPU-only wheel — fatal when a GPU exists.
+                            let gpu = p.gpu_cc.is_some();
+                            push(
+                                &mut checks,
+                                "torch",
+                                "PyTorch",
+                                !gpu,
+                                !gpu,
+                                format!("CPU-only torch {version} build installed — no CUDA support"),
+                                gpu.then_some(FIX_REPAIR),
+                            );
+                        } else if let (Some(cc), Some(max)) = (p.gpu_cc, max_sm) {
+                            if cc > max {
+                                // THE Blackwell-class failure: build predates the GPU.
+                                let gen = if cc >= 120 { " (Blackwell / RTX 50xx)" } else { "" };
+                                push(
+                                    &mut checks,
+                                    "torch",
+                                    "PyTorch",
+                                    false,
+                                    false,
+                                    format!(
+                                        "torch {version} supports GPU architectures up to sm_{max}, but your GPU is sm_{cc}{gen} — this build can't run kernels on it"
+                                    ),
+                                    Some(FIX_REPAIR),
+                                );
+                            } else if !available {
+                                push(
+                                    &mut checks,
+                                    "torch",
+                                    "PyTorch",
+                                    false,
+                                    false,
+                                    format!(
+                                        "torch {version} (cuda {}) can't see the GPU — usually the Windows NVIDIA driver is too old for WSL CUDA",
+                                        cuda.unwrap_or("?")
+                                    ),
+                                    Some("Update the NVIDIA Windows driver (it provides WSL's CUDA), then re-run the check."),
+                                );
+                            } else {
+                                let device = t.get("device").and_then(|v| v.as_str()).unwrap_or("GPU");
+                                push(
+                                    &mut checks,
+                                    "torch",
+                                    "PyTorch",
+                                    true,
+                                    false,
+                                    format!("torch {version} · cuda {} · {device}", cuda.unwrap_or("?")),
+                                    None,
+                                );
+                            }
+                        } else if !available && p.gpu_cc.is_some() {
+                            push(
+                                &mut checks,
+                                "torch",
+                                "PyTorch",
+                                false,
+                                false,
+                                format!("torch {version} can't see the GPU"),
+                                Some("Update the NVIDIA Windows driver (it provides WSL's CUDA), then re-run the check."),
+                            );
+                        } else {
+                            push(
+                                &mut checks,
+                                "torch",
+                                "PyTorch",
+                                true,
+                                p.gpu_cc.is_none(),
+                                format!("torch {version} · cuda {}", cuda.unwrap_or("?")),
+                                None,
+                            );
+                        }
+
+                        // 6) every other profile package.
+                        for pkg in profile.packages.iter().filter(|x| x.name != "torch") {
+                            let m = import_name(&pkg.name);
+                            let e = py.get(&m);
+                            let ok = e.and_then(|e| e.get("ok")).and_then(|v| v.as_bool()).unwrap_or(false);
+                            if ok {
+                                let v = e
+                                    .and_then(|e| e.get("v"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("present");
+                                push(&mut checks, &pkg.name, &pkg.name, true, false, v.to_string(), None);
+                            } else {
+                                let err = e
+                                    .and_then(|e| e.get("err"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("unknown error");
+                                let named = if err.contains("No module named") {
+                                    format!("{} is missing from the environment", pkg.name)
+                                } else {
+                                    format!("{} is broken: {err}", pkg.name)
+                                };
+                                // Optional packages (flash-attn) degrade, never break.
+                                push(
+                                    &mut checks,
+                                    &pkg.name,
+                                    &pkg.name,
+                                    pkg.optional,
+                                    pkg.optional,
+                                    named,
+                                    (!pkg.optional).then_some(FIX_REPAIR),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 7) manifest drift (stale = works, but pins changed since install).
+            let current = profile_hash(profile);
+            let drift = p.installed_hash.as_deref().map(|h| h != current).unwrap_or(true);
+            push(
+                &mut checks,
+                "manifest",
+                "Installed manifest",
+                true,
+                drift,
+                if drift {
+                    "package pins changed since this was installed — an Update is available".into()
+                } else {
+                    "up to date".into()
+                },
+                None,
+            );
+        }
+    }
+
+    let first_fatal = checks.iter().find(|c| !c.ok && !c.warn);
+    let healthy = first_fatal.is_none();
+    let repair_recommended = checks
+        .iter()
+        .any(|c| !c.ok && c.fix.as_deref().map(|f| f == FIX_REPAIR).unwrap_or(false));
+    let diagnosis = match first_fatal {
+        Some(c) => format!("{}: {}", c.label, c.detail),
+        None if checks.iter().any(|c| c.warn) => "Healthy, with warnings.".to_string(),
+        None => "Environment is healthy.".to_string(),
+    };
+    EnvDoctorReport {
+        profile: profile.name.clone(),
+        checks,
+        healthy,
+        repair_recommended,
+        diagnosis,
+    }
+}
+
+/// Run the doctor for one profile: targeted probes + named diagnoses + the
+/// one-click fix (Repair = the existing hardware-adaptive reinstall).
+#[tauri::command]
+pub async fn env_profile_doctor(name: String) -> Result<EnvDoctorReport, String> {
+    let profile = {
+        let n = name.clone();
+        tokio::task::spawn_blocking(move || -> Result<EnvProfile, String> {
+            read_profiles_yaml()?
+                .into_iter()
+                .find(|p| p.name == n)
+                .ok_or_else(|| format!("no env profile named {n}"))
+        })
+        .await
+        .map_err(|e| format!("join error: {e}"))??
+    };
+    doctor_impl(profile).await
+}
+
+#[cfg(windows)]
+async fn doctor_impl(profile: EnvProfile) -> Result<EnvDoctorReport, String> {
+    tokio::task::spawn_blocking(move || -> Result<EnvDoctorReport, String> {
+        let mut probes = DoctorProbes::default();
+        let Some(distro) = crate::wsl::best_linux_distro() else {
+            probes.sandbox_detail =
+                "no Ubuntu/Linux distro in WSL (a Docker/system distro doesn't count)".into();
+            return Ok(build_doctor_report(&profile, &probes));
+        };
+        probes.sandbox_ok = true;
+        probes.sandbox_detail = format!("WSL · {distro}");
+        probes.gpu_cc = wsl_backend::max_compute_cap(&distro);
+
+        let home = match wsl_backend::wsl_home(&distro) {
+            Ok(h) => h,
+            Err(e) => {
+                probes.sandbox_ok = false;
+                probes.sandbox_detail = format!("WSL distro {distro} unreachable: {e}");
+                return Ok(build_doctor_report(&profile, &probes));
+            }
+        };
+        let env = wsl_backend::env_dir(&home, &profile.name);
+        let python_exe = format!("{env}/bin/python");
+        // uv + venv + manifest hash in one sentinel-parsed round trip.
+        let q = crate::wsl::sh_quote;
+        let script = format!(
+            "command -v uv >/dev/null 2>&1 && echo 'OWLLM_UV=1' || echo 'OWLLM_UV=0'; \
+             if [ -x {py} ]; then echo 'OWLLM_VENV=1'; printf 'OWLLM_HASH=%s\\n' \"$(cat {hf} 2>/dev/null)\"; \
+             else echo 'OWLLM_VENV=0'; fi",
+            py = q(&python_exe),
+            hf = q(&format!("{env}/.owllm_manifest.sha256")),
+        );
+        let out = crate::wsl::run_in_distro(&distro, &script).unwrap_or_default();
+        let find = |key: &str| -> Option<String> {
+            out.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+        };
+        probes.uv_ok = find("OWLLM_UV=").as_deref() == Some("1");
+        if find("OWLLM_VENV=").as_deref() == Some("1") {
+            probes.venv_python = Some(python_exe.clone());
+            probes.installed_hash = find("OWLLM_HASH=").filter(|h| !h.is_empty());
+            // In-venv diagnostic (import probes), sentinel-parsed.
+            let run = format!("{py} -c {code}", py = q(&python_exe), code = q(&doctor_script(&profile)));
+            if let Ok(o) = crate::wsl::run_in_distro(&distro, &run) {
+                probes.py = o
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("OWLLM_DOCTOR="))
+                    .and_then(|j| serde_json::from_str(j).ok());
+            }
+        }
+        Ok(build_doctor_report(&profile, &probes))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(not(windows))]
+async fn doctor_impl(profile: EnvProfile) -> Result<EnvDoctorReport, String> {
+    tokio::task::spawn_blocking(move || -> Result<EnvDoctorReport, String> {
+        let mut probes = DoctorProbes::default();
+        probes.sandbox_ok = true;
+        probes.sandbox_detail = "native host".into();
+        probes.uv_ok = std::process::Command::new("uv")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        probes.gpu_cc = host_max_compute_cap();
+        let venv = match envs_root() {
+            Some(r) => r.join(&profile.name),
+            None => return Ok(build_doctor_report(&profile, &probes)),
+        };
+        let python_exe = venv.join("bin").join("python");
+        if python_exe.is_file() {
+            probes.venv_python = Some(python_exe.to_string_lossy().into_owned());
+            probes.installed_hash = std::fs::read_to_string(venv.join(".owllm_manifest.sha256"))
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if let Ok(o) = std::process::Command::new(&python_exe)
+                .args(["-c", &doctor_script(&profile)])
+                .output()
+            {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                probes.py = stdout
+                    .lines()
+                    .find_map(|l| l.trim().strip_prefix("OWLLM_DOCTOR="))
+                    .and_then(|j| serde_json::from_str(j).ok());
+            }
+        }
+        Ok(build_doctor_report(&profile, &probes))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Host nvidia-smi compute capability (native Linux/macOS path).
+#[cfg(not(windows))]
+fn host_max_compute_cap() -> Option<u32> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    let txt = String::from_utf8_lossy(&out.stdout).into_owned();
+    let mut best: Option<u32> = None;
+    for line in txt.lines() {
+        let mut it = line.trim().split('.');
+        if let (Some(a), Some(b)) = (it.next(), it.next()) {
+            if let (Ok(maj), Ok(min)) = (a.trim().parse::<u32>(), b.trim().parse::<u32>()) {
+                let v = maj * 10 + min;
+                best = Some(best.map_or(v, |c| c.max(v)));
+            }
+        }
+    }
+    best
+}
+
+#[cfg(test)]
 mod tests {
-    // Live probe (needs a real WSL distro): cargo test --lib -- --ignored probe_
+    use super::*;
+
+    fn profile() -> EnvProfile {
+        serde_yaml::from_str::<Vec<EnvProfile>>(
+            r#"
+- name: standard
+  display: "Standard"
+  python: "3.11"
+  packages:
+    - { name: torch, version: "2.5.1", cuda_wheel: true }
+    - { name: bitsandbytes, version: "0.44.1" }
+    - { name: flash-attn, version: "2.7.0.post2", optional: true }
+  probe: "print('OK')"
+"#,
+        )
+        .unwrap()
+        .remove(0)
+    }
+
+    fn py(json: &str) -> serde_json::Value {
+        serde_json::from_str(json).unwrap()
+    }
+
+    fn base_probes(pyv: serde_json::Value) -> DoctorProbes {
+        DoctorProbes {
+            sandbox_ok: true,
+            sandbox_detail: "WSL · Ubuntu".into(),
+            uv_ok: true,
+            venv_python: Some("/home/u/.owllm/envs/standard/bin/python".into()),
+            gpu_cc: Some(89),
+            py: Some(pyv),
+            installed_hash: None,
+        }
+    }
+
+    #[test]
+    fn doctor_names_blackwell_arch_mismatch() {
+        // RTX 50xx (sm_120) on a torch built only up to sm_90 → named by
+        // architecture, repair recommended. THE P0-6 done-when case.
+        let mut p = base_probes(py(
+            r#"{"torch":{"ok":true,"v":{"version":"2.5.1","cuda":"12.4","available":false,
+                "arches":["sm_50","sm_80","sm_86","sm_90"]}},
+                "bitsandbytes":{"ok":true,"v":"0.44.1"},
+                "flash_attn":{"ok":true,"v":"2.7.0.post2"}}"#,
+        ));
+        p.gpu_cc = Some(120);
+        let r = build_doctor_report(&profile(), &p);
+        assert!(!r.healthy);
+        assert!(r.repair_recommended);
+        assert!(r.diagnosis.contains("sm_120"), "diagnosis: {}", r.diagnosis);
+        assert!(r.diagnosis.contains("Blackwell"), "diagnosis: {}", r.diagnosis);
+    }
+
+    #[test]
+    fn doctor_names_cpu_only_torch() {
+        let p = base_probes(py(
+            r#"{"torch":{"ok":true,"v":{"version":"2.5.1","cuda":null,"available":false,"arches":[]}},
+                "bitsandbytes":{"ok":true,"v":"0.44.1"},
+                "flash_attn":{"ok":true,"v":"2.7.0.post2"}}"#,
+        ));
+        let r = build_doctor_report(&profile(), &p);
+        assert!(!r.healthy);
+        assert!(r.repair_recommended);
+        assert!(r.diagnosis.contains("CPU-only"), "diagnosis: {}", r.diagnosis);
+    }
+
+    #[test]
+    fn doctor_names_missing_package_and_tolerates_optional() {
+        let p = base_probes(py(
+            r#"{"torch":{"ok":true,"v":{"version":"2.5.1","cuda":"12.4","available":true,
+                "arches":["sm_50","sm_90"],"device_cc":89,"device":"NVIDIA GeForce RTX 4090"}},
+                "bitsandbytes":{"ok":false,"err":"ModuleNotFoundError: No module named 'bitsandbytes'"},
+                "flash_attn":{"ok":false,"err":"ModuleNotFoundError: No module named 'flash_attn'"}}"#,
+        ));
+        let r = build_doctor_report(&profile(), &p);
+        assert!(!r.healthy);
+        assert!(r.repair_recommended);
+        assert!(
+            r.diagnosis.contains("bitsandbytes is missing"),
+            "diagnosis: {}",
+            r.diagnosis
+        );
+        // optional flash-attn missing must be a warning, not a failure
+        let fa = r.checks.iter().find(|c| c.id == "flash-attn").unwrap();
+        assert!(fa.ok && fa.warn);
+    }
+
+    #[test]
+    fn doctor_healthy_env() {
+        let mut p = base_probes(py(
+            r#"{"torch":{"ok":true,"v":{"version":"2.5.1","cuda":"12.4","available":true,
+                "arches":["sm_50","sm_90"],"device_cc":89,"device":"NVIDIA GeForce RTX 4090"}},
+                "bitsandbytes":{"ok":true,"v":"0.44.1"},
+                "flash_attn":{"ok":true,"v":"2.7.0.post2"}}"#,
+        ));
+        p.installed_hash = Some(profile_hash(&profile()));
+        let r = build_doctor_report(&profile(), &p);
+        assert!(r.healthy, "checks: {:#?}", r.checks);
+        assert!(!r.repair_recommended);
+    }
+
+    #[test]
+    fn doctor_not_installed() {
+        let p = DoctorProbes {
+            sandbox_ok: true,
+            sandbox_detail: "WSL · Ubuntu".into(),
+            uv_ok: true,
+            ..Default::default()
+        };
+        let r = build_doctor_report(&profile(), &p);
+        assert!(!r.healthy);
+        assert!(r.diagnosis.contains("not installed"), "diagnosis: {}", r.diagnosis);
+    }
+
+    // Live probe (needs a real WSL distro + installed env):
+    //   cargo test --lib -- --ignored probe_
+    #[cfg(windows)]
     #[test]
     #[ignore]
     fn probe_wsl_home_is_sentinel_parsed() {
         let distro = crate::wsl::best_linux_distro().expect("a real Linux distro");
         let home = super::wsl_backend::wsl_home(&distro).expect("resolve $HOME");
         assert!(home.starts_with('/'), "got {home:?}");
+    }
+
+    /// Live doctor run against the machine's real `standard` env in WSL.
+    /// Prints the full report; asserts the probes resolved (torch check ran).
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn probe_doctor_live_standard_env() {
+        let prof = read_profiles_yaml()
+            .ok()
+            .and_then(|ps| ps.into_iter().find(|p| p.name == "standard"))
+            .unwrap_or_else(|| {
+                serde_yaml::from_str::<Vec<EnvProfile>>(
+                    r#"
+- name: standard
+  display: "Standard"
+  python: "3.11"
+  packages:
+    - { name: torch, version: "2.5.1", cuda_wheel: true }
+    - { name: transformers, version: "4.46.0" }
+    - { name: bitsandbytes, version: "0.44.1" }
+  probe: "print('OK')"
+"#,
+                )
+                .unwrap()
+                .remove(0)
+            });
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let r = rt.block_on(doctor_impl(prof)).expect("doctor runs");
+        eprintln!("== live doctor report ==\n{r:#?}");
+        assert!(r.checks.iter().any(|c| c.id == "sandbox" && c.ok), "sandbox check failed");
+        assert!(r.checks.iter().any(|c| c.id == "torch"), "torch check missing — venv probe didn't run");
+    }
+
+    /// DESTRUCTIVE live probe of the P0-6 done-when: deliberately break the
+    /// real `standard` env (rename bitsandbytes out of site-packages), assert
+    /// the doctor names the failure + recommends repair, run the REAL
+    /// one-click repair (env_profile_install — atomic, hardware-adaptive
+    /// reinstall), and assert the doctor reports it fixed. Restores the
+    /// rename if the repair path fails. Reinstalls the whole env — run only
+    /// deliberately:  cargo test --lib -- --ignored probe_destructive_
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn probe_destructive_break_doctor_repair() {
+        let distro = crate::wsl::best_linux_distro().expect("a real Linux distro");
+        let prof = read_profiles_yaml()
+            .expect("profiles yaml")
+            .into_iter()
+            .find(|p| p.name == "standard")
+            .expect("standard profile");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let restore = || {
+            let _ = crate::wsl::run_in_distro(
+                &distro,
+                "d=$(ls -d ~/.owllm/envs/standard/lib/python*/site-packages/bitsandbytes.broken 2>/dev/null | head -1); \
+                 [ -n \"$d\" ] && mv \"$d\" \"${d%.broken}\"; true",
+            );
+        };
+        // 1) break it
+        let out = crate::wsl::run_in_distro(
+            &distro,
+            "set -e; d=$(ls -d ~/.owllm/envs/standard/lib/python*/site-packages/bitsandbytes | head -1); \
+             mv \"$d\" \"${d}.broken\"; echo OWLLM_BROKEN=1",
+        )
+        .expect("break script");
+        assert!(out.contains("OWLLM_BROKEN=1"), "break didn't run: {out}");
+        // 2) doctor must NAME the failure
+        let r = rt.block_on(doctor_impl(prof.clone())).expect("doctor");
+        eprintln!("== after break ==\n{}", r.diagnosis);
+        if !(r.diagnosis.contains("bitsandbytes is missing") && r.repair_recommended) {
+            restore();
+            panic!("doctor did not name the break: {:#?}", r);
+        }
+        // 3) one-click repair = the real install command
+        let chan = tauri::ipc::Channel::new(|_| Ok(()));
+        if let Err(e) = rt.block_on(env_profile_install("standard".into(), chan)) {
+            restore();
+            panic!("repair (reinstall) failed: {e}");
+        }
+        // 4) doctor again → fixed
+        let r2 = rt.block_on(doctor_impl(prof)).expect("doctor after repair");
+        eprintln!("== after repair ==\n{}", r2.diagnosis);
+        assert!(
+            r2.checks.iter().any(|c| c.id == "bitsandbytes" && c.ok),
+            "bitsandbytes still broken after repair: {:#?}",
+            r2.checks
+        );
     }
 }

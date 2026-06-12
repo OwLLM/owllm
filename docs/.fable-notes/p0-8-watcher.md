@@ -70,10 +70,39 @@ Gotchas:
 - Non-Windows returns an explicit "attach an OS screenshot instead" error
   (the documented fallback messaging).
 
+## Slice 4 — activity stats (shipped 2026-06-13)
+
+`ui/src/support/activityStats.ts` — localStorage counters, 200-key cap,
+corruption-safe. Instrumented: page visits (AppShell, AFTER activeKey's
+declaration — TDZ bites if the effect is placed above the useState),
+env installs, manual server starts, tool-call failures (executeToolCall
+wrapper — tool NAME only). View/Clear in the drawer.
+
+## Slice 5 — model choice + AI diagnosis (shipped 2026-06-13)
+
+Auto-selection with the app's OWN discovery: `buildEntries(models,
+accounts)` (exported by ModelPicker — the shared catalogue) + server_status.
+Policy: RUNNING local model wins (private/free); else first available
+cloud entry (subscription before API key) with an EXPLICIT consent round
+("I'd use <label> — a CLOUD model: your question and the app snapshot
+would leave this device. Press Send again to confirm"); local-models-
+exist-but-cold → "start one on the Server page, I won't load GBs into
+your GPU unannounced"; nothing at all → tiny-Gemma (<1 GB) offer routing
+to the Models page. Dispatch: streamLocalChat({allowedTools: []}) for
+local (no tools in support chat), streamChatCompletion for cloud — the
+same shared paths as Code/Chat pages.
+
+Live probe: asked "Why is my model server not running" → consent named
+"Claude Fable 5 · low (subscription)" → confirmed → streamed answer was
+correctly snapshot-grounded ("everything ready, server just not started;
+pick a model; RTX 4090 + CUDA 12.6 detected; if it crashed on load tell
+me the model — broken GGUF / OOM / port conflict"). Exactly the spec's
+likely-cause + fix + bug-or-not + repro shape.
+
 ## Remaining slices
 
-- Slice 4: local activity counters (view/clear; product telemetry only).
-- Slice 5: model choice + AI diagnosis (reuse ModelPicker discovery; tiny
-  Gemma <1GB fallback offer; show provider before cloud use).
 - Slice 6: send report (private path default, preview + consent,
-  redaction; local export bundle when no backend configured).
+  redaction; local export bundle when no backend configured). The
+  building blocks all exist now: snapshot + capture + activity stats +
+  AI summary; what's left is the redactor, the bundle assembly/preview,
+  and the local-export default.

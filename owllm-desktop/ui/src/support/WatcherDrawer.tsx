@@ -10,6 +10,17 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getActivity, clearActivity, activityLines } from "./activityStats";
+// Model discovery + dispatch: the SAME machinery the rest of the app uses
+// (shared ModelPicker catalogue + the shared dispatch paths) — never a
+// parallel model list (P0-8 Slice 5).
+import { buildEntries, type AccountsStatusLite } from "../pages/agentic/ModelPicker";
+import {
+  streamLocalChat,
+  streamChatCompletion,
+  providerFor,
+  type ModelInfo,
+  type HistoryItem,
+} from "../pages/agentic/dispatch";
 
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
 type SupportSnapshot = {
@@ -29,6 +40,22 @@ type SupportSnapshot = {
 type Entry = { from: "watcher" | "you"; text: string; imageDataUrl?: string };
 
 type WindowCapture = { pngBase64: string; width: number; height: number; notCaptured: string };
+
+type ServerStatusT = { running: boolean; model_id: string | null; port: number | null; message: string };
+
+/// How the Watcher will answer an AI question.
+type ModelChoice =
+  | { kind: "local"; modelId: string; port: number; label: string }
+  | { kind: "cloud"; modelId: string; provider: string; label: string }
+  | { kind: "local-cold"; label: string }   // local models exist, server not running
+  | { kind: "none" };
+
+const WATCHER_PERSONA =
+  "You are The Watcher, OWLLM's in-app support assistant. You are given a JSON snapshot of the app's " +
+  "real state (readiness, hardware, server, WSL, modules). Help the user in plain language: likely cause, " +
+  "immediate fix steps, whether it looks like a product bug, and minimal repro steps when relevant. " +
+  "Be concise and concrete. If the snapshot already shows the answer (a ❌ row, a crashed server message), " +
+  "lead with it. Never invent state that isn't in the snapshot.";
 
 /// Human blurbs for the page the user is looking at — keyed by activeKey.
 const PAGE_BLURBS: Record<string, string> = {
@@ -65,6 +92,53 @@ export default function WatcherDrawer({
   ]);
   const [busy, setBusy] = React.useState(false);
   const listRef = React.useRef<HTMLDivElement | null>(null);
+  // AI chat (Slice 5): free-text questions answered by an auto-chosen model.
+  const [draft, setDraft] = React.useState("");
+  const [models, setModels] = React.useState<ModelInfo[]>([]);
+  const [accounts, setAccounts] = React.useState<AccountsStatusLite | null>(null);
+  const [server, setServer] = React.useState<ServerStatusT | null>(null);
+  // Cloud use needs one explicit confirmation (the question + snapshot
+  // leave the device). Holds the pending question while we wait.
+  const pendingCloud = React.useRef<string | null>(null);
+  const historyRef = React.useRef<HistoryItem[]>([]);
+  const abortRef = React.useRef<AbortController | null>(null);
+
+  React.useEffect(() => {
+    if (!open) return;
+    invoke<ModelInfo[]>("list_models").then((m) => setModels(Array.isArray(m) ? m : [])).catch(() => {});
+    invoke<AccountsStatusLite>("accounts_status").then(setAccounts).catch(() => {});
+    invoke<ServerStatusT>("server_status").then(setServer).catch(() => {});
+    return () => { abortRef.current?.abort(); };
+  }, [open]);
+
+  /// Pick a model with the app's own discovery: a RUNNING local model wins
+  /// (private + free); else the first available cloud entry (subscription
+  /// before API key); else say what's missing. Never silently cloud.
+  const chooseModel = (): ModelChoice => {
+    if (server?.running && server.model_id) {
+      return {
+        kind: "local",
+        modelId: server.model_id,
+        port: server.port ?? 0,
+        label: `${server.model_id} (local — private, free)`,
+      };
+    }
+    const entries = buildEntries(models, accounts);
+    const cloud =
+      entries.find((e) => e.available && e.variant === "sub") ??
+      entries.find((e) => e.available && e.variant === "api");
+    if (cloud) {
+      return {
+        kind: "cloud",
+        modelId: cloud.id,
+        provider: providerFor(cloud.id, models),
+        label: cloud.label,
+      };
+    }
+    const localExists = entries.some((e) => e.available && (e.section === "local" || e.section === "tuned"));
+    if (localExists) return { kind: "local-cold", label: "a local model (server not running)" };
+    return { kind: "none" };
+  };
 
   React.useEffect(() => {
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
@@ -159,6 +233,98 @@ export default function WatcherDrawer({
     say("Done — activity counters wiped. A fresh window starts now.");
   };
 
+  /// Free-text AI support: snapshot as grounding, auto-chosen model,
+  /// explicit consent before any cloud use, streamed reply.
+  const ask = async (raw?: string) => {
+    const text = (raw ?? draft).trim();
+    if (!text || busy) return;
+    setDraft("");
+    say(text, "you");
+    const choice = chooseModel();
+    if (choice.kind === "none") {
+      say(
+        "You don't have a usable model yet — no local model is downloaded and no cloud account/key is connected. " +
+        "The quickest fix: a tiny support model like Gemma 3 1B (Q4, under 1 GB) runs on almost anything. " +
+        "Open the Models page (📦 button below) to download one, or connect an account on the Accounts page.",
+      );
+      return;
+    }
+    if (choice.kind === "local-cold") {
+      say(
+        "You have local models, but the model server isn't running — start one on the Server page and ask me again. " +
+        "(I only use what's already running; I won't load gigabytes into your GPU unannounced.)",
+      );
+      return;
+    }
+    if (choice.kind === "cloud" && pendingCloud.current !== text) {
+      pendingCloud.current = text;
+      say(
+        `No local model is running, so I'd use ${choice.label} — a CLOUD model: your question and the app snapshot ` +
+        "would leave this device. Press Send again (or Enter) to confirm, or start a local model instead.",
+      );
+      setDraft(text);
+      return;
+    }
+    pendingCloud.current = null;
+    setBusy(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    say(`(answering with ${choice.label})`);
+    let acc = "";
+    // Stream into a dedicated live tail entry, replaced in place per delta.
+    const onDelta = (d: string) => {
+      acc += d;
+      setEntries((es) => {
+        const copy = [...es];
+        const tail = copy[copy.length - 1] as (Entry & { _live?: boolean }) | undefined;
+        if (tail?._live) {
+          copy[copy.length - 1] = { ...tail, text: acc };
+        } else {
+          copy.push({ from: "watcher", text: acc, _live: true } as Entry);
+        }
+        return copy;
+      });
+    };
+    try {
+      const snapshot = await invoke<SupportSnapshot>("support_snapshot").catch(() => null);
+      const system = `${WATCHER_PERSONA}\n\nCurrent page: ${activeKey} (mode ${mode})\n\nAPP SNAPSHOT:\n${JSON.stringify(snapshot)}`;
+      let reply: string;
+      if (choice.kind === "local") {
+        reply = await streamLocalChat({
+          port: choice.port,
+          modelId: choice.modelId,
+          systemPrompt: system,
+          userContent: text,
+          temperature: 0.3,
+          signal: ctrl.signal,
+          onDelta,
+          history: historyRef.current,
+          allowedTools: [], // support chat reads the snapshot; no tools
+        });
+      } else {
+        reply = await streamChatCompletion(
+          0, choice.modelId, choice.provider, system, text, 0.3, ctrl.signal,
+          onDelta, undefined, historyRef.current, false,
+        );
+      }
+      historyRef.current = [
+        ...historyRef.current,
+        { role: "user" as const, content: text },
+        { role: "assistant" as const, content: reply },
+      ].slice(-12);
+      // Finalize the streamed tail.
+      setEntries((es) => es.map((e) => {
+        const { _live, ...rest } = e as Entry & { _live?: boolean };
+        void _live;
+        return rest as Entry;
+      }));
+    } catch (e: any) {
+      if (e?.name !== "AbortError") say(`That didn't work: ${String(e?.message ?? e)}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const reportBug = () => {
     say("Report a bug", "you");
     say(
@@ -227,11 +393,39 @@ export default function WatcherDrawer({
           ))}
         </div>
 
-        <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", flexWrap: "wrap" }}>
+        {/* Free-text AI support (Slice 5). The model is auto-chosen with the
+            app's own discovery (running local first); cloud requires one
+            explicit confirmation, with the model/provider named first. */}
+        <div style={{ display: "flex", gap: 8, padding: "10px 14px 0", alignItems: "center" }}>
+          <input
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !busy) ask(); }}
+            placeholder="Ask me anything about the app — what broke, what a page does, what to try…"
+            disabled={busy}
+            style={{
+              flex: 1, height: 34, borderRadius: 8, padding: "0 12px", fontSize: 12.5,
+              background: "var(--bg-input)", color: "var(--fg-strong)", border: "1px solid var(--border)",
+            }}
+          />
+          <button style={actionBtn} disabled={busy || !draft.trim()} onClick={() => ask()}>
+            {busy ? "⏳" : "Send"}
+          </button>
+        </div>
+        <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: "1px solid transparent", flexWrap: "wrap" }}>
           <button style={actionBtn} disabled={busy} onClick={whatPage}>📍 What page am I on?</button>
           <button style={actionBtn} disabled={busy} onClick={checkSetup}>{busy ? "⏳ Checking…" : "🩺 Check my setup"}</button>
           <button style={actionBtn} disabled={busy} onClick={captureApp} title="Captures THIS app window only (in-app popups included). Never other windows or monitors. Shown to you first; nothing is sent.">📸 Capture current app</button>
           <button style={actionBtn} disabled={busy} onClick={showActivity} title="Local-only product-event counters (pages, installs, tool failures). View here, clear any time. Never sent.">📊 Activity</button>
+          <button
+            style={actionBtn}
+            disabled={busy}
+            onClick={() => {
+              onClose();
+              window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "models" } }));
+            }}
+            title="No model? A tiny Gemma-class support model (under 1 GB) runs on almost anything — download it on the Models page."
+          >📦 Get a model</button>
           <button style={actionBtn} disabled={busy} onClick={wipeActivity} title="Wipe the local activity counters">🧹 Clear</button>
           <button style={actionBtn} disabled={busy} onClick={reportBug}>🐞 Report a bug</button>
         </div>

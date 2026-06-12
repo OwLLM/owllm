@@ -38,6 +38,7 @@ import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRec
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
 import AccountSyncModal from "./pages/core/AccountSyncModal";
 import WatcherDrawer from "./support/WatcherDrawer";
+import { bumpActivity } from "./support/activityStats";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -985,6 +986,11 @@ export default function AppShell() {
   const [activeKey, setActiveKey] = useState<string>(
     () => initialDeep?.activeKey ?? defaultKeyForMode("home"),
   );
+  // Local-only activity stats (P0-8 Slice 4): count page visits by KEY
+  // (a product id, never content). Viewed/cleared inside The Watcher.
+  useEffect(() => {
+    try { bumpActivity(`page:${activeKey}`); } catch { /* never break nav */ }
+  }, [activeKey]);
 
   // Whenever mode changes, snap to that mode's first tab. (Qt
   // _activate_navbar_group does the same.)

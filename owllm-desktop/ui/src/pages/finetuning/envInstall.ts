@@ -14,6 +14,7 @@
 
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { InstallEvent } from "./envProfiles";
+import { bumpActivity } from "../../support/activityStats";
 
 export type EnvInstallState = {
   installing: boolean;
@@ -58,6 +59,7 @@ export function startEnvInstall(name: string): void {
   const cur = states.get(name);
   if (cur?.installing) return;
 
+  try { bumpActivity(`env-install:${name}`); } catch { /* stats never block installs */ }
   states.set(name, { installing: true, log: [`Installing ${name}…`], error: null, finishedAt: null });
   emit();
 

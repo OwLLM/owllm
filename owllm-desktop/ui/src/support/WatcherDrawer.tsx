@@ -9,6 +9,7 @@
 
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getActivity, clearActivity, activityLines } from "./activityStats";
 
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
 type SupportSnapshot = {
@@ -139,6 +140,25 @@ export default function WatcherDrawer({
     }
   };
 
+  // Local-only activity stats (Slice 4): product events only — counts of
+  // pages visited, installs, server starts, tool failures. View + clear.
+  const showActivity = () => {
+    say("Show my activity stats", "you");
+    const s = getActivity();
+    const since = new Date(s.since).toLocaleString();
+    say(
+      `Local activity since ${since} (product events only — no prompts, files, or keys; never sent anywhere):\n` +
+      activityLines(s).join("\n") +
+      "\n\nSay the word (the Clear button below) and I'll forget all of it.",
+    );
+  };
+
+  const wipeActivity = () => {
+    clearActivity();
+    say("Clear activity stats", "you");
+    say("Done — activity counters wiped. A fresh window starts now.");
+  };
+
   const reportBug = () => {
     say("Report a bug", "you");
     say(
@@ -211,6 +231,8 @@ export default function WatcherDrawer({
           <button style={actionBtn} disabled={busy} onClick={whatPage}>📍 What page am I on?</button>
           <button style={actionBtn} disabled={busy} onClick={checkSetup}>{busy ? "⏳ Checking…" : "🩺 Check my setup"}</button>
           <button style={actionBtn} disabled={busy} onClick={captureApp} title="Captures THIS app window only (in-app popups included). Never other windows or monitors. Shown to you first; nothing is sent.">📸 Capture current app</button>
+          <button style={actionBtn} disabled={busy} onClick={showActivity} title="Local-only product-event counters (pages, installs, tool failures). View here, clear any time. Never sent.">📊 Activity</button>
+          <button style={actionBtn} disabled={busy} onClick={wipeActivity} title="Wipe the local activity counters">🧹 Clear</button>
           <button style={actionBtn} disabled={busy} onClick={reportBug}>🐞 Report a bug</button>
         </div>
       </div>

@@ -23,6 +23,7 @@ import {
   isMcpMasterEnabled,
   getDisabledMcpTools,
 } from "./mcpSettings";
+import { bumpActivity } from "../../support/activityStats";
 
 export type ToolCall = {
   name: string;
@@ -711,7 +712,18 @@ export type ToolExecResult = {
 /// a (truncated) human-readable string for splicing back into the
 /// conversation as a synthetic user turn. Failures come back with ok:false
 /// and the error message — the model decides whether to retry/give up.
+/// Run one native tool call. Thin wrapper that also counts failures into
+/// The Watcher's local activity stats (product telemetry: tool NAME only,
+/// never arguments or output — P0-8 Slice 4).
 export async function executeToolCall(call: ToolCall, projectCwd: string): Promise<ToolExecResult> {
+  const r = await executeToolCallInner(call, projectCwd);
+  if (!r.ok) {
+    try { bumpActivity(`tool-fail:${call.name}`); } catch { /* stats must never break a turn */ }
+  }
+  return r;
+}
+
+async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise<ToolExecResult> {
   const cwd = projectCwd || undefined;
   // MCP-routed call: name is `mcp:<server>:<tool>`. Split, pass the
   // args dict through as the arguments object — most MCP tools use

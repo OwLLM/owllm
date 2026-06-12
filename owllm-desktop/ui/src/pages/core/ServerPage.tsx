@@ -19,6 +19,7 @@
 // llama.cpp with CREATE_NO_WINDOW directly from Rust.
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { bumpActivity } from "../../support/activityStats";
 import { listen } from "@tauri-apps/api/event";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getInferenceEndpoint, setInferenceEndpoint, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
@@ -134,6 +135,7 @@ async function serverStatus(): Promise<ServerStatus> {
   return invoke<ServerStatus>("server_status");
 }
 async function serverStart(modelId: string): Promise<void> {
+  try { bumpActivity("model-server-start"); } catch { /* stats never block */ }
   await invoke("server_start", { modelId });
 }
 async function serverStop(): Promise<void> {

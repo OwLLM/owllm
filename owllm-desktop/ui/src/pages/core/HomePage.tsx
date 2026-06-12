@@ -577,7 +577,9 @@ export default function HomePage() {
             color: "var(--fg)",
           }}
         >
-          <span style={{ fontSize: 22, lineHeight: 1 }}>{account.connected ? "☁️" : "🦉"}</span>
+          {account.connected
+            ? <span style={{ fontSize: 22, lineHeight: 1 }}>☁️</span>
+            : <img src={`${ICONS}/owllm_main.png`} alt="OWLLM" style={{ height: 26, width: "auto", flexShrink: 0 }} />}
           <span style={{ flex: 1 }}>
             {account.connected ? (
               <>

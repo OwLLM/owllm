@@ -200,9 +200,14 @@ export default function AccountSyncModal() {
           padding: "16px 22px", display: "flex", alignItems: "center",
           borderBottom: "1px solid rgba(var(--accent-rgb),0.30)",
         }}>
+          <img
+            src="/Page_icons/owllm_main.png"
+            alt="OWLLM"
+            style={{ height: 38, width: "auto", marginRight: 12, flexShrink: 0 }}
+          />
           <div>
             <div style={{ fontSize: 19, fontWeight: 800, letterSpacing: 0.4 }}>
-              🦉 Take OWLLM everywhere
+              Take OWLLM everywhere
             </div>
             <div style={{ fontSize: 12.5, opacity: 0.85, marginTop: 2 }}>
               Your chats &amp; setup, on every device — stored in your own GitHub.

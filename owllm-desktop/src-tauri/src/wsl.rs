@@ -78,6 +78,22 @@ pub struct WslToolchain {
 
 // ---- pure helpers (unit-tested; used by agent_tools shell routing) --------
 
+/// Decode bytes from `wsl.exe`. Command output from bash is UTF-8, but
+/// wsl.exe's OWN error messages (distro not found, distro failed to start,
+/// "command not found" from a busybox distro) are UTF-16LE — which, run
+/// through from_utf8_lossy, render as a wall of mojibake/□ boxes (the garbled
+/// "WSL check failed" the user saw). Stripping null bytes recovers the ASCII
+/// from UTF-16LE and is harmless for genuine UTF-8 (which has no interior
+/// nulls).
+fn decode_wsl(bytes: &[u8]) -> String {
+    if bytes.contains(&0) {
+        let stripped: Vec<u8> = bytes.iter().copied().filter(|&b| b != 0).collect();
+        String::from_utf8_lossy(&stripped).into_owned()
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+}
+
 /// Parse a Windows path and, if it points inside a WSL distro, return
 /// (distro, linux_path). Handles both `\\wsl.localhost\<d>\...` (modern) and
 /// `\\wsl$\<d>\...` (legacy), with either slash direction. Returns None for
@@ -158,8 +174,8 @@ fn run_wsl_user(distro: &str, user: Option<&str>, script: &str) -> Result<String
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     let out = cmd.output().map_err(|e| format!("spawn wsl: {e}"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = decode_wsl(&out.stdout);
+    let stderr = decode_wsl(&out.stderr);
     if !out.status.success() {
         return Err(format!(
             "wsl exited {}: {}",
@@ -214,8 +230,8 @@ pub fn run_in_distro_script(distro: &str, script: &str) -> Result<String, String
         // stdin dropped here → EOF so bash runs the script and exits.
     }
     let out = child.wait_with_output().map_err(|e| format!("wait wsl: {e}"))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let stdout = decode_wsl(&out.stdout);
+    let stderr = decode_wsl(&out.stderr);
     if !out.status.success() {
         return Err(format!(
             "wsl exited {}: {}",

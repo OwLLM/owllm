@@ -31,10 +31,19 @@ const ICONS = "/Page_icons";
 /// PC's managed llama-server) or a Remote server on another host (the
 /// Windows-GPU / Linux-agents split: run agents here, model on the GPU box).
 /// Persisted via inferenceEndpoint.ts and read by dispatch.ts at call time.
+type GpuServer = { name: string; host: string; port: number; apiKey: string; device: string };
+
 function InferenceSourceCard() {
   const [ep, setEp] = useState<InferenceEndpoint>(() => getInferenceEndpoint());
   const save = (next: InferenceEndpoint) => { setInferenceEndpoint(next); setEp(next); };
   const remote = ep.mode === "remote";
+  // One-click discovery: a GPU server another device on this account published
+  // into the vault (its LAN IP + port + key). No typing IPs.
+  const [discovered, setDiscovered] = useState<GpuServer | null>(null);
+  useEffect(() => {
+    invoke<GpuServer | null>("vault_read_server").then(setDiscovered).catch(() => setDiscovered(null));
+  }, []);
+  const usingDiscovered = remote && discovered && ep.host === discovered.host && ep.port === discovered.port;
   const inp: CSSProperties = {
     height: 30, padding: "0 10px", borderRadius: 6,
     border: "1px solid rgba(var(--accent-rgb),0.30)",
@@ -70,6 +79,29 @@ function InferenceSourceCard() {
           ? "Agents send inference to a llama-server on another host (e.g. your Windows GPU box). Run agents here, model there."
           : "Agents use this PC's managed llama-server (default)."}
       </div>
+      {discovered && !usingDiscovered && (
+        <button
+          onClick={() => save({ mode: "remote", host: discovered.host, port: discovered.port, apiKey: discovered.apiKey })}
+          style={{
+            display: "flex", alignItems: "center", gap: 8, textAlign: "left",
+            padding: "8px 12px", borderRadius: 8, cursor: "pointer",
+            border: "1px solid rgba(34,197,94,0.45)", background: "rgba(34,197,94,0.10)",
+            color: "var(--fg)", fontSize: 12,
+          }}
+          title={`Use ${discovered.name} (${discovered.host}:${discovered.port}) from your account`}
+        >
+          <span style={{ fontSize: 16 }}>🖥️</span>
+          <span style={{ flex: 1 }}>
+            <b>Use {discovered.name}’s GPU</b> — discovered on your account ({discovered.host}:{discovered.port})
+          </span>
+          <span style={{ fontWeight: 800, color: "#22c55e" }}>Connect →</span>
+        </button>
+      )}
+      {usingDiscovered && (
+        <div style={{ fontSize: 11.5, color: "#22c55e", fontWeight: 700 }}>
+          ✓ Using {discovered!.name}’s GPU ({discovered!.host}:{discovered!.port})
+        </div>
+      )}
       {remote && (
         <div style={{ display: "grid", gridTemplateColumns: "1fr 80px", gap: 8 }}>
           <input style={inp} placeholder="host / IP (e.g. 192.168.1.20)" value={ep.host}
@@ -1021,11 +1053,30 @@ function ServeOnNetworkCard() {
     catch (e: any) { setErr(String(e?.message ?? e)); }
     finally { setBusy(false); }
   };
+  const [shareMsg, setShareMsg] = useState<string>("");
   const toggle = () => {
-    if (cfg.enabled) { save({ enabled: false, apiKey: cfg.apiKey }); return; }
+    if (cfg.enabled) {
+      save({ enabled: false, apiKey: cfg.apiKey });
+      invoke("vault_unpublish_server").catch(() => {}); // stop advertising
+      setShareMsg("");
+      return;
+    }
     const key = cfg.apiKey
       || (globalThis.crypto?.randomUUID?.() ?? (Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)));
     save({ enabled: true, apiKey: key });
+  };
+  // Publish this PC (LAN IP auto-detected) as a GPU server in the vault so the
+  // user's other devices get a one-click "Use my GPU box".
+  const shareWithDevices = async () => {
+    setShareMsg("Publishing…");
+    try {
+      const st = await invoke<{ port: number | null }>("server_status");
+      if (!st.port) { setShareMsg("Start a model first, then share."); return; }
+      await invoke("vault_publish_server", { port: st.port, apiKey: cfg.apiKey });
+      setShareMsg("✓ Shared — your other devices can one-click connect (Server → Inference source).");
+    } catch (e: any) {
+      setShareMsg(`Couldn't share: ${String(e?.message ?? e)} (sign in with GitHub first)`);
+    }
   };
   return (
     <div data-ui="ServeOnNetworkCard" style={{
@@ -1075,6 +1126,14 @@ function ServeOnNetworkCard() {
               <br/>WSL note: Win11 mirrored networking can use loopback (exposure off); Win10 (NAT) needs this ON.
             </div>
           </div>
+          {/* One-click sharing via the account vault — no typing IPs on the
+              other device. */}
+          <button onClick={shareWithDevices} style={{
+            padding: "8px 12px", borderRadius: 8, border: "1px solid rgba(var(--accent-rgb),0.5)",
+            background: "rgba(var(--accent-rgb),0.18)", color: "var(--fg-strong)",
+            fontSize: 12, fontWeight: 700, cursor: "pointer",
+          }}>📡 Share this GPU with my other devices</button>
+          {shareMsg && <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>{shareMsg}</div>}
         </>
       )}
       {err && <div style={{ fontSize: 11, color: "#f87171" }}>{err}</div>}

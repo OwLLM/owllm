@@ -475,8 +475,10 @@ pub async fn accounts_test_probe_wsl(backend: String) -> ProbeResult {
 
 #[cfg(windows)]
 fn wsl_probe(backend: &str) -> (bool, String) {
-    let Some(distro) = crate::wsl::wsl_status().default_distro else {
-        return (false, "No WSL distro installed".to_string());
+    // Use a real general-purpose distro, not a Docker/system one (which has no
+    // bash → wsl exits 1 with a UTF-16 error that showed as garbled mojibake).
+    let Some(distro) = crate::wsl::best_linux_distro() else {
+        return (false, "No Ubuntu/Linux distro in WSL yet — set it up on Home".to_string());
     };
     let check = match backend {
         "claude_cli" => "[ -f ~/.claude/.credentials.json ]".to_string(),

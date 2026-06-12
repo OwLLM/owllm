@@ -16,6 +16,7 @@
 import React from "react";
 import ModelCard from "./widgets/ModelCard";
 import DownloadedModelCard from "./widgets/DownloadedModelCard";
+import { recordDownloadedModels, ghostedModels } from "./modelLibrary";
 import TunedModelCard from "./widgets/TunedModelCard";
 import AccessTokensPane from "./widgets/AccessTokensPane";
 import WeightPickerDialog from "./widgets/WeightPickerDialog";
@@ -648,7 +649,7 @@ export default function ModelsPage() {
   React.useEffect(() => {
     if (tab === "downloaded") {
       invoke<DownloadedItem[]>("models_list_downloaded")
-        .then(setDownloaded)
+        .then((d) => { setDownloaded(d); recordDownloadedModels(d.map((x) => x.name)); })
         .catch(() => setDownloaded([]));
     } else if (tab === "tuned") {
       invoke<TunedAdapterRow[]>("list_tuned_adapters")
@@ -1126,9 +1127,14 @@ export default function ModelsPage() {
           }
           return true;
         });
+        // Ghosted: models in the user's synced library (downloaded on another
+        // device) whose weights aren't on THIS disk. Shown dimmed with a
+        // Download button so the library follows the user across devices.
+        const ghosts = ghostedModels(downloaded.map((d) => d.name))
+          .filter((n) => !q || n.toLowerCase().includes(q));
         return (
         <div style={CARD_GRID}>
-          {downloaded.length === 0 ? (
+          {downloaded.length === 0 && ghosts.length === 0 ? (
             <div style={{
               gridColumn: "1 / -1",
               padding: 40,
@@ -1143,7 +1149,7 @@ export default function ModelsPage() {
                 Switch to the Browse tab and click Download on a model card to add one here.
               </div>
             </div>
-          ) : list.length === 0 ? (
+          ) : list.length === 0 && ghosts.length === 0 ? (
             <div style={{
               gridColumn: "1 / -1",
               padding: 24,
@@ -1154,30 +1160,69 @@ export default function ModelsPage() {
             }}>
               <div style={{ fontSize: 13 }}>No downloaded models match the current filter / search.</div>
             </div>
-          ) : list.map((d) => (
-            <DownloadedModelCard
-              key={d.path}
-              modelName={d.name}
-              modelPath={d.path}
-              size={d.size}
-              icons={d.icons}
-              envKey={d.envKey}
-              isIncomplete={d.isIncomplete}
-              onboardingStatus={d.onboarding}
-              compatibilityBadge={d.compat}
-              selected={selectedPath === d.path}
-              onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
-              onAddWeights={() => {
-                // Local dir convention from huggingface-cli / hf_hub:
-                // <author>/<repo> becomes <author>__<repo> on disk
-                // because Windows can't have '/' in a folder name.
-                // Reverse the convention to recover the HF id so
-                // hf_model_files doesn't 404/401 on the picker open.
-                const hfId = d.name.replace(/__/g, "/");
-                setPickerFor(hfId);
-              }}
-            />
-          ))}
+          ) : (
+            <>
+              {list.map((d) => (
+                <DownloadedModelCard
+                  key={d.path}
+                  modelName={d.name}
+                  modelPath={d.path}
+                  size={d.size}
+                  icons={d.icons}
+                  envKey={d.envKey}
+                  isIncomplete={d.isIncomplete}
+                  onboardingStatus={d.onboarding}
+                  compatibilityBadge={d.compat}
+                  selected={selectedPath === d.path}
+                  onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
+                  onAddWeights={() => {
+                    // Local dir convention from huggingface-cli / hf_hub:
+                    // <author>/<repo> becomes <author>__<repo> on disk
+                    // because Windows can't have '/' in a folder name.
+                    // Reverse the convention to recover the HF id so
+                    // hf_model_files doesn't 404/401 on the picker open.
+                    const hfId = d.name.replace(/__/g, "/");
+                    setPickerFor(hfId);
+                  }}
+                />
+              ))}
+              {/* Ghosted: in your synced library, not on this device's disk.
+                  Dimmed card + one-click re-download. */}
+              {ghosts.map((name) => {
+                const hfId = name.replace(/__/g, "/");
+                return (
+                  <div
+                    key={`ghost:${name}`}
+                    title="In your model library (downloaded on another device) — not on this PC yet"
+                    style={{
+                      border: "1px dashed var(--border-strong)", borderRadius: 12,
+                      padding: 14, background: "var(--bg-card)", opacity: 0.62,
+                      display: "flex", flexDirection: "column", gap: 10, minHeight: 120,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontSize: 18 }}>☁️</span>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)", wordBreak: "break-all" }}>
+                        {hfId}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                      In your library — not downloaded on this device.
+                    </div>
+                    <div style={{ flex: 1 }} />
+                    <button
+                      onClick={() => startDownload(hfId)}
+                      style={{
+                        padding: "8px 12px", borderRadius: 8, border: "none",
+                        background: "linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent))",
+                        color: "var(--accent-fg)", fontSize: 12.5, fontWeight: 800, cursor: "pointer",
+                      }}
+                    >⬇ Download to this PC</button>
+                  </div>
+                );
+              })}
+            </>
+          )}
         </div>
         );
       })()}
@@ -1401,6 +1446,14 @@ type HfCacheSummary = {
   totalBytes: number;
   entries: HfCacheEntry[];
 };
+type DeleteProgress = {
+  total: number;
+  done: number;
+  freedBytes: number;
+  currentName: string | null;
+  currentPath: string | null;
+  currentBytes: number;
+};
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`;
@@ -1417,12 +1470,74 @@ function fmtAge(unixSeconds: number | null): string {
   return `${(ageDays / 365).toFixed(1)}y ago`;
 }
 
+function isProtectedStorageEntry(e: HfCacheEntry): boolean {
+  return e.cacheRoot === "owllm-models" || e.cacheRoot === "owllm-fine-tuned";
+}
+
+function sumCacheEntries(entries: HfCacheEntry[]): number {
+  return entries.reduce((a, e) => a + e.sizeBytes, 0);
+}
+
+type CleanupBucket = "safe" | "env" | "runtime" | "other";
+type StorageBucket = "models" | "fineTuned" | CleanupBucket;
+
+function cleanupBucket(e: HfCacheEntry): CleanupBucket {
+  const root = e.cacheRoot || "";
+  const name = e.repoId || "";
+  if (name.startsWith(".tmp") || root === "pip-cache" || root === "npm-cache" || root === "hf-user-cache" || root.startsWith("hf-") || root === "owllm-wheelhouse") {
+    return "safe";
+  }
+  if (root === "owllm-envs") {
+    return "env";
+  }
+  if (root === "owllm-runtime" || root === "owllm-python-runtime" || root === "owllm-vendor") {
+    return "runtime";
+  }
+  return "other";
+}
+
+function cleanupBucketLabel(bucket: CleanupBucket): string {
+  switch (bucket) {
+    case "safe": return "Safe cleanup";
+    case "env": return "Rebuildable environments";
+    case "runtime": return "Runtime tools";
+    default: return "Other cleanup";
+  }
+}
+
+function cleanupBucketHint(bucket: CleanupBucket): string {
+  switch (bucket) {
+    case "safe": return "Disposable caches; downloads may be recreated later.";
+    case "env": return "Large Python/CUDA envs; models stay, but use may require rebuild.";
+    case "runtime": return "Shared binaries and tool runtimes; delete only to force reinstall.";
+    default: return "Review path before deleting.";
+  }
+}
+
+function storageBucketLabel(bucket: StorageBucket): string {
+  if (bucket === "models") return "Downloaded models";
+  if (bucket === "fineTuned") return "Fine-tuned outputs";
+  return cleanupBucketLabel(bucket);
+}
+
+function storageBucketHint(bucket: StorageBucket): string {
+  if (bucket === "models") return "Protected storage; inspect only.";
+  if (bucket === "fineTuned") return "Protected outputs; inspect only.";
+  return cleanupBucketHint(bucket);
+}
+
+function isCleanupBucket(bucket: StorageBucket): bucket is CleanupBucket {
+  return bucket !== "models" && bucket !== "fineTuned";
+}
+
 function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
   const [summary, setSummary] = React.useState<HfCacheSummary | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);
   const [selected, setSelected] = React.useState<Set<string>>(new Set());
   const [busy, setBusy] = React.useState(false);
+  const [deleteProgress, setDeleteProgress] = React.useState<DeleteProgress | null>(null);
+  const [activeBucket, setActiveBucket] = React.useState<StorageBucket>("safe");
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
@@ -1442,6 +1557,70 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
     refresh();
   }, [refresh]);
 
+  const storageEntries = React.useMemo(
+    () => (summary?.entries || []).filter(isProtectedStorageEntry),
+    [summary],
+  );
+  const cleanupEntries = React.useMemo(
+    () => (summary?.entries || []).filter((e) => !isProtectedStorageEntry(e)),
+    [summary],
+  );
+  const modelEntries = React.useMemo(
+    () => storageEntries.filter((e) => e.cacheRoot === "owllm-models"),
+    [storageEntries],
+  );
+  const fineTuneEntries = React.useMemo(
+    () => storageEntries.filter((e) => e.cacheRoot === "owllm-fine-tuned"),
+    [storageEntries],
+  );
+  const safeCleanupEntries = React.useMemo(
+    () => cleanupEntries.filter((e) => cleanupBucket(e) === "safe"),
+    [cleanupEntries],
+  );
+  const envCleanupEntries = React.useMemo(
+    () => cleanupEntries.filter((e) => cleanupBucket(e) === "env"),
+    [cleanupEntries],
+  );
+  const runtimeCleanupEntries = React.useMemo(
+    () => cleanupEntries.filter((e) => cleanupBucket(e) === "runtime"),
+    [cleanupEntries],
+  );
+  const otherCleanupEntries = React.useMemo(
+    () => cleanupEntries.filter((e) => cleanupBucket(e) === "other"),
+    [cleanupEntries],
+  );
+  const modelStorageBytes = React.useMemo(() => sumCacheEntries(modelEntries), [modelEntries]);
+  const fineTuneStorageBytes = React.useMemo(() => sumCacheEntries(fineTuneEntries), [fineTuneEntries]);
+  const safeCleanupBytes = React.useMemo(() => sumCacheEntries(safeCleanupEntries), [safeCleanupEntries]);
+  const envCleanupBytes = React.useMemo(() => sumCacheEntries(envCleanupEntries), [envCleanupEntries]);
+  const runtimeCleanupBytes = React.useMemo(() => sumCacheEntries(runtimeCleanupEntries), [runtimeCleanupEntries]);
+  const otherCleanupBytes = React.useMemo(() => sumCacheEntries(otherCleanupEntries), [otherCleanupEntries]);
+
+  const activeEntries = React.useMemo(() => {
+    switch (activeBucket) {
+      case "models": return modelEntries;
+      case "fineTuned": return fineTuneEntries;
+      case "safe": return safeCleanupEntries;
+      case "env": return envCleanupEntries;
+      case "runtime": return runtimeCleanupEntries;
+      default: return otherCleanupEntries;
+    }
+  }, [activeBucket, envCleanupEntries, fineTuneEntries, modelEntries, otherCleanupEntries, runtimeCleanupEntries, safeCleanupEntries]);
+  const activeBytes = React.useMemo(() => sumCacheEntries(activeEntries), [activeEntries]);
+  const activeCanDelete = isCleanupBucket(activeBucket);
+  const activeCleanupEntries = React.useMemo(
+    () => activeCanDelete ? activeEntries : [],
+    [activeCanDelete, activeEntries],
+  );
+
+  React.useEffect(() => {
+    setSelected(new Set());
+  }, [activeBucket]);
+
+  const activateBucket = (bucket: StorageBucket) => {
+    setActiveBucket(bucket);
+  };
+
   const toggleOne = (path: string) =>
     setSelected((curr) => {
       const next = new Set(curr);
@@ -1452,46 +1631,97 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
 
   const toggleAll = () => {
     if (!summary) return;
-    if (selected.size === summary.entries.length) setSelected(new Set());
-    else setSelected(new Set(summary.entries.map((e) => e.path)));
+    if (!activeCanDelete) {
+      setSelected(new Set());
+      return;
+    }
+    if (selected.size === activeCleanupEntries.length) setSelected(new Set());
+    else setSelected(new Set(activeCleanupEntries.map((e) => e.path)));
+  };
+
+  const selectSafeCleanup = () => {
+    setActiveBucket("safe");
+    setSelected(new Set(safeCleanupEntries.map((e) => e.path)));
   };
 
   const selectedSizeBytes = React.useMemo(() => {
     if (!summary) return 0;
-    return summary.entries
+    return activeCleanupEntries
       .filter((e) => selected.has(e.path))
       .reduce((a, e) => a + e.sizeBytes, 0);
-  }, [selected, summary]);
+  }, [activeCleanupEntries, selected, summary]);
 
   const deleteSelected = async () => {
-    if (!summary || selected.size === 0) return;
-    const paths = Array.from(selected);
-    const repoNames = summary.entries
-      .filter((e) => selected.has(e.path))
-      .map((e) => e.repoId);
+    if (!summary || selected.size === 0 || !activeCanDelete) return;
+    const items = activeCleanupEntries.filter((e) => selected.has(e.path));
+    const paths = items.map((e) => e.path);
+    const repoNames = items.map((e) => e.repoId);
     const ok = window.confirm(
-      `Delete ${paths.length} cache entr${paths.length === 1 ? "y" : "ies"} ` +
+      `Delete ${paths.length} cache/trash entr${paths.length === 1 ? "y" : "ies"} ` +
         `(${fmtBytes(selectedSizeBytes)})?\n\n` +
         repoNames.slice(0, 8).join("\n") +
         (repoNames.length > 8 ? `\n…and ${repoNames.length - 8} more` : "") +
-        `\n\nThis is permanent. Models may need to be downloaded again; environments may need to be rebuilt.`,
+        `\n\nThis is permanent. Cache may need to be downloaded again; environments may need to be rebuilt.`,
     );
     if (!ok) return;
     setBusy(true);
-    setBanner(`🧹 Deleting ${paths.length} cached model(s)…`);
+    setDeleteProgress({
+      total: items.length,
+      done: 0,
+      freedBytes: 0,
+      currentName: null,
+      currentPath: null,
+      currentBytes: 0,
+    });
+    setBanner(`🧹 Deleting ${paths.length} cache/trash item(s)…`);
     let freed = 0;
     let failures: string[] = [];
-    for (const p of paths) {
+    let done = 0;
+    for (const item of items) {
+      setDeleteProgress({
+        total: items.length,
+        done,
+        freedBytes: freed,
+        currentName: item.repoId,
+        currentPath: item.path,
+        currentBytes: item.sizeBytes,
+      });
+      setBanner(
+        `🧹 Deleting ${done + 1}/${items.length}: ${item.repoId} (${fmtBytes(item.sizeBytes)})`,
+      );
       try {
-        const f = await invoke<number>("hf_cache_delete", { path: p });
+        const f = await invoke<number>("hf_cache_delete", { path: item.path });
         freed += f;
+        setSummary((curr) => curr
+          ? {
+              ...curr,
+              totalBytes: Math.max(0, curr.totalBytes - f),
+              entries: curr.entries.filter((e) => e.path !== item.path),
+            }
+          : curr,
+        );
+        setSelected((curr) => {
+          const next = new Set(curr);
+          next.delete(item.path);
+          return next;
+        });
       } catch (e) {
-        failures.push(`${p}: ${e}`);
+        failures.push(`${item.path}: ${e}`);
       }
+      done += 1;
+      setDeleteProgress({
+        total: items.length,
+        done,
+        freedBytes: freed,
+        currentName: done < items.length ? null : item.repoId,
+        currentPath: done < items.length ? null : item.path,
+        currentBytes: done < items.length ? 0 : item.sizeBytes,
+      });
     }
     setBusy(false);
+    setDeleteProgress(null);
     if (failures.length === 0) {
-      setBanner(`✅ Freed ${fmtBytes(freed)} (${paths.length} models)`);
+      setBanner(`✅ Freed ${fmtBytes(freed)} (${paths.length} cache/trash item(s))`);
     } else {
       setBanner(
         `⚠ Freed ${fmtBytes(freed)} but ${failures.length} delete(s) failed — ${failures[0]}`,
@@ -1511,7 +1741,7 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
         color: "var(--fg)",
       }}>
         <div style={{ fontWeight: 700, marginBottom: 4 }}>
-          Disk cache{" "}
+          Storage audit{" "}
           <span style={{ color: "#9cc3ff" }}>
             {summary ? fmtBytes(summary.totalBytes) : "scanning…"}
           </span>{" "}
@@ -1519,9 +1749,7 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
           {summary?.entries.length === 1 ? "y" : "ies"}
         </div>
         <div style={{ fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.5 }}>
-          Shows OwLLM models, fine-tunes, Python environments, wheel caches,
-          and Hugging Face cache roots. Deleting models requires re-download;
-          deleting environments requires rebuild.
+          Models and fine-tunes are protected storage. Cleanup is split by how safe it is to remove.
         </div>
         {summary && summary.roots.length > 0 && (
           <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 6, wordBreak: "break-all" }}>
@@ -1536,6 +1764,71 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
         </div>
       )}
 
+      {deleteProgress && (
+        <DeleteProgressPanel progress={deleteProgress} />
+      )}
+
+      <div style={{
+        display: "grid",
+        gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+        gap: 10,
+      }}>
+        <StorageSummaryCard
+          title="Downloaded models"
+          count={modelEntries.length}
+          bytes={modelStorageBytes}
+          entries={modelEntries}
+          active={activeBucket === "models"}
+          onClick={() => activateBucket("models")}
+        />
+        <StorageSummaryCard
+          title="Fine-tuned outputs"
+          count={fineTuneEntries.length}
+          bytes={fineTuneStorageBytes}
+          entries={fineTuneEntries}
+          active={activeBucket === "fineTuned"}
+          onClick={() => activateBucket("fineTuned")}
+        />
+        <StorageSummaryCard
+          title="Safe cleanup"
+          count={safeCleanupEntries.length}
+          bytes={safeCleanupBytes}
+          entries={safeCleanupEntries}
+          cleanup
+          active={activeBucket === "safe"}
+          onClick={() => activateBucket("safe")}
+        />
+        <StorageSummaryCard
+          title="Rebuildable environments"
+          count={envCleanupEntries.length}
+          bytes={envCleanupBytes}
+          entries={envCleanupEntries}
+          caution
+          active={activeBucket === "env"}
+          onClick={() => activateBucket("env")}
+        />
+        <StorageSummaryCard
+          title="Runtime tools"
+          count={runtimeCleanupEntries.length}
+          bytes={runtimeCleanupBytes}
+          entries={runtimeCleanupEntries}
+          caution
+          active={activeBucket === "runtime"}
+          onClick={() => activateBucket("runtime")}
+        />
+        {otherCleanupEntries.length > 0 && (
+          <StorageSummaryCard
+            title="Other cleanup"
+            count={otherCleanupEntries.length}
+            bytes={otherCleanupBytes}
+            entries={otherCleanupEntries}
+            caution
+            active={activeBucket === "other"}
+            onClick={() => activateBucket("other")}
+          />
+        )}
+      </div>
+
       <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
         <button
           onClick={refresh}
@@ -1544,16 +1837,21 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
         >🔄 {loading ? "Scanning…" : "Refresh"}</button>
         <button
           onClick={toggleAll}
-          disabled={!summary || summary.entries.length === 0 || busy}
+          disabled={!summary || !activeCanDelete || activeCleanupEntries.length === 0 || busy}
           style={btnGhost(busy)}
-        >{summary && selected.size === summary.entries.length ? "Clear" : "Select all"}</button>
+        >{activeCleanupEntries.length > 0 && selected.size === activeCleanupEntries.length ? "Clear" : "Select all"}</button>
+        <button
+          onClick={selectSafeCleanup}
+          disabled={!summary || safeCleanupEntries.length === 0 || busy}
+          style={btnGhost(busy)}
+        >Select safe</button>
         <div style={{ flex: 1 }} />
         <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-          {selected.size} selected · {fmtBytes(selectedSizeBytes)}
+          {activeCanDelete ? `${selected.size} selected · ${fmtBytes(selectedSizeBytes)}` : "Protected · inspect only"}
         </div>
         <button
           onClick={deleteSelected}
-          disabled={selected.size === 0 || busy}
+          disabled={!activeCanDelete || selected.size === 0 || busy}
           style={{
             padding: "6px 14px",
             background: selected.size > 0
@@ -1564,8 +1862,8 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
             borderRadius: 6,
             fontSize: 12,
             fontWeight: 700,
-            cursor: selected.size === 0 || busy ? "not-allowed" : "pointer",
-            opacity: selected.size === 0 || busy ? 0.6 : 1,
+            cursor: !activeCanDelete || selected.size === 0 || busy ? "not-allowed" : "pointer",
+            opacity: !activeCanDelete || selected.size === 0 || busy ? 0.6 : 1,
           }}
         >🗑️ Delete selected</button>
       </div>
@@ -1582,36 +1880,183 @@ function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
           <div style={{ width: 100 }}>Last used</div>
           <div style={{ width: 90 }}>Cache</div>
         </div>
-        {!summary || summary.entries.length === 0 ? (
+        <div style={cacheSectionRow(activeBucket)}>
+          <div style={{ width: 28 }}></div>
+          <div style={{ flex: 2, minWidth: 0 }}>
+            <span style={{ fontWeight: 800 }}>{storageBucketLabel(activeBucket)}</span>
+            <span style={{ color: "var(--fg-muted)", marginLeft: 8, fontSize: 10 }}>
+              {storageBucketHint(activeBucket)}
+            </span>
+          </div>
+          <div style={{ width: 100, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+            {fmtBytes(activeBytes)}
+          </div>
+          <div style={{ width: 100, color: "var(--fg-muted)" }}>
+            {activeEntries.length} item{activeEntries.length === 1 ? "" : "s"}
+          </div>
+          <div style={{ width: 90 }}></div>
+        </div>
+        {!summary || activeEntries.length === 0 ? (
           <div style={{ padding: 30, textAlign: "center", color: "var(--fg-muted)", fontSize: 12 }}>
-            {loading ? "Scanning…" : "No cached models found."}
+            {loading ? "Scanning…" : `No entries in ${storageBucketLabel(activeBucket)}.`}
           </div>
-        ) : summary.entries.map((e) => (
-          <div key={e.path} style={cacheRow(false, selected.has(e.path))} title={e.path}>
-            <div style={{ width: 28 }}>
-              <input
-                type="checkbox"
-                checked={selected.has(e.path)}
-                onChange={() => toggleOne(e.path)}
-                disabled={busy}
-              />
-            </div>
-            <div style={{ flex: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-              {e.repoId}
-            </div>
-            <div style={{ width: 100, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
-              {fmtBytes(e.sizeBytes)}
-            </div>
-            <div style={{ width: 100, color: "var(--fg-muted)" }}>
-              {fmtAge(e.modifiedAt)}
-            </div>
-            <div style={{ width: 90, color: "var(--fg-muted)", fontSize: 10 }}>
-              {e.cacheRoot}
-            </div>
-          </div>
-        ))}
+        ) : activeEntries.map((e) => {
+          const isDeleting = deleteProgress?.currentPath === e.path;
+          return (
+              <div key={e.path} style={cacheRow(false, selected.has(e.path), isDeleting)} title={e.path}>
+                <div style={{ width: 28 }}>
+                  {activeCanDelete && (
+                    <input
+                      type="checkbox"
+                      checked={selected.has(e.path)}
+                      onChange={() => toggleOne(e.path)}
+                      disabled={busy}
+                    />
+                  )}
+                </div>
+                <div style={{ flex: 2, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {e.repoId}
+                  {isDeleting && (
+                    <span style={{ marginLeft: 8, color: "#9FE6B8", fontSize: 10, fontWeight: 800 }}>
+                      Deleting...
+                    </span>
+                  )}
+                </div>
+                <div style={{ width: 100, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                  {fmtBytes(e.sizeBytes)}
+                </div>
+                <div style={{ width: 100, color: "var(--fg-muted)" }}>
+                  {fmtAge(e.modifiedAt)}
+                </div>
+                <div style={{ width: 90, color: "var(--fg-muted)", fontSize: 10 }}>
+                  {e.cacheRoot}
+                </div>
+              </div>
+          );
+        })}
       </div>
     </div>
+  );
+}
+
+function DeleteProgressPanel({ progress }: { progress: DeleteProgress }) {
+  const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  return (
+    <div style={{
+      border: "1px solid rgba(159,230,184,0.35)",
+      background: "rgba(60,160,92,0.12)",
+      borderRadius: 6,
+      padding: "10px 12px",
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+    }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+        <div style={{ fontSize: 12, fontWeight: 900, color: "var(--fg)" }}>
+          Deleting cache/trash
+        </div>
+        <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+          {progress.done}/{progress.total} complete · {fmtBytes(progress.freedBytes)} freed
+        </div>
+      </div>
+      <div style={{
+        height: 8,
+        borderRadius: 999,
+        background: "rgba(0,0,0,0.35)",
+        overflow: "hidden",
+      }}>
+        <div style={{
+          width: `${pct}%`,
+          height: "100%",
+          background: "linear-gradient(90deg, #4fc47a, #9FE6B8)",
+          transition: "width 180ms ease",
+        }} />
+      </div>
+      <div style={{ fontSize: 11, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        {progress.currentName
+          ? `Working on ${progress.currentName} (${fmtBytes(progress.currentBytes)})`
+          : "Preparing next item..."}
+      </div>
+    </div>
+  );
+}
+
+function StorageSummaryCard({
+  title,
+  count,
+  bytes,
+  entries,
+  cleanup = false,
+  caution = false,
+  active = false,
+  onClick,
+}: {
+  title: string;
+  count: number;
+  bytes: number;
+  entries: HfCacheEntry[];
+  cleanup?: boolean;
+  caution?: boolean;
+  active?: boolean;
+  onClick?: () => void;
+}) {
+  const topEntries = entries.slice(0, 4);
+  const accent = cleanup ? "#9FE6B8" : caution ? "#F7C948" : "#9cc3ff";
+  return (
+    <button type="button" onClick={onClick} style={{
+      background: "var(--bg-card)",
+      border: active
+        ? `1px solid ${accent}`
+        : cleanup
+          ? "1px solid rgba(159,230,184,0.35)"
+          : caution
+            ? "1px solid rgba(247,201,72,0.35)"
+            : "1px solid rgba(var(--accent-rgb),0.22)",
+      borderRadius: 6,
+      padding: "10px 12px",
+      minHeight: 118,
+      display: "flex",
+      flexDirection: "column",
+      gap: 8,
+      cursor: "pointer",
+      textAlign: "left",
+      boxShadow: active ? `0 0 0 1px ${accent}33 inset` : "none",
+      opacity: count === 0 ? 0.75 : 1,
+    }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, color: "var(--fg)" }}>{title}</div>
+        <div style={{ fontSize: 10, color: "var(--fg-muted)" }}>{count} item{count === 1 ? "" : "s"}</div>
+      </div>
+      <div style={{ fontSize: 20, fontWeight: 900, color: accent }}>
+        {fmtBytes(bytes)}
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, minHeight: 48 }}>
+        {topEntries.length === 0 ? (
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>Empty</div>
+        ) : topEntries.map((e) => (
+          <div key={e.path} title={e.path} style={{
+            display: "flex",
+            gap: 8,
+            alignItems: "center",
+            fontSize: 11,
+            color: "var(--fg-muted)",
+            minWidth: 0,
+          }}>
+            <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              {e.repoId}
+            </span>
+            <span style={{ fontVariantNumeric: "tabular-nums", color: "var(--fg)" }}>
+              {fmtBytes(e.sizeBytes)}
+            </span>
+          </div>
+        ))}
+        {entries.length > topEntries.length && (
+          <div style={{ fontSize: 10, color: "var(--fg-muted)" }}>
+            +{entries.length - topEntries.length} more
+          </div>
+        )}
+      </div>
+    </button>
   );
 }
 
@@ -1626,7 +2071,7 @@ const btnGhost = (disabled: boolean): React.CSSProperties => ({
   opacity: disabled ? 0.6 : 1,
 });
 
-const cacheRow = (isHeader: boolean, isSelected = false): React.CSSProperties => ({
+const cacheRow = (isHeader: boolean, isSelected = false, isDeleting = false): React.CSSProperties => ({
   display: "flex",
   alignItems: "center",
   gap: 10,
@@ -1634,10 +2079,31 @@ const cacheRow = (isHeader: boolean, isSelected = false): React.CSSProperties =>
   fontSize: 12,
   background: isHeader
     ? "rgba(0,0,0,0.4)"
+    : isDeleting
+      ? "rgba(60,160,92,0.20)"
     : isSelected
       ? "rgba(var(--accent-rgb),0.10)"
       : "transparent",
   borderBottom: isHeader ? "1px solid #2a3242" : "1px solid rgba(255,255,255,0.05)",
   color: isHeader ? "var(--fg-muted)" : "var(--fg)",
   fontWeight: isHeader ? 700 : 400,
+});
+
+const cacheSectionRow = (bucket: StorageBucket): React.CSSProperties => ({
+  display: "flex",
+  alignItems: "center",
+  gap: 10,
+  padding: "9px 10px",
+  fontSize: 12,
+  background: bucket === "models" || bucket === "fineTuned"
+    ? "rgba(var(--accent-rgb),0.12)"
+    : bucket === "safe"
+    ? "rgba(60,160,92,0.16)"
+    : bucket === "env"
+      ? "rgba(247,201,72,0.14)"
+      : bucket === "runtime"
+        ? "rgba(120,150,190,0.14)"
+        : "rgba(255,255,255,0.08)",
+  borderBottom: "1px solid rgba(255,255,255,0.08)",
+  color: "var(--fg)",
 });

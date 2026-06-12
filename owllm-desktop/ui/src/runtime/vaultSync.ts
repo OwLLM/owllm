@@ -151,6 +151,10 @@ export async function startVaultSync(): Promise<void> {
   _lastSnapshotJson = JSON.stringify(snapshot());
   void pushNow(true);
 
+  // 2b) Sync custom agent teams + roles (files, not localStorage) — union
+  //     across devices. Fire-and-forget; failures don't block.
+  invoke("vault_sync_teams").catch(() => {});
+
   // 3) Keep pushing on the moments that matter.
   wireListeners();
 }
@@ -164,6 +168,7 @@ export async function onVaultConnected(): Promise<void> {
   wireListeners();
   _lastSnapshotJson = JSON.stringify(snapshot());
   await pushNow(true);
+  invoke("vault_sync_teams").catch(() => {});
 }
 
 /// Push on tab-hidden, app-close, and a debounced diff poll (localStorage's

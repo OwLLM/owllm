@@ -214,6 +214,162 @@ pub async fn vault_status() -> VaultStatus {
     .unwrap_or_default()
 }
 
+// --------------------------------------------------------------------------
+// One-click remote inference: a PC that exposes its model server publishes a
+// "GPU server" record (its LAN IP + port + key) into the vault; other devices
+// on the same account read it and connect with one click instead of typing IPs.
+// --------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuServer {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
+    pub api_key: String,
+    /// The publishing machine (so a device doesn't offer itself).
+    pub device: String,
+}
+
+fn machine_name() -> String {
+    std::env::var("COMPUTERNAME")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "this-pc".to_string())
+}
+
+/// Primary LAN IPv4 — the UDP "connect to a public addr, read local_addr"
+/// trick. No packets are sent; it just resolves the OS's default-route source
+/// address, which is this machine's LAN IP. Works offline.
+fn local_lan_ip() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("8.8.8.8:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip().to_string())
+}
+
+fn commit_push(dir: &std::path::Path, branch: &str) -> Result<(), String> {
+    run_git(&["add", "-A"], Some(dir))?;
+    let _ = run_git(&["commit", "-m", "owllm sync"], Some(dir));
+    let _ = run_git(&["fetch", "origin", branch], Some(dir));
+    let _ = run_git(&["merge", "-X", "ours", "--no-edit", &format!("origin/{branch}")], Some(dir));
+    run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(dir))
+        .map(|_| ())
+        .map_err(|e| format!("push failed: {e}"))
+}
+
+/// Publish this machine as a usable GPU/inference server in the vault.
+#[tauri::command]
+pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Err("vault not set up on this device yet".to_string());
+    }
+    let host = local_lan_ip().ok_or_else(|| "couldn't determine this PC's LAN IP".to_string())?;
+    let rec = GpuServer { name: machine_name(), host, port, api_key, device: machine_name() };
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let branch = current_branch(&dir);
+        let state_dir = dir.join("state");
+        std::fs::create_dir_all(&state_dir).map_err(|e| format!("mkdir state: {e}"))?;
+        let json = serde_json::to_string_pretty(&rec).map_err(|e| e.to_string())?;
+        std::fs::write(state_dir.join("gpu-server.json"), json).map_err(|e| format!("write: {e}"))?;
+        commit_push(&dir, &branch)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Stop advertising this machine as a server (deletes the record).
+#[tauri::command]
+pub async fn vault_unpublish_server() -> Result<(), String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) { return Ok(()); }
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let branch = current_branch(&dir);
+        let f = dir.join("state").join("gpu-server.json");
+        if f.exists() { let _ = std::fs::remove_file(&f); }
+        commit_push(&dir, &branch)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Read the published GPU server from the vault (None if absent, or if it's
+/// THIS device's own record). Used to offer a one-click "Use my GPU box".
+#[tauri::command]
+pub async fn vault_read_server() -> Result<Option<GpuServer>, String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Ok(None);
+    }
+    let me = machine_name();
+    tokio::task::spawn_blocking(move || -> Result<Option<GpuServer>, String> {
+        let branch = current_branch(&dir);
+        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
+        match run_git(&["show", &format!("origin/{branch}:state/gpu-server.json")], Some(&dir)) {
+            Ok(contents) => {
+                let rec: GpuServer = serde_json::from_str(&contents).map_err(|e| format!("parse: {e}"))?;
+                // Don't offer a device its own record.
+                if rec.device == me { Ok(None) } else { Ok(Some(rec)) }
+            }
+            Err(_) => Ok(None),
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Copy plain files between two dirs. `overwrite=false` only adds files the
+/// destination lacks (used remote→local so a remote team doesn't clobber a
+/// locally-edited one); `overwrite=true` always copies (local→vault, so local
+/// edits propagate). Together this gives union-of-all-devices for agent teams
+/// + roles, with the locally-syncing device winning the vault copy.
+fn copy_dir_files(from: &std::path::Path, to: &std::path::Path, overwrite: bool) {
+    let Ok(rd) = std::fs::read_dir(from) else { return };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() { continue; }
+        let Some(name) = p.file_name() else { continue };
+        let dest = to.join(name);
+        if !overwrite && dest.exists() { continue; }
+        let _ = std::fs::copy(&p, &dest);
+    }
+}
+
+/// Sync custom agent teams + roles (files, not localStorage) through the
+/// vault: pull teams from other devices (add-missing) and publish ours.
+#[tauri::command]
+pub async fn vault_sync_teams() -> Result<(), String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Ok(());
+    }
+    let pairs: Vec<(Option<std::path::PathBuf>, &str)> = vec![
+        (crate::paths::custom_teams_dir(), "teams"),
+        (crate::paths::custom_agents_dir(), "roles"),
+    ];
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let branch = current_branch(&dir);
+        // Bring the working tree to the latest remote first.
+        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
+        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let mut any = false;
+        for (src_opt, sub) in &pairs {
+            let Some(src) = src_opt.as_ref() else { continue };
+            let vault_sub = dir.join("state").join(sub);
+            let _ = std::fs::create_dir_all(&vault_sub);
+            let _ = std::fs::create_dir_all(src);
+            copy_dir_files(&vault_sub, src, false); // remote → local (add missing)
+            copy_dir_files(src, &vault_sub, true);  // local → vault (ours)
+            any = true;
+        }
+        if any { commit_push(&dir, &branch) } else { Ok(()) }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// The clone's current branch (GitHub auto_init defaults to `main`).
 fn current_branch(dir: &std::path::Path) -> String {
     run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(dir))

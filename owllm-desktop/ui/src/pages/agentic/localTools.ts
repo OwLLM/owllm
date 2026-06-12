@@ -407,6 +407,44 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     args: [{ name: "command", required: true, description: "The shell command line to run.", aliases: ["cmd", "cmd_line", "commandline", "script", "code", "input"] }],
   },
   {
+    name: "ssh_exec",
+    aliases: ["ssh", "ssh_run", "remote_shell", "ssh_command", "remote_exec", "run_remote"],
+    description:
+      "Run a shell command on a REMOTE host over SSH, using the user's existing " +
+      "SSH keys (no passwords). Returns stdout/stderr/exit_code. Use to operate, " +
+      "configure or program another machine — a server, Raspberry Pi, or another PC.",
+    args: [
+      { name: "host", required: true, description: "Remote host/IP, or an alias from ~/.ssh/config.", aliases: ["hostname", "server", "ip", "address", "target"] },
+      { name: "command", required: true, description: "The shell command to run on the remote host.", aliases: ["cmd", "script", "run", "command_line"] },
+      { name: "user", required: false, description: "SSH username (omit to use ssh config / current user).", aliases: ["username", "login"] },
+      { name: "port", required: false, description: "SSH port (default 22).", aliases: ["p", "ssh_port"] },
+    ],
+  },
+  {
+    name: "ssh_upload",
+    aliases: ["scp_upload", "upload_file", "ssh_put", "scp_put", "send_file", "scp"],
+    description: "Copy a LOCAL file to a REMOTE host over SSH/SCP using the user's SSH keys.",
+    args: [
+      { name: "host", required: true, description: "Remote host/IP, or a ~/.ssh/config alias.", aliases: ["hostname", "server", "ip", "address", "target"] },
+      { name: "local_path", required: true, description: "Path to the local file to send.", aliases: ["local", "source", "src", "from", "localPath"] },
+      { name: "remote_path", required: true, description: "Destination path on the remote host.", aliases: ["remote", "dest", "destination", "to", "remotePath"] },
+      { name: "user", required: false, description: "SSH username.", aliases: ["username", "login"] },
+      { name: "port", required: false, description: "SSH port (default 22).", aliases: ["p", "ssh_port"] },
+    ],
+  },
+  {
+    name: "ssh_download",
+    aliases: ["scp_download", "download_file", "ssh_get", "scp_get", "fetch_file"],
+    description: "Copy a REMOTE file to the LOCAL machine over SSH/SCP using the user's SSH keys.",
+    args: [
+      { name: "host", required: true, description: "Remote host/IP, or a ~/.ssh/config alias.", aliases: ["hostname", "server", "ip", "address", "target"] },
+      { name: "remote_path", required: true, description: "Path to the file on the remote host.", aliases: ["remote", "source", "src", "from", "remotePath"] },
+      { name: "local_path", required: true, description: "Destination path on this machine.", aliases: ["local", "dest", "destination", "to", "localPath"] },
+      { name: "user", required: false, description: "SSH username.", aliases: ["username", "login"] },
+      { name: "port", required: false, description: "SSH port (default 22).", aliases: ["p", "ssh_port"] },
+    ],
+  },
+  {
     name: "grep",
     aliases: ["search_files", "search_content", "rg", "ripgrep", "find_in_files", "content_search"],
     description:
@@ -671,6 +709,59 @@ export async function executeToolCall(call: ToolCall, projectCwd: string): Promi
         if (r.stderr.trim()) parts.push(`stderr:\n${truncate(r.stderr, 2000)}`);
         parts.push(`exit_code: ${r.exitCode}`);
         return { ok: r.exitCode === 0, output: parts.join("\n\n") };
+      }
+      case "ssh_exec":
+      case "ssh": {
+        const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
+          "tool_ssh_exec", {
+            host: call.args.host,
+            command: call.args.command,
+            user: call.args.user ?? null,
+            port: call.args.port ? Number(call.args.port) : null,
+            identity: null,
+          },
+        );
+        const parts: string[] = [];
+        if (r.stdout.trim()) parts.push(`stdout:\n${truncate(r.stdout, 4000)}`);
+        if (r.stderr.trim()) parts.push(`stderr:\n${truncate(r.stderr, 2000)}`);
+        parts.push(`exit_code: ${r.exitCode}`);
+        return { ok: r.exitCode === 0, output: parts.join("\n\n") };
+      }
+      case "ssh_upload": {
+        const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
+          "tool_ssh_upload", {
+            host: call.args.host,
+            localPath: call.args.local_path,
+            remotePath: call.args.remote_path,
+            user: call.args.user ?? null,
+            port: call.args.port ? Number(call.args.port) : null,
+            identity: null,
+          },
+        );
+        return {
+          ok: r.exitCode === 0,
+          output: r.exitCode === 0
+            ? `uploaded ${call.args.local_path} → ${call.args.host}:${call.args.remote_path}`
+            : `scp failed (exit ${r.exitCode})\n${truncate(r.stderr, 2000)}`,
+        };
+      }
+      case "ssh_download": {
+        const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
+          "tool_ssh_download", {
+            host: call.args.host,
+            remotePath: call.args.remote_path,
+            localPath: call.args.local_path,
+            user: call.args.user ?? null,
+            port: call.args.port ? Number(call.args.port) : null,
+            identity: null,
+          },
+        );
+        return {
+          ok: r.exitCode === 0,
+          output: r.exitCode === 0
+            ? `downloaded ${call.args.host}:${call.args.remote_path} → ${call.args.local_path}`
+            : `scp failed (exit ${r.exitCode})\n${truncate(r.stderr, 2000)}`,
+        };
       }
       case "grep": {
         const hits = await invoke<Array<{ path: string; line: number; text: string }>>(

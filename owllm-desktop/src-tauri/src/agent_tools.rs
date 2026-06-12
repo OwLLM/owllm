@@ -405,6 +405,148 @@ pub async fn tool_shell_exec(
     })
 }
 
+// ----- Remote machines over SSH (agents that operate other devices) -----
+//
+// These let an agent run commands + move files on a REMOTE host (a server, a
+// Raspberry Pi, another PC). Auth is the user's EXISTING SSH setup: we pass
+// `BatchMode=yes`, so ssh/scp NEVER prompt for a password — the agent can only
+// reach hosts the user's keys/agent already authenticate to (same blast radius
+// as the user's own `ssh`). We never store credentials. `StrictHostKeyChecking
+// =accept-new` trusts a brand-new host on first contact but still flags a
+// CHANGED key (MITM). Remote commands pass the SAME dangerous-command guard as
+// the local shell, so an agent can't `rm -rf /` a remote box.
+
+/// Common ssh/scp hardening options.
+fn ssh_base_opts(cmd: &mut tokio::process::Command) {
+    cmd.arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg("StrictHostKeyChecking=accept-new")
+        .arg("-o").arg("ConnectTimeout=15");
+}
+
+fn ssh_target(host: &str, user: &Option<String>) -> String {
+    match user.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(u) => format!("{u}@{}", host.trim()),
+        None => host.trim().to_string(),
+    }
+}
+
+#[tauri::command]
+pub async fn tool_ssh_exec(
+    host: String,
+    command: String,
+    user: Option<String>,
+    port: Option<u16>,
+    // Optional explicit private-key path; omit to use the ssh agent / config.
+    identity: Option<String>,
+) -> Result<ShellResult, String> {
+    use tokio::process::Command;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    if host.trim().is_empty() { return Err("ssh_exec: host is required".to_string()); }
+    if command.trim().is_empty() { return Err("ssh_exec: command is required".to_string()); }
+    if let Some(reason) = dangerous_shell_command(&command) {
+        return Err(format!(
+            "blocked dangerous remote command ({reason}). Run it yourself over ssh if you truly need it."
+        ));
+    }
+    let mut cmd = Command::new("ssh");
+    ssh_base_opts(&mut cmd);
+    if let Some(p) = port { cmd.arg("-p").arg(p.to_string()); }
+    if let Some(id) = identity.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.arg("-i").arg(id);
+    }
+    cmd.arg(ssh_target(&host, &user));
+    cmd.arg(&command); // ssh runs it through the remote login shell
+    cmd.stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("spawn ssh (is the OpenSSH client installed + on PATH?): {e}"))?;
+    Ok(ShellResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
+}
+
+/// Build an scp command shared by upload/download (scp uses -P for the port,
+/// not ssh's -p). `a`/`b` are the source then destination, already in scp's
+/// `[target:]path` form.
+fn scp_command(a: &str, b: &str, port: Option<u16>, identity: &Option<String>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("scp");
+    ssh_base_opts(&mut cmd);
+    if let Some(p) = port { cmd.arg("-P").arg(p.to_string()); }
+    if let Some(id) = identity.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        cmd.arg("-i").arg(id);
+    }
+    cmd.arg(a).arg(b);
+    cmd.stdin(std::process::Stdio::null());
+    cmd
+}
+
+#[tauri::command]
+pub async fn tool_ssh_upload(
+    host: String,
+    local_path: String,
+    remote_path: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity: Option<String>,
+) -> Result<ShellResult, String> {
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    if host.trim().is_empty() || local_path.trim().is_empty() || remote_path.trim().is_empty() {
+        return Err("ssh_upload: host, local_path and remote_path are required".to_string());
+    }
+    let dest = format!("{}:{}", ssh_target(&host, &user), remote_path.trim());
+    let mut cmd = scp_command(local_path.trim(), &dest, port, &identity);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().await.map_err(|e| format!("spawn scp: {e}"))?;
+    Ok(ShellResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
+}
+
+#[tauri::command]
+pub async fn tool_ssh_download(
+    host: String,
+    remote_path: String,
+    local_path: String,
+    user: Option<String>,
+    port: Option<u16>,
+    identity: Option<String>,
+) -> Result<ShellResult, String> {
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    if host.trim().is_empty() || remote_path.trim().is_empty() || local_path.trim().is_empty() {
+        return Err("ssh_download: host, remote_path and local_path are required".to_string());
+    }
+    let src = format!("{}:{}", ssh_target(&host, &user), remote_path.trim());
+    let mut cmd = scp_command(&src, local_path.trim(), port, &identity);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().await.map_err(|e| format!("spawn scp: {e}"))?;
+    Ok(ShellResult {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    })
+}
+
 // ----- Filesystem search (Claude Code parity: Grep + Glob) -----
 
 #[derive(Serialize)]

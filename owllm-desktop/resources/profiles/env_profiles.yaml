@@ -82,6 +82,12 @@
       version: "0.2.0"
     - name: trl
       version: "0.11.4"
+    # trl's SFTTrainer imports `rich` at module load, but trl 0.11.x does NOT
+    # pin it as a hard dependency, so a clean pinned install omits it and
+    # training dies with `ModuleNotFoundError: No module named 'rich'` the
+    # moment finetune.py does `from trl import SFTTrainer`. Pin it explicitly.
+    - name: rich
+      version: "13.9.4"
     # OPTIONAL speedup. Prebuilt only for exact torch×CUDA×python combos;
     # if pip can't find a matching wheel it would try a slow source build,
     # so `optional: true` lets the install skip it gracefully instead of
@@ -90,7 +96,11 @@
       version: "2.7.0.post2"
       optional: true
   probe: |
-    import torch, transformers, peft, accelerate, bitsandbytes, datasets, trl
+    import torch, transformers, peft, accelerate, bitsandbytes, datasets
+    # Import what finetune.py actually imports — `import trl` lazily succeeds
+    # even if SFTTrainer's deps (e.g. rich) are missing, which made a broken
+    # env falsely report "ready". This catches it.
+    from trl import SFTTrainer, SFTConfig
     assert torch.cuda.is_available(), "torch built without CUDA — wheel install picked the CPU build"
     try:
         import flash_attn
@@ -129,11 +139,21 @@
       version: "latest"
     - name: bitsandbytes
       version: "latest"
+    # unsloth pulls trl transitively, and trl's SFTTrainer imports `rich` —
+    # which trl 0.11.x doesn't pin, so it can be absent here too. List it so
+    # `from trl import SFTTrainer` (what finetune.py does) doesn't blow up.
+    - name: rich
+      version: "latest"
   probe: |
     import unsloth, torch
     assert torch.cuda.is_available(), "torch built without CUDA"
+    # finetune.py drives training through trl's SFTTrainer for BOTH envs, so
+    # verify the REAL import here — `import unsloth` alone wouldn't catch a
+    # missing trl/SFTTrainer dependency (e.g. rich) and the env would falsely
+    # report "ready".
+    from trl import SFTTrainer, SFTConfig
     # NOTE: the `unsloth` module has no __version__ attribute — referencing it
-    # was a false-negative in an earlier probe. Just confirm the import + CUDA.
+    # was a false-negative in an earlier probe. Just confirm the imports + CUDA.
     print(f"torch {torch.__version__} · cuda {torch.version.cuda} · device {torch.cuda.get_device_name(0)}")
     print("unsloth ready")
     print("OK")

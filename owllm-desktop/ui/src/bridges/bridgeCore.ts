@@ -1,7 +1,7 @@
 // Shared bridge dispatch core.
 //
 // The transport-agnostic guts extracted from TelegramBridgeRunner so EVERY
-// bridge (Telegram, Discord, Slack, Email, WhatsApp, LINE, KakaoTalk…) routes
+// bridge (Telegram, Discord, Slack, Email, WhatsApp, LINE…) routes
 // inbound messages through the SAME orchestrator → specialists → integrate
 // loop, with the SAME project routing, model-help commands, chat persistence
 // and desktop-canvas event mirroring. A bridge supplies only a

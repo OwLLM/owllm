@@ -1,16 +1,19 @@
-// Inbound webhook bridges — WhatsApp Cloud API, LINE Messaging API, KakaoTalk
-// skill server. Unlike the outbound bridges these RECEIVE over HTTP, so they
-// need a public URL: the user points a tunnel (cloudflared/ngrok) at the local
-// port and uses it as the webhook callback in each provider's console.
+// Inbound webhook bridges — WhatsApp Cloud API + LINE Messaging API. Unlike the
+// outbound bridges these RECEIVE over HTTP, so they need a public URL: the user
+// points a tunnel (cloudflared/ngrok) at the local port and uses it as the
+// webhook callback in each provider's console.
 //
-// One tiny_http listener serves all three, routed by path (/whatsapp, /line,
-// /kakao). Each inbound message is emitted to the frontend as
-// owllm:webhook:inbound; the WebhookBridgeRunner dispatches it through the
-// shared bridge core and replies via the REST commands below. KakaoTalk's
-// skill protocol wants the answer asynchronously, so we ack with useCallback
-// and post the real reply to its callbackUrl when ready.
+// One tiny_http listener serves both, routed by path (/whatsapp, /line). Each
+// inbound message is emitted to the frontend as owllm:webhook:inbound; the
+// WebhookBridgeRunner dispatches it through the shared bridge core and replies
+// via the REST commands below. LINE requests are authenticated by verifying the
+// X-Line-Signature header (HMAC-SHA256 of the raw body with the channel secret)
+// whenever a secret is configured — without it, anyone who finds the tunnel URL
+// could drive the tool-executing agent.
 
 use std::io::Read;
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -33,13 +36,43 @@ struct Inbound {
     platform: String,
     from: String,
     text: String,
-    callback_url: String, // KakaoTalk only
+}
+
+/// Base64(HMAC-SHA256(key, msg)) — the X-Line-Signature scheme. Hand-rolled on
+/// `sha2` (already a dep) so we don't pull in the `hmac` crate.
+fn hmac_sha256_base64(key: &[u8], msg: &[u8]) -> String {
+    const BLOCK: usize = 64;
+    let mut k = if key.len() > BLOCK {
+        Sha256::digest(key).to_vec()
+    } else {
+        key.to_vec()
+    };
+    k.resize(BLOCK, 0);
+    let ipad: Vec<u8> = k.iter().map(|b| b ^ 0x36).collect();
+    let opad: Vec<u8> = k.iter().map(|b| b ^ 0x5c).collect();
+    let inner = {
+        let mut h = Sha256::new();
+        h.update(&ipad);
+        h.update(msg);
+        h.finalize()
+    };
+    let mut h = Sha256::new();
+    h.update(&opad);
+    h.update(inner);
+    base64::engine::general_purpose::STANDARD.encode(h.finalize())
 }
 
 /// Start (or restart on a new port) the shared inbound webhook server.
-/// `whatsapp_verify_token` is checked on the WhatsApp GET verification probe.
+/// `whatsapp_verify_token` is checked on the WhatsApp GET verification probe;
+/// `line_channel_secret` (when non-empty) authenticates LINE POSTs via the
+/// X-Line-Signature header.
 #[tauri::command]
-pub fn webhook_start(app: AppHandle, port: u16, whatsapp_verify_token: String) -> Result<(), String> {
+pub fn webhook_start(
+    app: AppHandle,
+    port: u16,
+    whatsapp_verify_token: String,
+    line_channel_secret: String,
+) -> Result<(), String> {
     let mut guard = SERVER.lock().map_err(|_| "lock".to_string())?;
     if let Some(s) = guard.as_ref() {
         if s.port == port {
@@ -55,13 +88,14 @@ pub fn webhook_start(app: AppHandle, port: u16, whatsapp_verify_token: String) -
     let stop_loop = stop.clone();
     let app2 = app.clone();
     let vtoken = whatsapp_verify_token;
+    let lsecret = line_channel_secret;
     let handle = std::thread::spawn(move || {
         loop {
             if stop_loop.load(Ordering::SeqCst) {
                 break;
             }
             match server.recv_timeout(std::time::Duration::from_millis(500)) {
-                Ok(Some(req)) => handle_request(req, &app2, &vtoken),
+                Ok(Some(req)) => handle_request(req, &app2, &vtoken, &lsecret),
                 Ok(None) => continue,
                 Err(_) => break,
             }
@@ -96,12 +130,8 @@ fn parse_query(url: &str) -> std::collections::HashMap<String, String> {
     map
 }
 
-fn json_header() -> tiny_http::Header {
-    tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap()
-}
-
-fn emit(app: &AppHandle, platform: &str, from: &str, text: &str, callback_url: &str) {
-    if from.is_empty() || (text.is_empty() && platform != "kakao") {
+fn emit(app: &AppHandle, platform: &str, from: &str, text: &str) {
+    if from.is_empty() || text.is_empty() {
         return;
     }
     let _ = app.emit(
@@ -110,12 +140,11 @@ fn emit(app: &AppHandle, platform: &str, from: &str, text: &str, callback_url: &
             platform: platform.to_string(),
             from: from.to_string(),
             text: text.to_string(),
-            callback_url: callback_url.to_string(),
         },
     );
 }
 
-fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &str) {
+fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &str, line_secret: &str) {
     let method = req.method().as_str().to_uppercase();
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
@@ -148,7 +177,7 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &s
                             for m in msgs {
                                 let from = m.get("from").and_then(|x| x.as_str()).unwrap_or("");
                                 let text = m.pointer("/text/body").and_then(|x| x.as_str()).unwrap_or("");
-                                emit(app, "whatsapp", from, text, "");
+                                emit(app, "whatsapp", from, text);
                             }
                         }
                     }
@@ -160,6 +189,25 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &s
     }
 
     if method == "POST" && path.starts_with("/line") {
+        // Authenticate: X-Line-Signature = Base64(HMAC-SHA256(channel_secret, raw body)).
+        // Only enforced when a secret is configured (the card marks it optional),
+        // but strongly recommended — the agent can run tools.
+        if !line_secret.is_empty() {
+            let provided = req
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("X-Line-Signature"))
+                .map(|h| h.value.as_str().to_string())
+                .unwrap_or_default();
+            let expected = hmac_sha256_base64(line_secret.as_bytes(), body.as_bytes());
+            // Constant-time-ish: lengths then bytes. Reject on mismatch.
+            if provided.as_bytes().len() != expected.as_bytes().len()
+                || provided.bytes().zip(expected.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) != 0
+            {
+                let _ = req.respond(tiny_http::Response::from_string("bad signature").with_status_code(403));
+                return;
+            }
+        }
         // events[] : { type:"message", message:{ type:"text", text }, source:{ userId } }
         if let Some(events) = v.get("events").and_then(|e| e.as_array()) {
             for ev in events {
@@ -168,24 +216,11 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &s
                 {
                     let from = ev.pointer("/source/userId").and_then(|x| x.as_str()).unwrap_or("");
                     let text = ev.pointer("/message/text").and_then(|x| x.as_str()).unwrap_or("");
-                    emit(app, "line", from, text, "");
+                    emit(app, "line", from, text);
                 }
             }
         }
         let _ = req.respond(tiny_http::Response::from_string("OK"));
-        return;
-    }
-
-    if method == "POST" && path.starts_with("/kakao") {
-        // { userRequest: { utterance, user:{ id }, callbackUrl } }
-        let from = v.pointer("/userRequest/user/id").and_then(|x| x.as_str()).unwrap_or("");
-        let text = v.pointer("/userRequest/utterance").and_then(|x| x.as_str()).unwrap_or("");
-        let cb = v.pointer("/userRequest/callbackUrl").and_then(|x| x.as_str()).unwrap_or("");
-        emit(app, "kakao", from, text, cb);
-        // Ack asynchronously — the real answer is POSTed to callbackUrl later.
-        let resp = tiny_http::Response::from_string(r#"{"version":"2.0","useCallback":true}"#)
-            .with_header(json_header());
-        let _ = req.respond(resp);
         return;
     }
 
@@ -230,19 +265,21 @@ pub async fn line_push(channel_access_token: String, to: String, text: String) -
     Ok(())
 }
 
-#[tauri::command]
-pub async fn kakao_callback(callback_url: String, text: String) -> Result<(), String> {
-    if callback_url.is_empty() {
-        return Err("no Kakao callbackUrl for this user (it expires quickly — reply was too slow)".to_string());
+#[cfg(test)]
+mod tests {
+    use super::hmac_sha256_base64;
+
+    // Cross-checked against Node:
+    //   crypto.createHmac("sha256", key).update(body).digest("base64")
+    // This is exactly the X-Line-Signature LINE sends, so a match here means
+    // our verification accepts genuine LINE webhooks and rejects forgeries.
+    #[test]
+    fn line_signature_matches_reference() {
+        let key = b"my_channel_secret";
+        let body = br#"{"events":[{"type":"message","message":{"type":"text","text":"hi"},"source":{"userId":"U123"}}]}"#;
+        assert_eq!(
+            hmac_sha256_base64(key, body),
+            "bl6F3b3mJ78T8AH8eBJCrDyyPqbrv1s4/1geOWcvewI="
+        );
     }
-    let resp = reqwest::Client::new()
-        .post(&callback_url)
-        .json(&json!({ "version": "2.0", "template": { "outputs": [{ "simpleText": { "text": text } }] } }))
-        .send()
-        .await
-        .map_err(|e| format!("kakao callback: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("kakao callback HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
-    }
-    Ok(())
 }

@@ -60,7 +60,8 @@ type EmailConfig = {
   project_id: string;
   auto_approve: boolean;
 };
-type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig; discord: DiscordConfig; slack: SlackConfig; email: EmailConfig };
+type LineConfig = { channel_access_token: string; channel_secret: string; allowed_users: string[]; project_id: string; auto_approve: boolean };
+type BridgeConfigs = { telegram: TelegramConfig; whatsapp: WhatsAppConfig; discord: DiscordConfig; slack: SlackConfig; email: EmailConfig; line: LineConfig };
 
 // Qt: 10x10 dot, running color #4caf50, stopped color #5a6376
 // (bridges_page.py:350-352).
@@ -1202,12 +1203,11 @@ function EmailCard() {
 }
 
 // ---------------------------------------------------------------------
-// LINE + KakaoTalk cards — inbound webhooks sharing the WhatsApp webhook port.
-// Both need a public URL (tunnel). Callback path = <tunnel>/line and
-// <tunnel>/kakao. The shared WebhookBridgeRunner starts the listener whenever
-// any webhook bridge is enabled.
+// LINE card — inbound webhook sharing the WhatsApp webhook port. Needs a public
+// URL (tunnel); callback path = <tunnel>/line. The shared WebhookBridgeRunner
+// starts the listener whenever any webhook bridge is enabled.
 // ---------------------------------------------------------------------
-function makeStartedHelpers(platform: "line" | "kakao") {
+function makeStartedHelpers(platform: "line") {
   const key = `owllm:${platform}:started`;
   return {
     isStarted: () => { try { return sessionStorage.getItem(key) === "1"; } catch { return false; } },
@@ -1218,7 +1218,7 @@ function makeStartedHelpers(platform: "line" | "kakao") {
   };
 }
 
-function useWebhookCardCommon(platform: "line" | "kakao") {
+function useWebhookCardCommon(platform: "line") {
   const helpers = makeStartedHelpers(platform);
   const [status, setStatus] = useState<BridgeStatus>(() => helpers.isStarted() ? "running" : "stopped");
   const [projects, setProjects] = useState<ProjectLite[]>([]);
@@ -1315,78 +1315,6 @@ function LineCard() {
   );
 }
 
-function KakaoCard() {
-  const { helpers, status, setStatus, projects, lastError } = useWebhookCardCommon("kakao");
-  const [users, setUsers] = useState("");
-  const [project, setProject] = useState("");
-  const [autoApprove, setAutoApprove] = useState(false);
-  const [savedFlash, setSavedFlash] = useState(false);
-  const [saveError, setSaveError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let dead = false;
-    invoke<BridgeConfigs>("load_bridge_configs").then(c => {
-      if (dead) return;
-      const k = c.kakao;
-      setUsers((k.allowed_users || []).join(", ")); setProject(k.project_id || ""); setAutoApprove(!!k.auto_approve);
-    }).catch(() => {});
-    return () => { dead = true; };
-  }, []);
-
-  async function persist() {
-    setSaveError(null);
-    const allow = users.split(",").map(s => s.trim()).filter(Boolean);
-    try {
-      await invoke("save_kakao_config", { cfg: { allowed_users: allow, project_id: project, auto_approve: autoApprove } });
-      setSavedFlash(true); window.setTimeout(() => setSavedFlash(false), 1600);
-    } catch (e) { setSaveError(String(e)); }
-  }
-
-  const accent = "#f5d800";
-  const active = status === "starting" || status === "running";
-  const statusText = status === "running" ? "Running — skill server URL = <tunnel>/kakao (enable useCallback)."
-    : status === "starting" ? "Starting — binding the shared webhook listener."
-    : status === "error" ? `Error — ${lastError || "Not connected."}`
-    : (lastError ? `Stopped — last error: ${lastError}` : "Stopped.");
-
-  return (
-    <div style={{ flex: 1, background: "linear-gradient(180deg, #3a3410 0%, #0e1117 60%, #0e1117 100%)", border: "none", borderRadius: 16, padding: "18px 20px", boxShadow: "0 4px 24px rgba(0,0,0,0.43)", display: "flex", flexDirection: "column", gap: 10, minWidth: 320 }}>
-      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-        <div style={{ fontSize: 26, lineHeight: 1 }}>💛</div>
-        <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 2 }}>
-          <div style={{ fontSize: 15, fontWeight: 700, color: accent }}>KakaoTalk</div>
-          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>Skill webhook · async callback · needs a public URL (tunnel)</div>
-        </div>
-        <StatusDot state={status} />
-      </div>
-      <SectionLabel text="Allowed user IDs (optional)" />
-      <BridgeInput placeholder="(empty = any) — Kakao app user ids" value={users} onChange={e => setUsers(e.target.value)} />
-      <SectionLabel text="Project" />
-      <ProjectSelect value={project} onChange={e => setProject(e.target.value)}>
-        <option value="">(no project)</option>
-        {projects.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))}
-      </ProjectSelect>
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--fg)" }}>
-        <input type="checkbox" checked={autoApprove} onChange={e => setAutoApprove(e.target.checked)} style={{ accentColor: accent }} />
-        Auto-approve every tool call (only for personal bots)
-      </label>
-      <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
-        In the Kakao i Open Builder skill, set the URL to <code>&lt;tunnel&gt;/kakao</code> and turn on the <b>callback</b> (the agent replies asynchronously).
-      </div>
-      <div style={{ flex: 1 }} />
-      <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>{statusText}</div>
-      {saveError ? (<div style={{ fontSize: 11, color: "#ffb0b0" }}>{saveError}</div>) : null}
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <button onClick={persist} style={{ height: BTN_HEIGHT, padding: "0 14px", background: "var(--bg-surface)", color: "var(--fg)", border: "1px solid var(--border-strong)", borderRadius: 8, fontWeight: 600, fontSize: 12, cursor: "pointer" }} title="Persist to ~/.owllm/bridge_config.json">💾 Save</button>
-        {savedFlash ? (<span style={{ fontSize: 11, color: "#4caf50", fontWeight: 700 }}>✓ Saved</span>) : null}
-        <div style={{ flex: 1 }} />
-        <button disabled={active} onClick={async () => { await persist(); setStatus("starting"); helpers.setStarted(true); }} style={startButtonStyle(accent, "#ffe94d", active)}>Start</button>
-        <button disabled={!active} onClick={() => { setStatus("stopped"); helpers.setStarted(false); }} style={stopButtonStyle(!active)}>Stop</button>
-      </div>
-    </div>
-  );
-}
-
 // ---------------------------------------------------------------------
 // Page — Qt BridgesPage._build_ui (bridges_page.py:589)
 // ---------------------------------------------------------------------
@@ -1421,7 +1349,6 @@ export default function BridgesPage() {
         <EmailCard />
         <WhatsAppCard />
         <LineCard />
-        <KakaoCard />
       </div>
     </div>
   );

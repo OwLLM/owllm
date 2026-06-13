@@ -1,5 +1,5 @@
-// WebhookBridgeRunner — the three INBOUND webhook bridges (WhatsApp, LINE,
-// KakaoTalk) sharing one Rust HTTP listener.
+// WebhookBridgeRunner — the INBOUND webhook bridges (WhatsApp, LINE) sharing
+// one Rust HTTP listener.
 //
 // Unlike the outbound bridges these receive over HTTP, so they need a public
 // URL (the user runs a tunnel and pastes it as the webhook callback in each
@@ -18,16 +18,14 @@ import {
 
 type WhatsAppConfig = { access_token: string; phone_number_id: string; verify_token: string; webhook_port: number; allowed_senders: string[]; project_id: string; auto_approve: boolean };
 type LineConfig = { channel_access_token: string; channel_secret: string; allowed_users: string[]; project_id: string; auto_approve: boolean };
-type KakaoConfig = { allowed_users: string[]; project_id: string; auto_approve: boolean };
-type BridgeConfigs = { whatsapp: WhatsAppConfig; line: LineConfig; kakao: KakaoConfig };
+type BridgeConfigs = { whatsapp: WhatsAppConfig; line: LineConfig };
 
-type Platform = "whatsapp" | "line" | "kakao";
-type Inbound = { platform: Platform; from: string; text: string; callbackUrl: string };
+type Platform = "whatsapp" | "line";
+type Inbound = { platform: Platform; from: string; text: string };
 
 const STARTED_KEYS: Record<Platform, string> = {
   whatsapp: "owllm:whatsapp:started",
   line: "owllm:line:started",
-  kakao: "owllm:kakao:started",
 };
 function flag(p: Platform): boolean {
   try { return sessionStorage.getItem(STARTED_KEYS[p]) === "1"; } catch { return false; }
@@ -38,12 +36,11 @@ function emitRuntime(p: Platform, detail: { status: "running" | "stopped" | "err
 
 export default function WebhookBridgeRunner() {
   const [started, setStarted] = useState<Record<Platform, boolean>>(() => ({
-    whatsapp: flag("whatsapp"), line: flag("line"), kakao: flag("kakao"),
+    whatsapp: flag("whatsapp"), line: flag("line"),
   }));
   const [cfg, setCfg] = useState<BridgeConfigs | null>(null);
   const startedRef = useRef(started); startedRef.current = started;
   const cfgRef = useRef(cfg); cfgRef.current = cfg;
-  const kakaoCb = useRef<Record<string, string>>({}); // per-user callbackUrl
   const queue = useRef<Promise<void>>(Promise.resolve());
 
   const { handleMessage } = useBridgeDispatch();
@@ -53,34 +50,35 @@ export default function WebhookBridgeRunner() {
     const reload = () => invoke<BridgeConfigs>("load_bridge_configs").then(setCfg).catch(() => {});
     reload();
     const sync = () => {
-      setStarted({ whatsapp: flag("whatsapp"), line: flag("line"), kakao: flag("kakao") });
+      setStarted({ whatsapp: flag("whatsapp"), line: flag("line") });
       reload();
     };
     const onStatus = () => sync();
-    (["whatsapp", "line", "kakao"] as Platform[]).forEach((p) =>
+    (["whatsapp", "line"] as Platform[]).forEach((p) =>
       window.addEventListener(`owllm:${p}:status`, onStatus as EventListener));
     const id = window.setInterval(sync, 2000);
     return () => {
       window.clearInterval(id);
-      (["whatsapp", "line", "kakao"] as Platform[]).forEach((p) =>
+      (["whatsapp", "line"] as Platform[]).forEach((p) =>
         window.removeEventListener(`owllm:${p}:status`, onStatus as EventListener));
     };
   }, []);
 
-  // Start/stop the shared listener as the enabled set / port changes.
-  const anyOn = started.whatsapp || started.line || started.kakao;
+  // Start/stop the shared listener as the enabled set / port / LINE secret changes.
+  const anyOn = started.whatsapp || started.line;
   const port = cfg?.whatsapp?.webhook_port || 8911;
   const verifyToken = cfg?.whatsapp?.verify_token || "";
+  const lineSecret = cfg?.line?.channel_secret || "";
   useEffect(() => {
     if (!anyOn) {
       invoke("webhook_stop").catch(() => {});
-      (["whatsapp", "line", "kakao"] as Platform[]).forEach((p) => emitRuntime(p, { status: "stopped" }));
+      (["whatsapp", "line"] as Platform[]).forEach((p) => emitRuntime(p, { status: "stopped" }));
       return;
     }
-    invoke("webhook_start", { port, whatsappVerifyToken: verifyToken })
-      .then(() => (["whatsapp", "line", "kakao"] as Platform[]).forEach((p) => { if (startedRef.current[p]) emitRuntime(p, { status: "running" }); }))
-      .catch((e) => (["whatsapp", "line", "kakao"] as Platform[]).forEach((p) => { if (startedRef.current[p]) emitRuntime(p, { status: "error", lastError: String(e) }); }));
-  }, [anyOn, port, verifyToken]);
+    invoke("webhook_start", { port, whatsappVerifyToken: verifyToken, lineChannelSecret: lineSecret })
+      .then(() => (["whatsapp", "line"] as Platform[]).forEach((p) => { if (startedRef.current[p]) emitRuntime(p, { status: "running" }); }))
+      .catch((e) => (["whatsapp", "line"] as Platform[]).forEach((p) => { if (startedRef.current[p]) emitRuntime(p, { status: "error", lastError: String(e) }); }));
+  }, [anyOn, port, verifyToken, lineSecret]);
 
   // Per-platform transport + lite config.
   const transportFor = (p: Platform): BridgeTransport => {
@@ -89,30 +87,26 @@ export default function WebhookBridgeRunner() {
       if (!c) return;
       if (p === "whatsapp") {
         await invoke("whatsapp_send", { accessToken: c.whatsapp.access_token, phoneNumberId: c.whatsapp.phone_number_id, to, text });
-      } else if (p === "line") {
-        await invoke("line_push", { channelAccessToken: c.line.channel_access_token, to, text });
       } else {
-        await invoke("kakao_callback", { callbackUrl: kakaoCb.current[to] || "", text });
+        await invoke("line_push", { channelAccessToken: c.line.channel_access_token, to, text });
       }
     };
-    const maxLen = p === "kakao" ? 900 : p === "line" ? 4900 : 4000;
-    const tag = p === "whatsapp" ? "WhatsApp" : p === "line" ? "LINE" : "Kakao";
+    const maxLen = p === "line" ? 4900 : 4000;
+    const tag = p === "whatsapp" ? "WhatsApp" : "LINE";
     return { name: p, tag, maxLen, send };
   };
   const liteFor = (p: Platform): BridgeConfigLite => {
     const c = cfgRef.current;
     if (p === "whatsapp") return { allowed: c?.whatsapp.allowed_senders ?? [], project_id: c?.whatsapp.project_id ?? "", auto_approve: !!c?.whatsapp.auto_approve };
-    if (p === "line") return { allowed: c?.line.allowed_users ?? [], project_id: c?.line.project_id ?? "", auto_approve: !!c?.line.auto_approve };
-    return { allowed: c?.kakao.allowed_users ?? [], project_id: c?.kakao.project_id ?? "", auto_approve: !!c?.kakao.auto_approve };
+    return { allowed: c?.line.allowed_users ?? [], project_id: c?.line.project_id ?? "", auto_approve: !!c?.line.auto_approve };
   };
 
   // Inbound listener (Rust → here).
   useEffect(() => {
     const un = listen<Inbound>("owllm:webhook:inbound", (e) => {
-      const { platform, from, text, callbackUrl } = e.payload;
+      const { platform, from, text } = e.payload;
       if (!startedRef.current[platform]) return;
       if (!from) return;
-      if (platform === "kakao" && callbackUrl) kakaoCb.current[from] = callbackUrl;
       const lite = liteFor(platform);
       if (lite.allowed.length > 0 && !lite.allowed.includes(from)) return;
       emitRuntime(platform, { status: "running", seenFrom: from });

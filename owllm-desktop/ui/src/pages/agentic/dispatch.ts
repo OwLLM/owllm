@@ -24,6 +24,8 @@ import {
 import { canonicalizeNativeCalls, type RawNativeCall } from "./toolNormalizer";
 import { samplingFor } from "./modelProfiles";
 import { resolveInferenceBase } from "./inferenceEndpoint";
+// Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
+import { buildEntries } from "./ModelPicker";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -1118,6 +1120,163 @@ export function anthropicUserContent(text: string, images: Attachment[]): unknow
   return parts;
 }
 
+// ---------- Auto model routing (P0-4) ----------
+//
+// "Auto · …" entries resolve to a concrete model at dispatch time using the
+// SAME availability discovery as the picker (buildEntries + accounts +
+// server supervisor). The pick is split pure/impure: `pickAutoModel`
+// (pure, unit-probed) decides; `resolveAutoModel` gathers availability.
+// GUARDRAIL: callers must surface the resolution — a cloud pick is never
+// silent (streamChatCompletion emits it through onSystemWarning).
+
+export type AutoCandidates = {
+  /// The model loaded in the RUNNING local server, if any.
+  localRunning: { modelId: string; label: string } | null;
+  /// Available cloud entries (sub = subscription CLI, api = key).
+  cloud: Array<{ id: string; label: string; variant: "sub" | "api" }>;
+};
+
+export type AutoResolution = {
+  modelId: string;
+  provider: string;
+  label: string;
+  cloud: boolean;
+  reason: string;
+};
+
+/// Rough task-difficulty estimate from the prompt alone. Deliberately
+/// coarse — it only has to separate "what's 2+2" from "redesign my auth".
+export function estimatePromptTier(text: string): "simple" | "standard" | "hard" {
+  const t = text.trim();
+  const words = t.split(/\s+/).filter(Boolean).length;
+  // NOTE: everyday nouns stay out — "design" alone matched "the design
+  // team" in normal prose and escalated summaries to the hard tier.
+  const hardSignals =
+    /(architect|redesign|refactor|prove|optimi[sz]e|debug|root.?cause|security|concurren|distributed|algorithm|complexit|migrat|trade.?off|implement|build me|end.to.end)/i;
+  const codey = /```|\bfn\b|\bdef\b|\bclass\b|=>|;\s*$/m.test(t);
+  if (words > 150 || hardSignals.test(t)) return "hard";
+  if (words > 25 || codey) return "standard";
+  return "simple";
+}
+
+/// Lower = cheaper to run. Effort suffixes (":low"/":high") nudge the rank.
+function cheapScore(id: string): number {
+  const s = id.toLowerCase();
+  let n = 50;
+  if (/haiku|mini|flash|lite|small|nano/.test(s)) n = 0;
+  else if (/sonnet|deepseek|kimi|grok|gpt-4/.test(s)) n = 20;
+  else if (/fable|opus|gpt-5|o3|pro/.test(s)) n = 40;
+  if (/:low/.test(s)) n -= 5;
+  if (/:extra_high/.test(s)) n += 8;
+  else if (/:high/.test(s)) n += 5;
+  return n;
+}
+
+/// Higher = more capable. The small-model markers are tested FIRST —
+/// "gpt-5-mini" must rank as a mini, not as a gpt-5.
+function premiumScore(id: string): number {
+  const s = id.toLowerCase();
+  let n = 40;
+  if (/haiku|mini|flash|lite|small|nano/.test(s)) n = 10;
+  else if (/fable|opus/.test(s)) n = 100;
+  else if (/gpt-5|o3|grok-4|pro/.test(s)) n = 80;
+  else if (/sonnet/.test(s)) n = 60;
+  if (/:extra_high/.test(s)) n += 6;
+  else if (/:high/.test(s)) n += 4;
+  else if (/:low/.test(s)) n -= 5;
+  return n;
+}
+
+/// Stable preference: subscriptions before API keys (the sub is already
+/// paid for — "cheapest" is from the USER's wallet's point of view).
+function bySubFirst(a: { variant: string }, b: { variant: string }): number {
+  return (a.variant === "sub" ? 0 : 1) - (b.variant === "sub" ? 0 : 1);
+}
+
+/// Pure auto-pick. Throws a user-actionable error when nothing fits.
+export function pickAutoModel(
+  flavour: string,
+  tier: "simple" | "standard" | "hard",
+  c: AutoCandidates,
+): Omit<AutoResolution, "provider"> {
+  const local = (reason: string) =>
+    c.localRunning && {
+      modelId: c.localRunning.modelId,
+      label: c.localRunning.label,
+      cloud: false,
+      reason,
+    };
+  const cheapestCloud = () =>
+    [...c.cloud].sort((a, b) => cheapScore(a.id) - cheapScore(b.id) || bySubFirst(a, b))[0];
+  const bestCloud = () =>
+    [...c.cloud].sort((a, b) => premiumScore(b.id) - premiumScore(a.id) || bySubFirst(a, b))[0];
+
+  switch (flavour) {
+    case "cheapest-local": {
+      const l = local("cheapest-local: the running local model is free and private");
+      if (l) return l;
+      throw new Error(
+        "Auto · Cheapest Local: no local model is running — start one on the Server page (this mode never uses cloud).",
+      );
+    }
+    case "cheapest": {
+      const l = local("cheapest: the running local model is free");
+      if (l) return l;
+      const m = cheapestCloud();
+      if (m) return { modelId: m.id, label: m.label, cloud: true, reason: "cheapest available cloud model (no local model is running)" };
+      throw new Error("Auto: no usable model — start a local model or connect an account/key.");
+    }
+    case "premium": {
+      const m = bestCloud();
+      if (m) return { modelId: m.id, label: m.label, cloud: true, reason: "premium: most capable available model" };
+      const l = local("premium: no cloud account available — using the running local model");
+      if (l) return l;
+      throw new Error("Auto · Premium: no cloud account/key connected and no local model running.");
+    }
+    // "balanced" and any future/unknown flavour.
+    default: {
+      if (tier === "hard") {
+        const m = bestCloud();
+        if (m) return { modelId: m.id, label: m.label, cloud: true, reason: "balanced: hard task → most capable model" };
+        const l = local("balanced: hard task but no cloud available — using the running local model");
+        if (l) return l;
+      } else if (tier === "simple") {
+        const l = local("balanced: simple task → free local model");
+        if (l) return l;
+        const m = cheapestCloud();
+        if (m) return { modelId: m.id, label: m.label, cloud: true, reason: "balanced: simple task → cheapest cloud (no local model running)" };
+      } else {
+        const l = local("balanced: standard task → local model handles it (free, native tools)");
+        if (l) return l;
+        const mids = c.cloud.filter((x) => premiumScore(x.id) >= 55);
+        const m = (mids.length ? mids : c.cloud)
+          .sort((a, b) => cheapScore(a.id) - cheapScore(b.id) || bySubFirst(a, b))[0];
+        if (m) return { modelId: m.id, label: m.label, cloud: true, reason: "balanced: standard task → mid-tier cloud model" };
+      }
+      throw new Error("Auto: no usable model — start a local model or connect an account/key.");
+    }
+  }
+}
+
+/// Gather availability (the app's own discovery) and resolve an auto id.
+export async function resolveAutoModel(flavour: string, userMessage: string): Promise<AutoResolution> {
+  const [models, accounts, server] = await Promise.all([
+    invoke<ModelInfo[]>("list_models").catch(() => [] as ModelInfo[]),
+    invoke<any>("accounts_status").catch(() => null),
+    invoke<ServerStatus>("server_status").catch(() => null as ServerStatus | null),
+  ]);
+  const entries = buildEntries(models, accounts);
+  const cloud = entries
+    .filter((e) => e.available && (e.variant === "sub" || e.variant === "api"))
+    .map((e) => ({ id: e.id, label: e.label, variant: e.variant as "sub" | "api" }));
+  const localRunning = server?.running && server.model_id
+    ? { modelId: server.model_id, label: `${server.model_id} (local)` }
+    : null;
+  const tier = estimatePromptTier(userMessage);
+  const picked = pickAutoModel(flavour, tier, { localRunning, cloud });
+  return { ...picked, provider: providerFor(picked.modelId, models) };
+}
+
 export async function streamChatCompletion(
   port: number,
   modelId: string,
@@ -1170,7 +1329,18 @@ export async function streamChatCompletion(
   );
 
   if (provider === "auto") {
-    throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
+    // P0-4: resolve "Auto · …" at dispatch time. The pick is ALWAYS
+    // surfaced (onSystemWarning) — especially when it costs money — and
+    // we recurse with a concrete model id + provider.
+    const res = await resolveAutoModel(bareId, effectiveText);
+    onSystemWarning?.(
+      `⚡ Auto → ${res.label} (${res.cloud ? "cloud — uses your account/credits" : "local — free, private"}) · ${res.reason}`,
+    );
+    return streamChatCompletion(
+      port, res.modelId, res.provider, systemPrompt, userMessage, temperature, signal,
+      onDelta, projectCwd, history, autoApprove, onThought, allowedTools, attachments,
+      sessionId, onSystemWarning, onTranscript,
+    );
   }
   if (provider === "anthropic") {
     return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);

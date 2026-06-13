@@ -50,6 +50,7 @@ import {
   ensureCliWarm,
   parseDispatchesDetailed,
   unresolvedCorrectionMessage,
+  resolveAutoModel,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -5442,9 +5443,19 @@ async function streamChatCompletion(
   );
 
   if (provider === "auto") {
-    // Future slot. For now resolve to a local model when one exists,
-    // otherwise fail with an actionable message.
-    throw new Error(`Auto routing (${modelId}) is not implemented yet — pick a specific model.`);
+    // P0-4: resolve "Auto · …" at dispatch time with the shared resolver
+    // (dispatch.ts — same catalogue the picker shows). The pick is ALWAYS
+    // surfaced; a cloud pick is never silent (§0.4: this duplicate stays
+    // in lockstep with dispatch.ts's auto branch).
+    const res = await resolveAutoModel(bareId, effectiveText);
+    onSystemWarning?.(
+      `⚡ Auto → ${res.label} (${res.cloud ? "cloud — uses your account/credits" : "local — free, private"}) · ${res.reason}`,
+    );
+    return streamChatCompletion(
+      port, res.modelId, res.provider, systemPrompt, userMessage, temperature, signal,
+      onDelta, projectCwd, history, autoApprove, onThought, allowedTools, attachments,
+      sessionId, onSystemWarning,
+    );
   }
   if (provider === "anthropic") {
     return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);

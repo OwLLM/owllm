@@ -566,11 +566,32 @@ function ModeBar({
           off-axis. */}
       <div />
 
-      {/* OWLLM title — absolutely positioned to the window centre. When a
-          Watcher callback is wired (P0-8) the title is the summon point —
-          the owl chrome above it is a click-through window, so this is the
-          closest clickable surface to "the top-center owl". Without the
-          callback, pointer events stay off so drag clicks pass through. */}
+      {/* The Watcher summon hotspot (P0-8). The decorative owl top-center
+          lives in a CLICK-THROUGH overlay window, so clicks on it fall to
+          THIS main window — a generous transparent zone over the owl's
+          footprint (and the title beneath it) opens the Watcher. Reaches
+          to the very top edge so the owl's face is clickable, and shows a
+          soft ring on hover so users learn it's the support entry. */}
+      {onWatcher && (
+        <button
+          data-ui="WatcherSummon"
+          onClick={onWatcher}
+          title="The Watcher — OWLLM's support assistant (click the owl)"
+          className="owllm-watcher-summon"
+          style={{
+            position: "absolute",
+            left: "50%", top: 0,
+            transform: "translateX(-50%)",
+            width: 260, height: 64,
+            border: "none", background: "transparent",
+            cursor: "pointer", zIndex: 6, padding: 0,
+          }}
+        />
+      )}
+      <style>{`.owllm-watcher-summon:hover { background: radial-gradient(ellipse at 50% 30%, rgba(var(--accent-rgb),0.22), transparent 70%) !important; }`}</style>
+
+      {/* OWLLM title — absolutely positioned to the window centre. Also a
+          Watcher summon when wired (the owl sits directly above it). */}
       <div
         data-ui="AppTitle"
         onClick={onWatcher}

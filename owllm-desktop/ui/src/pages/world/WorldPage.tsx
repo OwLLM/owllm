@@ -9,8 +9,15 @@
 // Progression persists via worldState (§0.8).
 
 import React from "react";
-import { worldSubscribe, type WorldEvent } from "./worldBus";
+import { worldSubscribe, worldEmit, type WorldEvent } from "./worldBus";
 import { getProgress, subscribeProgress, addXp, setScene } from "./worldState";
+
+const DEMO_LINES = [
+  "Planning the build and dispatching the team…",
+  "Reading the files I'll need to change…",
+  "Writing the implementation + tests…",
+  "Reviewing the diff for correctness…",
+];
 
 type PropKind = "desk" | "rack" | "shelf" | "board" | "forge" | "lantern" | "crates" | "podium" | "vault";
 type Prop = { kind: PropKind; x: number; y: number; s?: number };
@@ -268,6 +275,14 @@ type SpriteState = {
 };
 
 const IDLE_CREW = ["orchestrator", "coder", "researcher", "critic"];
+// Fixed home docks along the floor — idle agents REST here (no random
+// wander; the only idle motion is a gentle in-place bob). Movement across
+// the room happens ONLY on real dispatch events, so the HQ never "moves on
+// its own".
+const HOMES: Array<[number, number]> = [
+  [0.16, 0.80], [0.38, 0.86], [0.62, 0.84], [0.84, 0.80], [0.50, 0.90], [0.28, 0.88], [0.74, 0.90],
+];
+const homeFor = (i: number): [number, number] => HOMES[i % HOMES.length];
 
 export default function WorldPage() {
   const [, force] = React.useReducer((x: number) => x + 1, 0);
@@ -275,41 +290,39 @@ export default function WorldPage() {
   const progress = getProgress();
   const scene = SCENES.find(s => s.key === progress.scene) ?? SCENES[0];
   const [artOk, setArtOk] = React.useState<Record<string, boolean>>({});
+  // Whose home dock is whose, assigned in arrival order so a returning
+  // agent always walks back to the SAME spot (stable, not random).
+  const homeIdx = React.useRef<Map<string, number>>(new Map());
+  const homeOf = (name: string): [number, number] => {
+    let i = homeIdx.current.get(name);
+    if (i === undefined) { i = homeIdx.current.size; homeIdx.current.set(name, i); }
+    return homeFor(i);
+  };
 
   const [sprites, setSprites] = React.useState<Map<string, SpriteState>>(() => {
     const m = new Map<string, SpriteState>();
     IDLE_CREW.forEach((n, i) => {
-      const [x, y] = WAYPOINTS[(i * 2) % WAYPOINTS.length];
+      const [x, y] = homeFor(i);
       m.set(n, { name: n, x, y, active: false, bubble: null, bubbleAt: 0 });
     });
     return m;
   });
+  IDLE_CREW.forEach((n, i) => { if (!homeIdx.current.has(n)) homeIdx.current.set(n, i); });
   const [reward, setReward] = React.useState<number>(0);
+  // Live-run tracking: how many agents are working + when we last heard
+  // anything. Drives the status banner so it's obvious the HQ is tied to
+  // real agentic runs (and idle when nothing is happening).
+  const [activeCount, setActiveCount] = React.useState(0);
+  const [lastEventAt, setLastEventAt] = React.useState(0);
+  const [running, setRunning] = React.useState(false);
 
   const patch = (name: string, p: Partial<SpriteState>) =>
     setSprites(prev => {
       const next = new Map(prev);
-      const cur = next.get(name) ?? { name, x: 0.5, y: 0.8, active: false, bubble: null, bubbleAt: 0 };
+      const cur = next.get(name) ?? { name, x: 0.5, y: 0.85, active: false, bubble: null, bubbleAt: 0 };
       next.set(name, { ...cur, ...p });
       return next;
     });
-
-  React.useEffect(() => {
-    const iv = window.setInterval(() => {
-      setSprites(prev => {
-        const next = new Map(prev);
-        for (const [name, s] of next) {
-          if (s.active) continue;
-          if (Math.random() < 0.45) {
-            const [x, y] = WAYPOINTS[Math.floor(Math.random() * WAYPOINTS.length)];
-            next.set(name, { ...s, x, y });
-          }
-        }
-        return next;
-      });
-    }, 2800);
-    return () => window.clearInterval(iv);
-  }, []);
 
   React.useEffect(() => {
     const iv = window.setInterval(() => {
@@ -332,22 +345,58 @@ export default function WorldPage() {
   React.useEffect(() => {
     let stationCursor = 0;
     return worldSubscribe((e: WorldEvent) => {
+      setLastEventAt(Date.now());
       if (e.kind === "agent-start") {
         const [x, y] = STATIONS[stationCursor++ % STATIONS.length];
         patch(e.agent, { x, y, active: true });
+        setRunning(true);
+        setActiveCount(c => c + 1);
       } else if (e.kind === "agent-end") {
-        const [x, y] = WAYPOINTS[Math.floor(Math.random() * WAYPOINTS.length)];
+        const [x, y] = homeOf(e.agent); // walk back to its OWN dock, not random
         patch(e.agent, { x, y, active: false });
+        setActiveCount(c => Math.max(0, c - 1));
       } else if (e.kind === "thought") {
         const text = e.text.length > 90 ? `${e.text.slice(0, 90)}…` : e.text;
         if (text.trim()) patch(e.agent, { bubble: text, bubbleAt: Date.now() });
       } else if (e.kind === "run-finish") {
         addXp(10, "Team run completed");
         setReward(r => r + 1);
+        setRunning(false);
+        setActiveCount(0);
       }
     });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The run is "live" only while we're actively hearing events. If the
+  // stream goes quiet for 12s (e.g. the user navigated away mid-run) we
+  // fall back to idle so the banner never lies.
+  React.useEffect(() => {
+    if (!running) return;
+    const iv = window.setInterval(() => {
+      if (Date.now() - lastEventAt > 12000) { setRunning(false); setActiveCount(0); }
+    }, 2000);
+    return () => window.clearInterval(iv);
+  }, [running, lastEventAt]);
+
+  // Scripted DEMO so the HQ is immediately legible: emits the SAME worldBus
+  // events a real run does (agent-start → thoughts → agent-end → finish),
+  // proving exactly what the HQ is tied to without setting up a team.
+  const demoTimers = React.useRef<number[]>([]);
+  const runDemo = () => {
+    demoTimers.current.forEach(clearTimeout);
+    demoTimers.current = [];
+    const crew = IDLE_CREW;
+    const at = (ms: number, fn: () => void) => demoTimers.current.push(window.setTimeout(fn, ms));
+    crew.forEach((name, i) => {
+      at(i * 600, () => worldEmit({ kind: "agent-start", agent: name }));
+      at(i * 600 + 900, () => worldEmit({ kind: "thought", agent: name, text: DEMO_LINES[i % DEMO_LINES.length] }));
+      at(i * 600 + 2600, () => worldEmit({ kind: "thought", agent: name, text: "…working on it." }));
+      at(4200 + i * 500, () => worldEmit({ kind: "agent-end", agent: name }));
+    });
+    at(4200 + crew.length * 500 + 400, () => worldEmit({ kind: "run-finish" }));
+  };
+  React.useEffect(() => () => demoTimers.current.forEach(clearTimeout), []);
 
   const [, , , glow, accent] = scene.pal;
   const spriteList = [...sprites.values()].sort((a, b) => a.y - b.y);
@@ -474,6 +523,31 @@ export default function WorldPage() {
             </div>
           )}
         </div>
+      </div>
+
+      {/* Live/idle status — makes it OBVIOUS the HQ is tied to real agentic
+          runs, and never moves on its own. Top-center. */}
+      <div style={{
+        position: "absolute", top: 12, left: "50%", transform: "translateX(-50%)",
+        display: "flex", alignItems: "center", gap: 8, zIndex: 210,
+        padding: "5px 14px", borderRadius: 999,
+        background: "rgba(8,12,22,0.86)",
+        border: `1px solid ${running ? glow : "rgba(255,255,255,0.18)"}`,
+        color: running ? glow : "rgba(238,242,252,0.82)", fontSize: 12, fontWeight: 800, whiteSpace: "nowrap",
+      }}>
+        {running
+          ? <>🟢 Live run — {activeCount} agent{activeCount === 1 ? "" : "s"} working</>
+          : <>💤 Idle — run a team on the <b>Agentic Team</b> tab to watch it here</>}
+        {!running && (
+          <button
+            onClick={runDemo}
+            title="Play a scripted demo using the SAME event stream a real run emits"
+            style={{
+              marginLeft: 4, padding: "2px 10px", borderRadius: 999, border: `1px solid ${glow}88`,
+              background: `${glow}22`, color: "#fff", fontSize: 11, fontWeight: 800, cursor: "pointer",
+            }}
+          >▶ Demo</button>
+        )}
       </div>
 
       {/* Scene dock bottom-left. */}

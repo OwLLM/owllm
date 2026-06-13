@@ -62,6 +62,7 @@ import {
 import { stripFabricatedToolOutput } from "./localTools";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet } from "./wslIsolation";
+import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
 
 // Native tool_call shape harvested by consumeOpenAISse from
@@ -2947,6 +2948,23 @@ function GraphCanvas({
     return `M ${sP.x} ${sP.y} C ${sCtl.x} ${sCtl.y}, ${tCtl.x} ${tCtl.y}, ${tP.x} ${tP.y}`;
   };
 
+  // Routed edge paths (P0-2b): obstacle avoidance around every card that
+  // isn't an endpoint, parallel-edge bundling. Plain per-render compute
+  // (NOT a hook — this code can sit below conditional logic) so dragging
+  // a card re-routes live; ~30k arithmetic ops worst case, fine at 60fps.
+  const routeOffsets = bundleOffsets(liveEdges);
+  const routedPaths = liveEdges.map((e, i) => {
+    const s = effective.get(e.source);
+    const t = effective.get(e.target);
+    if (!s || !t) return null;
+    const obstacles: Rect[] = [];
+    for (const [name, p] of effective) {
+      if (name === e.source || name === e.target) continue;
+      obstacles.push({ x: p.x, y: p.y, w: NODE_W, h: NODE_H });
+    }
+    return routeEdge(outPortFor(e.source, s), inPortFor(e.target, t), obstacles, routeOffsets[i]);
+  });
+
   return (
     <div
       ref={containerRef}
@@ -2989,17 +3007,24 @@ function GraphCanvas({
               get a softer dashed style and are NOT clickable — they aren't
               in the project's graph_json, so selecting them for delete/reverse
               would either no-op or corrupt the index mapping for real edges. */}
+          {/* Animated flow for ACTIVE dispatch edges (P0-2b): while the
+              target agent is running, its inbound edge pulses. */}
+          <style>{`@keyframes owllm-edge-flow { to { stroke-dashoffset: -22; } }`}</style>
           {liveEdges.map((e, i) => {
             const s = effective.get(e.source)!;
             const t = effective.get(e.target)!;
             const synthetic = (e as any).synthetic === true;
             const sel = !synthetic && selectedEdgeIdx === i;
+            // Routed path (obstacle-avoiding + bundled); falls back to the
+            // plain Bezier if routing returned null (missing endpoint).
+            const d = routedPaths[i]?.d ?? edgePath(e.source, e.target, s, t);
+            const live = activeAgents.has(e.target) && activeAgents.has(e.source);
             return (
               <g key={"ge"+i}>
                 {!synthetic && (
                   /* Fat invisible hit-target so click is forgiving. */
                   <path
-                    d={edgePath(e.source, e.target, s, t)}
+                    d={d}
                     stroke="rgba(0,0,0,0)"
                     strokeWidth={14}
                     fill="none"
@@ -3008,10 +3033,11 @@ function GraphCanvas({
                   />
                 )}
                 <path
-                  d={edgePath(e.source, e.target, s, t)}
-                  stroke={sel ? "var(--accent)" : synthetic ? "rgba(200,180,255,0.55)" : "rgba(var(--accent-rgb),0.55)"}
-                  strokeWidth={sel ? 2.6 : synthetic ? 1.4 : 1.6}
-                  strokeDasharray={synthetic ? "5 4" : undefined}
+                  d={d}
+                  stroke={live ? "#7ff0c5" : sel ? "var(--accent)" : synthetic ? "rgba(200,180,255,0.55)" : "rgba(var(--accent-rgb),0.55)"}
+                  strokeWidth={live ? 2.8 : sel ? 2.6 : synthetic ? 1.4 : 1.6}
+                  strokeDasharray={live ? "10 6" : synthetic ? "5 4" : undefined}
+                  style={live ? { animation: "owllm-edge-flow 0.7s linear infinite" } : undefined}
                   fill="none"
                   markerEnd={sel ? "url(#graphArrowSel)" : "url(#graphArrow)"}
                 />

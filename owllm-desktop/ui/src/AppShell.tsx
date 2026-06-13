@@ -757,6 +757,25 @@ function SubTabs({
     }}>
       {leftTabs.map(renderTab)}
       <div style={{ flex: 1 }} />
+      {/* The Watcher — a guaranteed-clickable summon (P0-8). The decorative
+          top-center owl sits in a click-through overlay window whose face is
+          ABOVE this main window, so it can't reliably receive clicks; this
+          always-visible button is the dependable entry point. Dispatches a
+          window event AppShell listens for, so no prop threading. */}
+      <div
+        data-ui="WatcherButton"
+        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-watcher"))}
+        title="The Watcher — OWLLM's in-app support assistant"
+        style={{
+          padding: "5px 12px", borderRadius: 8, fontWeight: 700,
+          color: "var(--accent)", cursor: "pointer", userSelect: "none",
+          display: "flex", alignItems: "center", gap: 6,
+          border: "1px solid rgba(var(--accent-rgb),0.45)",
+          background: "rgba(var(--accent-rgb),0.10)",
+        }}
+      >
+        <span style={{ fontSize: 14 }}>🦉</span> Watcher
+      </div>
       <div
         data-ui="TutorialRecorderToggle"
         onClick={toggleTutorialRecorder}
@@ -932,6 +951,14 @@ export default function AppShell() {
     setWatcherHint(false);
     setWatcherOpen(true);
   };
+  // The always-visible "🦉 Watcher" chrome button (and any other surface)
+  // summons via this window event, so it never depends on the click-through
+  // owl's geometry.
+  useEffect(() => {
+    const h = () => openWatcher();
+    window.addEventListener("owllm:open-watcher", h as EventListener);
+    return () => window.removeEventListener("owllm:open-watcher", h as EventListener);
+  }, []);
 
   useEffect(() => {
     if (!isTauri()) return;

@@ -61,7 +61,8 @@ import {
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput } from "./localTools";
 import { isolationBadge } from "./isolationBadge";
-import { wslIsolationGet } from "./wslIsolation";
+import { wslIsolationGet, isWslPath } from "./wslIsolation";
+import { sandboxSyncLogins, sandboxConvertProject, mirrorReportLines } from "./isolation";
 import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
@@ -464,9 +465,75 @@ function LocationRow({
   onDeleteProject: () => void;
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
-  // Sandbox semantics: trust_writes=true → agent writes are trusted
-  // (NOT sandboxed); trust_writes=false → sandbox mode is on.
-  const sandboxText  = trustWrites ? "⚠️ Direct writes" : "🟢 Sandboxed";
+  const [actBusy, setActBusy] = useState<string | null>(null);
+
+  // VERIFY: run the exact probe the agents' shell runs, through the same
+  // tool_shell_exec + cwd, and report whether it executed in WSL or on the
+  // host. One probe answers it for every agent — they all route through the
+  // same cwd predicate, so if this is isolated, all of them are.
+  const verifyIsolation = async () => {
+    if (actBusy) return;
+    setActBusy("verify");
+    try {
+      const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
+        "tool_shell_exec",
+        { command: 'uname -a; echo "PWD=$(pwd)"; echo "USER=$(whoami)"', cwd: location || undefined },
+      );
+      const out = `${r.stdout}\n${r.stderr}`.trim();
+      const inWsl = /microsoft-standard-WSL2/i.test(out) || (/\bLinux\b/.test(r.stdout) && !/PWD=[A-Za-z]:\\/.test(out));
+      window.alert(
+        (inWsl
+          ? "✅ ISOLATED — agents run inside WSL (Linux); they cannot touch your Windows files.\nEvery agent shares this execution path, so they are ALL isolated."
+          : "⚠️ NOT ISOLATED — agents run on the Windows HOST.\nUse “🛡 Isolate” to copy the project into the sandbox.") +
+        "\n\n— probe output (the exact command an agent's shell runs) —\n\n" + (out || "(no output)"),
+      );
+    } catch (e) {
+      window.alert("Verify failed: " + String(e));
+    } finally { setActBusy(null); }
+  };
+
+  // SYNC: mirror the host GitHub/CLI logins INTO the sandbox so isolated
+  // agents are authenticated (fixes "agents don't see GitHub"). Mirrors the
+  // Code page's sync — git credentials + gh auth land inside the distro.
+  const syncLogins = async () => {
+    if (actBusy) return;
+    setActBusy("sync");
+    try {
+      const r = await sandboxSyncLogins(null);
+      const lines = mirrorReportLines(r);
+      const summary = r.synced.length
+        ? `✓ Synced into the sandbox: ${r.synced.join(", ")} — isolated agents are now authenticated.`
+        : r.found_on_host.length
+          ? `⚠ Found on Windows: ${r.found_on_host.join(", ")}, but nothing landed in the sandbox.`
+          : "Nothing to sync — sign in first (Home → GitHub, or a CLI on the Accounts page).";
+      window.alert(summary + (lines.length ? "\n\n" + lines.join("\n") : ""));
+    } catch (e) {
+      window.alert("Login sync failed: " + String(e));
+    } finally { setActBusy(null); }
+  };
+
+  // ISOLATE: copy the (host) project INTO the WSL sandbox and switch to the
+  // copy, so its cwd becomes a \\wsl.localhost\... path the shell router runs
+  // inside the distro. Mirrors the Code page's convert.
+  const isolate = async () => {
+    if (actBusy) return;
+    if (isWslPath(location)) { window.alert("Already isolated — this project lives inside WSL."); return; }
+    if (!location.trim()) { window.alert("Pick a project folder first."); return; }
+    if (!window.confirm("Copy this project INTO the Linux sandbox (isolated) and switch to the copy?\n\nThe original folder stays where it is. Run “🔑 Sync logins” afterwards so the agents are authenticated inside it.")) return;
+    setActBusy("isolate");
+    try {
+      const p = await sandboxConvertProject(location);
+      onChangeLocation(p.path);
+      window.alert(`✅ Isolated — now working in the sandbox:\n${p.path}\n\nNext: press “🔑 Sync logins” so GitHub/CLIs work inside it, then “🔍 Verify”.`);
+    } catch (e) {
+      window.alert("Convert failed: " + String(e));
+    } finally { setActBusy(null); }
+  };
+
+  // trust_writes=true → agent writes are trusted (no write confirm); false →
+  // writes go through the guard. This is about WRITES, not OS isolation — the
+  // isolation badge below is the source of truth for "runs in WSL".
+  const sandboxText  = trustWrites ? "⚠️ Direct writes" : "🔒 Guarded writes";
   const sandboxColor = trustWrites ? "#ffb56a" : "#5af09c";
   const sandboxBg    = trustWrites ? "#241a0e" : "#0e2418";
   const sandboxBorder= trustWrites ? "#5a3c2c" : "#2c5a3c";
@@ -497,6 +564,22 @@ function LocationRow({
             style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:iso.bg, color:iso.color, border:`1px solid ${iso.border}`, borderRadius:6, fontSize:11, fontWeight: iso.hostFallback ? 800 : 600, whiteSpace:"nowrap" }}
           >{iso.text}</span>
         );
+      })()}
+      {/* Isolation actions (parity with the Code page): Verify runs the exact
+          probe an agent's shell runs (WSL vs host); Isolate copies the project
+          into the sandbox; Sync mirrors GitHub/CLI logins into it. */}
+      {(() => {
+        const aBtn = (label: string, onClick: () => void, key: string, title: string) => (
+          <button
+            type="button" onClick={onClick} disabled={!!actBusy} title={title}
+            style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:"var(--bg-elevated)", color:"var(--fg-strong)", border:"1px solid var(--border-strong)", borderRadius:6, fontSize:11, fontWeight:700, whiteSpace:"nowrap", cursor: actBusy ? "wait" : "pointer", opacity: actBusy ? 0.6 : 1 }}
+          >{actBusy === key ? "⏳" : label}</button>
+        );
+        return (<>
+          {aBtn("🔍 Verify", verifyIsolation, "verify", "Run uname/pwd/whoami through the agents' own shell + cwd and show whether it executes in WSL or on the host.")}
+          {!isWslPath(location) && aBtn("🛡 Isolate", isolate, "isolate", "Copy this project into the WSL sandbox and switch to the isolated copy.")}
+          {aBtn("🔑 Sync logins", syncLogins, "sync", "Mirror your GitHub / CLI logins into the sandbox so isolated agents are authenticated.")}
+        </>);
       })()}
       <button
         data-ui="BridgeBadge"

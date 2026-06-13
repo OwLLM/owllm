@@ -306,31 +306,50 @@ async fn status_impl(profile: EnvProfile) -> Result<EnvProfileState, String> {
     tokio::task::spawn_blocking(move || -> Result<EnvProfileState, String> {
         // Resolve the SAME real-Linux distro the installer uses, so status
         // reflects where the env actually lives (not a Docker/system distro).
+        // No real distro at all → genuinely nowhere it could live → NotInstalled.
         let Some(distro) = crate::wsl::best_linux_distro() else {
             return Ok(EnvProfileState::NotInstalled);
         };
-        let Ok(home) = wsl_backend::wsl_home(&distro) else {
-            return Ok(EnvProfileState::NotInstalled);
-        };
-        let env = wsl_backend::env_dir(&home, &profile.name);
-        let python_exe = format!("{env}/bin/python");
-        // One round-trip: report the python's existence + the stamped hash,
-        // behind SENTINELS — a login-shell banner (MOTD / profile.d output)
-        // can precede the script's output, so positional line parsing would
-        // misread a banner line as the OK marker / hash (§0.5 discipline).
+        // ONE round-trip gets $HOME, the python's existence, and the stamped
+        // hash — behind SENTINELS (a login-shell MOTD / profile.d banner can
+        // precede our output, so never parse by line position). §0.5 cold-start
+        // discipline: a freshly-detected / cold WSL service returns empty for
+        // the first call(s); that is TRANSIENT, not "not installed". The script
+        // answers DEFINITIVELY (OWLLM_PY=OK or =NONE) — retry until we get that,
+        // and only decide then. Previously a single failed/empty call was read
+        // as NotInstalled and, because readiness is session-cached, it STUCK —
+        // so users saw "Not set up — install on Train" on an env they had
+        // installed many times, and reinstalled forever.
         let q = crate::wsl::sh_quote;
         let script = format!(
-            "if [ -x {py} ]; then printf 'OWLLM_PY=OK\\n'; printf 'OWLLM_HASH=%s\\n' \"$(cat {hf} 2>/dev/null)\"; else printf 'OWLLM_PY=NONE\\n'; fi",
-            py = q(&python_exe),
-            hf = q(&format!("{env}/.owllm_manifest.sha256")),
+            "printf 'OWLLM_HOME=%s\\n' \"$HOME\"; p={name}; env=\"$HOME/.owllm/envs/$p\"; \
+             if [ -x \"$env/bin/python\" ]; then printf 'OWLLM_PY=OK\\n'; \
+             printf 'OWLLM_HASH=%s\\n' \"$(cat \"$env/.owllm_manifest.sha256\" 2>/dev/null)\"; \
+             else printf 'OWLLM_PY=NONE\\n'; fi",
+            name = q(&profile.name),
         );
-        let out = crate::wsl::run_in_distro(&distro, &script).unwrap_or_default();
+        let mut out = String::new();
+        for delay in [0u64, 300, 700, 1200] {
+            if delay > 0 {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            out = crate::wsl::run_in_distro(&distro, &script).unwrap_or_default();
+            if out.contains("OWLLM_PY=") {
+                break; // definitive answer — stop retrying
+            }
+        }
         let find = |key: &str| -> Option<String> {
             out.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
         };
-        if find("OWLLM_PY=").as_deref() != Some("OK") {
-            return Ok(EnvProfileState::NotInstalled);
+        match find("OWLLM_PY=").as_deref() {
+            Some("NONE") => return Ok(EnvProfileState::NotInstalled),
+            Some("OK") => {}
+            // No definitive marker after retries → WSL never answered. Surface
+            // that honestly rather than a false "not installed".
+            _ => return Err("WSL did not respond to the env probe (cold start?) — press Refresh".to_string()),
         }
+        let home = find("OWLLM_HOME=").unwrap_or_default();
+        let python_exe = format!("{home}/.owllm/envs/{}/bin/python", profile.name);
         let installed_hash = find("OWLLM_HASH=").unwrap_or_default();
         let current_hash = profile_hash(&profile);
         if installed_hash != current_hash {

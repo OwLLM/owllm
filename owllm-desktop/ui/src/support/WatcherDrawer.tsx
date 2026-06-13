@@ -56,7 +56,16 @@ const WATCHER_PERSONA =
   "real state (readiness, hardware, server, WSL, modules). Help the user in plain language: likely cause, " +
   "immediate fix steps, whether it looks like a product bug, and minimal repro steps when relevant. " +
   "Be concise and concrete. If the snapshot already shows the answer (a ❌ row, a crashed server message), " +
-  "lead with it. Never invent state that isn't in the snapshot.";
+  "lead with it. Never invent state that isn't in the snapshot.\n\n" +
+  "KEY FACTS about what each readiness row actually gates — do NOT conflate them:\n" +
+  "• WSL → agent/Coder ISOLATION (the sandbox). Agents and the Code page run isolated INSIDE WSL. " +
+  "If WSL is OK, isolation is available — that is the only requirement for sandboxed agent runs.\n" +
+  "• 'Fine-tuning env' (the `env` row) → ONLY model TRAINING / fine-tuning on the Train page (a Python/torch venv). " +
+  "It is NOT required for agents, the Coder, isolation, Chat, or the model server. " +
+  "NEVER tell the user to 'install the environment on Train' to fix agents, isolation, chat, or serving — that env is irrelevant to them. " +
+  "If `env` is not set up but the user is asking about agents/isolation/Code, say it does not matter for that.\n" +
+  "• GPU / runtime → local model SERVING (llama.cpp). Needed to run local models, not for agent dispatch to cloud models.\n" +
+  "So a snapshot with WSL ✅ but `env` ⚠️ means: agents CAN run isolated; only fine-tuning is unavailable.";
 
 /// Human blurbs for the page the user is looking at — keyed by activeKey.
 const PAGE_BLURBS: Record<string, string> = {
@@ -123,6 +132,12 @@ export default function WatcherDrawer({
   // While capturing, the Watcher steps OUT of the shot (stays mounted,
   // visibility hidden) so the screenshot shows the app/bug BEHIND it.
   const [selfHidden, setSelfHidden] = React.useState(false);
+  // Note composer for "Report this as a bug": the entry being reported (e.g. a
+  // screenshot) and the user's own description. Without a note the report only
+  // carries the auto-caption ("Here's the capture…"), which the team can't act
+  // on — so clicking report opens this composer instead of sending blind.
+  const [reportingEntry, setReportingEntry] = React.useState<Entry | null>(null);
+  const [reportNote, setReportNote] = React.useState("");
 
   React.useEffect(() => {
     if (!open) return;
@@ -267,10 +282,16 @@ export default function WatcherDrawer({
   // "Check my setup" result, a diagnosis…) AS a bug. Packages that exact
   // content + the live diagnostics + any screenshot, redacts, and sends
   // straight to the OwLLM team's GitHub intake. No typing, no second screen.
-  const reportEntry = async (entry: Entry) => {
+  const reportEntry = async (entry: Entry, note?: string) => {
     if (busy) return;
     setBusy(true);
-    say("Report this as a bug", "you");
+    // The user's own description (from the note composer) is what the team
+    // reads first; the entry text (e.g. a screenshot caption) is just context.
+    const userNote = (note ?? "").trim();
+    say(userNote ? `🐞 Bug report: ${userNote}` : "Report this as a bug", "you");
+    const reportedMessage = userNote
+      ? `${userNote}\n\n— captured view: ${entry.text}`
+      : entry.text;
     const PNG_PREFIX = "data:image/png;base64,";
     const pngFromEntry = entry.imageDataUrl?.startsWith(PNG_PREFIX)
       ? entry.imageDataUrl.slice(PNG_PREFIX.length)
@@ -282,17 +303,20 @@ export default function WatcherDrawer({
         createdAt: new Date().toISOString(),
         appVersion: snapshot?.appVersion ?? "?",
         page: { activeKey, mode },
-        reportedMessage: entry.text,
+        userNote: userNote || null,
+        reportedMessage,
         hasScreenshot: pngFromEntry != null,
         snapshot,
         activity: getActivity(),
       };
       const json = redactForReport(JSON.stringify(bundle, null, 2));
-      const firstLine = (entry.text.split("\n").find((l) => l.trim()) || "In-app bug report").trim();
+      const titleSrc = userNote || entry.text;
+      const firstLine = (titleSrc.split("\n").find((l) => l.trim()) || "In-app bug report").trim();
       const title = firstLine.length > 70 ? firstLine.slice(0, 70) + "…" : firstLine;
       const body =
-        "**Reported from The Watcher (one-click):**\n\n" +
-        redactForReport(entry.text).slice(0, 2000) +
+        "**Reported from The Watcher.**\n\n" +
+        (userNote ? `**What the user reported:**\n\n${redactForReport(userNote)}\n\n` : "") +
+        "_Captured view:_ " + redactForReport(entry.text).slice(0, 600) +
         "\n\n---\n<details><summary>diagnostics snapshot</summary>\n\n```json\n" + json + "\n```\n</details>";
       const sent = await invoke<{ issueUrl: string; bundleUrl: string }>("support_send_report", {
         title, bodyMd: body, reportJson: json, pngBase64: pngFromEntry,
@@ -302,7 +326,7 @@ export default function WatcherDrawer({
       // GitHub not connected / network → save locally so it isn't lost.
       try {
         const dir = await invoke<string>("support_export_report", {
-          reportJson: redactForReport(JSON.stringify({ reportedMessage: entry.text }, null, 2)),
+          reportJson: redactForReport(JSON.stringify({ userNote: userNote || null, reportedMessage }, null, 2)),
           pngBase64: pngFromEntry,
         });
         say(`Couldn't send it directly (${e}).\n\nMost likely GitHub isn't connected — sign in on the Home page, then report again to send with one click. I saved a copy locally meanwhile:\n${dir}`);
@@ -584,9 +608,9 @@ export default function WatcherDrawer({
                 && !e.text.startsWith("(") && !e.text.startsWith("✅") && !e.text.startsWith("Report this")
                 && (e.imageDataUrl || e.text.trim().length > 20) && (
                 <button
-                  onClick={() => reportEntry(e)}
+                  onClick={() => { setReportingEntry(e); setReportNote(""); }}
                   disabled={busy}
-                  title="Send this exact content — plus diagnostics and any screenshot — to the OwLLM team as a bug, in one click."
+                  title="Describe what's wrong, then send this view + diagnostics + any screenshot to the OwLLM team."
                   style={{
                     marginTop: 9, display: "inline-flex", alignItems: "center", gap: 5,
                     padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 800,
@@ -599,6 +623,45 @@ export default function WatcherDrawer({
             </div>
           ))}
         </div>
+
+        {/* Note composer — opens when "Report this as a bug" is clicked so the
+            user describes the problem (otherwise a screenshot report carries
+            only the auto-caption, which the team can't act on). */}
+        {reportingEntry && (
+          <div style={{
+            margin: "0 14px", padding: 12, borderRadius: 10,
+            background: "var(--bg-elevated)", border: "1px solid rgba(var(--accent-rgb),0.45)",
+            display: "flex", flexDirection: "column", gap: 8,
+          }}>
+            <div style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-strong)" }}>
+              Describe the bug {reportingEntry.imageDataUrl ? "(screenshot attached 📸)" : ""}
+            </div>
+            <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+              What did you do, what did you expect, what happened? This is what the team reads first.
+            </div>
+            <textarea
+              value={reportNote}
+              onChange={(e) => setReportNote(e.target.value)}
+              autoFocus
+              rows={3}
+              placeholder="e.g. Agents won't run isolated even though WSL is ready — it tells me to install the training env, which makes no sense."
+              style={{
+                resize: "vertical", minHeight: 56, borderRadius: 8, padding: "8px 10px",
+                fontSize: 12.5, fontFamily: "inherit",
+                background: "var(--bg-input)", color: "var(--fg-strong)", border: "1px solid var(--border)",
+              }}
+            />
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <button
+                style={{ ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800, opacity: busy || !reportNote.trim() ? 0.5 : 1 }}
+                disabled={busy || !reportNote.trim()}
+                onClick={async () => { const ent = reportingEntry; const note = reportNote; setReportingEntry(null); setReportNote(""); await reportEntry(ent, note); }}
+                title="Send your description + this view + diagnostics + any screenshot to the OwLLM team."
+              >📤 Send report</button>
+              <button style={actionBtn} disabled={busy} onClick={() => { setReportingEntry(null); setReportNote(""); }}>Cancel</button>
+            </div>
+          </div>
+        )}
 
         {/* Model selector — the SAME shared ModelPicker every other surface
             uses (local models, tuned, subscriptions, API keys, Auto). The

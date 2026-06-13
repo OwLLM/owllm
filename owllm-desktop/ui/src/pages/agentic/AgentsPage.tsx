@@ -61,7 +61,7 @@ import {
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput } from "./localTools";
 import { isolationBadge } from "./isolationBadge";
-import { wslIsolationGet, isWslPath } from "./wslIsolation";
+import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject } from "./isolation";
 import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
@@ -442,7 +442,7 @@ function computeDepths(team: Team): Map<string, number> {
 function LocationRow({
   projects, selectedId, onChangeProject,
   teams, pickedTeamId, onPickTeam,
-  location, onChangeLocation, onBrowse,
+  location, effectiveCwd, onChangeLocation, onBrowse,
   trustWrites, onToggleTrustWrites,
   bridgeOn, isolationRequested,
   onNewProject, onRenameProject, onDeleteProject,
@@ -454,6 +454,10 @@ function LocationRow({
   pickedTeamId: string | null;
   onPickTeam: (id: string | null) => void;
   location: string;
+  /** The cwd agents ACTUALLY run in (Windows path mapped to its /mnt WSL form
+      when isolating in place). The badge + Verify use this so they reflect
+      reality, not the raw Windows path shown in the input. */
+  effectiveCwd: string;
   onChangeLocation: (v: string) => void;
   onBrowse: () => void;
   trustWrites: boolean;
@@ -479,7 +483,7 @@ function LocationRow({
     try {
       const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
         "tool_shell_exec",
-        { command: 'uname -a; echo "PWD=$(pwd)"; echo "USER=$(whoami)"', cwd: location || undefined },
+        { command: 'uname -a; echo "PWD=$(pwd)"; echo "USER=$(whoami)"', cwd: effectiveCwd || undefined },
       );
       const out = `${r.stdout}\n${r.stderr}`.trim();
       const inWsl = /microsoft-standard-WSL2/i.test(out) || (/\bLinux\b/.test(r.stdout) && !/PWD=[A-Za-z]:\\/.test(out));
@@ -554,7 +558,7 @@ function LocationRow({
           LOUD red when isolation is requested but this location runs on the
           host (sandbox failed/unavailable). */}
       {(() => {
-        const iso = isolationBadge(location, isolationRequested);
+        const iso = isolationBadge(effectiveCwd, isolationRequested);
         return (
           <span
             data-ui="IsolationBadge"
@@ -575,7 +579,7 @@ function LocationRow({
         );
         return (<>
           {aBtn("🔍 Verify", verifyIsolation, "verify", "Run uname/pwd/whoami through the agents' own shell + cwd and show whether it executes in WSL or on the host.")}
-          {!isWslPath(location) && aBtn("🛡 Isolate", isolate, "isolate", "Copy this project into the WSL sandbox and switch to the isolated copy. Your GitHub / CLI logins are mirrored in automatically.")}
+          {!isWslPath(effectiveCwd) && aBtn("🛡 Isolate", isolate, "isolate", "Copy this project into the WSL sandbox (a sealed Linux copy). Not needed if the badge already says Isolated — that means agents already run in WSL on your real folder.")}
         </>);
       })()}
       <button
@@ -6431,8 +6435,17 @@ export default function AgentsPage() {
   // isolation badge: host location + isolation requested = loud red
   // "HOST — NOT isolated" (P1-1), because the run would NOT be sandboxed.
   const [isolationRequested, setIsolationRequested] = useState<boolean>(false);
+  // The default distro, so a Windows-folder project can run IN PLACE inside WSL
+  // via its /mnt mount (no copy) — see runCwd below + winToWslMountUnc.
+  const [wslDistro, setWslDistro] = useState<string | null>(null);
   useEffect(() => {
-    wslIsolationGet().then((i) => setIsolationRequested(!!i.enabled)).catch(() => {});
+    // Default to isolated whenever WSL is available — the user expects new
+    // projects to auto-isolate, not start on the host.
+    wslIsolationGet().then((i) => { if (i.enabled) setIsolationRequested(true); }).catch(() => {});
+    wslStatus().then((s) => {
+      setWslDistro(s.defaultDistro);
+      if (s.available && s.defaultDistro) setIsolationRequested(true);
+    }).catch(() => {});
   }, []);
   const [trustWritesOverride, setTrustWritesOverride] = useState<boolean | null>(null);
   /// Optional override of the project's team_default_model_id. When
@@ -6879,6 +6892,18 @@ export default function AgentsPage() {
   }, []);
 
   const selectedProject = projects.find(p => p.id === selectedProjectId) ?? null;
+
+  // The cwd agents actually run in — the single source of truth for the run
+  // AND the isolation badge. "Isolate in place": a Windows-folder project runs
+  // INSIDE WSL via its /mnt mount (the real files, no copy) whenever isolation
+  // is on and a distro exists; an explicit \\wsl.localhost\ path is used as-is;
+  // otherwise the raw host path. So a user who picked C:\repo gets isolated
+  // agents on C:\repo without ever copying it into the sandbox.
+  const rawLocation = (locationOverride || selectedProject?.location || "").trim();
+  const runCwd =
+    isolationRequested && wslDistro && !isWslPath(rawLocation)
+      ? (winToWslMountUnc(rawLocation, wslDistro) ?? rawLocation)
+      : rawLocation;
 
   // Hydrate per-agent icon overrides on project switch. Cheap one-pass
   // read of localStorage; lives next to selectedProject so it's not in
@@ -7377,7 +7402,7 @@ export default function AgentsPage() {
           0.3,
           supSendAbort.signal,
           (delta) => { criticReview += delta; streamLog(CRITIC_NAME, delta); },
-          (locationOverride || selectedProject?.location || "").trim(),
+          runCwd,
           priorHistory,
           autoApprove,
           (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
@@ -7496,7 +7521,7 @@ export default function AgentsPage() {
         // Pin the Claude CLI subscription path (and any future tool-
         // capable backend) to the user's project location instead of
         // letting it inherit the desktop install dir.
-        (locationOverride || selectedProject?.location || "").trim(),
+        runCwd,
         priorHistory,
         autoApprove,
         // Surface thinking + tool-call deltas to the right-pane Thought
@@ -7907,7 +7932,7 @@ export default function AgentsPage() {
     // Project location feeds the Claude CLI's --cwd so the bot runs
     // against the directory the user picked in the LocationRow, not
     // the desktop app's install dir. Empty / unset → CLI inherits cwd.
-    const projectCwd = (locationOverride || selectedProject?.location || "").trim();
+    const projectCwd = runCwd;
 
     // Load BRIEF.md if the brainstormer wrote one for this project.
     // Best-effort: missing file is silent (legacy behaviour), so
@@ -8856,6 +8881,7 @@ export default function AgentsPage() {
         pickedTeamId={pickedTeamId}
         onPickTeam={setPickedTeamId}
         location={locationOverride}
+        effectiveCwd={runCwd}
         onChangeLocation={setLocationOverride}
         onBrowse={onBrowseProjectFolder}
         trustWrites={trustWrites}
@@ -8879,7 +8905,7 @@ export default function AgentsPage() {
         // Brainstorm needs a project location to anchor BRIEF.md +
         // brainstorm/<png>. Disable the button (null callback) when no
         // location is set so the title attribute explains why.
-        onBrainstorm={(locationOverride || selectedProject?.location || "").trim()
+        onBrainstorm={runCwd
           ? () => setBrainstormOpen(true)
           : null}
         hasBrief={hasBriefForProject}
@@ -8916,7 +8942,7 @@ export default function AgentsPage() {
       <BrainstormPanel
         open={brainstormOpen}
         onClose={() => setBrainstormOpen(false)}
-        projectCwd={(locationOverride || selectedProject?.location || "").trim()}
+        projectCwd={runCwd}
         brainstormerRole={roleByName.get("brainstormer") ?? null}
         // Use the team's default model. Fallback to the orchestrator's
         // model, which respects per-agent overrides. Brainstormer is

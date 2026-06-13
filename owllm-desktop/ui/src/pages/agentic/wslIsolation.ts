@@ -43,6 +43,23 @@ export function isWslPath(p: string | null | undefined): boolean {
   return n.startsWith("\\\\wsl.localhost\\") || n.startsWith("\\\\wsl$\\");
 }
 
+/// Map a Windows path to its WSL drive-mount UNC form so the SAME shell router
+/// runs agents INSIDE the distro on the user's REAL Windows folder — no copy.
+/// `C:\Users\me\proj` → `\\wsl.localhost\<distro>\mnt\c\Users\me\proj`
+/// (WSL mounts the Windows drives at /mnt/<drive>). Returns null if the input
+/// isn't a plain Windows drive path or no distro is known. This is "isolate in
+/// place": Linux process + toolchain + write-jail, operating on the live repo.
+export function winToWslMountUnc(winPath: string | null | undefined, distro: string | null | undefined): string | null {
+  if (!winPath || !distro) return null;
+  const m = winPath.match(/^([A-Za-z]):[\\/](.*)$/);
+  if (!m) return null;
+  const drive = m[1].toLowerCase();
+  const rest = m[2].replace(/\//g, "\\").replace(/^\\+/, "").replace(/\\+$/, "");
+  return rest
+    ? `\\\\wsl.localhost\\${distro}\\mnt\\${drive}\\${rest}`
+    : `\\\\wsl.localhost\\${distro}\\mnt\\${drive}`;
+}
+
 export async function wslStatus(): Promise<WslStatus> {
   try {
     return await invoke<WslStatus>("wsl_status");

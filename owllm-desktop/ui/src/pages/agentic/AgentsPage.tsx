@@ -63,6 +63,7 @@ import { stripFabricatedToolOutput } from "./localTools";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet } from "./wslIsolation";
 import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
+import { worldEmit } from "../world/worldBus";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
 
 // Native tool_call shape harvested by consumeOpenAISse from
@@ -6425,6 +6426,7 @@ export default function AgentsPage() {
   // a single string; the change is essential for the parallel flow.
   const [activeAgents, setActiveAgents] = useState<Set<string>>(new Set());
   const addActive = (name: string) => {
+    worldEmit({ kind: "agent-start", agent: name }); // 2.5D HQ tap (P0-1)
     setActiveAgents(prev => {
       if (prev.has(name)) return prev;
       const next = new Set(prev);
@@ -6433,6 +6435,7 @@ export default function AgentsPage() {
     });
   };
   const removeActive = (name: string) => {
+    worldEmit({ kind: "agent-end", agent: name }); // 2.5D HQ tap (P0-1)
     setActiveAgents(prev => {
       if (!prev.has(name)) return prev;
       const next = new Set(prev);
@@ -6448,7 +6451,13 @@ export default function AgentsPage() {
   const activeAgent: string | null = activeAgents.size > 0
     ? Array.from(activeAgents)[activeAgents.size - 1]
     : null;
-  const [phase, setPhase] = useState<DispatchPhase>("idle");
+  const [phase, setPhaseRaw] = useState<DispatchPhase>("idle");
+  // Phase setter wrapped so the 2.5D HQ hears run completion through the
+  // SAME stream this page already drives (P0-1 — never a second stream).
+  const setPhase = (p: DispatchPhase) => {
+    if (p === "done") worldEmit({ kind: "run-finish" });
+    setPhaseRaw(p);
+  };
 
   // Canvas view mode — three states (user spec 2026-05-28):
   //   "diagram" → live orbital animation (TeamCanvas)
@@ -7092,6 +7101,10 @@ export default function AgentsPage() {
   // orchestrator's dispatch directives; tool-call / extended-thinking
   // channels can slot in later without changing the consumer.
   const appendThought = (agent: string, msg: GoalMsg) => {
+    // 2.5D HQ tap (P0-1): thoughts/dispatches become speech bubbles.
+    if (msg.text && msg.text.trim()) {
+      worldEmit({ kind: "thought", agent, text: msg.text, role: msg.role });
+    }
     setAgentThoughts(prev => {
       const next = new Map(prev);
       const cur = next.get(agent) ?? [];

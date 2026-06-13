@@ -1,17 +1,10 @@
-﻿import StubPage from "../../core/StubPage";
+// Gamify — the 2.5D RPG HQ (P0-1). The old Three.js-playground stub is
+// superseded by the deliberately-2.5D world: static scene art (or a
+// procedural room until the art ships) + animated agent sprites, speech
+// bubbles, XP, scene unlocks and the quest board, all driven by the
+// EXISTING agentic dispatch stream. See docs/BUILD_PLAN Appendix A.
+import WorldPage from "../world/WorldPage";
 
-// Qt: main.py — Gamify hosts the merged 3D playground (characters
-// + arena). Renders a Three.js scene with custom characters, NPCs,
-// and quest UI. Heavy work; would benefit from a Web-Worker render
-// pipeline.
 export default function GamifyPage() {
-  return (
-    <StubPage spec={{
-      icon: "🎮",
-      ownlPng: "/Page_icons/owl_studio_square.png",
-      title: "Gamify",
-      blurb: "3D playground: custom characters + scripted scenarios + quests. Replaces the legacy Characters/Arena split. Native impl will render via Three.js (or a Rust wgpu canvas) — Tauri webview handles it directly, no Python in the loop.",
-      qtRef: "LLM/desktop_app/main.py merged Gamify toggle (Characters + Arena)",
-    }} />
-  );
+  return <WorldPage />;
 }

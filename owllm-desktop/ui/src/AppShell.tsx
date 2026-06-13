@@ -575,25 +575,30 @@ function ModeBar({
       {onWatcher && (
         <button
           data-ui="WatcherSummon"
-          onClick={onWatcher}
+          // CRITICAL: stop the mousedown from bubbling to AppHeader's
+          // startDrag — otherwise pressing the owl starts a window-drag and
+          // the click never fires (that was why the owl "did nothing").
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => { e.stopPropagation(); onWatcher(); }}
           title="The Watcher — OWLLM's support assistant (click the owl)"
           className="owllm-watcher-summon"
           style={{
             position: "absolute",
             left: "50%", top: 0,
             transform: "translateX(-50%)",
-            width: 260, height: 64,
+            width: 300, height: 80,
             border: "none", background: "transparent",
             cursor: "pointer", zIndex: 6, padding: 0,
           }}
         />
       )}
-      <style>{`.owllm-watcher-summon:hover { background: radial-gradient(ellipse at 50% 30%, rgba(var(--accent-rgb),0.22), transparent 70%) !important; }`}</style>
+      <style>{`.owllm-watcher-summon:hover { background: radial-gradient(ellipse at 50% 26%, rgba(var(--accent-rgb),0.28), transparent 68%) !important; }`}</style>
 
       {/* OWLLM title — absolutely positioned to the window centre. Also a
           Watcher summon when wired (the owl sits directly above it). */}
       <div
         data-ui="AppTitle"
+        onMouseDown={(e) => { if (onWatcher) e.stopPropagation(); }}
         onClick={onWatcher}
         title={onWatcher ? "The Watcher — OWLLM's support assistant" : undefined}
         style={{
@@ -757,25 +762,6 @@ function SubTabs({
     }}>
       {leftTabs.map(renderTab)}
       <div style={{ flex: 1 }} />
-      {/* The Watcher — a guaranteed-clickable summon (P0-8). The decorative
-          top-center owl sits in a click-through overlay window whose face is
-          ABOVE this main window, so it can't reliably receive clicks; this
-          always-visible button is the dependable entry point. Dispatches a
-          window event AppShell listens for, so no prop threading. */}
-      <div
-        data-ui="WatcherButton"
-        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-watcher"))}
-        title="The Watcher — OWLLM's in-app support assistant"
-        style={{
-          padding: "5px 12px", borderRadius: 8, fontWeight: 700,
-          color: "var(--accent)", cursor: "pointer", userSelect: "none",
-          display: "flex", alignItems: "center", gap: 6,
-          border: "1px solid rgba(var(--accent-rgb),0.45)",
-          background: "rgba(var(--accent-rgb),0.10)",
-        }}
-      >
-        <span style={{ fontSize: 14 }}>🦉</span> Watcher
-      </div>
       <div
         data-ui="TutorialRecorderToggle"
         onClick={toggleTutorialRecorder}

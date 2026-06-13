@@ -454,18 +454,23 @@ export default function WatcherDrawer({
         // During a capture we vanish (but stay mounted) so the screenshot
         // shows the app/bug behind us, not this drawer.
         visibility: selfHidden ? "hidden" : "visible",
+        // Flex-center the drawer WITHOUT a transform — a transformed
+        // ancestor would make the ModelPicker's position:fixed popover
+        // anchor to the drawer (and get clipped by its overflow:hidden)
+        // instead of the screen. That was the hidden/misaligned dropdown.
+        display: "flex", justifyContent: "center", alignItems: "flex-start",
       }}
     >
       <style>{`
-        @keyframes owllm-watcher-in { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+        @keyframes owllm-watcher-in { from { opacity: 0; } to { opacity: 1; } }
       `}</style>
       <div style={{
-        position: "absolute", top: 64, left: "50%", transform: "translateX(-50%)",
+        marginTop: 64,
         width: "min(560px, 92%)", maxHeight: "min(620px, 82%)",
         background: "var(--bg-panel)", border: "2px solid rgba(var(--accent-rgb),0.78)",
         borderRadius: 14, boxShadow: "0 24px 64px rgba(0,0,0,0.55)",
         display: "flex", flexDirection: "column", overflow: "hidden",
-        animation: "owllm-watcher-in 220ms ease-out",
+        animation: "owllm-watcher-in 200ms ease-out",
       }}>
         <div style={{
           height: 50, background: "var(--bg-header)", color: "var(--bg-header-fg)",

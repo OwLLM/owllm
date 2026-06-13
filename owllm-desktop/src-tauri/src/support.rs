@@ -26,6 +26,11 @@ pub struct SupportSnapshot {
     /// Guided-WSL-setup stage + detail ("ready", "needsUser", …).
     pub wsl_stage: String,
     pub wsl_detail: String,
+    /// RAW WSL distro list as the app's own probe sees it (`wsl -l -q`,
+    /// system distros included). The single most useful line for diagnosing
+    /// the recurring "WSL installed but app says not installed" reports —
+    /// e.g. `["docker-desktop"]` means there's no real Linux, only Docker's.
+    pub wsl_distros: Vec<String>,
     /// Installed module ids (e.g. local-inference, python-runtime).
     pub modules: Vec<String>,
 }
@@ -363,6 +368,7 @@ pub async fn support_snapshot(app: tauri::AppHandle) -> Result<SupportSnapshot, 
         server,
         wsl_stage: wsl.stage,
         wsl_detail: wsl.detail,
+        wsl_distros: crate::wsl::wsl_status().distros,
         modules,
     })
 }

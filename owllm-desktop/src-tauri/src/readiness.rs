@@ -78,6 +78,13 @@ fn probe_wsl() -> ReadinessRow {
             warn: true,
             detail: "Installed — reboot to finish · Set up WSL".to_string(),
         },
+        "needsDistro" => ReadinessRow {
+            // WSL IS installed — it just only has Docker's distro, not a real
+            // Linux. Say so honestly instead of the old "Not installed" lie.
+            ok: false,
+            warn: true,
+            detail: "WSL installed (Docker only) — add Ubuntu · Set up WSL".to_string(),
+        },
         "virtualizationOff" => ReadinessRow {
             ok: false,
             warn: false,

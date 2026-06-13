@@ -200,11 +200,24 @@ mod imp {
         // out: "virtualization is not enabled on this machine".
         let virtualization_enabled = !lower.contains("virtualization is not enabled");
 
-        // Resolve through best_linux_distro: a Docker/system distro (no bash)
-        // doesn't count as a usable fine-tuning/sandbox distro. If only those
-        // exist we treat it as "not installed" so the flow offers Ubuntu.
-        let default_distro = crate::wsl::best_linux_distro();
+        // Resolve through one probe: a Docker/system distro (no bash) doesn't
+        // count as a usable fine-tuning/sandbox distro. We mirror
+        // best_linux_distro() here off a SINGLE wsl_status() call (fewer
+        // wsl.exe spawns = less cold-start exposure) so we can also tell the
+        // "no WSL at all" case apart from "WSL is here, but only Docker's".
+        let ws = crate::wsl::wsl_status();
+        let default_distro: Option<String> = ws
+            .default_distro
+            .clone()
+            .filter(|d| !crate::wsl::is_system_distro(d))
+            .or_else(|| ws.distros.iter().find(|d| !crate::wsl::is_system_distro(d)).cloned());
         let distro_installed = default_distro.is_some();
+        // WSL itself is present (it lists distros) but every one of them is a
+        // system distro (docker-desktop/rancher/podman) — a stripped busybox
+        // userland that can't run bash/apt/uv. This is NOT "WSL not installed";
+        // the user just needs a real Linux (Ubuntu). Reporting it as "not
+        // installed" is what made detection look broken on Docker-only PCs.
+        let system_distro_only = !distro_installed && !ws.distros.is_empty();
         let awaiting_reboot = super::install_marker_present();
 
         // Can we actually RUN a command in the distro? A distro can be
@@ -249,6 +262,14 @@ mod imp {
             (
                 "needsReboot",
                 "WSL was installed but Windows needs a restart to turn on the Virtual Machine Platform. Reboot, then re-check.".to_string(),
+            )
+        } else if system_distro_only {
+            // WSL is installed and working — but the only distro is Docker
+            // Desktop's, which can't run fine-tuning or the sandbox. Add Ubuntu
+            // (WSL2/VM platform is already on, so no reboot needed).
+            (
+                "needsDistro",
+                "WSL is installed, but the only Linux in it is Docker Desktop's — a stripped-down userland with no bash/apt, so fine-tuning and the agent sandbox can't run there. Add Ubuntu (one click, no reboot needed).".to_string(),
             )
         } else if !distro_installed {
             (

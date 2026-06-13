@@ -319,7 +319,7 @@ fn sanitize_project_name(name: &str) -> String {
 /// (which needs `bash -lc`, apt, uv) can't run in them. Docker Desktop and
 /// Rancher/Podman register these as the *default* WSL distro on many PCs,
 /// which made the env install die with `/bin/sh: bash: not found` (exit 127).
-fn is_system_distro(name: &str) -> bool {
+pub(crate) fn is_system_distro(name: &str) -> bool {
     let l = name.to_lowercase();
     l.contains("docker-desktop") || l.starts_with("rancher") || l.contains("podman")
 }

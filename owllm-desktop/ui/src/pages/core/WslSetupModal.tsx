@@ -13,7 +13,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 type WslSetupStatus = {
-  stage: "virtualizationOff" | "needsInstall" | "needsReboot" | "needsUser" | "needsPython" | "ready" | "unsupported";
+  stage: "virtualizationOff" | "needsInstall" | "needsDistro" | "needsReboot" | "needsUser" | "needsPython" | "ready" | "unsupported";
   virtualizationEnabled: boolean;
   distroInstalled: boolean;
   defaultDistro: string | null;
@@ -227,6 +227,24 @@ export default function WslSetupModal({
             </p>
             <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
               {btn(busy === "install" ? "Launching…" : "🚀 Install WSL + Ubuntu", install, { primary: true })}
+            </div>
+          </div>
+        );
+      case "needsDistro":
+        return (
+          <div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--fg-strong)" }}>
+              Add Ubuntu — WSL is here, but only Docker's distro
+            </div>
+            <p style={{ color: "var(--fg)", fontSize: 14, lineHeight: 1.6 }}>
+              WSL <b>is</b> installed and working on this PC — but the only Linux in it is
+              <b> Docker Desktop's</b> distro, a stripped-down userland with no <code>bash</code>,
+              <code> apt</code>, or <code>uv</code>. Fine-tuning and the agent sandbox can't run there.
+              One click installs <b>Ubuntu</b> alongside it — the Virtual Machine Platform is already
+              on, so <b>no reboot is needed</b>. We create the Linux user for you afterwards.
+            </p>
+            <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
+              {btn(busy === "install" ? "Installing Ubuntu…" : "🐧 Add Ubuntu", install, { primary: true })}
             </div>
           </div>
         );

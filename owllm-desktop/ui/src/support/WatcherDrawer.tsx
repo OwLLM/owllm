@@ -263,6 +263,57 @@ export default function WatcherDrawer({
     }
   };
 
+  // ONE-CLICK report of a specific Watcher message (the screenshot, the
+  // "Check my setup" result, a diagnosis…) AS a bug. Packages that exact
+  // content + the live diagnostics + any screenshot, redacts, and sends
+  // straight to the OwLLM team's GitHub intake. No typing, no second screen.
+  const reportEntry = async (entry: Entry) => {
+    if (busy) return;
+    setBusy(true);
+    say("Report this as a bug", "you");
+    const PNG_PREFIX = "data:image/png;base64,";
+    const pngFromEntry = entry.imageDataUrl?.startsWith(PNG_PREFIX)
+      ? entry.imageDataUrl.slice(PNG_PREFIX.length)
+      : (lastCapture.current?.pngBase64 ?? null);
+    try {
+      const snapshot = await invoke<SupportSnapshot>("support_snapshot").catch(() => null);
+      const bundle = {
+        kind: "owllm-bug-report",
+        createdAt: new Date().toISOString(),
+        appVersion: snapshot?.appVersion ?? "?",
+        page: { activeKey, mode },
+        reportedMessage: entry.text,
+        hasScreenshot: pngFromEntry != null,
+        snapshot,
+        activity: getActivity(),
+      };
+      const json = redactForReport(JSON.stringify(bundle, null, 2));
+      const firstLine = (entry.text.split("\n").find((l) => l.trim()) || "In-app bug report").trim();
+      const title = firstLine.length > 70 ? firstLine.slice(0, 70) + "…" : firstLine;
+      const body =
+        "**Reported from The Watcher (one-click):**\n\n" +
+        redactForReport(entry.text).slice(0, 2000) +
+        "\n\n---\n<details><summary>diagnostics snapshot</summary>\n\n```json\n" + json + "\n```\n</details>";
+      const sent = await invoke<{ issueUrl: string; bundleUrl: string }>("support_send_report", {
+        title, bodyMd: body, reportJson: json, pngBase64: pngFromEntry,
+      });
+      say(`✅ Sent to the OwLLM team — they (and the AI fixer) can see it here:\n${sent.issueUrl}`);
+    } catch (e) {
+      // GitHub not connected / network → save locally so it isn't lost.
+      try {
+        const dir = await invoke<string>("support_export_report", {
+          reportJson: redactForReport(JSON.stringify({ reportedMessage: entry.text }, null, 2)),
+          pngBase64: pngFromEntry,
+        });
+        say(`Couldn't send it directly (${e}).\n\nMost likely GitHub isn't connected — sign in on the Home page, then report again to send with one click. I saved a copy locally meanwhile:\n${dir}`);
+      } catch (e2) {
+        say(`Couldn't send the report (${e}) and the local fallback also failed (${e2}).`);
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Local-only activity stats (Slice 4): product events only — counts of
   // pages visited, installs, server starts, tool failures. View + clear.
   const showActivity = () => {
@@ -524,6 +575,26 @@ export default function WatcherDrawer({
                   alt="app capture preview"
                   style={{ display: "block", marginTop: 8, maxWidth: "100%", borderRadius: 8, border: "1px solid var(--border-strong)" }}
                 />
+              )}
+              {/* One-click: report THIS message (screenshot / setup check /
+                  diagnosis) as a bug, straight to the OwLLM team. Shown on
+                  substantive Watcher messages (not the greeting, transient
+                  status lines, or the live-streaming tail). */}
+              {e.from === "watcher" && i > 0 && !(e as Entry & { _live?: boolean })._live
+                && !e.text.startsWith("(") && !e.text.startsWith("✅") && !e.text.startsWith("Report this")
+                && (e.imageDataUrl || e.text.trim().length > 20) && (
+                <button
+                  onClick={() => reportEntry(e)}
+                  disabled={busy}
+                  title="Send this exact content — plus diagnostics and any screenshot — to the OwLLM team as a bug, in one click."
+                  style={{
+                    marginTop: 9, display: "inline-flex", alignItems: "center", gap: 5,
+                    padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 800,
+                    border: "1px solid rgba(var(--accent-rgb),0.45)",
+                    background: "rgba(var(--accent-rgb),0.10)",
+                    color: "var(--accent)", cursor: busy ? "wait" : "pointer",
+                  }}
+                >🐞 Report this as a bug</button>
               )}
             </div>
           ))}

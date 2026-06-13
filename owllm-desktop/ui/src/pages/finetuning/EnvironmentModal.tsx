@@ -259,7 +259,21 @@ export default function EnvironmentModal({
             <div style={{ color: "var(--fg-muted)", fontSize: 13 }}>No environments available.</div>
           )}
 
+          {/* Which one? Most users (and modest GPUs) want Unsloth. */}
+          {profiles.length > 1 && (
+            <div style={{
+              fontSize: 12, lineHeight: 1.6, color: "var(--fg)",
+              background: "rgba(var(--accent-rgb),0.08)", border: "1px solid rgba(var(--accent-rgb),0.35)",
+              borderRadius: 10, padding: "10px 12px",
+            }}>
+              <b>Not sure which to install?</b> Pick <b>⭐ Unsloth</b> — it's faster and uses much less
+              VRAM (best on modest GPUs), and supports the popular models (Llama, Mistral, Gemma, Qwen, Phi).
+              Choose <b>Standard</b> if your model isn't supported by Unsloth or you want maximum compatibility.
+            </div>
+          )}
+
           {profiles.map((p) => {
+            const recommended = p.name === "unsloth";
             const s = status[p.name] ?? null;
             const known = p.name in status; // has the status probe resolved?
             const busy = isInstalling(p.name);
@@ -276,10 +290,17 @@ export default function EnvironmentModal({
                 borderRadius: 12, padding: 14,
                 background: isSel ? "rgba(var(--accent-rgb),0.06)" : "var(--bg-card)",
               }}>
-                <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                  <div style={{ fontSize: 15, fontWeight: 700, color: "var(--fg-strong)", flex: 1 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <div style={{ fontSize: 15, fontWeight: 700, color: "var(--fg-strong)" }}>
                     {p.display}
                   </div>
+                  {recommended && (
+                    <span style={{
+                      fontSize: 10.5, fontWeight: 800, color: "#04231a",
+                      background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", borderRadius: 999, padding: "2px 9px", whiteSpace: "nowrap",
+                    }}>⭐ Recommended</span>
+                  )}
+                  <span style={{ flex: 1 }} />
                   <span style={{
                     fontSize: 11, fontWeight: 700, color: pill.color,
                     border: `1px solid ${pill.color}`, borderRadius: 999, padding: "2px 10px",

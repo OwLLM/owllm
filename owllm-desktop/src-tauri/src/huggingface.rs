@@ -1142,8 +1142,16 @@ pub async fn hf_cache_list() -> Result<HfCacheSummary, String> {
 #[tauri::command]
 pub async fn hf_cache_delete(path: String) -> Result<u64, String> {
     let target = PathBuf::from(&path);
-    let canon_target = std::fs::canonicalize(&target)
-        .map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let canon_target = match std::fs::canonicalize(&target) {
+        Ok(c) => c,
+        // ALREADY GONE = success, not failure. In the HF cache, deleting one
+        // repo removes blobs/dirs that another selected entry pointed at, so by
+        // the time we reach that entry its path no longer exists (os error 3 /
+        // NotFound) — same for a dangling symlink. Reporting these as "N
+        // delete(s) failed" was wrong; the goal ("this is gone") is met.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(format!("canonicalize {path}: {e}")),
+    };
     let roots = known_delete_roots();
     let under_a_root = roots.iter().any(|r| {
         let canon_root = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
@@ -1161,7 +1169,15 @@ pub async fn hf_cache_delete(path: String) -> Result<u64, String> {
         ));
     }
     let (size, _) = dir_size_recursive(&canon_target);
-    std::fs::remove_dir_all(&canon_target)
-        .map_err(|e| format!("remove_dir_all {}: {e}", canon_target.display()))?;
-    Ok(size)
+    let res = if canon_target.is_dir() {
+        std::fs::remove_dir_all(&canon_target)
+    } else {
+        std::fs::remove_file(&canon_target)
+    };
+    match res {
+        Ok(()) => Ok(size),
+        // Lost a race with an earlier delete in the batch — also success.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(format!("delete {}: {e}", canon_target.display())),
+    }
 }

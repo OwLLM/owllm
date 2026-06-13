@@ -865,8 +865,10 @@ export default function ModelsPage() {
         </div>
         )}
       </div>
-      </div>
-
+      {/* The status/error banner lives INSIDE the sticky toolbar so it stacks
+          BELOW the tabs instead of overlapping them. (It used to be a separate
+          sticky top:0 sibling at a higher z-index, so a long "Deleting … cache"
+          message painted over the tab row — bug #7.) */}
       {hfError && (
         <div
           onClick={() => setHfError(null)}
@@ -882,16 +884,15 @@ export default function ModelsPage() {
                   ? "error"
                   : "info"
             ),
-            position: "sticky",
-            top: 0,
-            zIndex: 50,
-            marginBottom: 10,
+            marginTop: 2,
             cursor: "pointer",
           }}
         >
           {hfError.startsWith("✅") || hfError.startsWith("❌") || hfError.startsWith("📦") ? "" : "⚠ "}{hfError}
         </div>
       )}
+      </div>
+
       {downloadProgress.size > 0 && (
         <div data-ui="DownloadProgressBanner" style={{
           position:"sticky", top: hfError ? 56 : 0, zIndex:49,

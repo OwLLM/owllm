@@ -263,6 +263,7 @@ pub fn run() {
             support::support_snapshot,
             support::support_capture_window,
             support::support_export_report,
+            support::support_send_report,
             env_manager::env_profiles_list,
             env_manager::env_profile_status,
             env_manager::env_profile_install,

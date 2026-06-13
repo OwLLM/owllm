@@ -207,6 +207,135 @@ pub async fn support_export_report(
     Ok(dir.to_string_lossy().into_owned())
 }
 
+/// The team intake repo for in-app bug reports. Private; reports arrive as
+/// issues (label `auto-report`) plus the raw redacted bundle committed under
+/// reports/<stamp>/.
+const BUG_REPORT_REPO: &str = "OwLLM/bug-reports";
+
+/// Where a submitted report landed, so the UI can link the user straight to it.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SentReport {
+    pub issue_url: String,
+    pub bundle_url: String,
+}
+
+/// SEND a redacted bug report straight to the OwLLM team's GitHub intake
+/// (one click — no save-and-forward). Commits report.json (+ optional
+/// screenshot.png) under reports/<stamp>/ and opens an issue referencing
+/// them. Uses the user's connected GitHub token (device-local; never
+/// embedded). The caller has already redacted + previewed the bundle.
+#[tauri::command]
+pub async fn support_send_report(
+    title: String,
+    body_md: String,
+    report_json: String,
+    png_base64: Option<String>,
+) -> Result<SentReport, String> {
+    use base64::Engine as _;
+    let token = crate::accounts::accounts_get_secret("GITHUB_TOKEN".to_string()).ok_or_else(|| {
+        "Connect GitHub first (Home → sign in) so the Watcher can send reports to the OwLLM team."
+            .to_string()
+    })?;
+    let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+    let dir = format!("reports/{stamp}");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .user_agent("owllm-desktop")
+        .build()
+        .map_err(|e| format!("http client: {e}"))?;
+
+    // 1) Commit the redacted report bundle.
+    let report_b64 = base64::engine::general_purpose::STANDARD.encode(report_json.as_bytes());
+    gh_put_file(&client, &token, &format!("{dir}/report.json"), &report_b64, &format!("report {stamp}"))
+        .await
+        .map_err(|e| format!("couldn't upload the report to the OwLLM team repo: {e}"))?;
+
+    let mut shot_line = String::new();
+    if let Some(png) = png_base64.filter(|s| !s.is_empty()) {
+        // png_base64 is already base64 of the PNG bytes — the Contents API
+        // wants exactly that.
+        gh_put_file(&client, &token, &format!("{dir}/screenshot.png"), &png, &format!("screenshot {stamp}"))
+            .await
+            .map_err(|e| format!("report uploaded but screenshot failed: {e}"))?;
+        shot_line = format!(
+            "\n📸 Screenshot: [`{dir}/screenshot.png`](https://github.com/{repo}/blob/main/{dir}/screenshot.png)\n",
+            repo = BUG_REPORT_REPO,
+        );
+    }
+
+    // 2) Open the issue referencing the bundle.
+    let bundle_url = format!("https://github.com/{}/tree/main/{}", BUG_REPORT_REPO, dir);
+    let body = format!(
+        "{body_md}\n\n---\n📦 Full redacted bundle: [`{dir}/`]({bundle_url}){shot_line}",
+    );
+    let issue_url = gh_create_issue(&client, &token, &title, &body).await?;
+    Ok(SentReport { issue_url, bundle_url })
+}
+
+/// PUT a file into the bug-report repo via the GitHub Contents API.
+async fn gh_put_file(
+    client: &reqwest::Client,
+    token: &str,
+    path: &str,
+    content_b64: &str,
+    message: &str,
+) -> Result<(), String> {
+    let url = format!("https://api.github.com/repos/{}/contents/{}", BUG_REPORT_REPO, path);
+    let resp = client
+        .put(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&serde_json::json!({ "message": message, "content": content_b64 }))
+        .send()
+        .await
+        .map_err(|e| format!("network: {e}"))?;
+    if resp.status().is_success() {
+        return Ok(());
+    }
+    let code = resp.status();
+    let msg = resp
+        .json::<serde_json::Value>()
+        .await
+        .ok()
+        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+        .unwrap_or_else(|| "unknown error".into());
+    Err(format!("GitHub {code}: {msg}"))
+}
+
+/// Open an issue in the bug-report repo. Returns its html_url.
+async fn gh_create_issue(
+    client: &reqwest::Client,
+    token: &str,
+    title: &str,
+    body: &str,
+) -> Result<String, String> {
+    let url = format!("https://api.github.com/repos/{}/issues", BUG_REPORT_REPO);
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {token}"))
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .json(&serde_json::json!({ "title": title, "body": body, "labels": ["auto-report"] }))
+        .send()
+        .await
+        .map_err(|e| format!("network: {e}"))?;
+    if !resp.status().is_success() {
+        let code = resp.status();
+        let msg = resp
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
+            .unwrap_or_else(|| "unknown error".into());
+        return Err(format!("opened the bundle but couldn't create the issue — GitHub {code}: {msg}"));
+    }
+    let v: serde_json::Value = resp.json().await.map_err(|e| format!("parse issue: {e}"))?;
+    v.get("html_url")
+        .and_then(|u| u.as_str())
+        .map(String::from)
+        .ok_or_else(|| "issue created but no URL returned".to_string())
+}
+
 #[tauri::command]
 pub async fn support_snapshot(app: tauri::AppHandle) -> Result<SupportSnapshot, String> {
     let readiness = crate::readiness::app_readiness().await.unwrap_or_default();

@@ -375,21 +375,39 @@ export default function WatcherDrawer({
     }
   };
 
-  // Bug report (Slice 6): describe → assemble → REDACT → preview → explicit
-  // save. Default path is PRIVATE: a local export bundle — nothing is
-  // transmitted anywhere; the user shares the folder however they choose.
+  // Bug report: describe → assemble → REDACT → preview → ONE-CLICK SEND to
+  // the OwLLM team's GitHub intake (issue + committed bundle the team and
+  // the AI fixer can screen). Redaction runs before the preview; the user
+  // sees exactly what goes, then sends. Local save is only a fallback when
+  // sending fails (e.g. GitHub not connected).
+  const reportTitleRef = React.useRef<string>("");
   const reportBug = async () => {
     if (reportArmed && reportPreview.current) {
-      // Second click = explicit consent to SAVE the previewed bundle.
+      // Second click = explicit consent → SEND to the team.
       setBusy(true);
       try {
-        const dir = await invoke<string>("support_export_report", {
+        const sent = await invoke<{ issueUrl: string; bundleUrl: string }>("support_send_report", {
+          title: reportTitleRef.current || "In-app bug report",
+          bodyMd: reportPreview.current.json
+            ? "```json\n" + reportPreview.current.json + "\n```"
+            : "(no diagnostics)",
           reportJson: reportPreview.current.json,
           pngBase64: reportPreview.current.png,
         });
-        say(`Saved the report bundle to:\n${dir}\n\nNothing was transmitted — share that folder with the OWLLM team however you prefer (or delete it).`);
+        say(
+          `✅ Sent to the OwLLM team. They (and the AI fixer) can see it here:\n${sent.issueUrl}\n\nThanks — that's exactly what they need to reproduce and fix it.`,
+        );
       } catch (e) {
-        say(`Saving the report failed: ${e}`);
+        // Fallback: save locally so the report isn't lost.
+        try {
+          const dir = await invoke<string>("support_export_report", {
+            reportJson: reportPreview.current.json,
+            pngBase64: reportPreview.current.png,
+          });
+          say(`I couldn't send it directly (${e}).\n\nSo I saved it locally instead, at:\n${dir}\n\nMost likely GitHub isn't connected yet — sign in on the Home page and try again to send with one click.`);
+        } catch (e2) {
+          say(`Sending failed (${e}) and the local fallback also failed (${e2}).`);
+        }
       } finally {
         reportPreview.current = null;
         setReportArmed(false);
@@ -400,9 +418,10 @@ export default function WatcherDrawer({
     const description = draft.trim();
     if (!description) {
       say("Report a bug", "you");
-      say("Type what went wrong in the box below (what you did, what you expected, what happened), then press “Report a bug” again. I'll assemble a redacted bundle and show you EXACTLY what it contains before anything is saved.");
+      say("Type what went wrong in the box below (what you did, what you expected, what happened), then press “Report a bug” again. I'll assemble a redacted report and show you EXACTLY what gets sent before anything leaves.");
       return;
     }
+    reportTitleRef.current = description.length > 70 ? description.slice(0, 70) + "…" : description;
     say(`Report a bug: ${description}`, "you");
     setBusy(true);
     setDraft("");
@@ -424,12 +443,12 @@ export default function WatcherDrawer({
       const json = redactForReport(JSON.stringify(bundle, null, 2));
       reportPreview.current = { json, png: lastCapture.current?.pngBase64 ?? null };
       setReportArmed(true);
-      const shown = json.length > 5000 ? `${json.slice(0, 5000)}\n… (${json.length - 5000} more chars — the full text is what gets saved)` : json;
+      const shown = json.length > 5000 ? `${json.slice(0, 5000)}\n… (${json.length - 5000} more chars — the full text is what gets sent)` : json;
       say(
-        "Here is EXACTLY what the report bundle contains (already redacted — keys, tokens and home paths are scrubbed):\n\n" +
+        "Here is EXACTLY what gets sent to the OwLLM team (already redacted — keys, tokens and home paths are scrubbed):\n\n" +
         shown +
-        (lastCapture.current ? "\n\n+ the app capture you took (preview above)." : "\n\nNo screenshot attached — use “Capture current app” first if you want one.") +
-        "\n\nPress “Report a bug” again to SAVE this as a local bundle (nothing is sent anywhere), or just keep chatting to discard it.",
+        (lastCapture.current ? "\n\n+ the app screenshot below." : "\n\nNo screenshot attached — use “Capture current app” first if you want one included.") +
+        "\n\nPress “Send to OwLLM” to submit it as a GitHub issue the team can act on, or keep chatting to discard it.",
         "watcher",
         lastCapture.current ? `data:image/png;base64,${lastCapture.current.pngBase64}` : undefined,
       );
@@ -570,11 +589,11 @@ export default function WatcherDrawer({
           >📦 Get a model</button>
           <button style={actionBtn} disabled={busy} onClick={wipeActivity} title="Wipe the local activity counters">🧹 Clear</button>
           <button
-            style={reportArmed ? { ...actionBtn, background: "linear-gradient(180deg, #ffb74d, #f59e0b)", color: "#241a05", fontWeight: 800 } : actionBtn}
+            style={reportArmed ? { ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800 } : actionBtn}
             disabled={busy}
             onClick={reportBug}
-            title="Assembles a redacted bundle (description + diagnostics + activity + optional capture), shows you exactly what's in it, and only saves locally on a second click. Nothing is ever auto-sent."
-          >{reportArmed ? "💾 Save report bundle" : "🐞 Report a bug"}</button>
+            title="Assembles a redacted report (description + diagnostics + activity + optional screenshot), shows you exactly what gets sent, and on a second click submits it straight to the OwLLM team as a GitHub issue they can act on."
+          >{reportArmed ? "📤 Send to OwLLM" : "🐞 Report a bug"}</button>
         </div>
       </div>
     </div>

@@ -16,7 +16,7 @@
 // (src-tauri/src/hardware.rs) — no Python, no console popups.
 // Software requirements remain placeholders until they have their
 // own native probes (Python interpreter / PyTorch / CUDA / deps).
-import React, { useEffect, useReducer, useRef, useState } from "react";
+import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import WslSetupModal from "./WslSetupModal";
 import { openSyncOnboarding } from "./AccountSyncModal";
@@ -453,7 +453,11 @@ export default function HomePage() {
   useEffect(() => { fetchReadiness(false); }, []);
   const ready = getCachedReadiness();
   const readyLoading = isReadinessLoading();
-  const refreshReady = () => { fetchReadiness(true); };
+  // Stable identity: this is passed as `onChanged` to WslSetupModal /
+  // EnvironmentModal, which feed it into effect deps. An inline (per-render)
+  // function there causes an infinite refresh loop. fetchReadiness is a stable
+  // module import, so [] deps are safe.
+  const refreshReady = useCallback(() => { fetchReadiness(true); }, []);
 
   // Self-heal a post-upgrade cold start: if WSL reads as not-ready on the
   // first probe (the WSL service is still warming after the app restarted),

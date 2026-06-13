@@ -53,16 +53,25 @@ export default function WslSetupModal({
   const [password, setPassword] = useState("owllm");
   const [showPw, setShowPw] = useState(false);
 
+  // Keep the latest onChanged in a ref so `refresh` can stay STABLE. If
+  // `refresh` depended on onChanged's identity and the parent passed an inline
+  // function (HomePage's `refreshReady` is recreated every render), refresh
+  // would change every render → the open-effect below re-fires → onChanged() →
+  // parent re-renders → new onChanged → … an infinite loop that flashes the
+  // readiness "Checking" tag and makes this modal's buttons unresponsive.
+  const onChangedRef = useRef(onChanged);
+  onChangedRef.current = onChanged;
+
   const refresh = useCallback(async () => {
     setErr(null);
     try {
       const s = await invoke<WslSetupStatus>("wsl_setup_status");
       setStatus(s);
-      onChanged?.();
+      onChangedRef.current?.();
     } catch (e) {
       setErr(String(e));
     }
-  }, [onChanged]);
+  }, []);
 
   useEffect(() => {
     if (open) {

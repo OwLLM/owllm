@@ -9,7 +9,7 @@
 
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { getActivity, clearActivity, activityLines } from "./activityStats";
+import { getActivity } from "./activityStats";
 import { redactForReport } from "./redact";
 // Model discovery + dispatch: the SAME machinery the rest of the app uses
 // (shared ModelPicker catalogue + the shared dispatch paths) — never a
@@ -66,9 +66,6 @@ const WATCHER_PERSONA =
   "If `env` is not set up but the user is asking about agents/isolation/Code, say it does not matter for that.\n" +
   "• GPU / runtime → local model SERVING (llama.cpp). Needed to run local models, not for agent dispatch to cloud models.\n" +
   "So a snapshot with WSL ✅ but `env` ⚠️ means: agents CAN run isolated; only fine-tuning is unavailable.";
-
-/// Full getting-started guide on GitHub (opened from the onboarding button).
-const GETTING_STARTED_URL = "https://github.com/ruigro/LLM-Studio/blob/main/docs/GETTING_STARTED.md";
 
 /// Human blurbs for the page the user is looking at — keyed by activeKey.
 const PAGE_BLURBS: Record<string, string> = {
@@ -343,23 +340,6 @@ export default function WatcherDrawer({
 
   // Local-only activity stats (Slice 4): product events only — counts of
   // pages visited, installs, server starts, tool failures. View + clear.
-  const showActivity = () => {
-    say("Show my activity stats", "you");
-    const s = getActivity();
-    const since = new Date(s.since).toLocaleString();
-    say(
-      `Local activity since ${since} (product events only — no prompts, files, or keys; never sent anywhere):\n` +
-      activityLines(s).join("\n") +
-      "\n\nSay the word (the Clear button below) and I'll forget all of it.",
-    );
-  };
-
-  const wipeActivity = () => {
-    clearActivity();
-    say("Clear activity stats", "you");
-    say("Done — activity counters wiped. A fresh window starts now.");
-  };
-
   // First-run onboarding: explain the essentials (a model = a brain, then run
   // a team) and open the full GitHub guide. The text is plain (the chat renders
   // pre-wrap, not markdown), so no ** or links inside.
@@ -370,11 +350,10 @@ export default function WatcherDrawer({
       "1) GIVE YOUR AGENTS A BRAIN (a model). Two ways — you can do either, or both:\n" +
       "   • Connect a subscription (Accounts page): Claude, OpenAI, Gemini, or Kimi. Uses an AI plan you already pay for — no GPU needed. Click Test after connecting. Easiest.\n" +
       "   • Run a local model: download a GGUF on the Models page, then start it on the Server page. Private, offline, runs on your own hardware.\n\n" +
-      "2) (RECOMMENDED) TURN ON ISOLATION. On the Home page, set up WSL so agents run sandboxed in Linux and can't touch your Windows files. Your GitHub/CLI logins mirror in automatically.\n\n" +
+      "2) (RECOMMENDED) TURN ON ISOLATION. On the Home page, set up WSL so agents run sandboxed in Linux and can't touch your Windows files. On the Agents page, press 🛡 Isolate — your GitHub/CLI logins mirror in automatically.\n\n" +
       "3) RUN A TEAM. Agents page → point at a project folder, type a goal, hit Run.\n\n" +
-      "Opening the full guide (with the details) on GitHub now…",
+      "Ask me anything below — “how do I connect Claude?”, “why won't my model start?” — I read your live app state and walk you through it.",
     );
-    invoke("shell_open_url", { url: GETTING_STARTED_URL }).catch(() => {});
   };
 
   /// Free-text AI support: snapshot as grounding, auto-chosen model,
@@ -731,14 +710,12 @@ export default function WatcherDrawer({
           <button style={actionBtn} disabled={busy} onClick={whatPage}>📍 What page am I on?</button>
           <button style={actionBtn} disabled={busy} onClick={checkSetup}>{busy ? "⏳ Checking…" : "🩺 Check my setup"}</button>
           <button style={actionBtn} disabled={busy} onClick={captureApp} title="Captures THIS app window only (in-app popups included). Never other windows or monitors. Shown to you first; nothing is sent.">📸 Capture current app</button>
-          <button style={actionBtn} disabled={busy} onClick={showActivity} title="Local-only product-event counters (pages, installs, tool failures). View here, clear any time. Never sent.">📊 Activity</button>
           <button
             style={actionBtn}
             disabled={busy}
             onClick={onboard}
-            title="New to OwLLM? The essentials to get a working agent — connect a subscription or run a local model — plus the full guide on GitHub."
+            title="New to OwLLM? The essentials to get a working agent — connect a subscription or run a local model."
           >🆕 I'm new here — help me onboard</button>
-          <button style={actionBtn} disabled={busy} onClick={wipeActivity} title="Wipe the local activity counters">🧹 Clear</button>
           <button
             style={reportArmed ? { ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800 } : actionBtn}
             disabled={busy}

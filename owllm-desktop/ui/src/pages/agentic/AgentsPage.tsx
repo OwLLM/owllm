@@ -62,7 +62,7 @@ import {
 import { stripFabricatedToolOutput } from "./localTools";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath } from "./wslIsolation";
-import { sandboxSyncLogins, sandboxConvertProject, mirrorReportLines } from "./isolation";
+import { sandboxSyncLogins, sandboxConvertProject } from "./isolation";
 import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
@@ -466,14 +466,16 @@ function LocationRow({
 }) {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [actBusy, setActBusy] = useState<string | null>(null);
+  // Non-blocking status banner — every wait shows visible progress here (no
+  // frozen-looking app, no blocking alert/confirm for results).
+  const [actMsg, setActMsg] = useState<string | null>(null);
 
-  // VERIFY: run the exact probe the agents' shell runs, through the same
-  // tool_shell_exec + cwd, and report whether it executed in WSL or on the
-  // host. One probe answers it for every agent — they all route through the
-  // same cwd predicate, so if this is isolated, all of them are.
+  // VERIFY: run the exact probe an agent's shell runs (same tool_shell_exec +
+  // cwd) and report WSL vs host. One probe answers it for the whole team.
   const verifyIsolation = async () => {
     if (actBusy) return;
     setActBusy("verify");
+    setActMsg("🔍 Running the probe through an agent's own shell…");
     try {
       const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
         "tool_shell_exec",
@@ -481,52 +483,48 @@ function LocationRow({
       );
       const out = `${r.stdout}\n${r.stderr}`.trim();
       const inWsl = /microsoft-standard-WSL2/i.test(out) || (/\bLinux\b/.test(r.stdout) && !/PWD=[A-Za-z]:\\/.test(out));
-      window.alert(
+      setActMsg(
         (inWsl
-          ? "✅ ISOLATED — agents run inside WSL (Linux); they cannot touch your Windows files.\nEvery agent shares this execution path, so they are ALL isolated."
-          : "⚠️ NOT ISOLATED — agents run on the Windows HOST.\nUse “🛡 Isolate” to copy the project into the sandbox.") +
-        "\n\n— probe output (the exact command an agent's shell runs) —\n\n" + (out || "(no output)"),
+          ? "✅ ISOLATED — agents run inside WSL (Linux); all agents share this path, so they are all isolated."
+          : "⚠️ NOT ISOLATED — agents run on the Windows host. Press 🛡 Isolate to move the project into the sandbox.") +
+        "\n\nProbe output (the exact command an agent's shell runs):\n" + (out || "(no output)"),
       );
     } catch (e) {
-      window.alert("Verify failed: " + String(e));
+      setActMsg("Verify failed: " + String(e));
     } finally { setActBusy(null); }
   };
 
-  // SYNC: mirror the host GitHub/CLI logins INTO the sandbox so isolated
-  // agents are authenticated (fixes "agents don't see GitHub"). Mirrors the
-  // Code page's sync — git credentials + gh auth land inside the distro.
-  const syncLogins = async () => {
-    if (actBusy) return;
-    setActBusy("sync");
-    try {
-      const r = await sandboxSyncLogins(null);
-      const lines = mirrorReportLines(r);
-      const summary = r.synced.length
-        ? `✓ Synced into the sandbox: ${r.synced.join(", ")} — isolated agents are now authenticated.`
-        : r.found_on_host.length
-          ? `⚠ Found on Windows: ${r.found_on_host.join(", ")}, but nothing landed in the sandbox.`
-          : "Nothing to sync — sign in first (Home → GitHub, or a CLI on the Accounts page).";
-      window.alert(summary + (lines.length ? "\n\n" + lines.join("\n") : ""));
-    } catch (e) {
-      window.alert("Login sync failed: " + String(e));
-    } finally { setActBusy(null); }
+  // Mirror host GitHub/CLI logins INTO the sandbox. Runs AUTOMATICALLY after
+  // isolate (no button) so isolated agents are authenticated without the user
+  // ever having to think about it.
+  const mirrorLogins = async (): Promise<string> => {
+    const r = await sandboxSyncLogins(null);
+    return r.synced.length
+      ? `logins synced into the sandbox: ${r.synced.join(", ")}`
+      : r.found_on_host.length
+        ? `found on Windows (${r.found_on_host.join(", ")}) but none landed in the sandbox`
+        : "no logins to mirror yet (connect GitHub on Home, or a CLI on Accounts)";
   };
 
-  // ISOLATE: copy the (host) project INTO the WSL sandbox and switch to the
-  // copy, so its cwd becomes a \\wsl.localhost\... path the shell router runs
-  // inside the distro. Mirrors the Code page's convert.
+  // ISOLATE: copy the (host) project INTO the WSL sandbox, switch to the copy
+  // (cwd becomes \\wsl.localhost\... → the shell router runs inside the distro),
+  // and auto-mirror logins. Visible progress throughout — no silent freeze.
   const isolate = async () => {
     if (actBusy) return;
-    if (isWslPath(location)) { window.alert("Already isolated — this project lives inside WSL."); return; }
-    if (!location.trim()) { window.alert("Pick a project folder first."); return; }
-    if (!window.confirm("Copy this project INTO the Linux sandbox (isolated) and switch to the copy?\n\nThe original folder stays where it is. Run “🔑 Sync logins” afterwards so the agents are authenticated inside it.")) return;
+    if (isWslPath(location)) { setActMsg("Already isolated — this project lives inside WSL."); return; }
+    if (!location.trim()) { setActMsg("Pick a project folder first (Browse…)."); return; }
+    if (!window.confirm("Copy this project INTO the Linux sandbox and switch to the copy?\n\nThe original folder stays where it is. A large repo can take a minute — the app stays responsive and shows progress.")) return;
     setActBusy("isolate");
+    setActMsg("🛡 Copying the project into the Linux sandbox… this can take a minute for a large repo. The app stays responsive — you'll see the result here.");
     try {
       const p = await sandboxConvertProject(location);
       onChangeLocation(p.path);
-      window.alert(`✅ Isolated — now working in the sandbox:\n${p.path}\n\nNext: press “🔑 Sync logins” so GitHub/CLIs work inside it, then “🔍 Verify”.`);
+      setActMsg("🔑 Isolated. Mirroring your GitHub / CLI logins into the sandbox…");
+      let syncMsg: string;
+      try { syncMsg = await mirrorLogins(); } catch (e) { syncMsg = "login mirror skipped: " + String(e); }
+      setActMsg(`✅ Isolated + ${syncMsg}.\nNow working in: ${p.path}\nAgents run in WSL — press 🔍 Verify to confirm.`);
     } catch (e) {
-      window.alert("Convert failed: " + String(e));
+      setActMsg("Convert failed: " + String(e));
     } finally { setActBusy(null); }
   };
 
@@ -577,8 +575,7 @@ function LocationRow({
         );
         return (<>
           {aBtn("🔍 Verify", verifyIsolation, "verify", "Run uname/pwd/whoami through the agents' own shell + cwd and show whether it executes in WSL or on the host.")}
-          {!isWslPath(location) && aBtn("🛡 Isolate", isolate, "isolate", "Copy this project into the WSL sandbox and switch to the isolated copy.")}
-          {aBtn("🔑 Sync logins", syncLogins, "sync", "Mirror your GitHub / CLI logins into the sandbox so isolated agents are authenticated.")}
+          {!isWslPath(location) && aBtn("🛡 Isolate", isolate, "isolate", "Copy this project into the WSL sandbox and switch to the isolated copy. Your GitHub / CLI logins are mirrored in automatically.")}
         </>);
       })()}
       <button
@@ -618,6 +615,18 @@ function LocationRow({
               </div>
             </button>
           ))}
+        </div>
+      )}
+      {/* Non-blocking status banner for Verify / Isolate — visual feedback for
+          every wait (the convert can take a minute; never freeze silently). */}
+      {(actBusy || actMsg) && (
+        <div style={{ position:"absolute", top:"100%", left:0, right:0, marginTop:6, zIndex:40, background:"var(--bg-panel)", border:"1px solid rgba(var(--accent-rgb),0.5)", borderRadius:10, padding:"10px 12px", display:"flex", gap:10, alignItems:"flex-start", boxShadow:"0 8px 30px rgba(0,0,0,0.5)", fontSize:12.5, color:"var(--fg)", whiteSpace:"pre-wrap", lineHeight:1.5 }}>
+          {actBusy && <span style={{ flexShrink:0, animation:"owllm-spin 1s linear infinite", display:"inline-block" }}>⏳</span>}
+          <div style={{ flex:1, minWidth:0 }}>{actMsg}</div>
+          {!actBusy && actMsg && (
+            <button onClick={() => setActMsg(null)} title="Dismiss" style={{ flexShrink:0, border:"none", background:"transparent", color:"var(--fg-muted)", cursor:"pointer", fontSize:14, lineHeight:1 }}>✕</button>
+          )}
+          <style>{`@keyframes owllm-spin { to { transform: rotate(360deg); } }`}</style>
         </div>
       )}
     </div>

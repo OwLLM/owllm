@@ -108,6 +108,7 @@ export default function WatcherDrawer({
   // crashes React with error #310 (caught by the release smoke test).
   const lastCapture = React.useRef<WindowCapture | null>(null);
   const reportPreview = React.useRef<{ json: string; png: string | null } | null>(null);
+  const reportTitleRef = React.useRef<string>("");
   const [reportArmed, setReportArmed] = React.useState(false);
   // User-chosen model via the SHARED ModelPicker (same catalogue as every
   // other surface — local models, tuned, subscriptions, API keys, Auto).
@@ -380,7 +381,6 @@ export default function WatcherDrawer({
   // the AI fixer can screen). Redaction runs before the preview; the user
   // sees exactly what goes, then sends. Local save is only a fallback when
   // sending fails (e.g. GitHub not connected).
-  const reportTitleRef = React.useRef<string>("");
   const reportBug = async () => {
     if (reportArmed && reportPreview.current) {
       // Second click = explicit consent → SEND to the team.

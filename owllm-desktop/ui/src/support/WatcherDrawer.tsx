@@ -14,7 +14,7 @@ import { redactForReport } from "./redact";
 // Model discovery + dispatch: the SAME machinery the rest of the app uses
 // (shared ModelPicker catalogue + the shared dispatch paths) — never a
 // parallel model list (P0-8 Slice 5).
-import { buildEntries, type AccountsStatusLite } from "../pages/agentic/ModelPicker";
+import ModelPicker, { buildEntries, type AccountsStatusLite } from "../pages/agentic/ModelPicker";
 import {
   streamLocalChat,
   streamChatCompletion,
@@ -47,7 +47,7 @@ type ServerStatusT = { running: boolean; model_id: string | null; port: number |
 /// How the Watcher will answer an AI question.
 type ModelChoice =
   | { kind: "local"; modelId: string; port: number; label: string }
-  | { kind: "cloud"; modelId: string; provider: string; label: string }
+  | { kind: "cloud"; modelId: string; provider: string; label: string; preconsented?: boolean }
   | { kind: "local-cold"; label: string }   // local models exist, server not running
   | { kind: "none" };
 
@@ -109,6 +109,19 @@ export default function WatcherDrawer({
   const lastCapture = React.useRef<WindowCapture | null>(null);
   const reportPreview = React.useRef<{ json: string; png: string | null } | null>(null);
   const [reportArmed, setReportArmed] = React.useState(false);
+  // User-chosen model via the SHARED ModelPicker (same catalogue as every
+  // other surface — local models, tuned, subscriptions, API keys, Auto).
+  // Empty = the Watcher's default policy (running local first). Persisted.
+  const [pickedModel, setPickedModel] = React.useState<string>(() => {
+    try { return localStorage.getItem("owllm:watcher:model") ?? ""; } catch { return ""; }
+  });
+  const pickModel = (id: string) => {
+    setPickedModel(id);
+    try { localStorage.setItem("owllm:watcher:model", id); } catch { /* ignore */ }
+  };
+  // While capturing, the Watcher steps OUT of the shot (stays mounted,
+  // visibility hidden) so the screenshot shows the app/bug BEHIND it.
+  const [selfHidden, setSelfHidden] = React.useState(false);
 
   React.useEffect(() => {
     if (!open) return;
@@ -118,10 +131,26 @@ export default function WatcherDrawer({
     return () => { abortRef.current?.abort(); };
   }, [open]);
 
-  /// Pick a model with the app's own discovery: a RUNNING local model wins
-  /// (private + free); else the first available cloud entry (subscription
-  /// before API key); else say what's missing. Never silently cloud.
+  /// Resolve which model answers. An EXPLICIT user pick (shared ModelPicker)
+  /// wins; otherwise the default policy: a running local model first (private
+  /// + free), else the first available cloud entry (subscription before API
+  /// key), else say what's missing. Never silently cloud.
   const chooseModel = (): ModelChoice => {
+    const entries = buildEntries(models, accounts);
+    // 1) Explicit user choice from the picker.
+    if (pickedModel) {
+      const prov = providerFor(pickedModel, models);
+      const label = entries.find((e) => e.id === pickedModel)?.label ?? pickedModel;
+      if (prov === "local" || prov === "tuned") {
+        if (server?.running && server.model_id) {
+          return { kind: "local", modelId: server.model_id, port: server.port ?? 0, label: `${server.model_id} (local)` };
+        }
+        return { kind: "local-cold", label };
+      }
+      // cloud / subscription / API / auto — explicitly chosen ⇒ pre-consented.
+      return { kind: "cloud", modelId: pickedModel, provider: prov, label, preconsented: true };
+    }
+    // 2) Default policy.
     if (server?.running && server.model_id) {
       return {
         kind: "local",
@@ -130,7 +159,6 @@ export default function WatcherDrawer({
         label: `${server.model_id} (local — private, free)`,
       };
     }
-    const entries = buildEntries(models, accounts);
     const cloud =
       entries.find((e) => e.available && e.variant === "sub") ??
       entries.find((e) => e.available && e.variant === "api");
@@ -209,16 +237,25 @@ export default function WatcherDrawer({
   const captureApp = async () => {
     say("Capture current app", "you");
     setBusy(true);
+    // Step the Watcher OUT of the shot first — otherwise the capture is
+    // just this drawer covering the app, and the bug behind is invisible.
+    // We stay mounted (visibility:hidden) and wait for the webview to
+    // repaint without us, then capture, then come back.
+    setSelfHidden(true);
     try {
+      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+      await new Promise((r) => setTimeout(r, 180));
       const c = await invoke<WindowCapture>("support_capture_window");
       lastCapture.current = c;
+      setSelfHidden(false);
       say(
-        `Here's the capture (${c.width}×${c.height}, this window only — not included: ${c.notCaptured}). ` +
+        `Here's the capture (${c.width}×${c.height}) — the app as it was, with the Watcher stepped out of the way so the actual screen shows through. Not included: ${c.notCaptured}. ` +
         "It stays on this device unless you attach it to a report later.",
         "watcher",
         `data:image/png;base64,${c.pngBase64}`,
       );
     } catch (e) {
+      setSelfHidden(false);
       say(`I couldn't capture the window: ${e}`);
     } finally {
       setBusy(false);
@@ -267,11 +304,13 @@ export default function WatcherDrawer({
       );
       return;
     }
-    if (choice.kind === "cloud" && pendingCloud.current !== text) {
+    // Cloud egress needs one confirmation — UNLESS the user explicitly
+    // picked this cloud model in the dropdown (that pick IS the consent).
+    if (choice.kind === "cloud" && !choice.preconsented && pendingCloud.current !== text) {
       pendingCloud.current = text;
       say(
         `No local model is running, so I'd use ${choice.label} — a CLOUD model: your question and the app snapshot ` +
-        "would leave this device. Press Send again (or Enter) to confirm, or start a local model instead.",
+        "would leave this device. Press Send again (or Enter) to confirm, or pick a model below / start a local one.",
       );
       setDraft(text);
       return;
@@ -410,7 +449,12 @@ export default function WatcherDrawer({
   return (
     <div
       onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
-      style={{ position: "fixed", inset: 0, zIndex: 9600, background: "rgba(0,0,0,0.45)" }}
+      style={{
+        position: "fixed", inset: 0, zIndex: 9600, background: "rgba(0,0,0,0.45)",
+        // During a capture we vanish (but stay mounted) so the screenshot
+        // shows the app/bug behind us, not this drawer.
+        visibility: selfHidden ? "hidden" : "visible",
+      }}
     >
       <style>{`
         @keyframes owllm-watcher-in { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
@@ -461,10 +505,35 @@ export default function WatcherDrawer({
           ))}
         </div>
 
-        {/* Free-text AI support (Slice 5). The model is auto-chosen with the
-            app's own discovery (running local first); cloud requires one
-            explicit confirmation, with the model/provider named first. */}
-        <div style={{ display: "flex", gap: 8, padding: "10px 14px 0", alignItems: "center" }}>
+        {/* Model selector — the SAME shared ModelPicker every other surface
+            uses (local models, tuned, subscriptions, API keys, Auto). The
+            user's pick is honored verbatim; "Auto" falls back to the default
+            policy (running local first). */}
+        <div style={{ display: "flex", gap: 8, padding: "8px 14px 0", alignItems: "center" }}>
+          <span style={{ fontSize: 11, color: "var(--fg-muted)", fontWeight: 700, whiteSpace: "nowrap" }}>Model</span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <ModelPicker
+              value={pickedModel}
+              onChange={pickModel}
+              models={models}
+              status={accounts}
+              placeholder="Auto (running local first)"
+              fallbackLabel="⚡ Auto (running local first)"
+            />
+          </div>
+          {pickedModel && (
+            <button
+              onClick={() => pickModel("")}
+              title="Back to automatic model choice"
+              style={{ ...actionBtn, padding: "5px 9px", fontSize: 11 }}
+            >Auto</button>
+          )}
+        </div>
+
+        {/* Free-text AI support (Slice 5). Uses the model chosen above (or
+            the default policy); cloud egress is confirmed once unless you
+            explicitly picked a cloud model. */}
+        <div style={{ display: "flex", gap: 8, padding: "8px 14px 0", alignItems: "center" }}>
           <input
             value={draft}
             onChange={(e) => setDraft(e.target.value)}

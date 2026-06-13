@@ -1,5 +1,14 @@
 # P0-1 · 2.5D RPG HQ — notes (engine slices shipped; art pending)
 
+UPDATE (same day, commit 1f7814b0): the first procedural fallback
+(gradient bands + raw page-icon PNGs) shipped and the user called it
+miserable — correctly. Replaced with a real SVG isometric room renderer
+(shaded three-face props per scene, tiled floor, glowing baseboard,
+light shafts, dust, vignette) + circular ringed agent tokens with ground
+shadows. Verified live at full resolution before committing. LESSON:
+never ship a visual feature on logic probes alone — the pixels ARE the
+done-when for anything the user looks at.
+
 Engine completed 2026-06-13. Probes: 7 node assertions on the real
 worldState + worldBus modules (XP accrual, localStorage persistence —
 survives tab unmount by construction, scene choice persisted, unlock

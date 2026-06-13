@@ -51,6 +51,8 @@ import {
   parseDispatchesDetailed,
   unresolvedCorrectionMessage,
   resolveAutoModel,
+  wiredDispatchTargets,
+  unwiredCorrectionMessage,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -5095,7 +5097,12 @@ function buildOrchestratorPrompt(
   /// (legacy behaviour, fine for tiny tasks that didn't need a brief).
   briefText?: string,
 ): string {
-  const specialists = team.agents.filter(a => a.name !== orch.name);
+  // Edge-seeded roster (P0-2, §0.4 lockstep with dispatch.ts): with a
+  // graph present the orchestrator only sees its edge-wired specialists.
+  const wired = wiredDispatchTargets(team, orch.name);
+  const specialists = team.agents.filter(
+    a => a.name !== orch.name && (wired === null || wired.has(a.name)),
+  );
   // Prefer the spec's own description (team JSON, agent-specific) over
   // the base role's description; the team JSONs intentionally tailor
   // each agent's blurb for the team context.
@@ -8007,7 +8014,53 @@ export default function AgentsPage() {
           }
         }
       }
-      const dispatches = parse.dispatches;
+
+      // Edges drive dispatch (P0-2, §0.4 lockstep with dispatch.ts): with a
+      // graph present only edge-wired targets run; unwired-but-real names
+      // surface loudly + one correction round when they cost us everything.
+      let dispatches = parse.dispatches;
+      const wiredSet = wiredDispatchTargets(activeTeam, orch.name);
+      if (wiredSet !== null) {
+        const unwiredD = dispatches.filter(d => !wiredSet.has(d.agentName));
+        dispatches = dispatches.filter(d => wiredSet.has(d.agentName));
+        for (const d of unwiredD) {
+          appendThought(orch.name, {
+            role: "system", color: "#ffb74d",
+            text: `⚠ @${d.agentName} is on the team but NOT WIRED to the orchestrator — line not dispatched. Draw the edge in the graph to enable it.`,
+          });
+        }
+        if (dispatches.length === 0 && unwiredD.length > 0) {
+          const correction = unwiredCorrectionMessage(unwiredD, wiredSet);
+          appendLog("system", { role: "system", color: "#ffb74d", text: "⚠ Dispatches blocked by the team graph — asking the orchestrator to re-emit with wired agents only." });
+          addActive(orch.name);
+          appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+          try {
+            orchReply = await streamChatCompletion(
+              port, orchModel, providerFor(orchModel),
+              orchPrompt,
+              correction,
+              tempFor(orch, 0.3), ctrl.signal,
+              (delta) => streamLog(orch.name, delta),
+              projectCwd,
+              undefined, undefined,
+              (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+              undefined,
+              undefined,
+              getClaudeSession(selectedProjectId, orch.name),
+            );
+          } finally {
+            removeActive(orch.name);
+          }
+          const reparse = parseDispatchesDetailed(orchReply, activeTeam, orch.name);
+          dispatches = reparse.dispatches.filter(d => wiredSet.has(d.agentName));
+          for (const d of reparse.dispatches.filter(x => !wiredSet.has(x.agentName))) {
+            appendThought(orch.name, {
+              role: "system", color: "#ffb74d",
+              text: `⚠ still unwired after correction: @${d.agentName} — not dispatched.`,
+            });
+          }
+        }
+      }
 
       // Drop the parsed directives into the orchestrator's THOUGHT
       // log — that's the routing decision, not part of the user-

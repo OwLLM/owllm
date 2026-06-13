@@ -354,6 +354,46 @@ export type AgentSpec = {
   extraPrompt?: string;
 };
 export type Edge = { source: string; target: string };
+
+// ---------- Edges drive dispatch (P0-2) ----------
+//
+// The drawn graph is an EXECUTION graph, not a picture. When a team has
+// edges, an orchestrator `@agent:` line is honored only if an edge
+// orchestrator→agent exists; the roster shown to the orchestrator is its
+// outgoing edges. A team with NO edges keeps today's free-dispatch
+// behavior so existing projects work unchanged.
+
+/// The set of agents the orchestrator may dispatch to, derived from its
+/// outgoing edges. `null` = the team has no edges at all → free dispatch.
+export function wiredDispatchTargets(
+  team: { agents: Array<{ name: string }>; edges?: Edge[] },
+  orchName: string,
+): Set<string> | null {
+  const edges = Array.isArray(team.edges) ? team.edges : [];
+  if (edges.length === 0) return null;
+  const wired = new Set<string>();
+  for (const e of edges) {
+    if (e && e.source === orchName && typeof e.target === "string") wired.add(e.target);
+  }
+  return wired;
+}
+
+/// Model-visible correction for dispatch lines that named REAL team members
+/// the graph doesn't wire to the orchestrator. Distinct wording from the
+/// no-such-agent case (P1-3) — the agent exists, the edge doesn't.
+export function unwiredCorrectionMessage(unwired: Dispatch[], wired: Set<string>): string {
+  const lines = unwired.map(d => `- "@${d.agentName}:" is on the team but NOT WIRED to you (no edge from you to it in the graph)`);
+  const roster = [...wired].join(", ") || "(none — the graph wires no one to you)";
+  return [
+    "[dispatch blocked by the team graph — fix and re-emit]",
+    "These dispatch lines were NOT executed:",
+    ...lines,
+    `Your wired specialists are exactly: ${roster}.`,
+    wired.size > 0
+      ? "Re-emit your dispatch lines now using only wired agents, one per line, as `@<agent>: <instruction>`."
+      : "No agent is wired to you — answer the user yourself, and mention that the team graph has no edges from the orchestrator.",
+  ].join("\n");
+}
 export type Team = {
   id: string;
   name: string;
@@ -596,7 +636,13 @@ export function buildOrchestratorPrompt(
   /// free-interpretation behaviour.
   briefText?: string,
 ): string {
-  const specialists = team.agents.filter(a => a.name !== orch.name);
+  // Edge-seeded roster (P0-2): when the team has a graph, the orchestrator
+  // only SEES the specialists its outgoing edges reach — the drawn graph
+  // defines who's reachable. No edges → whole team (legacy free dispatch).
+  const wired = wiredDispatchTargets(team, orch.name);
+  const specialists = team.agents.filter(
+    a => a.name !== orch.name && (wired === null || wired.has(a.name)),
+  );
   const rosterLines = specialists.map(a => {
     const desc = a.description ?? roleByName.get(a.base)?.description ?? "";
     return `  - ${a.name} (${a.base}): ${desc}`;
@@ -2623,7 +2669,55 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       }
     }
   }
-  const dispatches = parse.dispatches;
+
+  // Edges drive dispatch (P0-2): with a graph present, only edge-wired
+  // targets run. Unwired-but-real names surface loudly and, when they cost
+  // us everything, get ONE correction round naming the wired roster.
+  let dispatches = parse.dispatches;
+  const wired = wiredDispatchTargets(team, orch.name);
+  if (wired !== null) {
+    const unwiredD = dispatches.filter(d => !wired.has(d.agentName));
+    dispatches = dispatches.filter(d => wired.has(d.agentName));
+    for (const d of unwiredD) {
+      hooks.onThought(orch.name, {
+        role: "system",
+        color: "#ffb74d",
+        text: `⚠ @${d.agentName} is on the team but NOT WIRED to the orchestrator — line not dispatched. Draw the edge in the graph to enable it.`,
+      });
+    }
+    if (dispatches.length === 0 && unwiredD.length > 0) {
+      const correction = unwiredCorrectionMessage(unwiredD, wired);
+      liveHistory.push({ role: "assistant", content: orchReply });
+      liveHistory.push({ role: "user", content: correction });
+      if (signal.aborted) throw new DOMException("aborted", "AbortError");
+      hooks.onAgentStart(orch.name);
+      hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+      try {
+        orchReply = await streamChatCompletion(
+          port, orchModel, orchProvider,
+          orchPrompt, correction,
+          tempFor(orch, 0.3), signal,
+          (delta) => hooks.onLogDelta(orch.name, delta),
+          projectCwd, liveHistory, autoApprove,
+          (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
+          roleByName.get(orch.base)?.toolAllowlist,
+          undefined,
+          getClaudeSession(projectId, orch.name),
+        );
+      } finally {
+        hooks.onAgentEnd(orch.name);
+      }
+      const reparse = parseDispatchesDetailed(orchReply, team, orch.name);
+      dispatches = reparse.dispatches.filter(d => wired.has(d.agentName));
+      for (const d of reparse.dispatches.filter(x => !wired.has(x.agentName))) {
+        hooks.onThought(orch.name, {
+          role: "system",
+          color: "#ffb74d",
+          text: `⚠ still unwired after correction: @${d.agentName} — not dispatched.`,
+        });
+      }
+    }
+  }
   for (const d of dispatches) {
     hooks.onThought(orch.name, {
       role: "dispatch",

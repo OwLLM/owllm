@@ -67,6 +67,9 @@ const WATCHER_PERSONA =
   "• GPU / runtime → local model SERVING (llama.cpp). Needed to run local models, not for agent dispatch to cloud models.\n" +
   "So a snapshot with WSL ✅ but `env` ⚠️ means: agents CAN run isolated; only fine-tuning is unavailable.";
 
+/// Full getting-started guide on GitHub (opened from the onboarding button).
+const GETTING_STARTED_URL = "https://github.com/ruigro/LLM-Studio/blob/main/docs/GETTING_STARTED.md";
+
 /// Human blurbs for the page the user is looking at — keyed by activeKey.
 const PAGE_BLURBS: Record<string, string> = {
   home: "the Home page — system status, readiness checks, and quick setup actions live here.",
@@ -355,6 +358,23 @@ export default function WatcherDrawer({
     clearActivity();
     say("Clear activity stats", "you");
     say("Done — activity counters wiped. A fresh window starts now.");
+  };
+
+  // First-run onboarding: explain the essentials (a model = a brain, then run
+  // a team) and open the full GitHub guide. The text is plain (the chat renders
+  // pre-wrap, not markdown), so no ** or links inside.
+  const onboard = () => {
+    say("I'm new here — help me onboard", "you");
+    say(
+      "Welcome! 🦉 Here's the short path to a working agent:\n\n" +
+      "1) GIVE YOUR AGENTS A BRAIN (a model). Two ways — you can do either, or both:\n" +
+      "   • Connect a subscription (Accounts page): Claude, OpenAI, Gemini, or Kimi. Uses an AI plan you already pay for — no GPU needed. Click Test after connecting. Easiest.\n" +
+      "   • Run a local model: download a GGUF on the Models page, then start it on the Server page. Private, offline, runs on your own hardware.\n\n" +
+      "2) (RECOMMENDED) TURN ON ISOLATION. On the Home page, set up WSL so agents run sandboxed in Linux and can't touch your Windows files. Your GitHub/CLI logins mirror in automatically.\n\n" +
+      "3) RUN A TEAM. Agents page → point at a project folder, type a goal, hit Run.\n\n" +
+      "Opening the full guide (with the details) on GitHub now…",
+    );
+    invoke("shell_open_url", { url: GETTING_STARTED_URL }).catch(() => {});
   };
 
   /// Free-text AI support: snapshot as grounding, auto-chosen model,
@@ -715,12 +735,9 @@ export default function WatcherDrawer({
           <button
             style={actionBtn}
             disabled={busy}
-            onClick={() => {
-              onClose();
-              window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "models" } }));
-            }}
-            title="No model? A tiny Gemma-class support model (under 1 GB) runs on almost anything — download it on the Models page."
-          >📦 Get a model</button>
+            onClick={onboard}
+            title="New to OwLLM? The essentials to get a working agent — connect a subscription or run a local model — plus the full guide on GitHub."
+          >🆕 I'm new here — help me onboard</button>
           <button style={actionBtn} disabled={busy} onClick={wipeActivity} title="Wipe the local activity counters">🧹 Clear</button>
           <button
             style={reportArmed ? { ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800 } : actionBtn}

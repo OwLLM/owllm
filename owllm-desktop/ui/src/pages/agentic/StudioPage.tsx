@@ -14,7 +14,7 @@
 // list_agent_roles Tauri commands — those walk LLM/core/agents/teams/
 // (built-in JSONs) and LLM/core/agents/roles/ (built-in YAMLs) plus the
 // user-saved overrides under LLM/data/. No more baked arrays.
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import SkillLibraryDialog from "./SkillLibraryDialog";
 import IconPickerDialog, {
@@ -1588,6 +1588,208 @@ function skillToAgentDef(s: SkillPackBackend): AgentDef {
   };
 }
 
+// ---------------------------------------------------------------------
+// TeamEditorDialog — in-app team template CRUD (P0-3). Create a team from
+// scratch or edit a CUSTOM one: display name, category, description, and
+// the agent roster (name, base role, description, extra prompt). Saves
+// through save_team_template; unknown fields in an existing template are
+// preserved (we patch a clone of the raw JSON, never rebuild it).
+// ---------------------------------------------------------------------
+type EditorAgentRow = {
+  name: string;
+  base: string;
+  description: string;
+  extraPrompt: string;
+  /// Original JSON object when this row came from an existing template —
+  /// preserved so unknown per-agent fields (icon, model hints…) survive.
+  orig: any | null;
+};
+
+function TeamEditorDialog({
+  open, original, roles, onClose, onSaved,
+}: {
+  open: boolean;
+  /// Raw backend record when editing; null when creating from scratch.
+  original: TeamTemplateBackend | null;
+  /// Available base roles for the per-agent dropdown.
+  roles: string[];
+  onClose: () => void;
+  onSaved: (newName: string) => void;
+}) {
+  const [display, setDisplay] = useState("");
+  const [category, setCategory] = useState("Custom");
+  const [description, setDescription] = useState("");
+  const [rows, setRows] = useState<EditorAgentRow[]>([]);
+  const [err, setErr] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!open) return;
+    setErr(null);
+    if (original) {
+      const d = original.data ?? {};
+      setDisplay(d.display_name ?? original.id);
+      setCategory(d.category ?? "Custom");
+      setDescription(d.description ?? "");
+      setRows((Array.isArray(d.agents) ? d.agents : []).map((a: any) => ({
+        name: a?.name ?? "",
+        base: a?.base ?? (roles[0] ?? "coder"),
+        description: a?.description ?? "",
+        extraPrompt: a?.extra_prompt ?? "",
+        orig: a,
+      })));
+    } else {
+      setDisplay("");
+      setCategory("Custom");
+      setDescription("");
+      // Sensible starter roster: an orchestrator + one specialist.
+      const orch = roles.includes("orchestrator") ? "orchestrator" : (roles[0] ?? "orchestrator");
+      const spec = roles.find(r => r !== orch) ?? orch;
+      setRows([
+        { name: "orchestrator", base: orch, description: "Plans the work and dispatches the specialists.", extraPrompt: "", orig: null },
+        { name: "specialist", base: spec, description: "Does the work the orchestrator dispatches.", extraPrompt: "", orig: null },
+      ]);
+    }
+  }, [open, original, roles]);
+
+  if (!open) return null;
+
+  const setRow = (i: number, patch: Partial<EditorAgentRow>) =>
+    setRows(rs => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+
+  const save = async () => {
+    const dn = display.trim();
+    if (!dn) { setErr("Give the team a name."); return; }
+    const cleanRows = rows.filter(r => r.name.trim());
+    if (cleanRows.length === 0) { setErr("A team needs at least one agent."); return; }
+    const names = cleanRows.map(r => r.name.trim().toLowerCase());
+    if (new Set(names).size !== names.length) { setErr("Agent names must be unique."); return; }
+    setSaving(true);
+    setErr(null);
+    try {
+      // Patch a clone of the original JSON (preserves unknown fields like
+      // icon / mcp_pack / graph); start fresh only for brand-new teams.
+      const data: any = original ? JSON.parse(JSON.stringify(original.data ?? {})) : {};
+      data.display_name = dn;
+      data.category = category.trim() || "Custom";
+      data.description = description.trim();
+      data.agents = cleanRows.map(r => ({
+        ...(r.orig ?? {}),
+        name: r.name.trim(),
+        base: r.base,
+        description: r.description.trim(),
+        ...(r.extraPrompt.trim() ? { extra_prompt: r.extraPrompt } : {}),
+      }));
+      if (!original) data.icon = data.icon ?? "owl:owl_asssitant";
+      // Editing keeps the file stem (the id); creating derives it from the
+      // display name (Rust sanitizes + enforces data.name == stem).
+      const saved = await invoke<TeamTemplateBackend>("save_team_template", {
+        fileStem: original ? original.id : dn,
+        data,
+      });
+      // Custom teams ride the vault like other non-secret state.
+      invoke("vault_sync_teams").catch(() => {});
+      onSaved((saved.data?.name ?? saved.id) as string);
+      onClose();
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const input: React.CSSProperties = {
+    width: "100%", height: 30, borderRadius: 7, padding: "0 10px", fontSize: 12.5,
+    background: "var(--bg-input)", color: "var(--fg-strong)", border: "1px solid var(--border)",
+  };
+  const label: React.CSSProperties = { fontSize: 11, color: "var(--fg-muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 };
+
+  return (
+    <div
+      onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}
+      style={{ position: "fixed", inset: 0, zIndex: 9550, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center" }}
+    >
+      <div style={{
+        width: "min(680px, 94%)", maxHeight: "88%", overflow: "auto",
+        background: "var(--bg-panel)", border: "2px solid rgba(var(--accent-rgb),0.78)",
+        borderRadius: 14, boxShadow: "0 24px 64px rgba(0,0,0,0.55)", padding: 18,
+        display: "flex", flexDirection: "column", gap: 12,
+      }}>
+        <div style={{ fontSize: 17, fontWeight: 800, color: "var(--fg-strong)" }}>
+          {original ? `Edit team — ${original.data?.display_name ?? original.id}` : "Create your own team"}
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: 10 }}>
+          <div>
+            <div style={label}>Team name</div>
+            <input style={input} value={display} onChange={e => setDisplay(e.target.value)} placeholder="My Research Crew" />
+          </div>
+          <div>
+            <div style={label}>Category</div>
+            <input style={input} value={category} onChange={e => setCategory(e.target.value)} placeholder="Custom" />
+          </div>
+        </div>
+        <div>
+          <div style={label}>Description</div>
+          <input style={input} value={description} onChange={e => setDescription(e.target.value)} placeholder="What this team is for" />
+        </div>
+
+        <div style={{ ...label, marginTop: 4 }}>Agents</div>
+        {rows.map((r, i) => (
+          <div key={i} style={{ border: "1px solid var(--border)", borderRadius: 10, padding: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto", gap: 8, alignItems: "end" }}>
+              <div>
+                <div style={label}>Name</div>
+                <input style={input} value={r.name} onChange={e => setRow(i, { name: e.target.value })} placeholder="researcher" />
+              </div>
+              <div>
+                <div style={label}>Base role</div>
+                <select style={{ ...input, height: 32 }} value={r.base} onChange={e => setRow(i, { base: e.target.value })}>
+                  {roles.map(role => <option key={role} value={role}>{role}</option>)}
+                  {!roles.includes(r.base) && <option value={r.base}>{r.base}</option>}
+                </select>
+              </div>
+              <button
+                onClick={() => setRows(rs => rs.filter((_, j) => j !== i))}
+                title="Remove this agent"
+                style={{ height: 30, padding: "0 10px", borderRadius: 7, border: "none", background: "rgba(255,140,140,0.12)", color: "#ff8c8c", fontSize: 12, fontWeight: 700, cursor: "pointer" }}
+              >Remove</button>
+            </div>
+            <div>
+              <div style={label}>Description</div>
+              <input style={input} value={r.description} onChange={e => setRow(i, { description: e.target.value })} placeholder="What this agent does on the team" />
+            </div>
+            <div>
+              <div style={label}>Extra prompt (optional — appended to the base role's prompt)</div>
+              <textarea
+                value={r.extraPrompt}
+                onChange={e => setRow(i, { extraPrompt: e.target.value })}
+                rows={3}
+                style={{ ...input, height: "auto", padding: "8px 10px", fontFamily: "inherit", resize: "vertical" }}
+              />
+            </div>
+          </div>
+        ))}
+        <button
+          onClick={() => setRows(rs => [...rs, { name: "", base: roles[0] ?? "coder", description: "", extraPrompt: "", orig: null }])}
+          style={{ alignSelf: "flex-start", height: 30, padding: "0 12px", borderRadius: 7, border: "1px dashed var(--border-strong)", background: "transparent", color: "var(--fg)", fontSize: 12.5, fontWeight: 700, cursor: "pointer" }}
+        >+ Add agent</button>
+
+        {err && <div style={{ color: "#ff8c8c", fontSize: 12.5 }}>{err}</div>}
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button onClick={onClose} style={{ height: 32, padding: "0 14px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-elevated)", color: "var(--fg)", fontSize: 13, fontWeight: 700, cursor: "pointer" }}>Cancel</button>
+          <button
+            onClick={save}
+            disabled={saving}
+            style={{ height: 32, padding: "0 16px", borderRadius: 8, border: "none", background: "linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent))", color: "var(--accent-fg)", fontSize: 13, fontWeight: 800, cursor: saving ? "wait" : "pointer" }}
+          >{saving ? "Saving…" : original ? "Save changes" : "Create team"}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function StudioPage() {
   const [view, setView] = useState<"teams" | "agents">("teams");
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
@@ -1611,6 +1813,9 @@ export default function StudioPage() {
   const [iconPickerAgent, setIconPickerAgent] = useState<string | null>(null);
   const [mcpInstallingTeam, setMcpInstallingTeam] = useState<string | null>(null);
   const [mcpInstallStatusByTeam, setMcpInstallStatusByTeam] = useState<Record<string, string>>({});
+  // Team editor dialog (P0-3): null original = create from scratch.
+  const [editorOpen, setEditorOpen] = useState(false);
+  const [editorOriginal, setEditorOriginal] = useState<TeamTemplateBackend | null>(null);
 
   // Layer overrides on top of backend-loaded agent icons. Cheap pass
   // over the list whenever either dataset changes.
@@ -1619,6 +1824,12 @@ export default function StudioPage() {
     [agents, iconOverrides],
   );
 
+  // Raw backend records (path + full JSON), keyed by the UI name — the
+  // CRUD handlers need them for faithful duplicate/edit/delete round-trips
+  // (the mapped Team/AgentDef shapes drop unknown fields on purpose).
+  const teamBackendsRef = useRef<Map<string, TeamTemplateBackend>>(new Map());
+  const agentBackendsRef = useRef<Map<string, AgentRoleBackend>>(new Map());
+
   const loadAll = async () => {
     try {
       const [rawTeams, rawAgents, rawSkills] = await Promise.all([
@@ -1626,6 +1837,8 @@ export default function StudioPage() {
         invoke<AgentRoleBackend[]>("list_agent_roles"),
         invoke<SkillPackBackend[]>("list_skill_packs"),
       ]);
+      teamBackendsRef.current = new Map(rawTeams.map(t => [(t.data?.name ?? t.id) as string, t]));
+      agentBackendsRef.current = new Map(rawAgents.map(r => [(r.data?.name ?? r.id) as string, r]));
       setTeams(rawTeams.map(toTeam));
       // Roles + SKILL.md packs both surface as agent cards. Roles
       // come first (built-in identities), skills follow (user-
@@ -1722,42 +1935,137 @@ export default function StudioPage() {
       setMcpInstallingTeam(null);
     }
   };
+  // ---- Team/agent CRUD (P0-3): real in-app operations, no manual JSON ----
   const handleEditTemplate = (name: string) => {
     const t = teams.find(x => x.name === name);
     if (!t) return;
-    alert(
-      t.builtIn
-        ? `'${t.display}' is a built-in template — duplicate it first to edit.`
-        : `Editing custom templates lands in the next slice. Until then, the JSON sits at:\n\nLLM/data/teams/${name}.json`,
-    );
+    if (t.builtIn) {
+      alert(`'${t.display}' is a built-in template — duplicate it first, then edit your copy.`);
+      return;
+    }
+    const backend = teamBackendsRef.current.get(name);
+    if (!backend) { alert("Couldn't load this template from disk — refresh and try again."); return; }
+    setEditorOriginal(backend);
+    setEditorOpen(true);
   };
-  const handleDuplicateTemplate = (name: string) => {
+  const handleDuplicateTemplate = async (name: string) => {
     const t = teams.find(x => x.name === name);
-    if (!t) return;
-    alert(
-      `Cloning '${t.display}' as a custom template requires the write_team_template Tauri command, which lands in the next slice.\n\nUntil then, copy LLM/core/agents/teams/${name}.json → LLM/data/teams/${name}_copy.json and it'll show up here as CUSTOM.`,
-    );
+    const backend = teamBackendsRef.current.get(name);
+    if (!t || !backend) return;
+    const suggested = `${t.display} copy`;
+    const newName = window.prompt(`Name for your copy of '${t.display}':`, suggested);
+    if (!newName?.trim()) return;
+    try {
+      const data = JSON.parse(JSON.stringify(backend.data ?? {}));
+      data.display_name = newName.trim();
+      delete data.visibility;     // customs always show in the CUSTOM section
+      delete data.workflow_rank;
+      const saved = await invoke<TeamTemplateBackend>("save_team_template", {
+        fileStem: newName,
+        data,
+      });
+      invoke("vault_sync_teams").catch(() => {});
+      await loadAll();
+      setSelectedTeam((saved.data?.name ?? saved.id) as string);
+    } catch (e: any) {
+      alert(`Duplicate failed: ${String(e?.message ?? e)}`);
+    }
   };
-  const handleDeleteTemplate = (name: string) => {
+  const handleDeleteTemplate = async (name: string) => {
     const t = teams.find(x => x.name === name);
     if (!t) return;
     if (t.builtIn) {
       alert(`'${t.display}' is a built-in template — built-ins can't be deleted.`);
       return;
     }
-    if (confirm(`Delete the team template '${t.display}'?\nExisting projects spawned from it stay intact.`)) {
-      alert(`Delete needs the delete_team_template Tauri command, which lands in the next slice. Until then, remove the JSON manually from LLM/data/teams/${name}.json.`);
+    const backend = teamBackendsRef.current.get(name);
+    if (!backend) return;
+    if (!confirm(`Delete the team template '${t.display}'?\nExisting projects spawned from it stay intact.`)) return;
+    try {
+      await invoke("delete_team_template", { path: backend.path });
+      invoke("vault_sync_teams").catch(() => {});
+      setSelectedTeam(null);
+      await loadAll();
+    } catch (e: any) {
+      alert(`Delete failed: ${String(e?.message ?? e)}`);
     }
   };
   const handleCreateTeam = () => {
-    alert(
-      "Creating a brand-new team template needs the TeamBuilderDialog port — coming in the next slice.\n\nUntil then: duplicate an existing built-in (Duplicate button on its detail panel), then edit the JSON under LLM/data/teams/.",
-    );
+    setEditorOriginal(null);
+    setEditorOpen(true);
   };
-  const handleNewAgent = () => {
-    alert(
-      "Creating a custom agent needs the AgentEditor dialog port — coming in the next slice.\n\nUntil then: drop a SKILL.md (with YAML frontmatter) into LLM/data/skills/<your_pack>/SKILL.md — it'll show up here as a SKILL card.",
-    );
+  const handleNewAgent = async () => {
+    const name = window.prompt("Name for your new agent (e.g. data_wrangler):", "");
+    if (!name?.trim()) return;
+    try {
+      const created = await invoke<AgentRoleBackend>("create_agent_definition", {
+        fileStem: name,
+        data: {
+          description: "Describe what this agent does.",
+          icon: "owl:owl_asssitant",
+          default_temperature: 0.3,
+          system_prompt: "You are a helpful specialist. Stay in your role and answer concisely.",
+        },
+      });
+      invoke("vault_sync_teams").catch(() => {});
+      await loadAll();
+      setView("agents");
+      setSelectedAgent((created.data?.name ?? created.id) as string);
+    } catch (e: any) {
+      alert(`Create failed: ${String(e?.message ?? e)}`);
+    }
+  };
+  const handleDuplicateAgent = async (agentName: string | undefined) => {
+    if (!agentName) return;
+    const a = agentsWithIcons.find(x => x.name === agentName);
+    if (!a) return;
+    const newName = window.prompt(`Name for your copy of '${agentName}':`, `${agentName}_custom`);
+    if (!newName?.trim()) return;
+    try {
+      // Roles: clone the raw backend JSON (preserves unknown fields).
+      // Skills: synthesize a role JSON from the visible fields (the
+      // SKILL.md body is the system prompt).
+      const backend = agentBackendsRef.current.get(agentName);
+      const data: any = backend
+        ? JSON.parse(JSON.stringify(backend.data ?? {}))
+        : {
+            description: a.description,
+            icon: a.icon,
+            ...(a.temperature !== undefined ? { default_temperature: a.temperature } : {}),
+            ...(a.tools ? { tool_allowlist: a.tools } : {}),
+            ...(a.mcpTools ? { mcp_allowlist: a.mcpTools } : {}),
+            ...(a.systemPrompt ? { system_prompt: a.systemPrompt } : {}),
+            ...(a.canDispatch ? { can_dispatch: true } : {}),
+          };
+      const created = await invoke<AgentRoleBackend>("create_agent_definition", {
+        fileStem: newName,
+        data,
+      });
+      invoke("vault_sync_teams").catch(() => {});
+      await loadAll();
+      setSelectedAgent((created.data?.name ?? created.id) as string);
+    } catch (e: any) {
+      alert(`Duplicate failed: ${String(e?.message ?? e)}`);
+    }
+  };
+  const handleDeleteAgent = async (agentName: string | undefined) => {
+    if (!agentName) return;
+    const a = agentsWithIcons.find(x => x.name === agentName);
+    if (!a || a.builtIn) return;
+    if (a.isSkill) {
+      alert("Skill packs are managed in the 📚 Skill Library — open it to remove this one.");
+      return;
+    }
+    if (!a.path) return;
+    if (!confirm(`Delete custom agent '${agentName}'?\nTeams referencing it keep working off their own copies.`)) return;
+    try {
+      await invoke("delete_agent_definition", { path: a.path });
+      invoke("vault_sync_teams").catch(() => {});
+      setSelectedAgent(null);
+      await loadAll();
+    } catch (e: any) {
+      alert(`Delete failed: ${String(e?.message ?? e)}`);
+    }
   };
   const handleOpenSkillLibrary = () => {
     // Open the modal port of widgets/skill_library_dialog.py — git-
@@ -1934,12 +2242,8 @@ export default function StudioPage() {
                     alert(`Save failed: ${String(e?.message ?? e)}`);
                   }
                 }}
-                onDuplicate={() => console.log("[Studio] duplicate agent", agent?.name)}
-                onDelete={() => {
-                  if (agent && confirm(`Delete custom agent '${displayLabel(agent.name)}'?`)) {
-                    console.log("[Studio] delete agent", agent.name);
-                  }
-                }}
+                onDuplicate={() => handleDuplicateAgent(agent?.name)}
+                onDelete={() => handleDeleteAgent(agent?.name)}
                 onPickIcon={(name) => setIconPickerAgent(name)}
               />
             </div>
@@ -1954,6 +2258,17 @@ export default function StudioPage() {
         open={libraryOpen}
         onClose={() => setLibraryOpen(false)}
         onChange={() => loadAll()}
+      />
+      {/* Team CRUD editor (P0-3) — create-from-scratch or edit-a-custom. */}
+      <TeamEditorDialog
+        open={editorOpen}
+        original={editorOriginal}
+        roles={agentsWithIcons.filter(a => !a.isSkill).map(a => a.name)}
+        onClose={() => setEditorOpen(false)}
+        onSaved={async (newName) => {
+          await loadAll();
+          setSelectedTeam(newName);
+        }}
       />
       <IconPickerDialog
         open={iconPickerAgent != null}

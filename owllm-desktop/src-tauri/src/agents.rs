@@ -186,6 +186,138 @@ pub async fn save_agent_definition(path: String, data: JsonValue) -> Result<(), 
     Ok(())
 }
 
+/// True when `target`'s canonical path sits inside any of `dirs`.
+fn path_inside(dirs: &[std::path::PathBuf], target: &Path) -> bool {
+    let tc = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+    dirs.iter().any(|d| {
+        let dc = d.canonicalize().unwrap_or_else(|_| d.clone());
+        tc.starts_with(&dc)
+    })
+}
+
+/// Sanitize a user-typed template/agent name into a file stem.
+fn sanitize_stem(name: &str) -> String {
+    let s: String = name
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    s.trim_matches(|c| c == '_' || c == '-').to_string()
+}
+
+/// Create or update a CUSTOM team template (Studio CRUD — P0-3). Writes
+/// `<custom_teams_dir>/<stem>.json`; the same stem saves over itself (that
+/// IS the edit path). Built-in template names are refused so a custom team
+/// can never shadow a shipped one — duplicate-to-edit always picks a new
+/// name. Custom teams sync through the vault like other non-secret state.
+#[tauri::command]
+pub async fn save_team_template(file_stem: String, data: JsonValue) -> Result<TeamTemplate, String> {
+    let stem = sanitize_stem(&file_stem);
+    if stem.is_empty() {
+        return Err("that name produces an empty file name — use letters or digits".into());
+    }
+    if let Some(builtin) = paths::teams_dir() {
+        if builtin.join(format!("{stem}.json")).is_file() {
+            return Err(format!(
+                "'{stem}' is a built-in template name — pick a different name for your copy"
+            ));
+        }
+    }
+    let dir = paths::custom_teams_dir().ok_or_else(|| "user-data root not found".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = dir.join(format!("{stem}.json"));
+    // The template's `name` field IS its id — keep it equal to the file
+    // stem so the UI never has to predict the sanitization.
+    let mut data = data;
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("name".into(), JsonValue::String(stem.clone()));
+    }
+    let pretty = serde_json::to_string_pretty(&data).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, pretty).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(TeamTemplate {
+        id: stem,
+        path: path.to_string_lossy().into_owned(),
+        built_in: false,
+        data,
+    })
+}
+
+/// Delete a CUSTOM team template. Path must resolve inside a custom teams
+/// dir and end in .json — built-ins physically can't be deleted through
+/// this command.
+#[tauri::command]
+pub async fn delete_team_template(path: String) -> Result<(), String> {
+    let target = std::path::PathBuf::from(&path);
+    if target.extension().and_then(|s| s.to_str()) != Some("json") {
+        return Err("delete_team_template only removes .json files".into());
+    }
+    if !path_inside(&paths::custom_teams_dirs_read(), &target) {
+        return Err(format!(
+            "refusing to delete outside the custom teams dir — got {}",
+            target.display()
+        ));
+    }
+    std::fs::remove_file(&target).map_err(|e| format!("delete {}: {e}", target.display()))?;
+    Ok(())
+}
+
+/// Create a CUSTOM agent definition (duplicate-a-built-in / new-from-
+/// scratch — P0-3). Writes `<custom_agents_dir>/<stem>.json` and returns
+/// the role so the UI can select it for editing. Refuses stems that match
+/// a built-in role id (the `base` namespace must stay unambiguous).
+#[tauri::command]
+pub async fn create_agent_definition(file_stem: String, data: JsonValue) -> Result<AgentRole, String> {
+    let stem = sanitize_stem(&file_stem);
+    if stem.is_empty() {
+        return Err("that name produces an empty file name — use letters or digits".into());
+    }
+    if let Some(builtin) = paths::roles_dir() {
+        for ext in ["yaml", "yml"] {
+            if builtin.join(format!("{stem}.{ext}")).is_file() {
+                return Err(format!(
+                    "'{stem}' is a built-in role name — pick a different name for your copy"
+                ));
+            }
+        }
+    }
+    let dir = paths::custom_agents_dir().ok_or_else(|| "user-data root not found".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = dir.join(format!("{stem}.json"));
+    if path.is_file() {
+        return Err(format!("a custom agent named '{stem}' already exists — pick another name"));
+    }
+    let mut data = data;
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("name".into(), JsonValue::String(stem.clone()));
+    }
+    let pretty = serde_json::to_string_pretty(&data).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, pretty).map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(AgentRole {
+        id: stem,
+        path: path.to_string_lossy().into_owned(),
+        built_in: false,
+        data,
+    })
+}
+
+/// Delete a CUSTOM agent definition. Same containment guard as
+/// save_agent_definition; built-in YAML roles can't be touched.
+#[tauri::command]
+pub async fn delete_agent_definition(path: String) -> Result<(), String> {
+    let target = std::path::PathBuf::from(&path);
+    if target.extension().and_then(|s| s.to_str()) != Some("json") {
+        return Err("delete_agent_definition only removes .json files (built-in YAML roles are read-only)".into());
+    }
+    if !path_inside(&paths::custom_agents_dirs_read(), &target) {
+        return Err(format!(
+            "refusing to delete outside the custom agents dir — got {}",
+            target.display()
+        ));
+    }
+    std::fs::remove_file(&target).map_err(|e| format!("delete {}: {e}", target.display()))?;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn list_agent_roles() -> Result<Vec<AgentRole>, String> {
     let mut out = Vec::new();
@@ -385,6 +517,81 @@ system_prompt: |
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         (root, tmp)
+    }
+
+    #[test]
+    fn sanitize_stem_basics() {
+        assert_eq!(sanitize_stem("My Research Crew"), "my_research_crew");
+        assert_eq!(sanitize_stem("__weird--"), "weird");
+        assert_eq!(sanitize_stem("数据"), "");
+        assert_eq!(sanitize_stem("data_wrangler"), "data_wrangler");
+    }
+
+    /// Live CRUD probe against the REAL custom dirs (creates + deletes a
+    /// uniquely-named team/agent; cleans up after itself):
+    ///   cargo test --lib -- --ignored probe_studio_crud
+    #[test]
+    #[ignore]
+    fn probe_studio_crud_roundtrip() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        // --- team: create → list → edit(overwrite) → delete ---
+        let data = serde_json::json!({
+            "display_name": "Probe Team",
+            "category": "Custom",
+            "description": "crud probe",
+            "agents": [{"name": "orchestrator", "base": "orchestrator", "description": "plans"}],
+        });
+        let saved = rt
+            .block_on(save_team_template("OWLLM Probe CRUD Team".into(), data))
+            .expect("save team");
+        assert_eq!(saved.id, "owllm_probe_crud_team");
+        assert_eq!(saved.data["name"], "owllm_probe_crud_team", "name enforced to stem");
+        let listed = rt.block_on(list_team_templates()).unwrap();
+        assert!(listed.iter().any(|t| t.id == saved.id && !t.built_in), "custom team listed");
+        // built-in name collision refused
+        assert!(
+            rt.block_on(save_team_template("code_artisan".into(), serde_json::json!({}))).is_err(),
+            "built-in shadowing must be refused"
+        );
+        // edit = same stem saves over itself
+        let mut edited = saved.data.clone();
+        edited["description"] = "edited".into();
+        let resaved = rt
+            .block_on(save_team_template(saved.id.clone(), edited))
+            .expect("edit team");
+        assert_eq!(resaved.data["description"], "edited");
+        // delete + containment guard
+        assert!(
+            rt.block_on(delete_team_template("C:\\Windows\\notours.json".into())).is_err(),
+            "outside-path delete must be refused"
+        );
+        rt.block_on(delete_team_template(saved.path.clone())).expect("delete team");
+        let listed2 = rt.block_on(list_team_templates()).unwrap();
+        assert!(!listed2.iter().any(|t| t.id == saved.id), "deleted team gone");
+
+        // --- agent: create → list → duplicate-collision → delete ---
+        let role = serde_json::json!({
+            "description": "crud probe agent",
+            "default_temperature": 0.3,
+            "system_prompt": "You are a probe.",
+        });
+        let created = rt
+            .block_on(create_agent_definition("OWLLM Probe CRUD Agent".into(), role.clone()))
+            .expect("create agent");
+        assert_eq!(created.id, "owllm_probe_crud_agent");
+        let roles = rt.block_on(list_agent_roles()).unwrap();
+        assert!(roles.iter().any(|r| r.id == created.id && !r.built_in), "custom agent listed");
+        assert!(
+            rt.block_on(create_agent_definition(created.id.clone(), role)).is_err(),
+            "same-name create must be refused"
+        );
+        assert!(
+            rt.block_on(create_agent_definition("critic".into(), serde_json::json!({}))).is_err(),
+            "built-in role shadowing must be refused"
+        );
+        rt.block_on(delete_agent_definition(created.path.clone())).expect("delete agent");
+        let roles2 = rt.block_on(list_agent_roles()).unwrap();
+        assert!(!roles2.iter().any(|r| r.id == created.id), "deleted agent gone");
     }
 
     #[test]

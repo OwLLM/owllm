@@ -13,6 +13,10 @@ export type WslStatus = {
   available: boolean;
   distros: string[];
   defaultDistro: string | null;
+  /** The best REAL Linux distro to run the sandbox in (never docker-desktop).
+   *  Map isolated projects through THIS — the raw default can be a busybox
+   *  system distro where every shell (incl. Verify) fails. null if none. */
+  bestDistro: string | null;
 };
 
 export type WslProject = {
@@ -64,7 +68,7 @@ export async function wslStatus(): Promise<WslStatus> {
   try {
     return await invoke<WslStatus>("wsl_status");
   } catch {
-    return { available: false, distros: [], defaultDistro: null };
+    return { available: false, distros: [], defaultDistro: null, bestDistro: null };
   }
 }
 

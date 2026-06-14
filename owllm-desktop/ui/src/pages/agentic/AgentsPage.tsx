@@ -6473,8 +6473,12 @@ export default function AgentsPage() {
     // projects to auto-isolate, not start on the host.
     wslIsolationGet().then((i) => { if (i.enabled) setIsolationRequested(true); }).catch(() => {});
     wslStatus().then((s) => {
-      setWslDistro(s.defaultDistro);
-      if (s.available && s.defaultDistro) setIsolationRequested(true);
+      // Map projects through the best REAL Linux distro (Ubuntu), NOT the raw
+      // default — which can be docker-desktop (busybox, no bash). Mapping into
+      // that showed "isolated" while Verify failed (bug #11). If there's no real
+      // distro, leave wslDistro null so isolation honestly reports off.
+      setWslDistro(s.bestDistro);
+      if (s.available && s.bestDistro) setIsolationRequested(true);
     }).catch(() => {});
   }, []);
   const [trustWritesOverride, setTrustWritesOverride] = useState<boolean | null>(null);

@@ -83,6 +83,28 @@ function rowIcon(r: ReadinessRow): string {
   return r.ok ? "✅" : r.warn ? "⚠️" : "❌";
 }
 
+// Turn a raw model/CLI failure into ONE clean line for the user. A failed CLI
+// (e.g. codex hitting a usage limit) throws an error whose message is the entire
+// raw stdout — the session header, the persona prompt echoed back, the snapshot.
+// Dumping that verbatim is the "trash in the chat" users saw. Here we (a) name
+// the common, not-our-fault causes plainly, and (b) otherwise show only the
+// first MEANINGFUL line, never the echoed prompt/CLI banner.
+function cleanWatcherError(raw: unknown): string {
+  const s = String((raw as { message?: string })?.message ?? raw ?? "").trim();
+  const low = s.toLowerCase();
+  if (low.includes("usage limit") || low.includes("quota") || low.includes("rate limit") || low.includes("429") || low.includes("insufficient_quota")) {
+    return "⚠️ That model hit its usage limit — that's on the provider's side, not OwLLM. Pick a different model at the top of this panel (a local model, or another provider), then ask again.";
+  }
+  if (low.includes("not logged in") || low.includes("unauthorized") || low.includes("401") || (low.includes("auth") && low.includes("login"))) {
+    return "⚠️ That model isn't signed in. Connect it on the Accounts page (or pick another model above), then try again.";
+  }
+  // Strip the codex/claude CLI banner + the echoed persona prompt + snapshot, and
+  // surface the first line that's actually a message.
+  const noise = /^(you are the watcher|---|workdir|model:|provider:|approval|sandbox:|reasoning|session id|user$|<stdin>|openai codex|reading additional input|key facts|•|current page|app snapshot|\{)/i;
+  const meaningful = s.split("\n").map((l) => l.trim()).find((l) => l.length > 0 && !noise.test(l));
+  return `That didn't work: ${(meaningful ?? s).slice(0, 240)}`;
+}
+
 export default function WatcherDrawer({
   open,
   onClose,
@@ -444,7 +466,9 @@ export default function WatcherDrawer({
         return rest as Entry;
       }));
     } catch (e: any) {
-      if (e?.name !== "AbortError") say(`That didn't work: ${String(e?.message ?? e)}`);
+      // Never dump the raw CLI output (it echoes the persona prompt + snapshot —
+      // the "trash" users reported); show one clean, honest line instead.
+      if (e?.name !== "AbortError") say(cleanWatcherError(e));
     } finally {
       setBusy(false);
     }

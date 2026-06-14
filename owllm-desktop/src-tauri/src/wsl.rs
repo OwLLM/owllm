@@ -38,6 +38,13 @@ pub struct WslStatus {
     pub distros: Vec<String>,
     /// The default distro (what bare `wsl` uses), if resolvable.
     pub default_distro: Option<String>,
+    /// The best REAL Linux distro to actually run the sandbox in — the default
+    /// if it's a real distro, else the first non-system one; None if only
+    /// docker-desktop / system distros exist. The UI MUST map isolated projects
+    /// through this, not `default_distro`: on a Docker-default machine the raw
+    /// default is `docker-desktop` (busybox, no bash), so a project mapped into
+    /// it shows "isolated" but every shell — including Verify — fails.
+    pub best_distro: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -331,19 +338,25 @@ pub(crate) fn is_system_distro(name: &str) -> bool {
 /// fine-tuning path should resolve through instead of the raw default,
 /// which can be `docker-desktop`.
 pub fn best_linux_distro() -> Option<String> {
-    let s = wsl_status();
-    if let Some(d) = &s.default_distro {
+    wsl_status().best_distro
+}
+
+/// Pure: pick the best real Linux distro from a (default, all) pair. Shared by
+/// wsl_status so the field and best_linux_distro can never drift. Unit-tested.
+fn pick_best_distro(default_distro: &Option<String>, distros: &[String]) -> Option<String> {
+    if let Some(d) = default_distro {
         if !is_system_distro(d) {
             return Some(d.clone());
         }
     }
-    s.distros.into_iter().find(|d| !is_system_distro(d))
+    distros.iter().find(|d| !is_system_distro(d)).cloned()
 }
 
 #[tauri::command]
 pub fn wsl_status() -> WslStatus {
     let distros = list_distros();
     let default_distro = default_distro_name().or_else(|| distros.first().cloned());
+    let best_distro = pick_best_distro(&default_distro, &distros);
     WslStatus {
         // Either probe is enough: `-l -q` listed a distro, OR a distro actually
         // ran (`$WSL_DISTRO_NAME` via bash). Using both avoids a false "absent"
@@ -351,6 +364,7 @@ pub fn wsl_status() -> WslStatus {
         available: !distros.is_empty() || default_distro.is_some(),
         distros,
         default_distro,
+        best_distro,
     }
 }
 
@@ -552,6 +566,25 @@ mod tests {
         let (d, p) = parse_wsl_unc("\\\\wsl.localhost\\Ubuntu\\home\\mc\\owllm\\proj").unwrap();
         assert_eq!(d, "Ubuntu");
         assert_eq!(p, "/home/mc/owllm/proj");
+    }
+
+    #[test]
+    fn best_distro_skips_docker_default() {
+        let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        // The reported bug: Docker registers as the DEFAULT, but Ubuntu is the
+        // real distro. Mapping must pick Ubuntu, not docker-desktop (no bash).
+        assert_eq!(
+            pick_best_distro(&Some("docker-desktop".into()), &s(&["docker-desktop", "Ubuntu"])),
+            Some("Ubuntu".into())
+        );
+        // A real default is kept as-is.
+        assert_eq!(
+            pick_best_distro(&Some("Ubuntu".into()), &s(&["docker-desktop", "Ubuntu"])),
+            Some("Ubuntu".into())
+        );
+        // Only system distros → None (isolation genuinely unavailable; prompt Ubuntu).
+        assert_eq!(pick_best_distro(&Some("docker-desktop".into()), &s(&["docker-desktop"])), None);
+        assert_eq!(pick_best_distro(&None, &s(&["rancher-desktop"])), None);
     }
 
     #[test]

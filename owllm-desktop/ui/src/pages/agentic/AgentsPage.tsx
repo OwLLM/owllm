@@ -3682,9 +3682,8 @@ function ChatInputDock({
     action: () => void;
   };
   const slashCommands: SlashCmd[] = useMemo(() => [
-    { name: "/rules",     description: "Open the Rules sub-tab",            action: () => onSwitchTab("rules") },
+    { name: "/rules",     description: "Open the Rules sub-tab (Super User page)", action: () => onSwitchTab("rules") },
     { name: "/input",     description: "Show the User Input history",       action: () => onSwitchTab("userinput") },
-    { name: "/reply",     description: "Show the Reply (Clear Chat) tab",   action: () => onSwitchTab("reply") },
     { name: "/thought",   description: "Show the Thought tab",              action: () => onSwitchTab("thought") },
     { name: "/tools",     description: "Show the Tool Calls tab",           action: () => onSwitchTab("tools") },
     { name: "/full",      description: "Show the Full Chat tab",            action: () => onSwitchTab("full") },
@@ -4006,7 +4005,7 @@ function ChatInputDock({
 function OrchestratorPane({
   agentLogs, agentThoughts, runError, serverState,
   selectedAgent, activeAgent,
-  team,
+  team, isSuperUser,
   projectId, directives, onDirectivesChanged,
   supChat, onSupSend, supSendBusy,
   autoApprove, onToggleAutoApprove,
@@ -4019,6 +4018,9 @@ function OrchestratorPane({
   selectedAgent: string | null;
   activeAgent: string | null;
   team: Team | null;
+  /// True only on the Super User top page — gates the Rules sub-tab so rules
+  /// are visible ONLY there (per user request).
+  isSuperUser: boolean;
   /// Project + directives wiring for the Rules sub-tab.
   projectId: string;
   directives: Directive[];
@@ -4039,11 +4041,15 @@ function OrchestratorPane({
   loadingModel: boolean;
   onLoadModel: () => void;
 }) {
-  // Sub-tab strip — Rules and User Input precede Clear Chat per user
-  // spec ("we add the chat of the user in the chat container, BEFORE
-  // the Clear Chat, and we call it User Input"). Default starts on
-  // Clear Chat so the run log is visible at startup.
-  const [activeTab, setActiveTab] = useState<"rules"|"userinput"|"reply"|"thought"|"tools"|"full">("reply");
+  // Sub-tab strip. "Clear Chat" (reply) was removed in favour of "Full Chat"
+  // as the single chat view (per user request), which is now the default so the
+  // whole run is visible at startup. Rules shows ONLY on the Super User page.
+  const [activeTab, setActiveTab] = useState<"rules"|"userinput"|"reply"|"thought"|"tools"|"full">("full");
+  // Effective (displayed) tab: gracefully fold away tabs that no longer exist
+  // or aren't allowed here — the removed "reply" tab, and "rules" when we're not
+  // on the Super User page — both fall back to Full Chat. Keeps slash commands
+  // and stale state from showing a blank/forbidden pane.
+  const effTab = (activeTab === "reply" || (activeTab === "rules" && !isSuperUser)) ? "full" : activeTab;
   // Pick which buffer to show: explicit selection > currently-active
   // agent > orchestrator (so the user sees the plan even if nothing
   // is selected yet) > "you" (which holds the goal echo).
@@ -4093,12 +4099,11 @@ function OrchestratorPane({
     `${fullChat.length}:${fullChat[fullChat.length - 1]?.text?.length ?? 0}`
   );
   useLayoutEffect(() => {
-    if (activeTab === "rules") return;          // rules tab has no log to scroll
+    if (effTab === "rules") return;          // rules tab has no log to scroll
     const ref =
-      activeTab === "reply"   ? replyRef   :
-      activeTab === "thought" ? thoughtRef :
-      activeTab === "tools"   ? toolsRef   :
-                                fullRef;
+      effTab === "thought" ? thoughtRef :
+      effTab === "tools"   ? toolsRef   :
+                             fullRef;
     const el = ref.current;
     if (!el) return;
     // Auto-scroll to the latest reply BY DEFAULT (that's the
@@ -4109,7 +4114,7 @@ function OrchestratorPane({
     const sel = window.getSelection?.();
     if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
     el.scrollTop = el.scrollHeight;
-  }, [activeTab, focus, tailSig]);
+  }, [effTab, focus, tailSig]);
 
   // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
   // Persistent draft per project (localStorage); auto-resize textarea
@@ -4204,16 +4209,17 @@ function OrchestratorPane({
             on each button keeps the labels on one line. */}
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)", flexShrink:0, overflowX:"auto", overflowY:"hidden" }}>
           {([
-            // Order per user spec 2026-05-28: Rules → User Input →
-            // Clear Chat → Thought → Tool Calls → Full Chat.
-            { id:"rules",     label:"📋 Rules",      accent:"#ff6b6b",       count: directives.length },
-            { id:"userinput", label:"✏ User Input",  accent:"#ffd97a",       count: 0                  },
-            { id:"reply",     label:"💬 Clear Chat", accent:"var(--accent)", count: messages.length    },
-            { id:"thought",   label:"🧠 Thought",    accent:"#dcb0ff",       count: thoughts.length    },
-            { id:"tools",     label:"🛠 Tool Calls", accent:"#7ff0c5",       count: toolCalls.length   },
-            { id:"full",      label:"📜 Full Chat",  accent:"#ffd97a",       count: fullChat.length    },
-          ] as const).map(tab => {
-            const active = activeTab === tab.id;
+            // Rules shows ONLY on the Super User page. "Clear Chat" was removed;
+            // Full Chat is the single chat view (per user request).
+            ...(isSuperUser
+              ? [{ id:"rules" as const, label:"📋 Rules", accent:"#ff6b6b", count: directives.length }]
+              : []),
+            { id:"userinput" as const, label:"✏ User Input",  accent:"#ffd97a",       count: 0                  },
+            { id:"full"      as const, label:"📜 Full Chat",  accent:"var(--accent)", count: fullChat.length    },
+            { id:"thought"   as const, label:"🧠 Thought",    accent:"#dcb0ff",       count: thoughts.length    },
+            { id:"tools"     as const, label:"🛠 Tool Calls", accent:"#7ff0c5",       count: toolCalls.length   },
+          ]).map(tab => {
+            const active = effTab === tab.id;
             return (
               <button
                 key={tab.id}
@@ -4239,7 +4245,7 @@ function OrchestratorPane({
         {/* Rules — first sub-tab; project directives with inline CRUD.
             Mirrors the previous SuperUserCard rules face but lives in
             the chat container per user spec 2026-05-28. */}
-        <div data-ui="OrchestratorRulesView" style={{ flex:1, display: activeTab === "rules" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
+        <div data-ui="OrchestratorRulesView" style={{ flex:1, display: effTab ==="rules" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
           <div style={{ background:"rgba(255,107,107,0.08)", border:"1px solid rgba(255,107,107,0.25)", borderRadius:8, padding:"8px 10px", fontSize:11, lineHeight:1.5, color:"var(--fg)", display:"flex", flexDirection:"column", gap:4 }}>
             <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ff6b6b", textTransform:"uppercase" }}>About rules</div>
             <div><b style={{ color:"#ff8c8c" }}>MUST</b> — hard requirement; the team should refuse the goal if it can't comply.</div>
@@ -4340,7 +4346,7 @@ function OrchestratorPane({
             read-only log of what the user has sent; new sends happen
             via the bottom dock (UserInputDock) which is always
             visible. */}
-        <div data-ui="OrchestratorUserInputView" style={{ flex:1, display: activeTab === "userinput" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
+        <div data-ui="OrchestratorUserInputView" style={{ flex:1, display: effTab ==="userinput" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
           <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase" }}>User Input history</div>
           {(() => {
             const sentByMe = supChat.filter(m => m.role === "you");
@@ -4376,7 +4382,7 @@ function OrchestratorPane({
             (expandable cards), and replies (avatar bubbles), interleaved in
             arrival order via the shared ChatBubble / ToolEventCard /
             ThinkingBlock components. */}
-        <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: activeTab === "reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
+        <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: effTab ==="reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
           {fullChat.length === 0 && !runError ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:12 }}>
@@ -4390,7 +4396,7 @@ function OrchestratorPane({
           )}
         </div>
         {/* Thought — reasoning + dispatch directives. Tool entries excluded. */}
-        <div ref={thoughtRef} data-ui="OrchestratorThoughtView" style={{ flex:1, display: activeTab === "thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
+        <div ref={thoughtRef} data-ui="OrchestratorThoughtView" style={{ flex:1, display: effTab ==="thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {thoughts.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               No reasoning yet — the model's thinking blocks land here
@@ -4399,7 +4405,7 @@ function OrchestratorPane({
           ) : thoughts.map((t, i) => renderThoughtEntry(t, i))}
         </div>
         {/* Tool Calls — every command the agent ran + its result. */}
-        <div ref={toolsRef} data-ui="OrchestratorToolsView" style={{ flex:1, display: activeTab === "tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
+        <div ref={toolsRef} data-ui="OrchestratorToolsView" style={{ flex:1, display: effTab ==="tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {toolCalls.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               No tool calls yet — every command the agent runs (Bash,
@@ -4409,7 +4415,7 @@ function OrchestratorPane({
           ) : toolCalls.map((t, i) => renderThoughtEntry(t, i))}
         </div>
         {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
-        <div ref={fullRef} data-ui="OrchestratorFullView" style={{ flex:1, display: activeTab === "full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
+        <div ref={fullRef} data-ui="OrchestratorFullView" style={{ flex:1, display: effTab ==="full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {fullChat.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               Empty — replies, reasoning, and tool calls will all appear
@@ -4643,6 +4649,7 @@ function RightColumnTabs(props: {
           selectedAgent={props.selectedAgent}
           activeAgent={props.activeAgent}
           team={props.team}
+          isSuperUser={tab === "super"}
           projectId={props.projectId}
           directives={props.directives}
           onDirectivesChanged={props.onDirectivesChanged}

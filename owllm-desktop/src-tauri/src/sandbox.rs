@@ -619,6 +619,254 @@ pub async fn sandbox_harden(distro: Option<String>) -> Result<SandboxStatus, Str
         .map_err(|e| format!("join error: {e}"))?
 }
 
+// ---- sandbox disk management ----------------------------------------------
+//
+// The agent sandbox lives inside the WSL distro's ext4.vhdx. That file GROWS as
+// caches (uv/npm/pip) and project copies accumulate, but never shrinks on its
+// own. Three actions, escalating in cost:
+//   1. sandbox_disk_usage  — read-only: vhdx file size + reclaimable caches + copies.
+//   2. sandbox_clear_caches — safe, no restart: drop regenerable build caches
+//      (uv/npm/pip). Frees space INSIDE the vhdx (logical) — the file stays big.
+//   3. sandbox_reclaim_disk — the only way to physically SHRINK the .vhdx file:
+//      fstrim, then `wsl --shutdown` + `diskpart compact vdisk`. Needs admin
+//      (UAC) and restarts WSL, so it is ALWAYS explicit + warned, never automatic.
+
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxDisk {
+    /// The WSL virtual-disk file size on Windows — what the user sees on C:. 0 if unknown.
+    pub vhdx_bytes: u64,
+    pub vhdx_path: Option<String>,
+    /// Reclaimable regenerable caches inside the distro (uv/npm/pip + sandbox home).
+    pub cache_bytes: u64,
+    /// Total size of OwLLM sandbox project COPIES (~/owllm/*).
+    pub copies_bytes: u64,
+    /// Meaningful only where there's a managed VM disk (Windows/WSL today).
+    pub available: bool,
+}
+
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ReclaimResult {
+    pub before_bytes: u64,
+    pub after_bytes: u64,
+    pub freed_bytes: u64,
+}
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Resolve a real Linux distro (skip docker-desktop etc.), like the other commands.
+#[cfg(windows)]
+fn resolve_linux_distro(distro: Option<String>) -> Result<String, String> {
+    distro
+        .filter(|d| !d.trim().is_empty())
+        .or_else(crate::wsl::best_linux_distro)
+        .ok_or_else(|| "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string())
+}
+
+/// Run a PowerShell snippet (with optional env vars) and return its stdout.
+#[cfg(windows)]
+fn run_powershell(script: &str, env: &[(&str, &str)]) -> Option<String> {
+    use std::os::windows::process::CommandExt;
+    let mut cmd = std::process::Command::new("powershell.exe");
+    cmd.args(["-NoProfile", "-NonInteractive", "-Command", script]);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let out = cmd.output().ok()?;
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Locate the distro's ext4.vhdx via the Lxss registry (DistributionName → BasePath)
+/// and return (path, size_bytes). The distro name is passed via env to avoid any
+/// quoting in the PowerShell body.
+#[cfg(windows)]
+fn wsl_vhdx(distro: &str) -> Option<(String, u64)> {
+    const PS: &str = r#"
+$d = $env:OWLLM_DISTRO
+Get-ChildItem 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss' -ErrorAction SilentlyContinue | ForEach-Object {
+  $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+  if ($p.DistributionName -eq $d -and $p.BasePath) {
+    $v = Join-Path $p.BasePath 'ext4.vhdx'
+    if (Test-Path $v) { Write-Output ('{0}|{1}' -f $v, (Get-Item $v).Length) }
+  }
+}
+"#;
+    let out = run_powershell(PS, &[("OWLLM_DISTRO", distro)])?;
+    let line = out.lines().find(|l| l.contains('|'))?;
+    let mut parts = line.trim().splitn(2, '|');
+    let path = parts.next()?.to_string();
+    let bytes = parts.next()?.trim().parse().ok()?;
+    Some((path, bytes))
+}
+
+/// Measure reclaimable caches + sandbox copies inside the distro (bytes), behind
+/// sentinels so login-shell noise can't corrupt the numbers.
+#[cfg(windows)]
+const DISK_DU_SCRIPT: &str = r#"c=0
+for d in "$HOME/.cache/uv" "$HOME/.npm/_cacache" "$HOME/.cache/pip" "$HOME/.cache/huggingface/hub/.locks" "$HOME/.owllm/sbhome/.cache" "$HOME/.owllm/sbhome/.npm"; do
+  if [ -e "$d" ]; then s=$(du -sb "$d" 2>/dev/null | cut -f1); c=$((c + ${s:-0})); fi
+done
+echo "OWLLM_CACHE=$c"
+if [ -d "$HOME/owllm" ]; then echo "OWLLM_COPIES=$(du -sb "$HOME/owllm" 2>/dev/null | cut -f1)"; else echo "OWLLM_COPIES=0"; fi
+"#;
+
+#[cfg(windows)]
+fn parse_sentinel(out: &str, key: &str) -> u64 {
+    out.lines()
+        .find_map(|l| l.trim().strip_prefix(key))
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(windows)]
+fn disk_usage_impl(distro: Option<String>) -> SandboxDisk {
+    let Ok(distro) = resolve_linux_distro(distro) else {
+        return SandboxDisk::default();
+    };
+    let (vhdx_path, vhdx_bytes) = match wsl_vhdx(&distro) {
+        Some((p, b)) => (Some(p), b),
+        None => (None, 0),
+    };
+    let (cache_bytes, copies_bytes) = match crate::wsl::run_in_distro_script(&distro, DISK_DU_SCRIPT) {
+        Ok(out) => (parse_sentinel(&out, "OWLLM_CACHE="), parse_sentinel(&out, "OWLLM_COPIES=")),
+        Err(_) => (0, 0),
+    };
+    SandboxDisk { vhdx_bytes, vhdx_path, cache_bytes, copies_bytes, available: true }
+}
+
+#[cfg(not(windows))]
+fn disk_usage_impl(_distro: Option<String>) -> SandboxDisk {
+    SandboxDisk::default()
+}
+
+#[tauri::command]
+pub async fn sandbox_disk_usage(distro: Option<String>) -> SandboxDisk {
+    tokio::task::spawn_blocking(move || disk_usage_impl(distro))
+        .await
+        .unwrap_or_default()
+}
+
+/// Drop regenerable build caches inside the distro. Uses each tool's own cache-
+/// clean (so its bookkeeping stays consistent) with an rm fallback. NEVER touches
+/// project files, credentials, or downloaded models. Returns bytes freed.
+#[cfg(windows)]
+const CLEAR_CACHE_SCRIPT: &str = r#"before=$(du -sbc "$HOME/.cache/uv" "$HOME/.npm/_cacache" "$HOME/.cache/pip" "$HOME/.owllm/sbhome/.cache" "$HOME/.owllm/sbhome/.npm" 2>/dev/null | awk 'END{print $1+0}')
+command -v uv  >/dev/null 2>&1 && uv cache clean  >/dev/null 2>&1 || rm -rf "$HOME/.cache/uv"
+command -v npm >/dev/null 2>&1 && npm cache clean --force >/dev/null 2>&1 || rm -rf "$HOME/.npm/_cacache"
+rm -rf "$HOME/.cache/pip" "$HOME/.owllm/sbhome/.cache" "$HOME/.owllm/sbhome/.npm"
+echo "OWLLM_FREED=$before"
+"#;
+
+#[cfg(windows)]
+fn clear_caches_impl(distro: Option<String>) -> Result<u64, String> {
+    let distro = resolve_linux_distro(distro)?;
+    let out = crate::wsl::run_in_distro_script(&distro, CLEAR_CACHE_SCRIPT)?;
+    Ok(parse_sentinel(&out, "OWLLM_FREED="))
+}
+
+#[cfg(not(windows))]
+fn clear_caches_impl(_distro: Option<String>) -> Result<u64, String> {
+    Err("cache cleanup is implemented for WSL (Windows) today".into())
+}
+
+/// Clear regenerable caches. Returns bytes freed. Safe — no restart.
+#[tauri::command]
+pub async fn sandbox_clear_caches(distro: Option<String>) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || clear_caches_impl(distro))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Physically shrink the .vhdx: fstrim (mark free blocks) → `wsl --shutdown` →
+/// `diskpart compact vdisk`. The compaction needs admin, so it runs through a
+/// one-shot elevated PowerShell (UAC). DISRUPTIVE — stops all running WSL. The
+/// result is SELF-VERIFYING: we report the real file size before and after.
+#[cfg(windows)]
+fn reclaim_disk_impl(distro: Option<String>) -> Result<ReclaimResult, String> {
+    let distro = resolve_linux_distro(distro)?;
+    let (vhdx, before) = wsl_vhdx(&distro)
+        .ok_or_else(|| "Could not locate the WSL virtual disk (ext4.vhdx).".to_string())?;
+
+    // 1) Discard free blocks inside the distro so compaction can reclaim them
+    //    (a non-sparse vhdx only gives back blocks that have been trimmed).
+    let _ = crate::wsl::run_in_distro_script_user(&distro, Some("root"), "fstrim -av 2>/dev/null || true");
+
+    // 2) Write the diskpart + wrapper scripts to temp, run the wrapper ELEVATED.
+    let tmp = std::env::temp_dir();
+    let dp = tmp.join("owllm_compact.txt");
+    let res = tmp.join("owllm_reclaim_result.txt");
+    let wrap = tmp.join("owllm_reclaim.ps1");
+    let _ = std::fs::remove_file(&res);
+    std::fs::write(
+        &dp,
+        format!("select vdisk file=\"{vhdx}\"\nattach vdisk readonly\ncompact vdisk\ndetach vdisk\n"),
+    )
+    .map_err(|e| format!("write diskpart script: {e}"))?;
+    // Bake the paths straight into the wrapper FILE (single-quoted → backslashes
+    // and the {guid} in the path are literal). A file sidesteps ALL command-line
+    // quoting, so the elevated launch below needs only the wrapper's own path.
+    let wrap_body = format!(
+        "$ErrorActionPreference = 'SilentlyContinue'\n\
+         $vhdx = '{vhdx}'\n\
+         $dp   = '{dp}'\n\
+         $res  = '{res}'\n\
+         wsl.exe --shutdown\n\
+         Start-Sleep -Seconds 8\n\
+         $b = (Get-Item -LiteralPath $vhdx).Length\n\
+         diskpart /s \"$dp\" | Out-Null\n\
+         $a = (Get-Item -LiteralPath $vhdx).Length\n\
+         Set-Content -Path $res -Value \"$b`n$a\"\n",
+        vhdx = vhdx,
+        dp = dp.display(),
+        res = res.display(),
+    );
+    std::fs::write(&wrap, wrap_body).map_err(|e| format!("write wrapper: {e}"))?;
+
+    // 3) Elevate: a non-elevated PowerShell launches the wrapper elevated (UAC)
+    //    and waits. Only the wrapper's path crosses the command line (as its own
+    //    -ArgumentList element, so spaces are safe).
+    let launch = format!(
+        "Start-Process powershell -Verb RunAs -Wait -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','{}')",
+        wrap.display(),
+    );
+    use std::os::windows::process::CommandExt;
+    let status = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &launch])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("launch elevated compaction: {e}"))?;
+    if !status.success() {
+        return Err("The disk-reclaim helper exited with an error.".into());
+    }
+
+    // 4) Read the self-verifying before/after the elevated run wrote.
+    let txt = std::fs::read_to_string(&res).map_err(|_| {
+        "Compaction was cancelled or could not run (it needs the admin prompt). Nothing was changed.".to_string()
+    })?;
+    let nums: Vec<u64> = txt.lines().filter_map(|l| l.trim().parse().ok()).collect();
+    let after = nums.get(1).copied().unwrap_or(before);
+    let before = nums.first().copied().unwrap_or(before);
+    let _ = std::fs::remove_file(&res);
+    Ok(ReclaimResult { before_bytes: before, after_bytes: after, freed_bytes: before.saturating_sub(after) })
+}
+
+#[cfg(not(windows))]
+fn reclaim_disk_impl(_distro: Option<String>) -> Result<ReclaimResult, String> {
+    Err("disk reclaim is implemented for WSL (Windows) today".into())
+}
+
+/// Compact the WSL virtual disk. Needs admin (UAC) + restarts WSL. Returns the
+/// real file size before/after so the UI can show what was reclaimed.
+#[tauri::command]
+pub async fn sandbox_reclaim_disk(distro: Option<String>) -> Result<ReclaimResult, String> {
+    tokio::task::spawn_blocking(move || reclaim_disk_impl(distro))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
 #[cfg(windows)]
 fn create_impl(name: String) -> Result<SandboxProject, String> {
     let p = crate::wsl::wsl_create_project(name, None)?;

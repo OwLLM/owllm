@@ -33,7 +33,11 @@ type Scene = {
   props: Prop[];
 };
 
-// The 9 scenes from Appendix A.2, each a parameterized room.
+// TEMP: unlock every scene regardless of XP. Flip to false to restore the
+// XP-gated progression (each scene's unlockXp below is preserved either way).
+const SHOW_ALL_SCENES = true;
+
+// The 10 scenes from Appendix A.2, each a parameterized room.
 const SCENES: Scene[] = [
   { key: "hq_loft", title: "Command Loft", emoji: "🛋", desc: "Home base — glowing desks and mission boards.", pal: ["#0b1020", "#1a2440", "#222d4d", "#5ac8fa", "#f1c44a"], unlockXp: 0,
     props: [{ kind: "board", x: 0.18, y: 0.30 }, { kind: "desk", x: 0.16, y: 0.66 }, { kind: "desk", x: 0.46, y: 0.74, s: 1.1 }, { kind: "desk", x: 0.76, y: 0.64 }, { kind: "lantern", x: 0.05, y: 0.78 }, { kind: "lantern", x: 0.94, y: 0.80 }, { kind: "shelf", x: 0.88, y: 0.42 }] },
@@ -53,6 +57,8 @@ const SCENES: Scene[] = [
     props: [{ kind: "desk", x: 0.20, y: 0.62 }, { kind: "desk", x: 0.44, y: 0.70 }, { kind: "desk", x: 0.68, y: 0.62 }, { kind: "rack", x: 0.90, y: 0.52 }, { kind: "board", x: 0.20, y: 0.28 }, { kind: "board", x: 0.62, y: 0.28 }] },
   { key: "arena_coliseum", title: "Arena", emoji: "⚔", desc: "Two podiums and the prompt stage.", pal: ["#190b18", "#30152c", "#3c1b37", "#ff7ed1", "#f1c44a"], unlockXp: 600,
     props: [{ kind: "podium", x: 0.28, y: 0.62, s: 1.2 }, { kind: "podium", x: 0.72, y: 0.62, s: 1.2 }, { kind: "podium", x: 0.50, y: 0.78, s: 1.5 }, { kind: "board", x: 0.50, y: 0.26, s: 1.3 }, { kind: "lantern", x: 0.10, y: 0.78 }, { kind: "lantern", x: 0.90, y: 0.78 }] },
+  { key: "watcher_observatory", title: "Watcher Observatory", emoji: "🔭", desc: "Star charts and the great telescope.", pal: ["#0a0e1f", "#161d3a", "#1e2748", "#7fc8ff", "#f1c44a"], unlockXp: 0,
+    props: [{ kind: "podium", x: 0.50, y: 0.60, s: 1.4 }, { kind: "shelf", x: 0.12, y: 0.46 }, { kind: "shelf", x: 0.88, y: 0.46 }, { kind: "board", x: 0.30, y: 0.28 }, { kind: "lantern", x: 0.20, y: 0.80 }, { kind: "lantern", x: 0.80, y: 0.80 }] },
 ];
 
 const STATIONS: Array<[number, number]> = [
@@ -553,7 +559,7 @@ export default function WorldPage() {
       {/* Scene dock bottom-left. */}
       <div style={{ position: "absolute", left: 14, bottom: 12, display: "flex", gap: 6, flexWrap: "wrap", maxWidth: "55%", zIndex: 210 }}>
         {SCENES.map(sc => {
-          const locked = progress.xp < sc.unlockXp;
+          const locked = !SHOW_ALL_SCENES && progress.xp < sc.unlockXp;
           const sel = sc.key === scene.key;
           return (
             <button

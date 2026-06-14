@@ -43,9 +43,53 @@ You compose teams of specialised agents — an orchestrator that plans, a coder 
 | 🔬 **Abliterate for safety research** | Orthogonalise weights against refusal directions. Generate adversarial datasets. Train better safety classifiers. The honest tools the field actually needs. |
 | 🛠 **GGUF + quantization built-in** | Convert HF safetensors → GGUF, quantize Q4/Q5/Q6/Q8/F16. Ship custom models anyone with llama.cpp can run. |
 | 🛡 **Red-team capable** | Compose adversarial agent teams whose *job* is to find vulnerabilities — in models, code, apps. Pair with fine-tuning to train defenders. |
-| 🔒 **OS-level isolation (Win/Mac/Linux)** | Flip it on and every tool your agents run — shell, file writes, edits, search, **and the cloud CLIs (Claude/Codex/Gemini/Kimi)** — runs **inside a real Linux sandbox**: WSL2 on Windows, a Lima VM on macOS, bubblewrap on Linux *(Mac/Linux beta)*. The project lives on the sandbox filesystem, so a model that runs `rm -rf` or writes outside it **cannot touch your real drive or home**. Projects are **isolated by default** and the toolchain **auto-installs**. Your provider logins — the CLIs **and** every API key — **auto-sync** into the sandbox, so isolated cloud agents just work; the Accounts page tests each provider on **both** host and sandbox. **Connect GitHub** to clone/push private repos from inside; **convert** a project isolated↔not anytime. Code page, agentic teams, **and** the fine-tuning chat are all covered; the rest stays native. |
+| 🔒 **Sealed to ONE folder (Win/Mac/Linux)** | Flip it on and every tool your agents run — shell, file writes, edits, search, **and the cloud CLIs (Claude/Codex/Gemini/Kimi)** — runs **inside a real Linux sandbox** (WSL2 on Windows, Lima VM on macOS, bubblewrap on Linux *(Mac/Linux beta)*). Agents are **sealed to ONLY the project folder**: they work on your **real Windows folder — no copy** — but **cannot see the rest of your C: drive, other projects, or your home / SSH keys**. A model that runs `rm -rf` simply has nothing else to reach. Isolated **by default**; the seal and toolchain **auto-install**; provider logins (CLIs **and** API keys) **auto-sync** in so cloud agents just work. **Connect GitHub** to clone/push private repos from inside. See the **🔒 Sealed to one folder** section below for the diagram. |
 | 🔌 **MCP-first tooling** | Plug in any Model Context Protocol server (filesystem, git, browser, Postgres, GitHub…). **Keyless DuckDuckGo web search is auto-installed on first run** — no API key, no card. Engine-agnostic: any search MCP you add is used automatically. Curated packs per team. |
 | 🏠 **Run anywhere** | Desktop today. **Headless on a $5/mo VPS, 24/7** — on the roadmap. Containerised / VM — on the roadmap. Your agents, your hardware, your terms. |
+
+## 🔒 Sealed to one folder — nothing else
+
+Give an AI agent a shell and it can read your SSH keys, wander into other repos, or `rm -rf` the wrong thing. OwLLM puts a hard wall around that. Turn isolation on (it's the default) and every command runs inside a Linux sandbox that can see **only the project folder you're working on** — your **real** Windows folder, mounted live with **no copy** — and nothing else of your machine.
+
+```mermaid
+flowchart LR
+    A["🤖 Agent<br/>shell · edits · cloud CLIs<br/>(Claude · Codex · Gemini)"]
+    A ==>|"sealed by bubblewrap inside WSL2"| BOX
+
+    subgraph BOX["🔒 The sandbox sees ONLY this"]
+        direction TB
+        P["📁 Your project folder<br/>your real Windows files — no copy"]
+        K["🔑 The agent's own logins<br/>auto-synced — cloud agents just work"]
+    end
+
+    BOX -.->|"🚫 blocked"| C1["🗂️ Rest of your C: drive"]
+    BOX -.->|"🚫 blocked"| C2["📦 Your other projects"]
+    BOX -.->|"🚫 blocked"| C3["🔐 Home · SSH keys · browser"]
+
+    classDef safe fill:#0e2a1e,stroke:#3ec58a,stroke-width:2px,color:#d6ffe9;
+    classDef block fill:#2a1414,stroke:#d86a6a,stroke-width:1px,color:#ffd9d9;
+    classDef agent fill:#0a2230,stroke:#3ec5d8,stroke-width:2px,color:#dff6ff;
+    class A agent;
+    class P,K safe;
+    class C1,C2,C3 block;
+    style BOX fill:#0c1f17,stroke:#3ec58a,stroke-width:2px,color:#d6ffe9;
+```
+
+- **Real folder, no copy** — work on `C:\code\my-repo` directly; changes are immediate, nothing is duplicated, no disk doubling.
+- **Keeps working after you seal it** — the agent's Claude/Codex/Gemini logins are bound in, so the team doesn't suddenly ask you to log in again.
+- **One toggle, honest feedback** — press **🔍 Verify** and the app runs a probe through the agent's *own* shell and tells you plainly: *runs in WSL? sealed to only this folder?* — and installs the seal if it's missing.
+
+### 💾 …and it cleans up after itself
+
+The sandbox lives in WSL, whose virtual disk only ever grows. A **Sandbox disk** card on the Home page keeps it honest:
+
+| Action | What it does | Cost |
+|---|---|:---:|
+| **See usage** | WSL disk size + reclaimable caches (uv / npm / pip) + project-copy size, at a glance | — |
+| **🧹 Clear caches** | Drops regenerable build caches — never your projects, logins, or models. Often frees **many GB** in seconds | instant, no restart |
+| **💿 Reclaim disk** | Physically **shrinks** the WSL disk file and reports exactly how much came back | restarts WSL · admin prompt |
+
+Deleting a project also frees its sandbox copy automatically — your own folders are never touched.
 
 ## What teams can do
 
@@ -146,6 +190,8 @@ That's why the data/ tree is open and community-driven even though the app binar
 - [x] GGUF / quantization pipeline
 - [x] Telegram bridge
 - [x] **WSL tool isolation** — agents run their tools inside Ubuntu, off your Windows drive
+- [x] **Folder-sealed isolation** — agents see **only the project folder** (bubblewrap inside WSL), on your **real Windows folder, no copy**
+- [x] **Sandbox disk management** — usage view, one-click cache clear, disk reclaim; auto-cleanup on project delete
 - [x] **Cloud CLIs inside the sandbox** — Claude/Codex/Gemini/Kimi run isolated too
 - [x] **Connect GitHub** — isolated agents clone private repos + push from inside the sandbox
 - [x] **Auto login-sync** — codex/claude/gemini/kimi + every API key mirrored into the sandbox

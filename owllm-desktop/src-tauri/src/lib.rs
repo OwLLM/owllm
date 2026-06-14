@@ -319,6 +319,7 @@ pub fn run() {
             vault::vault_read_server,
             vault::vault_sync_teams,
             sandbox::sandbox_status,
+            sandbox::sandbox_harden,
             sandbox::sandbox_create_project,
             sandbox::sandbox_list_projects,
             sandbox::sandbox_provision,

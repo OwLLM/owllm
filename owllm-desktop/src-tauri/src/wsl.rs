@@ -498,7 +498,7 @@ pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
     // CLI npm hiccup doesn't fail the whole provision.
     let script = "set -e; export DEBIAN_FRONTEND=noninteractive; \
                   apt-get update -y; \
-                  apt-get install -y nodejs npm git curl ca-certificates; \
+                  apt-get install -y nodejs npm git curl ca-certificates bubblewrap; \
                   export UV_INSTALL_DIR=/usr/local/bin; \
                   (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
                   npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli || true; \

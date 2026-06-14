@@ -53,6 +53,11 @@ pub struct SandboxStatus {
     pub strong: bool,
     /// Engine not yet runtime-verified on real hardware (Lima/bwrap).
     pub beta: bool,
+    /// Folder-confinement is active: agents see ONLY the project folder, not the
+    /// rest of the C: drive / distro home. On Windows this needs bubblewrap in
+    /// the distro (install via Harden); without it the agent still runs in WSL
+    /// but can see all of /mnt. On Linux this IS bubblewrap; on macOS, Lima.
+    pub confined: bool,
     /// WSL distros / Lima instances (empty for bubblewrap).
     pub targets: Vec<String>,
     /// Preferred target (default distro / instance).
@@ -66,6 +71,7 @@ impl Default for SandboxStatus {
             kind: "none".into(),
             strong: false,
             beta: false,
+            confined: false,
             targets: Vec::new(),
             default_target: None,
         }
@@ -180,6 +186,131 @@ fn exec_script(program: &str, args: &[String]) -> String {
 }
 
 // ---- Windows: delegate to the live WSL backend ----------------------------
+//
+// Plain WSL routing (`bash -lc "cd /mnt/c/proj && cmd"`) makes the agent a
+// Linux process, but it can still see the WHOLE distro home AND all of /mnt
+// (the entire C: drive — every other project, ~/.ssh on /mnt, etc.). To truly
+// confine an agent to ONLY the project folder we run the command through
+// bubblewrap INSIDE the distro: bind ONLY the project (the user's REAL Windows
+// folder, live via /mnt — no copy), a dedicated sandbox HOME, and the agent's
+// own credential files; hide the rest of /mnt and the rest of $HOME; unshare
+// namespaces. Validated on real WSL2 (kernel 6.18, unprivileged userns): the
+// agent sees its project + toolchain (/usr) + its logins and nothing else, and
+// its writes land in the real Windows folder. When bubblewrap isn't installed
+// we fall back to the plain routing below — no regression, just less sealed.
+
+/// The sandbox runner installed once inside the distro at
+/// `~/.owllm/run-sandboxed.sh`. Invoked as `run-sandboxed.sh <cwd> <command>`.
+/// Authored as a FILE so its dense nested quoting never crosses the
+/// Windows→wsl.exe command-line handoff (which mangles complex `-lc` strings —
+/// see wsl.rs): only a short bootstrap + two CLEAN argv elements (cwd, command)
+/// make that trip, so the command's own quotes/spaces/`&&` stay intact.
+#[cfg(windows)]
+const SANDBOX_RUNNER: &str = r#"#!/bin/bash
+# OwLLM agent sandbox — confine the agent to ONLY this project folder.
+# args are base64 so NO shell metacharacter ever crosses the Windows→wsl.exe
+# command-line handoff (which mangles nested quotes — verified). Decode here.
+CWD="$(printf %s "$1" | base64 -d)"; CMD="$(printf %s "$2" | base64 -d)"
+SB="$HOME/.owllm/sbhome"
+mkdir -p "$SB" "$SB/.owllm" 2>/dev/null
+exec bwrap \
+  --ro-bind-try /usr /usr --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin \
+  --ro-bind-try /lib /lib --ro-bind-try /lib32 /lib32 --ro-bind-try /lib64 /lib64 \
+  --ro-bind-try /etc /etc --ro-bind-try /opt /opt --ro-bind-try /snap /snap \
+  --proc /proc --dev /dev --tmpfs /tmp \
+  --bind "$SB" "$SB" --setenv HOME "$SB" \
+  --bind-try "$HOME/.codex" "$SB/.codex" \
+  --bind-try "$HOME/.claude" "$SB/.claude" \
+  --bind-try "$HOME/.claude.json" "$SB/.claude.json" \
+  --bind-try "$HOME/.gemini" "$SB/.gemini" \
+  --bind-try "$HOME/.kimi" "$SB/.kimi" \
+  --bind-try "$HOME/.owllm/agent_env.sh" "$SB/.owllm/agent_env.sh" \
+  --bind "$CWD" "$CWD" --chdir "$CWD" \
+  --unshare-user-try --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \
+  --die-with-parent --new-session \
+  bash -lc '[ -f "$HOME/.owllm/agent_env.sh" ] && . "$HOME/.owllm/agent_env.sh" 2>/dev/null; '"$CMD"
+"#;
+
+#[cfg(windows)]
+fn sandbox_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, bool>> {
+    static C: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Ensure the runner is installed in `distro` and report whether bubblewrap is
+/// available there (i.e. folder-confinement is ready). Cached per distro for the
+/// process lifetime: the FIRST isolated command per distro pays one ~150ms probe
+/// + idempotent runner write; every later command is free. Installs only the
+/// lightweight runner (user-level, fast) — bubblewrap itself is installed by
+/// provisioning or the explicit Harden action, never lazily in the hot path.
+#[cfg(windows)]
+fn ensure_sandbox(distro: &str) -> bool {
+    if let Some(v) = sandbox_cache().lock().unwrap().get(distro).copied() {
+        return v;
+    }
+    // Heredoc with a quoted delimiter keeps the runner body byte-for-byte; piped
+    // over stdin by run_in_distro_script (mangle-proof). Always (re)writes the
+    // runner so an upgraded body lands, then reports bwrap presence.
+    let script = format!(
+        "mkdir -p \"$HOME/.owllm\"; cat > \"$HOME/.owllm/run-sandboxed.sh\" <<'OWLLM_RUNNER_EOF'\n{SANDBOX_RUNNER}OWLLM_RUNNER_EOF\nchmod +x \"$HOME/.owllm/run-sandboxed.sh\"; command -v bwrap >/dev/null 2>&1 && echo OWLLM_BWRAP=yes || echo OWLLM_BWRAP=no"
+    );
+    // Cache only DEFINITIVE answers. A cold/transient WSL hiccup must NOT poison
+    // the cache with `false` — that would silently un-confine agents for the
+    // whole session (the cold-start trap that has bitten WSL probes before).
+    // On an ambiguous/errored probe, return false for THIS call (safe fallback
+    // to plain routing) but don't cache, so the next command re-probes.
+    match crate::wsl::run_in_distro_script(distro, &script) {
+        Ok(o) if o.contains("OWLLM_BWRAP=yes") => {
+            sandbox_cache().lock().unwrap().insert(distro.to_string(), true);
+            true
+        }
+        Ok(o) if o.contains("OWLLM_BWRAP=no") => {
+            sandbox_cache().lock().unwrap().insert(distro.to_string(), false);
+            false
+        }
+        _ => false, // probe failed / ambiguous — fall back once, re-probe next time
+    }
+}
+
+/// Install bubblewrap in `distro` as root (wsl `-u root` — no sudo password,
+/// per wsl.rs) and bust the readiness cache so the next command picks up the
+/// new confinement. Idempotent.
+#[cfg(windows)]
+fn install_bwrap(distro: &str) -> Result<(), String> {
+    crate::wsl::run_in_distro_script_user(
+        distro,
+        Some("root"),
+        "export DEBIAN_FRONTEND=noninteractive; \
+         (apt-get install -y bubblewrap >/dev/null 2>&1 || (apt-get update -y && apt-get install -y bubblewrap)); \
+         command -v bwrap >/dev/null 2>&1 && echo OWLLM_BWRAP_OK || { echo OWLLM_BWRAP_FAIL; exit 1; }",
+    )?;
+    sandbox_cache().lock().unwrap().remove(distro);
+    Ok(())
+}
+
+/// Run `command` through the sandbox runner inside `distro`. The cwd + command
+/// are passed BASE64-ENCODED to the runner, so the `-lc` script is entirely
+/// quote-free (`exec $HOME/.owllm/run-sandboxed.sh <b64> <b64>`). This is the one
+/// transport robust to ANY command: trailing args don't survive wsl.exe, and an
+/// sh-quoted script with mixed `'`/`"`/`$()` gets mangled by Rust's arg-escaping
+/// colliding with wsl.exe's re-parsing — base64 has no metacharacters, so
+/// nothing can be re-split (same trick wsl_setup.rs uses to pass the WSL
+/// password in). The runner decodes both before use.
+#[cfg(windows)]
+fn runner_argv(distro: &str, linux_cwd: &str, command: &str) -> (String, Vec<String>) {
+    use base64::Engine as _;
+    let b64 = |s: &str| base64::engine::general_purpose::STANDARD.encode(s.as_bytes());
+    let script = format!(
+        "exec $HOME/.owllm/run-sandboxed.sh {} {}",
+        b64(linux_cwd),
+        b64(command),
+    );
+    (
+        "wsl.exe".to_string(),
+        vec!["-d".into(), distro.into(), "--".into(), "bash".into(), "-lc".into(), script],
+    )
+}
 
 #[cfg(windows)]
 pub fn is_isolated(cwd: Option<&str>) -> bool {
@@ -189,6 +320,11 @@ pub fn is_isolated(cwd: Option<&str>) -> bool {
 #[cfg(windows)]
 pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
+    if ensure_sandbox(&distro) {
+        return Some(runner_argv(&distro, &linux_cwd, &exec_script(program, args)));
+    }
+    // Fallback: bubblewrap not present — plain WSL routing (Linux process, but
+    // not folder-confined). The Harden action installs bwrap to seal it.
     let script = format!("cd {} && {}", crate::wsl::sh_quote(&linux_cwd), exec_script(program, args));
     Some((
         "wsl.exe".to_string(),
@@ -199,6 +335,9 @@ pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option
 #[cfg(windows)]
 pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
+    if ensure_sandbox(&distro) {
+        return Some(runner_argv(&distro, &linux_cwd, command));
+    }
     let script = crate::wsl::build_wsl_bash_script(&linux_cwd, command);
     Some((
         "wsl.exe".to_string(),
@@ -334,11 +473,16 @@ fn status_impl() -> SandboxStatus {
     // never docker-desktop); fall back to the raw default for display when
     // only system distros exist.
     let default_target = crate::wsl::best_linux_distro().or(w.default_distro);
+    // Folder-confinement is ready when the target distro has bubblewrap (+ the
+    // runner, installed idempotently by ensure_sandbox). Probed once per distro
+    // then cached, so polling status is cheap.
+    let confined = default_target.as_deref().map(ensure_sandbox).unwrap_or(false);
     SandboxStatus {
         available: w.available,
         kind: "wsl".into(),
         strong: true,
         beta: false,
+        confined,
         targets: w.distros,
         default_target,
     }
@@ -352,6 +496,7 @@ fn status_impl() -> SandboxStatus {
         kind: if ok { "bubblewrap".into() } else { "none".into() },
         strong: false,
         beta: true,
+        confined: ok, // bubblewrap IS the folder-confinement on Linux
         targets: Vec::new(),
         default_target: None,
     }
@@ -365,6 +510,7 @@ fn status_impl() -> SandboxStatus {
         kind: if ok { "lima".into() } else { "none".into() },
         strong: true,
         beta: true,
+        confined: ok, // Lima is a VM — confinement comes with availability
         targets: Vec::new(),
         default_target: None,
     }
@@ -378,6 +524,52 @@ fn status_impl() -> SandboxStatus {
 #[tauri::command]
 pub fn sandbox_status() -> SandboxStatus {
     status_impl()
+}
+
+/// Turn ON folder-confinement: install the isolation engine in the sandbox so
+/// agents see ONLY the project folder (not the rest of the C: drive / distro
+/// home). Windows installs bubblewrap in the distro (apt as root — no password)
+/// and re-probes; Linux installs bubblewrap via the provisioner; macOS reports
+/// Lima setup. Returns the refreshed status so the UI can confirm `confined`.
+/// Idempotent — safe to call when already sealed.
+#[cfg(windows)]
+fn harden_impl(distro: Option<String>) -> Result<SandboxStatus, String> {
+    let distro = distro
+        .filter(|d| !d.trim().is_empty())
+        .or_else(crate::wsl::best_linux_distro)
+        .ok_or_else(|| "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string())?;
+    install_bwrap(&distro)?;
+    if !ensure_sandbox(&distro) {
+        return Err("bubblewrap installed but isn't runnable in this distro — folder-confinement unavailable.".to_string());
+    }
+    Ok(status_impl())
+}
+
+#[cfg(target_os = "linux")]
+fn harden_impl(_distro: Option<String>) -> Result<SandboxStatus, String> {
+    if engine_available("bwrap") {
+        return Ok(status_impl());
+    }
+    linux_provision()?;
+    Ok(status_impl())
+}
+
+#[cfg(target_os = "macos")]
+fn harden_impl(_distro: Option<String>) -> Result<SandboxStatus, String> {
+    Err(MAC_PROVISION_HELP.to_string())
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
+fn harden_impl(_distro: Option<String>) -> Result<SandboxStatus, String> {
+    Err("isolation is not supported on this platform".to_string())
+}
+
+#[tauri::command]
+pub async fn sandbox_harden(distro: Option<String>) -> Result<SandboxStatus, String> {
+    // apt / provisioning is blocking — keep the UI responsive.
+    tokio::task::spawn_blocking(move || harden_impl(distro))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
 }
 
 #[cfg(windows)]
@@ -871,6 +1063,81 @@ mod tests {
     fn win_path_to_mnt() {
         assert_eq!(win_to_mnt("C:\\Users\\mc").unwrap(), "/mnt/c/Users/mc");
         assert_eq!(win_to_mnt("D:\\a\\b").unwrap(), "/mnt/d/a/b");
+    }
+
+    /// Definitive end-to-end probe of the REAL Rust transport on real WSL
+    /// (installs bubblewrap, then spawns wsl.exe exactly as the app does):
+    ///   cargo test --lib -- --ignored --nocapture probe_bwrap_confinement_real
+    /// Asserts the agent's command runs chdir'd into the project, can NOT see the
+    /// rest of the C: drive, and its write lands in the real Windows folder.
+    #[cfg(windows)]
+    #[test]
+    #[ignore]
+    fn probe_bwrap_confinement_real() {
+        let distro = crate::wsl::best_linux_distro().expect("a Linux distro in WSL");
+        install_bwrap(&distro).expect("install bubblewrap");
+        assert!(ensure_sandbox(&distro), "sandbox runner + bwrap ready");
+
+        let win_dir = std::env::temp_dir().join("owllm_iso_probe");
+        let _ = std::fs::remove_dir_all(&win_dir);
+        std::fs::create_dir_all(&win_dir).unwrap();
+        std::fs::write(win_dir.join("seed.txt"), "seed").unwrap();
+        let mnt = win_to_mnt(&win_dir.to_string_lossy()).unwrap();
+
+        let probe = r#"echo "PWD=$(pwd)"; echo "CDRIVE=$(ls /mnt/c/Windows >/dev/null 2>&1 && echo VISIBLE || echo HIDDEN)"; echo "LS=$(ls | tr '\n' ',')"; echo "NODE=$(node --version 2>&1)"; echo wrote-from-agent > out.txt && echo WROTE"#;
+        let (exe, argv) = runner_argv(&distro, &mnt, probe);
+        let out = std::process::Command::new(&exe).args(&argv).output().expect("spawn wsl.exe");
+        let so = String::from_utf8_lossy(&out.stdout);
+        eprintln!("--- real bwrap transport probe ---\n{so}\n--- stderr ---\n{}", String::from_utf8_lossy(&out.stderr));
+
+        assert!(so.contains(&format!("PWD={mnt}")), "must chdir INTO the project, got: {so}");
+        assert!(so.contains("CDRIVE=HIDDEN"), "the rest of C: must be hidden, got: {so}");
+        assert!(so.contains("LS=seed.txt,"), "only the project's files are visible, got: {so}");
+        assert!(so.contains("WROTE"), "agent could write, got: {so}");
+        assert!(win_dir.join("out.txt").exists(), "the write must land in the REAL Windows folder");
+        assert_eq!(std::fs::read_to_string(win_dir.join("out.txt")).unwrap().trim(), "wrote-from-agent");
+        let _ = std::fs::remove_dir_all(&win_dir);
+    }
+
+    /// The runner invocation is QUOTE-FREE: cwd + command are base64, so a
+    /// command full of quotes/`&&`/`$()`/spaces can't be re-split by the
+    /// Windows→wsl.exe handoff. The `-lc` script must contain no `'` or `"`.
+    #[cfg(windows)]
+    #[test]
+    fn runner_argv_is_quote_free_base64() {
+        use base64::Engine as _;
+        let nasty = r#"echo "a & b" && ls 'x y' | head -1; echo $(pwd)"#;
+        let (exe, argv) = runner_argv("Ubuntu", "/mnt/c/proj", nasty);
+        assert_eq!(exe, "wsl.exe");
+        assert_eq!(&argv[0..5], &["-d", "Ubuntu", "--", "bash", "-lc"]);
+        let script = &argv[5];
+        // NO shell metacharacters that wsl.exe could mangle
+        assert!(!script.contains('\''), "script must be quote-free: {script}");
+        assert!(!script.contains('"'), "script must be quote-free: {script}");
+        assert!(script.starts_with("exec $HOME/.owllm/run-sandboxed.sh "));
+        // the command is recoverable by decoding the last token
+        let b64cmd = base64::engine::general_purpose::STANDARD.encode(nasty.as_bytes());
+        assert!(script.ends_with(&b64cmd), "command must be the final base64 token");
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::STANDARD.decode(b64cmd.as_bytes()).unwrap(),
+        ).unwrap();
+        assert_eq!(decoded, nasty);
+    }
+
+    /// The runner body binds ONLY the project + sandbox home + the agent's own
+    /// creds, sets HOME to the sandbox home, and unshares namespaces — it must
+    /// never bind the whole real home or /mnt wholesale.
+    #[cfg(windows)]
+    #[test]
+    fn sandbox_runner_seals_correctly() {
+        assert!(SANDBOX_RUNNER.contains("--bind \"$CWD\" \"$CWD\""));
+        assert!(SANDBOX_RUNNER.contains("--chdir \"$CWD\""));
+        assert!(SANDBOX_RUNNER.contains("--setenv HOME \"$SB\""));
+        assert!(SANDBOX_RUNNER.contains("--bind-try \"$HOME/.codex\" \"$SB/.codex\""));
+        assert!(SANDBOX_RUNNER.contains("--unshare-pid"));
+        // never expose the whole real home or all of /mnt
+        assert!(!SANDBOX_RUNNER.contains("--bind \"$HOME\" \"$HOME\""));
+        assert!(!SANDBOX_RUNNER.contains("/mnt /mnt"));
     }
 
     #[test]

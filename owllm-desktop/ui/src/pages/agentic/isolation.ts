@@ -15,6 +15,9 @@ export type SandboxStatus = {
   strong: boolean;
   /** Engine not yet runtime-verified on real hardware (Lima/bwrap). */
   beta: boolean;
+  /** Folder-confinement is active: agents see ONLY the project folder, not the
+   *  rest of the C: drive / distro home. On Windows needs bubblewrap (Harden). */
+  confined: boolean;
   targets: string[];
   defaultTarget: string | null;
 };
@@ -32,8 +35,16 @@ export async function sandboxStatus(): Promise<SandboxStatus> {
   try {
     return await invoke<SandboxStatus>("sandbox_status");
   } catch {
-    return { available: false, kind: "none", strong: false, beta: false, targets: [], defaultTarget: null };
+    return { available: false, kind: "none", strong: false, beta: false, confined: false, targets: [], defaultTarget: null };
   }
+}
+
+/// Turn ON folder-confinement: install the isolation engine (bubblewrap on
+/// Windows/Linux) so agents see ONLY the project folder, not the rest of the C:
+/// drive / distro home. Returns the refreshed status (check `confined`).
+/// Blocking (apt) — the Rust side keeps the UI responsive. Idempotent.
+export async function sandboxHarden(distro?: string | null): Promise<SandboxStatus> {
+  return invoke<SandboxStatus>("sandbox_harden", { distro: distro ?? null });
 }
 
 export async function sandboxCreateProject(name: string): Promise<SandboxProject> {

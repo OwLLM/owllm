@@ -62,7 +62,7 @@ import {
 import { stripFabricatedToolOutput } from "./localTools";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
-import { sandboxSyncLogins, sandboxConvertProject } from "./isolation";
+import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
 import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
@@ -476,23 +476,53 @@ function LocationRow({
 
   // VERIFY: run the exact probe an agent's shell runs (same tool_shell_exec +
   // cwd) and report WSL vs host. One probe answers it for the whole team.
+  // Run the EXACT probe an agent's shell runs: confirm it executes in WSL
+  // (Linux), and whether it's folder-CONFINED — a sealed agent can't see the
+  // rest of the C: drive, so `/mnt/c/Windows` is gone. Returns the parsed facts.
+  const probeIsolation = async () => {
+    const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
+      "tool_shell_exec",
+      {
+        command:
+          'uname -a; echo "PWD=$(pwd)"; echo "USER=$(whoami)"; ' +
+          'echo "CDRIVE=$(ls /mnt/c/Windows >/dev/null 2>&1 && echo VISIBLE || echo HIDDEN)"',
+        cwd: effectiveCwd || undefined,
+      },
+    );
+    const out = `${r.stdout}\n${r.stderr}`.trim();
+    const inWsl = /microsoft-standard-WSL2/i.test(out) || (/\bLinux\b/.test(r.stdout) && !/PWD=[A-Za-z]:\\/.test(out));
+    const confined = /CDRIVE=HIDDEN/.test(out);
+    return { out, inWsl, confined };
+  };
+
   const verifyIsolation = async () => {
     if (actBusy) return;
     setActBusy("verify");
     setActMsg("🔍 Running the probe through an agent's own shell…");
     try {
-      const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
-        "tool_shell_exec",
-        { command: 'uname -a; echo "PWD=$(pwd)"; echo "USER=$(whoami)"', cwd: effectiveCwd || undefined },
-      );
-      const out = `${r.stdout}\n${r.stderr}`.trim();
-      const inWsl = /microsoft-standard-WSL2/i.test(out) || (/\bLinux\b/.test(r.stdout) && !/PWD=[A-Za-z]:\\/.test(out));
-      setActMsg(
-        (inWsl
-          ? "✅ ISOLATED — agents run inside WSL (Linux); all agents share this path, so they are all isolated."
-          : "⚠️ NOT ISOLATED — agents run on the Windows host. Press 🛡 Isolate to move the project into the sandbox.") +
-        "\n\nProbe output (the exact command an agent's shell runs):\n" + (out || "(no output)"),
-      );
+      let { out, inWsl, confined } = await probeIsolation();
+      // WSL but NOT sealed → install bubblewrap and re-probe so the agent is
+      // confined to ONLY this folder. Visible progress — never a silent wait.
+      if (inWsl && !confined) {
+        setActMsg("🛡 Runs in WSL — sealing it to ONLY this folder (installing bubblewrap, ~10–20s)…");
+        try {
+          await sandboxHarden(null);
+          ({ out, inWsl, confined } = await probeIsolation());
+        } catch (e) {
+          setActMsg(
+            "✅ Runs in WSL (Linux), but couldn't seal it to just this folder: " + String(e) +
+            "\n\nAgents still run isolated in WSL — they just also see the rest of /mnt (C: drive). " +
+            "Open the WSL distro and run: sudo apt-get install -y bubblewrap",
+          );
+          return;
+        }
+      }
+      const verdict = !inWsl
+        ? "⚠️ NOT ISOLATED — agents run on the Windows host. Press 🛡 Isolate to move the project into the sandbox."
+        : confined
+          ? "✅ FULLY ISOLATED — agents run in WSL (Linux) AND are sealed to ONLY this folder: they can't see the rest of your C: drive. Their writes land in your real folder. One probe answers it for the whole team."
+          : "✅ ISOLATED in WSL (Linux), but NOT folder-sealed — agents can still see the rest of /mnt (your C: drive). Install bubblewrap in the distro to seal it.";
+      setActMsg(verdict + "\n\nProbe output (the exact command an agent's shell runs):\n" + (out || "(no output)"));
     } catch (e) {
       setActMsg("Verify failed: " + String(e));
     } finally { setActBusy(null); }
@@ -578,7 +608,7 @@ function LocationRow({
           >{actBusy === key ? "⏳" : label}</button>
         );
         return (<>
-          {aBtn("🔍 Verify", verifyIsolation, "verify", "Run uname/pwd/whoami through the agents' own shell + cwd and show whether it executes in WSL or on the host.")}
+          {aBtn("🔍 Verify", verifyIsolation, "verify", "Run a probe through the agents' own shell + cwd: shows whether it executes in WSL vs the host AND whether it's sealed to ONLY this folder (can't see the rest of C:). If it runs in WSL but isn't sealed yet, this installs bubblewrap to seal it.")}
           {!isWslPath(effectiveCwd) && aBtn("🛡 Isolate", isolate, "isolate", "Copy this project into the WSL sandbox (a sealed Linux copy). Not needed if the badge already says Isolated — that means agents already run in WSL on your real folder.")}
         </>);
       })()}

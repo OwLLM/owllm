@@ -378,6 +378,36 @@ export function wiredDispatchTargets(
   return wired;
 }
 
+/// Tier-3 autonomous handoff (P0-2): the agents `agentName` hands its OUTPUT to,
+/// i.e. its outgoing edges EXCLUDING the orchestrator and itself. Empty = this
+/// agent is a chain SINK → its output returns to the orchestrator to integrate.
+/// An arrow `coder → critic` makes the critic receive the coder's output; an
+/// arrow back to the orchestrator just ends the chain. Pure + unit-tested.
+export function downstreamTargets(
+  team: { edges?: Edge[] },
+  agentName: string,
+  orchName: string,
+): string[] {
+  const edges = Array.isArray(team.edges) ? team.edges : [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const e of edges) {
+    if (
+      e && e.source === agentName && typeof e.target === "string" &&
+      e.target !== orchName && e.target !== agentName && !seen.has(e.target)
+    ) {
+      seen.add(e.target);
+      out.push(e.target);
+    }
+  }
+  return out;
+}
+
+/// The maximum number of agents a single handoff chain may run before it stops —
+/// a hard backstop against cyclic graphs (critic→coder→critic→…). Combined with
+/// a per-chain visited set this guarantees termination.
+export const MAX_CHAIN_HOPS = 8;
+
 /// Model-visible correction for dispatch lines that named REAL team members
 /// the graph doesn't wire to the orchestrator. Distinct wording from the
 /// no-such-agent case (P1-3) — the agent exists, the edge doesn't.
@@ -2752,15 +2782,10 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // multiple agents simultaneously while they work concurrently.
   hooks.onPhase("dispatching");
   if (signal.aborted) throw new DOMException("aborted", "AbortError");
-  const settled = await Promise.allSettled(dispatches.map(async (d) => {
-    const spec = team.agents.find(a => a.name === d.agentName);
-    if (!spec) return null;
+  // Run ONE agent on `instruction`; returns {name, text} (or an error reply).
+  const runOneAgent = async (spec: AgentSpec, instruction: string): Promise<{ name: string; text: string }> => {
     hooks.onAgentStart(spec.name);
-    hooks.onThought(spec.name, {
-      role: "dispatch",
-      color: "#a578ff",
-      text: `📩 ${d.instruction}`,
-    });
+    hooks.onThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
     hooks.onLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
     const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives);
     const specModel = modelFor(spec.name);
@@ -2768,7 +2793,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     try {
       const specText = await streamChatCompletion(
         port, specModel, specProvider,
-        specPrompt, d.instruction, tempFor(spec, 0.5), signal,
+        specPrompt, instruction, tempFor(spec, 0.5), signal,
         (delta) => hooks.onLogDelta(spec.name, delta),
         projectCwd, [], autoApprove,
         (channel, role, delta) => hooks.onThoughtDelta(spec.name, channel, role, delta),
@@ -2780,8 +2805,6 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       hooks.onAgentReply(spec.name, cleaned);
       return { name: spec.name, text: cleaned };
     } catch (e: any) {
-      // Surface the failure into the agent's own log so the user
-      // sees which specialist died.
       const errMsg = `(error: ${String(e?.message ?? e)})`;
       hooks.onLogDelta(spec.name, "\n\n" + errMsg);
       hooks.onAgentReply(spec.name, errMsg);
@@ -2789,7 +2812,36 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     } finally {
       hooks.onAgentEnd(spec.name);
     }
-  }));
+  };
+  // Tier-3 autonomous handoff: walk the linear pipeline from each initial
+  // dispatch along non-orchestrator edges — `coder → critic` makes the critic
+  // receive the coder's output, no orchestrator in between. A visited set +
+  // MAX_CHAIN_HOPS guarantee termination on cyclic graphs. A team with no
+  // agent→agent edges runs exactly one agent per dispatch (today's behavior).
+  const runChain = async (startName: string, startInstruction: string): Promise<{ name: string; text: string } | null> => {
+    let curName: string | undefined = startName;
+    let input = startInstruction;
+    const seen = new Set<string>();
+    let last: { name: string; text: string } | null = null;
+    for (let hop = 0; curName && !seen.has(curName) && hop < MAX_CHAIN_HOPS; hop++) {
+      seen.add(curName);
+      const spec = team.agents.find(a => a.name === curName);
+      if (!spec) break;
+      last = await runOneAgent(spec, input);
+      const downstream = downstreamTargets(team, curName, orch.name).filter(t => !seen.has(t));
+      if (downstream.length === 0) break;            // chain SINK → integrate
+      const next = downstream[0];
+      if (downstream.length > 1) {
+        hooks.onThought(curName, { role: "system", color: "#8a92a3",
+          text: `(pipeline: handing to @${next}; other branches ${downstream.slice(1).map(x => "@" + x).join(", ")} not auto-followed)` });
+      }
+      hooks.onThought(curName, { role: "dispatch", color: "#a578ff", text: `➡ handing off to @${next}` });
+      input = `You are continuing a team workflow. @${last.name} produced the following — build on it for YOUR part of the task:\n\n${last.text}`;
+      curName = next;
+    }
+    return last;
+  };
+  const settled = await Promise.allSettled(dispatches.map(d => runChain(d.agentName, d.instruction)));
   const specialistReplies: Array<{ name: string; text: string }> = [];
   for (const r of settled) {
     if (r.status === "fulfilled" && r.value) specialistReplies.push(r.value);

@@ -53,6 +53,8 @@ import {
   resolveAutoModel,
   wiredDispatchTargets,
   unwiredCorrectionMessage,
+  downstreamTargets,
+  MAX_CHAIN_HOPS,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -8379,64 +8381,89 @@ export default function AgentsPage() {
         finalize: FleetFinalizeResult | null;
       };
       const settled = await Promise.allSettled<SpecOutcome | null>(dispatches.map(async (d) => {
-        const spec = activeTeam.agents.find(a => a.name === d.agentName);
-        if (!spec) return null;
-        addActive(spec.name);
-        const specPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName, directives);
-        appendThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${d.instruction}` });
-        appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
-        const specModel = modelFor(spec.name);
-        const wt = worktreeBySpec.get(spec.name) ?? null;
-        const specCwd = wt ? wt.path : projectCwd;
-        // Per-role tool allowlist from the loaded role yaml.
-        const allowed = roleByName.get(spec.base)?.toolAllowlist;
-        let ok = false;
-        let specText = "";
-        try {
-          specText = (await streamChatCompletion(
-            port, specModel, providerFor(specModel),
-            specPrompt, d.instruction, tempFor(spec, 0.5), ctrl.signal,
-            (delta) => streamLog(spec.name, delta),
-            specCwd,
-            undefined, undefined,
-            (channel, role, delta) => streamThought(spec.name, channel, role, delta),
-            allowed,
-            undefined,
-            getClaudeSession(selectedProjectId, spec.name),
-          )).trim();
-          ok = true;
-        } catch (e: any) {
-          const errMsg = `(error: ${String(e?.message ?? e)})`;
-          streamLog(spec.name, "\n\n" + errMsg);
-          specText = errMsg;
+        const startSpec = activeTeam.agents.find(a => a.name === d.agentName);
+        if (!startSpec) return null;
+        // Tier-3 autonomous handoff: the whole pipeline shares the START agent's
+        // worktree, so `coder → critic` works on the same files and we commit
+        // ONCE at the end. A team with no agent→agent edges runs exactly one
+        // agent here — today's behavior, unchanged.
+        const wt = worktreeBySpec.get(startSpec.name) ?? null;
+        const chainCwd = wt ? wt.path : projectCwd;
+        const runChainAgent = async (spec: AgentSpec, instruction: string) => {
+          addActive(spec.name);
+          appendThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
+          appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
+          const specModel = modelFor(spec.name);
+          const allowed = roleByName.get(spec.base)?.toolAllowlist;
+          let ok = false, specText = "";
+          try {
+            specText = (await streamChatCompletion(
+              port, specModel, providerFor(specModel),
+              buildSpecialistPrompt(activeTeam, spec, roleByName, directives), instruction,
+              tempFor(spec, 0.5), ctrl.signal,
+              (delta) => streamLog(spec.name, delta),
+              chainCwd,
+              undefined, undefined,
+              (channel, role, delta) => streamThought(spec.name, channel, role, delta),
+              allowed,
+              undefined,
+              getClaudeSession(selectedProjectId, spec.name),
+            )).trim();
+            ok = true;
+          } catch (e: any) {
+            specText = `(error: ${String(e?.message ?? e)})`;
+            streamLog(spec.name, "\n\n" + specText);
+          }
+          removeActive(spec.name);
+          speakAgentReply(spec.name, specText);
+          return { name: spec.name, spec, text: specText, ok };
+        };
+        // Walk the linear pipeline along non-orchestrator edges; visited set +
+        // MAX_CHAIN_HOPS guarantee termination on cyclic graphs.
+        let curName: string | undefined = startSpec.name;
+        let input = d.instruction;
+        const seen = new Set<string>();
+        let last: { name: string; spec: AgentSpec; text: string; ok: boolean } | null = null;
+        for (let hop = 0; curName && !seen.has(curName) && hop < MAX_CHAIN_HOPS; hop++) {
+          seen.add(curName);
+          const spec = activeTeam.agents.find(a => a.name === curName);
+          if (!spec) break;
+          last = await runChainAgent(spec, input);
+          const downstream = downstreamTargets(activeTeam, curName, orch.name).filter(t => !seen.has(t));
+          if (downstream.length === 0) break;            // chain SINK → integrate
+          const next = downstream[0];
+          if (downstream.length > 1) {
+            appendThought(curName, { role: "system", color: "#8a92a3",
+              text: `(pipeline: handing to @${next}; other branches ${downstream.slice(1).map(x => "@" + x).join(", ")} not auto-followed)` });
+          }
+          appendThought(curName, { role: "dispatch", color: "#a578ff", text: `➡ handing off to @${next}` });
+          input = `You are continuing a team workflow. @${last.name} produced the following — build on it for YOUR part of the task:\n\n${last.text}`;
+          curName = next;
         }
-        // Finalize: commit anything the agent wrote in its worktree.
-        // Skip when there's no worktree (non-git project — shared cwd
-        // path, no isolation, no commit boundary either).
+        if (!last) return null;
+        // Finalize the chain's worktree ONCE — captures the whole pipeline's edits.
         let finalize: FleetFinalizeResult | null = null;
         if (wt) {
           try {
             finalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {
-              worktreePath: wt.path, agentName: spec.name, summary: d.instruction,
+              worktreePath: wt.path, agentName: startSpec.name, summary: d.instruction,
             });
             if (finalize.status === "committed") {
-              appendThought(spec.name, {
+              appendThought(startSpec.name, {
                 role: "fleet", color: "#7ff0c5",
                 text: `📦 committed ${finalize.commitSha.slice(0,7)} · ${finalize.filesChanged} file${finalize.filesChanged === 1 ? "" : "s"}\n${finalize.files.slice(0, 12).join("\n")}`,
               });
             } else if (finalize.status === "noChanges") {
-              appendThought(spec.name, { role: "fleet", color: "#8a92a3", text: "📦 no changes to commit" });
+              appendThought(startSpec.name, { role: "fleet", color: "#8a92a3", text: "📦 no changes to commit" });
             } else {
-              appendThought(spec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize failed: ${finalize.message}` });
+              appendThought(startSpec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize failed: ${finalize.message}` });
             }
           } catch (e: any) {
             finalize = { status: "error", message: String(e?.message ?? e) };
-            appendThought(spec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize errored: ${String(e?.message ?? e)}` });
+            appendThought(startSpec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize errored: ${String(e?.message ?? e)}` });
           }
         }
-        removeActive(spec.name);
-        speakAgentReply(spec.name, specText);
-        return { name: spec.name, spec, text: specText, ok, worktree: wt, finalize };
+        return { name: last.name, spec: last.spec, text: last.text, ok: last.ok, worktree: wt, finalize };
       }));
       const outcomes: SpecOutcome[] = [];
       for (const r of settled) {

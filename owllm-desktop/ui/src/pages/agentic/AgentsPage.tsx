@@ -6799,7 +6799,15 @@ export default function AgentsPage() {
   };
   const onDeleteProject = async () => {
     if (!selectedProject) return;
-    if (!window.confirm(`Delete project '${selectedProject.name}'?\n\nThis only removes the project row; the folder on disk stays.`)) return;
+    // A sandbox COPY (~/owllm/<name> inside WSL) is OwLLM-created, so deleting
+    // the project also frees it. An isolate-in-place project points at the
+    // user's OWN Windows folder — that always stays put.
+    const loc = (selectedProject.location ?? "").replace(/\\/g, "/").toLowerCase();
+    const isManagedCopy = isWslPath(selectedProject.location) && loc.includes("/owllm/") && !loc.includes("/mnt/");
+    const msg = isManagedCopy
+      ? `Delete project '${selectedProject.name}'?\n\nThis removes the project AND its sandbox copy inside WSL (frees that disk space). Your original folder, if any, stays put.`
+      : `Delete project '${selectedProject.name}'?\n\nThis only removes the project row; your folder on disk stays.`;
+    if (!window.confirm(msg)) return;
     try {
       await invoke("delete_project", { id: selectedProject.id });
       const rows = await reloadProjects();

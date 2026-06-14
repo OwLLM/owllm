@@ -414,14 +414,33 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
 pub async fn delete_project(id: String) -> Result<(), String> {
     let Some(path) = project_db_path() else { return Err("LLM/ tree not found".into()) };
     let path2 = path.clone();
-    tokio::task::spawn_blocking(move || {
+    // Read the location BEFORE deleting so we can auto-clean a sandbox copy.
+    let location = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         let conn = rusqlite::Connection::open(&path2)
             .map_err(|e| format!("open {}: {e}", path2.display()))?;
         ensure_schema(&conn)?;
+        let loc: Option<String> = match conn.query_row(
+            "SELECT location FROM agent_projects WHERE id = ?",
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        ) {
+            Ok(s) => Some(s),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(format!("read location: {e}")),
+        };
         conn.execute("DELETE FROM agent_projects WHERE id = ?", rusqlite::params![id])
             .map_err(|e| format!("delete: {e}"))?;
-        Ok(())
+        Ok(loc)
     })
     .await
-    .map_err(|e| format!("join error: {e}"))?
+    .map_err(|e| format!("join error: {e}"))??;
+
+    // Auto-clean on delete: remove the OwLLM-managed sandbox COPY (~/owllm/<name>)
+    // if this project was one. Never touches the user's real Windows/host folder
+    // (is_managed_sandbox_copy guards that). Best-effort — runs off-thread so a
+    // slow WSL call doesn't block the UI, and a failure can't fail the delete.
+    if let Some(loc) = location {
+        tokio::task::spawn_blocking(move || crate::sandbox::cleanup_deleted_project(&loc));
+    }
+    Ok(())
 }

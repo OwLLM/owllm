@@ -345,6 +345,53 @@ pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<Strin
     ))
 }
 
+// ---- auto-clean a deleted project's sandbox footprint ---------------------
+//
+// SAFETY: only ever removes a sandbox COPY that OwLLM itself created under the
+// managed `~/owllm/<name>` root. A `/mnt/...` location is the user's REAL
+// Windows folder (isolate-in-place) and is NEVER touched — deleting an OwLLM
+// project must not delete the user's source. Frees the LOGICAL space inside the
+// distro; the .vhdx file shrinks only on an explicit compaction (which needs a
+// `wsl --shutdown`), so that stays a deliberate manual action, never automatic.
+
+/// True only for an OwLLM-managed sandbox copy path `…/owllm/<name>` (exactly one
+/// level under the managed root) — never `/mnt/*` (the user's drive) or the root
+/// itself. Pure + unit-tested.
+pub fn is_managed_sandbox_copy(linux_path: &str) -> bool {
+    if linux_path.starts_with("/mnt/") {
+        return false;
+    }
+    match linux_path.split(&format!("/{ISO_SUBDIR}/")).nth(1) {
+        Some(rest) => {
+            let name = rest.trim_matches('/');
+            !name.is_empty() && !name.contains('/')
+        }
+        None => false,
+    }
+}
+
+/// Remove a deleted project's sandbox copy (if any). No-op for the user's own
+/// Windows/host folders. Best-effort: a cleanup failure must not block the
+/// delete, so errors are swallowed.
+#[cfg(windows)]
+pub fn cleanup_deleted_project(location: &str) {
+    if let Some((distro, linux)) = crate::wsl::parse_wsl_unc(location) {
+        let dir = linux.trim_end_matches('/');
+        if is_managed_sandbox_copy(dir) {
+            let script = format!("rm -rf {}", crate::wsl::sh_quote(dir));
+            let _ = crate::wsl::run_in_distro_script(&distro, &script);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn cleanup_deleted_project(location: &str) {
+    let dir = location.trim_end_matches('/');
+    if is_managed_sandbox_copy(dir) {
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
 // ---- Linux: bubblewrap ----------------------------------------------------
 
 #[cfg(target_os = "linux")]
@@ -1138,6 +1185,24 @@ mod tests {
         // never expose the whole real home or all of /mnt
         assert!(!SANDBOX_RUNNER.contains("--bind \"$HOME\" \"$HOME\""));
         assert!(!SANDBOX_RUNNER.contains("/mnt /mnt"));
+    }
+
+    #[test]
+    fn managed_copy_guard_never_deletes_user_folders() {
+        // managed sandbox copies → cleanable
+        assert!(is_managed_sandbox_copy("/home/mc/owllm/myproj"));
+        assert!(is_managed_sandbox_copy("/home/me/owllm/proj-1"));
+        // the user's real drive folder (isolate-in-place) → NEVER
+        assert!(!is_managed_sandbox_copy("/mnt/c/Users/mc/repo"));
+        assert!(!is_managed_sandbox_copy("/mnt/d/owllm/repo")); // even with 'owllm' in it
+        // the managed root itself → NEVER (no project name)
+        assert!(!is_managed_sandbox_copy("/home/mc/owllm"));
+        assert!(!is_managed_sandbox_copy("/home/mc/owllm/"));
+        // arbitrary distro paths → NEVER
+        assert!(!is_managed_sandbox_copy("/home/mc"));
+        assert!(!is_managed_sandbox_copy("/etc"));
+        // deeper than one level under owllm → NEVER (only the project dir matches)
+        assert!(!is_managed_sandbox_copy("/home/mc/owllm/proj/sub"));
     }
 
     #[test]

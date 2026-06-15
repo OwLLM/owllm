@@ -67,7 +67,7 @@ import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIs
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
 import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
-import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
+import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock, fmtTime } from "../../components/ChatBubble";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 
@@ -4164,7 +4164,7 @@ function OrchestratorPane({
     `${fullChat.length}:${fullChat[fullChat.length - 1]?.text?.length ?? 0}`
   );
   useLayoutEffect(() => {
-    if (effTab === "rules") return;          // rules tab has no log to scroll
+    if (effTab === "rules" || effTab === "userinput") return; // no log to scroll
     const ref =
       effTab === "thought" ? thoughtRef :
       effTab === "tools"   ? toolsRef   :
@@ -4178,7 +4178,15 @@ function OrchestratorPane({
     // No 'near bottom' gate: the user did not ask for that.
     const sel = window.getSelection?.();
     if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
-    el.scrollTop = el.scrollHeight;
+    const toBottom = () => { el.scrollTop = el.scrollHeight; };
+    toBottom();
+    // The synchronous scrollHeight above is measured BEFORE markdown blocks,
+    // tables, and pasted images finish committing their final height — so on
+    // first open it landed short of the real last message (the "doesn't start
+    // scrolled to the bottom" report). Re-pin across the next two frames once
+    // layout has settled.
+    const r1 = requestAnimationFrame(() => { toBottom(); const r2 = requestAnimationFrame(toBottom); (el as any).__r2 = r2; });
+    return () => { cancelAnimationFrame(r1); if ((el as any).__r2) cancelAnimationFrame((el as any).__r2); };
   }, [effTab, focus, tailSig]);
 
   // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
@@ -4436,7 +4444,12 @@ function OrchestratorPane({
                     fontSize:13, lineHeight:1.5,
                     whiteSpace:"pre-wrap",
                     fontFamily:"Segoe UI, sans-serif",
-                  }}>{m.text}</div>
+                  }}>
+                    {m.ts ? (
+                      <div style={{ fontSize:10, color:"var(--fg-subtle)", marginBottom:3, fontVariantNumeric:"tabular-nums" }}>{fmtTime(m.ts)}</div>
+                    ) : null}
+                    {m.text}
+                  </div>
                 ))}
               </div>
             );
@@ -7353,7 +7366,11 @@ export default function AgentsPage() {
     setAgentLogs(prev => {
       const next = new Map(prev);
       const cur = next.get(agent) ?? [];
-      next.set(agent, [...cur, { ...msg, seq: msg.seq ?? nextSeq() }]);
+      // Stamp a timestamp at creation if the caller didn't provide one, so
+      // every entry shows a date/time in the chat (the Full Chat view reads
+      // these). Bridge- and dispatch-created messages used to arrive without
+      // a `ts`, which is why they rendered with no time.
+      next.set(agent, [...cur, { ...msg, ts: msg.ts ?? Date.now(), seq: msg.seq ?? nextSeq() }]);
       return next;
     });
   };
@@ -7601,6 +7618,7 @@ export default function AgentsPage() {
     const traceMsg: GoalMsg = {
       role: "system", color: "#9ad9ff",
       text: `→ dispatching to ${orchKey} · model=${supModelId} · provider=${supProvider}${supProvider === "local" ? ` · port=${freshServerState.port ?? 0}` : ""}`,
+      ts: Date.now(),
     };
     setSupChat(prev => [...prev, traceMsg]);
     appendLog("system", traceMsg);
@@ -7706,19 +7724,32 @@ export default function AgentsPage() {
         // as the team-Run orchestrator — they're the same logical agent.
         getClaudeSession(selectedProjectId, orchKey),
       );
-      if (!streamedReply.trim() && returned.trim()) {
-        streamedReply = returned.trim();
+      // Judge "did the user get an answer?" on the CLEAN, VISIBLE text — not
+      // the raw stream. Small local models (e.g. abliterated Gemma) often emit
+      // ONLY a hallucinated <tool_call>/_tool_output block; liveStrip correctly
+      // removes it, so the visible reply is empty even though `streamedReply`
+      // is non-empty raw junk. The old check tested the raw text, so neither
+      // the reply NOR the "empty" notice showed — the chat just sat there doing
+      // nothing. That's the "starts the model, then nothing happens" report.
+      const cleanReply = stripFabricatedToolOutput(streamedReply).trim();
+      const cleanReturned = stripFabricatedToolOutput(returned || "").trim();
+      if (!cleanReply && cleanReturned) {
+        // The clean blob came back on the function return rather than the
+        // delta channel — show it.
         setSupChat(curr => {
           const out = curr.slice();
           const last = out[out.length - 1];
-          if (last) out[out.length - 1] = { ...last, text: returned.trim() };
+          if (last) out[out.length - 1] = { ...last, text: cleanReturned };
           return out;
         });
-        streamLog(orchKey, returned.trim());
-      }
-      if (!streamedReply.trim()) {
-        const emptyMsg = "(the model returned an empty response — no answer was produced)";
-        setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg }]);
+        streamLog(orchKey, cleanReturned);
+      } else if (!cleanReply) {
+        // Nothing readable. Distinguish "all output was stripped tool/format
+        // junk" from "genuinely empty" so the user knows WHY and what to try.
+        const emptyMsg = streamedReply.trim()
+          ? "(the model produced only tool-call / formatting output with no readable answer — try rephrasing, or set a stronger model for this team's orchestrator on the card)"
+          : "(the model returned an empty response — no answer was produced)";
+        setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg, ts: Date.now() }]);
         appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
       }
     } catch (e: any) {
@@ -7727,7 +7758,7 @@ export default function AgentsPage() {
       // it never reached the chat. Now both supChat (left/main) AND
       // the agent log (right pane) get the error in red.
       console.error("[onSupSend] streamChatCompletion threw", String(e?.message ?? e));
-      const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}` };
+      const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}`, ts: Date.now() };
       setSupChat(prev => [...prev, errMsg]);
       appendLog("system", errMsg);
       appendLog(orchKey, errMsg);
@@ -8436,8 +8467,8 @@ export default function AgentsPage() {
         appendLog("system", { role: "system", color: "#ff8c8c", text: noteText });
         setSupChat(prev => [
           ...prev,
-          { role: "system", color: "#ff8c8c", text: "⚠ Specialists did not run — orchestrator answered solo. See system log." },
-          { role: "orchestrator", color: "#ffd97a", text: clean || orchReply },
+          { role: "system", color: "#ff8c8c", text: "⚠ Specialists did not run — orchestrator answered solo. See system log.", ts: Date.now() },
+          { role: "orchestrator", color: "#ffd97a", text: clean || orchReply, ts: Date.now() },
         ]);
         setPhase("done");
         return;
@@ -8640,7 +8671,7 @@ export default function AgentsPage() {
         removeActive(orch.name);
       }
       speakAgentReply(orch.name, finalReply);
-      setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim() }]);
+      setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim(), ts: Date.now() }]);
 
       // ----- Phase 4: serial squash-merge each committed branch back -----
       // Conflicts here are real (two agents touched the same file) —

@@ -183,6 +183,16 @@ export default function CodePage() {
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+
+  // Plain "just chat" mode (no project) — opened from the Start screen's "New
+  // chat" action. Reuses the same model picker + streaming as the coder, but
+  // with no tools and no workspace: the everyday-chat surface lives here for now.
+  const [chatMode, setChatMode] = useState(false);
+  const [chatMsgs, setChatMsgs] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [chatDraft, setChatDraft] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "auto" }); }, [chatMsgs]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
@@ -749,6 +759,41 @@ export default function CodePage() {
     }
   };
 
+  const startChat = () => setChatMode(true);
+  const sendChat = async () => {
+    const text = chatDraft.trim();
+    if (!text || chatBusy) return;
+    if (!modelId) { setStatus("Pick a model above first."); return; }
+    setChatDraft("");
+    setChatBusy(true);
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    const history: HistoryItem[] = chatMsgs.map((m) => ({ role: m.role, content: m.content }));
+    setChatMsgs((m) => [...m, { role: "user", content: text }, { role: "assistant", content: "" }]);
+    const onD = (d: string) => setChatMsgs((m) => {
+      const c = [...m];
+      const last = c[c.length - 1];
+      if (last && last.role === "assistant") c[c.length - 1] = { ...last, content: last.content + d };
+      return c;
+    });
+    try {
+      const provider = providerFor(modelId, availableModels);
+      if (provider === "local" || provider === "tuned") {
+        const port = await ensureServer(modelId);
+        if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: text, temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: () => {}, history });
+      } else {
+        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", text, 0.4, ctrl.signal, onD, undefined, history, false, () => {});
+      }
+    } catch (e) {
+      const err = e as { name?: string; message?: string };
+      if (err.name !== "AbortError") onD(`\n\n⚠ ${err.message ?? e}`);
+    } finally {
+      setChatBusy(false);
+      abortRef.current = null;
+    }
+  };
+
   // Phase 3: plan the goal into task cards, then execute each step in turn,
   // moving its card pending → running → done/failed on the Kanban board.
   const planAndExecute = async () => {
@@ -816,6 +861,56 @@ export default function CodePage() {
 
   const wsShort = workspace ? workspace.replace(/^.*[\\/]/, "") : "No folder";
 
+  // ---- Just-chat mode (no folder): the everyday-chat surface --------------
+  if (!workspace && chatMode) {
+    return (
+      <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
+          <button onClick={() => setChatMode(false)} title="Back to Start" style={{ ...btn, height: 30, padding: "0 10px" }}>← Start</button>
+          <span style={{ fontSize: 14, fontWeight: 700, color: "var(--fg-strong)" }}>💬 Chat</span>
+          <div style={{ flex: 1 }} />
+          <div style={{ width: 280, maxWidth: "50%" }}>
+            <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
+          </div>
+          {chatMsgs.length > 0 && <button onClick={() => setChatMsgs([])} title="Clear conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
+        </div>
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+          {chatMsgs.length === 0 && (
+            <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", maxWidth: 440 }}>
+              <div style={{ fontSize: 34, marginBottom: 8 }}>💬</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--fg-strong)" }}>Just chat</div>
+              <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.6 }}>
+                Ask anything — no project, no setup. Uses the model picked above (local or cloud). To have the model work inside a folder, go back and pick “New project” or “Open a project folder”.
+              </div>
+            </div>
+          )}
+          {chatMsgs.map((m, i) => {
+            const isUser = m.role === "user";
+            return (
+              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} />
+            );
+          })}
+          <div ref={chatEndRef} />
+        </div>
+        <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", gap: 8, alignItems: "flex-end" }}>
+          <textarea
+            value={chatDraft}
+            onChange={(e) => setChatDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+            placeholder="Message…  (Enter to send, Shift+Enter for newline)"
+            rows={1}
+            style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: 13.5, padding: "9px 12px", lineHeight: 1.5 }}
+          />
+          {chatBusy ? (
+            <button onClick={() => abortRef.current?.abort()} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
+          ) : (
+            <button onClick={sendChat} disabled={!chatDraft.trim()} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: chatDraft.trim() ? 1 : 0.5 }}>Send</button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // ---- Onboarding: no folder open -----------------------------------------
   // The coding agent does nothing without a workspace, so instead of showing
   // the full (dead) IDE chrome that silently ignores input, show a real
@@ -827,74 +922,63 @@ export default function CodePage() {
           <span style={{ fontSize: 16 }}>🦉</span>
           <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
         </div>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", alignItems: "center", justifyContent: "center", overflow: "auto" }}>
-          <div style={{ width: "100%", maxWidth: 880, display: "flex", flexDirection: "column", gap: 18, padding: 24 }}>
-            <div style={{ textAlign: "center" }}>
-              <div style={{ fontSize: 40, marginBottom: 8 }}>🛠️</div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--fg-strong)" }}>Open a project to start coding</div>
-              <div style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.6 }}>
-                Your model works directly inside a folder — reading, searching, editing and
-                creating files and running commands there. Each folder is a saved project:
-                its conversation and plan come back when you reopen it.
+        <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
+          <div style={{ width: "100%", maxWidth: 760, display: "flex", flexDirection: "column", gap: 30, padding: "48px 36px" }}>
+            <div>
+              <div style={{ fontSize: 30, fontWeight: 800, color: "var(--fg-strong)", letterSpacing: -0.4 }}>OwLLM Code</div>
+              <div style={{ fontSize: 13.5, color: "var(--fg-muted)", marginTop: 5, lineHeight: 1.5 }}>
+                Your local AI coding workspace — open a folder and your model reads, searches, edits and runs commands right inside it.
               </div>
             </div>
-            {/* Isolation is automatic when an engine is present; the toolchain
-                installs itself in the background. A manual prompt appears only
-                when no engine exists. */}
-            {sbox === null ? (
-              // STILL CHECKING — never show the "not installed" verdict until the
-              // probe has actually returned. The WSL probe (wsl.exe) can be slow on
-              // a cold first call; showing the alarming yellow box during that window
-              // wrongly told users WSL was missing when it was just being detected.
-              <div style={{ fontSize: 12, color: "var(--fg-muted)", textAlign: "center", lineHeight: 1.5 }}>
-                ⏳ Checking isolation requirements (WSL)…
-              </div>
-            ) : sbox.available ? (
-              <div style={{ fontSize: 12, color: "#7ff0c5", textAlign: "center", lineHeight: 1.5 }}>
-                🛡 Isolation on — new projects run inside {engineLabel(sbox.kind)}{sbox.strong ? " (VM)" : ""}{sbox.beta ? " · beta" : ""}, off your {isWsl ? "Windows" : "host"} files.
-                {isWsl && provisionLog === "running" ? " Installing agent tools…" : ""}
-              </div>
-            ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, color: "#06080d", background: "#ffd97a", border: "1px solid #d9b24a", borderRadius: 8, padding: "10px 12px" }}>
-                <div style={{ fontSize: 12, lineHeight: 1.5 }}>
-                  ⚠ <b>No isolation engine installed</b> — agents would run on the host (guards still apply, but not sandboxed).{" "}
-                  {isWsl ? "Install WSL + Ubuntu to sandbox them." : "Install the sandbox engine (Lima/bubblewrap)."}
+
+            <div style={{ display: "flex", gap: 52, alignItems: "flex-start", width: "100%", flexWrap: "wrap" }}>
+              {/* START — VS Code-style action rows */}
+              <div style={{ flex: "1 1 250px", minWidth: 0, display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Start</div>
+                {([
+                  { icon: "🆕", label: "New project…", onClick: openNewProject },
+                  { icon: "📁", label: "Open a project folder…", onClick: pickWorkspace },
+                  { icon: "💬", label: "New chat (no project)", onClick: startChat },
+                  { icon: "🐙", label: gh?.connected ? `GitHub — ${gh.login}` : "Connect GitHub…", onClick: () => { setGhOpen((v) => !v); setGhMsg(""); } },
+                ]).map((a) => (
+                  <button key={a.label} onClick={a.onClick}
+                    onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                    style={{ display: "flex", alignItems: "center", gap: 11, background: "transparent", border: "none", padding: "7px 8px", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>
+                    <span style={{ fontSize: 15, width: 18, textAlign: "center" }}>{a.icon}</span>
+                    <span style={{ color: "var(--accent)", fontWeight: 500, fontSize: 13.5 }}>{a.label}</span>
+                  </button>
+                ))}
+                {/* GitHub connect form (inline, opens under the row) */}
+                {ghOpen && !gh?.connected && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0 0 28px", padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+                    <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5 }}>Paste a GitHub token so agents can clone private repos and push from inside the sandbox.</div>
+                    <button onClick={() => { invoke("shell_open_url", { url: GITHUB_TOKEN_URL }).catch(() => {}); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent)" }}>↗ Create a token (repo scope)</button>
+                    <input type="password" value={ghToken} onChange={(e) => setGhToken(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }} placeholder="ghp_… or github_pat_…" style={{ height: 32, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }} />
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 32, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>{ghBusy ? "⏳ Connecting…" : "Connect"}</button>
+                      <button onClick={() => { setGhOpen(false); setGhMsg(""); }} disabled={ghBusy} style={{ ...btn, height: 32, padding: "0 12px", color: "var(--fg-muted)" }}>Cancel</button>
+                    </div>
+                  </div>
+                )}
+                {gh?.connected && <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 24, width: "fit-content", margin: "2px 0 0 28px", padding: "0 10px", color: "var(--fg-muted)", fontSize: 11 }}>Disconnect</button>}
+                {ghMsg && <div style={{ margin: "4px 0 0 28px", fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
+                {/* Isolation status — compact line */}
+                <div style={{ marginTop: 18, fontSize: 11.5, lineHeight: 1.5, color: sbox?.available ? "#7ff0c5" : "var(--fg-muted)" }}>
+                  {sbox === null ? "⏳ Checking isolation (WSL)…"
+                    : sbox.available ? `🛡 Isolation on — projects run inside ${engineLabel(sbox.kind)}${sbox.strong ? " (VM)" : ""}, off your ${isWsl ? "Windows" : "host"} files.${isWsl && provisionLog === "running" ? " Installing agent tools…" : ""}`
+                    : `⚠ No sandbox engine — agents would run on the host. ${isWsl ? "Install WSL to isolate them." : "Install Lima/bubblewrap."}`}
                 </div>
-                {isWsl ? (
-                  <button onClick={installWsl} style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700 }}>⬇ Install WSL (needs admin + reboot)</button>
-                ) : (
-                  <button onClick={provisionTools} disabled={provisionLog === "running"} style={{ ...btn, height: 36, justifyContent: "center", background: "#06080d", color: "#ffd97a", border: "none", fontWeight: 700, opacity: provisionLog === "running" ? 0.6 : 1 }}>{provisionLog === "running" ? "⏳ Installing…" : "⬇ Install sandbox engine + agent tools"}</button>
+                {sbox && !sbox.available && (isWsl
+                  ? <button onClick={installWsl} style={{ ...btn, marginTop: 8, height: 32, width: "fit-content", justifyContent: "center" }}>⬇ Install WSL (admin + reboot)</button>
+                  : <button onClick={provisionTools} disabled={provisionLog === "running"} style={{ ...btn, marginTop: 8, height: 32, width: "fit-content", justifyContent: "center", opacity: provisionLog === "running" ? 0.6 : 1 }}>{provisionLog === "running" ? "⏳ Installing…" : "⬇ Install sandbox engine"}</button>
                 )}
               </div>
-            )}
 
-            {/* Two columns: primary actions (left) · recent projects + GitHub (right). */}
-            <div style={{ display: "flex", gap: 16, alignItems: "stretch", width: "100%" }}>
-              {/* LEFT — start a project */}
-              <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
-                <button
-                  onClick={openNewProject}
-                  style={{ ...btn, height: 48, fontSize: 14, fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", justifyContent: "center" }}
-                >
-                  {sbox?.available ? "🛡 New project" : "＋ New project"}
-                </button>
-                <button
-                  onClick={pickWorkspace}
-                  title="Open an existing folder on your drive"
-                  style={{ ...btn, height: 44, justifyContent: "center" }}
-                >
-                  📁 Open a project folder…
-                </button>
-                <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.6, marginTop: 2 }}>
-                  Your model reads, searches, edits and runs commands directly inside the project.
-                  {sbox?.available ? ` New projects are created inside ${engineLabel(sbox.kind)} and isolated from your ${isWsl ? "Windows" : "host"} system.` : ""}
-                </div>
-              </div>
-
-              {/* RIGHT — recent projects (scrollable) + GitHub underneath */}
-              <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)", textTransform: "uppercase", letterSpacing: 0.4 }}>Recent projects</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 300, overflowY: "auto", paddingRight: 2 }}>
+              {/* RECENT — projects (name + path), VS Code style */}
+              <div style={{ flex: "1 1 320px", minWidth: 0, display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Recent</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 360, overflowY: "auto", paddingRight: 2 }}>
                   {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
                     <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — create one on the left to get started.</div>
                   )}
@@ -948,44 +1032,6 @@ export default function CodePage() {
                   })}
                 </div>
 
-                {/* GitHub — under the recents list. Lets isolated agents clone
-                    private repos + push (host creds don't cross the sandbox). */}
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "10px 12px" }}>
-                  {gh?.connected ? (
-                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontSize: 13, color: "var(--fg-strong)", flex: 1, minWidth: 0 }}>🐙 GitHub connected as <b>{gh.login}</b></span>
-                      <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 28, padding: "0 10px", color: "var(--fg-muted)" }}>Disconnect</button>
-                    </div>
-                  ) : ghOpen ? (
-                    <>
-                      <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.5 }}>
-                        Paste a GitHub token so agents can clone private repos and push from inside the sandbox.
-                      </div>
-                      <button onClick={() => { invoke("shell_open_url", { url: GITHUB_TOKEN_URL }).catch(() => {}); }} style={{ ...btn, height: 30, justifyContent: "center", color: "var(--accent)" }}>
-                        ↗ Create a token on GitHub (repo scope)
-                      </button>
-                      <input
-                        type="password"
-                        value={ghToken}
-                        onChange={(e) => setGhToken(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }}
-                        placeholder="ghp_… or github_pat_…"
-                        style={{ height: 34, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }}
-                      />
-                      <div style={{ display: "flex", gap: 8 }}>
-                        <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 34, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>
-                          {ghBusy ? "⏳ Connecting…" : "Connect GitHub"}
-                        </button>
-                        <button onClick={() => { setGhOpen(false); setGhMsg(""); }} disabled={ghBusy} style={{ ...btn, height: 34, padding: "0 12px", color: "var(--fg-muted)" }}>Cancel</button>
-                      </div>
-                    </>
-                  ) : (
-                    <button onClick={() => { setGhOpen(true); setGhMsg(""); }} style={{ ...btn, height: 34, justifyContent: "center", color: "var(--fg-strong)" }}>
-                      🐙 Connect GitHub — clone &amp; push from inside the sandbox
-                    </button>
-                  )}
-                  {ghMsg && <div style={{ fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
-                </div>
               </div>
             </div>
           </div>

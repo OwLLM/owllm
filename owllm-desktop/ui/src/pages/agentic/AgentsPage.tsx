@@ -5,7 +5,7 @@
 // All data is live: projects from list_projects (legacy SQLite), team
 // templates + role definitions from agents.rs, bridge config from
 // bridges.rs, server state via server_status. No hardcoded rosters.
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Channel, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
@@ -68,6 +68,8 @@ import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isola
 import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock } from "../../components/ChatBubble";
+import { chatRuntime } from "../../runtime/chatRuntime";
+import { useChatSession } from "../../runtime/useChatSession";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -6510,6 +6512,33 @@ function useElementSize<T extends HTMLElement>() {
   return { ref, size };
 }
 
+// ── Persistent agentic run state (chatRuntime) ─────────────────────────
+// The Super User conversation + per-agent transcripts used to live in
+// component useState, so navigating away mid-dispatch unmounted the page and
+// orphaned the run: React drops setState on an unmounted component, so
+// post-navigation tokens (and the final result) landed nowhere and were never
+// persisted. They now live in the app-wide chatRuntime store, keyed per
+// project. The dispatch keeps writing through module-singleton setter shims
+// after unmount; the store's debounce persister flushes even with the page
+// gone; on return the component re-subscribes and re-paints the live buffer.
+type AgentRunPayload = {
+  supChat: GoalMsg[];
+  agentLogs: Map<string, GoalMsg[]>;
+  // True while a GOAL dispatch is in flight. Lives in the (observed) payload
+  // so the busy state survives a page change and a second Run can't be
+  // launched on top of a still-running one. NOT persisted (re-derived per run).
+  running?: boolean;
+};
+// Stable empty defaults so an un-hydrated session doesn't churn identity.
+const EMPTY_AGENT_CHAT: GoalMsg[] = [];
+const EMPTY_AGENT_LOGS: Map<string, GoalMsg[]> = new Map();
+const agentSid = (pid: string | null | undefined): string => `agents:${pid || "none"}`;
+// AbortController of the in-flight goal dispatch, keyed per project session.
+// Module-scoped (survives unmount) so Cancel still reaches a run that's been
+// left running in the background — a freshly-remounted page's `abortRef` is
+// null and couldn't otherwise stop it.
+const agentRunAborts = new Map<string, AbortController>();
+
 export default function AgentsPage() {
   const SPLITTER_W = 8;
   /// Live size of the canvas container — fed into TeamCanvas /
@@ -6619,10 +6648,52 @@ export default function AgentsPage() {
   // is unencumbered. In-memory only (base64); not persisted.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
 
-  // Per-agent log buffers — keyed by agent.name (plus "you" for the
-  // user goal echo and "system" for errors). OrchestratorPane filters
-  // these by selectedNode; canvas highlights members of `activeAgents`.
-  const [agentLogs, setAgentLogs] = useState<Map<string, GoalMsg[]>>(new Map());
+  // Per-agent log buffers (keyed by agent.name, plus "you"/"system") AND the
+  // Super User conversation now live in the shared chatRuntime store, keyed
+  // per project — see AgentRunPayload. The derived values + setter shims below
+  // preserve the exact (value | updater) setState signature the dispatch code
+  // already uses, so the ~30 call sites are unchanged; the writes simply land
+  // in the module store (which survives unmount) instead of component state.
+  // OrchestratorPane filters agentLogs by selectedNode; canvas highlights
+  // members of `activeAgents`.
+  const agentSessId = agentSid(selectedProjectId);
+  const agentSess = useChatSession<AgentRunPayload>(agentSessId);
+  const agentLogs = agentSess.payload?.agentLogs ?? EMPTY_AGENT_LOGS;
+  const supChat = agentSess.payload?.supChat ?? EMPTY_AGENT_CHAT;
+  // True when a goal dispatch is still running (possibly in the background
+  // after the user left this page) — gates a second Run + the busy UI.
+  const backgroundRunning = agentSess.payload?.running ?? false;
+  const writeAgentPayload = useCallback(
+    (mut: (p: AgentRunPayload) => AgentRunPayload) => {
+      chatRuntime.setPayload(agentSessId, (prev) =>
+        mut((prev as AgentRunPayload | null) ?? { supChat: [], agentLogs: new Map() }),
+      );
+    },
+    [agentSessId],
+  );
+  const setAgentLogs = useCallback(
+    (upd: Map<string, GoalMsg[]> | ((p: Map<string, GoalMsg[]>) => Map<string, GoalMsg[]>)) =>
+      writeAgentPayload((p) => ({
+        ...p,
+        agentLogs:
+          typeof upd === "function"
+            ? (upd as (m: Map<string, GoalMsg[]>) => Map<string, GoalMsg[]>)(p.agentLogs ?? new Map())
+            : upd,
+      })),
+    [writeAgentPayload],
+  );
+  const setSupChat = useCallback(
+    (upd: GoalMsg[] | ((p: GoalMsg[]) => GoalMsg[])) =>
+      writeAgentPayload((p) => ({
+        ...p,
+        supChat: typeof upd === "function" ? (upd as (m: GoalMsg[]) => GoalMsg[])(p.supChat ?? []) : upd,
+      })),
+    [writeAgentPayload],
+  );
+  const setRunning = useCallback(
+    (b: boolean) => writeAgentPayload((p) => ({ ...p, running: b })),
+    [writeAgentPayload],
+  );
   // Thought buffers — parallel to agentLogs but holds the agent's
   // INTERNAL traffic instead of the conversational reply. Today's
   // populator is the orchestrator's @agent: dispatch directives; the
@@ -6682,9 +6753,10 @@ export default function AgentsPage() {
   const [selectedEdgeIdx, setSelectedEdgeIdx] = useState<number | null>(null);
   const [nodePositions, setNodePositions] = useState<GraphPos | null>(null);
 
-  // Super User card chat (separate from the Run/Goal stream so users
-  // can chat alongside a running plan).
-  const [supChat, setSupChat] = useState<GoalMsg[]>([]);
+  // Super User card chat (supChat) + its setter are derived from the
+  // chatRuntime session above — they used to be component useState here, but
+  // moved into the store so the conversation survives leaving this page
+  // mid-run. Users can still chat alongside a running plan.
   const [supSendBusy, setSupSendBusy] = useState(false);
   const supSendBusyRef = useRef(false);
   // Shared abort controller for the active onSupSend run. The Stop
@@ -7057,29 +7129,37 @@ export default function AgentsPage() {
       setPerAgentModel(loadAgentModelsForProject(selectedProject.id));
       // Per-agent voice picks live alongside model picks — same scope.
       setPerAgentVoice(new Map());
-      // Restore saved chat + per-agent transcripts. Empty strings or
-      // malformed JSON fall back to a fresh chat for the project.
-      try {
-        const parsed = selectedProject.chat_json
-          ? JSON.parse(selectedProject.chat_json)
-          : [];
-        setSupChat(Array.isArray(parsed) ? parsed : []);
-      } catch { setSupChat([]); }
-      try {
-        const parsed = selectedProject.agent_logs_json
-          ? JSON.parse(selectedProject.agent_logs_json)
-          : {};
-        if (parsed && typeof parsed === "object") {
-          const m = new Map<string, GoalMsg[]>();
-          for (const k of Object.keys(parsed)) {
-            const v = (parsed as any)[k];
-            if (Array.isArray(v)) m.set(k, v);
+      // Restore saved chat + per-agent transcripts INTO the shared store —
+      // but ONLY if this project's session is empty (fresh load / app
+      // restart). If a dispatch is still running in the background, or
+      // finished while we were on another page, the store already holds the
+      // live/finished buffer; re-seeding from the now-stale DB would clobber
+      // it. Same hydrate-if-idle guard the Code page uses.
+      const psid = agentSid(selectedProject.id);
+      const live = chatRuntime.getSnapshot(psid).payload as AgentRunPayload | null;
+      const sessionEmpty =
+        !live ||
+        ((live.supChat?.length ?? 0) === 0 && (live.agentLogs?.size ?? 0) === 0 && !live.running);
+      if (sessionEmpty) {
+        let parsedChat: GoalMsg[] = [];
+        try {
+          const parsed = selectedProject.chat_json ? JSON.parse(selectedProject.chat_json) : [];
+          parsedChat = Array.isArray(parsed) ? parsed : [];
+        } catch { parsedChat = []; }
+        const m = new Map<string, GoalMsg[]>();
+        try {
+          const parsed = selectedProject.agent_logs_json
+            ? JSON.parse(selectedProject.agent_logs_json)
+            : {};
+          if (parsed && typeof parsed === "object") {
+            for (const k of Object.keys(parsed)) {
+              const v = (parsed as any)[k];
+              if (Array.isArray(v)) m.set(k, v);
+            }
           }
-          setAgentLogs(m);
-        } else {
-          setAgentLogs(new Map());
-        }
-      } catch { setAgentLogs(new Map()); }
+        } catch { /* fresh logs */ }
+        chatRuntime.setPayload(psid, () => ({ supChat: parsedChat, agentLogs: m }));
+      }
       // Thought traffic is ephemeral per-run (dispatches + tool calls
       // from the active dispatch) — reset whenever the user switches
       // project so stale @dispatch lines from a previous team don't
@@ -7175,62 +7255,40 @@ export default function AgentsPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [locationOverride, selectedProject?.id]);
 
-  // Persist the Super User chat transcript when it changes. 200 ms
-  // debounce — short enough that closing the app right after a reply
-  // still saves the turn, long enough that we don't write SQLite on
-  // every token during a stream. Was 800 ms; user lost a conversation
-  // by closing within the debounce window.
+  // Persist the Super User chat (chat_json) + per-agent transcripts
+  // (agent_logs_json). Ownership moved from two component effects into the
+  // chatRuntime store: registering a persister here means the store's debounce
+  // timer writes BOTH columns even AFTER this page unmounts mid-run — closing
+  // the "navigate away and lose the run" gap. The old effects flushed on
+  // unmount too, but they captured the last RENDERED state, so any tokens that
+  // streamed in after the page was gone (the orphaned-dispatch case) were
+  // never saved. The store keeps mutating + persisting with zero subscribers.
+  //
+  // We register on project change and DO NOT null the persister on cleanup
+  // (only flush): a background dispatch must keep persisting after the page is
+  // gone, so the persister has to outlive this component instance.
   useEffect(() => {
     if (!selectedProject) return;
-    const next = JSON.stringify(supChat);
-    if (next === (selectedProject.chat_json || "[]")) return;
-    const projectId = selectedProject.id;
-    const id = window.setTimeout(async () => {
-      try {
-        await invoke("update_project", { input: { id: projectId, chat_json: next } });
-        await reloadProjects();
-      } catch (e) {
-        console.error("persist chat_json failed", e);
-      }
-    }, 200);
-    // On unmount (page change!) ALSO fire the save synchronously
-    // so what was on screen survives the page swap. Previously the
-    // debounce got clearTimeout'd on unmount and the most recent
-    // tokens were lost — user reported 'when i change page the chat
-    // stops working' which is partly this (visible state didn't get
-    // saved) and partly that the in-flight dispatch is orphaned
-    // (see comment below).
-    return () => {
-      window.clearTimeout(id);
-      invoke("update_project", { input: { id: projectId, chat_json: next } })
+    const pid = selectedProject.id;
+    const psid = agentSid(pid);
+    chatRuntime.registerPersister(psid, (payload) => {
+      const p = payload as AgentRunPayload | null;
+      if (!p) return;
+      const chatJson = JSON.stringify(p.supChat ?? []);
+      const obj: Record<string, GoalMsg[]> = {};
+      for (const [k, v] of p.agentLogs ?? new Map()) obj[k] = v;
+      const logsJson = JSON.stringify(obj);
+      invoke("update_project", {
+        input: { id: pid, chat_json: chatJson, agent_logs_json: logsJson },
+      })
         .then(() => reloadProjects())
-        .catch(e => console.warn("flush chat_json on unmount failed", e));
-    };
+        .catch((e) => console.warn("persist agents session failed", e));
+    });
+    // Flush on switch-away so the latest is on disk promptly; leave the
+    // persister registered so an in-flight run keeps saving post-unmount.
+    return () => { chatRuntime.flushPersister(psid); };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [supChat, selectedProject?.id]);
-
-  // Persist per-agent transcripts (agentLogs Map → JSON object). Same
-  // 800 ms debounce — and only when the snapshot actually differs from
-  // what's already on disk.
-  useEffect(() => {
-    if (!selectedProject) return;
-    const obj: Record<string, GoalMsg[]> = {};
-    for (const [k, v] of agentLogs) obj[k] = v;
-    const next = JSON.stringify(obj);
-    if (next === (selectedProject.agent_logs_json || "{}")) return;
-    const id = window.setTimeout(async () => {
-      try {
-        await invoke("update_project", {
-          input: { id: selectedProject.id, agent_logs_json: next },
-        });
-        await reloadProjects();
-      } catch (e) {
-        console.error("persist agent_logs_json failed", e);
-      }
-    }, 800);
-    return () => window.clearTimeout(id);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [agentLogs, selectedProject?.id]);
+  }, [selectedProject?.id]);
 
   // Persist the team default model id when the user picks one on the
   // TeamInfoCard. Same debounced shape as location/trust_writes.
@@ -7958,6 +8016,16 @@ export default function AgentsPage() {
     setRunError(null);
     const text = goal.trim();
     if (!text) return;
+    // A goal dispatch is heavy (worktrees, commits, fan-out). Refuse to start
+    // a second on top of one already running for THIS project — including one
+    // still running in the background after the user changed pages. We read
+    // the live store snapshot (not the captured render value) so the guard
+    // holds even on a freshly-remounted page whose local `busy` reset to false.
+    const liveRun = chatRuntime.getSnapshot(agentSessId).payload as AgentRunPayload | null;
+    if (busy || liveRun?.running) {
+      setRunError("A run is already in progress for this project.");
+      return;
+    }
     // Require the local server only when the orchestrator (or any
     // dispatched specialist) actually resolves to a local model. Cloud-
     // only teams should run without one.
@@ -8018,6 +8086,7 @@ export default function AgentsPage() {
     setAgentThoughts(new Map());
     setRunError(null);
     setBusy(true);
+    setRunning(true); // store-backed: survives a page change so the run isn't orphaned
     setPhase("planning");
     // Snapshot + clear the chip strip now. The orchestrator owns these
     // bytes for the rest of the run; the UI strip should feel "spent".
@@ -8025,6 +8094,7 @@ export default function AgentsPage() {
     if (attachments.length > 0) setAttachments([]);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
+    agentRunAborts.set(agentSessId, ctrl); // reachable by Cancel after a page change
 
     const orch = findOrchestratorSpec(activeTeam)!;
     // Cloud calls don't need a port; only the local fallback does.
@@ -8713,8 +8783,10 @@ export default function AgentsPage() {
       setPhase("idle");
     } finally {
       setBusy(false);
+      setRunning(false); // clear the store-backed in-flight flag (mirrors setBusy)
       clearActive();
       abortRef.current = null;
+      agentRunAborts.delete(agentSessId);
     }
   }
 
@@ -8722,6 +8794,10 @@ export default function AgentsPage() {
 
   function onCancel() {
     abortRef.current?.abort();
+    // Also abort via the module-scoped registry: if this run was started
+    // before a page change, the remounted page's `abortRef` is null but the
+    // original controller is still in the registry, so Cancel can reach it.
+    agentRunAborts.get(agentSessId)?.abort();
     // Kill any in-flight TTS — if the user cancelled the dispatch
     // they don't want the agent to keep talking from a queued reply.
     ttsStopAll();
@@ -9034,7 +9110,7 @@ export default function AgentsPage() {
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
       />
       <GoalRow
-        goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy}
+        goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy || backgroundRunning}
         attachments={attachments} setAttachments={setAttachments}
         // Brainstorm needs a project location to anchor BRIEF.md +
         // brainstorm/<png>. Disable the button (null callback) when no

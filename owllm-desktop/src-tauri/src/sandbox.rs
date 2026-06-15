@@ -216,15 +216,23 @@ mkdir -p "$SB" "$SB/.owllm" 2>/dev/null
 # WSL makes /etc/resolv.conf a symlink into /mnt/wsl (or /run) — directories the
 # jail does NOT bind. Inside the sandbox the symlink then dangles and EVERY DNS
 # lookup fails ("failed to lookup address information"), so cloud-CLI agents
-# (Codex/Claude/Gemini) can't reach their API and the whole run dies. Resolve
-# the symlink's real target and bind it to its own path so the /etc symlink
-# works inside the jail. Best-effort; a no-op when resolv.conf is already a
-# plain file (native Linux). readlink -f follows the full chain, so this holds
-# whether the target lives in /mnt/wsl or /run/systemd/resolve.
+# (Codex/Claude/Gemini) can't reach their API and the whole run dies. Build a
+# resolv.conf for the jail and bind it to the symlink's real target so
+# /etc/resolv.conf resolves inside the jail. We list the HOST's resolvers FIRST
+# (so corporate / split-DNS still wins for the names it answers — the resolver
+# only falls through on an UNREACHABLE server, not on NXDOMAIN), then append
+# public resolvers as a fallback for when the host nameserver is unreachable
+# (common behind a VPN). Opt out of the public fallback (strict corporate DNS):
+#   touch ~/.owllm/no-dns-fallback
+# Best-effort; a no-op when resolv.conf is already a plain file (native Linux).
 RESOLV_BIND=()
 RT="$(readlink -f /etc/resolv.conf 2>/dev/null)"
-if [ -n "$RT" ] && [ -e "$RT" ] && [ "$RT" != "/etc/resolv.conf" ]; then
-  RESOLV_BIND=(--ro-bind-try "$RT" "$RT")
+if [ -n "$RT" ] && [ "$RT" != "/etc/resolv.conf" ]; then
+  SBR="$SB/.owllm/jail-resolv.conf"
+  { [ -e "$RT" ] && cat "$RT" 2>/dev/null
+    [ -f "$HOME/.owllm/no-dns-fallback" ] || printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n'
+  } > "$SBR" 2>/dev/null
+  [ -s "$SBR" ] && RESOLV_BIND=(--ro-bind-try "$SBR" "$RT")
 fi
 exec bwrap \
   --ro-bind-try /usr /usr --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin \

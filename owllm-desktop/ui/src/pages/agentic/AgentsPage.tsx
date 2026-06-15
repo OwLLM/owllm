@@ -285,7 +285,7 @@ function cleanAgentError(raw: unknown): string {
   const low = s.toLowerCase();
   if (low.includes("failed to lookup address") || low.includes("getaddrinfo") || low.includes("stream disconnected") ||
       low.includes("failed to connect to websocket") || low.includes("error sending request") || low.includes("dns")) {
-    return "couldn't reach the network — likely WSL DNS for the isolated agent. Try again; if it persists, restart WSL (Home → Set up WSL) or run `wsl --shutdown`.";
+    return "couldn't reach the network — the sandbox already falls back to public DNS, so a persistent failure is usually a VPN or WSL networking issue, not the model. Fixes: run `wsl --shutdown` (often enough right after a VPN connects); if it persists, enable mirrored networking — add a `[wsl2]` section with `networkingMode=mirrored` to `%UserProfile%\\.wslconfig`, then `wsl --shutdown`.";
   }
   if (low.includes("usage limit") || low.includes("quota") || low.includes("rate limit") || low.includes("429") || low.includes("insufficient_quota")) {
     return "the cloud model hit its usage limit (provider-side) — pick another model and try again.";

@@ -106,6 +106,29 @@ async function fileToImageAttachment(file: File): Promise<Attachment> {
   return { kind: "image", mime, data_b64: comma >= 0 ? dataUrl.slice(comma + 1) : "", filename: file.name || "pasted.png" };
 }
 
+// ---- Chat history -------------------------------------------------------
+// The "New chat" surface keeps a list of past conversations in localStorage so
+// they survive tab switches AND app restarts (the chat used to be plain useState
+// that evaporated). Each thread is one conversation; the newest is first.
+type ChatMsg = { role: "user" | "assistant"; content: string };
+type ChatThread = { id: string; title: string; ts: number; messages: ChatMsg[] };
+const CHATS_KEY = "owllm:code:chats";
+const CHATS_MAX = 60;
+function loadChats(): ChatThread[] {
+  try {
+    const a = JSON.parse(localStorage.getItem(CHATS_KEY) || "[]");
+    return Array.isArray(a) ? a.filter((c) => c && typeof c.id === "string" && Array.isArray(c.messages)) : [];
+  } catch { return []; }
+}
+function saveChats(chats: ChatThread[]): void {
+  try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX))); } catch { /* private mode / quota */ }
+}
+function newThreadId(): string { return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
+function threadTitle(text: string): string {
+  const t = text.trim().replace(/\s+/g, " ");
+  return t ? (t.length > 44 ? t.slice(0, 44) + "…" : t) : "New chat";
+}
+
 // Per-recent metadata: a friendly name and a pin flag. Stored separately from
 // the recents array so the array stays a plain path list.
 type RecentMeta = { name?: string; pinned?: boolean };
@@ -206,15 +229,32 @@ export default function CodePage() {
 
   // Plain "just chat" mode (no project) — opened from the Start screen's "New
   // chat" action. Reuses the same model picker + streaming as the coder, but
-  // with no tools and no workspace: the everyday-chat surface lives here for now.
+  // with no tools and no workspace. Conversations are PERSISTED (localStorage)
+  // as a list of threads, so history survives tab switches and app restarts.
   const [chatMode, setChatMode] = useState(false);
-  const [chatMsgs, setChatMsgs] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [chats, setChats] = useState<ChatThread[]>(loadChats);
+  const [chatId, setChatId] = useState<string>("");
+  const [showHistory, setShowHistory] = useState(false);
   const [chatDraft, setChatDraft] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatImages, setChatImages] = useState<Attachment[]>([]);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "auto" }); }, [chatMsgs]);
+  // The active conversation is derived from the thread list (single source of
+  // truth); persist the whole list whenever it changes.
+  const chatMsgs: ChatMsg[] = chats.find((c) => c.id === chatId)?.messages ?? [];
+  useEffect(() => { saveChats(chats); }, [chats]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "auto" }); }, [chats, chatId]);
+  const updateThread = (id: string, fn: (m: ChatMsg[]) => ChatMsg[], title?: string) =>
+    setChats((cs) => cs.map((c) => c.id === id
+      ? { ...c, ts: Date.now(), title: (!c.title || c.title === "New chat") && title ? title : c.title, messages: fn(c.messages) }
+      : c));
+  const newChat = () => {
+    const id = newThreadId();
+    setChats((cs) => [{ id, title: "New chat", ts: Date.now(), messages: [] }, ...cs]);
+    setChatId(id); setShowHistory(false); setChatImages([]); setChatDraft("");
+  };
+  const deleteThread = (id: string) => { setChats((cs) => cs.filter((c) => c.id !== id)); if (chatId === id) setChatId(""); };
 
   // Paste (Ctrl+V) an image from the clipboard into the chat, or pick files.
   const addChatFiles = async (files: FileList | File[]) => {
@@ -796,7 +836,14 @@ export default function CodePage() {
     }
   };
 
-  const startChat = () => setChatMode(true);
+  const startChat = () => {
+    setChatMode(true);
+    // Resume the most recent conversation; start a fresh one only if none exist.
+    if (!chatId || !chats.some((c) => c.id === chatId)) {
+      if (chats[0]) setChatId(chats[0].id);
+      else newChat();
+    }
+  };
   const sendChat = async () => {
     const text = chatDraft.trim();
     const images = imageAttachments(chatImages);
@@ -807,12 +854,23 @@ export default function CodePage() {
     setChatBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-    const history: HistoryItem[] = chatMsgs.map((m) => ({ role: m.role, content: m.content }));
     // The visible bubble shows the text + an image marker; the actual images
     // ride to the model via the multimodal content / attachments below.
     const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
-    setChatMsgs((m) => [...m, { role: "user", content: label }, { role: "assistant", content: "" }]);
-    const onD = (d: string) => setChatMsgs((m) => {
+    const userMsg: ChatMsg = { role: "user", content: label };
+    const asstMsg: ChatMsg = { role: "assistant", content: "" };
+    // Resolve/create the active thread; history = its current messages.
+    let tid = chatId;
+    const existing = chats.find((c) => c.id === tid);
+    const history: HistoryItem[] = (existing?.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
+    if (existing) {
+      updateThread(tid, (m) => [...m, userMsg, asstMsg], threadTitle(text || "Image"));
+    } else {
+      tid = newThreadId();
+      setChatId(tid);
+      setChats((cs) => [{ id: tid, title: threadTitle(text || "Image"), ts: Date.now(), messages: [userMsg, asstMsg] }, ...cs]);
+    }
+    const onD = (d: string) => updateThread(tid, (m) => {
       const c = [...m];
       const last = c[c.length - 1];
       if (last && last.role === "assistant") c[c.length - 1] = { ...last, content: last.content + d };
@@ -907,14 +965,36 @@ export default function CodePage() {
   if (!workspace && chatMode) {
     return (
       <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
           <button onClick={() => setChatMode(false)} title="Back to Start" style={{ ...btn, height: 30, padding: "0 10px" }}>← Start</button>
-          <span style={{ fontSize: 14, fontWeight: 700, color: "var(--fg-strong)" }}>💬 Chat</span>
+          <button onClick={newChat} title="New conversation" style={{ ...btn, height: 30, padding: "0 10px", fontWeight: 700 }}>＋ New</button>
+          {/* History dropdown — past conversations (persisted) */}
+          <div style={{ position: "relative" }}>
+            <button onClick={() => setShowHistory((v) => !v)} title="Past conversations" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg)" }}>🕘 History{chats.length ? ` (${chats.length})` : ""}</button>
+            {showHistory && (
+              <>
+                <div onClick={() => setShowHistory(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
+                <div style={{ position: "absolute", top: 34, left: 0, zIndex: 41, width: 320, maxHeight: 380, overflowY: "auto", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 10, boxShadow: "var(--shadow-lg)", padding: 6 }}>
+                  {chats.length === 0 && <div style={{ fontSize: 12.5, color: "var(--fg-muted)", padding: "8px 10px" }}>No past chats yet.</div>}
+                  {chats.map((c) => (
+                    <div key={c.id} onClick={() => { setChatId(c.id); setShowHistory(false); }}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = c.id === chatId ? "var(--bg-input)" : "transparent")}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 7, cursor: "pointer", background: c.id === chatId ? "var(--bg-input)" : "transparent" }}>
+                      <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</span>
+                      <span style={{ fontSize: 10.5, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>{c.messages.length}</span>
+                      <button onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete" style={{ ...btn, height: 22, padding: "0 6px", color: "var(--fg-muted)", fontSize: 11 }}>✕</button>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
           <div style={{ flex: 1 }} />
-          <div style={{ width: 280, maxWidth: "50%" }}>
+          <div style={{ width: 260, maxWidth: "45%" }}>
             <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
           </div>
-          {chatMsgs.length > 0 && <button onClick={() => setChatMsgs([])} title="Clear conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
+          {chatMsgs.length > 0 && <button onClick={() => chatId && updateThread(chatId, () => [])} title="Clear this conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
         </div>
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
           {chatMsgs.length === 0 && (

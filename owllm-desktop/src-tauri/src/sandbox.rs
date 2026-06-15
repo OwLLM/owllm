@@ -213,10 +213,24 @@ const SANDBOX_RUNNER: &str = r#"#!/bin/bash
 CWD="$(printf %s "$1" | base64 -d)"; CMD="$(printf %s "$2" | base64 -d)"
 SB="$HOME/.owllm/sbhome"
 mkdir -p "$SB" "$SB/.owllm" 2>/dev/null
+# WSL makes /etc/resolv.conf a symlink into /mnt/wsl (or /run) — directories the
+# jail does NOT bind. Inside the sandbox the symlink then dangles and EVERY DNS
+# lookup fails ("failed to lookup address information"), so cloud-CLI agents
+# (Codex/Claude/Gemini) can't reach their API and the whole run dies. Resolve
+# the symlink's real target and bind it to its own path so the /etc symlink
+# works inside the jail. Best-effort; a no-op when resolv.conf is already a
+# plain file (native Linux). readlink -f follows the full chain, so this holds
+# whether the target lives in /mnt/wsl or /run/systemd/resolve.
+RESOLV_BIND=()
+RT="$(readlink -f /etc/resolv.conf 2>/dev/null)"
+if [ -n "$RT" ] && [ -e "$RT" ] && [ "$RT" != "/etc/resolv.conf" ]; then
+  RESOLV_BIND=(--ro-bind-try "$RT" "$RT")
+fi
 exec bwrap \
   --ro-bind-try /usr /usr --ro-bind-try /bin /bin --ro-bind-try /sbin /sbin \
   --ro-bind-try /lib /lib --ro-bind-try /lib32 /lib32 --ro-bind-try /lib64 /lib64 \
   --ro-bind-try /etc /etc --ro-bind-try /opt /opt --ro-bind-try /snap /snap \
+  "${RESOLV_BIND[@]}" \
   --proc /proc --dev /dev --tmpfs /tmp \
   --bind "$SB" "$SB" --setenv HOME "$SB" \
   --bind-try "$HOME/.codex" "$SB/.codex" \

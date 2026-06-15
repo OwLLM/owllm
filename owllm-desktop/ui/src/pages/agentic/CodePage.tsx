@@ -7,14 +7,14 @@
 // search, edit and create files and run shell commands in that folder.
 // Cline's card-based UX is inspiration for later phases (file tree, live
 // diffs, task Kanban); Phase 1 is the working agent core.
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import GitBar from "./GitBar";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
-import { streamLocalChat, streamChatCompletion, providerFor, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
@@ -85,6 +85,26 @@ const CODE_LAST_KEY = "owllm:code:last";
 const CODE_RECENTS_KEY = "owllm:code:recents";
 const CODE_RECENTS_META_KEY = "owllm:code:recents:meta";
 const CODE_RECENTS_MAX = 12;
+
+// A pasted / picked clipboard image → Attachment (base64). Image-only; the chat
+// sends it to vision-capable models (cloud GPT/Claude/Gemini, or a local llava
+// GGUF). Capped so a huge paste doesn't balloon the request body.
+const MAX_CHAT_IMAGE_BYTES = 12 * 1024 * 1024;
+async function fileToImageAttachment(file: File): Promise<Attachment> {
+  const mime = file.type || "image/png";
+  if (!mime.startsWith("image/")) throw new Error("Only images can be pasted into chat.");
+  if (file.size > MAX_CHAT_IMAGE_BYTES) {
+    throw new Error(`Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — limit is ${MAX_CHAT_IMAGE_BYTES / 1024 / 1024} MB.`);
+  }
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result));
+    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
+    fr.readAsDataURL(file);
+  });
+  const comma = dataUrl.indexOf(",");
+  return { kind: "image", mime, data_b64: comma >= 0 ? dataUrl.slice(comma + 1) : "", filename: file.name || "pasted.png" };
+}
 
 // Per-recent metadata: a friendly name and a pin flag. Stored separately from
 // the recents array so the array stays a plain path list.
@@ -191,8 +211,25 @@ export default function CodePage() {
   const [chatMsgs, setChatMsgs] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [chatDraft, setChatDraft] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
+  const [chatImages, setChatImages] = useState<Attachment[]>([]);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
+  const chatFileRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "auto" }); }, [chatMsgs]);
+
+  // Paste (Ctrl+V) an image from the clipboard into the chat, or pick files.
+  const addChatFiles = async (files: FileList | File[]) => {
+    for (const f of Array.from(files)) {
+      if (!f.type.startsWith("image/")) continue;
+      try { const a = await fileToImageAttachment(f); setChatImages((x) => [...x, a]); }
+      catch (e: any) { setStatus(String(e?.message ?? e)); }
+    }
+  };
+  const onChatPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
+    const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
+    if (imgs.length === 0) return; // let normal text paste through
+    e.preventDefault();
+    void addChatFiles(imgs);
+  };
   const scrollRef = useRef<HTMLDivElement | null>(null);
 
   // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
@@ -762,14 +799,19 @@ export default function CodePage() {
   const startChat = () => setChatMode(true);
   const sendChat = async () => {
     const text = chatDraft.trim();
-    if (!text || chatBusy) return;
+    const images = imageAttachments(chatImages);
+    if ((!text && images.length === 0) || chatBusy) return;
     if (!modelId) { setStatus("Pick a model above first."); return; }
     setChatDraft("");
+    setChatImages([]);
     setChatBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const history: HistoryItem[] = chatMsgs.map((m) => ({ role: m.role, content: m.content }));
-    setChatMsgs((m) => [...m, { role: "user", content: text }, { role: "assistant", content: "" }]);
+    // The visible bubble shows the text + an image marker; the actual images
+    // ride to the model via the multimodal content / attachments below.
+    const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
+    setChatMsgs((m) => [...m, { role: "user", content: label }, { role: "assistant", content: "" }]);
     const onD = (d: string) => setChatMsgs((m) => {
       const c = [...m];
       const last = c[c.length - 1];
@@ -781,9 +823,9 @@ export default function CodePage() {
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
-        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: text, temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: () => {}, history });
+        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(text, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: () => {}, history });
       } else {
-        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", text, 0.4, ctrl.signal, onD, undefined, history, false, () => {});
+        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", text, 0.4, ctrl.signal, onD, undefined, history, false, () => {}, undefined, images);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -892,20 +934,35 @@ export default function CodePage() {
           })}
           <div ref={chatEndRef} />
         </div>
-        <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <textarea
-            value={chatDraft}
-            onChange={(e) => setChatDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
-            placeholder="Message…  (Enter to send, Shift+Enter for newline)"
-            rows={1}
-            style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: 13.5, padding: "9px 12px", lineHeight: 1.5 }}
-          />
-          {chatBusy ? (
-            <button onClick={() => abortRef.current?.abort()} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
-          ) : (
-            <button onClick={sendChat} disabled={!chatDraft.trim()} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: chatDraft.trim() ? 1 : 0.5 }}>Send</button>
+        <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+          {chatImages.length > 0 && (
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {chatImages.map((a, i) => (
+                <div key={i} style={{ position: "relative", width: 56, height: 56, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border-strong)" }}>
+                  <img src={`data:${a.mime};base64,${a.data_b64}`} alt={a.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                  <button onClick={() => setChatImages((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+                </div>
+              ))}
+            </div>
           )}
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+            <input ref={chatFileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
+            <button onClick={() => chatFileRef.current?.click()} title="Attach image (or just paste one)" style={{ ...btn, height: 38, width: 38, justifyContent: "center", padding: 0, fontSize: 16 }}>📎</button>
+            <textarea
+              value={chatDraft}
+              onChange={(e) => setChatDraft(e.target.value)}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
+              onPaste={onChatPaste}
+              placeholder="Message…  (paste or attach an image, Enter to send, Shift+Enter for newline)"
+              rows={1}
+              style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: 13.5, padding: "9px 12px", lineHeight: 1.5 }}
+            />
+            {chatBusy ? (
+              <button onClick={() => abortRef.current?.abort()} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
+            ) : (
+              <button onClick={sendChat} disabled={!chatDraft.trim() && chatImages.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: (chatDraft.trim() || chatImages.length) ? 1 : 0.5 }}>Send</button>
+            )}
+          </div>
         </div>
       </div>
     );

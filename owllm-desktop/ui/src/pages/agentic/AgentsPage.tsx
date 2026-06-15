@@ -816,7 +816,8 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
           onDragOver={onDragOver}
           onDragLeave={onDragLeave}
           onDrop={onDrop}
-          placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (drop an image / audio here)"
+          onPaste={e => { const imgs = Array.from(e.clipboardData?.files ?? []).filter(f => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); addFiles(imgs); } }}
+          placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (paste or drop an image / audio)"
           style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border: dragOver ? "1px dashed rgba(124,196,255,0.85)" : "1px solid transparent" }} />
         <button
           data-ui="GoalBrainstormBtn"

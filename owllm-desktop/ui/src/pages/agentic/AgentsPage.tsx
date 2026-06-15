@@ -244,6 +244,30 @@ function normalizeTeamVisibility(value: unknown, teamName: string): TeamVisibili
   if (value === "recommended" || value === "more" || value === "examples" || value === "legacy") return value;
   return RECOMMENDED_TEAM_RANK[teamName] ? "recommended" : "examples";
 }
+
+/// Collapse a raw agent/CLI failure into ONE clean line for the chat. A failed
+/// cloud CLI (e.g. codex) throws an error whose message is its entire raw
+/// stdout — the `Reconnecting 2/5…`, the `ERROR codex_api::…` walls, the session
+/// banner. Dumping that verbatim is the "trash" users reported. Name the common
+/// causes plainly (network/DNS, usage limit, not-signed-in) and otherwise show
+/// only the first meaningful line — never the dump.
+function cleanAgentError(raw: unknown): string {
+  const s = String((raw as { message?: string })?.message ?? raw ?? "").trim();
+  const low = s.toLowerCase();
+  if (low.includes("failed to lookup address") || low.includes("getaddrinfo") || low.includes("stream disconnected") ||
+      low.includes("failed to connect to websocket") || low.includes("error sending request") || low.includes("dns")) {
+    return "couldn't reach the network — likely WSL DNS for the isolated agent. Try again; if it persists, restart WSL (Home → Set up WSL) or run `wsl --shutdown`.";
+  }
+  if (low.includes("usage limit") || low.includes("quota") || low.includes("rate limit") || low.includes("429") || low.includes("insufficient_quota")) {
+    return "the cloud model hit its usage limit (provider-side) — pick another model and try again.";
+  }
+  if (low.includes("not logged in") || low.includes("unauthorized") || low.includes("401")) {
+    return "that model isn't signed in — connect it on the Accounts page, then retry.";
+  }
+  const noise = /^(reconnecting|openai codex|reading additional input|workdir|model:|provider:|approval|sandbox:|reasoning|session id|user$|<stdin>|----|key facts|•|error codex|error rmcp|error [a-z_]+::|\d{4}-\d\d-\d\d)/i;
+  const first = s.split(/\r?\n/).map((l) => l.trim()).find((l) => l.length > 0 && !noise.test(l));
+  return (first ?? s).slice(0, 220);
+}
 /// Display label with a special case for the design-team Product Owner,
 /// who appears in the canvas as "Team Leader (Design Team)" instead of
 /// the bare role name. Falls through to displayLabel for everything
@@ -7606,9 +7630,8 @@ export default function AgentsPage() {
       // failures on the first message and missing the cause because
       // it never reached the chat. Now both supChat (left/main) AND
       // the agent log (right pane) get the error in red.
-      const errText = String(e?.message ?? e);
-      console.error("[onSupSend] streamChatCompletion threw", errText);
-      const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${errText}` };
+      console.error("[onSupSend] streamChatCompletion threw", String(e?.message ?? e));
+      const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}` };
       setSupChat(prev => [...prev, errMsg]);
       appendLog("system", errMsg);
       appendLog(orchKey, errMsg);
@@ -8373,29 +8396,28 @@ export default function AgentsPage() {
       // projectCwd if none was created), then finalizes (commits) any
       // edits the agent made before resolving.
       type SpecOutcome = {
-        name: string;
-        spec: AgentSpec;
-        text: string;
-        ok: boolean;
+        name: string;                                   // START agent (owns the worktree/branch)
+        replies: { name: string; text: string }[];      // terminal results from the whole fan-out tree
         worktree: WorktreeBinding | null;
         finalize: FleetFinalizeResult | null;
       };
       const settled = await Promise.allSettled<SpecOutcome | null>(dispatches.map(async (d) => {
         const startSpec = activeTeam.agents.find(a => a.name === d.agentName);
         if (!startSpec) return null;
-        // Tier-3 autonomous handoff: the whole pipeline shares the START agent's
-        // worktree, so `coder → critic` works on the same files and we commit
-        // ONCE at the end. A team with no agent→agent edges runs exactly one
-        // agent here — today's behavior, unchanged.
+        // FAN-OUT: an agent hands its output to EVERY agent its arrows point to —
+        // the run follows the graph the user drew. The whole tree from this
+        // dispatch shares the START agent's worktree (so its agents see each
+        // other's edits) and commits ONCE at the end. A team with no agent→agent
+        // arrows runs exactly one agent here — today's behavior, unchanged.
         const wt = worktreeBySpec.get(startSpec.name) ?? null;
         const chainCwd = wt ? wt.path : projectCwd;
-        const runChainAgent = async (spec: AgentSpec, instruction: string) => {
+        const runAgent = async (spec: AgentSpec, instruction: string) => {
           addActive(spec.name);
           appendThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
           appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
           const specModel = modelFor(spec.name);
           const allowed = roleByName.get(spec.base)?.toolAllowlist;
-          let ok = false, specText = "";
+          let specText = "";
           try {
             specText = (await streamChatCompletion(
               port, specModel, providerFor(specModel),
@@ -8409,39 +8431,35 @@ export default function AgentsPage() {
               undefined,
               getClaudeSession(selectedProjectId, spec.name),
             )).trim();
-            ok = true;
           } catch (e: any) {
-            specText = `(error: ${String(e?.message ?? e)})`;
+            specText = `(error: ${cleanAgentError(e)})`;
             streamLog(spec.name, "\n\n" + specText);
           }
           removeActive(spec.name);
           speakAgentReply(spec.name, specText);
-          return { name: spec.name, spec, text: specText, ok };
+          return { name: spec.name, text: specText };
         };
-        // Walk the linear pipeline along non-orchestrator edges; visited set +
-        // MAX_CHAIN_HOPS guarantee termination on cyclic graphs.
-        let curName: string | undefined = startSpec.name;
-        let input = d.instruction;
-        const seen = new Set<string>();
-        let last: { name: string; spec: AgentSpec; text: string; ok: boolean } | null = null;
-        for (let hop = 0; curName && !seen.has(curName) && hop < MAX_CHAIN_HOPS; hop++) {
-          seen.add(curName);
-          const spec = activeTeam.agents.find(a => a.name === curName);
-          if (!spec) break;
-          last = await runChainAgent(spec, input);
-          const downstream = downstreamTargets(activeTeam, curName, orch.name).filter(t => !seen.has(t));
-          if (downstream.length === 0) break;            // chain SINK → integrate
-          const next = downstream[0];
-          if (downstream.length > 1) {
-            appendThought(curName, { role: "system", color: "#8a92a3",
-              text: `(pipeline: handing to @${next}; other branches ${downstream.slice(1).map(x => "@" + x).join(", ")} not auto-followed)` });
-          }
-          appendThought(curName, { role: "dispatch", color: "#a578ff", text: `➡ handing off to @${next}` });
-          input = `You are continuing a team workflow. @${last.name} produced the following — build on it for YOUR part of the task:\n\n${last.text}`;
-          curName = next;
-        }
-        if (!last) return null;
-        // Finalize the chain's worktree ONCE — captures the whole pipeline's edits.
+        // Walk the graph: each node runs, then hands its output to ALL its
+        // non-orchestrator arrow targets. `ran` (claimed before each await) +
+        // MAX_CHAIN_HOPS dedupe fan-in and guarantee termination on cycles.
+        const ran = new Set<string>();
+        const runFrom = async (name: string, input: string): Promise<{ name: string; text: string }[]> => {
+          if (ran.has(name) || ran.size >= MAX_CHAIN_HOPS) return [];
+          ran.add(name);
+          const spec = activeTeam.agents.find(a => a.name === name);
+          if (!spec) return [];
+          const out = await runAgent(spec, input);
+          const downstream = downstreamTargets(activeTeam, name, orch.name).filter(t => !ran.has(t));
+          if (downstream.length === 0) return [out];   // leaf → a terminal result
+          const handoff = `You are continuing a team workflow. @${out.name} produced the following — build on it for YOUR part of the task:\n\n${out.text}`;
+          appendThought(name, { role: "dispatch", color: "#a578ff", text: `➡ handing off to ${downstream.map(x => "@" + x).join(", ")}` });
+          const results: { name: string; text: string }[] = [];
+          for (const t of downstream) results.push(...await runFrom(t, handoff));
+          return results.length ? results : [out];
+        };
+        const replies = await runFrom(startSpec.name, d.instruction);
+        if (replies.length === 0) return null;
+        // Finalize the tree's worktree ONCE — captures the whole branch's edits.
         let finalize: FleetFinalizeResult | null = null;
         if (wt) {
           try {
@@ -8463,13 +8481,13 @@ export default function AgentsPage() {
             appendThought(startSpec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize errored: ${String(e?.message ?? e)}` });
           }
         }
-        return { name: last.name, spec: last.spec, text: last.text, ok: last.ok, worktree: wt, finalize };
+        return { name: startSpec.name, replies, worktree: wt, finalize };
       }));
       const outcomes: SpecOutcome[] = [];
       for (const r of settled) {
         if (r.status === "fulfilled" && r.value) outcomes.push(r.value);
       }
-      const specialistReplies = outcomes.map(o => ({ name: o.name, text: o.text }));
+      const specialistReplies = outcomes.flatMap(o => o.replies);
 
       if (specialistReplies.length === 0) {
         // Cleanup any worktrees we did create even though no spec ran.

@@ -2818,33 +2818,31 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // receive the coder's output, no orchestrator in between. A visited set +
   // MAX_CHAIN_HOPS guarantee termination on cyclic graphs. A team with no
   // agent→agent edges runs exactly one agent per dispatch (today's behavior).
-  const runChain = async (startName: string, startInstruction: string): Promise<{ name: string; text: string } | null> => {
-    let curName: string | undefined = startName;
-    let input = startInstruction;
-    const seen = new Set<string>();
-    let last: { name: string; text: string } | null = null;
-    for (let hop = 0; curName && !seen.has(curName) && hop < MAX_CHAIN_HOPS; hop++) {
-      seen.add(curName);
-      const spec = team.agents.find(a => a.name === curName);
-      if (!spec) break;
-      last = await runOneAgent(spec, input);
-      const downstream = downstreamTargets(team, curName, orch.name).filter(t => !seen.has(t));
-      if (downstream.length === 0) break;            // chain SINK → integrate
-      const next = downstream[0];
-      if (downstream.length > 1) {
-        hooks.onThought(curName, { role: "system", color: "#8a92a3",
-          text: `(pipeline: handing to @${next}; other branches ${downstream.slice(1).map(x => "@" + x).join(", ")} not auto-followed)` });
-      }
-      hooks.onThought(curName, { role: "dispatch", color: "#a578ff", text: `➡ handing off to @${next}` });
-      input = `You are continuing a team workflow. @${last.name} produced the following — build on it for YOUR part of the task:\n\n${last.text}`;
-      curName = next;
-    }
-    return last;
+  // FAN-OUT: an agent hands its output to EVERY agent its arrows point to (not
+  // just the first) — the workflow follows the graph the user drew. A node with
+  // 3 outgoing arrows runs all 3 downstream (sequentially, so each builds on the
+  // last cleanly); leaves (no non-orchestrator arrow) are the terminal results
+  // the orchestrator integrates. A per-tree `ran` set (claimed synchronously
+  // before each await) + MAX_CHAIN_HOPS dedupe fan-in and guarantee termination.
+  const runFrom = async (name: string, input: string, ran: Set<string>): Promise<Array<{ name: string; text: string }>> => {
+    if (ran.has(name) || ran.size >= MAX_CHAIN_HOPS) return [];
+    ran.add(name);
+    const spec = team.agents.find(a => a.name === name);
+    if (!spec) return [];
+    const out = await runOneAgent(spec, input);
+    const downstream = downstreamTargets(team, name, orch.name).filter(t => !ran.has(t));
+    if (downstream.length === 0) return [out];      // leaf → a terminal result
+    const handoff = `You are continuing a team workflow. @${out.name} produced the following — build on it for YOUR part of the task:\n\n${out.text}`;
+    hooks.onThought(name, { role: "dispatch", color: "#a578ff",
+      text: `➡ handing off to ${downstream.map(x => "@" + x).join(", ")}` });
+    const results: Array<{ name: string; text: string }> = [];
+    for (const t of downstream) results.push(...await runFrom(t, handoff, ran));
+    return results.length ? results : [out];
   };
-  const settled = await Promise.allSettled(dispatches.map(d => runChain(d.agentName, d.instruction)));
+  const settled = await Promise.allSettled(dispatches.map(d => runFrom(d.agentName, d.instruction, new Set<string>())));
   const specialistReplies: Array<{ name: string; text: string }> = [];
   for (const r of settled) {
-    if (r.status === "fulfilled" && r.value) specialistReplies.push(r.value);
+    if (r.status === "fulfilled" && r.value) specialistReplies.push(...r.value);
   }
 
   if (specialistReplies.length === 0) {

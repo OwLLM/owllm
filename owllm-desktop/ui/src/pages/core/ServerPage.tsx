@@ -22,7 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { bumpActivity } from "../../support/activityStats";
 import { listen } from "@tauri-apps/api/event";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
-import { getInferenceEndpoint, setInferenceEndpoint, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
+import { getInferenceEndpoint, setInferenceEndpoint, setLocalServerKey, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
 
 // Real Page_icons PNG served by vite.config.ts middleware
 // (same pattern as AgentsPage.tsx / CodePage.tsx).
@@ -1047,11 +1047,19 @@ function ServeOnNetworkCard() {
   const [err, setErr] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   useEffect(() => {
-    invoke<{ enabled: boolean; apiKey: string }>("inference_expose_get").then(setCfg).catch(() => {});
+    invoke<{ enabled: boolean; apiKey: string }>("inference_expose_get")
+      .then((c) => { setCfg(c); setLocalServerKey(c.enabled ? c.apiKey : ""); })
+      .catch(() => {});
   }, []);
   const save = async (next: { enabled: boolean; apiKey: string }) => {
     setBusy(true); setErr(null);
-    try { setCfg(await invoke<{ enabled: boolean; apiKey: string }>("inference_expose_set", { config: next })); }
+    try {
+      const c = await invoke<{ enabled: boolean; apiKey: string }>("inference_expose_set", { config: next });
+      setCfg(c);
+      // Local UI must send this key too (llama-server enforces --api-key on
+      // 127.0.0.1 when exposed) — otherwise every local request 401s.
+      setLocalServerKey(c.enabled ? c.apiKey : "");
+    }
     catch (e: any) { setErr(String(e?.message ?? e)); }
     finally { setBusy(false); }
   };

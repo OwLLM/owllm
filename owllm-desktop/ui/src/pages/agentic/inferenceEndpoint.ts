@@ -30,6 +30,29 @@ export type InferenceEndpoint = {
 
 const DEFAULTS: InferenceEndpoint = { mode: "local", host: "127.0.0.1", port: 8080, apiKey: "" };
 
+// The LOCAL managed server normally needs no auth — but when the user EXPOSES it
+// on the network (Server page), llama-server is launched with `--api-key`, which
+// it enforces on 127.0.0.1 connections too. So the local UI must send that same
+// key or every local request 401s ("Invalid API Key"). We cache the key here
+// (mirrored from inference_expose_get on startup + whenever expose is changed)
+// so resolveInferenceBase — which is synchronous — can attach it.
+const LOCAL_KEY = "owllm.inference.localKey";
+
+/// Mirror the local server's required api-key (empty = none / not exposed).
+export function setLocalServerKey(key: string): void {
+  try {
+    if (key && key.trim()) localStorage.setItem(LOCAL_KEY, key.trim());
+    else localStorage.removeItem(LOCAL_KEY);
+  } catch { /* private mode / quota */ }
+}
+
+function getLocalServerKey(): string | null {
+  try {
+    const k = localStorage.getItem(LOCAL_KEY);
+    return k && k.trim() ? k.trim() : null;
+  } catch { return null; }
+}
+
 export function getInferenceEndpoint(): InferenceEndpoint {
   try {
     const raw = localStorage.getItem(KEY);
@@ -72,5 +95,6 @@ export function resolveInferenceBase(localPort: number): ResolvedInference {
       remote: true,
     };
   }
-  return { baseUrl: `http://127.0.0.1:${localPort}`, apiKey: null, remote: false };
+  // Local managed server: send the expose api-key if one is set (else no auth).
+  return { baseUrl: `http://127.0.0.1:${localPort}`, apiKey: getLocalServerKey(), remote: false };
 }

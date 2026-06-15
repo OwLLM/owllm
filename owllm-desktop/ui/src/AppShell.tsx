@@ -33,6 +33,7 @@ import SlackBridgeRunner from "./bridges/SlackBridgeRunner";
 import EmailBridgeRunner from "./bridges/EmailBridgeRunner";
 import WebhookBridgeRunner from "./bridges/WebhookBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
+import { setLocalServerKey } from "./pages/agentic/inferenceEndpoint";
 import BridgesPage from "./pages/agentic/BridgesPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
@@ -214,6 +215,12 @@ function useLiveSysInfo() {
       } catch { /* keep last good values */ }
     };
     tick();
+    // Mirror the local server's required api-key (set when the user EXPOSES the
+    // server on the network — llama-server then enforces --api-key on 127.0.0.1
+    // too) so local inference attaches it instead of 401-ing.
+    invoke<{ enabled: boolean; apiKey: string }>("inference_expose_get")
+      .then((c) => setLocalServerKey(c.enabled ? c.apiKey : ""))
+      .catch(() => {});
     const id = window.setInterval(tick, 2000);
     return () => { dead = true; window.clearInterval(id); };
   }, []);

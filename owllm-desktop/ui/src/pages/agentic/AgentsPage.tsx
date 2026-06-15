@@ -1557,14 +1557,23 @@ function AgentChatTile({
           </div>
         ) : (
           replyMessages.map((m, i) => {
-            // Finished agent replies render as markdown (shared renderer);
-            // the live one (agent active + last) stays plain pre-wrap so
-            // streaming doesn't wipe selection.
+            // Reuse the SAME ChatBubble as the Code page + the Full Chat view —
+            // avatar, sender, and timestamp — so the agentic chat isn't a
+            // different-looking fork (no date). isStreaming handles the live one.
             const streaming = isActive && i === replyMessages.length - 1;
-            if (!m.text) return <div key={i} style={{ color: "var(--fg-subtle)", fontStyle: "italic", fontSize: 12 }}>…</div>;
-            return streaming
-              ? <div key={i} style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.5, whiteSpace: "pre-wrap", userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}>{m.text}<span className="owl-cursor">▍</span></div>
-              : <div key={i} style={{ userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}><ChatMarkdown text={m.text} /></div>;
+            const isUser = m.role === "you";
+            return (
+              <ChatBubble
+                key={i}
+                avatar={isUser ? "Y" : (m.role || "?").charAt(0).toUpperCase()}
+                sender={displayLabel(m.role)}
+                accent={isUser ? "#ffd97a" : (m.color ?? "#9ad9ff")}
+                isUser={isUser}
+                isStreaming={streaming}
+                content={m.text}
+                ts={m.ts}
+              />
+            );
           })
         )}
       </div>

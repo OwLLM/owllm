@@ -89,6 +89,33 @@ type ProjectRow = {
   agent_logs_json: string;
   updated_at: string;
 };
+
+// Per-agent MODEL overrides persist per project in localStorage — the SAME
+// per-project-per-agent scheme the icon overrides use (IconPickerDialog). They
+// were ephemeral useState, so a project never kept its model and the orchestrator
+// silently fell back to a default (e.g. Claude) on reload — bug #16/#17.2.
+const agentModelKey = (pid: string, agent: string) => `owllm:agent-model:${pid}:${agent}`;
+function setAgentModelOverride(pid: string, agent: string, modelId: string): void {
+  if (!pid || !agent) return;
+  try {
+    if (modelId.trim()) localStorage.setItem(agentModelKey(pid, agent), modelId);
+    else localStorage.removeItem(agentModelKey(pid, agent));
+  } catch { /* private mode */ }
+}
+function loadAgentModelsForProject(pid: string): Map<string, string> {
+  const m = new Map<string, string>();
+  if (!pid) return m;
+  const prefix = `owllm:agent-model:${pid}:`;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(prefix)) continue;
+      const v = localStorage.getItem(k);
+      if (v && v.trim()) m.set(k.slice(prefix.length), v);
+    }
+  } catch { /* private mode */ }
+  return m;
+}
 type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
 type AgentRoleBackend    = { id: string; path: string; built_in: boolean; data: any };
 type TelegramCfg = { bot_token: string; project_id: string; auto_approve?: boolean };
@@ -7015,9 +7042,10 @@ export default function AgentsPage() {
       setLocationOverride(selectedProject.location || "");
       setTrustWritesOverride(null);
       setTeamModelOverride(null);
-      // Wipe per-agent model picks too — they belong to a single
-      // project session, not across projects.
-      setPerAgentModel(new Map());
+      // Restore THIS project's saved per-agent model picks (persisted in
+      // localStorage, project-scoped). Was wiped to empty, so the project never
+      // kept its model and the orchestrator fell back to a default on reload.
+      setPerAgentModel(loadAgentModelsForProject(selectedProject.id));
       // Per-agent voice picks live alongside model picks — same scope.
       setPerAgentVoice(new Map());
       // Restore saved chat + per-agent transcripts. Empty strings or
@@ -7691,6 +7719,8 @@ export default function AgentsPage() {
       else next.set(agentName, modelId);
       return next;
     });
+    // Persist so the pick survives tab switches AND restarts (#17.2).
+    setAgentModelOverride(selectedProject?.id ?? "", agentName, modelId);
   };
 
   /// Resolve voice config for an agent. Falls back to DEFAULT_VOICE

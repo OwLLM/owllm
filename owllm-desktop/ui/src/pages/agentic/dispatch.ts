@@ -1055,6 +1055,41 @@ export function appendImageAttachmentNotes(userMessage: string, images: Attachme
   return userMessage ? `${userMessage}\n\n${note}` : note;
 }
 
+/// Make pasted images visible to a subscription / CLI agent (Claude Code, Codex,
+/// Gemini) that takes only text on stdin: SAVE the images into the agent's
+/// working directory and reference the file paths in the prompt, so the agent
+/// opens them with its own image/Read tool. This is the documented Claude Code
+/// "file path reference" mechanism — images work on a subscription with no API
+/// key. Falls back to a clear note if saving isn't possible (no WSL cwd). The
+/// override line neutralises appendImageAttachmentNotes' "state you cannot
+/// inspect" guidance, which only applies to text-only backends.
+export async function appendCliImageFiles(
+  userMessage: string,
+  images: Attachment[],
+  cwd?: string,
+): Promise<string> {
+  if (images.length === 0) return userMessage;
+  if (!cwd || !cwd.trim()) {
+    return `${userMessage}\n\n[${images.length} image(s) were attached but no project folder is set, so they couldn't be saved for the agent to read.]`;
+  }
+  try {
+    const saved = await invoke<string[]>("agent_save_inbox_images", {
+      cwd,
+      images: images.map((a) => ({ data_b64: a.data_b64, mime: a.mime })),
+    });
+    if (!saved || saved.length === 0) throw new Error("no paths returned");
+    const list = saved.map((p) => `- ${p}`).join("\n");
+    return (
+      `${userMessage}\n\n[The user attached ${saved.length} image${saved.length === 1 ? "" : "s"}, ` +
+      `now saved in your working directory. You CAN see them — OPEN AND VIEW each file before answering ` +
+      `(use your image/Read tool); they are part of the question. Ignore any earlier note saying you ` +
+      `cannot inspect images — that applies only to text-only backends.\n${list}]`
+    );
+  } catch (e) {
+    return `${userMessage}\n\n[${images.length} image attachment(s) couldn't be saved for the agent: ${String((e as { message?: string })?.message ?? e)}]`;
+  }
+}
+
 /// Transcribe every audio attachment and fold transcripts into the
 /// user message. The product path is native whisper.cpp via Rust
 /// (`audio_transcribe_local`); OpenAI Whisper is only a fallback when
@@ -1703,12 +1738,11 @@ async function streamAnthropic(
   // receive the clean wire-name + a normalised effort label.
   const { wireModel: cliModel, effort: cliEffort } = parseClaudeModelId(modelId);
   const claudeEffort = mapClaudeEffort(cliEffort);
-  // The Claude CLI binding is text-only. When the user routed via the
-  // subscription path AND attached images, prefix a note so they're
-  // not silently dropped. Users on the API path get full inline images.
-  const cliUserMessage = imgList.length > 0
-    ? `${userMessage}\n\n[${imgList.length} image attachment(s) dropped — switch to the API row to send images to Claude.]`
-    : userMessage;
+  // The Claude CLI binding is text-only on stdin — but Claude Code READS image
+  // files with its own tool. So save the pasted images into the working
+  // directory and reference their paths; the agent opens them itself (works on
+  // a subscription, no API key). Users on the API path get full inline vision.
+  const cliUserMessage = await appendCliImageFiles(userMessage, imgList, projectCwd);
   const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
   // Wrap CLI invocations so a "Session ID already in use" failure
   // (a stale lock from a prior crashed claude process, or the same

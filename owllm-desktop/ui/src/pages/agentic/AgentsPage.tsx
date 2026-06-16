@@ -38,6 +38,7 @@ import {
   transcribeAudioAttachments,
   imageAttachments,
   appendImageAttachmentNotes,
+  appendCliImageFiles,
   openaiUserContent,
   anthropicUserContent,
   parseClaudeModelId,
@@ -5722,20 +5723,16 @@ async function streamChatCompletion(
   // Audio attachments collapse into the user message via Whisper.
   // Images stay on the side and get a provider-specific encoding.
   const images = imageAttachments(attachments);
-  // CLI subscription paths (Claude Code, Kimi `kimi`, Gemini CLI) take
-  // text-only stdin — any image attachments get silently dropped.
-  // Surface this to the user with a visible system note instead of
-  // leaving the orchestrator to mumble "I can see you sent an image but
-  // I can't process it" later. The note tells them exactly how to fix
-  // it (switch to the API row or a local vision model).
+  // CLI subscription paths take text-only stdin. The Claude (anthropic) CLI now
+  // gets images via the file-reference path (appendCliImageFiles saves them and
+  // the agent reads them), so no warning there. The other CLIs (Kimi, Gemini,
+  // OpenAI) don't yet, so still warn for those.
   if (forceSub && images.length > 0 && onSystemWarning &&
-      (provider === "anthropic" || provider === "moonshot" || provider === "gemini" || provider === "openai")) {
-    const providerName = provider === "anthropic" ? "Claude"
-                       : provider === "moonshot"  ? "Kimi"
+      (provider === "moonshot" || provider === "gemini" || provider === "openai")) {
+    const providerName = provider === "moonshot"  ? "Kimi"
                        : provider === "gemini"    ? "Gemini"
                        :                            "OpenAI";
-    const apiKey = provider === "anthropic" ? "ANTHROPIC_API_KEY"
-                 : provider === "moonshot"  ? "MOONSHOT_API_KEY"
+    const apiKey = provider === "moonshot"  ? "MOONSHOT_API_KEY"
                  : provider === "gemini"    ? "GEMINI_API_KEY"
                  :                            "OPENAI_API_KEY";
     onSystemWarning(
@@ -5907,9 +5904,10 @@ async function streamAnthropic(
   // and the API (thinking budget in buildAnthropicBody) get clean inputs.
   const { wireModel: cliModel, effort: cliEffortRaw } = parseClaudeModelId(modelId);
   const claudeEffort = mapClaudeEffort(cliEffortRaw);
-  const cliUserMessage = imgList.length > 0
-    ? `${userMessage}\n\n[${imgList.length} image attachment(s) dropped — switch to the API row to send images to Claude.]`
-    : userMessage;
+  // Save pasted images into the working directory and reference their paths so
+  // the Claude CLI reads them with its own tool (subscription images, no API
+  // key). See appendCliImageFiles. The API path embeds images natively instead.
+  const cliUserMessage = await appendCliImageFiles(userMessage, imgList, projectCwd);
   // Claude CLI's --print mode is one-shot — no inherent memory across
   // calls — so fold the prior conversation into the user prompt the
   // CLI sees. The CLI then has everything it needs to continue.

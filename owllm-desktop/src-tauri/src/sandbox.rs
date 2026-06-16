@@ -396,6 +396,58 @@ fn full_access_set_impl(_cwd: String, _enabled: bool) -> Result<(), String> {
     Err("full host access is a WSL (Windows) feature today".into())
 }
 
+// ---- image inbox: let a subscription/CLI agent SEE pasted images -----------
+// The cloud-CLI agents (Claude Code, Codex, Gemini) are text-only on stdin, but
+// they can READ image files with their own file/vision tool — that's how Claude
+// Code handles images without an API key ("file path reference"). So we drop the
+// pasted images into the agent's working directory and reference the paths in
+// the prompt; the agent opens them itself. Returns the agent-visible absolute
+// Linux paths. The inbox is cleared each call so stale images don't pile up.
+#[derive(serde::Deserialize)]
+pub struct InboxImage {
+    pub data_b64: String,
+    pub mime: Option<String>,
+}
+
+#[cfg(windows)]
+fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, String> {
+    use base64::Engine as _;
+    let (_distro, linux_cwd) = crate::wsl::parse_wsl_unc(&cwd)
+        .ok_or_else(|| "images attach only to WSL-routed (sandboxed) agents".to_string())?;
+    let dir = std::path::Path::new(&cwd).join(".owllm-inbox");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create inbox: {e}"))?;
+    let base = linux_cwd.trim_end_matches('/');
+    let mut paths = Vec::new();
+    for (i, img) in images.iter().enumerate() {
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(img.data_b64.trim())
+            .map_err(|e| format!("decode image {}: {e}", i + 1))?;
+        let ext = match img.mime.as_deref().unwrap_or("") {
+            m if m.contains("jpeg") || m.contains("jpg") => "jpg",
+            m if m.contains("webp") => "webp",
+            m if m.contains("gif") => "gif",
+            _ => "png",
+        };
+        let name = format!("image_{}.{ext}", i + 1);
+        std::fs::write(dir.join(&name), &bytes).map_err(|e| format!("write image {}: {e}", i + 1))?;
+        paths.push(format!("{base}/.owllm-inbox/{name}"));
+    }
+    Ok(paths)
+}
+
+#[cfg(not(windows))]
+fn save_inbox_impl(_cwd: String, _images: Vec<InboxImage>) -> Result<Vec<String>, String> {
+    Err("image inbox is a WSL (Windows) feature today".into())
+}
+
+/// Save pasted images into the agent's working directory (.owllm-inbox/) so a
+/// subscription/CLI agent can read them. Returns the agent-visible Linux paths.
+#[tauri::command]
+pub fn agent_save_inbox_images(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, String> {
+    save_inbox_impl(cwd, images)
+}
+
 /// Read whether a project folder is marked full-access (agents run unsandboxed).
 #[tauri::command]
 pub fn agent_full_access_get(cwd: String) -> bool { full_access_get_impl(cwd) }

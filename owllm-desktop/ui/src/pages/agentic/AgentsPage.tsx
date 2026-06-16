@@ -40,6 +40,7 @@ import {
   appendImageAttachmentNotes,
   appendCliImageFiles,
   saveCliImages,
+  fileToImageAttachment,
   openaiUserContent,
   anthropicUserContent,
   parseClaudeModelId,
@@ -3782,7 +3783,7 @@ function ChatInputDock({
   draft: string;
   setDraft: (v: string) => void;
   inputRef: React.RefObject<HTMLTextAreaElement | null>;
-  onSend: () => void;
+  onSend: (images: Attachment[]) => void;
   busy: boolean;
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
@@ -3820,6 +3821,20 @@ function ChatInputDock({
     { name: "/auto",      description: autoApprove ? "Turn Auto mode OFF"   : "Turn Auto mode ON", action: onToggleAutoApprove },
     { name: "/clear",     description: "Clear the draft text",              action: () => setDraft("") },
   ], [autoApprove, onSwitchTab, onToggleAutoApprove, setDraft]);
+
+  // Pasted images for the team chat (parity with the Code + fine-tuning chats).
+  // Sent on the next message via onSend(images); cleared after. Same shared
+  // fileToImageAttachment + Attachment shape used everywhere.
+  const [images, setImages] = useState<Attachment[]>([]);
+  const onDockPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData?.files ?? []).filter(f => f.type.startsWith("image/"));
+    if (files.length === 0) return;
+    e.preventDefault();
+    files.forEach(async (f) => {
+      try { const a = await fileToImageAttachment(f); setImages(x => [...x, a]); }
+      catch (err) { console.warn("[agentic chat] image paste failed", err); }
+    });
+  };
 
   // Droplist state — open whenever the draft is exactly "/" or starts
   // with "/<token>" (matched against command names). We also open
@@ -3924,7 +3939,7 @@ function ChatInputDock({
       return;
     }
     const t = draft.trim();
-    if (!t) return;
+    if (!t && images.length === 0) return;
     if (t.startsWith("/")) {
       const exact = slashCommands.find(c => c.name.toLowerCase() === t.toLowerCase());
       if (exact) { runCommand(exact); return; }
@@ -3946,7 +3961,8 @@ function ChatInputDock({
       onLoadModel();
       return;
     }
-    onSend();
+    onSend(images);
+    setImages([]);
   };
 
   return (
@@ -3995,12 +4011,23 @@ function ChatInputDock({
         borderRadius:12,
         overflow:"hidden",
       }}>
+        {images.length > 0 && (
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap", padding:"8px 12px 0" }}>
+            {images.map((a, i) => (
+              <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:6, border:"1px solid rgba(122,162,255,0.35)", background:"rgba(122,162,255,0.12)", color:"#9ad9ff", borderRadius:12, padding:"2px 6px 2px 8px", fontSize:11, fontWeight:700 }}>
+                🖼 {a.filename ?? "image"}
+                <button onClick={() => setImages(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border:"none", background:"transparent", color:"#9ad9ff", cursor:"pointer", fontSize:13, lineHeight:1, padding:0 }}>×</button>
+              </span>
+            ))}
+          </div>
+        )}
         <div style={{ display:"flex", alignItems:"flex-start", padding:"10px 12px 6px", gap:8 }}>
           <textarea
             ref={inputRef}
             data-ui="UserInputArea"
             value={draft}
             onChange={e => setDraft(e.target.value)}
+            onPaste={onDockPaste}
             onKeyDown={e => {
               if (e.key === "Escape") { setPaletteOpen(false); return; }
               if (e.key === "Enter" && !e.shiftKey) {
@@ -4157,7 +4184,7 @@ function OrchestratorPane({
   /// (filtered to role="you"). The bottom input dock writes to this
   /// stream via onSupSend.
   supChat: GoalMsg[];
-  onSupSend: (text: string) => void;
+  onSupSend: (text: string, images?: Attachment[]) => void;
   supSendBusy: boolean;
   /// VS Code-style dock's "Auto mode" toggle — wires to the project's
   /// autoApprove flag (drives the dispatch's auto-accept of tool calls).
@@ -4283,11 +4310,11 @@ function OrchestratorPane({
     const next = Math.min(ta.scrollHeight, 240);
     ta.style.height = `${Math.max(36, next)}px`;
   }, [draft]);
-  const submitInput = () => {
+  const submitInput = (images: Attachment[] = []) => {
     if (supSendBusy) return;
     const t = draft.trim();
-    if (!t) return;
-    onSupSend(t);
+    if (!t && images.length === 0) return;
+    onSupSend(t, images);
     setDraft("");
   };
 
@@ -4625,7 +4652,7 @@ function RightColumnTabs(props: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
   supChat: GoalMsg[];
-  onSupSend: (text: string) => void;
+  onSupSend: (text: string, images?: Attachment[]) => void;
   supSendBusy: boolean;
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
@@ -7581,7 +7608,7 @@ export default function AgentsPage() {
   // SuperUserCard Send — drops a one-off message into the Super User
   // log buffer. The dispatch loop above handles the orchestrator-led
   // flow; this lets the user sneak in a side note without re-running.
-  const onSupSend = async (text: string) => {
+  const onSupSend = async (text: string, images: Attachment[] = []) => {
     if (supSendBusyRef.current) {
       console.log("[onSupSend] ignored — already busy");
       return;
@@ -7606,7 +7633,11 @@ export default function AgentsPage() {
     // forgets every restart, which is what users keep hitting).
     const priorHistory = chatToHistory(supChat);
 
-    const userMsg: GoalMsg = { role: "you", color: "#9ad9ff", text, ts: Date.now() };
+    const userMsg: GoalMsg = {
+      role: "you", color: "#9ad9ff",
+      text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
+      ts: Date.now(),
+    };
     setSupChat(prev => [...prev, userMsg]);
     appendLog("you", userMsg);
 
@@ -7840,8 +7871,8 @@ export default function AgentsPage() {
         // commands it asks tools to run (Anthropic API thinking blocks
         // & tool_use, OpenAI tool_calls, local <think> tags).
         (channel, role, delta) => streamThought(orchKey, channel, role, delta),
-        undefined,
-        undefined,
+        undefined,        // allowedTools
+        images,           // pasted images → native vision (API) / codex -i / claude file-ref
         // SuperUser orchestrator chat uses the same persistent session
         // as the team-Run orchestrator — they're the same logical agent.
         getClaudeSession(selectedProjectId, orchKey),

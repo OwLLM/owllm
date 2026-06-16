@@ -141,6 +141,7 @@ async function runClaudeCliStream(args: {
 /// Reuses the ClaudeStreamEvent wire shape (codex_cli_stream emits the
 /// identical tagged JSON) so there's one handler for both CLIs.
 export async function runCodexCliStream(args: {
+  imagePaths?: string[];
   systemPrompt: string;
   userMessage: string;
   cwd?: string | null;
@@ -178,6 +179,7 @@ export async function runCodexCliStream(args: {
     systemPrompt: args.systemPrompt,
     userMessage: args.userMessage,
     cwd: args.cwd ?? null,
+    imagePaths: args.imagePaths ?? null,
     onEvent: ch,
   });
 }
@@ -1063,6 +1065,26 @@ export function appendImageAttachmentNotes(userMessage: string, images: Attachme
 /// key. Falls back to a clear note if saving isn't possible (no WSL cwd). The
 /// override line neutralises appendImageAttachmentNotes' "state you cannot
 /// inspect" guidance, which only applies to text-only backends.
+/// Save pasted images into the agent's working directory and return their
+/// cwd-relative paths (".owllm-inbox/image_N.ext"). Used by the codex path,
+/// which attaches them via codex's native `-i` flag. Returns undefined when
+/// there's nothing to save or no working directory. Verified end-to-end.
+export async function saveCliImages(
+  images: Attachment[],
+  cwd?: string,
+): Promise<string[] | undefined> {
+  if (images.length === 0 || !cwd || !cwd.trim()) return undefined;
+  try {
+    const paths = await invoke<string[]>("agent_save_inbox_images", {
+      cwd,
+      images: images.map((a) => ({ data_b64: a.data_b64, mime: a.mime })),
+    });
+    return paths && paths.length > 0 ? paths : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function appendCliImageFiles(
   userMessage: string,
   images: Attachment[],
@@ -1984,6 +2006,9 @@ async function streamOpenAI(
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
       .join("\n\n");
     const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Pasted images → saved to the cwd inbox + attached via codex's native -i
+    // flag (verified). Codex sees them as vision input; no API key needed.
+    const codexImagePaths = await saveCliImages(images ?? [], projectCwd ?? undefined);
     // Stream live activity (reasoning, commands, tools, web searches) when
     // the caller wants thought traffic — AgentsPage / ChatPage / CodePage.
     // Bridge callers (no Thought pane) fall back to the one-shot blob.
@@ -1992,6 +2017,7 @@ async function streamOpenAI(
         systemPrompt,
         userMessage: prompt,
         cwd: projectCwd ?? null,
+        imagePaths: codexImagePaths,
         onDelta,
         onThought,
       });
@@ -2000,6 +2026,7 @@ async function streamOpenAI(
       systemPrompt,
       userMessage: prompt,
       cwd: projectCwd ?? undefined,
+      imagePaths: codexImagePaths,
     });
     if (reply) onDelta(reply);
     return reply;

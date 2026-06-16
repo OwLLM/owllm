@@ -412,12 +412,12 @@ pub struct InboxImage {
 #[cfg(windows)]
 fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, String> {
     use base64::Engine as _;
-    let (_distro, linux_cwd) = crate::wsl::parse_wsl_unc(&cwd)
-        .ok_or_else(|| "images attach only to WSL-routed (sandboxed) agents".to_string())?;
+    if cwd.trim().is_empty() {
+        return Err("no working directory to save images into".into());
+    }
     let dir = std::path::Path::new(&cwd).join(".owllm-inbox");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create inbox: {e}"))?;
-    let base = linux_cwd.trim_end_matches('/');
     let mut paths = Vec::new();
     for (i, img) in images.iter().enumerate() {
         let bytes = base64::engine::general_purpose::STANDARD
@@ -431,7 +431,9 @@ fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, 
         };
         let name = format!("image_{}.{ext}", i + 1);
         std::fs::write(dir.join(&name), &bytes).map_err(|e| format!("write image {}: {e}", i + 1))?;
-        paths.push(format!("{base}/.owllm-inbox/{name}"));
+        // RELATIVE to the agent's cwd — works for codex `-i` AND claude's Read
+        // tool, whether the agent runs sandboxed (cwd bound) or on the host.
+        paths.push(format!(".owllm-inbox/{name}"));
     }
     Ok(paths)
 }
@@ -442,7 +444,9 @@ fn save_inbox_impl(_cwd: String, _images: Vec<InboxImage>) -> Result<Vec<String>
 }
 
 /// Save pasted images into the agent's working directory (.owllm-inbox/) so a
-/// subscription/CLI agent can read them. Returns the agent-visible Linux paths.
+/// subscription/CLI agent can read them. Returns the paths RELATIVE to the cwd
+/// (".owllm-inbox/image_N.ext"): codex passes them via `-i`, claude reads them
+/// with its Read tool. Both verified end-to-end.
 #[tauri::command]
 pub fn agent_save_inbox_images(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, String> {
     save_inbox_impl(cwd, images)

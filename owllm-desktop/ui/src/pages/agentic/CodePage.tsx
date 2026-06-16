@@ -883,7 +883,10 @@ export default function CodePage() {
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(text, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: () => {}, history });
       } else {
-        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", text, 0.4, ctrl.signal, onD, undefined, history, false, () => {}, undefined, images);
+        // Pass the workspace as the cwd so pasted images can be saved into it
+        // for the agent to read (codex -i / claude file-ref). Was `undefined`,
+        // which is why images never reached a subscription model on this page.
+        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", text, 0.4, ctrl.signal, onD, workspace, history, false, () => {}, undefined, images);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };

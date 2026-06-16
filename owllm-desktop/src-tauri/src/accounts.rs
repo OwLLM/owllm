@@ -1046,6 +1046,7 @@ pub async fn codex_cli_complete(
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
+    image_paths: Option<Vec<String>>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let prompt = if system_prompt.trim().is_empty() {
@@ -1054,7 +1055,7 @@ pub async fn codex_cli_complete(
             format!("{}\n\n{}", system_prompt.trim(), user_message)
         };
         // Base args shared by both paths (no -o — see per-branch handling).
-        let base_args: Vec<String> = vec![
+        let mut base_args: Vec<String> = vec![
             "exec".into(),
             "--skip-git-repo-check".into(),
             "--color".into(),
@@ -1063,6 +1064,13 @@ pub async fn codex_cli_complete(
             "--sandbox".into(),
             "read-only".into(),
         ];
+        // Attach pasted images via codex's native `-i` flag (verified: codex
+        // reads them as vision input). One flag per file so the variadic `-i`
+        // doesn't swallow the positional prompt. Paths are relative to cwd.
+        for p in image_paths.iter().flatten() {
+            base_args.push("-i".into());
+            base_args.push(p.clone());
+        }
 
         // Isolated project → run `codex` inside the sandbox and read the final
         // message from stdout (a Windows -o tempfile path is meaningless inside
@@ -1569,6 +1577,7 @@ pub async fn codex_cli_stream(
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
+    image_paths: Option<Vec<String>>,
     on_event: Channel<CodexStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -1581,7 +1590,7 @@ pub async fn codex_cli_stream(
         // Same non-interactive flags as codex_cli_complete, plus --json for the
         // NDJSON event stream. Collected once so the same invocation runs as the
         // Windows CLI or inside WSL for an isolated project.
-        let args: Vec<String> = vec![
+        let mut args: Vec<String> = vec![
             "exec".into(),
             "--json".into(),
             "--skip-git-repo-check".into(),
@@ -1598,10 +1607,16 @@ pub async fn codex_cli_stream(
             // the workspace proceed without a prompt.
             "--sandbox".into(),
             "workspace-write".into(),
-            // Positional prompt (older codex reads it here); stdin carries it
-            // too (newer codex reads it there).
-            prompt.clone(),
         ];
+        // Pasted images via codex's native `-i` flag (one per file so the
+        // positional prompt isn't swallowed). Relative paths (cwd-rooted).
+        for p in image_paths.iter().flatten() {
+            args.push("-i".into());
+            args.push(p.clone());
+        }
+        // Positional prompt (older codex reads it here); stdin carries it
+        // too (newer codex reads it there).
+        args.push(prompt.clone());
 
         // WSL-isolated project → run `codex` inside the distro; else Windows CLI.
         let mut cmd = if let Some((exe, sargs)) =

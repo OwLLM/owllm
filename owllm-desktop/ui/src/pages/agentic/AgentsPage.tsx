@@ -39,6 +39,7 @@ import {
   imageAttachments,
   appendImageAttachmentNotes,
   appendCliImageFiles,
+  saveCliImages,
   openaiUserContent,
   anthropicUserContent,
   parseClaudeModelId,
@@ -6143,15 +6144,18 @@ async function streamOpenAI(
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
       .join("\n\n");
     const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Pasted images → saved to the cwd inbox + attached via codex's native -i
+    // flag (verified). Same path the Code page uses — consistent everywhere.
+    const codexImagePaths = await saveCliImages(images ?? [], projectCwd ?? undefined);
     // Stream live activity (reasoning/commands/tools/web-search) into the
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await runCodexCliStream({
-        systemPrompt, userMessage: prompt, cwd: projectCwd ?? null, onDelta, onThought,
+        systemPrompt, userMessage: prompt, cwd: projectCwd ?? null, imagePaths: codexImagePaths, onDelta, onThought,
       });
     }
     const reply = await invoke<string>("codex_cli_complete", {
-      systemPrompt, userMessage: prompt, cwd: projectCwd ?? undefined,
+      systemPrompt, userMessage: prompt, cwd: projectCwd ?? undefined, imagePaths: codexImagePaths,
     });
     if (reply) onDelta(reply);
     return reply;

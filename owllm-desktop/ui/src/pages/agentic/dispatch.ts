@@ -1092,6 +1092,19 @@ export function appendImageAttachmentNotes(userMessage: string, images: Attachme
 /// cwd-relative paths (".owllm-inbox/image_N.ext"). Used by the codex path,
 /// which attaches them via codex's native `-i` flag. Returns undefined when
 /// there's nothing to save or no working directory. Verified end-to-end.
+/// The working dir to use for CLI image attaching. The project cwd if one is
+/// set, else a WSL scratch dir (chat_scratch_dir) — so a chat with NO project
+/// folder can STILL save + attach images. Critically, this is the SAME dir the
+/// CLI then runs in, so codex `-i` / claude file-ref relative paths resolve.
+/// The recurring "I can't inspect the image" bug was a no-folder chat passing an
+/// empty cwd → nowhere to save → no -i. Centralizes the fix for every surface.
+export async function resolveImageCwd(cwd: string | undefined, hasImages: boolean): Promise<string | undefined> {
+  if (cwd && cwd.trim()) return cwd;
+  if (!hasImages) return cwd;
+  try { const d = await invoke<string>("chat_scratch_dir"); return d && d.trim() ? d : cwd; }
+  catch { return cwd; }
+}
+
 export async function saveCliImages(
   images: Attachment[],
   cwd?: string,
@@ -1787,7 +1800,12 @@ async function streamAnthropic(
   // files with its own tool. So save the pasted images into the working
   // directory and reference their paths; the agent opens them itself (works on
   // a subscription, no API key). Users on the API path get full inline vision.
-  const cliUserMessage = await appendCliImageFiles(userMessage, imgList, projectCwd);
+  // A no-folder agentic/code chat has no projectCwd; the Claude CLI still needs
+  // a real directory to (a) save the pasted image into and (b) run in so its Read
+  // tool can open the relative path. Fall back to the shared chat-scratch dir so
+  // images work in EVERY surface, folder or not (#22/#24).
+  const claudeCwd = await resolveImageCwd(projectCwd, imgList.length > 0);
+  const cliUserMessage = await appendCliImageFiles(userMessage, imgList, claudeCwd);
   const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
   // Wrap CLI invocations so a "Session ID already in use" failure
   // (a stale lock from a prior crashed claude process, or the same
@@ -1825,14 +1843,14 @@ async function streamAnthropic(
     // doesn't display a Thought tab).
     if (onThought) {
       return await runWithSessionRetry((sid) => runClaudeCliStream({
-        systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+        systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
         model: cliModel, effort: claudeEffort, sessionId: sid,
         onDelta, onThought,
       }));
     }
     const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-      systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+      systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
       autoApprove: autoApprove ?? false,
       model: cliModel, effort: claudeEffort, sessionId: sid,
     }));
@@ -1848,14 +1866,14 @@ async function streamAnthropic(
         await ensureCliWarm("claude_cli");
         if (onThought) {
           return await runWithSessionRetry((sid) => runClaudeCliStream({
-            systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+            systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
             model: cliModel, effort: claudeEffort, sessionId: sid,
             onDelta, onThought,
           }));
         }
         const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-          systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+          systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
           model: cliModel, effort: claudeEffort, sessionId: sid,
         }));
@@ -2029,9 +2047,11 @@ async function streamOpenAI(
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
       .join("\n\n");
     const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
-    // Pasted images → saved to the cwd inbox + attached via codex's native -i
-    // flag (verified). Codex sees them as vision input; no API key needed.
-    const codexImagePaths = await saveCliImages(images ?? [], projectCwd ?? undefined);
+    // Pasted images → saved to the working-dir inbox + attached via codex's
+    // native -i flag. resolveImageCwd falls back to a scratch dir when there's
+    // no project folder, and we run codex in that SAME dir so -i resolves.
+    const codexCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
+    const codexImagePaths = await saveCliImages(images ?? [], codexCwd);
     // Stream live activity (reasoning, commands, tools, web searches) when
     // the caller wants thought traffic — AgentsPage / ChatPage / CodePage.
     // Bridge callers (no Thought pane) fall back to the one-shot blob.
@@ -2039,7 +2059,7 @@ async function streamOpenAI(
       return await runCodexCliStream({
         systemPrompt,
         userMessage: prompt,
-        cwd: projectCwd ?? null,
+        cwd: codexCwd ?? null,
         imagePaths: codexImagePaths,
         onDelta,
         onThought,
@@ -2048,7 +2068,7 @@ async function streamOpenAI(
     const reply = await invoke<string>("codex_cli_complete", {
       systemPrompt,
       userMessage: prompt,
-      cwd: projectCwd ?? undefined,
+      cwd: codexCwd ?? undefined,
       imagePaths: codexImagePaths,
     });
     if (reply) onDelta(reply);

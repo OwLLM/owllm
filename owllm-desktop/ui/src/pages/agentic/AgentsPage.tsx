@@ -40,6 +40,7 @@ import {
   appendImageAttachmentNotes,
   appendCliImageFiles,
   saveCliImages,
+  resolveImageCwd,
   fileToImageAttachment,
   openaiUserContent,
   anthropicUserContent,
@@ -5935,7 +5936,11 @@ async function streamAnthropic(
   // Save pasted images into the working directory and reference their paths so
   // the Claude CLI reads them with its own tool (subscription images, no API
   // key). See appendCliImageFiles. The API path embeds images natively instead.
-  const cliUserMessage = await appendCliImageFiles(userMessage, imgList, projectCwd);
+  // A no-folder team chat has no projectCwd; fall back to the shared chat-scratch
+  // dir so the CLI has a real place to save+read the image (#24). claudeCwd is
+  // used for BOTH the image save and every claude_cli cwd below.
+  const claudeCwd = await resolveImageCwd(projectCwd, imgList.length > 0);
+  const cliUserMessage = await appendCliImageFiles(userMessage, imgList, claudeCwd);
   // Claude CLI's --print mode is one-shot — no inherent memory across
   // calls — so fold the prior conversation into the user prompt the
   // CLI sees. The CLI then has everything it needs to continue.
@@ -5976,7 +5981,7 @@ async function streamAnthropic(
     };
     if (onThought) {
       return await runWithSessionRetry((sid) => runClaudeCliStream({
-        systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+        systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
         autoApprove: autoApprove ?? false, allowedTools,
         model: cliModel, effort: claudeEffort, sessionId: sid,
         onDelta, onThought,
@@ -6000,7 +6005,7 @@ async function streamAnthropic(
         await ensureCliWarm("claude_cli");
         if (onThought) {
           return await runClaudeCliStream({
-            systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+            systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
             model: cliModel, effort: claudeEffort, sessionId,
             onDelta, onThought,
@@ -6009,7 +6014,7 @@ async function streamAnthropic(
         const reply = await invoke<string>("claude_cli_complete", {
           systemPrompt,
           userMessage: cliPrompt,
-          cwd: projectCwd ?? null,
+          cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
           model: cliModel, effort: claudeEffort, sessionId,
         });
@@ -6173,16 +6178,19 @@ async function streamOpenAI(
     const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
     // Pasted images → saved to the cwd inbox + attached via codex's native -i
     // flag (verified). Same path the Code page uses — consistent everywhere.
-    const codexImagePaths = await saveCliImages(images ?? [], projectCwd ?? undefined);
+    // A no-folder team chat has no projectCwd; fall back to the shared
+    // chat-scratch dir so codex has a real place to save+read the image (#24).
+    const codexCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
+    const codexImagePaths = await saveCliImages(images ?? [], codexCwd);
     // Stream live activity (reasoning/commands/tools/web-search) into the
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await runCodexCliStream({
-        systemPrompt, userMessage: prompt, cwd: projectCwd ?? null, imagePaths: codexImagePaths, onDelta, onThought,
+        systemPrompt, userMessage: prompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, onDelta, onThought,
       });
     }
     const reply = await invoke<string>("codex_cli_complete", {
-      systemPrompt, userMessage: prompt, cwd: projectCwd ?? undefined, imagePaths: codexImagePaths,
+      systemPrompt, userMessage: prompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths,
     });
     if (reply) onDelta(reply);
     return reply;

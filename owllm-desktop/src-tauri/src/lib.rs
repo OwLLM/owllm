@@ -290,6 +290,7 @@ pub fn run() {
             agent_tools::tool_web_fetch,
             agent_tools::tool_screenshot_url,
             wsl::wsl_status,
+            wsl::wsl_restart,
             wsl::wsl_isolation_get,
             wsl::wsl_isolation_set,
             wsl::wsl_create_project,

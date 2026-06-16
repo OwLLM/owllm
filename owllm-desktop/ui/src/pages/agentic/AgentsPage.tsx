@@ -198,6 +198,10 @@ type GoalMsg = {
   /// Epoch ms when the entry was created — shown next to the role in the
   /// shared ChatBubble. Stamped at creation; deltas don't re-stamp.
   ts?: number;
+  /// Optional inline recovery action rendered as a one-click button under the
+  /// bubble. "wsl-restart" → "⟳ Restart WSL networking" (fires owllm:wsl-restart).
+  /// Set on network-failure system messages so users never type a terminal cmd.
+  action?: "wsl-restart";
 };
 
 // Module-scoped monotonic sequence — assigns a chronological id to
@@ -280,12 +284,21 @@ function normalizeTeamVisibility(value: unknown, teamName: string): TeamVisibili
 /// banner. Dumping that verbatim is the "trash" users reported. Name the common
 /// causes plainly (network/DNS, usage limit, not-signed-in) and otherwise show
 /// only the first meaningful line — never the dump.
+/// True when an agent failure is a network/DNS reachability problem (vs. a model
+/// or auth error). Drives the one-click "Restart WSL networking" recovery button.
+function isNetworkAgentError(raw: unknown): boolean {
+  const low = String((raw as { message?: string })?.message ?? raw ?? "").toLowerCase();
+  return low.includes("failed to lookup address") || low.includes("getaddrinfo") ||
+    low.includes("stream disconnected") || low.includes("failed to connect to websocket") ||
+    low.includes("error sending request") || low.includes("dns");
+}
 function cleanAgentError(raw: unknown): string {
   const s = String((raw as { message?: string })?.message ?? raw ?? "").trim();
   const low = s.toLowerCase();
-  if (low.includes("failed to lookup address") || low.includes("getaddrinfo") || low.includes("stream disconnected") ||
-      low.includes("failed to connect to websocket") || low.includes("error sending request") || low.includes("dns")) {
-    return "couldn't reach the network — the sandbox already falls back to public DNS, so a persistent failure is usually a VPN or WSL networking issue, not the model. Fixes: run `wsl --shutdown` (often enough right after a VPN connects); if it persists, enable mirrored networking — add a `[wsl2]` section with `networkingMode=mirrored` to `%UserProfile%\\.wslconfig`, then `wsl --shutdown`.";
+  if (isNetworkAgentError(raw) || low.includes("dns")) {
+    // Plain language + a button does the fix — no terminal commands in the user's
+    // face. The button (rendered under this bubble) runs `wsl --shutdown` for them.
+    return "couldn't reach the network from the sandbox — usually a VPN or a WSL networking hiccup, not the model. Click “Restart WSL networking” below, then send your message again.";
   }
   if (low.includes("usage limit") || low.includes("quota") || low.includes("rate limit") || low.includes("429") || low.includes("insufficient_quota")) {
     return "the cloud model hit its usage limit (provider-side) — pick another model and try again.";
@@ -3620,6 +3633,23 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         content={m.text}
         ts={m.ts}
       />
+      {m.action === "wsl-restart" ? (
+        // One-click recovery for a network/DNS failure — runs `wsl --shutdown`
+        // for the user (handled by the owllm:wsl-restart listener) so they never
+        // touch a terminal. Module-level renderer, so it talks to the component
+        // via a window event rather than a prop.
+        <button
+          data-ui="WslRestartBtn"
+          onClick={() => window.dispatchEvent(new CustomEvent("owllm:wsl-restart"))}
+          style={{
+            marginLeft: 28, marginTop: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700,
+            borderRadius: 6, border: "1px solid var(--accent)", background: "rgba(var(--accent-rgb),0.16)",
+            color: "var(--accent)", cursor: "pointer",
+          }}
+        >
+          ⟳ Restart WSL networking
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -6788,6 +6818,28 @@ export default function AgentsPage() {
     window.addEventListener("owllm:dispatch-abort", onAbort);
     return () => window.removeEventListener("owllm:dispatch-abort", onAbort);
   }, []);
+  // One-click WSL networking restart — fired by the "⟳ Restart WSL networking"
+  // button under a network-failure message. Runs `wsl --shutdown` for the user
+  // (no terminal), then tells them to retry. The next agent run cold-starts WSL
+  // with fresh DNS/routing.
+  const wslRestartingRef = useRef(false);
+  useEffect(() => {
+    const onRestart = async () => {
+      if (wslRestartingRef.current) return; // ignore double-clicks while in flight
+      wslRestartingRef.current = true;
+      setSupChat(prev => [...prev, { role: "system", color: "#9ad9ff", text: "↻ Restarting WSL networking… (a few seconds — every WSL session is being cold-started)", ts: Date.now() }]);
+      try {
+        await invoke("wsl_restart");
+        setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: "✓ WSL restarted with fresh networking. Send your message again.", ts: Date.now() }]);
+      } catch (e: any) {
+        setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: `Couldn't restart WSL automatically: ${String(e?.message ?? e)}`, ts: Date.now() }]);
+      } finally {
+        wslRestartingRef.current = false;
+      }
+    };
+    window.addEventListener("owllm:wsl-restart", onRestart);
+    return () => window.removeEventListener("owllm:wsl-restart", onRestart);
+  }, [setSupChat]);
   // Live cold-load status. dispatch.ts fires owllm:llama:loading on
   // every retry attempt while llama-server is still mmap'ing the
   // GGUF (or refusing connections). We surface the elapsed time +
@@ -7758,7 +7810,12 @@ export default function AgentsPage() {
       // it never reached the chat. Now both supChat (left/main) AND
       // the agent log (right pane) get the error in red.
       console.error("[onSupSend] streamChatCompletion threw", String(e?.message ?? e));
-      const errMsg: GoalMsg = { role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}`, ts: Date.now() };
+      const errMsg: GoalMsg = {
+        role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}`,
+        ts: Date.now(),
+        // Attach the one-click WSL-restart recovery when it's a network failure.
+        action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
+      };
       setSupChat(prev => [...prev, errMsg]);
       appendLog("system", errMsg);
       appendLog(orchKey, errMsg);
@@ -8808,8 +8865,13 @@ export default function AgentsPage() {
         setRunError("Stopped.");
         appendLog("system", { role: "system", color: "#ff8c8c", text: "⏹ Stopped by user." });
       } else {
-        setRunError(String(e?.message ?? e));
-        appendLog("system", { role: "system", color: "#ff8c8c", text: `⚠ ${String(e?.message ?? e)}` });
+        const clean = cleanAgentError(e);
+        setRunError(clean);
+        // Network failures get the one-click WSL-restart recovery button.
+        appendLog("system", {
+          role: "system", color: "#ff8c8c", text: `⚠ ${clean}`,
+          action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
+        });
       }
       setPhase("idle");
     } finally {

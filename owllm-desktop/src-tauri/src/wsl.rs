@@ -368,6 +368,36 @@ pub fn wsl_status() -> WslStatus {
     }
 }
 
+/// Restart WSL networking with `wsl.exe --shutdown`. The next agent run
+/// cold-starts WSL with fresh DNS + routing — the one-click recovery for the
+/// rare case where a VPN (or a host network change) wedged WSL networking so
+/// badly that even the sandbox's public-DNS fallback can't route. Surfaced as a
+/// button next to the network-error message so users never type a terminal
+/// command. NOT automatic: --shutdown kills every running WSL session, so it
+/// stays an explicit, user-initiated action.
+#[tauri::command]
+pub fn wsl_restart() -> Result<(), String> {
+    let mut cmd = std::process::Command::new("wsl.exe");
+    cmd.arg("--shutdown");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd.output().map_err(|e| format!("launch `wsl --shutdown`: {e}"))?;
+    if !out.status.success() {
+        let err = decode_wsl(&out.stderr);
+        let so = decode_wsl(&out.stdout);
+        let detail = if err.trim().is_empty() { so.trim() } else { err.trim() };
+        return Err(format!(
+            "wsl --shutdown exited {}: {}",
+            out.status.code().unwrap_or(-1),
+            detail
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub fn wsl_isolation_get() -> WslIsolation {
     isolation_path()

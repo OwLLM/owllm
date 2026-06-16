@@ -481,8 +481,19 @@ export function useBridgeDispatch() {
     const orch = findOrchestratorSpec(team);
     const orchName = orch?.name ?? "orchestrator";
 
+    // Resolve the model the SAME way the desktop does: the orchestrator's
+    // PER-AGENT override (set on the team card, stored per project in
+    // localStorage) wins over the team default. The bridge used to read
+    // team_default_model_id ONLY, so a per-agent model — e.g. a local gemma on
+    // the orchestrator — was ignored: a Telegram message replied with the wrong
+    // (team-default) model and never loaded gemma into RAM. That's bug #23.
+    const orchOverride = (() => {
+      try { return (localStorage.getItem(`owllm:agent-model:${projectId}:${orchName}`) || "").trim(); }
+      catch { return ""; }
+    })();
     const teamDefault = (project?.team_default_model_id || "").trim();
-    if (!teamDefault) {
+    const baseModel = orchOverride || teamDefault;
+    if (!baseModel) {
       const note = modelHelp(project.name);
       await send(transport, chatId, note);
       const sysMsg: GoalMsg = { role: "system", color: "#ffd166", text: note };
@@ -494,7 +505,6 @@ export function useBridgeDispatch() {
       if (projectId) await persistChat(projectId, [sysMsg]);
       return;
     }
-    const baseModel = teamDefault;
     const modelFor = (_agent: string) => baseModel;
 
     // ---- 2b. Lazy local-server start (local models only) ----

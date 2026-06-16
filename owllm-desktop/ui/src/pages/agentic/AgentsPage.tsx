@@ -512,6 +512,7 @@ function LocationRow({
   teams, pickedTeamId, onPickTeam,
   location, effectiveCwd, onChangeLocation, onBrowse,
   trustWrites, onToggleTrustWrites,
+  fullAccess, onToggleFullAccess,
   bridgeOn, isolationRequested,
   onNewProject, onRenameProject, onDeleteProject,
 }: {
@@ -530,6 +531,10 @@ function LocationRow({
   onBrowse: () => void;
   trustWrites: boolean;
   onToggleTrustWrites: () => void;
+  /** When true, this project's agents run OUTSIDE the sandbox (full host access).
+      OFF by default; toggling ON is gated behind a confirm in the parent. */
+  fullAccess: boolean;
+  onToggleFullAccess: () => void;
   bridgeOn: boolean;
   isolationRequested: boolean;
   onNewProject: () => void;
@@ -656,6 +661,20 @@ function LocationRow({
           LOUD red when isolation is requested but this location runs on the
           host (sandbox failed/unavailable). */}
       {(() => {
+        // When full access is ON the agent runs UNSANDBOXED, so the normal
+        // isolation badge would be misleading — show a single loud HOST-ACCESS
+        // badge instead. Otherwise show the honest isolation badge.
+        if (fullAccess) {
+          return (
+            <button
+              data-ui="FullAccessBadge"
+              type="button"
+              onClick={onToggleFullAccess}
+              title="This project runs agents OUTSIDE the sandbox — full access to your PC (Windows drives, system commands). Click to turn it back off."
+              style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:"#3a1416", color:"#ff8c8c", border:"1px solid #ff5a5a", borderRadius:6, fontSize:11, fontWeight:800, whiteSpace:"nowrap", cursor:"pointer" }}
+            >⚠ HOST ACCESS — sandbox OFF</button>
+          );
+        }
         const iso = isolationBadge(effectiveCwd, isolationRequested);
         return (
           <span
@@ -665,6 +684,18 @@ function LocationRow({
           >{iso.text}</span>
         );
       })()}
+      {/* Grant / revoke full host access (bug #19). OFF by default; the parent
+          gates the ON path behind an explicit confirm. Hidden once ON (the loud
+          HOST-ACCESS badge above doubles as the off switch). */}
+      {!fullAccess && (
+        <button
+          data-ui="GrantHostAccessBtn"
+          type="button"
+          onClick={onToggleFullAccess}
+          title="Let this project's agents run OUTSIDE the sandbox — full access to your PC. Use only for projects you trust. You'll be asked to confirm."
+          style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:"var(--bg-elevated)", color:"var(--fg-muted)", border:"1px solid var(--border-strong)", borderRadius:6, fontSize:11, fontWeight:700, whiteSpace:"nowrap", cursor:"pointer" }}
+        >🔓 Full access…</button>
+      )}
       {/* Isolation actions (parity with the Code page): Verify runs the exact
           probe an agent's shell runs (WSL vs host); Isolate copies the project
           into the sandbox; Sync mirrors GitHub/CLI logins into it. */}
@@ -6592,6 +6623,10 @@ export default function AgentsPage() {
 
   const [projects, setProjects] = useState<ProjectRow[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string>("");
+  // Per-project "full host access" (#19): when ON this project's agents run
+  // OUTSIDE the bwrap sandbox. Persisted host-side (sandbox.rs full-access.json),
+  // keyed by cwd; loaded per project below. OFF by default.
+  const [fullAccess, setFullAccess] = useState<boolean>(false);
 
   const [teams, setTeams] = useState<Team[]>([]);
   const [roleByName, setRoleByName] = useState<Map<string, RoleData>>(new Map());
@@ -7153,6 +7188,39 @@ export default function AgentsPage() {
     isolationRequested && wslDistro && !isWslPath(rawLocation)
       ? (winToWslMountUnc(rawLocation, wslDistro) ?? rawLocation)
       : rawLocation;
+
+  // Load this project's full-access state (host-side, keyed by cwd) whenever the
+  // effective cwd changes. OFF unless the user explicitly granted it.
+  useEffect(() => {
+    if (!runCwd) { setFullAccess(false); return; }
+    let cancelled = false;
+    invoke<boolean>("agent_full_access_get", { cwd: runCwd })
+      .then(v => { if (!cancelled) setFullAccess(!!v); })
+      .catch(() => { if (!cancelled) setFullAccess(false); });
+    return () => { cancelled = true; };
+  }, [runCwd]);
+
+  // Toggle full host access for this project. Turning it ON removes the sandbox
+  // for THIS project's agents, so it's gated behind an explicit confirm.
+  const onToggleFullAccess = async () => {
+    const cwd = runCwd;
+    if (!cwd) return;
+    if (!fullAccess) {
+      const ok = window.confirm(
+        "Give this project's agents FULL ACCESS to your PC?\n\n" +
+        "They will run OUTSIDE the sandbox — able to read and write files anywhere, run system commands, and use the network, exactly like you can. The folder-only protection is removed for THIS project only.\n\n" +
+        "Only do this for a project and agents you trust. You can turn it back off at any time.",
+      );
+      if (!ok) return;
+    }
+    try {
+      await invoke("agent_full_access_set", { cwd, enabled: !fullAccess });
+      setFullAccess(!fullAccess);
+    } catch (e) {
+      console.error("agent_full_access_set failed", e);
+      setRunError(`Couldn't change access mode: ${String((e as { message?: string })?.message ?? e)}`);
+    }
+  };
 
   // Hydrate per-agent icon overrides on project switch. Cheap one-pass
   // read of localStorage; lives next to selectedProject so it's not in
@@ -9189,6 +9257,8 @@ export default function AgentsPage() {
         onBrowse={onBrowseProjectFolder}
         trustWrites={trustWrites}
         onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
+        fullAccess={fullAccess}
+        onToggleFullAccess={onToggleFullAccess}
         bridgeOn={bridgeOn}
         isolationRequested={isolationRequested}
         onNewProject={onNewProject}

@@ -320,6 +320,8 @@ pub fn run() {
             vault::vault_read_server,
             vault::vault_sync_teams,
             sandbox::sandbox_status,
+            sandbox::agent_full_access_get,
+            sandbox::agent_full_access_set,
             sandbox::sandbox_harden,
             sandbox::sandbox_disk_usage,
             sandbox::sandbox_clear_caches,

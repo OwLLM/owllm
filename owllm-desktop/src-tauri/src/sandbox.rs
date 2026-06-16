@@ -339,10 +339,82 @@ pub fn is_isolated(cwd: Option<&str>) -> bool {
     cwd.and_then(crate::wsl::parse_wsl_unc).is_some()
 }
 
+// ---- per-project "full host access" (explicit opt-out of the sandbox) -------
+// A project the user has deliberately marked TRUSTED runs OUTSIDE the bwrap
+// jail: plain WSL routing, so the agent can reach the Windows drives (/mnt/c),
+// invoke Windows tools via interop (powershell.exe), and read beyond the project
+// folder — "more power" when the user knowingly wants it (bug #19). OFF by
+// default; the UI gates the ON path behind an explicit confirmation. Keyed by
+// the project cwd (the same value the CLIs run with) so the decision lives in
+// ONE place — program_argv/shell_argv — without threading a flag through every
+// agent-CLI call. This is the "always allow everything, unsandboxed" end of the
+// graduated-trust scale; per-action approval is a planned follow-up.
+#[cfg(windows)]
+fn full_access_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(std::path::PathBuf::from(home).join(".owllm").join("full-access.json"))
+}
+#[cfg(windows)]
+fn norm_cwd(cwd: &str) -> String {
+    cwd.trim().trim_end_matches(|c| c == '/' || c == '\\').to_lowercase()
+}
+#[cfg(windows)]
+fn full_access_set() -> std::collections::BTreeSet<String> {
+    full_access_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .map(|v| v.iter().map(|s| norm_cwd(s)).collect())
+        .unwrap_or_default()
+}
+/// True when the user has marked this project's folder full-access (trusted):
+/// agents run OUTSIDE the bwrap jail. Checked in program_argv/shell_argv.
+#[cfg(windows)]
+pub fn is_full_access(cwd: Option<&str>) -> bool {
+    matches!(cwd, Some(c) if !c.trim().is_empty() && full_access_set().contains(&norm_cwd(c)))
+}
+
+#[cfg(windows)]
+fn full_access_get_impl(cwd: String) -> bool { is_full_access(Some(&cwd)) }
+#[cfg(not(windows))]
+fn full_access_get_impl(_cwd: String) -> bool { false }
+
+#[cfg(windows)]
+fn full_access_set_impl(cwd: String, enabled: bool) -> Result<(), String> {
+    let p = full_access_path().ok_or_else(|| "no home directory".to_string())?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let mut set = full_access_set();
+    if enabled { set.insert(norm_cwd(&cwd)); } else { set.remove(&norm_cwd(&cwd)); }
+    let list: Vec<String> = set.into_iter().collect();
+    std::fs::write(&p, serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("write {}: {e}", p.display()))?;
+    Ok(())
+}
+#[cfg(not(windows))]
+fn full_access_set_impl(_cwd: String, _enabled: bool) -> Result<(), String> {
+    Err("full host access is a WSL (Windows) feature today".into())
+}
+
+/// Read whether a project folder is marked full-access (agents run unsandboxed).
+#[tauri::command]
+pub fn agent_full_access_get(cwd: String) -> bool { full_access_get_impl(cwd) }
+
+/// Mark/unmark a project folder full-access. When ON, that project's agents run
+/// OUTSIDE the bwrap sandbox (full host access). OFF by default; the UI gates the
+/// ON path behind an explicit confirmation.
+#[tauri::command]
+pub fn agent_full_access_set(cwd: String, enabled: bool) -> Result<(), String> {
+    full_access_set_impl(cwd, enabled)
+}
+
 #[cfg(windows)]
 pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
-    if ensure_sandbox(&distro) {
+    // A full-access (trusted) project opts OUT of the bwrap jail entirely — plain
+    // WSL routing below, which can reach the Windows drives + interop. Otherwise
+    // confine to the project folder when bubblewrap is available.
+    if !is_full_access(cwd) && ensure_sandbox(&distro) {
         return Some(runner_argv(&distro, &linux_cwd, &exec_script(program, args)));
     }
     // Fallback: bubblewrap not present — plain WSL routing (Linux process, but
@@ -357,7 +429,8 @@ pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option
 #[cfg(windows)]
 pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
-    if ensure_sandbox(&distro) {
+    // Full-access (trusted) project → skip the jail (plain routing below).
+    if !is_full_access(cwd) && ensure_sandbox(&distro) {
         return Some(runner_argv(&distro, &linux_cwd, command));
     }
     let script = crate::wsl::build_wsl_bash_script(&linux_cwd, command);

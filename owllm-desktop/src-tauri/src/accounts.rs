@@ -480,11 +480,29 @@ fn wsl_probe(backend: &str) -> (bool, String) {
     let Some(distro) = crate::wsl::best_linux_distro() else {
         return (false, "No Ubuntu/Linux distro in WSL yet — set it up on Home".to_string());
     };
-    let check = match backend {
-        "claude_cli" => "[ -f ~/.claude/.credentials.json ]".to_string(),
-        "codex_cli" => "[ -f ~/.codex/auth.json ]".to_string(),
-        "kimi_cli" => "[ -f ~/.kimi/config.toml ]".to_string(),
-        "gemini_cli" => "[ -d ~/.gemini ] && [ -n \"$(ls -A ~/.gemini 2>/dev/null)\" ]".to_string(),
+    // CLI backends get an HONEST 3-way probe instead of "does a config file
+    // exist" (which was a false positive — it reported kimi/gemini as ready
+    // when an isolated agent couldn't actually run them):
+    //   NOBIN  — the binary isn't on the PATH the JAIL sees. The sandbox runner
+    //            exposes /usr/local + system dirs, NOT ~/.local/bin, so a CLI
+    //            installed there (e.g. `uv tool install kimi-cli`) is invisible
+    //            to an isolated agent even though it runs in a plain shell.
+    //   NOCRED — the binary is reachable but there's no REAL credential (e.g.
+    //            gemini has a ~/.gemini dir full of history/state but no
+    //            oauth_creds.json → "set an Auth method"; often means no login
+    //            or no active subscription).
+    //   YES    — installed where the agent can reach it AND a real credential.
+    let cli_probe = |bin: &str, cred: &str| -> String {
+        format!(
+            "if ! PATH=/usr/local/bin:/usr/bin:/bin command -v {bin} >/dev/null 2>&1; then echo NOBIN; \
+             elif ! {cred}; then echo NOCRED; else echo YES; fi"
+        )
+    };
+    let script = match backend {
+        "claude_cli" => cli_probe("claude", "[ -f ~/.claude/.credentials.json ]"),
+        "codex_cli" => cli_probe("codex", "[ -f ~/.codex/auth.json ]"),
+        "kimi_cli" => cli_probe("kimi", "[ -f ~/.kimi/config.toml ]"),
+        "gemini_cli" => cli_probe("gemini", "[ -f ~/.gemini/oauth_creds.json ]"),
         other => {
             let var = match other {
                 "claude_api" => "ANTHROPIC_API_KEY",
@@ -500,13 +518,16 @@ fn wsl_probe(backend: &str) -> (bool, String) {
                 "huggingface" => "HF_TOKEN",
                 _ => return (false, format!("No WSL check for '{other}'")),
             };
-            format!("grep -qE '{var}' ~/.owllm/agent_env.sh 2>/dev/null")
+            format!("if grep -qE '{var}' ~/.owllm/agent_env.sh 2>/dev/null; then echo YES; else echo NO; fi")
         }
     };
-    let script = format!("if {check}; then echo YES; else echo NO; fi");
     match crate::wsl::run_in_distro(&distro, &script) {
-        Ok(o) if o.contains("YES") => (true, "Present in WSL sandbox — isolated agents can use it".to_string()),
-        Ok(_) => (false, "Not in the WSL sandbox yet — open an isolated project or click 'Sync logins'".to_string()),
+        Ok(o) if o.contains("YES") => (true, "Installed + logged in — an isolated agent can use it".to_string()),
+        Ok(o) if o.contains("NOBIN") => (false,
+            "CLI isn't installed where an isolated agent can reach it (the sandbox sees /usr/local, not ~/.local/bin) — re-run Install CLI for WSL.".to_string()),
+        Ok(o) if o.contains("NOCRED") => (false,
+            "Not actually logged in for an isolated agent — no real credential found. Sign in inside WSL (a paid subscription may be required).".to_string()),
+        Ok(_) => (false, "Not in the WSL sandbox yet — add the API key or click 'Sync logins'".to_string()),
         Err(e) => (false, format!("WSL check failed: {e}")),
     }
 }

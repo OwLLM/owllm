@@ -1045,6 +1045,29 @@ export async function ensureCliWarm(backend: "claude_cli" | "codex_cli"): Promis
 export function imageAttachments(atts?: Attachment[]): Attachment[] {
   return (atts ?? []).filter(a => a.kind === "image");
 }
+
+/// Max size of a pasted chat image. Larger ones are rejected with a clear error
+/// instead of silently bloating the request.
+export const MAX_CHAT_IMAGE_BYTES = 12 * 1024 * 1024;
+
+/// Read a pasted/attached image File into an Attachment (base64). SHARED by the
+/// Code, agentic, and fine-tuning chats so image attaching is identical
+/// everywhere — don't fork it.
+export async function fileToImageAttachment(file: File): Promise<Attachment> {
+  const mime = file.type || "image/png";
+  if (!mime.startsWith("image/")) throw new Error("Only images can be pasted into chat.");
+  if (file.size > MAX_CHAT_IMAGE_BYTES) {
+    throw new Error(`Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — limit is ${MAX_CHAT_IMAGE_BYTES / 1024 / 1024} MB.`);
+  }
+  const dataUrl = await new Promise<string>((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => resolve(String(fr.result));
+    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
+    fr.readAsDataURL(file);
+  });
+  const comma = dataUrl.indexOf(",");
+  return { kind: "image", mime, data_b64: comma >= 0 ? dataUrl.slice(comma + 1) : "", filename: file.name || "pasted.png" };
+}
 export function audioAttachments(atts?: Attachment[]): Attachment[] {
   return (atts ?? []).filter(a => a.kind === "audio");
 }

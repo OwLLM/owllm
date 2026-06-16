@@ -573,12 +573,12 @@ function ModeBar({
           off-axis. */}
       <div />
 
-      {/* The Watcher summon hotspot (P0-8). The decorative owl top-center
-          lives in a CLICK-THROUGH overlay window, so clicks on it fall to
-          THIS main window — a generous transparent zone over the owl's
-          footprint (and the title beneath it) opens the Watcher. Reaches
-          to the very top edge so the owl's face is clickable, and shows a
-          soft ring on hover so users learn it's the support entry. */}
+      {/* The Watcher summon hotspot (P0-8). Sized + placed to match the
+          OWL ICON ITSELF (top-centre), not the broad title beneath it: the
+          decorative owl lives in a CLICK-THROUGH overlay window, so clicks
+          on its lower body fall to this compact zone in the main window.
+          Narrow + short so the hover affordance reads as "the owl", and the
+          OWLLM text below is no longer a trigger. */}
       {onWatcher && (
         <button
           data-ui="WatcherSummon"
@@ -587,27 +587,28 @@ function ModeBar({
           // the click never fires (that was why the owl "did nothing").
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => { e.stopPropagation(); onWatcher(); }}
-          title="The Watcher — OWLLM's support assistant (click the owl)"
+          title="The Watcher — OWLLM's support assistant"
           className="owllm-watcher-summon"
           style={{
             position: "absolute",
             left: "50%", top: 0,
             transform: "translateX(-50%)",
-            width: 300, height: 80,
+            // The owl art is ~150px wide and its hoverable body sits in the
+            // top strip of the header (its face peeks above the window).
+            width: 150, height: 50,
+            borderRadius: "0 0 50% 50%",
             border: "none", background: "transparent",
-            cursor: "pointer", zIndex: 6, padding: 0,
+            cursor: "pointer", zIndex: 7, padding: 0,
           }}
         />
       )}
-      <style>{`.owllm-watcher-summon:hover { background: radial-gradient(ellipse at 50% 26%, rgba(var(--accent-rgb),0.28), transparent 68%) !important; }`}</style>
+      <style>{`.owllm-watcher-summon:hover { background: radial-gradient(ellipse at 50% 0%, rgba(var(--accent-rgb),0.30), transparent 72%) !important; }`}</style>
 
-      {/* OWLLM title — absolutely positioned to the window centre. Also a
-          Watcher summon when wired (the owl sits directly above it). */}
+      {/* OWLLM title — purely decorative text. The Watcher summon lives on
+          the owl icon above (the compact hotspot), NOT on this broad text,
+          so hovering/clicking the title does nothing. */}
       <div
         data-ui="AppTitle"
-        onMouseDown={(e) => { if (onWatcher) e.stopPropagation(); }}
-        onClick={onWatcher}
-        title={onWatcher ? "The Watcher — OWLLM's support assistant" : undefined}
         style={{
           position: "absolute",
           left: "50%",
@@ -618,8 +619,7 @@ function ModeBar({
           fontSize: 35, fontWeight: 700, color: "var(--bg-header-fg)",
           letterSpacing: 2, lineHeight: "54px",
           textAlign: "center",
-          pointerEvents: onWatcher ? "auto" : "none",
-          cursor: onWatcher ? "pointer" : undefined,
+          pointerEvents: "none",
         }}
       >OWLLM</div>
       {watcherHint && (

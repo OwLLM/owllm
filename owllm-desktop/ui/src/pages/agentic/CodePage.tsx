@@ -14,7 +14,7 @@ import GitBar from "./GitBar";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
@@ -86,25 +86,8 @@ const CODE_RECENTS_KEY = "owllm:code:recents";
 const CODE_RECENTS_META_KEY = "owllm:code:recents:meta";
 const CODE_RECENTS_MAX = 12;
 
-// A pasted / picked clipboard image → Attachment (base64). Image-only; the chat
-// sends it to vision-capable models (cloud GPT/Claude/Gemini, or a local llava
-// GGUF). Capped so a huge paste doesn't balloon the request body.
-const MAX_CHAT_IMAGE_BYTES = 12 * 1024 * 1024;
-async function fileToImageAttachment(file: File): Promise<Attachment> {
-  const mime = file.type || "image/png";
-  if (!mime.startsWith("image/")) throw new Error("Only images can be pasted into chat.");
-  if (file.size > MAX_CHAT_IMAGE_BYTES) {
-    throw new Error(`Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — limit is ${MAX_CHAT_IMAGE_BYTES / 1024 / 1024} MB.`);
-  }
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result));
-    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
-    fr.readAsDataURL(file);
-  });
-  const comma = dataUrl.indexOf(",");
-  return { kind: "image", mime, data_b64: comma >= 0 ? dataUrl.slice(comma + 1) : "", filename: file.name || "pasted.png" };
-}
+// fileToImageAttachment + MAX_CHAT_IMAGE_BYTES now live in ./dispatch (shared by
+// the Code, agentic, and fine-tuning chats — imported above).
 
 // ---- Chat history -------------------------------------------------------
 // The "New chat" surface keeps a list of past conversations in localStorage so

@@ -50,7 +50,7 @@ import { canonicalizeNativeCalls, type RawNativeCall } from "../agentic/toolNorm
 import { isolationBadge } from "../agentic/isolationBadge";
 import { wslIsolationGet } from "../agentic/wslIsolation";
 import { samplingFor } from "../agentic/modelProfiles";
-import { streamChatCompletion, providerFor, type HistoryItem } from "../agentic/dispatch";
+import { streamChatCompletion, providerFor, fileToImageAttachment, type Attachment, type HistoryItem } from "../agentic/dispatch";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 
@@ -268,6 +268,19 @@ export default function ChatPage() {
     persisted.columns ?? [DEFAULT_COL("A"), DEFAULT_COL("B"), DEFAULT_COL("C")]
   );
   const [draft, setDraft] = useState("");
+  // Pasted images, attached to the next send (broadcast to all columns). Only
+  // cloud / CLI / API models receive them (vision); local models ignore them.
+  // Same shared fileToImageAttachment + Attachment shape as the Code/agentic chats.
+  const [chatImages, setChatImages] = useState<Attachment[]>([]);
+  const onComposerPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(e.clipboardData?.files ?? []).filter(f => f.type.startsWith("image/"));
+    if (files.length === 0) return;
+    e.preventDefault();
+    files.forEach(async (f) => {
+      try { const a = await fileToImageAttachment(f); setChatImages(x => [...x, a]); }
+      catch (err) { console.warn("[finetune chat] image paste failed", err); }
+    });
+  };
   const [converse, setConverse] = useState<boolean>(persisted.converse ?? false);
   const [maxTurns, setMaxTurns] = useState<number>(persisted.maxTurns ?? 20);
   const [chatMode, setChatMode] = useState<ChatMode>("agent");
@@ -611,7 +624,7 @@ export default function ChatPage() {
 
   // Send the same user text to one column. Returns the assistant
   // reply when the stream completes (used by the M2M loop).
-  async function sendOne(col: Column, userText: string): Promise<string> {
+  async function sendOne(col: Column, userText: string, images: Attachment[] = []): Promise<string> {
     // The stream runs in the ChatRuntime store (above the router) so it
     // survives this page unmounting if the user navigates away mid-
     // generation. The store owns the AbortController + reader + busy
@@ -687,6 +700,8 @@ export default function ChatPage() {
           historyC,
           toolsOn,                              // autoApprove when tools enabled
           (channel, _role, delta) => { if (channel === "thinking") appendThinking(col.id, delta); },
+          undefined,                            // allowedTools (not used here)
+          images,                               // pasted images → vision (cloud/CLI/API)
         );
       } catch (e: unknown) {
         const err = e as { name?: string; message?: string };
@@ -1256,8 +1271,10 @@ export default function ChatPage() {
   async function sendAll() {
     for (const id of ["A", "B", "C"] as const) chatRuntime.setError(SID(id), null);
     const text = draft.trim();
-    if (!text) return;
+    if (!text && chatImages.length === 0) return;
     setDraft("");
+    const imgs = chatImages;
+    setChatImages([]);
     if (converse && count >= 2) {
       // Start the M2M loop instead of broadcasting to all columns.
       void runConverse(text);
@@ -1267,7 +1284,7 @@ export default function ChatPage() {
     // Fire all columns concurrently. We snapshot the current
     // columns array (not state-after-setColumns) so each parallel call
     // starts from the same baseline.
-    await Promise.all(active.map((c) => sendOne(c, text)));
+    await Promise.all(active.map((c) => sendOne(c, text, imgs)));
   }
 
   // M2M: alternate A and B. C is ignored even when count===3 because
@@ -1721,9 +1738,20 @@ export default function ChatPage() {
                 ))}
               </div>
             )}
+            {chatImages.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "6px 8px 0" }}>
+                {chatImages.map((a, i) => (
+                  <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, border: "1px solid rgba(122,162,255,0.35)", background: "rgba(122,162,255,0.12)", color: "#9ad9ff", borderRadius: 12, padding: "2px 6px 2px 8px", fontSize: 11, fontWeight: 700 }}>
+                    🖼 {a.filename ?? "image"}
+                    <button onClick={() => setChatImages(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border: "none", background: "transparent", color: "#9ad9ff", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>×</button>
+                  </span>
+                ))}
+              </div>
+            )}
             <textarea
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
+              onPaste={onComposerPaste}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey && !anyBusy) {
                   e.preventDefault();
@@ -1747,13 +1775,14 @@ export default function ChatPage() {
               {anyBusy ? (
                 <button onClick={stopAll} style={{ ...footerComposerBtn, borderColor: "#f44336", color: "#ffb0b0" }}>Stop</button>
               ) : (
-                <button onClick={sendComposer} disabled={!draft.trim()} style={{
+                (() => { const canSend = !!draft.trim() || chatImages.length > 0; return (
+                <button onClick={sendComposer} disabled={!canSend} style={{
                   ...footerComposerBtn,
-                  background: draft.trim() ? "var(--accent)" : "var(--bg-surface)",
-                  borderColor: draft.trim() ? "var(--accent)" : "var(--border)",
-                  color: draft.trim() ? "var(--accent-fg)" : "var(--fg-subtle)",
-                  cursor: draft.trim() ? "pointer" : "not-allowed",
-                }}>Send</button>
+                  background: canSend ? "var(--accent)" : "var(--bg-surface)",
+                  borderColor: canSend ? "var(--accent)" : "var(--border)",
+                  color: canSend ? "var(--accent-fg)" : "var(--fg-subtle)",
+                  cursor: canSend ? "pointer" : "not-allowed",
+                }}>Send</button>); })()
               )}
             </div>
           </div>

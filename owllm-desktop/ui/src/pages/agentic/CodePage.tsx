@@ -223,6 +223,14 @@ export default function CodePage() {
   const [chatImages, setChatImages] = useState<Attachment[]>([]);
   const chatEndRef = useRef<HTMLDivElement | null>(null);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
+  // Fallback working dir for chats with NO workspace folder selected. A pasted
+  // image needs somewhere to be saved so a CLI/subscription model can READ it
+  // (codex -i / claude file-ref) — without a cwd the image was silently dropped
+  // ("I can't inspect the image"). Same WSL scratch the fine-tuning chat uses.
+  const chatScratchRef = useRef<string>("");
+  useEffect(() => {
+    invoke<string>("chat_scratch_dir").then((d) => { chatScratchRef.current = d; }).catch(() => {});
+  }, []);
   // The active conversation is derived from the thread list (single source of
   // truth); persist the whole list whenever it changes.
   const chatMsgs: ChatMsg[] = chats.find((c) => c.id === chatId)?.messages ?? [];
@@ -866,10 +874,12 @@ export default function CodePage() {
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(text, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: () => {}, history });
       } else {
-        // Pass the workspace as the cwd so pasted images can be saved into it
-        // for the agent to read (codex -i / claude file-ref). Was `undefined`,
-        // which is why images never reached a subscription model on this page.
-        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", text, 0.4, ctrl.signal, onD, workspace, history, false, () => {}, undefined, images);
+        // Pass a working dir so pasted images can be saved into it for the model
+        // to read (codex -i / claude file-ref). Use the workspace if one is
+        // selected, else the WSL scratch — without ANY cwd the image is dropped
+        // ("I can't inspect the image"), which is the bug on a no-folder chat.
+        const chatCwd = workspace || chatScratchRef.current || undefined;
+        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", text, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };

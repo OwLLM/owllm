@@ -14,6 +14,7 @@
 // we keep the same glyphs.
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { clearChatProjects } from "../../bridges/bridgeCore";
 
 type BridgeStatus = "stopped" | "starting" | "running" | "error";
 
@@ -245,6 +246,11 @@ function TelegramCard() {
           auto_approve: autoApprove,
         } as TelegramConfig,
       });
+      // Saving the bridge config = "route to THIS project". Drop any stale
+      // per-chat mappings so a previously-pinned chat can't keep overriding the
+      // project the user just selected (the "picked RED but it goes elsewhere"
+      // bug). Explicit /project commands in Telegram re-establish a mapping.
+      clearChatProjects("telegram");
       setSavedFlash(true);
       window.setTimeout(() => setSavedFlash(false), 1600);
     } catch (e) {

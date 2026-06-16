@@ -100,6 +100,24 @@ function getChatProject(name: string, chatId: string): string {
 function setChatProject(name: string, chatId: string, projectId: string) {
   try { localStorage.setItem(keyFor(name, chatId), projectId); } catch {}
 }
+/// Clear every per-chat project mapping for a bridge. Called when the user
+/// changes the bridge's configured default project in the UI, so a STALE
+/// auto-mapping can't keep overriding their choice (the "I picked RED but
+/// messages go to an old project" bug). After this, the configured default
+/// applies until the user explicitly runs /project in a chat.
+export function clearChatProjects(name: string): void {
+  const prefix = name === "telegram"
+    ? "owllm:telegram:active-project:"
+    : `owllm:bridge:${name}:active-project:`;
+  try {
+    const stale: string[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(prefix)) stale.push(k);
+    }
+    for (const k of stale) localStorage.removeItem(k);
+  } catch { /* ignore */ }
+}
 
 // Split a reply into platform-safe chunks on paragraph/line boundaries.
 function splitForLen(body: string, maxLen: number): string[] {
@@ -404,19 +422,23 @@ export function useBridgeDispatch() {
       await send(transport, chatId, `Routing this chat to project: ${route.project.name}`);
       return;
     }
-    let project = route.project;
     if (route.kind === "new-brainstorm") {
-      project = await createProjectFromText(
+      const np = await createProjectFromText(
         `Brainstorm - ${shortNameFromText(route.idea)}`,
         `Bridge brainstorm seed:\n${route.idea || "(empty)"}`,
       );
-      setChatProject(name, chatId, project.id);
+      setChatProject(name, chatId, np.id);
       await send(transport, chatId,
-        `Created brainstorm project: ${project.name}\n\n${modelHelp(project.name)}`);
+        `Created brainstorm project: ${np.name}\n\n${modelHelp(np.name)}`);
       return;
-    } else {
-      setChatProject(name, chatId, project.id);
     }
+    // route.kind === "dispatch" here. Deliberately NOT auto-pinning the chat to
+    // this project. Auto-pinning made a stale per-chat mapping override the
+    // user's configured default project (they pick RED in the UI but messages
+    // keep routing to an old/auto project). The per-chat mapping is now set ONLY
+    // by an explicit /project (switch), /new, or set-model command; otherwise
+    // the configured default applies.
+    const project = route.project;
     const projectId = project.id;
 
     // ---- 1. INBOUND VISIBLE IMMEDIATELY ----

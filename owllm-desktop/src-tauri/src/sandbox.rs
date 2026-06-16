@@ -351,8 +351,8 @@ pub fn is_isolated(cwd: Option<&str>) -> bool {
 // graduated-trust scale; per-action approval is a planned follow-up.
 #[cfg(windows)]
 fn full_access_path() -> Option<std::path::PathBuf> {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(std::path::PathBuf::from(home).join(".owllm").join("full-access.json"))
+    // Shared resolver — honors portable mode (USB-portable Block 1).
+    Some(crate::paths::owllm_config_home()?.join("full-access.json"))
 }
 #[cfg(windows)]
 fn norm_cwd(cwd: &str) -> String {

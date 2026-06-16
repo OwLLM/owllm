@@ -191,8 +191,8 @@ pub struct BridgeConfigs {
 }
 
 fn config_path() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(PathBuf::from(home).join(".owllm").join("bridge_config.json"))
+    // Honors portable mode via the shared resolver (USB-portable Block 1).
+    Some(crate::paths::owllm_config_home()?.join("bridge_config.json"))
 }
 
 #[tauri::command]

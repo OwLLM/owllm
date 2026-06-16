@@ -88,11 +88,9 @@ fn push_arg(cmd: &mut Command, _batch: bool, arg: &str) {
 }
 
 /// Where API keys live on disk. Same path as the legacy Python store.
+/// Honors portable mode via the shared resolver (USB-portable Block 1).
 fn secrets_path() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))?;
-    let p = PathBuf::from(home).join(".owllm").join("agent_secrets.json");
-    Some(p)
+    Some(crate::paths::owllm_config_home()?.join("agent_secrets.json"))
 }
 
 /// Read the secrets file. Returns an empty map when the file is

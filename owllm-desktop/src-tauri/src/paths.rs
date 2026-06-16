@@ -242,6 +242,29 @@ fn appdata_root() -> Option<PathBuf> {
     Some(PathBuf::from(appdata).join("com.localllm.owllm-desktop"))
 }
 
+/// The OwLLM config + credentials home ON THE HOST. Normally
+/// `%USERPROFILE%\.owllm` (or `$HOME/.owllm`), but when `OWLLM_PORTABLE_ROOT`
+/// is set (USB / portable mode) it redirects to `<root>/.owllm` so secrets,
+/// configs, and bridges live on the stick and leave no trace on the host.
+///
+/// This is the SINGLE source of truth for every host-side `.owllm` path
+/// (agent_secrets.json, mcp_config.json, bridge_config.json, full-access.json,
+/// …). USB-portable Block 1 — see docs/USB_PORTABLE_OWLLM.md.
+///
+/// IMPORTANT: this is the HOST config home. Paths that live INSIDE WSL — the
+/// sandbox runner's `$HOME/.owllm/sbhome`, `agent_env.sh`, fine-tuning venvs —
+/// reference the WSL home and are NOT redirected by this (a USB stick can't
+/// carry WSL). Don't route those through here.
+pub fn owllm_config_home() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("OWLLM_PORTABLE_ROOT") {
+        if !root.is_empty() {
+            return Some(PathBuf::from(root).join(".owllm"));
+        }
+    }
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(PathBuf::from(home).join(".owllm"))
+}
+
 /// Path to `llama-quantize.exe` — used by the GGUF export pipeline to
 /// turn an f16 intermediate into K-quants (Q4_K_M etc) that the
 /// convert script can't produce directly.

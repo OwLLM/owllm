@@ -307,8 +307,8 @@ fn default_distro_name() -> Option<String> {
 }
 
 fn isolation_path() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(PathBuf::from(home).join(".owllm").join("wsl_isolation.json"))
+    // Honors portable mode via the shared resolver (USB-portable Block 1).
+    Some(crate::paths::owllm_config_home()?.join("wsl_isolation.json"))
 }
 
 fn sanitize_project_name(name: &str) -> String {

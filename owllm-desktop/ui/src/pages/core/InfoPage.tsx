@@ -1,14 +1,25 @@
-﻿// InfoPage — app/build summary plus a live hardware probe. Pulls
-// everything from native commands so this view never lies.
+// InfoPage — the app's "everything I actually know about this machine" view.
+// Every number comes from a native Rust command so this page never lies:
+//   hardware_info · vram_status · app_readiness · server_status · list_models ·
+//   paths_debug · llama_server_path · sandbox_disk_usage (via SandboxDiskCard).
 //
-// Qt: main.py::_build_info_tab (line 27273) was a tall list of
-// dependency versions sourced from SystemDetector. The Rust runtime
-// doesn't carry that catalog; we show the things we actually know:
-// hardware, GPU memory, llama-server path, model count.
+// Qt: main.py::_build_info_tab (line 27273) was a tall list of dependency
+// versions from SystemDetector. The Rust runtime doesn't carry that catalog;
+// we show what we genuinely measure: build, environment readiness, hardware,
+// live GPU memory, the model server, the model library, and sandbox disk.
 
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
+import { Card, Row } from "./infoCards";
+import SandboxDiskCard from "./SandboxDiskCard";
+import {
+  fetchReadiness,
+  getCachedReadiness,
+  isReadinessLoading,
+  subscribeReadiness,
+  type ReadinessRow,
+} from "./readinessStore";
 
 const ICONS = "/Page_icons";
 
@@ -34,41 +45,28 @@ type PathsDebug = {
   models_dirs_read?: string[];
   runtime_root?: string | null;
 };
+type ServerStatus = {
+  running: boolean;
+  model_id: string | null;
+  port: number | null;
+  message: string;
+};
 
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
+// One readiness signal as a glyph + detail. warn (⚠️ orange) = optional/degraded;
+// ok (✅ green) = ready; neither (❌ red) = missing + needed.
+function ReadyLine({ label, row }: { label: string; row?: ReadinessRow }) {
+  const glyph = !row ? "…" : row.warn ? "⚠️" : row.ok ? "✅" : "❌";
+  const color = !row ? "var(--fg-muted)" : row.warn ? "#FF9800" : row.ok ? "#22c55e" : "#ef4444";
   return (
-    <div style={{
-      display: "grid",
-      gridTemplateColumns: "180px 1fr",
-      gap: 12,
-      padding: "6px 0",
-      borderBottom: "1px solid var(--border)",
-      fontSize: 12,
-    }}>
-      <div style={{ color: "var(--fg-muted)" }}>{label}</div>
-      <div style={{ color: "var(--fg)", fontFamily: "Consolas, monospace", fontSize: 12 }}>{value}</div>
-    </div>
-  );
-}
-
-function Card({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <div style={{
-      background: "linear-gradient(180deg, rgba(60,60,80,0.4), rgba(40,40,60,0.4))",
-      border: "1px solid rgba(var(--accent-rgb),0.20)",
-      borderRadius: 10,
-      padding: "14px 18px",
-      display: "flex",
-      flexDirection: "column",
-      gap: 4,
-    }}>
-      <div style={{
-        fontSize: 14, fontWeight: 700, color: "var(--fg)",
-        borderBottom: "1px solid rgba(var(--accent-rgb),0.10)",
-        paddingBottom: 6, marginBottom: 6,
-      }}>{title}</div>
-      {children}
-    </div>
+    <Row
+      label={label}
+      value={
+        <span>
+          <span style={{ color, fontWeight: 700 }}>{glyph}</span>{"  "}
+          <span style={{ color: "var(--fg)" }}>{row?.detail ?? "Checking…"}</span>
+        </span>
+      }
+    />
   );
 }
 
@@ -79,18 +77,28 @@ export default function InfoPage() {
   const [version, setVersion] = useState<string>("…");
   const [paths, setPaths] = useState<PathsDebug | null>(null);
   const [llamaPath, setLlamaPath] = useState<string | null>(null);
+  const [server, setServer] = useState<ServerStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Environment readiness shares the session cache with Home (readinessStore),
+  // so opening Info doesn't re-shell wsl.exe/nvidia-smi unless you press Refresh.
+  const [, forceReady] = useReducer((x: number) => x + 1, 0);
+  useEffect(() => subscribeReadiness(forceReady), []);
+  const ready = getCachedReadiness();
+  const readyLoading = isReadinessLoading();
 
   async function refresh() {
     setError(null);
+    fetchReadiness(true);
     try {
-      const [h, v, m, ver, pd, lp] = await Promise.all([
+      const [h, v, m, ver, pd, lp, srv] = await Promise.all([
         invoke<HardwareInfo>("hardware_info"),
         invoke<VramStatus>("vram_status"),
         invoke<ModelInfo[]>("list_models"),
         getVersion().catch(() => "unknown"),
         invoke<PathsDebug>("paths_debug").catch(() => null),
         invoke<string | null>("llama_server_path").catch(() => null),
+        invoke<ServerStatus>("server_status").catch(() => null),
       ]);
       setHw(h);
       setVram(v);
@@ -98,6 +106,7 @@ export default function InfoPage() {
       setVersion(ver);
       setPaths(pd);
       setLlamaPath(lp);
+      setServer(srv);
     } catch (e) {
       setError(String(e));
     }
@@ -105,10 +114,15 @@ export default function InfoPage() {
 
   useEffect(() => {
     refresh();
+    fetchReadiness(false);
     const id = window.setInterval(async () => {
       try {
-        const v = await invoke<VramStatus>("vram_status");
+        const [v, srv] = await Promise.all([
+          invoke<VramStatus>("vram_status"),
+          invoke<ServerStatus>("server_status").catch(() => null),
+        ]);
         setVram(v);
+        if (srv) setServer(srv);
       } catch { /* ignore */ }
     }, 3000);
     return () => window.clearInterval(id);
@@ -138,7 +152,9 @@ export default function InfoPage() {
         <img src={`${ICONS}/owl_startup.png`} alt="" style={{ width: 32, height: 32, objectFit: "contain" }} />
         <div style={{ fontSize: 24, fontWeight: 800, color: "var(--fg-strong)" }}>ℹ️ Info</div>
         <div style={{ flex: 1 }} />
-        <button className="ghost-btn" onClick={refresh}>🔄 Refresh</button>
+        <button className="ghost-btn" onClick={refresh} disabled={readyLoading}>
+          {readyLoading ? "⏳ Checking…" : "🔄 Refresh"}
+        </button>
       </div>
 
       {error ? (
@@ -155,12 +171,21 @@ export default function InfoPage() {
         display: "grid",
         gridTemplateColumns: "1fr 1fr",
         gap: 14,
+        alignItems: "start",
       }}>
         <Card title="📦 Application">
           <Row label="Product" value="OwLLM Desktop" />
           <Row label="Version" value={version} />
           <Row label="Runtime" value="Tauri 2 · Rust + React" />
+          <Row label="Update channel" value="GitHub Releases (auto-update)" />
           <Row label="Python" value="Invited on-demand only (fine-tuning)" />
+        </Card>
+
+        <Card title="✅ Environment readiness">
+          <ReadyLine label="WSL / Ubuntu"      row={ready?.wsl} />
+          <ReadyLine label="GPU & CUDA driver" row={ready?.gpu} />
+          <ReadyLine label="Fine-tuning env"   row={ready?.env} />
+          <ReadyLine label="Local LLM runtime" row={ready?.runtime} />
         </Card>
 
         <Card title="🖥 Hardware">
@@ -204,6 +229,20 @@ export default function InfoPage() {
           )}
         </Card>
 
+        <Card title="🦙 Model server">
+          <Row
+            label="State"
+            value={
+              <span style={{ color: server?.running ? "#22c55e" : "var(--fg-muted)", fontWeight: 700 }}>
+                {server ? (server.running ? "🟢 Running" : "⚪ Stopped") : "…"}
+              </span>
+            }
+          />
+          <Row label="Model" value={server?.model_id ?? "—"} />
+          <Row label="Port" value={server?.port ? String(server.port) : "—"} />
+          <Row label="Detail" value={server?.message ?? "…"} />
+        </Card>
+
         <Card title="📁 Models">
           <Row label="Local GGUFs" value={`${localModels.length}`} />
           <Row label="Cloud peers" value={`${cloudModels.length}`} />
@@ -218,17 +257,17 @@ export default function InfoPage() {
           />
         </Card>
 
-        <Card title="📜 What this app does">
+        {/* Sandbox disk usage + reclaim controls (moved here off the Home page). */}
+        <SandboxDiskCard />
+
+        <Card title="📜 About OwLLM">
           <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6 }}>
             Native Rust supervises every subprocess with <code>CREATE_NO_WINDOW</code> — no
-            console popups. React talks to Rust via Tauri commands; there is
-            no embedded Python HTTP server. Python is invoked one-shot only
-            for the fine-tuning workflow and for per-model virtualenv bootstrap.
+            console popups. React talks to Rust via Tauri commands; there is no
+            embedded Python HTTP server. Python is invoked one-shot only for the
+            fine-tuning workflow and per-model virtualenv bootstrap.
           </div>
-        </Card>
-
-        <Card title="🔗 Where to go next">
-          <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6 }}>
+          <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6, marginTop: 10 }}>
             <strong style={{ color: "var(--accent)" }}>Server</strong> — start / stop a model.<br />
             <strong style={{ color: "var(--accent)" }}>Models</strong> (under Fine Tuning) — browse discovered GGUFs.<br />
             <strong style={{ color: "var(--accent)" }}>Chat</strong> (under Fine Tuning) — talk to the running model.<br />

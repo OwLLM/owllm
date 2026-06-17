@@ -388,106 +388,6 @@ function GridPanel({ children, accent }: {
   );
 }
 
-type SandboxDisk = {
-  vhdxBytes: number; vhdxPath: string | null;
-  cacheBytes: number; copiesBytes: number; available: boolean;
-};
-
-// Sandbox disk: what the WSL agent sandbox is using on disk, and two ways to
-// shrink it. "Clear caches" drops regenerable build caches (uv/npm/pip) — safe,
-// instant, no restart, but it only frees space INSIDE the .vhdx. "Reclaim disk
-// space" then physically shrinks the .vhdx file (fstrim + wsl --shutdown +
-// diskpart compact) — needs admin + restarts WSL, so it's explicit + warned.
-// Backend: src-tauri/src/sandbox.rs (sandbox_disk_usage / _clear_caches / _reclaim_disk).
-function SandboxDiskCard() {
-  const [disk, setDisk] = useState<SandboxDisk | null>(null);
-  const [busy, setBusy] = useState<string | null>(null);
-  const [msg, setMsg] = useState<string | null>(null);
-
-  const fmt = (b: number) =>
-    b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(0)} MB` : `${Math.max(0, Math.round(b / 1e3))} KB`;
-
-  const load = async () => {
-    try { setDisk(await invoke<SandboxDisk>("sandbox_disk_usage", { distro: null })); }
-    catch { /* non-WSL or no distro — card hides itself */ }
-  };
-  useEffect(() => { load(); }, []);
-
-  const clearCaches = async () => {
-    if (busy) return;
-    setBusy("clear");
-    setMsg("🧹 Clearing regenerable caches inside WSL…");
-    try {
-      const freed = await invoke<number>("sandbox_clear_caches", { distro: null });
-      setMsg(`✅ Freed ${fmt(freed)} of build caches. They rebuild automatically when needed. To shrink the disk file itself, use Reclaim disk space.`);
-      await load();
-    } catch (e) { setMsg("Clear caches failed: " + String(e)); }
-    finally { setBusy(null); }
-  };
-
-  const reclaim = async () => {
-    if (busy) return;
-    if (!window.confirm(
-      "Reclaim disk space?\n\nThis physically shrinks the WSL disk file. It will:\n• RESTART WSL (any running agents stop)\n• ask for a Windows admin prompt\n• take up to a minute\n\nTip: press “Clear caches” first so there’s more to reclaim. Continue?"
-    )) return;
-    setBusy("reclaim");
-    setMsg("💿 Restarting WSL and compacting the disk — approve the admin prompt when it appears. This can take a minute…");
-    try {
-      const r = await invoke<{ beforeBytes: number; afterBytes: number; freedBytes: number }>("sandbox_reclaim_disk", { distro: null });
-      setMsg(r.freedBytes > 0
-        ? `✅ Reclaimed ${fmt(r.freedBytes)} — the WSL disk went from ${fmt(r.beforeBytes)} to ${fmt(r.afterBytes)}.`
-        : "Done — nothing to reclaim right now (the disk is already compact, or there were no freed blocks to give back). Clearing caches first usually helps.");
-      await load();
-    } catch (e) { setMsg("Reclaim failed: " + String(e)); }
-    finally { setBusy(null); }
-  };
-
-  // Hide entirely on non-WSL platforms or when no distro is present.
-  if (disk && !disk.available) return null;
-
-  const Row = ({ label, value, hint }: { label: string; value: string; hint?: string }) => (
-    <div style={{ display: "flex", alignItems: "baseline", gap: 8, padding: "3px 0", fontSize: 14 }}>
-      <span style={{ color: "var(--fg)", minWidth: 150 }}>{label}</span>
-      <span style={{ color: "var(--fg-strong)", fontWeight: 700 }}>{value}</span>
-      {hint && <span style={{ color: "var(--fg-muted)", fontSize: 12 }}>{hint}</span>}
-    </div>
-  );
-  const btn = (label: string, onClick: () => void, key: string, primary?: boolean) => (
-    <button
-      data-ui={`SandboxDisk:${key}`}
-      onClick={onClick}
-      disabled={!!busy}
-      style={{
-        minHeight: 38, padding: "8px 16px", borderRadius: 10,
-        border: `2px solid ${primary ? "var(--accent-strong)" : "var(--border-strong)"}`,
-        background: "var(--bg-elevated)", color: "var(--fg-strong)",
-        fontSize: 14, fontWeight: 700, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
-      }}
-    >{busy === key ? "⏳ Working…" : label}</button>
-  );
-
-  return (
-    <GridPanel accent="var(--accent-strong)">
-      <PanelHeader
-        icon="💾"
-        label="Sandbox disk"
-        action={btn("🔄 Refresh", load, "load")}
-      />
-      <Row label="WSL disk file" value={disk ? fmt(disk.vhdxBytes) : "…"} hint="grows over time; shrink with Reclaim" />
-      <Row label="Reclaimable caches" value={disk ? fmt(disk.cacheBytes) : "…"} hint="uv / npm / pip — safe to clear" />
-      <Row label="Project sandbox copies" value={disk ? fmt(disk.copiesBytes) : "…"} hint="freed automatically when you delete a project" />
-      <div style={{ flex: 1 }} />
-      <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 12 }}>
-        {btn("🧹 Clear caches", clearCaches, "clear", true)}
-        {btn("💿 Reclaim disk space", reclaim, "reclaim")}
-      </div>
-      {msg && (
-        <div style={{ marginTop: 12, fontSize: 13, color: "var(--fg)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{msg}</div>
-      )}
-    </GridPanel>
-  );
-}
-
 export default function HomePage() {
   // Live hardware from native Rust (src-tauri/src/hardware.rs). The
   // command always returns Ok with a default if probing fails, so we
@@ -877,8 +777,6 @@ export default function HomePage() {
             )}
           </div>
         </GridPanel>
-
-        <SandboxDiskCard />
         </div>
       </div>
 

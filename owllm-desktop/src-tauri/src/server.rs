@@ -248,6 +248,26 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
     })
 }
 
+/// A local vision model keeps its multimodal projector in a sibling
+/// `mmproj-*.gguf` next to the weights (the model scan skips these as standalone
+/// models, mirroring HF's naming). llama-server needs it via `--mmproj` to
+/// accept image input. Returns the first sibling mmproj GGUF, or None when the
+/// model is text-only (or the projector wasn't downloaded).
+fn find_sibling_mmproj(base_model: &str) -> Option<std::path::PathBuf> {
+    let dir = std::path::Path::new(base_model).parent()?;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let p = entry.path();
+        let is_gguf = p.extension().map(|x| x.eq_ignore_ascii_case("gguf")).unwrap_or(false);
+        if !is_gguf { continue; }
+        if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+            if stem.to_ascii_lowercase().starts_with("mmproj") {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 #[tauri::command]
 pub async fn server_start(
     app: AppHandle,
@@ -385,6 +405,19 @@ pub async fn server_start(
     // Hermes 3, Mistral Nemo+). Older models without a jinja template
     // fall back to the same built-in path as before — no regression.
     cmd.arg("--jinja");
+    // Vision models keep their multimodal projector in a SIBLING `mmproj-*.gguf`
+    // (the model scan deliberately skips those as standalone models). Without
+    // `--mmproj`, llama-server loads text-only and rejects an image with
+    // `500 image input is not supported - provide the mmproj` — the exact
+    // failure when pasting a picture into a local gemma-3/4-style model. Pass it
+    // when present so local vision input just works.
+    if let Some(mmproj) = find_sibling_mmproj(&base_model) {
+        cmd.arg("--mmproj").arg(&mmproj);
+        let _ = app.emit("server-log", ServerLogEvent {
+            stream: "stdout".into(),
+            line: format!("[supervisor] vision projector found — loading --mmproj {}", mmproj.display()),
+        });
+    }
     // Pin inference to the GPU(s) the user picked in gpu_config.json.
     // Without this, llama.cpp's default split-mode=layer spreads the model
     // across EVERY visible GPU, so a 4090-only selection still lit up the

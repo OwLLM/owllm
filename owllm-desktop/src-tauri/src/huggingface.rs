@@ -407,7 +407,69 @@ pub async fn hf_download(
         path: dest_file.to_string_lossy().into_owned(),
         bytes: received,
     });
+    // If this was a PRIMARY model file, fetch its multimodal projector
+    // (mmproj-*.gguf) in the background so local VISION input works. Without the
+    // projector, llama-server rejects images with "500 image input is not
+    // supported - provide the mmproj". Fire-and-forget + idempotent: the main
+    // download is already reported done, and re-downloading an existing model
+    // (the main file is a no-op) is the way to backfill the projector for a
+    // model grabbed before this shipped.
+    spawn_mmproj_fetch(&model_id, &branch, &dest_dir, &file);
     Ok(())
+}
+
+/// Background-fetch a model repo's `mmproj-*.gguf` projector next to the weights,
+/// when the just-downloaded file was a primary model GGUF (not itself a
+/// projector / LoRA). Silent + best-effort: skips if already present, never
+/// touches the foreground download's progress channel.
+fn spawn_mmproj_fetch(model_id: &str, branch: &str, dest_dir: &std::path::Path, downloaded_file: &str) {
+    let lf = downloaded_file.to_ascii_lowercase();
+    if !lf.ends_with(".gguf") || lf.contains("mmproj") || lf.contains("-lora-") {
+        return;
+    }
+    let model_id = model_id.to_string();
+    let branch = branch.to_string();
+    let dest_dir = dest_dir.to_path_buf();
+    tokio::spawn(async move {
+        let files = match hf_model_files(model_id.clone(), Some(branch.clone())).await {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        let proj = files.into_iter().find(|f| {
+            let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_ascii_lowercase();
+            name.starts_with("mmproj") && name.ends_with(".gguf")
+        });
+        let Some(proj) = proj else { return };
+        let base = proj.path.rsplit('/').next().unwrap_or(&proj.path).to_string();
+        let dest = dest_dir.join(&base);
+        if let Ok(m) = std::fs::metadata(&dest) {
+            if m.is_file() && m.len() > 0 { return; }
+        }
+        let url = format!("https://huggingface.co/{model_id}/resolve/{branch}/{}", proj.path);
+        let mut req = client().get(&url);
+        if let Some(tok) = hf_token() { req = req.bearer_auth(tok); }
+        let resp = match req.send().await {
+            Ok(r) if r.status().is_success() => r,
+            _ => return,
+        };
+        let partial = with_suffix(&dest, ".partial");
+        let mut out = match std::fs::File::create(&partial) { Ok(f) => f, Err(_) => return };
+        let mut stream = resp.bytes_stream();
+        use futures_util::StreamExt;
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    if std::io::Write::write_all(&mut out, &bytes).is_err() {
+                        let _ = std::fs::remove_file(&partial);
+                        return;
+                    }
+                }
+                Err(_) => { let _ = std::fs::remove_file(&partial); return; }
+            }
+        }
+        drop(out);
+        let _ = std::fs::rename(&partial, &dest);
+    });
 }
 
 /// Append a suffix string to a path (preserving the filename). Used

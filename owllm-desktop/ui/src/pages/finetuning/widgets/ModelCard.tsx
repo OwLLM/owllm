@@ -13,6 +13,9 @@ export type TagChip = { key: string; label: string; color: string };
 export type ModelCardProps = {
   modelName: string;
   modelId: string;
+  /// The lab/org that published the model (HF id prefix) — shown as a small
+  /// brand chip on the stats line so the user can see who cooked it (#25).
+  org?: { name: string; glyph: string; color: string } | null;
   description?: string;
   size?: string;
   icons?: string;
@@ -31,7 +34,7 @@ export type ModelCardProps = {
 
 export function ModelCard(props: ModelCardProps) {
   const {
-    modelName, modelId, description, size, icons, tagChips,
+    modelName, modelId, org, description, size, icons, tagChips,
     isDownloaded = false, isNew = false,
     downloads, likes, compatibilityBadge, requiresToken = false,
     downloadProgress, selected = false, onDownload, onClick,
@@ -86,8 +89,23 @@ export function ModelCard(props: ModelCardProps) {
           }}>NEW</span>
         )}
       </>}
-      subline={(downloads || likes) ? (
-        <div style={{ display: "flex", gap: 15, marginTop: 2 }}>
+      subline={(org || downloads || likes) ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 2, flexWrap: "wrap" }}>
+          {org && (
+            <span title={`Published by ${org.name}`} style={{ display: "inline-flex", alignItems: "center", gap: 5 }}>
+              {/^[A-Z0-9]$/i.test(org.glyph) ? (
+                // Monogram in a brand-coloured chip for labs without an iconic emoji.
+                <span style={{
+                  width: 16, height: 16, borderRadius: 8, background: org.color, color: "white",
+                  fontSize: 10, fontWeight: 800, lineHeight: "16px", textAlign: "center", flexShrink: 0,
+                }}>{org.glyph}</span>
+              ) : (
+                // Iconic brand glyph (🐋 DeepSeek, 🦙 Meta, 🤗 HF …) — no chip.
+                <span style={{ fontSize: 14, lineHeight: 1 }}>{org.glyph}</span>
+              )}
+              <span style={{ color: "#c7cad1", fontSize: 11, fontWeight: 600 }}>{org.name}</span>
+            </span>
+          )}
           {downloads && <span style={{ color: "#9aa0aa", fontSize: 11 }}>📥 {downloads} downloads</span>}
           {likes     && <span style={{ color: "#9aa0aa", fontSize: 11 }}>❤️ {likes} likes</span>}
         </div>

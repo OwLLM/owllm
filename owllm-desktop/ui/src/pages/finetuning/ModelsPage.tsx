@@ -37,6 +37,9 @@ type HfModelHit = {
   lastModified: string | null;
   gated: boolean;
   private: boolean;
+  // GPU-fit badge computed Rust-side (parse_params_b + the user's VRAM), so a
+  // searched/filtered result is colour-coded by size like a recommended one (#25).
+  compat?: { color: "green" | "orange" | "red" | "gray"; text: string; tooltip?: string } | null;
 };
 
 // Mirrors Rust RecommendedModel in src-tauri/src/recommendations.rs.
@@ -174,6 +177,48 @@ export function tagChipsForTags(tags: string[]): TagChip[] {
   if (has(/reasoning|cot|thinking|r1|o1|qwq/)) out.push({ key: "reasoning", label: "🧠 Reasoning", color: "#a855f7" });
   if (has(/vision|llava|^vl-|-vl$|multimodal/)) out.push({ key: "vision", label: "👁️ Vision", color: "#ec4899" });
   return out;
+}
+
+// "Which lab cooked this model" badge (#25). The org is the HF id prefix
+// (google/gemma-2-9b → google). Well-known labs get a recognisable glyph +
+// brand colour + tidy display name; everything else falls back to a colour-
+// hashed monogram so the chip is always deterministic and needs no bundled art.
+export type OrgBadge = { name: string; glyph: string; color: string };
+const ORG_BRAND: Record<string, OrgBadge> = {
+  "google":        { name: "Google",        glyph: "G",  color: "#4285F4" },
+  "deepseek-ai":   { name: "DeepSeek",      glyph: "🐋", color: "#4D6BFE" },
+  "deepseek":      { name: "DeepSeek",      glyph: "🐋", color: "#4D6BFE" },
+  "meta-llama":    { name: "Meta",          glyph: "🦙", color: "#0866FF" },
+  "facebook":      { name: "Meta",          glyph: "🦙", color: "#0866FF" },
+  "mistralai":     { name: "Mistral AI",    glyph: "🌬️", color: "#FA520F" },
+  "qwen":          { name: "Qwen · Alibaba",glyph: "Q",  color: "#615CED" },
+  "microsoft":     { name: "Microsoft",     glyph: "🪟", color: "#00A4EF" },
+  "openai":        { name: "OpenAI",        glyph: "O",  color: "#10A37F" },
+  "nvidia":        { name: "NVIDIA",        glyph: "N",  color: "#76B900" },
+  "01-ai":         { name: "01.AI",         glyph: "0",  color: "#2563EB" },
+  "huggingfaceh4": { name: "Hugging Face",  glyph: "🤗", color: "#FF9D00" },
+  "huggingface":   { name: "Hugging Face",  glyph: "🤗", color: "#FF9D00" },
+  "stabilityai":   { name: "Stability AI",  glyph: "S",  color: "#9333EA" },
+  "tiiuae":        { name: "Falcon · TII",  glyph: "🦅", color: "#0EA5E9" },
+  "bigcode":       { name: "BigCode",       glyph: "B",  color: "#F59E0B" },
+  "ibm-granite":   { name: "IBM Granite",   glyph: "I",  color: "#0F62FE" },
+  "cohereforai":   { name: "Cohere",        glyph: "C",  color: "#39594D" },
+  "allenai":       { name: "Allen AI",      glyph: "A",  color: "#B11116" },
+  "xai-org":       { name: "xAI",           glyph: "X",  color: "#111111" },
+  "internlm":      { name: "InternLM",      glyph: "I",  color: "#2563EB" },
+  "thudm":         { name: "Zhipu · THUDM", glyph: "Z",  color: "#3B82F6" },
+};
+const ORG_HUES = ["#6366f1", "#0ea5e9", "#10b981", "#f59e0b", "#ef4444", "#a855f7", "#ec4899", "#14b8a6"];
+export function orgFromId(id: string, author: string | null): OrgBadge | null {
+  const slug = (id.includes("/") ? id.split("/")[0] : (author ?? "")).trim().toLowerCase();
+  if (!slug) return null;
+  const known = ORG_BRAND[slug];
+  if (known) return known;
+  // Prettify: "some-lab_ai" → "Some Lab Ai"; colour-hash for a stable monogram.
+  const name = slug.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  let h = 0;
+  for (let i = 0; i < slug.length; i++) h = (h * 31 + slug.charCodeAt(i)) >>> 0;
+  return { name, glyph: slug[0].toUpperCase(), color: ORG_HUES[h % ORG_HUES.length] };
 }
 
 // Kick the Rust export_gguf command against a tuned transformers dir.
@@ -966,7 +1011,7 @@ export default function ModelsPage() {
             background: "transparent",
           }}
         >
-          📚 Recommended Models
+          {inSearchMode ? "🔎 Search Results" : "📚 Recommended Models"}
         </span>
         <div
           style={{
@@ -1041,12 +1086,14 @@ export default function ModelsPage() {
                   key={h.id}
                   modelName={h.id.split("/").pop() ?? h.id}
                   modelId={h.id}
+                  org={orgFromId(h.id, h.author)}
                   description={h.pipelineTag ? `Pipeline: ${h.pipelineTag}` : undefined}
                   icons={iconsForTags(h.tags)}
                   tagChips={tagChipsForTags(h.tags)}
                   isNew={isNewFlag}
                   downloads={fmtCount(h.downloads)}
                   likes={fmtCount(h.likes)}
+                  compatibilityBadge={h.compat ?? undefined}
                   requiresToken={h.gated || h.private}
                   isDownloaded={false}
                   downloadProgress={dl ? undefined : undefined}
@@ -1088,6 +1135,7 @@ export default function ModelsPage() {
               key={r.id}
               modelName={r.name}
               modelId={r.id}
+              org={orgFromId(r.id, null)}
               description={`${r.description}  ·  ${r.paramsB.toFixed(1)}B params · inference ≈${r.inferenceGb.toFixed(1)} GB · LoRA ≈${r.loraTrainGb.toFixed(1)} GB`}
               size={`${r.paramsB.toFixed(1)}B params`}
               icons={iconsForTags(r.tags)}

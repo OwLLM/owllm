@@ -57,6 +57,12 @@ pub struct HfModelHit {
     /// authed token). For an anon caller this never appears, but
     /// when the user has saved HF_TOKEN we surface it.
     pub private: bool,
+    /// GPU-fit badge (green/orange/red) derived from the param count
+    /// parsed out of the model id + the user's detected VRAM — the SAME
+    /// formula the Recommended and Tuned cards use, so a searched/filtered
+    /// result is colour-coded by size exactly like a recommended one.
+    /// None when the id carries no parseable size (e.g. "org/my-model").
+    pub compat: Option<crate::recommendations::CompatTag>,
 }
 
 /// One file inside a model repo. Returned by hf_model_files() and
@@ -113,6 +119,8 @@ impl From<ApiModel> for HfModelHit {
             last_modified: m.last_modified,
             gated,
             private: m.private,
+            // Filled in by hf_search once VRAM is known (From can't reach it).
+            compat: None,
         }
     }
 }
@@ -193,7 +201,21 @@ pub async fn hf_search(
     }
     let parsed: Vec<ApiModel> = serde_json::from_str(&body)
         .map_err(|e| format!("hf json: {e}"))?;
-    Ok(parsed.into_iter().map(HfModelHit::from).collect())
+    // Colour every search/filter result by GPU-fit, just like the curated
+    // Recommended cards — otherwise checking a filter dropped the user into a
+    // wall of identically-bordered cards with no size legend (#25). VRAM is
+    // detected once and reused for the whole page of hits.
+    let vram_gb = crate::recommendations::detect_vram_gb().await;
+    let hits: Vec<HfModelHit> = parsed
+        .into_iter()
+        .map(HfModelHit::from)
+        .map(|mut h| {
+            h.compat = crate::recommendations::parse_params_b(&h.id)
+                .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
+            h
+        })
+        .collect();
+    Ok(hits)
 }
 
 /// List every file in a model repo at the given branch (default `main`).

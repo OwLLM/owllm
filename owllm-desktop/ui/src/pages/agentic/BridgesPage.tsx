@@ -250,7 +250,7 @@ function TelegramCard() {
       // per-chat mappings so a previously-pinned chat can't keep overriding the
       // project the user just selected (the "picked RED but it goes elsewhere"
       // bug). Explicit /project commands in Telegram re-establish a mapping.
-      clearChatProjects("telegram");
+      await clearChatProjects("telegram");
       setSavedFlash(true);
       window.setTimeout(() => setSavedFlash(false), 1600);
     } catch (e) {

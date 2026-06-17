@@ -266,6 +266,63 @@ fn write(c: &BridgeConfigs) -> Result<(), String> {
     Ok(())
 }
 
+// --- Per-chat → project routing, SHARED across OwLLM windows -----------------
+// Which project a bridge chat dispatches to used to live in each window's
+// localStorage, so two windows disagreed (the "saved to RED but the other
+// window sent it to a different project" bug). Persist it on disk instead —
+// one source of truth every window reads — keyed exactly like the old
+// localStorage key (`owllm:telegram:active-project:<chatId>` etc.) so the map
+// is unambiguous and the frontend can migrate a legacy value in place.
+
+fn routes_path() -> Option<PathBuf> {
+    Some(crate::paths::owllm_config_home()?.join("bridge_chat_routes.json"))
+}
+fn load_routes() -> std::collections::HashMap<String, String> {
+    let Some(path) = routes_path() else { return Default::default(); };
+    if !path.is_file() {
+        return Default::default();
+    }
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+fn save_routes(m: &std::collections::HashMap<String, String>) -> Result<(), String> {
+    let Some(path) = routes_path() else { return Err("no home directory".to_string()); };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(m).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// Project id a bridge chat is pinned to, or None for "use the configured default".
+#[tauri::command]
+pub async fn bridge_route_get(key: String) -> Result<Option<String>, String> {
+    Ok(load_routes().get(&key).cloned())
+}
+/// Pin (or, with an empty project_id, unpin) a bridge chat to a project.
+#[tauri::command]
+pub async fn bridge_route_set(key: String, project_id: String) -> Result<(), String> {
+    let mut m = load_routes();
+    if project_id.trim().is_empty() {
+        m.remove(&key);
+    } else {
+        m.insert(key, project_id);
+    }
+    save_routes(&m)
+}
+/// Drop every chat pin for a bridge (all keys with this prefix). Called when the
+/// user changes the bridge's configured default project.
+#[tauri::command]
+pub async fn bridge_routes_clear_prefix(prefix: String) -> Result<(), String> {
+    let mut m = load_routes();
+    let before = m.len();
+    m.retain(|k, _| !k.starts_with(&prefix));
+    if m.len() != before { save_routes(&m)?; }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

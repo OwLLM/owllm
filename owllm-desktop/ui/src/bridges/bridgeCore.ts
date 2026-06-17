@@ -94,21 +94,45 @@ function keyFor(name: string, chatId: string): string {
     ? `owllm:telegram:active-project:${chatId}`
     : `owllm:bridge:${name}:active-project:${chatId}`;
 }
-function getChatProject(name: string, chatId: string): string {
-  try { return localStorage.getItem(keyFor(name, chatId)) || ""; } catch { return ""; }
+function prefixFor(name: string): string {
+  return name === "telegram"
+    ? "owllm:telegram:active-project:"
+    : `owllm:bridge:${name}:active-project:`;
 }
-function setChatProject(name: string, chatId: string, projectId: string) {
-  try { localStorage.setItem(keyFor(name, chatId), projectId); } catch {}
+// The per-chat route now lives on DISK (bridge_chat_routes.json via Rust), shared
+// by every OwLLM window, so two windows can't disagree about which project a chat
+// belongs to (the "saved to RED but the other window sent it elsewhere" bug). A
+// legacy per-window localStorage value is migrated to disk on first read.
+async function getChatProject(name: string, chatId: string): Promise<string> {
+  const key = keyFor(name, chatId);
+  try {
+    const v = await invoke<string | null>("bridge_route_get", { key });
+    if (v && v.trim()) return v;
+    // One-time migration of a route that only existed in this window's storage.
+    let legacy = "";
+    try { legacy = localStorage.getItem(key) || ""; } catch { /* ignore */ }
+    if (legacy.trim()) {
+      try { await invoke("bridge_route_set", { key, projectId: legacy }); } catch { /* best-effort */ }
+      return legacy;
+    }
+    return "";
+  } catch {
+    try { return localStorage.getItem(key) || ""; } catch { return ""; }
+  }
+}
+async function setChatProject(name: string, chatId: string, projectId: string): Promise<void> {
+  const key = keyFor(name, chatId);
+  try { await invoke("bridge_route_set", { key, projectId }); } catch { /* best-effort */ }
+  // Drop the legacy per-window copy so it can never diverge / shadow the shared one.
+  try { localStorage.removeItem(key); } catch { /* ignore */ }
 }
 /// Clear every per-chat project mapping for a bridge. Called when the user
 /// changes the bridge's configured default project in the UI, so a STALE
-/// auto-mapping can't keep overriding their choice (the "I picked RED but
-/// messages go to an old project" bug). After this, the configured default
-/// applies until the user explicitly runs /project in a chat.
-export function clearChatProjects(name: string): void {
-  const prefix = name === "telegram"
-    ? "owllm:telegram:active-project:"
-    : `owllm:bridge:${name}:active-project:`;
+/// mapping can't keep overriding their choice. Clears the shared disk store AND
+/// any legacy per-window localStorage keys.
+export async function clearChatProjects(name: string): Promise<void> {
+  const prefix = prefixFor(name);
+  try { await invoke("bridge_routes_clear_prefix", { prefix }); } catch { /* best-effort */ }
   try {
     const stale: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -274,7 +298,7 @@ export function useBridgeDispatch() {
 
   const currentProjectForChat = async (name: string, cfg: BridgeConfigLite, chatId: string): Promise<ProjectRow> => {
     const projectsNow = projectsRef.current;
-    const activeId = getChatProject(name, chatId);
+    const activeId = await getChatProject(name, chatId);
     const active = activeId ? projectsNow.find(p => p.id === activeId) : null;
     if (active) return active;
     const configured = cfg.project_id ? projectsNow.find(p => p.id === cfg.project_id) : null;
@@ -367,7 +391,7 @@ export function useBridgeDispatch() {
       return { kind: "dispatch", project: explicit, reason: "mentioned-project" };
     }
 
-    const activeId = getChatProject(name, chatId);
+    const activeId = await getChatProject(name, chatId);
     const active = activeId ? projectsNow.find(p => p.id === activeId) : null;
     if (active) return { kind: "dispatch", project: active, reason: "chat-active-project" };
 
@@ -412,13 +436,13 @@ export function useBridgeDispatch() {
         return;
       }
       const updated = await saveProjectModel(route.project.id, route.modelId);
-      setChatProject(name, chatId, route.project.id);
+      await setChatProject(name, chatId, route.project.id);
       await send(transport, chatId,
         `Model associated with ${updated?.name ?? route.project.name}: ${route.modelId}`);
       return;
     }
     if (route.kind === "switch-project") {
-      setChatProject(name, chatId, route.project.id);
+      await setChatProject(name, chatId, route.project.id);
       await send(transport, chatId, `Routing this chat to project: ${route.project.name}`);
       return;
     }
@@ -427,7 +451,7 @@ export function useBridgeDispatch() {
         `Brainstorm - ${shortNameFromText(route.idea)}`,
         `Bridge brainstorm seed:\n${route.idea || "(empty)"}`,
       );
-      setChatProject(name, chatId, np.id);
+      await setChatProject(name, chatId, np.id);
       await send(transport, chatId,
         `Created brainstorm project: ${np.name}\n\n${modelHelp(np.name)}`);
       return;
@@ -730,7 +754,7 @@ export function useBridgeMirror(
         if (!m || !m.text || !m.text.trim()) continue;
         if (m.role === "you") continue;
         for (const chatId of allow) {
-          const activeProjectId = getChatProject(transport.name, chatId) || cfg.project_id || "";
+          const activeProjectId = (await getChatProject(transport.name, chatId)) || cfg.project_id || "";
           if (detail.projectId !== activeProjectId) continue;
           for (const chunk of splitForLen(m.text, transport.maxLen)) {
             await rawSend(chatId, chunk);

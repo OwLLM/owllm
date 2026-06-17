@@ -107,6 +107,28 @@ struct Inner {
     /// On crash, server_status classifies the cause from here (OOM vs
     /// broken GGUF vs other) far more precisely than the exit code alone.
     stderr_tail: Option<std::sync::Arc<std::sync::Mutex<Vec<String>>>>,
+    /// True when this instance is REUSING a llama-server that another OwLLM
+    /// instance (or a survivor of a prior run) already had live on the model's
+    /// port — `child` is None because we don't own the process. Lets many
+    /// instances share one model server instead of fighting over the port.
+    adopted: bool,
+}
+
+/// Is a llama-server reachable on this loopback port right now? True when the
+/// /health endpoint answers AT ALL (200 ready, or 503 still-loading, or even a
+/// 401 when network-exposed): any HTTP reply means a server already owns this
+/// port, so we adopt it rather than spawn a second one that can't bind. A
+/// connection refusal / timeout means nothing is there. Kept short (1.5s) so a
+/// dead port doesn't stall a start.
+async fn server_present(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{port}/health");
+    match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+    {
+        Ok(c) => c.get(&url).send().await.is_ok(),
+        Err(_) => false,
+    }
 }
 
 /// Classify a llama-server crash from its stderr tail. Returns the named
@@ -152,6 +174,26 @@ fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
 #[tauri::command]
 pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<ServerStatus, String> {
     let mut inner = state.inner.lock().await;
+    // Adopted (shared) server: we hold no child, so liveness can only be told by
+    // re-probing the port. If its owner instance closed, the server is gone —
+    // clear the adoption so the UI stops claiming a model is running.
+    if inner.child.is_none() && inner.adopted {
+        let port = inner.port;
+        let live = match port { Some(p) => server_present(p).await, None => false };
+        if live {
+            return Ok(ServerStatus {
+                running: true,
+                model_id: inner.model_id.clone(),
+                port,
+                message: inner.message.clone(),
+            });
+        }
+        inner.adopted = false;
+        inner.model_id = None;
+        inner.port = None;
+        inner.message = "The shared model server stopped (the OwLLM instance that owned it closed).".to_string();
+        return Ok(ServerStatus { running: false, model_id: None, port: None, message: inner.message.clone() });
+    }
     // Reap dead child so the "running" bit doesn't lie after a crash.
     let (alive, exit_code) = match inner.child.as_mut() {
         Some(c) => match c.try_wait() {
@@ -272,9 +314,39 @@ pub async fn server_start(
 
     // Take the lock and stop any running child before spawning a new one.
     let mut inner = state.inner.lock().await;
-    if let Some(mut c) = inner.child.take() {
+    // Release a server WE own first (a restart / model switch). Remember its
+    // port so we don't mistake our own just-killed socket for an adoptable one.
+    let just_killed_port = if let Some(mut c) = inner.child.take() {
+        let kp = inner.port;
         let _ = c.kill().await;
+        inner.adopted = false;
+        kp
+    } else {
+        None
+    };
+    // ADOPT-don't-spawn: if a llama-server is ALREADY live on this model's port
+    // (another OwLLM instance, or a survivor of a prior run) and it isn't the
+    // socket we just killed, reuse it. Spawning a second one would only fail to
+    // bind the port and crash — which is exactly the "llama server gives errors"
+    // collision. Sharing one server is what lets several instances coexist.
+    if just_killed_port != Some(port) && server_present(port).await {
+        inner.adopted = true;
+        inner.model_id = Some(model_id.clone());
+        inner.port = Some(port);
+        inner.message = format!("Using the model server already running on :{port} (shared with another OwLLM instance).");
+        drop(inner);
+        let _ = app.emit("server-log", ServerLogEvent {
+            stream: "stdout".into(),
+            line: format!("[supervisor] adopted the model server already live on :{port} — not spawning a second one"),
+        });
+        let _ = app.emit("llama-ready", serde_json::json!({
+            "model_id": model_id,
+            "port": port,
+            "elapsed_ms": 0,
+        }));
+        return Ok(());
     }
+    inner.adopted = false;
 
     // Bind loopback by default; only open on the network when the user has
     // explicitly enabled exposure (which also forces an api-key). 0.0.0.0
@@ -469,6 +541,20 @@ pub async fn server_stop(
     state: tauri::State<'_, ServerState>,
 ) -> Result<(), String> {
     let mut inner = state.inner.lock().await;
+    // An ADOPTED server belongs to another instance — we only stop USING it; we
+    // must NOT kill it out from under the instances still relying on it.
+    if inner.adopted {
+        inner.adopted = false;
+        inner.model_id = None;
+        inner.port = None;
+        inner.message = "Released the shared server (it stays up for other OwLLM instances).".to_string();
+        drop(inner);
+        let _ = app.emit(
+            "server-log",
+            ServerLogEvent { stream: "stdout".into(), line: "[supervisor] released the shared model server (not owned by this instance)".into() },
+        );
+        return Ok(());
+    }
     if let Some(mut c) = inner.child.take() {
         let _ = c.kill().await;
     }

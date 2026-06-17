@@ -378,22 +378,31 @@ pub fn run() {
                     ..
                 } if label == "main" => {
                     overlay_frame::close_if_present(app);
-                    // Reap llama-server HERE too, not only on ExitRequested.
-                    // When the user clicks the main window's X, Tauri 2's
-                    // event lifecycle does NOT guarantee ExitRequested fires
-                    // (overlay_frame or other auxiliary windows can hold the
-                    // app alive). Without this, llama-server.exe survives
-                    // the visible-app close and keeps the model resident in
-                    // VRAM — exactly the A2000-stuck-full symptom users hit.
-                    server::kill_all_llama_servers("main-window-close");
+                    // Reap llama-server HERE too, not only on ExitRequested —
+                    // Tauri 2 doesn't guarantee ExitRequested fires on the X.
+                    // BUT only when THIS is the last OwLLM window: other windows
+                    // may be sharing the server (multi-instance), and killing it
+                    // out from under them is what split/broke their sessions.
+                    // Deregister ourselves, then reap by name only if no other
+                    // window is live ("stop on last close").
+                    server::deregister_window();
+                    if server::other_live_windows() == 0 {
+                        server::kill_all_llama_servers("last-window-close");
+                    }
                 }
                 tauri::RunEvent::ExitRequested { .. } => {
                     overlay_frame::close_if_present(app);
-                    server::kill_all_llama_servers("exit-requested");
+                    server::deregister_window();
+                    if server::other_live_windows() == 0 {
+                        server::kill_all_llama_servers("last-window-exit-requested");
+                    }
                 }
                 tauri::RunEvent::Exit => {
                     overlay_frame::close_if_present(app);
-                    server::kill_all_llama_servers("exit");
+                    server::deregister_window();
+                    if server::other_live_windows() == 0 {
+                        server::kill_all_llama_servers("last-window-exit");
+                    }
                 }
                 _ => {}
             }

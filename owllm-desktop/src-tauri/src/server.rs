@@ -393,7 +393,11 @@ pub async fn server_start(
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
-    cmd.kill_on_drop(true);
+    // NOT kill_on_drop: a detached/shared server must SURVIVE the window that
+    // spawned it closing, so other windows keep using it. It's reaped by name
+    // only when the LAST window closes (lib.rs close/exit hooks) or as a
+    // startup orphan — both gated on the window registry.
+    cmd.kill_on_drop(false);
     #[cfg(windows)]
     {
         // CREATE_NO_WINDOW — the whole reason we did the Python wipe.
@@ -786,7 +790,79 @@ fn crash_hint_for(code: i32) -> Option<&'static str> {
 /// expectation (header says "Stopped" the moment the app starts).
 pub fn install<R: tauri::Runtime>(app: &tauri::App<R>) {
     app.manage(ServerState::default());
-    kill_all_llama_servers("startup");
+    // Multi-window lifecycle: count THIS window in the shared registry, then
+    // only wipe a leftover llama-server when we're the ONLY window. If another
+    // OwLLM window is live it's SHARING that server (multi-instance) — nuking it
+    // on our startup is exactly what broke "open a second window". A server
+    // still running with zero live windows is a crash-orphan → reap it so the
+    // GPU is never stranded and the header honestly reads "Stopped".
+    register_window();
+    if other_live_windows() == 0 {
+        kill_all_llama_servers("startup-orphan-reap");
+    }
+    // Heartbeat so this window stays "live" while open; a crashed window's entry
+    // just expires (WINDOW_TTL_SECS) so it stops blocking the last-window reap.
+    tauri::async_runtime::spawn(async {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            register_window();
+        }
+    });
+}
+
+// --- Window registry: reference-count OwLLM windows ACROSS processes so the
+// shared (detached) llama-server is reaped only when the LAST window closes, and
+// a crash-orphaned server is reaped on next launch — the GPU is never stranded.
+// Keyed by OS process id; a 10s heartbeat keeps each entry fresh, a 30s TTL
+// expires a crashed window's stale entry. Best-effort: any IO failure degrades
+// to "I'm the only window", i.e. the safe (reap) behaviour.
+const WINDOW_TTL_SECS: u64 = 30;
+fn windows_registry_path() -> Option<std::path::PathBuf> {
+    Some(crate::paths::owllm_config_home()?.join("owllm_windows.json"))
+}
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+fn load_windows() -> std::collections::HashMap<String, u64> {
+    let Some(p) = windows_registry_path() else { return Default::default(); };
+    if !p.is_file() { return Default::default(); }
+    std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or_default()
+}
+fn save_windows(m: &std::collections::HashMap<String, u64>) {
+    let Some(p) = windows_registry_path() else { return; };
+    if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
+    if let Ok(json) = serde_json::to_string_pretty(m) { let _ = std::fs::write(&p, json); }
+}
+fn prune_windows(m: &mut std::collections::HashMap<String, u64>) {
+    let now = now_secs();
+    m.retain(|_, ts| now.saturating_sub(*ts) <= WINDOW_TTL_SECS);
+}
+/// Record THIS process as a live window (also the heartbeat tick).
+pub fn register_window() {
+    let mut m = load_windows();
+    prune_windows(&mut m);
+    m.insert(std::process::id().to_string(), now_secs());
+    save_windows(&m);
+}
+/// Remove THIS process from the live set (on window close / app exit).
+pub fn deregister_window() {
+    let mut m = load_windows();
+    m.remove(&std::process::id().to_string());
+    prune_windows(&mut m);
+    save_windows(&m);
+}
+/// How many OTHER OwLLM windows are live right now (fresh heartbeat, not us).
+pub fn other_live_windows() -> usize {
+    let me = std::process::id().to_string();
+    let mut m = load_windows();
+    prune_windows(&mut m);
+    m.keys().filter(|k| **k != me).count()
 }
 
 /// Walk the OS process table and kill every llama-server process by

@@ -11,7 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
-import NewProjectDialog from "./NewProjectDialog";
+import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import IconPickerDialog, {
   getAgentIconOverride,
@@ -537,267 +537,6 @@ function computeDepths(team: Team): Map<string, number> {
   return out;
 }
 
-// LocationRow — mirrors _build_project_strip in agents_page.py:2845-3029.
-// Sandbox/Bridge badges reflect real state; Team… opens a template picker.
-function LocationRow({
-  projects, selectedId, onChangeProject,
-  teams, pickedTeamId, onPickTeam,
-  location, effectiveCwd, onChangeLocation, onBrowse,
-  trustWrites, onToggleTrustWrites,
-  fullAccess, onToggleFullAccess,
-  bridgeOn, isolationRequested,
-  onNewProject, onRenameProject, onDeleteProject,
-}: {
-  projects: ProjectRow[];
-  selectedId: string;
-  onChangeProject: (id: string) => void;
-  teams: Team[];
-  pickedTeamId: string | null;
-  onPickTeam: (id: string | null) => void;
-  location: string;
-  /** The cwd agents ACTUALLY run in (Windows path mapped to its /mnt WSL form
-      when isolating in place). The badge + Verify use this so they reflect
-      reality, not the raw Windows path shown in the input. */
-  effectiveCwd: string;
-  onChangeLocation: (v: string) => void;
-  onBrowse: () => void;
-  trustWrites: boolean;
-  onToggleTrustWrites: () => void;
-  /** When true, this project's agents run OUTSIDE the sandbox (full host access).
-      OFF by default; toggling ON is gated behind a confirm in the parent. */
-  fullAccess: boolean;
-  onToggleFullAccess: () => void;
-  bridgeOn: boolean;
-  isolationRequested: boolean;
-  onNewProject: () => void;
-  onRenameProject: () => void;
-  onDeleteProject: () => void;
-}) {
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [actBusy, setActBusy] = useState<string | null>(null);
-  // Non-blocking status banner — every wait shows visible progress here (no
-  // frozen-looking app, no blocking alert/confirm for results).
-  const [actMsg, setActMsg] = useState<string | null>(null);
-
-  // VERIFY: run the exact probe an agent's shell runs (same tool_shell_exec +
-  // cwd) and report WSL vs host. One probe answers it for the whole team.
-  // Run the EXACT probe an agent's shell runs: confirm it executes in WSL
-  // (Linux), and whether it's folder-CONFINED — a sealed agent can't see the
-  // rest of the C: drive, so `/mnt/c/Windows` is gone. Returns the parsed facts.
-  const probeIsolation = async () => {
-    const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
-      "tool_shell_exec",
-      {
-        command:
-          'uname -a; echo "PWD=$(pwd)"; echo "USER=$(whoami)"; ' +
-          'echo "CDRIVE=$(ls /mnt/c/Windows >/dev/null 2>&1 && echo VISIBLE || echo HIDDEN)"',
-        cwd: effectiveCwd || undefined,
-      },
-    );
-    const out = `${r.stdout}\n${r.stderr}`.trim();
-    const inWsl = /microsoft-standard-WSL2/i.test(out) || (/\bLinux\b/.test(r.stdout) && !/PWD=[A-Za-z]:\\/.test(out));
-    const confined = /CDRIVE=HIDDEN/.test(out);
-    return { out, inWsl, confined };
-  };
-
-  const verifyIsolation = async () => {
-    if (actBusy) return;
-    setActBusy("verify");
-    setActMsg("🔍 Running the probe through an agent's own shell…");
-    try {
-      let { out, inWsl, confined } = await probeIsolation();
-      // WSL but NOT sealed → install bubblewrap and re-probe so the agent is
-      // confined to ONLY this folder. Visible progress — never a silent wait.
-      if (inWsl && !confined) {
-        setActMsg("🛡 Runs in WSL — sealing it to ONLY this folder (installing bubblewrap, ~10–20s)…");
-        try {
-          await sandboxHarden(null);
-          ({ out, inWsl, confined } = await probeIsolation());
-        } catch (e) {
-          setActMsg(
-            "✅ Runs in WSL (Linux), but couldn't seal it to just this folder: " + String(e) +
-            "\n\nAgents still run isolated in WSL — they just also see the rest of /mnt (C: drive). " +
-            "Open the WSL distro and run: sudo apt-get install -y bubblewrap",
-          );
-          return;
-        }
-      }
-      const verdict = !inWsl
-        ? "⚠️ NOT ISOLATED — agents run on the Windows host. Press 🛡 Isolate to move the project into the sandbox."
-        : confined
-          ? "✅ FULLY ISOLATED — agents run in WSL (Linux) AND are sealed to ONLY this folder: they can't see the rest of your C: drive. Their writes land in your real folder. One probe answers it for the whole team."
-          : "✅ ISOLATED in WSL (Linux), but NOT folder-sealed — agents can still see the rest of /mnt (your C: drive). Install bubblewrap in the distro to seal it.";
-      setActMsg(verdict + "\n\nProbe output (the exact command an agent's shell runs):\n" + (out || "(no output)"));
-    } catch (e) {
-      setActMsg("Verify failed: " + String(e));
-    } finally { setActBusy(null); }
-  };
-
-  // Mirror host GitHub/CLI logins INTO the sandbox. Runs AUTOMATICALLY after
-  // isolate (no button) so isolated agents are authenticated without the user
-  // ever having to think about it.
-  const mirrorLogins = async (): Promise<string> => {
-    const r = await sandboxSyncLogins(null);
-    return r.synced.length
-      ? `logins synced into the sandbox: ${r.synced.join(", ")}`
-      : r.found_on_host.length
-        ? `found on Windows (${r.found_on_host.join(", ")}) but none landed in the sandbox`
-        : "no logins to mirror yet (connect GitHub on Home, or a CLI on Accounts)";
-  };
-
-  // ISOLATE: copy the (host) project INTO the WSL sandbox, switch to the copy
-  // (cwd becomes \\wsl.localhost\... → the shell router runs inside the distro),
-  // and auto-mirror logins. Visible progress throughout — no silent freeze.
-  const isolate = async () => {
-    if (actBusy) return;
-    if (isWslPath(location)) { setActMsg("Already isolated — this project lives inside WSL."); return; }
-    if (!location.trim()) { setActMsg("Pick a project folder first (Browse…)."); return; }
-    if (!window.confirm("Copy this project INTO the Linux sandbox and switch to the copy?\n\nThe original folder stays where it is. A large repo can take a minute — the app stays responsive and shows progress.")) return;
-    setActBusy("isolate");
-    setActMsg("🛡 Copying the project into the Linux sandbox… this can take a minute for a large repo. The app stays responsive — you'll see the result here.");
-    try {
-      const p = await sandboxConvertProject(location);
-      onChangeLocation(p.path);
-      setActMsg("🔑 Isolated. Mirroring your GitHub / CLI logins into the sandbox…");
-      let syncMsg: string;
-      try { syncMsg = await mirrorLogins(); } catch (e) { syncMsg = "login mirror skipped: " + String(e); }
-      setActMsg(`✅ Isolated + ${syncMsg}.\nNow working in: ${p.path}\nAgents run in WSL — press 🔍 Verify to confirm.`);
-    } catch (e) {
-      setActMsg("Convert failed: " + String(e));
-    } finally { setActBusy(null); }
-  };
-
-  // trust_writes=true → agent writes are trusted (no write confirm); false →
-  // writes go through the guard. This is about WRITES, not OS isolation — the
-  // isolation badge below is the source of truth for "runs in WSL".
-  const sandboxText  = trustWrites ? "⚠️ Direct writes" : "🔒 Guarded writes";
-  const sandboxColor = trustWrites ? "#ffb56a" : "#5af09c";
-  const sandboxBg    = trustWrites ? "#241a0e" : "#0e2418";
-  const sandboxBorder= trustWrites ? "#5a3c2c" : "#2c5a3c";
-  const bridgeText   = bridgeOn ? "📱 Bridge: ON" : "📱 Bridge: OFF";
-  const bridgeColor  = bridgeOn ? "var(--accent)" : "#7d8595";
-  const bridgeBg     = bridgeOn ? "#0a2230" : "#1a1f2a";
-  const bridgeBorder = bridgeOn ? "#2a5060" : "var(--border-strong)";
-  return (
-    <div data-ui="ProjectStrip" style={{ height:52, padding:"10px 14px", background:"linear-gradient(180deg, #1f2632, #181c29)", borderRadius:10, margin:"0 23px", display:"flex", alignItems:"center", gap:10, position:"relative" }}>
-      <div data-ui="LocationLabel" style={{ display:"inline-flex", alignItems:"center", height:32, fontSize:11, color:"var(--fg-muted)", textTransform:"uppercase", letterSpacing:0.6, marginRight:4 }}>LOCATION</div>
-      <input data-ui="LocationInput" value={location} onChange={e => onChangeLocation(e.target.value)} placeholder="/path/to/repo · esp-flash · github.com/me/x" style={{ flex:2, minWidth:240, height:32, borderRadius:8, padding:"0 12px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border:"1px solid var(--border)" }} />
-      <button data-ui="LocationBrowseBtn" className="ghost-btn" onClick={onBrowse} title="Pick a project folder" style={{ height:32, width:79 }}>Browse…</button>
-      <label data-ui="TrustWritesCheckbox" style={{ display:"inline-flex", alignItems:"center", fontSize:12, color:"var(--fg)", padding:"0 6px" }}>
-        <input type="checkbox" checked={trustWrites} onChange={onToggleTrustWrites} style={{ marginRight:6, width:13, height:13, accentColor:"var(--accent)" }} />
-        Trust writes
-      </label>
-      <span data-ui="SandboxBadge" style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:sandboxBg, color:sandboxColor, border:`1px solid ${sandboxBorder}`, borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap" }}>{sandboxText}</span>
-      {/* Honest OS-isolation badge (P1-1): derived from the location path —
-          the same predicate the Rust shell router uses — so it cannot lie.
-          LOUD red when isolation is requested but this location runs on the
-          host (sandbox failed/unavailable). */}
-      {(() => {
-        // When full access is ON the agent runs UNSANDBOXED, so the normal
-        // isolation badge would be misleading — show a single loud HOST-ACCESS
-        // badge instead. Otherwise show the honest isolation badge.
-        if (fullAccess) {
-          return (
-            <button
-              data-ui="FullAccessBadge"
-              type="button"
-              onClick={onToggleFullAccess}
-              title="This project runs agents OUTSIDE the sandbox — full access to your PC (Windows drives, system commands). Click to turn it back off."
-              style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:"#3a1416", color:"#ff8c8c", border:"1px solid #ff5a5a", borderRadius:6, fontSize:11, fontWeight:800, whiteSpace:"nowrap", cursor:"pointer" }}
-            >⚠ HOST ACCESS — sandbox OFF</button>
-          );
-        }
-        const iso = isolationBadge(effectiveCwd, isolationRequested);
-        return (
-          <span
-            data-ui="IsolationBadge"
-            title={iso.title}
-            style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:iso.bg, color:iso.color, border:`1px solid ${iso.border}`, borderRadius:6, fontSize:11, fontWeight: iso.hostFallback ? 800 : 600, whiteSpace:"nowrap" }}
-          >{iso.text}</span>
-        );
-      })()}
-      {/* Grant / revoke full host access (bug #19). OFF by default; the parent
-          gates the ON path behind an explicit confirm. Hidden once ON (the loud
-          HOST-ACCESS badge above doubles as the off switch). */}
-      {!fullAccess && (
-        <button
-          data-ui="GrantHostAccessBtn"
-          type="button"
-          onClick={onToggleFullAccess}
-          title="Let this project's agents run OUTSIDE the sandbox — full access to your PC. Use only for projects you trust. You'll be asked to confirm."
-          style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:"var(--bg-elevated)", color:"var(--fg-muted)", border:"1px solid var(--border-strong)", borderRadius:6, fontSize:11, fontWeight:700, whiteSpace:"nowrap", cursor:"pointer" }}
-        >🔓 Full access…</button>
-      )}
-      {/* Isolation actions (parity with the Code page): Verify runs the exact
-          probe an agent's shell runs (WSL vs host); Isolate copies the project
-          into the sandbox; Sync mirrors GitHub/CLI logins into it. */}
-      {(() => {
-        const aBtn = (label: string, onClick: () => void, key: string, title: string) => (
-          <button
-            type="button" onClick={onClick} disabled={!!actBusy} title={title}
-            style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:"var(--bg-elevated)", color:"var(--fg-strong)", border:"1px solid var(--border-strong)", borderRadius:6, fontSize:11, fontWeight:700, whiteSpace:"nowrap", cursor: actBusy ? "wait" : "pointer", opacity: actBusy ? 0.6 : 1 }}
-          >{actBusy === key ? "⏳" : label}</button>
-        );
-        return (<>
-          {aBtn("🔍 Verify", verifyIsolation, "verify", "Run a probe through the agents' own shell + cwd: shows whether it executes in WSL vs the host AND whether it's sealed to ONLY this folder (can't see the rest of C:). If it runs in WSL but isn't sealed yet, this installs bubblewrap to seal it.")}
-          {!isWslPath(effectiveCwd) && aBtn("🛡 Isolate", isolate, "isolate", "Copy this project into the WSL sandbox (a sealed Linux copy). Not needed if the badge already says Isolated — that means agents already run in WSL on your real folder.")}
-        </>);
-      })()}
-      <button
-        data-ui="BridgeBadge"
-        type="button"
-        onClick={() => {
-          // Reuse the cross-page navigate hook AppShell already wires
-          // up; key="bridges" is intercepted there and opens the
-          // bridges modal popup (the full configurator). Saves us from
-          // adding a parallel "open bridges modal" event.
-          window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "bridges" } }));
-        }}
-        title="Open the Bridges configurator (Telegram / WhatsApp connections)"
-        style={{ display:"inline-flex", alignItems:"center", justifyContent:"center", height:24, padding:"2px 8px", background:bridgeBg, color:bridgeColor, border:`1px solid ${bridgeBorder}`, borderRadius:6, fontSize:11, fontWeight:600, whiteSpace:"nowrap", cursor:"pointer" }}
-      >{bridgeText}</button>
-      <span style={{ display:"inline-flex", alignItems:"center", height:32, padding:"0 12px", fontSize:11, color:"var(--fg-muted)", textTransform:"uppercase", letterSpacing:0.6 }}>Project</span>
-      <select data-ui="ProjectCombo" value={selectedId} onChange={e => onChangeProject(e.target.value)} style={{ flex:2, minWidth:200, height:32, padding:"0 12px", borderRadius:8, border:"none", background:"var(--bg-input)", color:"var(--fg-strong)", fontSize:13 }}>
-        {projects.length === 0
-          ? <option value="">(no projects — create one in Studio)</option>
-          : projects.map(p => (<option key={p.id} value={p.id}>{p.name}</option>))
-        }
-      </select>
-      <button className="ghost-btn" onClick={() => setPickerOpen(v => !v)} style={{ height:32, padding:"0 12px" }} title="Pick a team template to display on the canvas">Team…</button>
-      <button className="ghost-btn" onClick={onNewProject} title="Create a new project from a team template" style={{ height:32, padding:"0 12px" }}>+ New</button>
-      <button className="ghost-btn" onClick={onRenameProject} title="Rename the selected project" disabled={!selectedId} style={{ height:32, padding:"0 12px" }}>Rename</button>
-      <button onClick={onDeleteProject} title="Delete the selected project" disabled={!selectedId} style={{ height:32, padding:"0 12px", background: selectedId ? "rgba(255,140,140,0.10)" : "var(--bg-surface)", color: selectedId ? "#ff8c8c" : "var(--fg-subtle)", border:"none", borderRadius:8, fontSize:12, fontWeight:600, cursor: selectedId ? "pointer" : "not-allowed" }}>Delete</button>
-      {pickerOpen && (
-        <div style={{ position:"absolute", top:60, right:14, background:"var(--bg-panel)", border:"1px solid var(--border-strong)", borderRadius:10, padding:8, zIndex:50, maxHeight:340, overflow:"auto", minWidth:280, boxShadow:"0 8px 30px rgba(0,0,0,0.6)" }}>
-          <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:1, textTransform:"uppercase", padding:"6px 10px" }}>Team template</div>
-          <button onClick={() => { onPickTeam(null); setPickerOpen(false); }} style={{ display:"block", width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === null ? "rgba(var(--accent-rgb),0.12)" : "transparent", color:"var(--fg)", fontSize:12, cursor:"pointer", borderRadius:6 }}>(use project roster)</button>
-          {teams.map(t => (
-            <button key={t.id} onClick={() => { onPickTeam(t.id); setPickerOpen(false); }} style={{ display:"flex", alignItems:"center", gap:8, width:"100%", textAlign:"left", padding:"8px 12px", border:"none", background: pickedTeamId === t.id ? "rgba(var(--accent-rgb),0.12)" : "transparent", color:"var(--fg)", fontSize:12, cursor:"pointer", borderRadius:6 }}>
-              <img src={owlSrc(t.icon)} style={{ width:20, height:20, objectFit:"contain", flexShrink:0 }} />
-              <div style={{ display:"flex", flexDirection:"column", minWidth:0, flex:1 }}>
-                <span style={{ color:"var(--fg-strong)", fontWeight:600 }}>{t.display}</span>
-                <span style={{ fontSize:10, color:"var(--fg-muted)" }}>{t.category.toUpperCase()} · {t.agents.length} agents</span>
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
-      {/* Non-blocking status banner for Verify / Isolate — visual feedback for
-          every wait (the convert can take a minute; never freeze silently). */}
-      {(actBusy || actMsg) && (
-        <div style={{ position:"absolute", top:"100%", left:0, right:0, marginTop:6, zIndex:40, background:"var(--bg-panel)", border:"1px solid rgba(var(--accent-rgb),0.5)", borderRadius:10, padding:"10px 12px", display:"flex", gap:10, alignItems:"flex-start", boxShadow:"0 8px 30px rgba(0,0,0,0.5)", fontSize:12.5, color:"var(--fg)", whiteSpace:"pre-wrap", lineHeight:1.5 }}>
-          {actBusy && <span style={{ flexShrink:0, animation:"owllm-spin 1s linear infinite", display:"inline-block" }}>⏳</span>}
-          <div style={{ flex:1, minWidth:0 }}>{actMsg}</div>
-          {!actBusy && actMsg && (
-            <button onClick={() => setActMsg(null)} title="Dismiss" style={{ flexShrink:0, border:"none", background:"transparent", color:"var(--fg-muted)", cursor:"pointer", fontSize:14, lineHeight:1 }}>✕</button>
-          )}
-          <style>{`@keyframes owllm-spin { to { transform: rotate(360deg); } }`}</style>
-        </div>
-      )}
-    </div>
-  );
-}
-
 // GoalRow — agents_page.py:1757-1910. 📎 attach, goal input, Run,
 // Cancel, 📊 telemetry, 🔊 voice with ▾ menu caret. Images + audio
 // can be attached via the 📎 button (file picker) or dropped onto the
@@ -847,10 +586,13 @@ async function fileToAttachment(file: File): Promise<Attachment> {
   return { kind, mime, data_b64, filename: file.name };
 }
 
-function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachments, onBrainstorm, hasBrief }: {
+function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachments, onBrainstorm, hasBrief, leftSlot }: {
   goal: string; setGoal: (g: string) => void;
   onRun: () => void; onCancel: () => void; busy: boolean;
   attachments: Attachment[]; setAttachments: (a: Attachment[]) => void;
+  /// Compact project cluster (project dropdown + ⚙ settings + New) rendered at
+  /// the START of the run row, so the whole top is a SINGLE line.
+  leftSlot?: React.ReactNode;
   /// Opens the BrainstormPanel modal. Null disables the button — used
   /// when the project has no location set (brainstormer can't save
   /// BRIEF.md without one).
@@ -900,6 +642,7 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
   return (
     <div style={{ padding:"0 23px", margin:"12px 0", background:"transparent" }}>
       <div style={{ height:38, display:"flex", alignItems:"center", gap:10 }}>
+        {leftSlot}
         <input
           ref={fileInputRef}
           type="file"
@@ -7076,6 +6819,10 @@ export default function AgentsPage() {
   // After every mutation we refetch list_projects so the combo box +
   // selection stay accurate.
   const [newProjOpen, setNewProjOpen] = useState(false);
+  // The project popup is ONE dialog in two modes: "new" (create) and "edit"
+  // (⚙ settings for the current project). Both open the same ProjectSettingsDialog.
+  const [settingsMode, setSettingsMode] = useState<"new" | "edit">("edit");
+  const onOpenSettings = () => { setSettingsMode("edit"); setNewProjOpen(true); };
   const reloadProjects = async () => {
     try {
       const rows = await invoke<ProjectRow[]>("list_projects");
@@ -7086,7 +6833,7 @@ export default function AgentsPage() {
       return [] as ProjectRow[];
     }
   };
-  const onNewProject = () => setNewProjOpen(true);
+  const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
   const onProjectCreated = async (row: ProjectRow) => {
     const rows = await reloadProjects();
     // Select the freshly-created project. Fall back to id from the
@@ -9322,37 +9069,64 @@ export default function AgentsPage() {
           onClose={() => setDirectivesPanelOpen(false)}
         />
       )}
-      <LocationRow
-        projects={projects}
-        selectedId={selectedProjectId}
-        onChangeProject={(id) => { setSelectedProjectId(id); setPickedTeamId(null); }}
+      <ProjectSettingsDialog
+        open={newProjOpen}
+        mode={settingsMode}
+        onClose={() => setNewProjOpen(false)}
         teams={teams}
         pickedTeamId={pickedTeamId}
         onPickTeam={setPickedTeamId}
+        defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+        onCreated={onProjectCreated}
+        project={selectedProject}
         location={locationOverride}
         effectiveCwd={runCwd}
         onChangeLocation={setLocationOverride}
-        onBrowse={onBrowseProjectFolder}
         trustWrites={trustWrites}
         onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
         fullAccess={fullAccess}
         onToggleFullAccess={onToggleFullAccess}
         bridgeOn={bridgeOn}
         isolationRequested={isolationRequested}
-        onNewProject={onNewProject}
-        onRenameProject={onRenameProject}
-        onDeleteProject={onDeleteProject}
-      />
-      <NewProjectDialog
-        open={newProjOpen}
-        onClose={() => setNewProjOpen(false)}
-        onCreated={onProjectCreated}
-        teams={teams}
-        defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+        onAfterRename={() => { reloadProjects(); }}
+        onAfterDelete={() => { reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
       />
       <GoalRow
         goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy || backgroundRunning}
         attachments={attachments} setAttachments={setAttachments}
+        // Single-line top: the compact project cluster (dropdown + ⚙ settings +
+        // New) renders at the start of the run row. Everything else that used to
+        // crowd the old project strip now lives in the ⚙ ProjectSettingsDialog.
+        leftSlot={
+          <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+            <span style={{ fontSize:15 }} title="Project">📁</span>
+            <select
+              data-ui="ProjectCombo"
+              value={selectedProjectId}
+              onChange={e => { setSelectedProjectId(e.target.value); setPickedTeamId(null); }}
+              title="Switch project"
+              style={{ height:38, maxWidth:190, padding:"0 10px", borderRadius:10, border:"none", background:"var(--bg-input)", color:"var(--fg-strong)", fontSize:13 }}
+            >
+              {projects.length === 0
+                ? <option value="">(no projects — + New)</option>
+                : projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+            <button
+              data-ui="ProjectSettingsBtn"
+              onClick={onOpenSettings}
+              disabled={!selectedProjectId}
+              title="Project settings — folder, security, team, bridge, rename, delete"
+              style={{ height:38, minWidth:40, padding:"0 10px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16, cursor: selectedProjectId ? "pointer":"not-allowed", opacity: selectedProjectId?1:0.5 }}
+            >⚙</button>
+            <button
+              data-ui="NewProjectBtn"
+              onClick={onNewProject}
+              title="Create a new project"
+              style={{ height:38, padding:"0 12px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:13, fontWeight:700, cursor:"pointer" }}
+            >+ New</button>
+            <div style={{ width:1, height:24, background:"var(--border-strong)", margin:"0 2px" }} />
+          </div>
+        }
         // Brainstorm needs a project location to anchor BRIEF.md +
         // brainstorm/<png>. Disable the button (null callback) when no
         // location is set so the title attribute explains why.

@@ -440,17 +440,21 @@ function projectToTeam(p: ProjectRow): Team {
 // actually matters is the chain of specialist→specialist hand-offs:
 // an agent that depends on another's output should sit one ring
 // further out, so the diagram reads like a real flow.
-// Identify a team's orchestrator CONSISTENTLY everywhere. An agent named/based
-// "orchestrator", else the first agent. Dispatch + computeDepths already use
-// this fallback; the canvas/layout sites used to return null when no agent was
-// LITERALLY named "orchestrator" — so a project whose lead was renamed (or a
-// roster round-trip that drops the base) rendered with NO orchestrator: the
-// "orchestrator was not properly identified" report (#27). Returns null only
-// for an empty roster.
+// Identify a team's orchestrator CONSISTENTLY everywhere:
+//   1) exact role/name "orchestrator"
+//   2) a RENAMED orchestrator that keeps "orchestrator" in its name/base
+//      (e.g. "Orchi the orchestrator") — projects persist only agent NAMES, so a
+//      renamed lead loses its base="orchestrator" on reload (projectToTeam sets
+//      base=name); without this the next step wrongly crowned whatever card sat
+//      first (e.g. "Coder").
+//   3) the first agent — true last resort only.
+// (Step 2 is the stopgap; the durable fix is preserving each agent's base in the
+// project so the rename keeps base="orchestrator". Returns null for an empty roster.)
 function orchestratorOf(agents: AgentSpec[]): AgentSpec | null {
   if (!agents.length) return null;
   return agents.find(a => a.name === "orchestrator")
       ?? agents.find(a => a.base === "orchestrator")
+      ?? agents.find(a => /\borchestrator\b/i.test(a.name) || /\borchestrator\b/i.test(a.base))
       ?? agents[0];
 }
 
@@ -2896,10 +2900,7 @@ function GraphCanvas({
   }
 
   const depths = computeDepths(team);
-  const orchName =
-    team.agents.find(a => a.name === "orchestrator")?.name ??
-    team.agents.find(a => a.base === "orchestrator")?.name ??
-    team.agents[0].name;
+  const orchName = orchestratorOf(team.agents)?.name ?? team.agents[0].name;
 
   // Resolve renderable nodes. Skip agents that don't have a position
   // (defensive — shouldn't happen given autoLayout fills everything).
@@ -5186,12 +5187,14 @@ function withSyntheticCritic(team: Team | null): Team | null {
   return { ...team, agents: [...team.agents, CRITIC_SYNTHETIC_SPEC] };
 }
 
+// The DISPATCH-side orchestrator finder (used by onSupSend, the orchestrator
+// pane, prompt building, canvas pulse). Was a second copy of the exact-match +
+// agents[0] chain, so a renamed lead like "Orchi the orchestrator" fell through
+// to the first card (Coder) — and since THIS is what actually dispatches, Coder
+// went LIVE. Route it through the one shared orchestratorOf so dispatch and the
+// canvas agree on the same orchestrator.
 function findOrchestratorSpec(team: Team): AgentSpec | undefined {
-  return (
-    team.agents.find(a => a.name === "orchestrator") ??
-    team.agents.find(a => a.base === "orchestrator") ??
-    team.agents[0]
-  );
+  return orchestratorOf(team.agents) ?? undefined;
 }
 
 function buildOrchestratorPrompt(

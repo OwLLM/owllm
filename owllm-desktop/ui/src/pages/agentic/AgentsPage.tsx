@@ -122,6 +122,34 @@ function loadAgentModelsForProject(pid: string): Map<string, string> {
   } catch { /* private mode */ }
   return m;
 }
+
+// Per-agent VOICE picks persist the same way the model picks do — project- and
+// agent-scoped localStorage — so an agent's TTS voice/rate survives a restart
+// instead of resetting to default ("everything random on restart"). Was
+// in-memory only: set on change but never saved and wiped to {} on every
+// project/team change.
+const agentVoiceKey = (pid: string, agent: string) => `owllm:agent-voice:${pid}:${agent}`;
+function setAgentVoiceOverride(pid: string, agent: string, voice: VoiceConfig): void {
+  if (!pid || !agent) return;
+  try { localStorage.setItem(agentVoiceKey(pid, agent), JSON.stringify(voice)); }
+  catch { /* private mode */ }
+}
+function loadAgentVoicesForProject(pid: string): Map<string, VoiceConfig> {
+  const m = new Map<string, VoiceConfig>();
+  if (!pid) return m;
+  const prefix = `owllm:agent-voice:${pid}:`;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(prefix)) continue;
+      const v = localStorage.getItem(k);
+      if (!v) continue;
+      try { m.set(k.slice(prefix.length), JSON.parse(v) as VoiceConfig); }
+      catch { /* skip a corrupt entry */ }
+    }
+  } catch { /* private mode */ }
+  return m;
+}
 type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
 type AgentRoleBackend    = { id: string; path: string; built_in: boolean; data: any };
 type TelegramCfg = { bot_token: string; project_id: string; auto_approve?: boolean };
@@ -7297,8 +7325,10 @@ export default function AgentsPage() {
       // localStorage, project-scoped). Was wiped to empty, so the project never
       // kept its model and the orchestrator fell back to a default on reload.
       setPerAgentModel(loadAgentModelsForProject(selectedProject.id));
-      // Per-agent voice picks live alongside model picks — same scope.
-      setPerAgentVoice(new Map());
+      // Per-agent voice picks live alongside model picks — same scope, now
+      // ALSO restored from localStorage (was wiped to empty → voice reset
+      // every restart).
+      setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id));
       // Restore saved chat + per-agent transcripts INTO the shared store —
       // but ONLY if this project's session is empty (fresh load / app
       // restart). If a dispatch is still running in the background, or
@@ -7355,10 +7385,15 @@ export default function AgentsPage() {
     setSelectedEdgeIdx(null);
     setNodePositions(null);
     setSelectedNode(null);
-    // Per-agent model picks reference agent NAMES from the previous
-    // team — those names may not exist in the new team. Drop them.
-    setPerAgentModel(new Map());
-    setPerAgentVoice(new Map());
+    // RELOAD (not wipe) this project's saved per-agent model + voice picks.
+    // This effect fires on EVERY activeTeam recompute — which includes every
+    // project switch and app start — so wiping here clobbered the picks that
+    // the project-change effect had just loaded, making each agent's model
+    // look "random" after a restart. Reloading from localStorage is safe:
+    // picks are keyed by agent name, and any name not in the new team's
+    // roster is simply never looked up (harmless), while real picks survive.
+    setPerAgentModel(loadAgentModelsForProject(selectedProject?.id ?? ""));
+    setPerAgentVoice(loadAgentVoicesForProject(selectedProject?.id ?? ""));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTeam?.id]);
 
@@ -7996,12 +8031,14 @@ export default function AgentsPage() {
   /// Patch a single agent's voice config. Partial so the checkbox /
   /// voice picker / rate input can all funnel through one setter.
   const onPickAgentVoice = (agentName: string, partial: Partial<VoiceConfig>) => {
+    const merged = { ...(perAgentVoice.get(agentName) ?? DEFAULT_VOICE), ...partial };
     setPerAgentVoice(prev => {
       const next = new Map(prev);
-      const cur = next.get(agentName) ?? DEFAULT_VOICE;
-      next.set(agentName, { ...cur, ...partial });
+      next.set(agentName, merged);
       return next;
     });
+    // Persist so the agent's voice + rate survive tab switches AND restarts.
+    setAgentVoiceOverride(selectedProject?.id ?? "", agentName, merged);
   };
 
   /// Speak an agent's full reply if voice is enabled for that agent.

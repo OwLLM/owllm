@@ -399,8 +399,13 @@ function toTeam(t: TeamTemplateBackend): Team {
 // the diagram/graph view falls back to the star topology computed in
 // computeDepths().
 function projectToTeam(p: ProjectRow): Team {
-  const agents: AgentSpec[] = p.team.map(n => ({ name: n, base: n }));
   let edges: Edge[] = [];
+  // Recover each agent's ROLE (base). The project's `team` is just NAMES, so a
+  // renamed lead like "Orchi the orchestrator" otherwise loses base="orchestrator"
+  // (base=name). We persist the roster's {name, base} into graph_json on save, so
+  // read it back here. Older projects (no roster stored) fall back to base=name —
+  // the name-contains rule in orchestratorOf still catches a renamed orchestrator.
+  const baseByName = new Map<string, string>();
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
       const parsed = JSON.parse(p.graph_json);
@@ -409,10 +414,18 @@ function projectToTeam(p: ProjectRow): Team {
           .filter((e: any) => typeof e?.source === "string" && typeof e?.target === "string")
           .map((e: any) => ({ source: e.source, target: e.target }));
       }
+      if (Array.isArray(parsed?.roster)) {
+        for (const r of parsed.roster) {
+          if (r && typeof r.name === "string" && typeof r.base === "string" && r.base.trim()) {
+            baseByName.set(r.name, r.base);
+          }
+        }
+      }
     } catch {
       // Stale graph_json — silently fall back to empty.
     }
   }
+  const agents: AgentSpec[] = p.team.map(n => ({ name: n, base: baseByName.get(n) ?? n }));
   return {
     id: `project:${p.id}`,
     name: p.name,
@@ -7172,7 +7185,13 @@ export default function AgentsPage() {
         await invoke("update_project", {
           input: {
             id: selectedProject.id,
-            graph_json: JSON.stringify({ edges: editedEdges }),
+            // Keep the roster's roles in graph_json — writing only `edges` here
+            // would drop the {name, base} map that projectToTeam reads back, so a
+            // renamed agent would lose its role again on the next edge edit.
+            graph_json: JSON.stringify({
+              edges: editedEdges,
+              roster: (activeTeam?.agents ?? []).map(a => ({ name: a.name, base: a.base })),
+            }),
           },
         });
         await reloadProjects();

@@ -116,7 +116,12 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
         input: {
           name: name.trim(), description: description.trim(), location: newLocation.trim(),
           team: team.agents.map(a => a.name),
-          graph_json: team.edges.length > 0 ? JSON.stringify({ edges: team.edges }) : "",
+          // Persist the roster's roles (base) alongside the edges so a renamed
+          // agent keeps its role on reload (the `team` field is names only).
+          graph_json: JSON.stringify({
+            edges: team.edges,
+            roster: team.agents.map(a => ({ name: a.name, base: a.base })),
+          }),
           team_default_model_id: "", trust_writes: newTrust, auto_approve_all: false,
         },
       });

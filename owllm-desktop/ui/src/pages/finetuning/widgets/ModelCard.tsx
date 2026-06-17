@@ -17,11 +17,6 @@ export type ModelCardProps = {
   size?: string;
   icons?: string;
   tagChips?: TagChip[];
-  /// Subset of tagChips whose keys are currently in the active filter
-  /// set — used to draw the matched chips with extra emphasis and to
-  /// paint a glow border around the whole card so the user can see at
-  /// a glance which cards a freshly-checked filter has surfaced.
-  matchedChipKeys?: string[];
   isDownloaded?: boolean;
   isNew?: boolean;
   downloads?: string;
@@ -36,16 +31,11 @@ export type ModelCardProps = {
 
 export function ModelCard(props: ModelCardProps) {
   const {
-    modelName, modelId, description, size, icons, tagChips, matchedChipKeys,
+    modelName, modelId, description, size, icons, tagChips,
     isDownloaded = false, isNew = false,
     downloads, likes, compatibilityBadge, requiresToken = false,
     downloadProgress, selected = false, onDownload, onClick,
   } = props;
-  const matchedSet = new Set(matchedChipKeys ?? []);
-  const hasFilterMatch = matchedSet.size > 0;
-  const matchGlowColor = hasFilterMatch
-    ? (tagChips?.find((c) => matchedSet.has(c.key))?.color ?? "var(--accent)")
-    : "transparent";
 
   const [btnHover, setBtnHover] = React.useState(false);
   const [btnPressed, setBtnPressed] = React.useState(false);
@@ -66,18 +56,6 @@ export function ModelCard(props: ModelCardProps) {
     :              "1px solid rgba(var(--accent-rgb),0.4)";
 
   return (
-    <div style={{
-      // Filter-match glow ring. Drawn outside the card so it doesn't
-      // disturb CardShell's internal border/shadow logic. The colour
-      // matches the first matched chip so a checked-GGUF filter halos
-      // GGUF cards in blue, checked-LoRA halos in teal, etc.
-      borderRadius: 12,
-      padding: 0,
-      boxShadow: hasFilterMatch
-        ? `0 0 0 3px ${matchGlowColor}, 0 0 18px -2px ${matchGlowColor}`
-        : "none",
-      transition: "box-shadow 200ms ease",
-    }}>
     <CardShell
       dataUi="ModelCard"
       iconKey={modelId}
@@ -123,34 +101,26 @@ export function ModelCard(props: ModelCardProps) {
           <div style={{ fontSize: 13, color: "#d6d8de", lineHeight: 1.35 }}>{description}</div>
         )}
         {tagChips && tagChips.length > 0 && (
+          // Informational tag pills (GGUF / Instruct / LoRA / …). These describe
+          // the model; they are NOT the card's compatibility colour and they do
+          // NOT react to the filter checkboxes — the only card colour rule is the
+          // VRAM-fit border on CardShell. Render every chip at steady intensity.
           <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 2 }}>
-            {tagChips.map((c) => {
-              const matched = matchedSet.has(c.key);
-              // When some filters are active, dim chips that don't
-              // match those filters and emphasise the ones that do
-              // (subtle ring + slight scale). When no filters are
-              // active, every chip renders at full intensity.
-              const dim = hasFilterMatch && !matched;
-              return (
-                <span
-                  key={c.key}
-                  style={{
-                    background: c.color,
-                    color: "white",
-                    padding: "2px 7px",
-                    borderRadius: 10,
-                    fontSize: 10,
-                    fontWeight: 700,
-                    lineHeight: 1.4,
-                    whiteSpace: "nowrap",
-                    opacity: dim ? 0.35 : 1,
-                    boxShadow: matched ? `0 0 0 2px white, 0 0 8px ${c.color}` : "none",
-                    transform: matched ? "scale(1.05)" : "scale(1)",
-                    transition: "opacity 150ms ease, transform 150ms ease, box-shadow 150ms ease",
-                  }}
-                >{c.label}</span>
-              );
-            })}
+            {tagChips.map((c) => (
+              <span
+                key={c.key}
+                style={{
+                  background: c.color,
+                  color: "white",
+                  padding: "2px 7px",
+                  borderRadius: 10,
+                  fontSize: 10,
+                  fontWeight: 700,
+                  lineHeight: 1.4,
+                  whiteSpace: "nowrap",
+                }}
+              >{c.label}</span>
+            ))}
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center" }}>
@@ -201,7 +171,6 @@ export function ModelCard(props: ModelCardProps) {
         </div>
       }
     />
-    </div>
   );
 }
 

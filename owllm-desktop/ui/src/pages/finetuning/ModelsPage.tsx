@@ -117,6 +117,11 @@ const CARD_GRID: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fill, minmax(290px, 390px))",
   gap: 10,
+  // Each card sizes to its OWN content (CardShell has minHeight:220), not to
+  // the tallest card in its grid row. Without this, the default `stretch`
+  // makes a card's height depend on whoever it shares a row with — so toggling
+  // a filter (which reflows the grid) appears to "resize cards randomly".
+  alignItems: "start",
 };
 
 const emptyState: React.CSSProperties = {
@@ -1039,7 +1044,6 @@ export default function ModelsPage() {
                   description={h.pipelineTag ? `Pipeline: ${h.pipelineTag}` : undefined}
                   icons={iconsForTags(h.tags)}
                   tagChips={tagChipsForTags(h.tags)}
-                  matchedChipKeys={tagChipsForTags(h.tags).filter((c) => filters.has(c.key as FilterKey)).map((c) => c.key)}
                   isNew={isNewFlag}
                   downloads={fmtCount(h.downloads)}
                   likes={fmtCount(h.likes)}
@@ -1088,7 +1092,6 @@ export default function ModelsPage() {
               size={`${r.paramsB.toFixed(1)}B params`}
               icons={iconsForTags(r.tags)}
               tagChips={tagChipsForTags(r.tags)}
-              matchedChipKeys={tagChipsForTags(r.tags).filter((c) => filters.has(c.key as FilterKey)).map((c) => c.key)}
               isNew={r.isNew}
               downloads={fmtCount(r.downloads)}
               likes={fmtCount(r.likes)}

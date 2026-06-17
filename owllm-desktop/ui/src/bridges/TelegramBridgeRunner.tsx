@@ -263,10 +263,31 @@ export default function TelegramBridgeRunner() {
               .catch(e => console.error("[telegram] handle failed", e));
           }
         } catch (e: any) {
-          console.error("[telegram] poll loop error", e);
-          emitRuntimeStatus({ status: "error", lastError: String(e?.message ?? e) });
+          const errMsg = String(e?.message ?? e);
           if (dead) return;
-          await sleep(5000);
+          // 409 Conflict = ANOTHER process is already long-polling this bot
+          // token (almost always a second OwLLM window). Telegram hands each
+          // update to whichever poller grabs it, so two instances SPLIT the
+          // conversation between them — which is how the same chat got
+          // dispatched to two different projects (each instance routes by its
+          // OWN per-window state). Don't fight over it: yield to the active
+          // poller and back off hard. We keep retrying so THIS window can take
+          // over if the other one stops/closes — but only ONE polls at a time.
+          const isConflict = /\b409\b/.test(errMsg)
+            || /conflict/i.test(errMsg)
+            || /terminated by other getupdates/i.test(errMsg);
+          if (isConflict) {
+            console.warn("[telegram] 409 Conflict — another OwLLM window is polling this bot; yielding.");
+            emitRuntimeStatus({
+              status: "error",
+              lastError: "Another OwLLM window is already handling this bot — yielding. Only one window polls a bot token at a time (close the other window or Stop its bridge to take over here).",
+            });
+            await sleep(45000);
+          } else {
+            console.error("[telegram] poll loop error", e);
+            emitRuntimeStatus({ status: "error", lastError: errMsg });
+            await sleep(5000);
+          }
         }
       }
     })();

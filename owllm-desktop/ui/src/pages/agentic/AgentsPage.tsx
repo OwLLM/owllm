@@ -440,13 +440,24 @@ function projectToTeam(p: ProjectRow): Team {
 // actually matters is the chain of specialist→specialist hand-offs:
 // an agent that depends on another's output should sit one ring
 // further out, so the diagram reads like a real flow.
+// Identify a team's orchestrator CONSISTENTLY everywhere. An agent named/based
+// "orchestrator", else the first agent. Dispatch + computeDepths already use
+// this fallback; the canvas/layout sites used to return null when no agent was
+// LITERALLY named "orchestrator" — so a project whose lead was renamed (or a
+// roster round-trip that drops the base) rendered with NO orchestrator: the
+// "orchestrator was not properly identified" report (#27). Returns null only
+// for an empty roster.
+function orchestratorOf(agents: AgentSpec[]): AgentSpec | null {
+  if (!agents.length) return null;
+  return agents.find(a => a.name === "orchestrator")
+      ?? agents.find(a => a.base === "orchestrator")
+      ?? agents[0];
+}
+
 function computeDepths(team: Team): Map<string, number> {
   const out = new Map<string, number>();
   if (!team.agents.length) return out;
-  const orchName =
-    team.agents.find(a => a.name === "orchestrator")?.name ??
-    team.agents.find(a => a.base === "orchestrator")?.name ??
-    team.agents[0].name;
+  const orchName = orchestratorOf(team.agents)?.name ?? team.agents[0].name;
   out.set(orchName, 0);
   // Synthetic Critic — when present in the augmented team, it sits at
   // the same layer as the orchestrator. They are peers: the critic
@@ -1072,7 +1083,7 @@ function tileAccentFor(spec: AgentSpec): string {
 function arrangeTilesFourCol(team: Team | null): (AgentSpec | null)[] {
   if (!team) return [];
   const agents = team.agents;
-  const orch = agents.find(a => a.base === "orchestrator" || a.name === "orchestrator") ?? null;
+  const orch = orchestratorOf(agents);
   let critic = agents.find(a => a.name === CRITIC_AGENT_NAME) ?? null;
   // Auto-inject synthetic Critic when the team has an orchestrator —
   // same rule the canvas applies so the two views show the same roster.
@@ -1173,7 +1184,7 @@ function AgentChatGrid({
     : (() => {
       // Small team: order [orch, critic, design(PO first), build] and
       // pack with no nulls.
-      const orch = filledArr.find(a => a.base === "orchestrator" || a.name === "orchestrator");
+      const orch = orchestratorOf(filledArr) ?? undefined;
       let critic = filledArr.find(a => a.name === CRITIC_AGENT_NAME);
       if (!critic && orch) critic = { name: CRITIC_AGENT_NAME, base: "critic", icon: null };
       const designs = filledArr
@@ -2195,7 +2206,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   // orchestrator). The orchestrator's coords sit at the centre (cx,cy).
   const nodeByName = new Map<string, { x: number; y: number }>();
   for (const n of nodes) nodeByName.set(n.name, { x: n.x, y: n.y });
-  const orchSpec = team?.agents.find(a => a.name === "orchestrator" || a.base === "orchestrator");
+  const orchSpec = team ? orchestratorOf(team.agents) : null;
   if (orchSpec) nodeByName.set(orchSpec.name, { x: cx, y: cy });
   // Non-trivial routing edges (anything that isn't orchestrator → X,
   // because those are already drawn as star spokes). Drawing them on

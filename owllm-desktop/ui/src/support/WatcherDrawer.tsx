@@ -21,6 +21,7 @@ import {
   providerFor,
   type ModelInfo,
   type HistoryItem,
+  type Attachment,
 } from "../pages/agentic/dispatch";
 
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
@@ -132,9 +133,63 @@ const PAGE_DOCS: Record<string, string> = {
     "MCP — connect MCP servers so agents gain extra tools (filesystem, git, web, integrations). Add a server, it's verified, then its tools are available to the team.",
 };
 
-function rowIcon(r: ReadinessRow): string {
-  return r.ok ? "✅" : r.warn ? "⚠️" : "❌";
-}
+/// The guided "Help using the app" option list. Each topic shows a real,
+/// app-accurate step-by-step. (Future: each gets a short animated walkthrough.)
+const HELP_TOPICS: { key: string; label: string; steps: string }[] = [
+  {
+    key: "finetune",
+    label: "🎓 Fine-tune a model",
+    steps:
+      "🎓 FINE-TUNE A MODEL (Train page)\n" +
+      "1. Models page → download a base model (a 🟢 one that fits your GPU), or pick one you already have.\n" +
+      "2. Train page → if the “Environment” button says it isn't installed, click it once to build the fine-tuning Python env. (This is the ONLY feature that needs that env — not agents, Code, Chat or serving.)\n" +
+      "3. Choose your base model + a dataset (a .jsonl of examples).\n" +
+      "4. Set the method (LoRA/QLoRA), epochs and learning rate — the defaults are sane.\n" +
+      "5. Pick your GPU, then Start, and watch the loss fall in the log.\n" +
+      "6. The result lands in Models → Tuned, ready to chat with or serve.",
+  },
+  {
+    key: "local",
+    label: "💻 Use a local model",
+    steps:
+      "💻 USE A LOCAL MODEL (private, offline)\n" +
+      "1. Models page → Browse → download a GGUF. A card's colour tells you the fit: 🟢 fits your GPU, 🟡 tight, 🔴 too big.\n" +
+      "2. To run it, just open Chat (or send to it from a team) — the model server auto-starts. You can also start it by hand on the Server page.\n" +
+      "3. Chat page → pick the local model → talk. Vision models can read pasted images (their projector is fetched automatically on download).",
+  },
+  {
+    key: "abliterate",
+    label: "🚫 Abliterate a model",
+    steps:
+      "🚫 ABLITERATE A MODEL (strip refusals)\n" +
+      "1. Models page → download the base model you want to uncensor (full transformers weights, not a GGUF).\n" +
+      "2. Train page → scroll to the Abliterate section → the ℹ icon explains the recipe (FailSpy refusal-direction removal).\n" +
+      "3. Pick that base model and Run. It writes a new copy to Models → Tuned named “<model>__abliterated”.\n" +
+      "4. Optionally convert it to GGUF and serve it like any local model. (You'll be offered to reclaim the cached source weights afterward.)",
+  },
+  {
+    key: "coder",
+    label: "⌨️ Coding agent",
+    steps:
+      "⌨️ CODING AGENT (Code page)\n" +
+      "1. Give it a brain: Accounts page → sign into Claude Code or Codex (subscription), or paste an API key — or run a local model.\n" +
+      "2. Code page → set the project Folder at the top and pick the model.\n" +
+      "3. For a sandbox, make sure the green “Isolated” badge shows — it runs inside WSL and can't touch the rest of your disk.\n" +
+      "4. Type your task. It plans, edits files in that folder, and runs commands. The chat + plan persist when you switch tabs.",
+  },
+  {
+    key: "agentic",
+    label: "🧩 Agentic workflow",
+    steps:
+      "🧩 AGENTIC WORKFLOW (Agentic Team page)\n" +
+      "1. Have at least one working model (Accounts for cloud/subscription, or a running local model).\n" +
+      "2. Agents page → 📁 pick or “+ New” a project, then ⚙ set its Folder.\n" +
+      "3. Design the team: 🧠 Brainstorm researches your idea and assembles a runnable team, or start from a template.\n" +
+      "4. Type a goal → Run. The orchestrator leads and hands off to specialists along the arrows between the cards.\n" +
+      "5. Optional: connect a Bridge (Telegram/WhatsApp/Discord/Slack/email) to drive the team by chat.",
+  },
+];
+
 
 // Turn a raw model/CLI failure into ONE clean line for the user. A failed CLI
 // (e.g. codex hitting a usage limit) throws an error whose message is the entire
@@ -191,9 +246,6 @@ export default function WatcherDrawer({
   // return — a hook below it changes the hook count between renders and
   // crashes React with error #310 (caught by the release smoke test).
   const lastCapture = React.useRef<WindowCapture | null>(null);
-  const reportPreview = React.useRef<{ json: string; png: string | null } | null>(null);
-  const reportTitleRef = React.useRef<string>("");
-  const [reportArmed, setReportArmed] = React.useState(false);
   // User-chosen model via the SHARED ModelPicker (same catalogue as every
   // other surface — local models, tuned, subscriptions, API keys, Auto).
   // Empty = the Watcher's default policy (running local first). Persisted.
@@ -213,6 +265,12 @@ export default function WatcherDrawer({
   // on — so clicking report opens this composer instead of sending blind.
   const [reportingEntry, setReportingEntry] = React.useState<Entry | null>(null);
   const [reportNote, setReportNote] = React.useState("");
+  // Top-level navigation: the Watcher opens on a 1×2 "home" menu (Help vs
+  // Report a bug); each choice drills into its own surface.
+  const [view, setView] = React.useState<"home" | "help" | "bug">("home");
+
+  // Always land on the home menu when the drawer (re)opens.
+  React.useEffect(() => { if (open) setView("home"); }, [open]);
 
   React.useEffect(() => {
     if (!open) return;
@@ -282,72 +340,6 @@ export default function WatcherDrawer({
     setEntries((es) => [...es, { from, text, imageDataUrl }]);
 
 
-  const checkSetup = async () => {
-    say("Check my setup", "you");
-    setBusy(true);
-    try {
-      const s = await invoke<SupportSnapshot>("support_snapshot");
-      const lines = [
-        `OWLLM ${s.appVersion} · ${s.os}/${s.arch}`,
-        `CPU: ${s.cpu || "?"} · RAM ${Math.round(s.ramTotalGb)} GB`,
-        `GPU: ${s.gpus.length ? s.gpus.join(", ") : "none detected"}`,
-        ``,
-        `${rowIcon(s.readiness.wsl)} WSL / Linux sandbox — ${s.readiness.wsl.detail}`,
-        `${rowIcon(s.readiness.gpu)} GPU & CUDA — ${s.readiness.gpu.detail}`,
-        `${rowIcon(s.readiness.env)} Fine-tuning env — ${s.readiness.env.detail}`,
-        `${rowIcon(s.readiness.runtime)} Local LLM runtime — ${s.readiness.runtime.detail}`,
-        ``,
-        s.server.running
-          ? `🟢 Model server: running (${s.server.model_id ?? "?"} on :${s.server.port ?? "?"})`
-          : `⚪ Model server: not running${s.server.message ? ` — ${s.server.message}` : ""}`,
-        `📦 Modules: ${s.modules.length ? s.modules.join(", ") : "none installed"}`,
-      ];
-      say(lines.join("\n"));
-      const bad = [s.readiness.wsl, s.readiness.env, s.readiness.runtime].filter((r) => !r.ok && !r.warn);
-      if (bad.length > 0) {
-        say("Something above is ❌ — the Home page has a Set-up button for each red row.");
-      }
-    } catch (e) {
-      say(`I couldn't read the app state: ${e}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  // User-approved capture of the APP WINDOW ONLY (in-app modals included —
-  // they live in the same WebView surface). The preview is shown before
-  // anything could ever join a report; nothing is sent anywhere. The last
-  // capture is kept so "Report a bug" can offer to attach it.
-  // (lastCapture/reportPreview/reportArmed hooks are declared ABOVE the
-  // early return with the other hooks — see the hooks block.)
-  const captureApp = async () => {
-    say("Capture current app", "you");
-    setBusy(true);
-    // Step the Watcher OUT of the shot first — otherwise the capture is
-    // just this drawer covering the app, and the bug behind is invisible.
-    // We stay mounted (visibility:hidden) and wait for the webview to
-    // repaint without us, then capture, then come back.
-    setSelfHidden(true);
-    try {
-      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-      await new Promise((r) => setTimeout(r, 180));
-      const c = await invoke<WindowCapture>("support_capture_window");
-      lastCapture.current = c;
-      setSelfHidden(false);
-      say(
-        `Here's the capture (${c.width}×${c.height}) — the app as it was, with the Watcher stepped out of the way so the actual screen shows through. Not included: ${c.notCaptured}. ` +
-        "It stays on this device unless you attach it to a report later.",
-        "watcher",
-        `data:image/png;base64,${c.pngBase64}`,
-      );
-    } catch (e) {
-      setSelfHidden(false);
-      say(`I couldn't capture the window: ${e}`);
-    } finally {
-      setBusy(false);
-    }
-  };
-
   // ONE-CLICK report of a specific Watcher message (the screenshot, the
   // "Check my setup" result, a diagnosis…) AS a bug. Packages that exact
   // content + the live diagnostics + any screenshot, redacts, and sends
@@ -408,31 +400,16 @@ export default function WatcherDrawer({
     }
   };
 
-  // Local-only activity stats (Slice 4): product events only — counts of
-  // pages visited, installs, server starts, tool failures. View + clear.
-  // First-run onboarding: explain the essentials (a model = a brain, then run
-  // a team) and open the full GitHub guide. The text is plain (the chat renders
-  // pre-wrap, not markdown), so no ** or links inside.
-  const onboard = () => {
-    say("I'm new here — help me onboard", "you");
-    say(
-      "Welcome! 🦉 Here's the short path to a working agent:\n\n" +
-      "1) GIVE YOUR AGENTS A BRAIN (a model). Two ways — you can do either, or both:\n" +
-      "   • Connect a subscription (Accounts page): Claude, OpenAI, Gemini, or Kimi. Uses an AI plan you already pay for — no GPU needed. Click Test after connecting. Easiest.\n" +
-      "   • Run a local model: download a GGUF on the Models page, then start it on the Server page. Private, offline, runs on your own hardware.\n\n" +
-      "2) (RECOMMENDED) TURN ON ISOLATION. On the Home page, set up WSL so agents run sandboxed in Linux and can't touch your Windows files. On the Agents page, press 🛡 Isolate — your GitHub/CLI logins mirror in automatically.\n\n" +
-      "3) RUN A TEAM. Agents page → point at a project folder, type a goal, hit Run.\n\n" +
-      "Ask me anything below — “how do I connect Claude?”, “why won't my model start?” — I read your live app state and walk you through it.",
-    );
-  };
-
   /// Free-text AI support: snapshot as grounding, auto-chosen model,
-  /// explicit consent before any cloud use, streamed reply.
-  const ask = async (raw?: string) => {
-    const text = (raw ?? draft).trim();
+  /// explicit consent before any cloud use, streamed reply. An optional
+  /// screenshot (base64 PNG) is shown in the chat AND handed to the model
+  /// so a vision model can actually read the screen ("Screenshot and ask").
+  const ask = async (raw?: string, imageB64?: string | null) => {
+    const typed = (raw ?? draft).trim();
+    const text = typed || (imageB64 ? "Here's my screen — what do you see, and what should I do?" : "");
     if (!text || busy) return;
     setDraft("");
-    say(text, "you");
+    say(text, "you", imageB64 ? `data:image/png;base64,${imageB64}` : undefined);
     const choice = chooseModel();
     if (choice.kind === "none") {
       say(
@@ -491,11 +468,19 @@ export default function WatcherDrawer({
         `=== APP SNAPSHOT (live state) ===\n${JSON.stringify(snapshot)}`;
       let reply: string;
       if (choice.kind === "local") {
+        // Local vision models read the screenshot via an OpenAI multimodal
+        // parts array; text-only when there's no image.
+        const userContent = imageB64
+          ? [
+              { type: "text", text },
+              { type: "image_url", image_url: { url: `data:image/png;base64,${imageB64}` } },
+            ]
+          : text;
         reply = await streamLocalChat({
           port: choice.port,
           modelId: choice.modelId,
           systemPrompt: system,
-          userContent: text,
+          userContent,
           temperature: 0.3,
           signal: ctrl.signal,
           onDelta,
@@ -503,9 +488,14 @@ export default function WatcherDrawer({
           allowedTools: [], // support chat reads the snapshot; no tools
         });
       } else {
+        // Cloud/subscription: the screenshot rides as a native image attachment.
+        const attachments: Attachment[] | undefined = imageB64
+          ? [{ kind: "image", mime: "image/png", data_b64: imageB64 }]
+          : undefined;
         reply = await streamChatCompletion(
           0, choice.modelId, choice.provider, system, text, 0.3, ctrl.signal,
           onDelta, undefined, historyRef.current, false,
+          undefined, undefined, attachments,
         );
       }
       historyRef.current = [
@@ -528,92 +518,89 @@ export default function WatcherDrawer({
     }
   };
 
-  // Bug report: describe → assemble → REDACT → preview → ONE-CLICK SEND to
-  // the OwLLM team's GitHub intake (issue + committed bundle the team and
-  // the AI fixer can screen). Redaction runs before the preview; the user
-  // sees exactly what goes, then sends. Local save is only a fallback when
-  // sending fails (e.g. GitHub not connected).
-  const reportBug = async () => {
-    if (reportArmed && reportPreview.current) {
-      // Second click = explicit consent → SEND to the team.
-      setBusy(true);
-      try {
-        const sent = await invoke<{ issueUrl: string; bundleUrl: string }>("support_send_report", {
-          title: reportTitleRef.current || "In-app bug report",
-          bodyMd: reportPreview.current.json
-            ? "```json\n" + reportPreview.current.json + "\n```"
-            : "(no diagnostics)",
-          reportJson: reportPreview.current.json,
-          pngBase64: reportPreview.current.png,
-        });
-        say(
-          `✅ Sent to the OwLLM team. They (and the AI fixer) can see it here:\n${sent.issueUrl}\n\nThanks — that's exactly what they need to reproduce and fix it.`,
-        );
-      } catch (e) {
-        // Fallback: save locally so the report isn't lost.
-        try {
-          const dir = await invoke<string>("support_export_report", {
-            reportJson: reportPreview.current.json,
-            pngBase64: reportPreview.current.png,
-          });
-          say(`I couldn't send it directly (${e}).\n\nSo I saved it locally instead, at:\n${dir}\n\nMost likely GitHub isn't connected yet — sign in on the Home page and try again to send with one click.`);
-        } catch (e2) {
-          say(`Sending failed (${e}) and the local fallback also failed (${e2}).`);
-        }
-      } finally {
-        reportPreview.current = null;
-        setReportArmed(false);
-        setBusy(false);
-      }
-      return;
-    }
-    const description = draft.trim();
-    if (!description) {
-      say("Report a bug", "you");
-      say("Type what went wrong in the box below (what you did, what you expected, what happened), then press “Report a bug” again. I'll assemble a redacted report and show you EXACTLY what gets sent before anything leaves.");
-      return;
-    }
-    reportTitleRef.current = description.length > 70 ? description.slice(0, 70) + "…" : description;
-    say(`Report a bug: ${description}`, "you");
-    setBusy(true);
-    setDraft("");
+  // ── Home → Help: pick a model, get guided walkthroughs, screenshot+ask ──
+  const enterHelp = () => {
+    historyRef.current = [];
+    setReportingEntry(null);
+    setEntries([{
+      from: "watcher",
+      text: "What do you need help with? Pick a topic below for a step-by-step — or take a screenshot and ask me anything about what's on your screen.",
+    }]);
+    setView("help");
+  };
+
+  const showTopic = (t: { label: string; steps: string }) => {
+    if (busy) return;
+    say(t.label, "you");
+    say(`${t.steps}\n\n🎬 A short animated walkthrough of this will land here in a future update.`);
+  };
+
+  // Capture the app window, then hand it + the user's question to the model.
+  const screenshotAndAsk = async () => {
+    if (busy) return;
+    setSelfHidden(true);
+    let png: string | null = null;
     try {
-      const snapshot = await invoke<SupportSnapshot>("support_snapshot").catch(() => null);
-      const lastAi = [...entries].reverse().find((e) => e.from === "watcher" && !e.imageDataUrl)?.text ?? null;
-      const bundle = {
-        kind: "owllm-bug-report",
-        createdAt: new Date().toISOString(),
-        appVersion: snapshot?.appVersion ?? "?",
-        page: { activeKey, mode },
-        description,
-        assistantSummary: lastAi,
-        snapshot,
-        activity: getActivity(),
-        screenshotAttached: lastCapture.current != null,
-      };
-      // Redact BEFORE preview — secrets must not even reach the preview.
-      const json = redactForReport(JSON.stringify(bundle, null, 2));
-      reportPreview.current = { json, png: lastCapture.current?.pngBase64 ?? null };
-      setReportArmed(true);
-      const shown = json.length > 5000 ? `${json.slice(0, 5000)}\n… (${json.length - 5000} more chars — the full text is what gets sent)` : json;
-      say(
-        "Here is EXACTLY what gets sent to the OwLLM team (already redacted — keys, tokens and home paths are scrubbed):\n\n" +
-        shown +
-        (lastCapture.current ? "\n\n+ the app screenshot below." : "\n\nNo screenshot attached — use “Capture current app” first if you want one included.") +
-        "\n\nPress “Send to OwLLM” to submit it as a GitHub issue the team can act on, or keep chatting to discard it.",
-        "watcher",
-        lastCapture.current ? `data:image/png;base64,${lastCapture.current.pngBase64}` : undefined,
-      );
+      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+      await new Promise((r) => setTimeout(r, 180));
+      const c = await invoke<WindowCapture>("support_capture_window");
+      lastCapture.current = c;
+      png = c.pngBase64;
     } catch (e) {
-      say(`I couldn't assemble the report: ${e}`);
+      setSelfHidden(false);
+      say(`I couldn't capture the window: ${e}`);
+      return;
+    }
+    setSelfHidden(false);
+    await ask(draft.trim() || undefined, png);
+  };
+
+  // ── Home → Report a bug: auto-screenshot, then open the description box ──
+  const startBugReport = async () => {
+    historyRef.current = [];
+    setReportNote("");
+    setView("bug");
+    setBusy(true);
+    setSelfHidden(true);
+    try {
+      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+      await new Promise((r) => setTimeout(r, 180));
+      const c = await invoke<WindowCapture>("support_capture_window");
+      lastCapture.current = c;
+      setSelfHidden(false);
+      const shot: Entry = {
+        from: "watcher",
+        text: `📸 Screenshot captured (${c.width}×${c.height}). Describe what went wrong below — what you did, what you expected, what happened — then send it to the OwLLM team.`,
+        imageDataUrl: `data:image/png;base64,${c.pngBase64}`,
+      };
+      setEntries([shot]);
+      setReportingEntry(shot);
+    } catch (e) {
+      setSelfHidden(false);
+      const noShot: Entry = { from: "watcher", text: `I couldn't grab a screenshot (${e}), but you can still describe the bug below and send it.` };
+      setEntries([noShot]);
+      setReportingEntry(noShot);
     } finally {
       setBusy(false);
     }
   };
 
+  const goHome = () => { setReportingEntry(null); setView("home"); };
+
   const actionBtn: React.CSSProperties = {
     padding: "7px 12px", borderRadius: 8, border: "1px solid var(--border-strong)",
     background: "var(--bg-elevated)", color: "var(--fg-strong)", fontSize: 12.5,
+    fontWeight: 700, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
+  };
+  const homeCard: React.CSSProperties = {
+    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+    gap: 10, padding: "30px 16px", borderRadius: 14, textAlign: "center", minHeight: 170,
+    border: "1px solid rgba(var(--accent-rgb),0.45)", background: "var(--bg-card)",
+    color: "var(--fg-strong)", cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
+  };
+  const topicBtn: React.CSSProperties = {
+    padding: "6px 11px", borderRadius: 999, border: "1px solid rgba(var(--accent-rgb),0.40)",
+    background: "rgba(var(--accent-rgb),0.10)", color: "var(--accent)", fontSize: 12,
     fontWeight: 700, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
   };
 
@@ -649,8 +636,17 @@ export default function WatcherDrawer({
           padding: "0 16px", position: "relative",
           borderBottom: "1px solid rgba(var(--accent-rgb),0.30)",
         }}>
+          {view !== "home" && (
+            <button
+              onClick={goHome}
+              title="Back to menu"
+              style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", width: 30, height: 24, border: "none", background: "rgba(var(--accent-rgb),0.18)", color: "var(--accent)", fontSize: 14, cursor: "pointer", borderRadius: 5 }}
+            >←</button>
+          )}
           <div style={{ fontWeight: 800, fontSize: 16, letterSpacing: 0.4, lineHeight: 1.1 }}>The Watcher</div>
-          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>local support assistant</div>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+            {view === "help" ? "help using the app" : view === "bug" ? "report a bug" : "local support assistant"}
+          </div>
           <button
             onClick={onClose}
             title="Close (Esc)"
@@ -658,147 +654,164 @@ export default function WatcherDrawer({
           >✕</button>
         </div>
 
-        <div ref={listRef} style={{ flex: 1, overflow: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
-          {entries.map((e, i) => (
-            <div key={i} style={{
-              alignSelf: e.from === "you" ? "flex-end" : "flex-start",
-              maxWidth: "88%", padding: "8px 12px", borderRadius: 10,
-              whiteSpace: "pre-wrap", fontSize: 12.5, lineHeight: 1.55,
-              background: e.from === "you" ? "rgba(var(--accent-rgb),0.16)" : "var(--bg-card)",
-              border: `1px solid ${e.from === "you" ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"}`,
-              color: "var(--fg)",
-            }}>
-              {e.text}
-              {e.imageDataUrl && (
-                <img
-                  src={e.imageDataUrl}
-                  alt="app capture preview"
-                  style={{ display: "block", marginTop: 8, maxWidth: "100%", borderRadius: 8, border: "1px solid var(--border-strong)" }}
-                />
-              )}
-              {/* One-click: report THIS message (screenshot / setup check /
-                  diagnosis) as a bug, straight to the OwLLM team. Shown on
-                  substantive Watcher messages (not the greeting, transient
-                  status lines, or the live-streaming tail). */}
-              {e.from === "watcher" && i > 0 && !(e as Entry & { _live?: boolean })._live
-                && !e.text.startsWith("(") && !e.text.startsWith("✅") && !e.text.startsWith("Report this")
-                && (e.imageDataUrl || e.text.trim().length > 20) && (
-                <button
-                  onClick={() => { setReportingEntry(e); setReportNote(""); }}
-                  disabled={busy}
-                  title="Describe what's wrong, then send this view + diagnostics + any screenshot to the OwLLM team."
+        {view === "home" ? (
+          /* Landing menu — the 1×2 table: Help using the app · Report a bug. */
+          <div style={{ padding: 22, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "stretch" }}>
+            <button style={homeCard} disabled={busy} onClick={enterHelp}>
+              <div style={{ fontSize: 32 }}>🛟</div>
+              <div style={{ fontWeight: 800, fontSize: 15 }}>Help using the app</div>
+              <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+                Pick a model, get guided walkthroughs, or screenshot your screen and ask.
+              </div>
+            </button>
+            <button style={homeCard} disabled={busy} onClick={startBugReport}>
+              <div style={{ fontSize: 32 }}>🐞</div>
+              <div style={{ fontWeight: 800, fontSize: 15 }}>Report a bug</div>
+              <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+                Grabs a screenshot automatically and opens a box to describe the issue.
+              </div>
+            </button>
+          </div>
+        ) : (
+          <>
+            <div ref={listRef} style={{ flex: 1, overflow: "auto", padding: 14, display: "flex", flexDirection: "column", gap: 10 }}>
+              {entries.map((e, i) => (
+                <div key={i} style={{
+                  alignSelf: e.from === "you" ? "flex-end" : "flex-start",
+                  maxWidth: "88%", padding: "8px 12px", borderRadius: 10,
+                  whiteSpace: "pre-wrap", fontSize: 12.5, lineHeight: 1.55,
+                  background: e.from === "you" ? "rgba(var(--accent-rgb),0.16)" : "var(--bg-card)",
+                  border: `1px solid ${e.from === "you" ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"}`,
+                  color: "var(--fg)",
+                }}>
+                  {e.text}
+                  {e.imageDataUrl && (
+                    <img
+                      src={e.imageDataUrl}
+                      alt="app capture preview"
+                      style={{ display: "block", marginTop: 8, maxWidth: "100%", borderRadius: 8, border: "1px solid var(--border-strong)" }}
+                    />
+                  )}
+                  {/* One-click: report THIS message (a diagnosis / screenshot)
+                      as a bug. Only in the Help view — the bug view already IS
+                      a report. Skips the greeting, status lines, the live tail. */}
+                  {view === "help" && e.from === "watcher" && i > 0 && !(e as Entry & { _live?: boolean })._live
+                    && !e.text.startsWith("(") && !e.text.startsWith("✅") && !e.text.startsWith("Report this")
+                    && (e.imageDataUrl || e.text.trim().length > 20) && (
+                    <button
+                      onClick={() => { setReportingEntry(e); setReportNote(""); }}
+                      disabled={busy}
+                      title="Describe what's wrong, then send this view + diagnostics + any screenshot to the OwLLM team."
+                      style={{
+                        marginTop: 9, display: "inline-flex", alignItems: "center", gap: 5,
+                        padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 800,
+                        border: "1px solid rgba(var(--accent-rgb),0.45)",
+                        background: "rgba(var(--accent-rgb),0.10)",
+                        color: "var(--accent)", cursor: busy ? "wait" : "pointer",
+                      }}
+                    >🐞 Report this as a bug</button>
+                  )}
+                </div>
+              ))}
+            </div>
+
+            {/* Note composer — the description box. In the bug view it opens
+                automatically (with the auto-screenshot attached); in the help
+                view it opens when "Report this as a bug" is clicked. */}
+            {reportingEntry && (
+              <div style={{
+                margin: "0 14px", padding: 12, borderRadius: 10,
+                background: "var(--bg-elevated)", border: "1px solid rgba(var(--accent-rgb),0.45)",
+                display: "flex", flexDirection: "column", gap: 8,
+              }}>
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-strong)" }}>
+                  Describe the bug {reportingEntry.imageDataUrl ? "(screenshot attached 📸)" : ""}
+                </div>
+                <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+                  What did you do, what did you expect, what happened? This is what the team reads first.
+                </div>
+                <textarea
+                  value={reportNote}
+                  onChange={(e) => setReportNote(e.target.value)}
+                  autoFocus
+                  rows={3}
+                  placeholder="e.g. Agents won't run isolated even though WSL is ready — it tells me to install the training env, which makes no sense."
                   style={{
-                    marginTop: 9, display: "inline-flex", alignItems: "center", gap: 5,
-                    padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 800,
-                    border: "1px solid rgba(var(--accent-rgb),0.45)",
-                    background: "rgba(var(--accent-rgb),0.10)",
-                    color: "var(--accent)", cursor: busy ? "wait" : "pointer",
+                    resize: "vertical", minHeight: 56, borderRadius: 8, padding: "8px 10px",
+                    fontSize: 12.5, fontFamily: "inherit",
+                    background: "var(--bg-input)", color: "var(--fg-strong)", border: "1px solid var(--border)",
                   }}
-                >🐞 Report this as a bug</button>
-              )}
-            </div>
-          ))}
-        </div>
+                />
+                <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                  <button
+                    style={{ ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800, opacity: busy || !reportNote.trim() ? 0.5 : 1 }}
+                    disabled={busy || !reportNote.trim()}
+                    onClick={async () => { const ent = reportingEntry; const note = reportNote; setReportingEntry(null); setReportNote(""); await reportEntry(ent, note); }}
+                    title="Send your description + this view + diagnostics + any screenshot to the OwLLM team."
+                  >📤 Send report</button>
+                  <button style={actionBtn} disabled={busy} onClick={() => { setReportNote(""); if (view === "bug") goHome(); else setReportingEntry(null); }}>Cancel</button>
+                </div>
+              </div>
+            )}
 
-        {/* Note composer — opens when "Report this as a bug" is clicked so the
-            user describes the problem (otherwise a screenshot report carries
-            only the auto-caption, which the team can't act on). */}
-        {reportingEntry && (
-          <div style={{
-            margin: "0 14px", padding: 12, borderRadius: 10,
-            background: "var(--bg-elevated)", border: "1px solid rgba(var(--accent-rgb),0.45)",
-            display: "flex", flexDirection: "column", gap: 8,
-          }}>
-            <div style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-strong)" }}>
-              Describe the bug {reportingEntry.imageDataUrl ? "(screenshot attached 📸)" : ""}
-            </div>
-            <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
-              What did you do, what did you expect, what happened? This is what the team reads first.
-            </div>
-            <textarea
-              value={reportNote}
-              onChange={(e) => setReportNote(e.target.value)}
-              autoFocus
-              rows={3}
-              placeholder="e.g. Agents won't run isolated even though WSL is ready — it tells me to install the training env, which makes no sense."
-              style={{
-                resize: "vertical", minHeight: 56, borderRadius: 8, padding: "8px 10px",
-                fontSize: 12.5, fontFamily: "inherit",
-                background: "var(--bg-input)", color: "var(--fg-strong)", border: "1px solid var(--border)",
-              }}
-            />
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <button
-                style={{ ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800, opacity: busy || !reportNote.trim() ? 0.5 : 1 }}
-                disabled={busy || !reportNote.trim()}
-                onClick={async () => { const ent = reportingEntry; const note = reportNote; setReportingEntry(null); setReportNote(""); await reportEntry(ent, note); }}
-                title="Send your description + this view + diagnostics + any screenshot to the OwLLM team."
-              >📤 Send report</button>
-              <button style={actionBtn} disabled={busy} onClick={() => { setReportingEntry(null); setReportNote(""); }}>Cancel</button>
-            </div>
-          </div>
+            {/* Help view: the option list + model picker + ask input + the
+                single "Screenshot & ask" button. */}
+            {view === "help" && (
+              <>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "2px 14px 0" }}>
+                  {HELP_TOPICS.map((t) => (
+                    <button key={t.key} style={topicBtn} disabled={busy} onClick={() => showTopic(t)}>{t.label}</button>
+                  ))}
+                </div>
+
+                {/* Model selector — the SAME shared ModelPicker every other
+                    surface uses; "Auto" falls back to running-local-first. */}
+                <div style={{ display: "flex", gap: 8, padding: "8px 14px 0", alignItems: "center" }}>
+                  <span style={{ fontSize: 11, color: "var(--fg-muted)", fontWeight: 700, whiteSpace: "nowrap" }}>Model</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <ModelPicker
+                      value={pickedModel}
+                      onChange={pickModel}
+                      models={models}
+                      status={accounts}
+                      placeholder="Auto (running local first)"
+                      fallbackLabel="⚡ Auto (running local first)"
+                    />
+                  </div>
+                  {pickedModel && (
+                    <button
+                      onClick={() => pickModel("")}
+                      title="Back to automatic model choice"
+                      style={{ ...actionBtn, padding: "5px 9px", fontSize: 11 }}
+                    >Auto</button>
+                  )}
+                </div>
+
+                {/* Ask input (Enter sends text) + the one action button:
+                    Screenshot & ask (captures the app, then asks with it). */}
+                <div style={{ display: "flex", gap: 8, padding: "8px 14px 12px", alignItems: "center" }}>
+                  <input
+                    value={draft}
+                    onChange={(e) => setDraft(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === "Enter" && !busy) ask(); }}
+                    placeholder="Ask me anything about the app — what broke, what a page does, what to try…"
+                    disabled={busy}
+                    style={{
+                      flex: 1, height: 34, borderRadius: 8, padding: "0 12px", fontSize: 12.5,
+                      background: "var(--bg-input)", color: "var(--fg-strong)", border: "1px solid var(--border)",
+                    }}
+                  />
+                  <button
+                    style={actionBtn}
+                    disabled={busy}
+                    onClick={screenshotAndAsk}
+                    title="Capture this app window and ask the model about what's on screen."
+                  >{busy ? "⏳" : "📸 Screenshot & ask"}</button>
+                </div>
+              </>
+            )}
+          </>
         )}
-
-        {/* Model selector — the SAME shared ModelPicker every other surface
-            uses (local models, tuned, subscriptions, API keys, Auto). The
-            user's pick is honored verbatim; "Auto" falls back to the default
-            policy (running local first). */}
-        <div style={{ display: "flex", gap: 8, padding: "8px 14px 0", alignItems: "center" }}>
-          <span style={{ fontSize: 11, color: "var(--fg-muted)", fontWeight: 700, whiteSpace: "nowrap" }}>Model</span>
-          <div style={{ flex: 1, minWidth: 0 }}>
-            <ModelPicker
-              value={pickedModel}
-              onChange={pickModel}
-              models={models}
-              status={accounts}
-              placeholder="Auto (running local first)"
-              fallbackLabel="⚡ Auto (running local first)"
-            />
-          </div>
-          {pickedModel && (
-            <button
-              onClick={() => pickModel("")}
-              title="Back to automatic model choice"
-              style={{ ...actionBtn, padding: "5px 9px", fontSize: 11 }}
-            >Auto</button>
-          )}
-        </div>
-
-        {/* Free-text AI support (Slice 5). Uses the model chosen above (or
-            the default policy); cloud egress is confirmed once unless you
-            explicitly picked a cloud model. */}
-        <div style={{ display: "flex", gap: 8, padding: "8px 14px 0", alignItems: "center" }}>
-          <input
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !busy) ask(); }}
-            placeholder="Ask me anything about the app — what broke, what a page does, what to try…"
-            disabled={busy}
-            style={{
-              flex: 1, height: 34, borderRadius: 8, padding: "0 12px", fontSize: 12.5,
-              background: "var(--bg-input)", color: "var(--fg-strong)", border: "1px solid var(--border)",
-            }}
-          />
-          <button style={actionBtn} disabled={busy || !draft.trim()} onClick={() => ask()}>
-            {busy ? "⏳" : "Send"}
-          </button>
-        </div>
-        <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: "1px solid transparent", flexWrap: "wrap" }}>
-          <button style={actionBtn} disabled={busy} onClick={checkSetup}>{busy ? "⏳ Checking…" : "🩺 Check my setup"}</button>
-          <button style={actionBtn} disabled={busy} onClick={captureApp} title="Captures THIS app window only (in-app popups included). Never other windows or monitors. Shown to you first; nothing is sent.">📸 Capture current app</button>
-          <button
-            style={actionBtn}
-            disabled={busy}
-            onClick={onboard}
-            title="New to OwLLM? The essentials to get a working agent — connect a subscription or run a local model."
-          >🆕 I'm new here — help me onboard</button>
-          <button
-            style={reportArmed ? { ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800 } : actionBtn}
-            disabled={busy}
-            onClick={reportBug}
-            title="Assembles a redacted report (description + diagnostics + activity + optional screenshot), shows you exactly what gets sent, and on a second click submits it straight to the OwLLM team as a GitHub issue they can act on."
-          >{reportArmed ? "📤 Send to OwLLM" : "🐞 Report a bug"}</button>
-        </div>
       </div>
     </div>
   );

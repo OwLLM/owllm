@@ -579,6 +579,24 @@ export default function WorldPage() {
         })}
       </div>
 
+      {/* Under-construction notice — big, transparent background, upper-centre
+          over the scene art (deliberately NOT in the vertical centre). */}
+      <div style={{
+        position: "absolute", top: "13%", left: "50%", transform: "translateX(-50%)",
+        zIndex: 215, pointerEvents: "none", textAlign: "center", width: "100%",
+      }}>
+        <div style={{
+          display: "inline-block",
+          fontSize: "clamp(26px, 5.5vw, 60px)", fontWeight: 900, letterSpacing: 3,
+          textTransform: "uppercase", color: "rgba(255,255,255,0.92)",
+          textShadow: "0 2px 18px rgba(0,0,0,0.85), 0 0 30px rgba(241,196,74,0.35)",
+        }}>🚧 Under Construction 🚧</div>
+        <div style={{
+          marginTop: 6, fontSize: "clamp(11px, 1.4vw, 14px)", fontWeight: 700,
+          color: "rgba(238,242,252,0.7)", textShadow: "0 1px 8px rgba(0,0,0,0.8)",
+        }}>The Gamify HQ is still being built — explore, but expect changes.</div>
+      </div>
+
       {/* Quest board bottom-right. */}
       <div style={{
         position: "absolute", right: 12, bottom: 12, width: 236, maxHeight: 190, overflow: "auto",

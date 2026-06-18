@@ -2211,9 +2211,11 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   // depth (0), positioned PAST the orchestrator's owl hub artwork on
   // the right so it doesn't disappear under the owl image. Scales with
   // orchestrator_r so it stays outside the hub at any canvas size.
+  // 1.4 (was 1.6) nudges it a little closer to centre — the hub artwork
+  // is now smaller (drawn at orchestrator_r * 0.95), so 1.4 still clears it.
   const criticNode: Node | null = criticSpec ? {
     name: criticSpec.name,
-    x: cx + orchestrator_r * 1.6,
+    x: cx + orchestrator_r * 1.4,
     y: cy,
     label: displayLabel(criticSpec.name),
     iconRef: agentIconRef(criticSpec, roleByName),
@@ -2458,7 +2460,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
           }} />
         );
       })()}
-      <img src={`${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 1.12, top:cy - orchestrator_r * 1.12, width:orchestrator_r * 2.24, height:orchestrator_r * 2.24, pointerEvents:"none", filter: orchActive ? "drop-shadow(0 0 22px rgba(60,242,107,0.85)) drop-shadow(0 0 40px rgba(60,242,107,0.55))" : "drop-shadow(0 0 16px rgba(255,200,100,0.55)) drop-shadow(0 0 28px rgba(255,180,80,0.35))" }} />
+      <img src={orchSpec ? owlSrc(agentIconRef(orchSpec, roleByName)) : `${ICONS}/owl_agentic.png`} style={{ position:"absolute", left:cx - orchestrator_r * 0.95, top:cy - orchestrator_r * 0.95, width:orchestrator_r * 1.9, height:orchestrator_r * 1.9, objectFit:"contain", pointerEvents:"none", filter: orchActive ? "drop-shadow(0 0 22px rgba(60,242,107,0.85)) drop-shadow(0 0 40px rgba(60,242,107,0.55))" : "drop-shadow(0 0 16px rgba(255,200,100,0.55)) drop-shadow(0 0 28px rgba(255,180,80,0.35))" }} />
       <div style={{ position:"absolute", left:cx-60, top:cy + orchestrator_r * 1.6, width:120, textAlign:"center", fontSize:11, fontWeight:700, color:"#ffd97a", textTransform:"uppercase", letterSpacing:0.8, textShadow:"0 1px 3px rgba(0,0,0,0.9)", pointerEvents:"none" }}>Orchestrator</div>
       {nodes.map((n,i) => {
         const col = LAYER_COLORS[n.depth % LAYER_COLORS.length];
@@ -2530,10 +2532,12 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
               src={owlSrc(n.iconRef)}
               style={{
                 position: "absolute",
-                left: n.x - NODE_R,
-                top:  n.y - NODE_R,
-                width:  NODE_R * 2,
-                height: NODE_R * 2,
+                // Icon drawn a touch larger than the NODE_R disc so the
+                // agent artwork reads better (overflows the disc slightly).
+                left: n.x - (NODE_R + 6),
+                top:  n.y - (NODE_R + 6),
+                width:  (NODE_R + 6) * 2,
+                height: (NODE_R + 6) * 2,
                 objectFit: "contain",
                 pointerEvents: "none",
                 filter: `drop-shadow(0 0 ${glow}px ${col}${n.active ? "ee" : "55"})`,
@@ -2600,10 +2604,10 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
           title={displayLabel(orchSpec.name)}
           style={{
             position:"absolute",
-            left: cx - orchestrator_r * 1.12,
-            top:  cy - orchestrator_r * 1.12,
-            width:  orchestrator_r * 2.24,
-            height: orchestrator_r * 2.24,
+            left: cx - orchestrator_r * 0.95,
+            top:  cy - orchestrator_r * 0.95,
+            width:  orchestrator_r * 1.9,
+            height: orchestrator_r * 1.9,
             borderRadius:"50%",
             cursor:"pointer",
             background:"transparent",
@@ -9296,41 +9300,9 @@ export default function AgentsPage() {
                 onSelectAgent={(name) => setSelectedNode(name)}
               />
             )}
-            {/* Canvas voice overlay — scoped to whichever agent is
-                selected (or orchestrator by default). The redundant
-                auto-approve / director-mode / team-model controls
-                that used to live here are gone — those live in the
-                Super User and Team top-tab settings panels. Voice
-                stays as a canvas overlay because it's intrinsically
-                tied to clicking an agent on the graph. */}
-            {viewMode === "graph" && (() => {
-              const orchNameLocal = activeTeam ? (findOrchestratorSpec(activeTeam)?.name ?? null) : null;
-              const voiceFocus = selectedNode ?? orchNameLocal;
-              if (!voiceFocus) return null;
-              return (
-                <div data-ui="CanvasVoiceOverlay" style={{
-                  position:"absolute", bottom:12, left:12,
-                  background:"linear-gradient(135deg, rgba(18,22,34,0.94) 0%, rgba(8,11,18,0.94) 100%)",
-                  border:"1px solid var(--border-strong)",
-                  borderRadius:12, padding:"8px 10px",
-                  display:"flex", flexDirection:"column", gap:4,
-                  minWidth:280, maxWidth:360,
-                  boxShadow:"0 4px 14px rgba(0,0,0,0.5)",
-                  zIndex:5,
-                }}>
-                  <div style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>
-                    Voice · {displayLabel(voiceFocus)}{voiceFocus === orchNameLocal && !selectedNode ? " (default — click an agent to switch)" : ""}
-                  </div>
-                  <AgentVoiceRow
-                    agent={voiceFocus}
-                    cfg={voiceFor(voiceFocus)}
-                    voices={ttsVoices}
-                    onChange={(partial) => onPickAgentVoice(voiceFocus, partial)}
-                    disabled={false}
-                  />
-                </div>
-              );
-            })()}
+            {/* (The bottom-left canvas voice overlay was removed — the
+                per-agent voice control already lives in the chat-column
+                Super User / Team settings panel, so it was redundant.) */}
             {/* Big chat-mode toggle — sits on the canvas top-right
                 where SuperUserCard used to be (user spec 2026-05-28).
                 ONLY shown in diagram / graph modes — in chat mode the

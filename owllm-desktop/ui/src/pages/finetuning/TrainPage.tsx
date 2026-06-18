@@ -367,10 +367,11 @@ export default function TrainPage() {
   const outputDir = `LLM/fine_tuned/${safeBase}_${(runName || "finetune").replace(/[^a-zA-Z0-9._-]/g, "_")}/`;
   const [status, setStatus] = React.useState<TrainStatus>(EMPTY_STATUS);
 
-  // Real downloaded base models from the HF cache — the SAME place the Train
-  // flow downloads into — so the dropdown reflects what's actually on disk
-  // instead of offering models that silently trigger a multi-GB HuggingFace
-  // download (or fail) at train time. (huggingface.rs::hf_cache_list)
+  // Real downloaded base models — from models_list_downloaded, the SAME scan
+  // the Models → Downloaded tab uses, over the SAME roots hf_download writes
+  // into. So this dropdown's "Downloaded" group always AGREES with the Models
+  // page instead of offering bases that silently trigger a multi-GB
+  // HuggingFace fetch (or fail) at train time. (huggingface.rs::models_list_downloaded)
   const [downloadedBases, setDownloadedBases] = React.useState<string[]>([]);
   const [customBase, setCustomBase] = React.useState(false);
 
@@ -399,21 +400,28 @@ export default function TrainPage() {
   }, [downloadedBases]);
   React.useEffect(() => {
     let dead = false;
-    invoke<{ entries?: { repoId: string; cacheRoot?: string }[] }>("hf_cache_list")
-      .then((sum) => {
+    // SINGLE SOURCE OF TRUTH for "what's downloaded": models_list_downloaded.
+    // Its `name` is already "<owner>/<model>" (e.g.
+    // "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"), so it matches the curated
+    // DEFAULT_BASE_MODELS ids verbatim — no reconstruction needed.
+    //
+    // Why this was broken: it previously called hf_cache_list, the disk-
+    // CLEANUP enumerator. That reports the app models tree under cacheRoot
+    // "owllm-models" with repoId = only the *owner* dir ("unsloth"), because
+    // it never descends into <owner>/<model>. The old filter
+    // `cacheRoot.startsWith("hf-") && repoId.includes("/")` therefore dropped
+    // EVERY real base on both conditions → "none downloaded yet" forever, for
+    // every model. Meanwhile the bases were sitting on disk the whole time,
+    // visible on the Models page (which uses this exact command).
+    invoke<{ name: string; isIncomplete?: boolean }[]>("models_list_downloaded")
+      .then((items) => {
         if (dead) return;
-        // hf_cache_list is the disk-CLEANUP enumerator: it also returns every
-        // top-level dir in the pip / npm / runtime caches (_npx, _cacache,
-        // _logs, http-v2, …) so a "manage disk" UI can delete them. Those are
-        // NOT models. A fine-tunable base is an HF model repo: "owner/name"
-        // form, living under an hf-* cache root. Filter to exactly those so
-        // the dropdown stops listing cache junk as downloaded bases.
-        const bases = (sum.entries || [])
-          .filter((e) => (e.cacheRoot || "").startsWith("hf-") && e.repoId.includes("/"))
-          .map((e) => e.repoId);
+        const bases = (items || [])
+          .filter((m) => m && m.name && !m.isIncomplete)
+          .map((m) => m.name);
         setDownloadedBases(bases);
       })
-      .catch(() => { /* cache scan best-effort; dropdown still shows curated list */ });
+      .catch(() => { /* scan best-effort; dropdown still shows curated list */ });
     return () => { dead = true; };
   }, []);
 

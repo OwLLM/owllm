@@ -59,6 +59,36 @@ type Props = {
 
 type LogLine = { kind: "text" | "tool" | "system"; text: string };
 type ProposedAgent = { name: string; base: string; why?: string };
+type BriefFeature = { feature: string; priority: "v1" | "v2" | "opportunity" | "drop" };
+
+// Parse the "## Feature Priority" table out of BRIEF.md into structured rows so
+// the board view can show features as columns. Forgiving: returns [] when the
+// section/table isn't there (board just stays empty, no crash).
+function parseBriefFeatures(brief: string): BriefFeature[] {
+  const out: BriefFeature[] = [];
+  if (!brief) return out;
+  const lines = brief.split("\n");
+  let inSection = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (/^##\s+feature priority/i.test(line)) { inSection = true; continue; }
+    if (inSection && /^##\s+/.test(line)) break; // next section ends it
+    if (!inSection || !line.startsWith("|")) continue;
+    const cells = line.split("|").slice(1, -1).map(c => c.trim());
+    if (cells.length < 2) continue;
+    const feature = cells[0];
+    const prioRaw = cells[cells.length - 1].toLowerCase();
+    if (!feature || /^feature$/i.test(feature) || /^[-:\s]+$/.test(feature)) continue; // header/separator
+    const priority: BriefFeature["priority"] =
+      prioRaw.includes("v1") ? "v1"
+      : prioRaw.includes("opportunity") ? "opportunity"
+      : prioRaw.includes("v2") ? "v2"
+      : prioRaw.includes("drop") ? "drop"
+      : "v2";
+    out.push({ feature, priority });
+  }
+  return out;
+}
 
 // Default building-block roles when the parent doesn't pass the live set.
 const DEFAULT_ROLES: { base: string; description: string }[] = [
@@ -109,6 +139,9 @@ export default function BrainstormPanel(props: Props) {
   // Conversational co-founder (step 3): a back-and-forth before/around the brief.
   const [convHistory, setConvHistory] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
+  // Living visual brief (step 4): the current BRIEF.md text + a board/log toggle.
+  const [briefText, setBriefText] = useState("");
+  const [boardView, setBoardView] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -131,6 +164,8 @@ export default function BrainstormPanel(props: Props) {
       setTeamApplied(false);
       setConvHistory([]);
       setChatInput("");
+      setBriefText("");
+      setBoardView(false);
     }
   }, [open]);
 
@@ -191,10 +226,11 @@ export default function BrainstormPanel(props: Props) {
       try {
         const text = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd: projectCwd });
         briefOnDisk = text.trim().length > 0;
+        if (briefOnDisk) setBriefText(text);   // keep the live board in sync each turn
       } catch { /* not yet */ }
       if (briefOnDisk && !done) {
         setDone(true);
-        append("system", `\n✓ BRIEF.md saved. Keep chatting to refine it, or 🤝 Assemble a team from it below.`);
+        append("system", `\n✓ BRIEF.md saved. Keep chatting to refine it (the board updates live), or 🤝 Assemble a team below.`);
         onBriefSaved?.();
       }
     } catch (e: any) {
@@ -510,7 +546,46 @@ export default function BrainstormPanel(props: Props) {
             </div>
           ) : null}
 
+          {/* View toggle — conversation log vs the living feature board. */}
+          {done && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <span style={{ color: "#8a92a3", fontSize: 11 }}>View:</span>
+              <button onClick={() => setBoardView(false)} style={{ padding: "3px 10px", fontSize: 11, borderRadius: 5, border: "1px solid rgba(255,255,255,0.15)", background: boardView ? "transparent" : "rgba(107,127,255,0.25)", color: "#cfd4e1", cursor: "pointer" }}>📄 Conversation</button>
+              <button onClick={() => setBoardView(true)} style={{ padding: "3px 10px", fontSize: 11, borderRadius: 5, border: "1px solid rgba(255,255,255,0.15)", background: boardView ? "rgba(107,127,255,0.25)" : "transparent", color: "#cfd4e1", cursor: "pointer" }}>📋 Board</button>
+              {boardView && <span style={{ color: "#5a6175", fontSize: 10.5 }}>live — refine the brief in chat and it updates</span>}
+            </div>
+          )}
+
+          {/* Living visual brief — feature columns parsed from BRIEF.md. */}
+          {done && boardView && (() => {
+            const features = parseBriefFeatures(briefText);
+            const cols = [
+              { key: "v1", title: "🟢 v1 — must have", color: "#36d27a", items: features.filter(f => f.priority === "v1") },
+              { key: "opportunity", title: "💡 opportunity", color: "#ffd97a", items: features.filter(f => f.priority === "opportunity") },
+              { key: "v2", title: "🟡 v2 — later", color: "#9aa6bc", items: features.filter(f => f.priority === "v2") },
+            ];
+            return (
+              <div style={{ flex: 1, minHeight: 200, maxHeight: "50vh", overflowY: "auto", display: "flex", gap: 10 }}>
+                {features.length === 0 ? (
+                  <div style={{ color: "#8a92a3", fontSize: 12, padding: 12 }}>
+                    No Feature Priority table in BRIEF.md yet — ask the co-founder to add one, or use the Conversation view.
+                  </div>
+                ) : cols.map(col => (
+                  <div key={col.key} style={{ flex: 1, minWidth: 0, background: "rgba(8,11,18,0.92)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                    <div style={{ color: col.color, fontSize: 12, fontWeight: 700 }}>{col.title} · {col.items.length}</div>
+                    {col.items.length === 0
+                      ? <div style={{ color: "#5a6175", fontSize: 11, fontStyle: "italic" }}>—</div>
+                      : col.items.map((f, i) => (
+                        <div key={i} style={{ background: "rgba(20,26,40,0.9)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "7px 9px", fontSize: 12, color: "#e6ebf7" }}>{f.feature}</div>
+                      ))}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
           {/* Log viewer */}
+          {!(done && boardView) && (
           <div
             ref={logRef}
             style={{
@@ -550,6 +625,7 @@ export default function BrainstormPanel(props: Props) {
               })
             )}
           </div>
+          )}
 
           {/* Conversational input — appears once the co-founder chat has started.
               The user answers questions, refines, or says "go" to research. */}

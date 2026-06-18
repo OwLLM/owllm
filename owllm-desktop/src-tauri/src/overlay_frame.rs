@@ -226,6 +226,50 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
     Ok(())
 }
 
+/// The on-screen rectangle that holds the WHOLE app — content window plus
+/// the frame that's drawn in the separate, larger overlay window around it —
+/// together with the monitor it sits on. The tutorial recorder uses this to
+/// crop a full-screen capture down to exactly the app (frame included), since
+/// the frame lives OUTSIDE the main window and a single-window capture misses
+/// it. All values are PHYSICAL pixels in virtual-desktop coordinates.
+#[derive(serde::Serialize)]
+pub struct CaptureGeometry {
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    monitor_x: i32,
+    monitor_y: i32,
+    monitor_w: u32,
+    monitor_h: u32,
+    scale_factor: f64,
+}
+
+#[tauri::command]
+pub fn overlay_frame_capture_geometry(app: tauri::AppHandle) -> Option<CaptureGeometry> {
+    // The overlay window already spans content + frame; when the overlay is
+    // off, the main window is itself the whole app, so fall back to it.
+    let win = app
+        .get_webview_window(OVERLAY_LABEL)
+        .or_else(|| app.get_webview_window("main"))?;
+    let pos = win.outer_position().ok()?;
+    let size = win.outer_size().ok()?;
+    let monitor = win.current_monitor().ok().flatten()?;
+    let mpos = monitor.position();
+    let msize = monitor.size();
+    Some(CaptureGeometry {
+        x: pos.x,
+        y: pos.y,
+        w: size.width,
+        h: size.height,
+        monitor_x: mpos.x,
+        monitor_y: mpos.y,
+        monitor_w: msize.width,
+        monitor_h: msize.height,
+        scale_factor: monitor.scale_factor(),
+    })
+}
+
 fn start_sync_loop(main: WebviewWindow, overlay: WebviewWindow) {
     std::thread::spawn(move || {
         // A single transient failure must NOT kill the follow. Reading the

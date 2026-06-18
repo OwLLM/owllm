@@ -229,6 +229,7 @@ pub fn run() {
             hardware::set_gpu_selection,
             models::list_models,
             overlay_frame::overlay_frame_enabled,
+            overlay_frame::overlay_frame_capture_geometry,
             projects::list_projects,
             projects::create_project,
             projects::update_project,

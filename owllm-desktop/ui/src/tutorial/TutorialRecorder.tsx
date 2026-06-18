@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 type Point = { x: number; y: number };
 type ClickMark = Point & { id: number };
@@ -10,13 +11,77 @@ const TOGGLE_EVENT = "owllm:tutorial-recorder-toggle";
 const HAND_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='42' height='46' viewBox='0 0 42 46'%3E%3Cpath d='M17.6 4.8c2.1 0 3.8 1.7 3.8 3.8v11.2l1.6-2.1c1.2-1.6 3.4-2 5.1-.8 1.1.8 1.6 2 1.6 3.2.7-.4 1.5-.5 2.4-.4 2 .4 3.3 2.3 2.9 4.3l-.3 1.5c.7-.2 1.5-.1 2.2.2 1.9.8 2.7 3 1.9 4.9l-2.1 5c-1.9 4.6-6.4 7.5-11.4 7.5h-4.8c-4 0-7.8-1.9-10.1-5.2L3.6 28c-1.1-1.6-.8-3.8.8-5 1.3-1 3.2-.9 4.4.2l5 4.6V8.6c0-2.1 1.7-3.8 3.8-3.8Z' fill='%23ffe0a8' stroke='%23271407' stroke-width='2.2' stroke-linejoin='round'/%3E%3Cpath d='M21.4 19.8v8.8M29.5 20.1l-3.3 8.8M34.7 25.5l-2.2 6.8M13.8 27.8v5.6' stroke='%239f6430' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E\") 10 8, pointer";
 
-// Opaque backdrop colour painted BEHIND the app's existing frame while
-// recording a window (the frame lives in the transparent window margin,
-// which a window capture would otherwise record as see-through desktop).
-const RECORD_BACKDROP = "#0a0e1a";
+// The full app rectangle (content window + the frame that's drawn in the
+// separate, larger overlay window around it) plus the monitor it's on, in
+// physical px. Returned by the Rust `overlay_frame_capture_geometry` command.
+type CaptureGeometry = {
+  x: number; y: number; w: number; h: number;
+  monitor_x: number; monitor_y: number; monitor_w: number; monitor_h: number;
+  scale_factor: number;
+};
 
 export function toggleTutorialRecorder() {
   window.dispatchEvent(new CustomEvent(TOGGLE_EVENT));
+}
+
+// Crop a full-screen capture down to the app rectangle. The frame lives in a
+// SEPARATE window OUTSIDE the main content window, so the only surface that
+// holds both is the screen; we draw the app's sub-rect of the screen video to
+// an off-screen canvas every frame and record THAT. Returns the cropped
+// stream + a stop() that tears down the draw loop.
+function cropScreenToApp(src: MediaStream, geom: CaptureGeometry): { stream: MediaStream; stop: () => void } {
+  const video = document.createElement("video");
+  video.srcObject = src;
+  video.muted = true;
+  (video as HTMLVideoElement & { playsInline?: boolean }).playsInline = true;
+  void video.play().catch(() => {});
+
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  let raf = 0;
+  let stopped = false;
+
+  // Crop rect in the screen video's pixel space. The video may be captured at
+  // a different resolution than the monitor's reported physical size, so scale
+  // by videoWidth/monitorW (handles DPI / downscaled capture).
+  const computeCrop = () => {
+    const vw = video.videoWidth || geom.monitor_w;
+    const vh = video.videoHeight || geom.monitor_h;
+    const sx = vw / Math.max(1, geom.monitor_w);
+    const sy = vh / Math.max(1, geom.monitor_h);
+    let cx = (geom.x - geom.monitor_x) * sx;
+    let cy = (geom.y - geom.monitor_y) * sy;
+    let cw = geom.w * sx;
+    let ch = geom.h * sy;
+    // Clamp into the captured frame so a wrong-monitor pick can't throw.
+    cx = Math.max(0, Math.min(cx, vw - 2));
+    cy = Math.max(0, Math.min(cy, vh - 2));
+    cw = Math.max(2, Math.min(cw, vw - cx));
+    ch = Math.max(2, Math.min(ch, vh - cy));
+    return { cx, cy, cw, ch };
+  };
+
+  const draw = () => {
+    if (stopped) return;
+    if (ctx && video.videoWidth) {
+      const { cx, cy, cw, ch } = computeCrop();
+      if (canvas.width !== Math.round(cw)) canvas.width = Math.round(cw);
+      if (canvas.height !== Math.round(ch)) canvas.height = Math.round(ch);
+      try { ctx.drawImage(video, cx, cy, cw, ch, 0, 0, canvas.width, canvas.height); } catch { /* frame not ready */ }
+    }
+    raf = requestAnimationFrame(draw);
+  };
+  // Seed the canvas size so captureStream starts with valid dimensions
+  // (refined to the real crop size once the first video frame arrives).
+  canvas.width = Math.max(2, Math.round(geom.w));
+  canvas.height = Math.max(2, Math.round(geom.h));
+  raf = requestAnimationFrame(draw);
+
+  const stream = canvas.captureStream(30);
+  return {
+    stream,
+    stop: () => { stopped = true; cancelAnimationFrame(raf); try { video.pause(); } catch { /* ignore */ } video.srcObject = null; },
+  };
 }
 
 function formatTime(ms: number): string {
@@ -115,7 +180,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const [captureMode, setCaptureMode] = useState<CaptureMode>("window");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [mark, setMark] = useState<ClickMark | null>(null);
-  const [status, setStatus] = useState("Records the selected OWLLM window with its frame on a solid backdrop. Use Ctrl+Shift+R to stop.");
+  const [status, setStatus] = useState("“Window + frame” records the screen and auto-crops to the OWLLM app (frame included). Pick the screen OWLLM is on. Use Ctrl+Shift+R to stop.");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -125,6 +190,8 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const pausedTotalRef = useRef<number>(0);
   const clickIdRef = useRef(0);
   const clickTrackRef = useRef<Array<{ t: number; x: number; y: number; target: string }>>([]);
+  // Crop pipeline for "window" mode (screen capture cropped to the app rect).
+  const cropHandleRef = useRef<{ stream: MediaStream; stop: () => void } | null>(null);
 
   useEffect(() => {
     const onToggle = () => {
@@ -198,23 +265,6 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
     };
   }, [state]);
 
-  // While recording a WINDOW, paint a solid backdrop BEHIND the app's
-  // existing frame. The frame + corners + owl live in the transparent
-  // window margin, so a window capture records that margin as see-through
-  // desktop. We do NOT draw a second frame or resize anything — we just
-  // override the real frame container's transparent background with an
-  // opaque colour for the duration, then restore it. (Full-screen capture
-  // already has the desktop behind it, so it's left untouched.)
-  useEffect(() => {
-    const on = (state === "recording" || state === "paused" || state === "saving") && captureMode === "window";
-    if (!on) return;
-    const style = document.createElement("style");
-    style.dataset.owllmRecordBackdrop = "1";
-    style.textContent = `[data-ui="hybrid-frame-root"]{background:${RECORD_BACKDROP} !important;}`;
-    document.head.appendChild(style);
-    return () => style.remove();
-  }, [state, captureMode]);
-
   const canRecord = useMemo(() => (
     typeof navigator !== "undefined"
       && Boolean(navigator.mediaDevices?.getDisplayMedia)
@@ -240,11 +290,27 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       setElapsedMs(0);
       setStatus(captureMode === "screen"
         ? "Recording full screen. The recorder panel is hidden from the video. Press Ctrl+Shift+R or the header Record button to stop."
-        : "Recording window. Pick the OWLLM window in the share dialog. Press Ctrl+Shift+R or the header Record button to stop.");
+        : "Pick the SCREEN that OWLLM is on — I crop it to just the app window (frame included). Press Ctrl+Shift+R to stop.");
 
-      const stream = await requestDisplayStream(captureMode);
-      streamRef.current = stream;
-      const recorder = new MediaRecorder(stream, {
+      // "Window" mode: the frame is a SEPARATE window OUTSIDE the main one, so
+      // a single-window capture can't include it. Capture the whole screen and
+      // crop to the app's real rect (content + frame) instead.
+      const geom = captureMode === "window"
+        ? await invoke<CaptureGeometry | null>("overlay_frame_capture_geometry").catch(() => null)
+        : null;
+
+      // Both modes capture a monitor; window mode then crops.
+      const screenStream = await requestDisplayStream("screen");
+      streamRef.current = screenStream;
+
+      let recordStream = screenStream;
+      if (captureMode === "window" && geom) {
+        const handle = cropScreenToApp(screenStream, geom);
+        cropHandleRef.current = handle;
+        recordStream = handle.stream;
+      }
+
+      const recorder = new MediaRecorder(recordStream, {
         mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
           ? "video/webm;codecs=vp9"
           : "video/webm",
@@ -264,14 +330,19 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         downloadBlob(video, `owllm-tutorial-${stamp}.webm`);
         downloadBlob(track, `owllm-tutorial-${stamp}-clicks.json`);
+        cropHandleRef.current?.stop();
+        cropHandleRef.current = null;
         stopStreams();
         setState("idle");
         setStatus("Saved video and click track.");
       };
-      stream.getVideoTracks()[0]?.addEventListener("ended", () => stop());
+      // Stop if the user ends the share from the browser/OS chrome.
+      screenStream.getVideoTracks()[0]?.addEventListener("ended", () => stop());
       recorder.start(250);
       setState("recording");
     } catch (err) {
+      cropHandleRef.current?.stop();
+      cropHandleRef.current = null;
       stopStreams();
       setState("idle");
       setStatus(err instanceof Error ? err.message : "Could not start recording.");
@@ -303,6 +374,8 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       setStatus("Saving recording...");
       recorder.stop();
     } else {
+      cropHandleRef.current?.stop();
+      cropHandleRef.current = null;
       stopStreams();
       setState("idle");
     }

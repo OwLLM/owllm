@@ -640,8 +640,8 @@ export default function WatcherDrawer({
             <button
               onClick={goHome}
               title="Back to menu"
-              style={{ position: "absolute", left: 16, top: "50%", transform: "translateY(-50%)", width: 30, height: 24, border: "none", background: "rgba(var(--accent-rgb),0.18)", color: "var(--accent)", fontSize: 14, cursor: "pointer", borderRadius: 5 }}
-            >←</button>
+              style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", gap: 4, height: 26, padding: "0 10px", border: "1px solid rgba(255,255,255,0.45)", background: "rgba(255,255,255,0.18)", color: "var(--bg-header-fg)", fontSize: 13, fontWeight: 800, cursor: "pointer", borderRadius: 6 }}
+            >← Back</button>
           )}
           <div style={{ fontWeight: 800, fontSize: 16, letterSpacing: 0.4, lineHeight: 1.1 }}>The Watcher</div>
           <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>

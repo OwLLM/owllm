@@ -1007,12 +1007,12 @@ pub async fn claude_cli_complete(
         }
 
         // Build + run wrapped in a closure so a "Session ID … is already in use"
-        // failure (a prior/concurrent claude process holding the same session —
-        // common when the Telegram bridge AND the desktop both dispatch the
-        // orchestrator) RETRIES once WITHOUT --session-id. Doing it at the source
-        // guarantees the conflict self-heals on every path; dropping the session
-        // loses CLI multi-turn memory for that one call only (the prompt still
-        // carries the folded history).
+        // failure RETRIES once WITHOUT --session-id. Cause: `--session-id X`
+        // *creates* session X, so a reused id (or a stale session file from a
+        // prior run) collides with what's already on disk — no concurrent
+        // process needed. Doing the retry at the source guarantees the conflict
+        // self-heals on every path; the prompt still carries the folded history,
+        // so dropping the id costs nothing.
         let session_was_set = session_id.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
         let run_once = |args: &[String]| -> Result<String, String> {
             // WSL-isolated project → run `claude` inside the distro; else the
@@ -1361,8 +1361,9 @@ pub async fn claude_cli_stream(
 
         // Build + stream wrapped in a closure so a "Session ID … is already in
         // use" startup failure retries once WITHOUT --session-id (see
-        // claude_cli_complete). The conflict aborts the CLI before any event is
-        // streamed, so the retry can't double-emit.
+        // claude_cli_complete — the id collides with an existing/stale session
+        // on disk, not a live process). The conflict aborts the CLI before any
+        // event is streamed, so the retry can't double-emit.
         let run_once = |args: &[String]| -> Result<String, String> {
         // WSL-isolated project → run `claude` inside the distro; else the
         // Windows CLI exactly as before (no regression for normal folders).

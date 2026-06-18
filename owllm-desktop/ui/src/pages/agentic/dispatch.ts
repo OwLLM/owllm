@@ -239,39 +239,40 @@ export function parseClaudeModelId(modelId: string): { wireModel: string; effort
 const SESSION_KEY_PREFIX = "owllm:claude_session:";
 const sessionMemCache = new Map<string, string>();
 
+/// localStorage/cache key for a (project, agent) pair — only used now by
+/// the legacy reset helpers that scrub ids left by older builds.
 function sessionKey(projectId: string, agentName: string): string {
   return `${SESSION_KEY_PREFIX}${projectId}:${agentName}`;
 }
 
-/// Return (and create if missing) the Claude CLI session UUID for an
-/// (agent, project) pair. Returns null when either arg is empty so a
-/// caller without context just runs in stateless one-shot mode.
+/// Return a FRESH Claude CLI session UUID for this dispatch — or null
+/// when there's no project/agent context (caller runs a stateless
+/// one-shot).
+///
+/// This used to PERSIST one id per (project, agent) and reuse it on
+/// every turn. That reuse was the actual cause of "Session ID X is
+/// already in use": `--session-id X` *creates* a session with id X, so
+/// the 2nd+ turn reusing X collided with the one already on disk — no
+/// concurrent process involved (continuing a session is `--resume`, not
+/// a reused `--session-id`). Each prompt already carries the folded
+/// conversation history, so a unique id per dispatch preserves all
+/// memory and can never collide. The Rust runner keeps a
+/// drop-the-session retry as a backstop.
 export function getClaudeSession(
   projectId: string | null | undefined,
   agentName: string | null | undefined,
 ): string | null {
   if (!projectId || !agentName) return null;
-  const key = sessionKey(projectId, agentName);
-  const cached = sessionMemCache.get(key);
-  if (cached) return cached;
-  try {
-    const stored = localStorage.getItem(key);
-    if (stored) { sessionMemCache.set(key, stored); return stored; }
-  } catch { /* localStorage unavailable */ }
   // crypto.randomUUID is available in every Tauri webview (Edge/Chromium).
-  const uuid = (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
+  return (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function")
     ? globalThis.crypto.randomUUID()
     : `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
-  sessionMemCache.set(key, uuid);
-  try { localStorage.setItem(key, uuid); } catch {}
-  return uuid;
 }
 
-/// Wipe every cached Claude session across every project. Used when
-/// the CLI reports "Session ID … is already in use" — that means a
-/// prior process crashed without releasing the lock, and the next
-/// call will keep hitting the same stale id unless we evict it from
-/// our cache too.
+/// Clear any cached/persisted Claude session ids. Now that ids are
+/// fresh per dispatch this is mostly legacy housekeeping — it still
+/// evicts the in-memory cache and clears ids left in localStorage by
+/// older builds, and stays callable from the conflict-retry path.
 export function clearAllClaudeSessions(): void {
   for (const k of Array.from(sessionMemCache.keys())) {
     if (k.startsWith(SESSION_KEY_PREFIX)) sessionMemCache.delete(k);

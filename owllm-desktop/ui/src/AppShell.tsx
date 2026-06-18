@@ -354,7 +354,7 @@ function HybridFrame({ children, outerW, outerH, onOwlClick, showWatcherHint }: 
   // ModeBar inside the inner content.
   const badgeY = parent_y - BADGE_H / 2;
   return (
-    <div style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
+    <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
       <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
       <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />

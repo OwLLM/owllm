@@ -10,46 +10,13 @@ const TOGGLE_EVENT = "owllm:tutorial-recorder-toggle";
 const HAND_CURSOR =
   "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='42' height='46' viewBox='0 0 42 46'%3E%3Cpath d='M17.6 4.8c2.1 0 3.8 1.7 3.8 3.8v11.2l1.6-2.1c1.2-1.6 3.4-2 5.1-.8 1.1.8 1.6 2 1.6 3.2.7-.4 1.5-.5 2.4-.4 2 .4 3.3 2.3 2.9 4.3l-.3 1.5c.7-.2 1.5-.1 2.2.2 1.9.8 2.7 3 1.9 4.9l-2.1 5c-1.9 4.6-6.4 7.5-11.4 7.5h-4.8c-4 0-7.8-1.9-10.1-5.2L3.6 28c-1.1-1.6-.8-3.8.8-5 1.3-1 3.2-.9 4.4.2l5 4.6V8.6c0-2.1 1.7-3.8 3.8-3.8Z' fill='%23ffe0a8' stroke='%23271407' stroke-width='2.2' stroke-linejoin='round'/%3E%3Cpath d='M21.4 19.8v8.8M29.5 20.1l-3.3 8.8M34.7 25.5l-2.2 6.8M13.8 27.8v5.6' stroke='%239f6430' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E\") 10 8, pointer";
 
-// --- Capture-frame geometry, mirrored 1:1 from AppShell's HybridFrame ---
-// so the recorder draws the SAME chrome the app shows. The app's real frame
-// lives in the TRANSPARENT window margin, which OS window-capture doesn't
-// include — so the recorder redraws it on an OPAQUE mat. The mat also masks
-// the app's own corners / owl behind us so they can't double up on screen.
-const ICONS = "/Page_icons";
-const CORNERS = `${ICONS}/CornersNew`;
-const MIN_PARENT_W = 800;
-const MIN_PARENT_H = 500;
-const BADGE_W = 300;
-const BADGE_H = 195;
-const BORDER_T = 18;
-const CORNER_OUTSET = 10;
-const SHIFT_OUT = BORDER_T / 2;
-const EXTRA_TOP = 35;
-const EXTRA_RIGHT = 0;
-const EXTRA_BOTTOM = 0;
-const CORNER_PNG_W = 160;
-const CORNER_PNG_H_TL = Math.round(CORNER_PNG_W * 513 / 486);
-const CORNER_PNG_H_TR = Math.round(CORNER_PNG_W * 484 / 516);
-const CORNER_PNG_H_BL = Math.round(CORNER_PNG_W * 512 / 488);
-const CORNER_PNG_H_BR = Math.round(CORNER_PNG_W * 488 / 512);
-const PARENT_X = SHIFT_OUT + CORNER_OUTSET;
-const PARENT_Y = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
-const FRAME_COLOR = "rgba(var(--accent-rgb), 0.86)";
-const FRAME_ACCENT = "rgba(var(--accent-rgb), 0.78)";
-const FRAME_BG = "var(--bg-header)";
+// Opaque backdrop colour painted BEHIND the app's existing frame while
+// recording a window (the frame lives in the transparent window margin,
+// which a window capture would otherwise record as see-through desktop).
+const RECORD_BACKDROP = "#0a0e1a";
 
 export function toggleTutorialRecorder() {
   window.dispatchEvent(new CustomEvent(TOGGLE_EVENT));
-}
-
-function useViewportSize() {
-  const [size, setSize] = useState({ w: window.innerWidth, h: window.innerHeight });
-  useEffect(() => {
-    const onResize = () => setSize({ w: window.innerWidth, h: window.innerHeight });
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
-  return size;
 }
 
 function formatTime(ms: number): string {
@@ -117,85 +84,6 @@ function ClickPulseOverlay({
   );
 }
 
-// Drawn ONLY while recording a window. An OPAQUE mat fills the whole frame
-// margin (so the app's own corners / owl / bars — which sit in the transparent
-// window margin and would otherwise show through OR double up — are hidden
-// behind us, and the captured video gets a solid backing instead of desktop),
-// then the SAME clean frame the app uses is drawn on top.
-function CaptureFrameOverlay({ active, outerW, outerH }: {
-  active: boolean; outerW: number; outerH: number;
-}) {
-  if (!active) return null;
-  const parent_w = Math.max(MIN_PARENT_W, outerW - EXTRA_RIGHT - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
-  const parent_h = Math.max(MIN_PARENT_H, outerH - EXTRA_TOP - EXTRA_BOTTOM - 2 * SHIFT_OUT - 2 * CORNER_OUTSET);
-  const parent_x = PARENT_X;
-  const parent_y = PARENT_Y;
-  const t = BORDER_T;
-  const so = SHIFT_OUT;
-  const outerL = parent_x - so;
-  const outerT = parent_y - so;
-  const outerW2 = parent_w + 2 * so;
-  const outerH2 = parent_h + 2 * so;
-  const outerR = outerL + outerW2;
-  const outerB = outerT + outerH2;
-  const innerL = parent_x - so + t;
-  const innerT = parent_y - so + t;
-  const innerW = parent_w + 2 * so - 2 * t;
-  const innerH = parent_h + 2 * so - 2 * t;
-  const innerR = innerL + innerW;
-  const innerB = innerT + innerH;
-  const brkL = 36, brkI = 14;
-  const bxL = outerL + brkI, bxR = outerR - brkI;
-  const byT = outerT + brkI, byB = outerB - brkI;
-  const tckL = 18, tckI = 10;
-  const midx = (outerL + outerR) / 2;
-  const midy = (outerT + outerB) / 2;
-  const cnTL = { x: outerL - CORNER_OUTSET, y: outerT - CORNER_OUTSET };
-  const cnTR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET, y: outerT - CORNER_OUTSET };
-  const cnBL = { x: outerL - CORNER_OUTSET, y: outerB - CORNER_PNG_H_BL + 1 + CORNER_OUTSET };
-  const cnBR = { x: outerR - CORNER_PNG_W + 1 + CORNER_OUTSET, y: outerB - CORNER_PNG_H_BR + 1 + CORNER_OUTSET };
-  const badgeX = parent_x + (parent_w - BADGE_W) / 2;
-  const badgeY = parent_y - BADGE_H / 2;
-  return (
-    <div data-ui="TutorialCaptureFrame" style={{ position: "fixed", inset: 0, zIndex: 11900, pointerEvents: "none" }}>
-      {/* (1) Opaque mat — fills the whole margin OUTSIDE the inner content
-          rect: 4 bands cover the app's corners + edge bars; a centred patch
-          covers the part of the owl that overhangs the header. */}
-      <div style={{ position: "absolute", left: 0, top: 0, width: outerW, height: innerT, background: FRAME_BG }} />
-      <div style={{ position: "absolute", left: 0, top: innerB, width: outerW, height: Math.max(0, outerH - innerB), background: FRAME_BG }} />
-      <div style={{ position: "absolute", left: 0, top: 0, width: innerL, height: outerH, background: FRAME_BG }} />
-      <div style={{ position: "absolute", left: innerR, top: 0, width: Math.max(0, outerW - innerR), height: outerH, background: FRAME_BG }} />
-      <div style={{ position: "absolute", left: badgeX - 6, top: innerT, width: BADGE_W + 12, height: Math.max(0, badgeY + BADGE_H - innerT), background: FRAME_BG }} />
-      {/* (2) Clean frame on top — identical to AppShell HybridFrame. */}
-      <svg width={outerW} height={outerH} style={{ position: "absolute", left: 0, top: 0, pointerEvents: "none" }}>
-        <rect x={outerL + 1} y={outerT + 1} width={outerW2 - 2} height={outerH2 - 2} rx={14} ry={14} fill="none" stroke={FRAME_COLOR} strokeWidth={1} />
-        <rect x={innerL} y={innerT} width={innerW} height={innerH} rx={10} ry={10} fill="none" stroke={FRAME_ACCENT} strokeWidth={1} />
-        <g stroke={FRAME_ACCENT} strokeWidth={1}>
-          <line x1={bxL} y1={byT} x2={bxL + brkL} y2={byT} />
-          <line x1={bxL} y1={byT} x2={bxL} y2={byT + brkL} />
-          <line x1={bxR} y1={byT} x2={bxR - brkL} y2={byT} />
-          <line x1={bxR} y1={byT} x2={bxR} y2={byT + brkL} />
-          <line x1={bxL} y1={byB} x2={bxL + brkL} y2={byB} />
-          <line x1={bxL} y1={byB} x2={bxL} y2={byB - brkL} />
-          <line x1={bxR} y1={byB} x2={bxR - brkL} y2={byB} />
-          <line x1={bxR} y1={byB} x2={bxR} y2={byB - brkL} />
-        </g>
-        <g stroke={FRAME_ACCENT} strokeWidth={1}>
-          <line x1={midx - tckL / 2} y1={outerT + tckI} x2={midx + tckL / 2} y2={outerT + tckI} />
-          <line x1={midx - tckL / 2} y1={outerB - tckI} x2={midx + tckL / 2} y2={outerB - tckI} />
-          <line x1={outerL + tckI} y1={midy - tckL / 2} x2={outerL + tckI} y2={midy + tckL / 2} />
-          <line x1={outerR - tckI} y1={midy - tckL / 2} x2={outerR - tckI} y2={midy + tckL / 2} />
-        </g>
-      </svg>
-      <img src={`${CORNERS}/corner_br.png`} style={{ position: "absolute", left: cnBR.x, top: cnBR.y, width: CORNER_PNG_W, height: CORNER_PNG_H_BR, pointerEvents: "none" }} />
-      <img src={`${CORNERS}/corner_ul.png`} style={{ position: "absolute", left: cnTL.x, top: cnTL.y, width: CORNER_PNG_W, height: CORNER_PNG_H_TL, pointerEvents: "none" }} />
-      <img src={`${CORNERS}/corner_ur.png`} style={{ position: "absolute", left: cnTR.x, top: cnTR.y, width: CORNER_PNG_W, height: CORNER_PNG_H_TR, pointerEvents: "none" }} />
-      <img src={`${CORNERS}/corner_bl.png`} style={{ position: "absolute", left: cnBL.x, top: cnBL.y, width: CORNER_PNG_W, height: CORNER_PNG_H_BL, pointerEvents: "none" }} />
-      <img src={`${ICONS}/owl_studio_square.png`} style={{ position: "absolute", left: badgeX, top: badgeY, width: BADGE_W, height: BADGE_H, pointerEvents: "none" }} />
-    </div>
-  );
-}
-
 async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
   const media = navigator.mediaDevices as MediaDevices & {
     getDisplayMedia(options?: unknown): Promise<MediaStream>;
@@ -227,8 +115,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const [captureMode, setCaptureMode] = useState<CaptureMode>("window");
   const [elapsedMs, setElapsedMs] = useState(0);
   const [mark, setMark] = useState<ClickMark | null>(null);
-  const [status, setStatus] = useState("Records the selected OWLLM window and draws a clean frame over its own chrome. Use Ctrl+Shift+R to stop.");
-  const viewport = useViewportSize();
+  const [status, setStatus] = useState("Records the selected OWLLM window with its frame on a solid backdrop. Use Ctrl+Shift+R to stop.");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -310,6 +197,23 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       window.removeEventListener("click", onClick, true);
     };
   }, [state]);
+
+  // While recording a WINDOW, paint a solid backdrop BEHIND the app's
+  // existing frame. The frame + corners + owl live in the transparent
+  // window margin, so a window capture records that margin as see-through
+  // desktop. We do NOT draw a second frame or resize anything — we just
+  // override the real frame container's transparent background with an
+  // opaque colour for the duration, then restore it. (Full-screen capture
+  // already has the desktop behind it, so it's left untouched.)
+  useEffect(() => {
+    const on = (state === "recording" || state === "paused" || state === "saving") && captureMode === "window";
+    if (!on) return;
+    const style = document.createElement("style");
+    style.dataset.owllmRecordBackdrop = "1";
+    style.textContent = `[data-ui="hybrid-frame-root"]{background:${RECORD_BACKDROP} !important;}`;
+    document.head.appendChild(style);
+    return () => style.remove();
+  }, [state, captureMode]);
 
   const canRecord = useMemo(() => (
     typeof navigator !== "undefined"
@@ -412,7 +316,6 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
 
   return (
     <>
-      <CaptureFrameOverlay active={active && captureMode === "window"} outerW={viewport.w} outerH={viewport.h} />
       <ClickPulseOverlay mark={mark} active={active} />
       {!hidePanel && (
         <div

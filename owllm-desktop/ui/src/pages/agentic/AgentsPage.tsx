@@ -2102,11 +2102,17 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   const roster: RosterRow[] = useMemo(() => {
     if (!team || team.agents.length === 0) return [];
     const depths = computeDepths(team);
+    // Exclude the SAME agent the centre hub uses (orchestratorOf), not a
+    // hard-coded name==="orchestrator". orchestratorOf matches case-
+    // insensitively / by "contains orchestrator" / falls back to agents[0],
+    // so a lead named "Orchestrator" (capital) or "Orchi the orchestrator"
+    // used to slip past this filter and render TWICE — once as the hub and
+    // once as a ring node (the "two orchestrators" bug).
+    const orchName = orchestratorOf(team.agents)?.name;
     return team.agents
-      // Exclude both the orchestrator (rendered at center) AND the
-      // synthetic critic (rendered as a peer next to the orchestrator,
-      // not on a specialist arc).
-      .filter(a => a.name !== "orchestrator" && a.base !== "orchestrator" && a.name !== CRITIC_AGENT_NAME)
+      // Exclude the orchestrator (rendered at center) AND the synthetic
+      // critic (rendered as a peer next to the orchestrator, not on an arc).
+      .filter(a => a.name !== orchName && a.name !== CRITIC_AGENT_NAME)
       .map(a => {
         const group = groupForAgent(a);
         // Orbital depth is capped at 2. The orbital diagram is a

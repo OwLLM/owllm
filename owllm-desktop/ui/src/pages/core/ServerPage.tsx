@@ -1266,10 +1266,11 @@ export default function ServerPage() {
       <div style={{
         flex: 1,
         display: "grid",
-        // Qt enforces a 40/40/20 ratio on resize
-        // (server_page.py:1022-1027). React grid mirrors that exactly
-        // — NOT the previous equal-thirds 1fr 1fr 1fr.
-        gridTemplateColumns: "2fr 2fr 1fr",
+        // Even thirds (34/33/33) that adapt fluidly to window width.
+        // minmax(0,…) lets each column shrink below its content width so
+        // the three stay balanced instead of the log column squeezing the
+        // others. (Was 2fr 2fr 1fr; user asked for equal adaptive thirds.)
+        gridTemplateColumns: "minmax(0, 34fr) minmax(0, 33fr) minmax(0, 33fr)",
         gap: 12,
         minHeight: 0,
       }}>

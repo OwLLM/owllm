@@ -120,11 +120,11 @@ const CARD_GRID: React.CSSProperties = {
   display: "grid",
   gridTemplateColumns: "repeat(auto-fill, minmax(290px, 390px))",
   gap: 10,
-  // Each card sizes to its OWN content (CardShell has minHeight:220), not to
-  // the tallest card in its grid row. Without this, the default `stretch`
-  // makes a card's height depend on whoever it shares a row with — so toggling
-  // a filter (which reflows the grid) appears to "resize cards randomly".
-  alignItems: "start",
+  // Every card in a row is the SAME height (grid's default `stretch`): cards
+  // stretch to the tallest one in their row, and CardShell keeps the Download
+  // button pinned to the bottom (flex:1 spacer), so a row reads as a clean,
+  // even strip instead of ragged cards. Shared by Browse / Downloaded / Tuned.
+  alignItems: "stretch",
 };
 
 const emptyState: React.CSSProperties = {

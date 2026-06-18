@@ -281,11 +281,6 @@ export default function WatcherDrawer({
   const say = (text: string, from: Entry["from"] = "watcher", imageDataUrl?: string) =>
     setEntries((es) => [...es, { from, text, imageDataUrl }]);
 
-  const whatPage = () => {
-    say("What page am I on?", "you");
-    const blurb = PAGE_BLURBS[activeKey] ?? `the "${activeKey}" page (mode: ${mode}).`;
-    say(`You're on ${blurb}`);
-  };
 
   const checkSetup = async () => {
     say("Check my setup", "you");
@@ -789,7 +784,6 @@ export default function WatcherDrawer({
           </button>
         </div>
         <div style={{ display: "flex", gap: 8, padding: "10px 14px", borderTop: "1px solid transparent", flexWrap: "wrap" }}>
-          <button style={actionBtn} disabled={busy} onClick={whatPage}>📍 What page am I on?</button>
           <button style={actionBtn} disabled={busy} onClick={checkSetup}>{busy ? "⏳ Checking…" : "🩺 Check my setup"}</button>
           <button style={actionBtn} disabled={busy} onClick={captureApp} title="Captures THIS app window only (in-app popups included). Never other windows or monitors. Shown to you first; nothing is sent.">📸 Capture current app</button>
           <button

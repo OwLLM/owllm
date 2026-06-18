@@ -913,6 +913,33 @@ pub fn which_extended(name: &str) -> Option<PathBuf> {
     None
 }
 
+/// True when a claude CLI error text reports a session-id collision
+/// ("Session ID … is already in use"). Matched loosely so a wording
+/// change in the CLI doesn't silently disable the retry.
+fn is_session_in_use(err: &str) -> bool {
+    let l = err.to_lowercase();
+    l.contains("already in use") && l.contains("session")
+}
+
+/// Return a copy of `args` with the `--session-id <uuid>` pair removed,
+/// so a conflicting call can retry with a fresh CLI-generated session.
+fn strip_session_arg(args: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(args.len());
+    let mut skip_next = false;
+    for a in args {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if a == "--session-id" {
+            skip_next = true;
+            continue;
+        }
+        out.push(a.clone());
+    }
+    out
+}
+
 /// One-shot completion via `claude --print`. Streams the user's
 /// system + user prompt on stdin and returns the full reply text on
 /// stdout. No token-level streaming — Claude Code's --print mode
@@ -979,69 +1006,76 @@ pub async fn claude_cli_complete(
             args.push(system_prompt.clone());
         }
 
-        // WSL-isolated project → run `claude` inside the distro; else the
-        // Windows CLI exactly as before. (On Windows, npm installs claude.cmd;
-        // push_arg routes multi-line args via raw_arg quoting for batch shims.)
-        let mut cmd = if let Some((exe, sargs)) =
-            crate::sandbox::program_argv(cwd.as_deref(), "claude", &args)
-        {
-            let mut c = Command::new(exe);
-            c.args(sargs);
-            c
-        } else {
-            let exe = find_claude_cli()
-                .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
-            #[cfg(windows)]
-            let batch = is_batch_shim(&exe);
-            #[cfg(not(windows))]
-            let batch = false;
-            let mut c = Command::new(&exe);
-            for a in &args {
-                push_arg(&mut c, batch, a);
-            }
-            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                let p = std::path::Path::new(dir);
-                if p.is_dir() {
-                    c.current_dir(p);
+        // Build + run wrapped in a closure so a "Session ID … is already in use"
+        // failure (a prior/concurrent claude process holding the same session —
+        // common when the Telegram bridge AND the desktop both dispatch the
+        // orchestrator) RETRIES once WITHOUT --session-id. Doing it at the source
+        // guarantees the conflict self-heals on every path; dropping the session
+        // loses CLI multi-turn memory for that one call only (the prompt still
+        // carries the folded history).
+        let session_was_set = session_id.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let run_once = |args: &[String]| -> Result<String, String> {
+            // WSL-isolated project → run `claude` inside the distro; else the
+            // Windows CLI. (On Windows, npm installs claude.cmd; push_arg routes
+            // multi-line args via raw_arg quoting for batch shims.)
+            let mut cmd = if let Some((exe, sargs)) =
+                crate::sandbox::program_argv(cwd.as_deref(), "claude", args)
+            {
+                let mut c = Command::new(exe);
+                c.args(sargs);
+                c
+            } else {
+                let exe = find_claude_cli()
+                    .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
+                #[cfg(windows)]
+                let batch = is_batch_shim(&exe);
+                #[cfg(not(windows))]
+                let batch = false;
+                let mut c = Command::new(&exe);
+                for a in args {
+                    push_arg(&mut c, batch, a);
                 }
+                if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    let p = std::path::Path::new(dir);
+                    if p.is_dir() {
+                        c.current_dir(p);
+                    }
+                }
+                c
+            };
+            cmd.stdin(Stdio::piped());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(CREATE_NO_WINDOW);
             }
-            c
+            let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin
+                    .write_all(user_message.as_bytes())
+                    .map_err(|e| format!("write stdin: {e}"))?;
+            }
+            // Wait as long as the CLI needs (agentic runs can be 15-30 min).
+            let output = child
+                .wait_with_output()
+                .map_err(|e| format!("wait claude: {e}"))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                return Err(format!(
+                    "claude CLI exited {} — {}",
+                    output.status.code().unwrap_or(-1),
+                    if stderr.is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
+                ));
+            }
+            let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
+            Ok(stdout.trim().to_string())
         };
-        cmd.stdin(Stdio::piped());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NO_WINDOW);
+        match run_once(&args) {
+            Err(e) if session_was_set && is_session_in_use(&e) => run_once(&strip_session_arg(&args)),
+            other => other,
         }
-        let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(user_message.as_bytes())
-                .map_err(|e| format!("write stdin: {e}"))?;
-        }
-        // Wait as long as the CLI needs. Real agentic coding sessions
-        // routinely run 15-30 min under bypassPermissions; the previous
-        // 10-minute wall-clock cap was killing them mid-flight. The
-        // bridge runner already serializes dispatches, so a long run
-        // can't pile up against itself; that's a sufficient guard
-        // against resource exhaustion. If the CLI truly wedges, the
-        // user can close the app to terminate the child (it's spawned
-        // as a child of this process, so OS process cleanup gets it).
-        let output = child
-            .wait_with_output()
-            .map_err(|e| format!("wait claude: {e}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(format!(
-                "claude CLI exited {} — {}",
-                output.status.code().unwrap_or(-1),
-                if stderr.is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
-            ));
-        }
-        let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
-        Ok(stdout.trim().to_string())
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -1325,10 +1359,15 @@ pub async fn claude_cli_stream(
             args.push(system_prompt.clone());
         }
 
+        // Build + stream wrapped in a closure so a "Session ID … is already in
+        // use" startup failure retries once WITHOUT --session-id (see
+        // claude_cli_complete). The conflict aborts the CLI before any event is
+        // streamed, so the retry can't double-emit.
+        let run_once = |args: &[String]| -> Result<String, String> {
         // WSL-isolated project → run `claude` inside the distro; else the
         // Windows CLI exactly as before (no regression for normal folders).
         let mut cmd = if let Some((exe, sargs)) =
-            crate::sandbox::program_argv(cwd.as_deref(), "claude", &args)
+            crate::sandbox::program_argv(cwd.as_deref(), "claude", args)
         {
             let mut c = Command::new(exe);
             c.args(sargs);
@@ -1341,7 +1380,7 @@ pub async fn claude_cli_stream(
             #[cfg(not(windows))]
             let batch = false;
             let mut c = Command::new(&exe);
-            for a in &args {
+            for a in args {
                 push_arg(&mut c, batch, a);
             }
             if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
@@ -1542,6 +1581,12 @@ pub async fn claude_cli_stream(
             ));
         }
         Ok(assembled.trim().to_string())
+        };
+        let session_was_set = session_id.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        match run_once(&args) {
+            Err(e) if session_was_set && is_session_in_use(&e) => run_once(&strip_session_arg(&args)),
+            other => other,
+        }
     })
     .await
     .map_err(|e| format!("join error: {e}"))?

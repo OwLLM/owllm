@@ -27,60 +27,71 @@ export function toggleTutorialRecorder() {
 // Crop a full-screen capture down to the app rectangle. The frame lives in a
 // SEPARATE window OUTSIDE the main content window, so the only surface that
 // holds both is the screen; we draw the app's sub-rect of the screen video to
-// an off-screen canvas every frame and record THAT. Returns the cropped
-// stream + a stop() that tears down the draw loop.
-function cropScreenToApp(src: MediaStream, geom: CaptureGeometry): { stream: MediaStream; stop: () => void } {
+// an off-screen canvas every frame and record THAT. Async so we can wait for
+// the first decoded frame before building the recorded stream (otherwise the
+// MediaRecorder can start on a zero-content canvas and produce nothing).
+async function cropScreenToApp(src: MediaStream, geom: CaptureGeometry): Promise<{ stream: MediaStream; stop: () => void }> {
   const video = document.createElement("video");
   video.srcObject = src;
   video.muted = true;
   (video as HTMLVideoElement & { playsInline?: boolean }).playsInline = true;
-  void video.play().catch(() => {});
+  // Must be in the DOM (even if invisible) for WebView2 to decode frames a
+  // canvas can read; a fully-detached <video> often stays at 0×0.
+  video.style.cssText = "position:fixed;left:-99999px;top:0;width:2px;height:2px;opacity:0;pointer-events:none;";
+  document.body.appendChild(video);
+  await video.play().catch(() => {});
+  // Wait for the first frame (videoWidth becomes non-zero), with a timeout so
+  // a stuck stream still proceeds rather than hanging the Record button.
+  await new Promise<void>((resolve) => {
+    if (video.videoWidth) return resolve();
+    const done = () => resolve();
+    video.addEventListener("loadeddata", done, { once: true });
+    setTimeout(done, 1500);
+  });
+
+  const vw = video.videoWidth || geom.monitor_w;
+  const vh = video.videoHeight || geom.monitor_h;
+  // The video may be captured at a different resolution than the monitor's
+  // reported physical size, so scale by videoWidth/monitorW (DPI / downscale).
+  const sx = vw / Math.max(1, geom.monitor_w);
+  const sy = vh / Math.max(1, geom.monitor_h);
+  let cx = (geom.x - geom.monitor_x) * sx;
+  let cy = (geom.y - geom.monitor_y) * sy;
+  let cw = geom.w * sx;
+  let ch = geom.h * sy;
+  cx = Math.max(0, Math.min(cx, Math.max(0, vw - 2)));
+  cy = Math.max(0, Math.min(cy, Math.max(0, vh - 2)));
+  cw = Math.max(2, Math.min(cw, vw - cx));
+  ch = Math.max(2, Math.min(ch, vh - cy));
 
   const canvas = document.createElement("canvas");
+  canvas.width = Math.round(cw);
+  canvas.height = Math.round(ch);
   const ctx = canvas.getContext("2d");
+  // Paint once so captureStream has real content immediately.
+  if (ctx) { ctx.fillStyle = "#0a0e1a"; ctx.fillRect(0, 0, canvas.width, canvas.height); }
+
   let raf = 0;
   let stopped = false;
-
-  // Crop rect in the screen video's pixel space. The video may be captured at
-  // a different resolution than the monitor's reported physical size, so scale
-  // by videoWidth/monitorW (handles DPI / downscaled capture).
-  const computeCrop = () => {
-    const vw = video.videoWidth || geom.monitor_w;
-    const vh = video.videoHeight || geom.monitor_h;
-    const sx = vw / Math.max(1, geom.monitor_w);
-    const sy = vh / Math.max(1, geom.monitor_h);
-    let cx = (geom.x - geom.monitor_x) * sx;
-    let cy = (geom.y - geom.monitor_y) * sy;
-    let cw = geom.w * sx;
-    let ch = geom.h * sy;
-    // Clamp into the captured frame so a wrong-monitor pick can't throw.
-    cx = Math.max(0, Math.min(cx, vw - 2));
-    cy = Math.max(0, Math.min(cy, vh - 2));
-    cw = Math.max(2, Math.min(cw, vw - cx));
-    ch = Math.max(2, Math.min(ch, vh - cy));
-    return { cx, cy, cw, ch };
-  };
-
   const draw = () => {
     if (stopped) return;
     if (ctx && video.videoWidth) {
-      const { cx, cy, cw, ch } = computeCrop();
-      if (canvas.width !== Math.round(cw)) canvas.width = Math.round(cw);
-      if (canvas.height !== Math.round(ch)) canvas.height = Math.round(ch);
       try { ctx.drawImage(video, cx, cy, cw, ch, 0, 0, canvas.width, canvas.height); } catch { /* frame not ready */ }
     }
     raf = requestAnimationFrame(draw);
   };
-  // Seed the canvas size so captureStream starts with valid dimensions
-  // (refined to the real crop size once the first video frame arrives).
-  canvas.width = Math.max(2, Math.round(geom.w));
-  canvas.height = Math.max(2, Math.round(geom.h));
   raf = requestAnimationFrame(draw);
 
   const stream = canvas.captureStream(30);
   return {
     stream,
-    stop: () => { stopped = true; cancelAnimationFrame(raf); try { video.pause(); } catch { /* ignore */ } video.srcObject = null; },
+    stop: () => {
+      stopped = true;
+      cancelAnimationFrame(raf);
+      try { video.pause(); } catch { /* ignore */ }
+      video.srcObject = null;
+      video.remove();
+    },
   };
 }
 
@@ -290,7 +301,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       setElapsedMs(0);
       setStatus(captureMode === "screen"
         ? "Recording full screen. The recorder panel is hidden from the video. Press Ctrl+Shift+R or the header Record button to stop."
-        : "Pick the SCREEN that OWLLM is on — I crop it to just the app window (frame included). Press Ctrl+Shift+R to stop.");
+        : "In the dialog, click “Entire Screen” and pick the screen OWLLM is on — I crop it to just the app (frame included). Press Ctrl+Shift+R to stop.");
 
       // "Window" mode: the frame is a SEPARATE window OUTSIDE the main one, so
       // a single-window capture can't include it. Capture the whole screen and
@@ -299,15 +310,26 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         ? await invoke<CaptureGeometry | null>("overlay_frame_capture_geometry").catch(() => null)
         : null;
 
-      // Both modes capture a monitor; window mode then crops.
+      // Both modes capture a display surface; window mode then crops — but
+      // ONLY if the user actually shared a whole screen. If they pick a single
+      // window the crop math (screen-relative) doesn't apply, so we record
+      // that window as-is rather than producing a broken sliver.
       const screenStream = await requestDisplayStream("screen");
       streamRef.current = screenStream;
 
+      const surface = (screenStream.getVideoTracks()[0]?.getSettings?.() as { displaySurface?: string } | undefined)?.displaySurface;
       let recordStream = screenStream;
-      if (captureMode === "window" && geom) {
-        const handle = cropScreenToApp(screenStream, geom);
-        cropHandleRef.current = handle;
-        recordStream = handle.stream;
+      if (captureMode === "window" && geom && surface === "monitor") {
+        try {
+          const handle = await cropScreenToApp(screenStream, geom);
+          cropHandleRef.current = handle;
+          recordStream = handle.stream;
+        } catch {
+          // Crop pipeline failed → record the full screen rather than nothing.
+          recordStream = screenStream;
+        }
+      } else if (captureMode === "window" && surface !== "monitor") {
+        setStatus("Recording the chosen window as-is. To include the OWLLM frame, stop and re-record, choosing “Entire Screen”. Ctrl+Shift+R to stop.");
       }
 
       const recorder = new MediaRecorder(recordStream, {

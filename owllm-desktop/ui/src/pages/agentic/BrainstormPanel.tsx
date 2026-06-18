@@ -46,18 +46,66 @@ type Props = {
   /// Called after BRIEF.md is verified on disk so the parent can
   /// refresh its UI (show "brief: ✓" badge, etc.). Optional.
   onBriefSaved?: () => void;
+  /// Project id — needed to persist an assembled team onto the project
+  /// (update_project). Without it the "Assemble team" step is hidden.
+  projectId?: string;
+  /// Agent roles the team can be composed from (base + short description).
+  /// Falls back to a sensible built-in set when not provided.
+  availableRoles?: { base: string; description: string }[];
+  /// Called after a team is applied to the project so the parent reloads
+  /// the roster + canvas.
+  onTeamApplied?: () => void;
 };
 
 type LogLine = { kind: "text" | "tool" | "system"; text: string };
+type ProposedAgent = { name: string; base: string; why?: string };
+
+// Default building-block roles when the parent doesn't pass the live set.
+const DEFAULT_ROLES: { base: string; description: string }[] = [
+  { base: "orchestrator", description: "leads the team, plans, and dispatches work to specialists" },
+  { base: "coder", description: "writes and edits code" },
+  { base: "critic", description: "reviews work, challenges assumptions, catches problems early" },
+  { base: "researcher", description: "investigates, gathers facts, reads docs/APIs" },
+  { base: "operator", description: "runs tools + external actions (shell, web, integrations)" },
+  { base: "documentation", description: "writes user-facing and developer docs" },
+];
+
+// Pull a JSON team array out of the model's reply (tolerates prose/fences around
+// it). Guarantees exactly one orchestrator (promotes the first agent if none).
+function parseProposedTeam(reply: string): ProposedAgent[] | null {
+  const start = reply.indexOf("[");
+  const end = reply.lastIndexOf("]");
+  if (start < 0 || end <= start) return null;
+  try {
+    const arr = JSON.parse(reply.slice(start, end + 1));
+    if (!Array.isArray(arr)) return null;
+    const out: ProposedAgent[] = arr
+      .filter((a: any) => a && typeof a.name === "string" && typeof a.base === "string" && a.name.trim() && a.base.trim())
+      .map((a: any) => ({
+        name: String(a.name).trim(),
+        base: String(a.base).trim().toLowerCase(),
+        why: typeof a.why === "string" ? a.why : undefined,
+      }));
+    if (out.length === 0) return null;
+    if (!out.some(a => a.base === "orchestrator")) out[0].base = "orchestrator";
+    return out;
+  } catch { return null; }
+}
 
 export default function BrainstormPanel(props: Props) {
-  const { open, onClose, projectCwd, brainstormerRole, modelId, port, models, onBriefSaved } = props;
+  const { open, onClose, projectCwd, brainstormerRole, modelId, port, models, onBriefSaved,
+    projectId, availableRoles, onTeamApplied } = props;
 
   const [idea, setIdea] = useState("");
   const [running, setRunning] = useState(false);
   const [lines, setLines] = useState<LogLine[]>([]);
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Idea → team → launch (step 2 of the brainstorm evolution).
+  const [proposing, setProposing] = useState(false);
+  const [proposedTeam, setProposedTeam] = useState<ProposedAgent[] | null>(null);
+  const [applying, setApplying] = useState(false);
+  const [teamApplied, setTeamApplied] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -74,6 +122,10 @@ export default function BrainstormPanel(props: Props) {
       setDone(false);
       setError(null);
       setLines([]);
+      setProposing(false);
+      setProposedTeam(null);
+      setApplying(false);
+      setTeamApplied(false);
     }
   }, [open]);
 
@@ -185,6 +237,88 @@ export default function BrainstormPanel(props: Props) {
 
   const cancel = () => {
     abortRef.current?.abort();
+  };
+
+  // ---- Idea → team → launch ----
+  // Read the brief and propose a team to BUILD it. Output is a JSON roster the
+  // user reviews before applying.
+  const assembleTeam = async () => {
+    if (proposing || applying) return;
+    setProposing(true);
+    setError(null);
+    setProposedTeam(null);
+    try {
+      const brief = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd: projectCwd }).catch(() => "");
+      const roles = (availableRoles && availableRoles.length ? availableRoles : DEFAULT_ROLES)
+        .map(r => `- ${r.base}: ${r.description}`).join("\n");
+      const sys = "You assemble a small agent team to BUILD a software project from a brief. You reply with ONLY a JSON array — no prose, no markdown fences.";
+      const user = [
+        "Compose a team of 4-7 agents to build the project described below.",
+        'ALWAYS include EXACTLY ONE agent with base "orchestrator" (it leads + dispatches the others).',
+        "Choose the rest from the available roles to cover what THIS project actually needs.",
+        "Give each a short, friendly, project-specific name.",
+        "",
+        "Available roles (base: what it does):",
+        roles,
+        "",
+        "BRIEF:",
+        (brief.trim() ? brief.slice(0, 8000) : `(brief unavailable — infer from the idea: ${idea})`),
+        "",
+        "Reply with ONLY this shape:",
+        '[{"name":"Atlas","base":"orchestrator","why":"plans and dispatches"},{"name":"API Coder","base":"coder","why":"backend + data model"}]',
+      ].join("\n");
+      let reply = "";
+      const ctrl = new AbortController();
+      abortRef.current = ctrl;
+      await streamChatCompletion(
+        port, modelId, providerFor(modelId, models),
+        sys, user, 0.3, ctrl.signal,
+        (d) => { reply += d; },
+        projectCwd,
+      );
+      const team = parseProposedTeam(reply);
+      if (!team) {
+        setError("Couldn't read a team from the model's reply — try again, or build the team on the canvas.");
+      } else {
+        setProposedTeam(team);
+      }
+    } catch (e: any) {
+      if (e?.name !== "AbortError") setError("Team assembly failed: " + String(e?.message ?? e));
+    } finally {
+      setProposing(false);
+      abortRef.current = null;
+    }
+  };
+
+  // Persist the proposed roster onto the project (names + roles + an
+  // orchestrator→specialists graph) so it survives restart and is runnable.
+  const applyTeam = async () => {
+    if (!proposedTeam || applying || !projectId) return;
+    setApplying(true);
+    setError(null);
+    try {
+      const orch = proposedTeam.find(a => a.base === "orchestrator") ?? proposedTeam[0];
+      const edges = proposedTeam
+        .filter(a => a.name !== orch.name)
+        .map(a => ({ source: orch.name, target: a.name }));
+      await invoke("update_project", {
+        input: {
+          id: projectId,
+          team: proposedTeam.map(a => a.name),
+          graph_json: JSON.stringify({
+            edges,
+            roster: proposedTeam.map(a => ({ name: a.name, base: a.base })),
+          }),
+        },
+      });
+      setTeamApplied(true);
+      onTeamApplied?.();
+      append("system", `\n🤝 Team applied (${proposedTeam.length} agents). Close this panel — the canvas now shows your team. Hit Run to build.`);
+    } catch (e: any) {
+      setError("Apply failed: " + String(e?.message ?? e));
+    } finally {
+      setApplying(false);
+    }
   };
 
   // ---- Render ----
@@ -310,21 +444,63 @@ export default function BrainstormPanel(props: Props) {
                 ⏹ Stop
               </button>
             )}
-            {done && (
+            {done && !teamApplied && (
+              <>
+                {projectId && !proposedTeam && (
+                  <button
+                    onClick={assembleTeam}
+                    disabled={proposing}
+                    style={{
+                      padding: "8px 16px", fontSize: 13, fontWeight: 700,
+                      background: "linear-gradient(180deg, #36d27a, #1faa5c)",
+                      color: "#062012", border: "none", borderRadius: 6,
+                      cursor: proposing ? "wait" : "pointer", opacity: proposing ? 0.7 : 1,
+                    }}
+                  >{proposing ? "🤝 Assembling team…" : "🤝 Assemble team from brief"}</button>
+                )}
+                <button
+                  onClick={onClose}
+                  style={{
+                    padding: "8px 16px", fontSize: 13, fontWeight: 700,
+                    background: "rgba(80, 200, 120, 0.18)", color: "#a0f0c0",
+                    border: "1px solid rgba(100, 220, 140, 0.4)", borderRadius: 6, cursor: "pointer",
+                  }}
+                >✓ Brief done — Close</button>
+              </>
+            )}
+            {teamApplied && (
               <button
                 onClick={onClose}
                 style={{
                   padding: "8px 16px", fontSize: 13, fontWeight: 700,
-                  background: "rgba(80, 200, 120, 0.18)",
-                  color: "#a0f0c0",
-                  border: "1px solid rgba(100, 220, 140, 0.4)", borderRadius: 6,
-                  cursor: "pointer",
+                  background: "rgba(80, 200, 120, 0.18)", color: "#a0f0c0",
+                  border: "1px solid rgba(100, 220, 140, 0.4)", borderRadius: 6, cursor: "pointer",
                 }}
-              >
-                ✓ Done — Close
-              </button>
+              >✓ Team applied — Close &amp; open canvas</button>
             )}
           </div>
+
+          {/* Proposed team — review before applying (idea → team → launch). */}
+          {proposedTeam && !teamApplied && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "rgba(10,30,20,0.5)", border: "1px solid rgba(100,220,140,0.3)", borderRadius: 8 }}>
+              <div style={{ color: "#bfeed0", fontSize: 12, fontWeight: 700 }}>
+                Proposed team — review, then apply. You can change each agent's model on the canvas before running.
+              </div>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                {proposedTeam.map((a, i) => (
+                  <div key={i} style={{ minWidth: 160, flex: "1 1 200px", padding: "8px 10px", background: "rgba(8,11,18,0.85)", border: `1px solid ${a.base === "orchestrator" ? "rgba(255,210,120,0.55)" : "rgba(255,255,255,0.12)"}`, borderRadius: 6 }}>
+                    <div style={{ color: "#fff", fontWeight: 700, fontSize: 12.5 }}>{a.base === "orchestrator" ? "⭐ " : ""}{a.name}</div>
+                    <div style={{ color: "#8aa0c0", fontSize: 11, fontFamily: "Consolas, monospace" }}>{a.base}</div>
+                    {a.why && <div style={{ color: "#9aa6bc", fontSize: 11, marginTop: 2 }}>{a.why}</div>}
+                  </div>
+                ))}
+              </div>
+              <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+                <button onClick={applyTeam} disabled={applying} style={{ padding: "7px 14px", fontSize: 12.5, fontWeight: 700, background: "linear-gradient(180deg, #6b7fff, #4a5fd9)", color: "#fff", border: "none", borderRadius: 6, cursor: applying ? "wait" : "pointer", opacity: applying ? 0.7 : 1 }}>{applying ? "Applying…" : "✅ Apply to project & open"}</button>
+                <button onClick={assembleTeam} disabled={proposing || applying} style={{ padding: "7px 14px", fontSize: 12.5, fontWeight: 600, background: "transparent", color: "#cfd4e1", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 6, cursor: (proposing || applying) ? "wait" : "pointer" }}>🔄 Re-propose</button>
+              </div>
+            </div>
+          )}
 
           {/* Error */}
           {error ? (

@@ -9210,6 +9210,10 @@ export default function AgentsPage() {
         port={serverState.port ?? 0}
         models={models}
         onBriefSaved={() => setHasBriefForProject(true)}
+        projectId={selectedProjectId}
+        // Apply the assembled roster to THIS project (persists), then clear any
+        // template override + reload so the canvas shows the new team.
+        onTeamApplied={() => { setPickedTeamId(null); reloadProjects(); }}
       />
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{

@@ -106,6 +106,9 @@ export default function BrainstormPanel(props: Props) {
   const [proposedTeam, setProposedTeam] = useState<ProposedAgent[] | null>(null);
   const [applying, setApplying] = useState(false);
   const [teamApplied, setTeamApplied] = useState(false);
+  // Conversational co-founder (step 3): a back-and-forth before/around the brief.
+  const [convHistory, setConvHistory] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [chatInput, setChatInput] = useState("");
   const abortRef = useRef<AbortController | null>(null);
   const logRef = useRef<HTMLDivElement | null>(null);
 
@@ -126,6 +129,8 @@ export default function BrainstormPanel(props: Props) {
       setProposedTeam(null);
       setApplying(false);
       setTeamApplied(false);
+      setConvHistory([]);
+      setChatInput("");
     }
   }, [open]);
 
@@ -143,96 +148,87 @@ export default function BrainstormPanel(props: Props) {
       return out;
     });
 
-  const runBrainstorm = async () => {
-    const trimmed = idea.trim();
-    if (!trimmed) {
-      setError("Enter a generic idea first (one or two sentences is enough).");
-      return;
-    }
-    if (!projectCwd) {
-      setError("This project has no location set. Pick a folder in the Location row first so the brainstormer can save BRIEF.md.");
-      return;
-    }
-    if (!brainstormerRole?.systemPrompt) {
-      setError("Brainstormer role not loaded. Make sure LLM/core/agents/roles/brainstormer.yaml is present.");
-      return;
-    }
-    if (!modelId) {
-      setError("No model picked. Set a team default model first.");
-      return;
-    }
+  // Conversational co-founder (step 3): wrap the brainstormer role so it FIRST
+  // talks (clarifies + challenges like a co-founder/skeptic), then runs the
+  // research workflow + writes BRIEF.md when the user is ready.
+  const convSystemPrompt = brainstormerRole?.systemPrompt
+    ? [
+        "You are the user's CO-FOUNDER and a friendly SKEPTIC, scoping their idea before any code is written.",
+        "Hold a short back-and-forth FIRST: ask 1-3 sharp questions per turn — pin down the ICP and the core job, AND challenge scope, assumptions, and whether this is even worth building. Be concise and direct, not a wall of text.",
+        "Do NOT start web research yet — wait until you've clarified enough, OR the user tells you to (e.g. 'go', 'run', 'proceed', 'looks good'). THEN run your full research workflow below and WRITE BRIEF.md.",
+        "After BRIEF.md exists, the user may keep talking to refine it — re-write BRIEF.md to reflect their changes.",
+        "",
+        "--- YOUR RESEARCH ROLE (run this once you're ready) ---",
+        brainstormerRole.systemPrompt,
+      ].join("\n")
+    : "";
 
+  // One conversational turn: stream the reply with full history, remember it,
+  // and re-check whether BRIEF.md now exists on disk.
+  const runTurn = async (userText: string) => {
+    if (!convSystemPrompt || !modelId || running) return;
     setRunning(true);
     setError(null);
-    setDone(false);
-    setLines([{ kind: "system", text: `🧠 Starting brainstorm in ${projectCwd} using ${modelId}…` }]);
-
+    append("system", `\n🧑 ${userText}\n`);
+    const priorHistory = convHistory;
     const ctrl = new AbortController();
     abortRef.current = ctrl;
-
-    const onDelta = (delta: string) => append("text", delta);
     const onThought = (channel: string, role: string, _delta: string) => {
-      // Tool-call channels look like `tool:<name>:<turn>`; surface
-      // them as inline banners so the user sees what's happening.
-      if (channel.startsWith("tool:")) {
-        append("tool", `🛠 ${role}`);
-      }
+      if (channel.startsWith("tool:")) append("tool", `🛠 ${role}`);
     };
-
-    // The brainstormer asks the user (us — the panel) to write BRIEF.md
-    // to `<project_cwd>/BRIEF.md`. We seed the user message with the
-    // idea + the project_cwd anchor so the agent knows where to save.
-    const userMessage = [
-      `Project location (where BRIEF.md and brainstorm/<png> should be saved):`,
-      projectCwd,
-      "",
-      `My generic idea:`,
-      trimmed,
-      "",
-      "Run the full STRICT WORKFLOW from your role: clarify → search → per-competitor scan → feature aggregation → GUI direction → write BRIEF.md → wrap.",
-    ].join("\n");
-
+    let reply = "";
+    const onDelta = (delta: string) => { reply += delta; append("text", delta); };
     try {
       await streamChatCompletion(
-        port,
-        modelId,
-        providerFor(modelId, models),
-        brainstormerRole.systemPrompt,
-        userMessage,
-        brainstormerRole.defaultTemperature ?? 0.4,
-        ctrl.signal,
-        onDelta,
-        projectCwd,
-        undefined, undefined,
-        onThought,
+        port, modelId, providerFor(modelId, models),
+        convSystemPrompt, userText, brainstormerRole?.defaultTemperature ?? 0.4,
+        ctrl.signal, onDelta, projectCwd,
+        priorHistory, undefined, onThought,
       );
-      // Verify BRIEF.md actually landed on disk before declaring success.
-      // The model can claim it wrote a file when it didn't (or wrote it
-      // to the wrong path) — better to check than trust.
+      setConvHistory([...priorHistory, { role: "user", content: userText }, { role: "assistant", content: reply }]);
+      // Did the brief land (or get refined) this turn?
       let briefOnDisk = false;
       try {
-        const text = await invoke<string>("tool_read_file", {
-          path: "BRIEF.md", cwd: projectCwd,
-        });
+        const text = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd: projectCwd });
         briefOnDisk = text.trim().length > 0;
-      } catch { /* missing or unreadable */ }
-      if (briefOnDisk) {
+      } catch { /* not yet */ }
+      if (briefOnDisk && !done) {
         setDone(true);
-        append("system", `\n✓ BRIEF.md saved to ${projectCwd}\\BRIEF.md. Close this panel — the orchestrator will pick it up on the next Run.`);
+        append("system", `\n✓ BRIEF.md saved. Keep chatting to refine it, or 🤝 Assemble a team from it below.`);
         onBriefSaved?.();
-      } else {
-        setError("Brainstormer finished but BRIEF.md was not written. Check the log for what went wrong — likely a tool error (missing BRAVE_API_KEY, network, etc.).");
       }
     } catch (e: any) {
-      if (e?.name === "AbortError") {
-        append("system", "\n⏹ Cancelled.");
-      } else {
-        setError(String(e?.message ?? e));
-      }
+      if (e?.name === "AbortError") append("system", "\n⏹ Cancelled.");
+      else setError(String(e?.message ?? e));
     } finally {
       setRunning(false);
       abortRef.current = null;
     }
+  };
+
+  const runBrainstorm = async () => {
+    const trimmed = idea.trim();
+    if (!trimmed) { setError("Enter a generic idea first (one or two sentences is enough)."); return; }
+    if (!projectCwd) { setError("This project has no location set. Pick a folder first so the brainstormer can save BRIEF.md."); return; }
+    if (!brainstormerRole?.systemPrompt) { setError("Brainstormer role not loaded (resources/agents/roles/brainstormer.yaml)."); return; }
+    if (!modelId) { setError("No model picked. Set a team default model first."); return; }
+    setDone(false);
+    setConvHistory([]);
+    setLines([{ kind: "system", text: `🧠 Brainstorm in ${projectCwd} using ${modelId}. I'll ask a couple of questions first — answer below, then say "go" when you want me to research + write the brief.` }]);
+    await runTurn([
+      `Project location (where BRIEF.md and brainstorm/<png> go): ${projectCwd}`,
+      "",
+      `My idea: ${trimmed}`,
+      "",
+      "Start as my co-founder: ask me your sharpest 1-3 questions (don't research yet).",
+    ].join("\n"));
+  };
+
+  const sendFollowup = async () => {
+    const t = chatInput.trim();
+    if (!t || running) return;
+    setChatInput("");
+    await runTurn(t);
   };
 
   const cancel = () => {
@@ -355,7 +351,7 @@ export default function BrainstormPanel(props: Props) {
             <div>
               <div style={{ color: "#fff", fontWeight: 700, fontSize: 15 }}>Project Brainstorm</div>
               <div style={{ color: "#aab2c8", fontSize: 11, marginTop: 2 }}>
-                Researches competitors → ranks features by frequency → writes BRIEF.md
+                Co-founder chat → research (competitors, OSS, real pain) → BRIEF.md → assemble a team
               </div>
             </div>
           </div>
@@ -385,7 +381,7 @@ export default function BrainstormPanel(props: Props) {
             <textarea
               value={idea}
               onChange={(e) => setIdea(e.target.value)}
-              disabled={running || done}
+              disabled={running || convHistory.length > 0}
               placeholder="e.g. A Gmail-native CRM I can use for my own business contacts. Or: a workout tracker that learns from my history and suggests next week's plan."
               rows={3}
               style={{
@@ -414,7 +410,7 @@ export default function BrainstormPanel(props: Props) {
 
           {/* Action row */}
           <div style={{ display: "flex", gap: 8 }}>
-            {!running && !done && (
+            {!running && convHistory.length === 0 && (
               <button
                 onClick={runBrainstorm}
                 disabled={!idea.trim() || !projectCwd || !modelId || !brainstormerRole?.systemPrompt}
@@ -427,7 +423,7 @@ export default function BrainstormPanel(props: Props) {
                   opacity: (idea.trim() && projectCwd && modelId) ? 1 : 0.5,
                 }}
               >
-                🚀 Run Brainstorm
+                🚀 Start brainstorm
               </button>
             )}
             {running && (
@@ -554,6 +550,26 @@ export default function BrainstormPanel(props: Props) {
               })
             )}
           </div>
+
+          {/* Conversational input — appears once the co-founder chat has started.
+              The user answers questions, refines, or says "go" to research. */}
+          {convHistory.length > 0 && (
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendFollowup(); } }}
+                disabled={running}
+                placeholder={running ? "Co-founder is thinking…" : (done ? "Refine the brief, or assemble a team above…" : "Answer, push back, or say ‘go’ to research + write the brief…")}
+                style={{ flex: 1, padding: "9px 12px", background: "rgba(10,14,22,0.8)", color: "#e6ebf7", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 6, fontSize: 13 }}
+              />
+              <button
+                onClick={sendFollowup}
+                disabled={running || !chatInput.trim()}
+                style={{ padding: "0 18px", fontSize: 13, fontWeight: 700, background: "linear-gradient(180deg, #6b7fff, #4a5fd9)", color: "#fff", border: "none", borderRadius: 6, cursor: (running || !chatInput.trim()) ? "not-allowed" : "pointer", opacity: (running || !chatInput.trim()) ? 0.5 : 1 }}
+              >Send</button>
+            </div>
+          )}
         </div>
       </div>
     </div>

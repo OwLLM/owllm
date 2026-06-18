@@ -567,10 +567,18 @@ export function colorForAgent(spec: AgentSpec): string {
 }
 
 export function findOrchestratorSpec(team: Team): AgentSpec | undefined {
+  // Must match AgentsPage's orchestratorOf EXACTLY — this copy is what the
+  // bridge (bridgeCore) and runDispatchLoop use. A renamed lead like "Orchi the
+  // orchestrator" loses base="orchestrator" on the project round-trip, so the
+  // exact checks miss it; without the name/base CONTAINS step the bridge fell
+  // back to the FIRST card and dispatched to THAT agent's model (Codex) instead
+  // of the real orchestrator's — the "dispatch error codex CLI" from Telegram.
+  const a = team.agents;
   return (
-    team.agents.find(a => a.name === "orchestrator") ??
-    team.agents.find(a => a.base === "orchestrator") ??
-    team.agents[0]
+    a.find(x => x.name === "orchestrator") ??
+    a.find(x => x.base === "orchestrator") ??
+    a.find(x => /\borchestrator\b/i.test(x.name) || /\borchestrator\b/i.test(x.base)) ??
+    a[0]
   );
 }
 
@@ -612,7 +620,11 @@ export function toTeam(t: TeamTemplateBackend): Team {
 }
 
 export function projectToTeam(p: ProjectRow): Team {
-  const agents: AgentSpec[] = (p.team ?? []).map(n => ({ name: n, base: n }));
+  // Recover each agent's ROLE (base) from the roster persisted in graph_json
+  // (the `team` field is names only). MUST match AgentsPage's projectToTeam —
+  // this copy is what the bridge / runDispatchLoop use. Without it a renamed
+  // agent loses its role here too.
+  const baseByName = new Map<string, string>();
   let edges: Edge[] = [];
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
@@ -622,8 +634,16 @@ export function projectToTeam(p: ProjectRow): Team {
           .filter((e: any) => typeof e?.source === "string" && typeof e?.target === "string")
           .map((e: any) => ({ source: e.source, target: e.target }));
       }
+      if (Array.isArray(parsed?.roster)) {
+        for (const r of parsed.roster) {
+          if (r && typeof r.name === "string" && typeof r.base === "string" && r.base.trim()) {
+            baseByName.set(r.name, r.base);
+          }
+        }
+      }
     } catch { /* fall back to no edges */ }
   }
+  const agents: AgentSpec[] = (p.team ?? []).map(n => ({ name: n, base: baseByName.get(n) ?? n }));
   return {
     id: `project:${p.id}`,
     name: p.name,

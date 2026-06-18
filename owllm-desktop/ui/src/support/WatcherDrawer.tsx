@@ -52,11 +52,14 @@ type ModelChoice =
   | { kind: "none" };
 
 const WATCHER_PERSONA =
-  "You are The Watcher, OWLLM's in-app support assistant. You are given a JSON snapshot of the app's " +
-  "real state (readiness, hardware, server, WSL, modules). Help the user in plain language: likely cause, " +
-  "immediate fix steps, whether it looks like a product bug, and minimal repro steps when relevant. " +
-  "Be concise and concrete. If the snapshot already shows the answer (a ❌ row, a crashed server message), " +
-  "lead with it. Never invent state that isn't in the snapshot.\n\n" +
+  "You are The Watcher, OWLLM's in-app support assistant. You are given (a) DOCS for the page the user is " +
+  "currently on — what each function/button does and how to fix its common problems — plus a one-line index " +
+  "of the other pages, and (b) a JSON snapshot of the app's real state (readiness, hardware, server, WSL, " +
+  "modules). Use the DOCS to explain features and walk the user through what to click; use the SNAPSHOT for " +
+  "live state. Help in plain language: likely cause, immediate fix steps, whether it looks like a product " +
+  "bug, and minimal repro steps when relevant. Be concise and concrete. If the snapshot or docs already show " +
+  "the answer (a ❌ row, a crashed server, a documented fix), lead with it. Prefer the DOCS over guessing, " +
+  "and never invent state that isn't in the snapshot.\n\n" +
   "KEY FACTS about what each readiness row actually gates — do NOT conflate them:\n" +
   "• WSL → agent/Coder ISOLATION (the sandbox). Agents and the Code page run isolated INSIDE WSL. " +
   "If WSL is OK, isolation is available — that is the only requirement for sandboxed agent runs.\n" +
@@ -67,7 +70,8 @@ const WATCHER_PERSONA =
   "• GPU / runtime → local model SERVING (llama.cpp). Needed to run local models, not for agent dispatch to cloud models.\n" +
   "So a snapshot with WSL ✅ but `env` ⚠️ means: agents CAN run isolated; only fine-tuning is unavailable.";
 
-/// Human blurbs for the page the user is looking at — keyed by activeKey.
+/// Short one-liners — used for the "What page am I on?" answer and as the
+/// cross-page INDEX the Watcher gets so it can point the user elsewhere.
 const PAGE_BLURBS: Record<string, string> = {
   home: "the Home page — system status, readiness checks, and quick setup actions live here.",
   agents: "the Agentic Team page — orchestrator + specialist agents that fan out on your goal. Pick a project location, type a goal, hit Run.",
@@ -77,6 +81,55 @@ const PAGE_BLURBS: Record<string, string> = {
   models: "the Models page — your downloaded and fine-tuned models.",
   server: "the Server page — start/stop the local llama.cpp model server.",
   bridges: "the Bridges page — connect Telegram / WhatsApp / Discord / Slack / email to your agents.",
+  info: "the Info page — live system info + sandbox-disk maintenance.",
+  accounts: "the Accounts page — API keys + subscription-CLI logins for cloud models.",
+  mcp: "the MCP page — connect MCP servers so agents gain extra tools.",
+};
+
+/// FULL per-page/function documentation the Watcher reads for the page the user
+/// is ON. Keep this CURRENT when features change — it's the Watcher's source of
+/// truth about how each page + function works and how to fix common problems.
+const PAGE_DOCS: Record<string, string> = {
+  home:
+    "HOME — the launcher + system status.\n" +
+    "• System Status: live GPU(s) with per-GPU VRAM and a checkbox to include/exclude each from inference; CPU; RAM. 'Refresh Hardware Detection' re-probes.\n" +
+    "• Software Requirements & Setup: four LIVE readiness rows (WSL/Ubuntu, GPU & CUDA driver, Fine-tuning env, Local LLM runtime) with one-click fixes when missing — 'Set up WSL', 'Set up Fine-tuning Environment' (jumps to Train), 'Install LLM engine' (llama.cpp).\n" +
+    "• Sign-in/sync bar at top: GitHub sign-in so chats/settings follow you across devices.\n" +
+    "• Three launcher tiles (Fine Tuning, Agentic Team, Gamify) reveal quick actions on hover.\n" +
+    "Note: the Sandbox-disk maintenance panel moved to the Info page.",
+  agents:
+    "AGENTIC TEAM — an orchestrator + specialist agents that fan out on your goal.\n" +
+    "• The top is ONE line: a 📁 project dropdown + ⚙ (Project settings) + '+ New' + the goal/Run row.\n" +
+    "• ⚙ Project settings popup holds everything project-level: Folder/Browse, a Security block (Trust writes; Isolated vs ⚠ Host-access; Verify; Isolate; Full access), Team template, Bridge, Rename, and Delete (requires a double-confirm). '+ New' opens the SAME popup to create a project.\n" +
+    "• Goal/Run row: 📎 attach an image/audio, the goal box, 🧠 Brainstorm, Run, Cancel, 📊 telemetry, 🔊 voice.\n" +
+    "• The orchestrator leads and dispatches to specialists; the arrows between cards ARE the dispatch graph. Each agent's model + voice are set on its card and PERSIST per project.\n" +
+    "• Brainstorm (🧠): a co-founder chat → deep research (competitors, open-source, real user pain, pricing) → writes BRIEF.md → '🤝 Assemble team from brief' (proposes + saves a runnable team) → a live feature Board view.\n" +
+    "COMMON ISSUES → FIX: (1) 🧠 button greyed = the project has NO folder; click it — it opens ⚙ Settings; set a Folder there, then 🧠 works. (2) The wrong agent acts as orchestrator = a renamed lead; keep 'orchestrator' in its name. (3) Telegram replies 'dispatch error codex CLI' = the orchestrator's model is Codex and it failed (rate-limited / not signed in) — set its model to a working one on its card. (4) Team empty after restart = roster edits on the canvas aren't persisted yet; assembling a team via Brainstorm DOES persist it.",
+  code:
+    "CODE — a single coding agent working in ONE project folder.\n" +
+    "Runs isolated inside WSL when the green 'Isolated' badge shows. The chat + plan/Kanban + workspace persist when you switch tabs and come back. Paste images for the model to read. Set the folder + model at the top. Subscription CLIs (Claude Code, Codex) and cloud/local models all work.",
+  chat:
+    "CHAT (fine-tuning playground) — talk to local OR cloud models, with tools, in up to three columns side by side. Paste images. Subscription CLIs (Claude Code, Codex) work here too. Great for trying a model before wiring it into a team.",
+  train:
+    "TRAIN — fine-tune a model on your own data (LoRA/QLoRA).\n" +
+    "Needs the fine-tuning ENVIRONMENT installed (the 'Environment' button). This is the ONLY thing the `env` readiness row gates — it is NOT needed for agents, Code, Chat, or serving. Pick a base model + dataset, set params, run; uses your selected GPU.",
+  models:
+    "MODELS — Browse / Downloaded / Tuned / Cache tabs.\n" +
+    "• Browse: HuggingFace search + curated recommendations. A card's COLOUR means one thing: does it fit YOUR selected GPU's VRAM — 🟢 fits (inference + fine-tune), 🟡 tight, 🔴 too large. Filter checkboxes narrow by type (GGUF, Instruct, LoRA, Vision…); each card shows the lab that made it.\n" +
+    "• Downloading a model ALSO auto-fetches its vision projector (mmproj) for image-capable models so local vision input works.\n" +
+    "COMMON ISSUE → FIX: a local model 500s on a pasted image ('image input is not supported - provide the mmproj') = the projector isn't on disk; re-download that model (it backfills the projector), then restart the model.",
+  server:
+    "SERVER — start/stop the local llama.cpp model server.\n" +
+    "It auto-starts when you send to a local model (no manual step). The server is SHARED across OwLLM windows — a second window reuses it instead of fighting over the port — and stops only when the LAST window closes. Vision models load their mmproj automatically. In the log, '/health poll gave up' is a benign readiness-probe timeout, NOT a crash, if the model is actually serving requests.",
+  bridges:
+    "BRIDGES — connect Telegram / WhatsApp / Discord / Slack / email to your agents.\n" +
+    "Set the bot token + the PROJECT to route messages to, then Start. Only ONE OwLLM window polls a given bot at a time (a second one yields). Which project a chat routes to is shared across windows. In a chat you can use /project and /model commands; a new idea can spin up a brainstorm project.",
+  info:
+    "INFO — a live, honest system view: Application/version, Environment readiness, Hardware, GPU detail (live VRAM), Model-server state, your Models, plus the Sandbox-disk controls (Clear caches / Reclaim disk space) that moved here off Home.",
+  accounts:
+    "ACCOUNTS — connect models here: paste API keys (Anthropic, OpenAI, Gemini, …) and/or sign into subscription CLIs (Claude Code, Codex, Gemini, Kimi). Keys/secrets never sync off this device. A cloud or subscription agent needs the matching key/login on this page.",
+  mcp:
+    "MCP — connect MCP servers so agents gain extra tools (filesystem, git, web, integrations). Add a server, it's verified, then its tools are available to the team.",
 };
 
 function rowIcon(r: ReadinessRow): string {
@@ -434,7 +487,13 @@ export default function WatcherDrawer({
     };
     try {
       const snapshot = await invoke<SupportSnapshot>("support_snapshot").catch(() => null);
-      const system = `${WATCHER_PERSONA}\n\nCurrent page: ${activeKey} (mode ${mode})\n\nAPP SNAPSHOT:\n${JSON.stringify(snapshot)}`;
+      const pageDoc = PAGE_DOCS[activeKey] ?? PAGE_BLURBS[activeKey] ?? `the "${activeKey}" page (mode ${mode}).`;
+      const pageIndex = Object.entries(PAGE_BLURBS).map(([k, v]) => `- ${k}: ${v}`).join("\n");
+      const system =
+        `${WATCHER_PERSONA}\n\n` +
+        `=== DOCS: CURRENT PAGE (${activeKey}, mode ${mode}) — what the user is looking at ===\n${pageDoc}\n\n` +
+        `=== OTHER PAGES (so you can point them to the right place) ===\n${pageIndex}\n\n` +
+        `=== APP SNAPSHOT (live state) ===\n${JSON.stringify(snapshot)}`;
       let reply: string;
       if (choice.kind === "local") {
         reply = await streamLocalChat({
@@ -591,17 +650,16 @@ export default function WatcherDrawer({
       }}>
         <div style={{
           height: 50, background: "var(--bg-header)", color: "var(--bg-header-fg)",
-          display: "flex", alignItems: "center", gap: 10, padding: "0 16px",
+          display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          padding: "0 16px", position: "relative",
           borderBottom: "1px solid rgba(var(--accent-rgb),0.30)",
         }}>
-          <span style={{ fontSize: 20 }}>🦉</span>
-          <div style={{ fontWeight: 800, fontSize: 16, letterSpacing: 0.4 }}>The Watcher</div>
-          <div style={{ fontSize: 11, color: "var(--fg-muted)", marginLeft: 4 }}>local support assistant</div>
-          <div style={{ flex: 1 }} />
+          <div style={{ fontWeight: 800, fontSize: 16, letterSpacing: 0.4, lineHeight: 1.1 }}>The Watcher</div>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>local support assistant</div>
           <button
             onClick={onClose}
             title="Close (Esc)"
-            style={{ width: 32, height: 24, border: "none", background: "rgba(244,67,54,0.18)", color: "#ff8080", fontSize: 13, cursor: "pointer", borderRadius: 5 }}
+            style={{ position: "absolute", right: 16, top: "50%", transform: "translateY(-50%)", width: 32, height: 24, border: "none", background: "rgba(244,67,54,0.18)", color: "#ff8080", fontSize: 13, cursor: "pointer", borderRadius: 5 }}
           >✕</button>
         </div>
 

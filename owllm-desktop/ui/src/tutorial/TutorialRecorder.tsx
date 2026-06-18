@@ -55,10 +55,13 @@ async function cropScreenToApp(src: MediaStream, geom: CaptureGeometry): Promise
   // reported physical size, so scale by videoWidth/monitorW (DPI / downscale).
   const sx = vw / Math.max(1, geom.monitor_w);
   const sy = vh / Math.max(1, geom.monitor_h);
+  // A few px of breathing room so the frame isn't cropped flush. The overlay
+  // window already leaves a left margin, so pad only TOP / RIGHT / BOTTOM.
+  const PAD = 16;
   let cx = (geom.x - geom.monitor_x) * sx;
-  let cy = (geom.y - geom.monitor_y) * sy;
-  let cw = geom.w * sx;
-  let ch = geom.h * sy;
+  let cy = (geom.y - PAD - geom.monitor_y) * sy;
+  let cw = (geom.w + PAD) * sx;
+  let ch = (geom.h + 2 * PAD) * sy;
   cx = Math.max(0, Math.min(cx, Math.max(0, vw - 2)));
   cy = Math.max(0, Math.min(cy, Math.max(0, vh - 2)));
   cw = Math.max(2, Math.min(cw, vw - cx));

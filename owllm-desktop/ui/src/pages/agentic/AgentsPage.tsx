@@ -614,20 +614,22 @@ async function fileToAttachment(file: File): Promise<Attachment> {
   return { kind, mime, data_b64, filename: file.name };
 }
 
-function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachments, onBrainstorm, hasBrief, leftSlot }: {
+function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachments, onBrainstorm, hasBrief, brainstormReady, leftSlot }: {
   goal: string; setGoal: (g: string) => void;
   onRun: () => void; onCancel: () => void; busy: boolean;
   attachments: Attachment[]; setAttachments: (a: Attachment[]) => void;
   /// Compact project cluster (project dropdown + ⚙ settings + New) rendered at
   /// the START of the run row, so the whole top is a SINGLE line.
   leftSlot?: React.ReactNode;
-  /// Opens the BrainstormPanel modal. Null disables the button — used
-  /// when the project has no location set (brainstormer can't save
-  /// BRIEF.md without one).
+  /// Opens the BrainstormPanel modal — OR, when the project has no folder yet,
+  /// opens Project settings so the user can set one (never a dead button).
   onBrainstorm: (() => void) | null;
   /// Whether BRIEF.md exists in this project's location. Drives the
   /// 🧠 button's tint (green = brief locked, neutral = brief missing).
   hasBrief: boolean;
+  /// True when the project has a folder set (so brainstorm can run straight
+  /// away). False → the 🧠 button opens Project settings instead.
+  brainstormReady?: boolean;
 }) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [dragOver, setDragOver] = useState(false);
@@ -699,19 +701,21 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
           data-ui="GoalBrainstormBtn"
           onClick={() => onBrainstorm?.()}
           disabled={!onBrainstorm || busy}
-          title={onBrainstorm
-            ? (hasBrief
+          title={!brainstormReady
+            ? "Brainstorm needs a project folder — click to open Project settings and set one"
+            : (hasBrief
                 ? "Re-run brainstorm (BRIEF.md exists — will be overwritten)"
-                : "Brainstorm: research competitors, build BRIEF.md before the team runs")
-            : "Set a project location first so the brainstormer can save BRIEF.md"}
+                : "Brainstorm: co-founder chat → research → BRIEF.md before the team runs")}
           style={{
             height: 38, minWidth: 44, padding: "0 10px",
             border: "none", borderRadius: 10,
             background: hasBrief ? "rgba(80, 200, 120, 0.18)" : "var(--bg-surface)",
             color: hasBrief ? "#a0f0c0" : "var(--fg)",
             fontSize: 16,
+            // Always clickable (unless busy): with no folder it opens Settings
+            // to set one, instead of sitting there ghosted with no way forward.
             cursor: (onBrainstorm && !busy) ? "pointer" : "not-allowed",
-            opacity: (onBrainstorm && !busy) ? 1 : 0.5,
+            opacity: busy ? 0.5 : (brainstormReady ? 1 : 0.8),
           }}
         >🧠</button>
         <button data-ui="GoalRunBtn" disabled={busy || !goal.trim()} onClick={onRun}
@@ -9160,12 +9164,15 @@ export default function AgentsPage() {
             <div style={{ width:1, height:24, background:"var(--border-strong)", margin:"0 2px" }} />
           </div>
         }
-        // Brainstorm needs a project location to anchor BRIEF.md +
-        // brainstorm/<png>. Disable the button (null callback) when no
-        // location is set so the title attribute explains why.
-        onBrainstorm={runCwd
-          ? () => setBrainstormOpen(true)
-          : null}
+        // Brainstorm needs a project folder to anchor BRIEF.md + brainstorm/<png>.
+        // If there's no folder yet, don't dead-end the button — open Project
+        // settings so the user can set one (the folder field moved into that
+        // popup in v0.5.26, so a bare "set a location" hint had nowhere to point).
+        onBrainstorm={() => {
+          if (runCwd && runCwd.trim()) { setBrainstormOpen(true); }
+          else { setSettingsMode("edit"); setNewProjOpen(true); }
+        }}
+        brainstormReady={!!(runCwd && runCwd.trim())}
         hasBrief={hasBriefForProject}
       />
       <IconPickerDialog

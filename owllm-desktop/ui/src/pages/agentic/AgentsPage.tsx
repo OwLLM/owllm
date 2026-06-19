@@ -4034,9 +4034,19 @@ function OrchestratorPane({
   // (where mode used to matter) lives in OrchestratorSettings.
   const focus = agentFocus;
 
-  // Filter the focused agent's messages. The "you" buffer always
-  // contains just the user goal echo; useful as a sanity check.
-  const messages = agentLogs.get(focus) ?? [];
+  // The main conversation view = the canonical supChat thread. onSupSend AND
+  // the Telegram bridge BOTH reliably append the user turn, every agent reply,
+  // and any "model produced only tool-call output" notice to supChat. The pane
+  // used to read agentLogs[focus], which silently desynced: the orchestrator's
+  // reply landed under an agent key the focused view wasn't reading, and when a
+  // local model's whole output was stripped tool-junk, agentLogs[orch] stayed
+  // empty while the explanatory notice went only to supChat — so a fresh turn
+  // looked like it produced NOTHING in the right column (#29/#30). Only an
+  // EXPLICIT drill into a specific non-orchestrator specialist shows that
+  // agent's private buffer.
+  const isSpecialistFocus =
+    !!selectedAgent && selectedAgent !== orchName && selectedAgent !== "you";
+  const messages = isSpecialistFocus ? (agentLogs.get(focus) ?? []) : supChat;
   // All thought-tab traffic for this agent (thinking + tool calls +
   // tool results + dispatch directives). Split per-tab below.
   const allThoughts = agentThoughts.get(focus) ?? [];

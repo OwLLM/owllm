@@ -159,9 +159,9 @@ function LauncherTile({ spec }: { spec: LauncherSpec }) {
           width: "100%",
           height: "100%",
           objectFit: "cover",
-          // Picture only — render the owl art at 80% of its size, centered.
+          // Picture only — render the owl art at 90% of its size, centered.
           // The tile/container keeps its full size; just the image shrinks.
-          transform: "scale(0.8)",
+          transform: "scale(0.9)",
           // Dim the art on hover so the action grid reads clearly.
           filter: hover ? "brightness(0.32) saturate(0.85)" : "none",
           transition: "filter 0.2s",

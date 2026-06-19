@@ -55,13 +55,23 @@ async function cropScreenToApp(src: MediaStream, geom: CaptureGeometry): Promise
   // reported physical size, so scale by videoWidth/monitorW (DPI / downscale).
   const sx = vw / Math.max(1, geom.monitor_w);
   const sy = vh / Math.max(1, geom.monitor_h);
-  // A few px of breathing room so the frame isn't cropped flush. The overlay
-  // window already leaves a left margin, so pad only TOP / RIGHT / BOTTOM.
-  const PAD = 16;
-  let cx = (geom.x - geom.monitor_x) * sx;
-  let cy = (geom.y - PAD - geom.monitor_y) * sy;
-  let cw = (geom.w + PAD) * sx;
-  let ch = (geom.h + 2 * PAD) * sy;
+  // Crop to EXACTLY the overlay window's rect. By construction that rect
+  // already spans content + frame: the frame art lives in the overlay window
+  // and its corner PNGs reach (and are clipped ~1px at) all four overlay edges
+  // — see overlay_frame.rs constants + overlay-frame.html layout(). So NO
+  // guessed padding is needed; the overlay extends past the content window by
+  // 19/54/19/19 px and geom already encodes that. The only reason a flush crop
+  // ever shaved the frame was sub-pixel DPI scaling (sx/sy) + Math.round, so we
+  // round the rect OUTWARD: floor the top-left, ceil the bottom-right. Rounding
+  // can then only ever ADD ≤1px of desktop, never trim a frame pixel.
+  const left = (geom.x - geom.monitor_x) * sx;
+  const top = (geom.y - geom.monitor_y) * sy;
+  const right = (geom.x - geom.monitor_x + geom.w) * sx;
+  const bottom = (geom.y - geom.monitor_y + geom.h) * sy;
+  let cx = Math.floor(left);
+  let cy = Math.floor(top);
+  let cw = Math.ceil(right) - cx;
+  let ch = Math.ceil(bottom) - cy;
   cx = Math.max(0, Math.min(cx, Math.max(0, vw - 2)));
   cy = Math.max(0, Math.min(cy, Math.max(0, vh - 2)));
   cw = Math.max(2, Math.min(cw, vw - cx));

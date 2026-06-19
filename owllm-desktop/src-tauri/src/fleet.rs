@@ -103,6 +103,15 @@ pub enum CreateOutcome {
     Error { message: String },
 }
 
+/// True if `path` exists and is a directory the host can actually reach.
+/// Used by the dispatch loop to detect an unreachable cwd (e.g. a
+/// `\\wsl.localhost\...` isolation path when the WSL distro is stopped) so it
+/// can fall back to the host folder instead of failing every worktree.
+#[tauri::command]
+pub fn path_is_dir(path: String) -> bool {
+    !path.trim().is_empty() && PathBuf::from(&path).is_dir()
+}
+
 /// Create a per-agent worktree from `project_cwd`'s HEAD.
 #[tauri::command]
 pub async fn fleet_worktree_create(

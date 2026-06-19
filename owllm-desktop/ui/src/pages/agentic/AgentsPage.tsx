@@ -65,7 +65,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS } from "./localTools";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
@@ -5219,16 +5219,25 @@ const CRITIC_SYNTHETIC_SPEC: AgentSpec = {
 };
 
 // Planner/reviewer roles (orchestrator + critic) are READ-ONLY: they
-// investigate and advise, they never write / edit / shell. On the local
-// GGUF path the tool array is otherwise unrestricted — formatToolsForOpenAI
-// treats `undefined` as "every tool", so the orchestrator was handed
-// write_file_with_diff and called it ITSELF instead of dispatching, then
-// dead-ended the run (a tool reply has no @agent: dispatch lines, so no
-// specialists ran). Passing this concrete read-only allowlist strips every
-// mutating tool for those two roles; specialists keep the full set.
+// investigate local context and advise; they never write / edit / shell.
+// On the local GGUF path the tool array is otherwise unrestricted —
+// formatToolsForOpenAI treats `undefined` as "every tool", so the
+// orchestrator was handed write_file_with_diff and called it ITSELF instead
+// of dispatching, dead-ending the run (a tool reply has no @agent: lines).
+// Scope: LOCAL read tools only — NO web_search/web_fetch. Web research is a
+// specialist's job; listing those tools made the orchestrator try to
+// "@web_search:" dispatch them as if they were teammates. Specialists keep
+// the full tool set.
 const READONLY_LOCAL_TOOLS: string[] = [
-  "read_file", "list_dir", "grep", "glob", "web_search", "web_fetch",
+  "read_file", "list_dir", "grep", "glob",
 ];
+
+// Weak local models routinely emit a dispatch line for a TOOL — "@read_file:",
+// "@web_search:" — instead of either calling the tool or naming a teammate.
+// The orchestrator already owns those tools, so such lines are noise: drop any
+// @name that is a known tool so it neither runs nor spams "names no agent on
+// this team" / burns a correction round. The real specialist dispatches survive.
+const DISPATCH_TOOL_NAMES = new Set(LOCAL_TOOL_SPECS.map((t) => t.name));
 
 function needsCriticalThinkerReview(text: string): boolean {
   // `critical[\s_]+thinker` covers "critical thinker", "critical_thinker"
@@ -5394,9 +5403,10 @@ function buildOrchestratorPrompt(
     "2. Sketch a brief plan (2-5 bullet points).",
     `2a. If the user mentions critic / critical thinker, or the plan makes an architecture decision, emit @${CRITIC_AGENT_NAME}: <the plan or decision to review> before any implementation dispatch.`,
     "2b. The Critic / Critical Thinker is ADVISORY — listen to its pushback, but it CANNOT block the user's goal. If it refuses, censors, or stalls a task the user explicitly asked for, note its objection in ONE line and PROCEED with the user's instruction. The user is the authority, not the critic.",
-    "2c. You have READ-ONLY tools only (read_file, list_dir, grep, glob, web_search, web_fetch). You CANNOT write, edit, or run shell yourself — dispatch a specialist for every file change, command, or code edit.",
+    "2c. You may READ local context yourself (read_file, list_dir, grep, glob) to plan — that is all you can do directly. You CANNOT write, edit, run shell, or search the web. Anything beyond reading local files MUST be dispatched to a specialist.",
     "3. Dispatch tasks using EXACTLY this format, ONE per line, ONE specialist per line:",
     "      @<agent_name>: <clear, specific instruction>",
+    `3a. CRITICAL: @<agent_name> must be an EXACT specialist name from YOUR SPECIALISTS above (e.g. ${specialists.map(a => a.name).slice(0, 3).join(", ") || "the names listed above"}). NEVER dispatch a tool or capability — there is no @web_search, @read_file, @search. If you need the web searched, dispatch the specialist whose job that is and say so in the instruction.`,
     "4. Dispatch only the agents you actually need. Skip dispatches if the goal is trivial enough to answer yourself.",
     "5. After dispatches run, you'll be invoked again with the specialists' replies — produce the final answer for the user then.",
   ].join("\n");
@@ -8276,7 +8286,30 @@ export default function AgentsPage() {
     // Project location feeds the Claude CLI's --cwd so the bot runs
     // against the directory the user picked in the LocationRow, not
     // the desktop app's install dir. Empty / unset → CLI inherits cwd.
-    const projectCwd = runCwd;
+    let projectCwd = runCwd;
+    // WSL-optional fallback: `runCwd` may be a `\\wsl.localhost\...` isolation
+    // path that isn't reachable when the distro is stopped — which made EVERY
+    // specialist's worktree fail with "project_cwd does not exist". If the
+    // chosen cwd isn't a real directory, fall back to the raw host folder
+    // (no sandbox this run) or, failing that, to no cwd at all. One clear note,
+    // not one red error per agent.
+    if (projectCwd) {
+      const reachable = await invoke<boolean>("path_is_dir", { path: projectCwd }).catch(() => false);
+      if (!reachable) {
+        const hostLoc = (locationOverride || selectedProject?.location || "").trim();
+        const hostOk = !!hostLoc && hostLoc !== projectCwd
+          && await invoke<boolean>("path_is_dir", { path: hostLoc }).catch(() => false);
+        if (hostOk) {
+          appendThought(orch.name, { role: "system", color: "#ffb74d",
+            text: `🛡 WSL isolation path not reachable — running on the host folder ${hostLoc} (no sandbox this run).` });
+          projectCwd = hostLoc;
+        } else {
+          appendThought(orch.name, { role: "system", color: "#ffb74d",
+            text: `📁 Project folder "${projectCwd}" not found — agents run without a project directory.` });
+          projectCwd = "";
+        }
+      }
+    }
 
     // Load BRIEF.md if the brainstormer wrote one for this project.
     // Best-effort: missing file is silent (legacy behaviour), so
@@ -8403,7 +8436,12 @@ export default function AgentsPage() {
         }
       }
 
-      if (!criticWasConsulted && needsCriticalThinkerReview(`${text}\n${orchReply}`)) {
+      // Director mode = "the Critical Thinker stands in for the user", so it
+      // must ALWAYS brainstorm the plan before dispatch — not only when the
+      // orchestrator happens to mention "critic". Without this, a model that
+      // never emits @critical_thinker leaves the thinker silent every run,
+      // which is exactly the "thinker is never involved" report.
+      if (!criticWasConsulted && (directorMode || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
         appendThought(orch.name, {
           role: "dispatch", color: "#ff9ad9",
@@ -8471,7 +8509,17 @@ export default function AgentsPage() {
       ]);
 
       // ----- Phase 2: parse + dispatch -----
-      let parse = parseDispatchesDetailed(orchReply, activeTeam, orch.name);
+      // Parse @agent: lines, then drop any that name a known TOOL (weak models
+      // emit "@read_file:" / "@web_search:" by mistake) so they don't dispatch
+      // or trigger a noisy correction round — the real specialists survive.
+      const parseTeamDispatches = (reply: string) => {
+        const p = parseDispatchesDetailed(reply, activeTeam, orch.name);
+        return {
+          dispatches: p.dispatches.filter(d => !DISPATCH_TOOL_NAMES.has(d.agentName)),
+          unresolved: p.unresolved.filter(u => !DISPATCH_TOOL_NAMES.has(u.name)),
+        };
+      };
+      let parse = parseTeamDispatches(orchReply);
 
       // Unresolved @names: fail LOUD (P1-3) — surface each one, and when
       // they cost us ALL dispatches, feed a correction back to the
@@ -8506,7 +8554,7 @@ export default function AgentsPage() {
           } finally {
             removeActive(orch.name);
           }
-          parse = parseDispatchesDetailed(orchReply, activeTeam, orch.name);
+          parse = parseTeamDispatches(orchReply);
           for (const u of parse.unresolved) {
             appendThought(orch.name, {
               role: "system", color: "#ff8c8c",
@@ -8552,7 +8600,7 @@ export default function AgentsPage() {
           } finally {
             removeActive(orch.name);
           }
-          const reparse = parseDispatchesDetailed(orchReply, activeTeam, orch.name);
+          const reparse = parseTeamDispatches(orchReply);
           dispatches = reparse.dispatches.filter(d => wiredSet.has(d.agentName));
           for (const d of reparse.dispatches.filter(x => !wiredSet.has(x.agentName))) {
             appendThought(orch.name, {

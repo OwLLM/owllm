@@ -4118,17 +4118,24 @@ function OrchestratorPane({
     // is currently mid-selection inside this pane — the per-token
     // scrollTop jump kills the drag and the user can't highlight.
     // No 'near bottom' gate: the user did not ask for that.
-    const sel = window.getSelection?.();
-    if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) return;
-    const toBottom = () => { el.scrollTop = el.scrollHeight; };
+    const isSelecting = () => {
+      const sel = window.getSelection?.();
+      return !!(sel && !sel.isCollapsed && el.contains(sel.anchorNode));
+    };
+    const toBottom = () => { if (!isSelecting()) el.scrollTop = el.scrollHeight; };
     toBottom();
     // The synchronous scrollHeight above is measured BEFORE markdown blocks,
-    // tables, and pasted images finish committing their final height — so on
-    // first open it landed short of the real last message (the "doesn't start
-    // scrolled to the bottom" report). Re-pin across the next two frames once
-    // layout has settled.
-    const r1 = requestAnimationFrame(() => { toBottom(); const r2 = requestAnimationFrame(toBottom); (el as any).__r2 = r2; });
-    return () => { cancelAnimationFrame(r1); if ((el as any).__r2) cancelAnimationFrame((el as any).__r2); };
+    // tables, and pasted images finish committing their final height, and
+    // streamed tokens keep growing it after this layout pass — so a fixed
+    // 2-frame rAF landed SHORT of the latest line (the "auto-scroll doesn't
+    // follow the last message" report). A MutationObserver re-pins on every DOM
+    // change to this pane until the deps change again, so it reliably tracks the
+    // newest content. Cheap — it only assigns scrollTop, and pauses while the
+    // user is selecting text.
+    const mo = new MutationObserver(() => toBottom());
+    mo.observe(el, { childList: true, subtree: true, characterData: true });
+    const r1 = requestAnimationFrame(toBottom);
+    return () => { mo.disconnect(); cancelAnimationFrame(r1); };
   }, [effTab, focus, tailSig]);
 
   // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
@@ -5406,7 +5413,7 @@ function buildOrchestratorPrompt(
     "2c. You may READ local context yourself (read_file, list_dir, grep, glob) to plan — that is all you can do directly. You CANNOT write, edit, run shell, or search the web. Anything beyond reading local files MUST be dispatched to a specialist.",
     "3. Dispatch tasks using EXACTLY this format, ONE per line, ONE specialist per line:",
     "      @<agent_name>: <clear, specific instruction>",
-    `3a. CRITICAL: @<agent_name> must be an EXACT specialist name from YOUR SPECIALISTS above (e.g. ${specialists.map(a => a.name).slice(0, 3).join(", ") || "the names listed above"}). NEVER dispatch a tool or capability — there is no @web_search, @read_file, @search. If you need the web searched, dispatch the specialist whose job that is and say so in the instruction.`,
+    `3a. CRITICAL — the ONLY valid dispatch targets are these EXACT names: ${specialists.map(a => a.name).join(", ") || "(none)"}. Do NOT invent or assume agents: there is no @coder, @critic, @assistant, @writer, @developer (unless that exact name appears in the list). Never dispatch a tool either (no @web_search, @read_file). If the perfect specialist isn't on the list, pick the CLOSEST one that IS and put the real work in its instruction — but NEVER emit an @name that is not listed above, or it will be dropped and nothing runs.`,
     "4. Dispatch only the agents you actually need. Skip dispatches if the goal is trivial enough to answer yourself.",
     "5. After dispatches run, you'll be invoked again with the specialists' replies — produce the final answer for the user then.",
   ].join("\n");
@@ -7539,15 +7546,17 @@ export default function AgentsPage() {
     setAgentThoughts(prev => {
       const next = new Map(prev);
       const cur = next.get(agent) ?? [];
-      // Find an existing open entry with the same channel key and grow
-      // it in place. Without this every SSE chunk would spawn a new
-      // entry and the panel would flood with single-token rows.
-      const lastIdx = (() => {
-        for (let i = cur.length - 1; i >= 0; i--) {
-          if (cur[i].channelKey === channel) return i;
-        }
-        return -1;
-      })();
+      // Grow the CURRENTLY-OPEN entry in place (so streaming tokens don't
+      // flood the panel with one row each), but ONLY if it is the most recent
+      // entry. Searching backwards past newer entries merged a post-tool
+      // thinking burst back into the PRE-tool thinking bubble — so a
+      // think → tool → think sequence collapsed into one ever-growing blob
+      // instead of separate entries (VS Code-style). Checking just the tail
+      // means a new thinking burst that follows a tool call starts its own row.
+      const lastIdx =
+        cur.length > 0 && cur[cur.length - 1].channelKey === channel
+          ? cur.length - 1
+          : -1;
       if (lastIdx >= 0) {
         const updated = [...cur];
         const prevMsg = updated[lastIdx];
@@ -8267,8 +8276,16 @@ export default function AgentsPage() {
     agentRunAborts.set(agentSessId, ctrl); // reachable by Cancel after a page change
 
     const orch = findOrchestratorSpec(activeTeam)!;
-    // Cloud calls don't need a port; only the local fallback does.
-    const port = serverState.port ?? 0;
+    // Cloud calls don't need a port; only the local fallback does. Pull a FRESH
+    // server status here — `serverState` is the render-time closure value and is
+    // still STALE right after ensureLocalServer started the server, so the FIRST
+    // run read port 0 and every request "Failed to fetch" → the run finished
+    // empty ("Done with no output"). It only "worked the second time" because the
+    // component had re-rendered with the real port by then. onSupSend already did
+    // this fresh-pull; dispatchGoal didn't.
+    const freshStatus = await invoke<ServerStatus>("server_status").catch(() => serverState);
+    setServerState(freshStatus);
+    const port = freshStatus.port ?? 0;
 
     // Anchor the goal in the user log AND the orchestrator's log so
     // the Reply tab reads as a conversation thread when the user
@@ -8287,13 +8304,13 @@ export default function AgentsPage() {
     // against the directory the user picked in the LocationRow, not
     // the desktop app's install dir. Empty / unset → CLI inherits cwd.
     let projectCwd = runCwd;
-    // WSL-optional fallback: `runCwd` may be a `\\wsl.localhost\...` isolation
-    // path that isn't reachable when the distro is stopped — which made EVERY
-    // specialist's worktree fail with "project_cwd does not exist". If the
-    // chosen cwd isn't a real directory, fall back to the raw host folder
-    // (no sandbox this run) or, failing that, to no cwd at all. One clear note,
-    // not one red error per agent.
-    if (projectCwd) {
+    // Host-path reachability fallback. ONLY for non-WSL paths: a WSL isolation
+    // path (`\\wsl.localhost\...`) runs via wsl.exe, and Windows can't reliably
+    // stat that UNC even when the distro is perfectly healthy — checking it here
+    // wrongly downgraded WORKING isolation to host/no-sandbox (the "isolated but
+    // system sees different" bug). For a plain host folder that genuinely doesn't
+    // exist, fall back to no cwd with one clear note.
+    if (projectCwd && !isWslPath(projectCwd)) {
       const reachable = await invoke<boolean>("path_is_dir", { path: projectCwd }).catch(() => false);
       if (!reachable) {
         const hostLoc = (locationOverride || selectedProject?.location || "").trim();
@@ -8669,9 +8686,20 @@ export default function AgentsPage() {
       if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
       type WorktreeBinding = { path: string; branch: string; baseSha: string };
       const worktreeBySpec = new Map<string, WorktreeBinding | null>();
+      // Per-agent git worktrees are a Windows-side operation; they can't be
+      // created on a `\\wsl.localhost\...` path (Windows can't reach it). For a
+      // WSL-isolated project the agents already run sealed inside the distro via
+      // wsl.exe — so skip the worktree step entirely and run them shared in the
+      // WSL folder. Isolation is preserved; we just don't sub-isolate per agent.
+      const wslShared = isWslPath(projectCwd);
+      if (wslShared) {
+        appendThought(orch.name, { role: "fleet", color: "#7ff0c5",
+          text: `🗂 WSL-isolated project — agents run sealed inside the distro (shared worktree).` });
+      }
       // Surface a "🗂 isolated" or "🗂 shared" line in the orchestrator's
       // Thought tab per dispatch so the user can see what happened.
       for (const d of dispatches) {
+        if (wslShared) { worktreeBySpec.set(d.agentName, null); continue; }
         const spec = activeTeam.agents.find(a => a.name === d.agentName);
         if (!spec) continue;
         let res: FleetCreateResult;

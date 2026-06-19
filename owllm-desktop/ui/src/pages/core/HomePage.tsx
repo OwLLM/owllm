@@ -158,7 +158,13 @@ function LauncherTile({ spec }: { spec: LauncherSpec }) {
           inset: 0,
           width: "100%",
           height: "100%",
-          objectFit: "cover",
+          // contain, NOT cover: the art files differ in aspect ratio (the
+          // center "Agentic Team" png is 635x690 = portrait, the others are
+          // ~square). cover fills the square tile by cropping the overflow,
+          // which sliced the top/bottom off the narrower center image. contain
+          // fits the whole image inside the tile (no crop) — a non-square image
+          // just gets a thin letterbox against the tile background.
+          objectFit: "contain",
           // Picture only — render the owl art at 90% of its size, centered.
           // The tile/container keeps its full size; just the image shrinks.
           transform: "scale(0.9)",

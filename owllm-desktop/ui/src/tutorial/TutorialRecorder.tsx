@@ -191,10 +191,12 @@ async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
 export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const [open, setOpen] = useState(false);
   const [state, setState] = useState<RecorderState>("idle");
-  const [captureMode, setCaptureMode] = useState<CaptureMode>("window");
+  // We always capture a whole screen; this toggle decides whether the result is
+  // cropped down to just the OWLLM app (frame included) or kept as the full screen.
+  const [cropToApp, setCropToApp] = useState<boolean>(true);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [mark, setMark] = useState<ClickMark | null>(null);
-  const [status, setStatus] = useState("“Window + frame” records the screen and auto-crops to the OWLLM app (frame included). Pick the screen OWLLM is on. Use Ctrl+Shift+R to stop.");
+  const [status, setStatus] = useState("Records your screen and auto-crops to just the OWLLM app (frame included). In the share dialog, choose “Entire Screen”. Use Ctrl+Shift+R to stop.");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -302,27 +304,26 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       pausedAtRef.current = null;
       startedAtRef.current = performance.now();
       setElapsedMs(0);
-      setStatus(captureMode === "screen"
-        ? "Recording full screen. The recorder panel is hidden from the video. Press Ctrl+Shift+R or the header Record button to stop."
-        : "In the dialog, click “Entire Screen” and pick the screen OWLLM is on — I crop it to just the app (frame included). Press Ctrl+Shift+R to stop.");
+      setStatus(cropToApp
+        ? "In the share dialog, click “Entire Screen” and pick the screen OWLLM is on — I crop it to just the app (frame included). Press Ctrl+Shift+R to stop."
+        : "Recording the whole screen. In the share dialog choose “Entire Screen”. Press Ctrl+Shift+R to stop.");
 
-      // "Window" mode: the frame is a SEPARATE window OUTSIDE the main one, so
-      // a single-window capture can't include it. Capture the whole screen and
-      // crop to the app's real rect (content + frame) instead.
-      const geom = captureMode === "window"
+      // We always capture a whole SCREEN (the frame is a separate window OUTSIDE
+      // the main one, so only the screen holds both). The "crop to app" toggle
+      // then decides whether we trim it down to the app rect or keep it whole.
+      const geom = cropToApp
         ? await invoke<CaptureGeometry | null>("overlay_frame_capture_geometry").catch(() => null)
         : null;
 
-      // Both modes capture a display surface; window mode then crops — but
-      // ONLY if the user actually shared a whole screen. If they pick a single
-      // window the crop math (screen-relative) doesn't apply, so we record
-      // that window as-is rather than producing a broken sliver.
       const screenStream = await requestDisplayStream("screen");
       streamRef.current = screenStream;
 
+      // Crop ONLY if the user actually shared a whole screen — a single window
+      // share has no screen-relative geometry, so record it as-is rather than a
+      // broken sliver.
       const surface = (screenStream.getVideoTracks()[0]?.getSettings?.() as { displaySurface?: string } | undefined)?.displaySurface;
       let recordStream = screenStream;
-      if (captureMode === "window" && geom && surface === "monitor") {
+      if (cropToApp && geom && surface === "monitor") {
         try {
           const handle = await cropScreenToApp(screenStream, geom);
           cropHandleRef.current = handle;
@@ -331,8 +332,8 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
           // Crop pipeline failed → record the full screen rather than nothing.
           recordStream = screenStream;
         }
-      } else if (captureMode === "window" && surface !== "monitor") {
-        setStatus("Recording the chosen window as-is. To include the OWLLM frame, stop and re-record, choosing “Entire Screen”. Ctrl+Shift+R to stop.");
+      } else if (cropToApp && surface !== "monitor") {
+        setStatus("Recording the chosen window as-is. For the OWLLM frame, stop and re-record, choosing “Entire Screen”. Ctrl+Shift+R to stop.");
       }
 
       const recorder = new MediaRecorder(recordStream, {
@@ -455,21 +456,29 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
             ×
           </button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginBottom: 8 }}>
-          <button
-            onClick={() => setCaptureMode("window")}
+        <label
+          style={{
+            display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+            padding: "7px 9px", borderRadius: 6,
+            border: "1px solid rgba(var(--accent-rgb),0.35)",
+            background: "rgba(var(--accent-rgb),0.08)",
+            cursor: active ? "not-allowed" : "pointer", opacity: active ? 0.6 : 1,
+          }}
+          title="On: trims the screen recording down to just the OWLLM app + frame. Off: keeps the whole screen."
+        >
+          <input
+            type="checkbox"
+            checked={cropToApp}
             disabled={active}
-            style={modeBtn(captureMode === "window", active)}
-          >
-            Window + frame
-          </button>
-          <button
-            onClick={() => setCaptureMode("screen")}
-            disabled={active}
-            style={modeBtn(captureMode === "screen", active)}
-          >
-            Full screen
-          </button>
+            onChange={(e) => setCropToApp(e.target.checked)}
+            style={{ width: 14, height: 14, accentColor: "var(--accent)" }}
+          />
+          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg-strong)" }}>
+            ✂ Crop to the OWLLM app (frame included)
+          </span>
+        </label>
+        <div style={{ fontSize: 10.5, color: "var(--fg-muted)", marginBottom: 8, lineHeight: 1.35 }}>
+          In the share dialog, choose <b>Entire Screen</b> (not Window). Off = record the whole screen.
         </div>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
           <button
@@ -501,19 +510,6 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       )}
     </>
   );
-}
-
-function modeBtn(selected: boolean, locked: boolean): React.CSSProperties {
-  return {
-    height: 26,
-    borderRadius: 5,
-    border: selected ? "1px solid rgba(var(--accent-rgb),0.72)" : "1px solid rgba(255,255,255,0.14)",
-    background: selected ? "rgba(var(--accent-rgb),0.22)" : "rgba(255,255,255,0.06)",
-    color: selected ? "#ffffff" : "var(--fg-muted)",
-    fontSize: 11,
-    fontWeight: 700,
-    cursor: locked ? "not-allowed" : "pointer",
-  };
 }
 
 function recBtn(enabled: boolean, color: string): React.CSSProperties {

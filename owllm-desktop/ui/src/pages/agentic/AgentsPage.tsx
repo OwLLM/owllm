@@ -7558,6 +7558,26 @@ export default function AgentsPage() {
       console.log("[onSupSend] ignored — already busy");
       return;
     }
+    // A chat to a TEAM must orchestrate, not answer solo. When the active
+    // team has specialists, route the message through the real team-dispatch
+    // flow (dispatchGoal): the read-only orchestrator emits @agent: lines,
+    // the specialists run, and the Critical Thinker is consulted. Without
+    // this, the chat hit a lone tool-using assistant that never dispatched
+    // and never involved the critic — the "orchestrator does nothing" bug.
+    // Text-only for now; image chats keep the single-assistant path.
+    if (text.trim() && images.length === 0 && activeTeam) {
+      const orchSpec = findOrchestratorSpec(activeTeam);
+      const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
+      if (hasSpecialists) {
+        console.log("[onSupSend] team chat → dispatchGoal", { agents: activeTeam.agents.length });
+        // Echo the user's message into the chat thread (dispatchGoal logs
+        // it to the agent buffers, not supChat), then run the team.
+        const echo: GoalMsg = { role: "you", color: "#9ad9ff", text, ts: Date.now() };
+        setSupChat(prev => [...prev, echo]);
+        await dispatchGoal(text);
+        return;
+      }
+    }
     console.log("[onSupSend] start", {
       textChars: text.length,
       teamModel: effectiveTeamModel,
@@ -8148,9 +8168,13 @@ export default function AgentsPage() {
   //   3. Integrate — orchestrator gets one more turn with all replies
   // Each phase streams into the matching per-agent log buffer; the
   // canvas's `activeAgent` highlights whichever agent is on stage.
-  async function dispatchGoal() {
+  async function dispatchGoal(overrideText?: string) {
     setRunError(null);
-    const text = goal.trim();
+    // overrideText is passed when the SuperUser CHAT routes a message
+    // through the team flow (so the orchestrator dispatches instead of
+    // answering solo). Guard against React handing this a click Event
+    // when it's wired directly as the onRun handler.
+    const text = (typeof overrideText === "string" ? overrideText : goal).trim();
     if (!text) return;
     // A goal dispatch is heavy (worktrees, commits, fan-out). Refuse to start
     // a second on top of one already running for THIS project — including one

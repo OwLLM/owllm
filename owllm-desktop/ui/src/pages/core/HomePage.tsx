@@ -139,7 +139,11 @@ function LauncherTile({ spec }: { spec: LauncherSpec }) {
       style={{
         position: "relative",
         aspectRatio: "1 / 1",
-        width: "100%",
+        // 80% of the column width (centered in its 1fr cell). Still fully
+        // responsive — it scales with the window like before — just rendered
+        // at 80% of the previous full-bleed size per the user's request.
+        width: "80%",
+        justifySelf: "center",
         borderRadius: 18,
         overflow: "hidden",
         border: `1px solid ${hover ? spec.accentLine : "var(--border-strong)"}`,
@@ -574,10 +578,10 @@ export default function HomePage() {
           }}>{account.connected ? "Manage →" : "Sign in →"}</span>
         </button>
 
-        {/* Square, image-only launcher tiles. Three equal columns that
-            stretch to the full window width (1fr each) so the row never
-            leaves dead space on the sides; each tile stays square via
-            aspectRatio and reveals a 2x2 quick-action matrix on hover. */}
+        {/* Square, image-only launcher tiles. Three equal columns (1fr
+            each) that scale with the window; each tile renders at 80% of
+            its column width, centered, stays square via aspectRatio, and
+            reveals a 2x2 quick-action matrix on hover. */}
         <div style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, 1fr)",

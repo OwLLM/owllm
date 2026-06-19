@@ -139,11 +139,7 @@ function LauncherTile({ spec }: { spec: LauncherSpec }) {
       style={{
         position: "relative",
         aspectRatio: "1 / 1",
-        // 80% of the column width (centered in its 1fr cell). Still fully
-        // responsive — it scales with the window like before — just rendered
-        // at 80% of the previous full-bleed size per the user's request.
-        width: "80%",
-        justifySelf: "center",
+        width: "100%",
         borderRadius: 18,
         overflow: "hidden",
         border: `1px solid ${hover ? spec.accentLine : "var(--border-strong)"}`,
@@ -163,6 +159,9 @@ function LauncherTile({ spec }: { spec: LauncherSpec }) {
           width: "100%",
           height: "100%",
           objectFit: "cover",
+          // Picture only — render the owl art at 80% of its size, centered.
+          // The tile/container keeps its full size; just the image shrinks.
+          transform: "scale(0.8)",
           // Dim the art on hover so the action grid reads clearly.
           filter: hover ? "brightness(0.32) saturate(0.85)" : "none",
           transition: "filter 0.2s",
@@ -578,10 +577,10 @@ export default function HomePage() {
           }}>{account.connected ? "Manage →" : "Sign in →"}</span>
         </button>
 
-        {/* Square, image-only launcher tiles. Three equal columns (1fr
-            each) that scale with the window; each tile renders at 80% of
-            its column width, centered, stays square via aspectRatio, and
-            reveals a 2x2 quick-action matrix on hover. */}
+        {/* Square, image-only launcher tiles. Three equal columns that
+            stretch to the full window width (1fr each) so the row never
+            leaves dead space on the sides; each tile stays square via
+            aspectRatio and reveals a 2x2 quick-action matrix on hover. */}
         <div style={{
           display: "grid",
           gridTemplateColumns: "repeat(3, 1fr)",

@@ -4022,7 +4022,11 @@ function OrchestratorPane({
   const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
   const agentFocus =
     selectedAgent ??
-    activeAgent ??
+    // Skip the transient Critical-Thinker pre-review so it can't steal the
+    // pane: it runs before the orchestrator and ends on its own note, which
+    // made the orchestrator's actual answer look missing from the chat column
+    // (#29). Click the critic node to inspect it explicitly.
+    (activeAgent && activeAgent !== CRITIC_AGENT_NAME ? activeAgent : null) ??
     orchName ??
     "you";
   // The pane only operates in agent mode now. "focus" maps directly
@@ -5181,7 +5185,13 @@ function needsCriticalThinkerReview(text: string): boolean {
   // and "@critical_thinker" — the underscore is a word char, so the
   // previous `\bcritical\s+thinker\b` rejected the very form users
   // were typing to explicitly invoke the agent.
-  return /\b(critical[\s_]+thinker|critic|architecture|architectural|api|contract|schema|runtime|bootstrap|security|permission|mcp|installer|workflow|orchestrator\s+plan|decision)\b/i.test(text);
+  // Only an EXPLICIT mention pulls in the Critical Thinker. The old broad
+  // keyword list (api, schema, runtime, workflow, decision, mcp, …) fired on
+  // ordinary requests, so the critic pre-empted the orchestrator and the
+  // user's message looked "forwarded to the critic instead of the
+  // orchestrator" (#29). The critic stays opt-in; say "critic"/"critical
+  // thinker" (or @critical_thinker) to bring it in.
+  return /\b(critical[\s_]+thinker|critic)\b/i.test(text);
 }
 function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Directive[]): string {
   const directivesBlock = formatDirectivesBlock(directives);
@@ -5200,7 +5210,11 @@ function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Direct
     "",
     directivesBlock || "(No project rules are set yet.)",
     "",
-    "Reply in 3-6 direct bullets. End with one line: APPROVE, REVISE, or BLOCK.",
+    // No APPROVE/REVISE/BLOCK verdict line: the critic is ADVISORY and the
+    // orchestrator proceeds with this input. The old verdict made users expect
+    // a clickable approval that never existed, so the run looked stalled at the
+    // critic with no way forward (#29).
+    "Reply in 3-6 direct bullets of concrete guidance for the orchestrator.",
   ].join("\n");
 }
 /// Return a team augmented with the synthetic critic node. Idempotent:

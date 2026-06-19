@@ -108,7 +108,7 @@ function setAgentModelOverride(pid: string, agent: string, modelId: string): voi
     else localStorage.removeItem(agentModelKey(pid, agent));
   } catch { /* private mode */ }
 }
-function loadAgentModelsForProject(pid: string): Map<string, string> {
+function loadAgentModelsForProject(pid: string, graphJson?: string | null): Map<string, string> {
   const m = new Map<string, string>();
   if (!pid) return m;
   const prefix = `owllm:agent-model:${pid}:`;
@@ -120,6 +120,21 @@ function loadAgentModelsForProject(pid: string): Map<string, string> {
       if (v && v.trim()) m.set(k.slice(prefix.length), v);
     }
   } catch { /* private mode */ }
+  // The project's DB graph_json is AUTHORITATIVE and survives an app
+  // reinstall/update — which wipes the WebView2 localStorage above and was the
+  // root cause of "I have to re-pick every agent's model on every reboot".
+  // Overlay it on top of any (legacy) localStorage values.
+  if (graphJson && graphJson.trim()) {
+    try {
+      const am = JSON.parse(graphJson)?.agentModels;
+      if (am && typeof am === "object") {
+        for (const k of Object.keys(am)) {
+          const v = (am as Record<string, unknown>)[k];
+          if (typeof v === "string" && v.trim()) m.set(k, v);
+        }
+      }
+    } catch { /* malformed graph_json → keep localStorage values */ }
+  }
   return m;
 }
 
@@ -134,7 +149,7 @@ function setAgentVoiceOverride(pid: string, agent: string, voice: VoiceConfig): 
   try { localStorage.setItem(agentVoiceKey(pid, agent), JSON.stringify(voice)); }
   catch { /* private mode */ }
 }
-function loadAgentVoicesForProject(pid: string): Map<string, VoiceConfig> {
+function loadAgentVoicesForProject(pid: string, graphJson?: string | null): Map<string, VoiceConfig> {
   const m = new Map<string, VoiceConfig>();
   if (!pid) return m;
   const prefix = `owllm:agent-voice:${pid}:`;
@@ -148,6 +163,18 @@ function loadAgentVoicesForProject(pid: string): Map<string, VoiceConfig> {
       catch { /* skip a corrupt entry */ }
     }
   } catch { /* private mode */ }
+  // DB graph_json is authoritative + survives reinstall (see model loader).
+  if (graphJson && graphJson.trim()) {
+    try {
+      const av = JSON.parse(graphJson)?.agentVoices;
+      if (av && typeof av === "object") {
+        for (const k of Object.keys(av)) {
+          const v = (av as Record<string, unknown>)[k];
+          if (v && typeof v === "object") m.set(k, v as VoiceConfig);
+        }
+      }
+    } catch { /* malformed graph_json → keep localStorage values */ }
+  }
   return m;
 }
 type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
@@ -7133,14 +7160,14 @@ export default function AgentsPage() {
       setLocationOverride(selectedProject.location || "");
       setTrustWritesOverride(null);
       setTeamModelOverride(null);
-      // Restore THIS project's saved per-agent model picks (persisted in
-      // localStorage, project-scoped). Was wiped to empty, so the project never
-      // kept its model and the orchestrator fell back to a default on reload.
-      setPerAgentModel(loadAgentModelsForProject(selectedProject.id));
-      // Per-agent voice picks live alongside model picks — same scope, now
-      // ALSO restored from localStorage (was wiped to empty → voice reset
-      // every restart).
-      setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id));
+      // Restore THIS project's saved per-agent model picks. Primary source is
+      // now the project's DB graph_json (survives app reinstall/update);
+      // localStorage is a legacy fallback. Was wiped to empty on every reboot,
+      // forcing the user to re-pick every agent's model.
+      setPerAgentModel(loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json));
+      // Per-agent voice picks live alongside model picks — same scope, same
+      // DB-first restore.
+      setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id, selectedProject.graph_json));
       // Restore saved chat + per-agent transcripts INTO the shared store —
       // but ONLY if this project's session is empty (fresh load / app
       // restart). If a dispatch is still running in the background, or
@@ -7204,8 +7231,8 @@ export default function AgentsPage() {
     // look "random" after a restart. Reloading from localStorage is safe:
     // picks are keyed by agent name, and any name not in the new team's
     // roster is simply never looked up (harmless), while real picks survive.
-    setPerAgentModel(loadAgentModelsForProject(selectedProject?.id ?? ""));
-    setPerAgentVoice(loadAgentVoicesForProject(selectedProject?.id ?? ""));
+    setPerAgentModel(loadAgentModelsForProject(selectedProject?.id ?? "", selectedProject?.graph_json));
+    setPerAgentVoice(loadAgentVoicesForProject(selectedProject?.id ?? "", selectedProject?.graph_json));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTeam?.id]);
 
@@ -7226,9 +7253,13 @@ export default function AgentsPage() {
             // Keep the roster's roles in graph_json — writing only `edges` here
             // would drop the {name, base} map that projectToTeam reads back, so a
             // renamed agent would lose its role again on the next edge edit.
+            // ALSO carry the per-agent model + voice picks so an edge edit never
+            // clobbers them (both writers serialise the full graph_json).
             graph_json: JSON.stringify({
               edges: editedEdges,
               roster: (activeTeam?.agents ?? []).map(a => ({ name: a.name, base: a.base })),
+              agentModels: Object.fromEntries(perAgentModel),
+              agentVoices: Object.fromEntries(perAgentVoice),
             }),
           },
         });
@@ -7240,6 +7271,40 @@ export default function AgentsPage() {
     return () => window.clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editedEdges, selectedProject?.id, pickedTeamId]);
+
+  // Persist per-agent MODEL + VOICE picks into the project's graph_json (the
+  // DB row) — not just localStorage. localStorage is wiped when the app is
+  // reinstalled on update, so picks vanished and the user had to re-select a
+  // model for every agent on each reboot (their #1 complaint). The DB row
+  // survives. We write the FULL graph_json (edges + roster too) so this never
+  // clobbers the wiring. No reloadProjects() on purpose: the picks are already
+  // live in perAgentModel/Voice, and reloading would re-run the hydration
+  // effect and churn (or loop).
+  useEffect(() => {
+    if (!selectedProject) return;
+    if (pickedTeamId !== null) return;            // template override → not the project's own roster
+    if (!activeTeam) return;                       // team not computed yet → don't write empty edges/roster
+    if (perAgentModel.size === 0 && perAgentVoice.size === 0) return;
+    const id = window.setTimeout(async () => {
+      try {
+        await invoke("update_project", {
+          input: {
+            id: selectedProject.id,
+            graph_json: JSON.stringify({
+              edges: editedEdges ?? activeTeam?.edges ?? [],
+              roster: (activeTeam?.agents ?? []).map(a => ({ name: a.name, base: a.base })),
+              agentModels: Object.fromEntries(perAgentModel),
+              agentVoices: Object.fromEntries(perAgentVoice),
+            }),
+          },
+        });
+      } catch (e) {
+        console.error("persist agent models/voices failed", e);
+      }
+    }, 600);
+    return () => window.clearTimeout(id);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [perAgentModel, perAgentVoice, selectedProject?.id, pickedTeamId]);
 
   // Persist trust_writes toggles too. Same debounce shape.
   useEffect(() => {

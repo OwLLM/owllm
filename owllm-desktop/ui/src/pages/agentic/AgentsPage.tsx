@@ -66,6 +66,7 @@ import {
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS } from "./localTools";
+import { normalizeTeam } from "./teamConfig";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
@@ -8276,6 +8277,23 @@ export default function AgentsPage() {
     agentRunAborts.set(agentSessId, ctrl); // reachable by Cancel after a page change
 
     const orch = findOrchestratorSpec(activeTeam)!;
+
+    // Auto-adjust the team into a structurally-valid config before running:
+    // wire any agent that's unreachable from the orchestrator (its dispatches
+    // would otherwise be silently dropped), drop dead/duplicate edges, and
+    // surface what changed + what's missing (e.g. "no specialist can write
+    // files"). Pure + idempotent — see teamConfig.normalizeTeam. The run uses
+    // `runTeam` for all edge-driven logic (roster, wiring, hand-offs).
+    const { team: runTeam, changes: teamFixes, warnings: teamWarnings } =
+      normalizeTeam(activeTeam, roleByName);
+    for (const c of teamFixes) {
+      appendThought(orch.name, { role: "system", color: "#7ff0c5", text: `🧩 auto-config: ${c}` });
+    }
+    for (const w of teamWarnings) {
+      appendThought(orch.name, { role: "system", color: "#ffb74d", text: `⚠ team config: ${w}` });
+      setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `⚠ ${w}`, ts: Date.now() }]);
+    }
+
     // Cloud calls don't need a port; only the local fallback does. Pull a FRESH
     // server status here — `serverState` is the render-time closure value and is
     // still STALE right after ensureLocalServer started the server, so the FIRST
@@ -8344,7 +8362,7 @@ export default function AgentsPage() {
     try {
       // ----- Phase 1: orchestrator plan + dispatches -----
       addActive(orch.name);
-      const orchPrompt = buildOrchestratorPrompt(activeTeam, roleByName, orch, directives, directorMode, briefText);
+      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
       let orchReply: string;
@@ -8530,7 +8548,7 @@ export default function AgentsPage() {
       // emit "@read_file:" / "@web_search:" by mistake) so they don't dispatch
       // or trigger a noisy correction round — the real specialists survive.
       const parseTeamDispatches = (reply: string) => {
-        const p = parseDispatchesDetailed(reply, activeTeam, orch.name);
+        const p = parseDispatchesDetailed(reply, runTeam, orch.name);
         return {
           dispatches: p.dispatches.filter(d => !DISPATCH_TOOL_NAMES.has(d.agentName)),
           unresolved: p.unresolved.filter(u => !DISPATCH_TOOL_NAMES.has(u.name)),
@@ -8585,7 +8603,7 @@ export default function AgentsPage() {
       // graph present only edge-wired targets run; unwired-but-real names
       // surface loudly + one correction round when they cost us everything.
       let dispatches = parse.dispatches;
-      const wiredSet = wiredDispatchTargets(activeTeam, orch.name);
+      const wiredSet = wiredDispatchTargets(runTeam, orch.name);
       if (wiredSet !== null) {
         const unwiredD = dispatches.filter(d => !wiredSet.has(d.agentName));
         dispatches = dispatches.filter(d => wiredSet.has(d.agentName));
@@ -8796,7 +8814,7 @@ export default function AgentsPage() {
           const spec = activeTeam.agents.find(a => a.name === name);
           if (!spec) return [];
           const out = await runAgent(spec, input);
-          const downstream = downstreamTargets(activeTeam, name, orch.name).filter(t => !ran.has(t));
+          const downstream = downstreamTargets(runTeam, name, orch.name).filter(t => !ran.has(t));
           if (downstream.length === 0) return [out];   // leaf → a terminal result
           const handoff = `You are continuing a team workflow. @${out.name} produced the following — build on it for YOUR part of the task:\n\n${out.text}`;
           appendThought(name, { role: "dispatch", color: "#a578ff", text: `➡ handing off to ${downstream.map(x => "@" + x).join(", ")}` });
@@ -8863,7 +8881,7 @@ export default function AgentsPage() {
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(activeTeam, roleByName, orch, directives, directorMode, briefText), integrationInput,
+          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,

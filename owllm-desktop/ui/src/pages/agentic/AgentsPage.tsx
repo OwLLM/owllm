@@ -3559,31 +3559,10 @@ function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isSt
   return renderReplyEntry(m, i, "", orchName, isStreaming);
 }
 
-// Render a thought-stream entry (rail + role label + kind-styled body).
-// Same widget used by the Thought, Tool Calls, and Full Chat tabs so
-// styling stays consistent across the three views.
-function renderThoughtEntry(t: GoalMsg, i: number) {
-  const isThinking = t.kind === "thinking";
-  const isTool = t.kind === "tool";
-  // All variants below render plain pre-wrap text (no MarkdownBody)
-  // and force userSelect:text so mouse copy works during streaming.
-  return (
-    <div key={`t-${t.seq ?? i}`} style={{ display:"flex", alignItems:"flex-start", gap:8, flexShrink:0 }}>
-      <div style={{ width:6, alignSelf:"stretch", borderRadius:3, background: t.color, opacity:0.85, flexShrink:0 }} />
-      <div style={{ flex:1, background:"var(--bg-surface)", borderRadius:6, padding:"5px 10px", minWidth:0 }}>
-        <div style={{ fontSize:9, fontWeight:700, color:t.color, textTransform:"uppercase", letterSpacing:0.5, marginBottom:3, fontFamily:"Segoe UI, sans-serif", userSelect:"none" }}>{t.role}</div>
-        {isThinking
-          ? (t.text
-              ? <div style={{ fontSize:13, fontStyle:"italic", color:"var(--fg-muted)", whiteSpace:"pre-wrap", fontFamily:"Segoe UI, sans-serif", lineHeight:1.5, userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>{t.text}</div>
-              : <div style={{ fontSize:12, color:"var(--fg-subtle)" }}>…</div>)
-          : isTool
-            ? <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace", lineHeight:1.4, background:"rgba(127,240,197,0.06)", padding:"4px 6px", borderRadius:4, userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>{t.text || "…"}</div>
-            : <div style={{ fontSize:12, color:"var(--fg)", whiteSpace:"pre-wrap", fontFamily:"Consolas, 'JetBrains Mono', monospace", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>{t.text}</div>
-        }
-      </div>
-    </div>
-  );
-}
+// (renderThoughtEntry removed — the Thought / Tool / Full Chat tabs now all go
+// through renderUnifiedEntry, which uses the SAME shared ChatBubble /
+// ThinkingBlock / ToolEventCard components as the fine-tuning ChatPage. One
+// renderer, no per-page fork.)
 
 // ChatInputDock — VS Code Claude Code-style composer (user spec 2026-05-29
 // "make the text input like in VS Code here? included functionality and
@@ -4430,7 +4409,7 @@ function OrchestratorPane({
               No reasoning yet — the model's thinking blocks land here
               while the team runs.
             </div>
-          ) : thoughts.map((t, i) => renderThoughtEntry(t, i))}
+          ) : thoughts.map((t, i) => renderUnifiedEntry(t, i, orchName))}
         </div>
         {/* Tool Calls — every command the agent ran + its result. */}
         <div ref={toolsRef} data-ui="OrchestratorToolsView" style={{ flex:1, display: effTab ==="tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
@@ -4440,7 +4419,7 @@ function OrchestratorPane({
               Read, Write, Edit, etc.) appears here with its arguments
               and the result it returned.
             </div>
-          ) : toolCalls.map((t, i) => renderThoughtEntry(t, i))}
+          ) : toolCalls.map((t, i) => renderUnifiedEntry(t, i, orchName))}
         </div>
         {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
         <div ref={fullRef} data-ui="OrchestratorFullView" style={{ flex:1, display: effTab ==="full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
@@ -4450,10 +4429,10 @@ function OrchestratorPane({
               here in chronological order once the team runs.
             </div>
           ) : fullChat.map((m, i) =>
-            // Reply entries (no `kind`) get the avatar-style render,
-            // everything else uses the thought renderer. Same chrono
-            // order either way thanks to the `seq` stamp.
-            m.kind ? renderThoughtEntry(m, i) : renderReplyEntry(m, i, focus, orchName, supSendBusy && i === fullChat.length - 1)
+            // ONE shared renderer for every entry — thinking → 💭 ThinkingBlock,
+            // tool → ToolEventCard, reply → ChatBubble — identical to the
+            // fine-tuning ChatPage. No fork. (Same chrono order via `seq`.)
+            renderUnifiedEntry(m, i, orchName, supSendBusy && i === fullChat.length - 1)
           )}
         </div>
       </div>
@@ -8508,6 +8487,16 @@ export default function AgentsPage() {
             undefined,
             getClaudeSession(selectedProjectId, CRITIC_NAME),
           );
+        } catch (e: any) {
+          if (ctrl.signal.aborted) throw e; // user cancelled → stop the run
+          // The Critical Thinker is ADVISORY — if its model fails (e.g. an
+          // expired Claude subscription → 401) the run must NOT crash. Note it
+          // and dispatch anyway, exactly as if the critic had nothing to add.
+          const msg = cleanAgentError(e);
+          appendThought(orch.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker unavailable (${msg}) — proceeding without its review.` });
+          appendLog(CRITIC_NAME, { role: "system", color: "#ff8c8c", text: `⚠ ${msg}` });
+          setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `⚠ Critical Thinker skipped: ${msg} (check the model on its card / re-auth the subscription).`, ts: Date.now() }]);
+          criticReview = "";
         } finally {
           removeActive(CRITIC_NAME);
         }

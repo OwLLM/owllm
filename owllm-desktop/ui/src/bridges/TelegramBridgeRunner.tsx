@@ -182,6 +182,27 @@ export default function TelegramBridgeRunner() {
     const lite = () => toLite(cfgRef.current);
 
     (async () => {
+      // Skip the backlog on start. Telegram buffers undelivered updates for
+      // ~24h, so a fresh start (app launch, or after a crash) would otherwise
+      // REPLAY every old message into the current chat — the "[TG] Hi from
+      // who-knows-when shows up AFTER my new message" bug. Drain past the
+      // latest update_id WITHOUT dispatching, so only messages that arrive
+      // AFTER we start get handled. Capped so a huge backlog can't spin.
+      try {
+        for (let i = 0; i < 20 && !dead; i++) {
+          const backlog: Array<any> = await invoke("telegram_get_updates", {
+            token: cfg.bot_token, offset, timeout: 0,
+          });
+          if (dead || !Array.isArray(backlog) || backlog.length === 0) break;
+          for (const upd of backlog) {
+            if (typeof upd.update_id === "number") offset = Math.max(offset, upd.update_id + 1);
+          }
+        }
+        if (offset > 0) console.log(`[telegram] skipped backlog on start; next offset=${offset}`);
+      } catch (e) {
+        console.warn("[telegram] backlog drain failed (will still skip via normal offset):", e);
+      }
+
       while (!dead) {
         try {
           const updates: Array<any> = await invoke("telegram_get_updates", {

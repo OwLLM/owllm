@@ -610,6 +610,7 @@ export function toTeam(t: TeamTemplateBackend): Team {
         icon: a.icon ?? null,
         description: typeof a.description === "string" ? a.description : undefined,
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
+        extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
       }))
     : [];
   const edges: Edge[] = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
@@ -802,6 +803,8 @@ export function buildSpecialistPrompt(
   spec: AgentSpec,
   roleByName: Map<string, RoleData>,
   directives?: Directive[],
+  /// Pre-built SKILL block (skillRuntime.buildSkillBlock) — see AgentsPage copy.
+  skillBlock?: string,
 ): string {
   const role = roleByName.get(spec.base);
   const layers: string[] = [
@@ -819,6 +822,10 @@ export function buildSpecialistPrompt(
   }
   if (spec.extraPrompt) {
     layers.push(spec.extraPrompt);
+    layers.push("");
+  }
+  if (skillBlock && skillBlock.trim()) {
+    layers.push(skillBlock);
     layers.push("");
   }
   const directivesBlock = formatDirectivesBlock(directives);

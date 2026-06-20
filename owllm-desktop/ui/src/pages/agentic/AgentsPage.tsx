@@ -67,6 +67,7 @@ import {
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS } from "./localTools";
 import { normalizeTeam, roleCanWrite } from "./teamConfig";
+import { resolveAgentSkills, buildSkillBlock, listSkillPacks, type SkillPack } from "./skillRuntime";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
@@ -201,6 +202,28 @@ function loadAgentListMapForProject(
 }
 const loadAgentSkillsForProject = (gj?: string | null) => loadAgentListMapForProject(gj, "agentSkills");
 const loadAgentToolExtrasForProject = (gj?: string | null) => loadAgentListMapForProject(gj, "agentToolExtras");
+
+// THE single graph_json serializer. Every persist site must go through this so
+// a partial write (e.g. an edge edit) can never clobber sibling keys (models,
+// voices, skills, tool-extras) — the exact bug class the per-agent persistence
+// comments warn about. Writes the FULL blob every time.
+function buildGraphJson(opts: {
+  edges: Edge[];
+  agents: AgentSpec[];
+  agentModels: Map<string, string>;
+  agentVoices: Map<string, VoiceConfig>;
+  agentSkills: Map<string, string[]>;
+  agentToolExtras: Map<string, string[]>;
+}): string {
+  return JSON.stringify({
+    edges: opts.edges,
+    roster: opts.agents.map(a => ({ name: a.name, base: a.base })),
+    agentModels: Object.fromEntries(opts.agentModels),
+    agentVoices: Object.fromEntries(opts.agentVoices),
+    agentSkills: Object.fromEntries(opts.agentSkills),
+    agentToolExtras: Object.fromEntries(opts.agentToolExtras),
+  });
+}
 
 type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
 type AgentRoleBackend    = { id: string; path: string; built_in: boolean; data: any };
@@ -432,6 +455,7 @@ function toTeam(t: TeamTemplateBackend): Team {
         // Qt source spells this `extra_prompt`; we expose it camel-case
         // on the React side so usage doesn't pierce snake_case.
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
+        extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
       }))
     : [];
   const edges: Edge[] = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
@@ -4557,6 +4581,9 @@ function RightColumnTabs(props: {
   needsLoad: boolean;
   loadingModel: boolean;
   onLoadModel: () => void;
+  perAgentSkills: Map<string, string[]>;
+  availableSkills: SkillPack[];
+  onToggleAgentSkill: (agentName: string, skillId: string, on: boolean) => void;
 }) {
   // The 3 top "pages" are small info containers (~20% of available
   // height) per user spec 2026-05-28. They swap above the chat
@@ -4679,6 +4706,9 @@ function RightColumnTabs(props: {
             voiceFor={props.voiceFor}
             onPickAgentVoice={props.onPickAgentVoice}
             voices={props.ttsVoices}
+            perAgentSkills={props.perAgentSkills}
+            availableSkills={props.availableSkills}
+            onToggleAgentSkill={props.onToggleAgentSkill}
           />
         )}
       </div>
@@ -4945,6 +4975,7 @@ function OrchAgentSettings({
   models, modelFor, onPickAgentModel, accountsStatus,
   effectiveTeamModel, serverState,
   voiceFor, onPickAgentVoice, voices,
+  perAgentSkills, availableSkills, onToggleAgentSkill,
 }: {
   team: Team | null;
   selectedAgent: string | null;
@@ -4958,10 +4989,14 @@ function OrchAgentSettings({
   voiceFor: (agentName: string) => VoiceConfig;
   onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
   voices: SpeechSynthesisVoice[];
+  perAgentSkills: Map<string, string[]>;
+  availableSkills: SkillPack[];
+  onToggleAgentSkill: (agentName: string, skillId: string, on: boolean) => void;
 }) {
   const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
   const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
   const disabled = focus === "you" || focus === "system";
+  const equippedSkills = perAgentSkills.get(focus) ?? [];
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
@@ -4988,6 +5023,45 @@ function OrchAgentSettings({
         onChange={(partial) => onPickAgentVoice(focus, partial)}
         disabled={disabled}
       />
+      {/* SKILLS — equip SKILL.md capability packs onto this agent. Distinct
+          from tools: skills are instruction packs the runtime loads on demand
+          at dispatch (budgeted progressive disclosure via skillRuntime), and
+          they persist per-project in graph_json (agentSkills). */}
+      {!disabled && (
+        <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
+          <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>
+            📚 Skills · forwarded only when needed
+          </span>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:4, alignItems:"center" }}>
+            {equippedSkills.map(id => {
+              const p = availableSkills.find(s => s.id === id);
+              return (
+                <span key={id} title={p?.description || id} style={{ display:"inline-flex", alignItems:"center", gap:4, fontSize:11, background:"rgba(160,232,138,0.12)", border:"1px solid rgba(160,232,138,0.30)", borderRadius:999, padding:"2px 4px 2px 8px", color:"var(--fg)" }}>
+                  📚 {p?.name ?? id}
+                  {p && <span style={{ fontSize:9, color:"var(--fg-subtle)" }}>~{Math.max(1, Math.round(p.ctx_estimate/1000))}k</span>}
+                  <button onClick={() => onToggleAgentSkill(focus, id, false)} title="Unequip" style={{ background:"none", border:"none", color:"#ff8c8c", cursor:"pointer", fontSize:11, lineHeight:1, padding:"0 2px" }}>✕</button>
+                </span>
+              );
+            })}
+            {availableSkills.length === 0 ? (
+              <span style={{ fontSize:10, color:"var(--fg-subtle)", fontStyle:"italic" }}>
+                No skills installed — add some in the Skill Library.
+              </span>
+            ) : (
+              <select
+                value=""
+                onChange={e => { const v = e.target.value; if (v) onToggleAgentSkill(focus, v, true); e.currentTarget.value = ""; }}
+                style={{ fontSize:11, background:"var(--bg-surface)", border:"1px solid rgba(160,232,138,0.30)", borderRadius:6, color:"var(--fg)", padding:"2px 4px", cursor:"pointer" }}
+              >
+                <option value="">+ equip skill…</option>
+                {availableSkills.filter(s => !equippedSkills.includes(s.id)).map(s => (
+                  <option key={s.id} value={s.id}>{s.name} (~{Math.max(1, Math.round(s.ctx_estimate/1000))}k)</option>
+                ))}
+              </select>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -5442,6 +5516,9 @@ function buildSpecialistPrompt(
   spec: AgentSpec,
   roleByName: Map<string, RoleData>,
   directives?: Directive[],
+  /// Pre-built SKILL block (from skillRuntime.buildSkillBlock) for the agent's
+  /// equipped skills — resolved async by the caller so this stays pure/sync.
+  skillBlock?: string,
 ): string {
   const role = roleByName.get(spec.base);
   // Layer: role base prompt (from yaml) + team-specific spec
@@ -5465,6 +5542,10 @@ function buildSpecialistPrompt(
   }
   if (spec.extraPrompt) {
     layers.push(spec.extraPrompt);
+    layers.push("");
+  }
+  if (skillBlock && skillBlock.trim()) {
+    layers.push(skillBlock);
     layers.push("");
   }
   const directivesBlock = formatDirectivesBlock(directives);
@@ -6626,6 +6707,15 @@ export default function AgentsPage() {
   /// by agent name, cleared on project/team flip. Missing key means the
   /// agent uses DEFAULT_VOICE (disabled / Auto / default rate).
   const [perAgentVoice, setPerAgentVoice] = useState<Map<string, VoiceConfig>>(new Map());
+  /// Per-agent equipped SKILL packs + per-agent extra tool grants. Same
+  /// lifecycle as perAgentModel; persisted in graph_json via buildGraphJson.
+  const [perAgentSkills, setPerAgentSkills] = useState<Map<string, string[]>>(new Map());
+  const [perAgentToolExtras, setPerAgentToolExtras] = useState<Map<string, string[]>>(new Map());
+  /// Catalog of installed SKILL.md packs (cheap metadata) for the equip
+  /// picker. Loaded once via skillRuntime; invalidate + reload after an
+  /// install/uninstall from the Skill Library.
+  const [availableSkills, setAvailableSkills] = useState<SkillPack[]>([]);
+  useEffect(() => { listSkillPacks().then(setAvailableSkills).catch(() => {}); }, []);
   /// Mirror of the OS voice list so the picker re-renders when the
   /// async `voiceschanged` event arrives after first paint.
   const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>(() => listTtsVoices());
@@ -7222,6 +7312,9 @@ export default function AgentsPage() {
       // Per-agent voice picks live alongside model picks — same scope, same
       // DB-first restore.
       setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id, selectedProject.graph_json));
+      // Per-agent equipped skills + extra tool grants — same DB-first restore.
+      setPerAgentSkills(loadAgentSkillsForProject(selectedProject.graph_json));
+      setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject.graph_json));
       // Restore saved chat + per-agent transcripts INTO the shared store —
       // but ONLY if this project's session is empty (fresh load / app
       // restart). If a dispatch is still running in the background, or
@@ -7287,6 +7380,8 @@ export default function AgentsPage() {
     // roster is simply never looked up (harmless), while real picks survive.
     setPerAgentModel(loadAgentModelsForProject(selectedProject?.id ?? "", selectedProject?.graph_json));
     setPerAgentVoice(loadAgentVoicesForProject(selectedProject?.id ?? "", selectedProject?.graph_json));
+    setPerAgentSkills(loadAgentSkillsForProject(selectedProject?.graph_json));
+    setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject?.graph_json));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTeam?.id]);
 
@@ -7309,11 +7404,11 @@ export default function AgentsPage() {
             // renamed agent would lose its role again on the next edge edit.
             // ALSO carry the per-agent model + voice picks so an edge edit never
             // clobbers them (both writers serialise the full graph_json).
-            graph_json: JSON.stringify({
-              edges: editedEdges,
-              roster: (activeTeam?.agents ?? []).map(a => ({ name: a.name, base: a.base })),
-              agentModels: Object.fromEntries(perAgentModel),
-              agentVoices: Object.fromEntries(perAgentVoice),
+            graph_json: buildGraphJson({
+              edges: editedEdges ?? [],
+              agents: activeTeam?.agents ?? [],
+              agentModels: perAgentModel, agentVoices: perAgentVoice,
+              agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
             }),
           },
         });
@@ -7338,27 +7433,27 @@ export default function AgentsPage() {
     if (!selectedProject) return;
     if (pickedTeamId !== null) return;            // template override → not the project's own roster
     if (!activeTeam) return;                       // team not computed yet → don't write empty edges/roster
-    if (perAgentModel.size === 0 && perAgentVoice.size === 0) return;
+    if (perAgentModel.size === 0 && perAgentVoice.size === 0 && perAgentSkills.size === 0 && perAgentToolExtras.size === 0) return;
     const id = window.setTimeout(async () => {
       try {
         await invoke("update_project", {
           input: {
             id: selectedProject.id,
-            graph_json: JSON.stringify({
+            graph_json: buildGraphJson({
               edges: editedEdges ?? activeTeam?.edges ?? [],
-              roster: (activeTeam?.agents ?? []).map(a => ({ name: a.name, base: a.base })),
-              agentModels: Object.fromEntries(perAgentModel),
-              agentVoices: Object.fromEntries(perAgentVoice),
+              agents: activeTeam?.agents ?? [],
+              agentModels: perAgentModel, agentVoices: perAgentVoice,
+              agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
             }),
           },
         });
       } catch (e) {
-        console.error("persist agent models/voices failed", e);
+        console.error("persist agent picks failed", e);
       }
     }, 600);
     return () => window.clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [perAgentModel, perAgentVoice, selectedProject?.id, pickedTeamId]);
+  }, [perAgentModel, perAgentVoice, perAgentSkills, perAgentToolExtras, selectedProject?.id, pickedTeamId]);
 
   // Persist trust_writes toggles too. Same debounce shape.
   useEffect(() => {
@@ -7998,6 +8093,25 @@ export default function AgentsPage() {
     });
     // Persist so the agent's voice + rate survive tab switches AND restarts.
     setAgentVoiceOverride(selectedProject?.id ?? "", agentName, merged);
+  };
+
+  /// Equip / unequip a SKILL pack on an agent. Updates the per-agent skill
+  /// map; the graph_json persister effect (keyed on perAgentSkills) writes it
+  /// to the project row, so the grant survives tab switches and reinstall.
+  const onToggleAgentSkill = (agentName: string, skillId: string, on: boolean) => {
+    setPerAgentSkills(prev => {
+      const next = new Map(prev);
+      const cur = next.get(agentName) ?? [];
+      if (on) {
+        if (cur.includes(skillId)) return prev;
+        next.set(agentName, [...cur, skillId]);
+      } else {
+        const filtered = cur.filter(id => id !== skillId);
+        if (filtered.length) next.set(agentName, filtered);
+        else next.delete(agentName);
+      }
+      return next;
+    });
   };
 
   /// Speak an agent's full reply if voice is enabled for that agent.
@@ -8833,11 +8947,16 @@ export default function AgentsPage() {
           appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
           const specModel = modelFor(spec.name);
           const allowed = roleByName.get(spec.base)?.toolAllowlist;
+          // Resolve this agent's equipped skills (template extra_skills + the
+          // per-project graph_json grant) and inject them (budgeted progressive
+          // disclosure). Skills not installed are skipped.
+          const skillIds = [...(spec.extraSkills ?? []), ...(perAgentSkills.get(spec.name) ?? [])];
+          const skillBlock = skillIds.length ? buildSkillBlock(await resolveAgentSkills(skillIds)) : "";
           let specText = "";
           try {
             specText = (await streamChatCompletion(
               port, specModel, providerFor(specModel),
-              buildSpecialistPrompt(activeTeam, spec, roleByName, directives), instruction,
+              buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock), instruction,
               tempFor(spec, 0.5), ctrl.signal,
               (delta) => streamLog(spec.name, delta),
               chainCwd,
@@ -9020,10 +9139,12 @@ export default function AgentsPage() {
         } catch { /* fall back to shared cwd */ }
         const docCwd = docWt ? docWt.path : projectCwd;
         const docAllowed = roleByName.get(docSpec.base)?.toolAllowlist;
+        const docSkillIds = [...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
+        const docSkillBlock = docSkillIds.length ? buildSkillBlock(await resolveAgentSkills(docSkillIds)) : "";
         try {
           await streamChatCompletion(
             port, modelFor(docSpec.name), providerFor(modelFor(docSpec.name)),
-            buildSpecialistPrompt(activeTeam, docSpec, roleByName, directives),
+            buildSpecialistPrompt(activeTeam, docSpec, roleByName, directives, docSkillBlock),
             docInstruction, tempFor(docSpec, 0.3), ctrl.signal,
             (delta) => streamLog(docSpec.name, delta),
             docCwd,
@@ -9655,6 +9776,9 @@ export default function AgentsPage() {
             voiceFor={voiceFor}
             onPickAgentVoice={onPickAgentVoice}
             ttsVoices={ttsVoices}
+            perAgentSkills={perAgentSkills}
+            availableSkills={availableSkills}
+            onToggleAgentSkill={onToggleAgentSkill}
           />
         </div>
       </div>

@@ -7716,11 +7716,16 @@ export default function AgentsPage() {
       const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
       if (hasSpecialists) {
         console.log("[onSupSend] team chat → dispatchGoal", { agents: activeTeam.agents.length });
+        // Capture the prior conversation BEFORE echoing this turn, so the
+        // orchestrator gets continuity across messages. Without this every
+        // team chat started from scratch — the "memory resets each message"
+        // bug (the solo path below already did this; the team path didn't).
+        const priorHistory = chatToHistory(supChat);
         // Echo the user's message into the chat thread (dispatchGoal logs
         // it to the agent buffers, not supChat), then run the team.
-        const echo: GoalMsg = { role: "you", color: "#9ad9ff", text, ts: Date.now() };
+        const echo: GoalMsg = { role: "you", color: "#9ad9ff", text, ts: Date.now(), seq: nextSeq() };
         setSupChat(prev => [...prev, echo]);
-        await dispatchGoal(text);
+        await dispatchGoal(text, priorHistory);
         return;
       }
     }
@@ -8333,7 +8338,7 @@ export default function AgentsPage() {
   //   3. Integrate — orchestrator gets one more turn with all replies
   // Each phase streams into the matching per-agent log buffer; the
   // canvas's `activeAgent` highlights whichever agent is on stage.
-  async function dispatchGoal(overrideText?: string) {
+  async function dispatchGoal(overrideText?: string, priorHistory?: HistoryItem[]) {
     setRunError(null);
     // overrideText is passed when the SuperUser CHAT routes a message
     // through the team flow (so the orchestrator dispatches instead of
@@ -8517,7 +8522,9 @@ export default function AgentsPage() {
           orchPrompt, text, tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
-          undefined, undefined,
+          // history: prior turns so the orchestrator remembers the conversation
+          // (essential for local-model orchestrators, which have no session memory).
+          priorHistory, undefined,
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
           READONLY_LOCAL_TOOLS,
           // User-attached images/audio ride with the orchestrator only.
@@ -9038,6 +9045,27 @@ export default function AgentsPage() {
       }
       const specialistReplies = outcomes.flatMap(o => o.replies);
 
+      // Surface each specialist's reply in the UNIFIED conversation (Full Chat),
+      // not only on its per-agent card. Before this, a team chat's Full Chat
+      // showed just the user turn, system notices, and the orchestrator's final
+      // answer — the specialists looked skipped. seq orders them after the
+      // orchestrator's planning thoughts and before its final integration.
+      if (specialistReplies.length > 0) {
+        setSupChat(prev => [
+          ...prev,
+          ...specialistReplies.map(r => {
+            const spec = activeTeam.agents.find(a => a.name === r.name);
+            return {
+              role: r.name,
+              color: spec ? colorForAgent(spec) : "#cbd5e1",
+              text: r.text,
+              ts: Date.now(),
+              seq: nextSeq(),
+            } as GoalMsg;
+          }),
+        ]);
+      }
+
       if (specialistReplies.length === 0) {
         // Cleanup any worktrees we did create even though no spec ran.
         for (const wt of worktreeBySpec.values()) {
@@ -9069,7 +9097,7 @@ export default function AgentsPage() {
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
-          undefined, undefined,
+          priorHistory, undefined,   // history: continuity for the final answer
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
           undefined,
           undefined,
@@ -9079,7 +9107,7 @@ export default function AgentsPage() {
         removeActive(orch.name);
       }
       speakAgentReply(orch.name, finalReply);
-      setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim(), ts: Date.now() }]);
+      setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim(), ts: Date.now(), seq: nextSeq() }]);
 
       // ----- Phase 4: serial squash-merge each committed branch back -----
       // Conflicts here are real (two agents touched the same file) —

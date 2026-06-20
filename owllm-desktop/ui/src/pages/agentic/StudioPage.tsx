@@ -965,6 +965,23 @@ function AgentCard({
   );
 }
 
+// Skill categories — the Skills tab groups packs into "containers" by purpose
+// (orchestration, design, coding, …) instead of one flat wall. Keyword match
+// on name+description; FIRST match wins, so order = priority. Unmatched → Other.
+const SKILL_CATEGORIES: { key: string; label: string; match: RegExp }[] = [
+  { key: "orchestration", label: "🧭 Orchestration & Planning", match: /plan|dispatch|orchestrat|brainstorm|subagent|superpower|coordinat|delegat|workflow/i },
+  { key: "design",        label: "🎨 Design & Visual",          match: /design|art|brand|canvas|theme|visual|frontend|\bui\b|\bux\b|gif|web.?artifact|colou?r|logo/i },
+  { key: "coding",        label: "💻 Coding & Engineering",     match: /cod(e|ing)|debug|test|\bgit\b|build|review|develop|deploy|lint|refactor|worktree|\bapi\b|mcp|skill/i },
+  { key: "docs",          label: "📄 Documents & Content",      match: /\bdocx?\b|pdf|pptx|xlsx|word|excel|powerpoint|spreadsheet|writ|content|comms|slack|report|markdown|co-?author/i },
+  { key: "execution",     label: "⚙ Execution & Verification",  match: /execut|verif|finish|complete|ship|release/i },
+];
+const SKILL_CATEGORY_OTHER = { key: "other", label: "📦 Other" };
+function categorizeSkill(name: string, description: string): string {
+  const hay = `${name} ${description}`.toLowerCase();
+  for (const c of SKILL_CATEGORIES) if (c.match.test(hay)) return c.key;
+  return SKILL_CATEGORY_OTHER.key;
+}
+
 // SkillCard — a SKILL.md pack rendered as a PACK, deliberately distinct from
 // an AgentCard so skills and agents never read as the same thing. Book-framed,
 // green accent, shows the context cost + the tools it grants.
@@ -2018,6 +2035,34 @@ export default function StudioPage() {
     return base;
   }, [agentQuery, agentsWithIcons, view]);
 
+  // Skills grouped into purpose "containers" for the Skills tab, deduped by
+  // display name (a pack present in both the new + legacy/_remote skill homes
+  // would otherwise show twice). Empty categories are dropped; Other goes last.
+  const skillSections = useMemo(() => {
+    if (view !== "skills") return [] as { key: string; label: string; skills: AgentDef[] }[];
+    const seen = new Set<string>();
+    const deduped = filteredAgents.filter(a => {
+      const k = a.name.toLowerCase();
+      if (seen.has(k)) return false;
+      seen.add(k);
+      return true;
+    });
+    const byCat = new Map<string, AgentDef[]>();
+    for (const a of deduped) {
+      const cat = categorizeSkill(a.name, a.description);
+      if (!byCat.has(cat)) byCat.set(cat, []);
+      byCat.get(cat)!.push(a);
+    }
+    const out: { key: string; label: string; skills: AgentDef[] }[] = [];
+    for (const c of SKILL_CATEGORIES) {
+      const s = byCat.get(c.key);
+      if (s && s.length) out.push({ key: c.key, label: c.label, skills: s });
+    }
+    const other = byCat.get(SKILL_CATEGORY_OTHER.key);
+    if (other && other.length) out.push({ key: SKILL_CATEGORY_OTHER.key, label: SKILL_CATEGORY_OTHER.label, skills: other });
+    return out;
+  }, [view, filteredAgents]);
+
   const team = teams.find(t => t.name === selectedTeam) ?? null;
   const agent = agentsWithIcons.find(a => a.name === selectedAgent) ?? null;
   const skill = agentsWithIcons.find(a => a.name === selectedSkill && a.isSkill) ?? null;
@@ -2306,37 +2351,41 @@ export default function StudioPage() {
           <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
             <div style={{
               flex: 6,
-              display: "grid",
-              gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))",
-              gridAutoRows: "min-content",
-              gap: 12,
+              display: "flex", flexDirection: "column", gap: 16,
               overflow: "auto",
-              alignContent: "flex-start",
               paddingRight: 8,
               paddingBottom: 12,
               minWidth: 0,
             }}>
-              {view === "skills"
-                ? filteredAgents.map(a => (
-                    <SkillCard
-                      key={a.name}
-                      skill={a}
-                      selected={selectedSkill === a.name}
-                      onClick={() => setSelectedSkill(a.name)}
-                    />
+              {view === "skills" ? (
+                skillSections.length === 0 ? (
+                  <div style={{ color: "var(--fg-subtle)", fontSize: 12.5, lineHeight: 1.6, padding: "8px 2px" }}>
+                    No skills installed yet. Click <b>📚 Install skills…</b> to add Anthropic-style SKILL.md packs,
+                    then give them to your agents (Agents tab → an agent → 📚 Skills).
+                  </div>
+                ) : (
+                  // Grouped into purpose "containers" (Orchestration / Design /
+                  // Coding / …) so the library is scannable, not one flat wall.
+                  skillSections.map(sec => (
+                    <div key={sec.key} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{ fontSize: 11.5, fontWeight: 800, color: "var(--fg)", letterSpacing: 0.4 }}>{sec.label}</span>
+                        <span style={{ fontSize: 10, color: "var(--fg-subtle)", fontWeight: 700 }}>{sec.skills.length}</span>
+                        <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+                      </div>
+                      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
+                        {sec.skills.map(a => (
+                          <SkillCard key={a.name} skill={a} selected={selectedSkill === a.name} onClick={() => setSelectedSkill(a.name)} />
+                        ))}
+                      </div>
+                    </div>
                   ))
-                : filteredAgents.map(a => (
-                    <AgentCard
-                      key={a.name}
-                      agent={a}
-                      selected={selectedAgent === a.name}
-                      onClick={() => setSelectedAgent(a.name)}
-                    />
+                )
+              ) : (
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
+                  {filteredAgents.map(a => (
+                    <AgentCard key={a.name} agent={a} selected={selectedAgent === a.name} onClick={() => setSelectedAgent(a.name)} />
                   ))}
-              {view === "skills" && filteredAgents.length === 0 && (
-                <div style={{ gridColumn: "1/-1", color: "var(--fg-subtle)", fontSize: 12.5, lineHeight: 1.6, padding: "8px 2px" }}>
-                  No skills installed yet. Click <b>📚 Install skills…</b> to add Anthropic-style SKILL.md packs,
-                  then equip them onto an agent (in a Team's Workbench, or per-agent on the Agents page).
                 </div>
               )}
             </div>

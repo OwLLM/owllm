@@ -67,7 +67,7 @@ import {
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS } from "./localTools";
 import { normalizeTeam, roleCanWrite } from "./teamConfig";
-import { resolveAgentSkills, buildSkillBlock, listSkillPacks, type SkillPack } from "./skillRuntime";
+import { resolveAgentSkills, buildSkillBlock } from "./skillRuntime";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
@@ -4585,9 +4585,6 @@ function RightColumnTabs(props: {
   needsLoad: boolean;
   loadingModel: boolean;
   onLoadModel: () => void;
-  perAgentSkills: Map<string, string[]>;
-  availableSkills: SkillPack[];
-  onToggleAgentSkill: (agentName: string, skillId: string, on: boolean) => void;
 }) {
   // The 3 top "pages" are small info containers (~20% of available
   // height) per user spec 2026-05-28. They swap above the chat
@@ -4710,9 +4707,6 @@ function RightColumnTabs(props: {
             voiceFor={props.voiceFor}
             onPickAgentVoice={props.onPickAgentVoice}
             voices={props.ttsVoices}
-            perAgentSkills={props.perAgentSkills}
-            availableSkills={props.availableSkills}
-            onToggleAgentSkill={props.onToggleAgentSkill}
           />
         )}
       </div>
@@ -4979,7 +4973,6 @@ function OrchAgentSettings({
   models, modelFor, onPickAgentModel, accountsStatus,
   effectiveTeamModel, serverState,
   voiceFor, onPickAgentVoice, voices,
-  perAgentSkills, availableSkills, onToggleAgentSkill,
 }: {
   team: Team | null;
   selectedAgent: string | null;
@@ -4993,14 +4986,10 @@ function OrchAgentSettings({
   voiceFor: (agentName: string) => VoiceConfig;
   onPickAgentVoice: (agentName: string, partial: Partial<VoiceConfig>) => void;
   voices: SpeechSynthesisVoice[];
-  perAgentSkills: Map<string, string[]>;
-  availableSkills: SkillPack[];
-  onToggleAgentSkill: (agentName: string, skillId: string, on: boolean) => void;
 }) {
   const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
   const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
   const disabled = focus === "you" || focus === "system";
-  const equippedSkills = perAgentSkills.get(focus) ?? [];
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
@@ -5027,59 +5016,11 @@ function OrchAgentSettings({
         onChange={(partial) => onPickAgentVoice(focus, partial)}
         disabled={disabled}
       />
-      {/* SKILLS — an inline checklist of installed SKILL.md capability packs.
-          Tick the ones this agent may use; the runtime injects only the
-          relevant ones at dispatch (budgeted progressive disclosure via
-          skillRuntime). Skills are DISTINCT from tools and persist per-project
-          in graph_json (agentSkills). */}
-      {!disabled && (() => {
-        const equippedCtx = equippedSkills.reduce(
-          (sum, id) => sum + (availableSkills.find(a => a.id === id)?.ctx_estimate ?? 0), 0);
-        return (
-          <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
-              <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>📚 Skills</span>
-              {equippedSkills.length > 0 && (
-                <span style={{ fontSize:9.5, color: equippedCtx > 6000 ? "#ffd97a" : "var(--fg-subtle)" }}>
-                  {equippedSkills.length} on · ~{Math.max(1, Math.round(equippedCtx / 1000))}k ctx
-                </span>
-              )}
-            </div>
-            {availableSkills.length === 0 ? (
-              <span style={{ fontSize:10.5, color:"var(--fg-subtle)", fontStyle:"italic" }}>
-                No skills installed yet — add them in Studio → Skills.
-              </span>
-            ) : (
-              <>
-                <div style={{ maxHeight:148, overflow:"auto", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-surface)" }}>
-                  {availableSkills.map((s, i) => {
-                    const on = equippedSkills.includes(s.id);
-                    return (
-                      <button key={s.id} onClick={() => onToggleAgentSkill(focus, s.id, !on)} title={s.description || s.name}
-                        style={{ width:"100%", textAlign:"left", display:"flex", alignItems:"center", gap:8, padding:"5px 8px",
-                          background: on ? "rgba(160,232,138,0.10)" : "transparent", border:"none",
-                          borderTop: i === 0 ? "none" : "1px solid var(--border)", cursor:"pointer" }}>
-                        <span style={{ width:15, height:15, borderRadius:4, flexShrink:0, display:"inline-flex", alignItems:"center", justifyContent:"center",
-                          border:`1.5px solid ${on ? "#6cd28e" : "var(--border-strong)"}`, background: on ? "#6cd28e" : "transparent", color:"#11231a", fontSize:10, fontWeight:900 }}>
-                          {on ? "✓" : ""}
-                        </span>
-                        <span style={{ minWidth:0, flex:1 }}>
-                          <span style={{ display:"block", fontSize:11.5, fontWeight:600, color:"var(--fg)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</span>
-                          {s.description && <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.description}</span>}
-                        </span>
-                        <span style={{ fontSize:9, color:"var(--fg-subtle)", flexShrink:0 }}>~{Math.max(1, Math.round(s.ctx_estimate / 1000))}k</span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <span style={{ fontSize:9.5, color:"var(--fg-subtle)", lineHeight:1.35 }}>
-                  Tick the packs this agent may use — only the ones a task needs get loaded into its prompt.
-                </span>
-              </>
-            )}
-          </div>
-        );
-      })()}
+      {/* Skills are NOT selected here. They are associated with the AGENT
+          itself (Studio → Agents → the agent's 📚 Skills checklist, or a
+          team's Workbench). At dispatch the runtime gives each agent its
+          associated skills and loads only the ones a task needs (progressive
+          disclosure) — the user doesn't hand-pick skills per chat. */}
     </div>
   );
 }
@@ -6729,11 +6670,6 @@ export default function AgentsPage() {
   /// lifecycle as perAgentModel; persisted in graph_json via buildGraphJson.
   const [perAgentSkills, setPerAgentSkills] = useState<Map<string, string[]>>(new Map());
   const [perAgentToolExtras, setPerAgentToolExtras] = useState<Map<string, string[]>>(new Map());
-  /// Catalog of installed SKILL.md packs (cheap metadata) for the equip
-  /// picker. Loaded once via skillRuntime; invalidate + reload after an
-  /// install/uninstall from the Skill Library.
-  const [availableSkills, setAvailableSkills] = useState<SkillPack[]>([]);
-  useEffect(() => { listSkillPacks().then(setAvailableSkills).catch(() => {}); }, []);
   /// Mirror of the OS voice list so the picker re-renders when the
   /// async `voiceschanged` event arrives after first paint.
   const [ttsVoices, setTtsVoices] = useState<SpeechSynthesisVoice[]>(() => listTtsVoices());
@@ -8118,25 +8054,6 @@ export default function AgentsPage() {
     });
     // Persist so the agent's voice + rate survive tab switches AND restarts.
     setAgentVoiceOverride(selectedProject?.id ?? "", agentName, merged);
-  };
-
-  /// Equip / unequip a SKILL pack on an agent. Updates the per-agent skill
-  /// map; the graph_json persister effect (keyed on perAgentSkills) writes it
-  /// to the project row, so the grant survives tab switches and reinstall.
-  const onToggleAgentSkill = (agentName: string, skillId: string, on: boolean) => {
-    setPerAgentSkills(prev => {
-      const next = new Map(prev);
-      const cur = next.get(agentName) ?? [];
-      if (on) {
-        if (cur.includes(skillId)) return prev;
-        next.set(agentName, [...cur, skillId]);
-      } else {
-        const filtered = cur.filter(id => id !== skillId);
-        if (filtered.length) next.set(agentName, filtered);
-        else next.delete(agentName);
-      }
-      return next;
-    });
   };
 
   /// Speak an agent's full reply if voice is enabled for that agent.
@@ -9828,9 +9745,6 @@ export default function AgentsPage() {
             voiceFor={voiceFor}
             onPickAgentVoice={onPickAgentVoice}
             ttsVoices={ttsVoices}
-            perAgentSkills={perAgentSkills}
-            availableSkills={availableSkills}
-            onToggleAgentSkill={onToggleAgentSkill}
           />
         </div>
       </div>

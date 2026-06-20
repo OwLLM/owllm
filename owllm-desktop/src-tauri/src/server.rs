@@ -137,18 +137,34 @@ async fn server_present(port: u16) -> bool {
 fn classify_crash(stderr_tail: &str) -> Option<(&'static str, &'static str)> {
     let t = stderr_tail.to_lowercase();
     // GPU/host memory exhaustion — the model (or its KV cache) didn't fit.
+    // CLEAR device/host memory exhaustion — llama.cpp said so explicitly.
+    // NB: with GPU layers on, this is GPU VRAM, NOT system RAM — so "I have
+    // plenty of RAM free" doesn't contradict it.
     if t.contains("out of memory")
         || t.contains("outofdevicememory")
         || t.contains("cudamalloc failed")
         || t.contains("cuda_malloc")
-        || t.contains("failed to allocate")
-        || t.contains("not enough memory")
         || t.contains("erroroutofdevicememory")
+        || t.contains("not enough memory")
     {
         return Some((
             "oom",
-            "The model didn't fit in memory (GPU/RAM OOM). Try a smaller quant (e.g. Q4_K_M), \
-             fewer GPU layers, a smaller context size, or close other GPU apps.",
+            "Ran out of memory loading the model. With GPU layers ON this is GPU VRAM — not system RAM — \
+             so free RAM doesn't help. Lower the GPU layers (-ngl), pick a smaller quant (e.g. Q4_K_M), \
+             or reduce the context size. With GPU layers OFF, it's system RAM — close other apps or pick a smaller model.",
+        ));
+    }
+    // BROAD allocation failure — llama.cpp printed "failed to allocate" but
+    // that is NOT always true OOM: a GGUF whose architecture this build only
+    // partially supports allocates a wrong-sized buffer and trips the same
+    // line, then segfaults. Don't assert OOM here — name BOTH likely causes.
+    if t.contains("failed to allocate") {
+        return Some((
+            "alloc",
+            "A buffer failed to allocate while loading the model. Two common causes: (1) GPU VRAM (not system RAM) \
+             is too small — lower the GPU layers (-ngl) or use a smaller quant; (2) the GGUF uses a newer model \
+             architecture this llama.cpp build can't run yet — update the local-inference runtime (Home → reinstall) \
+             or re-export the GGUF with a current converter.",
         ));
     }
     // Broken / incompatible model file.
@@ -786,8 +802,11 @@ fn crash_hint_for(code: i32) -> Option<&'static str> {
     let unsigned = code as u32;
     match unsigned {
         0xC000_0005 => Some(
-            "STATUS_ACCESS_VIOLATION — usually VRAM OOM on a too-large model. \
-             Try a smaller quant (e.g. Q4_K_M instead of f16) or lower -ngl."
+            "STATUS_ACCESS_VIOLATION — llama.cpp segfaulted with no clear message. This is NOT necessarily \
+             out of memory. Most often a GGUF using a newer architecture this build can't run yet \
+             (update the local-inference runtime, or re-export the GGUF) — common with brand-new Qwen / \
+             Llama releases. Otherwise: GPU VRAM (not system RAM) too small — lower -ngl / smaller quant; \
+             or a corrupt GGUF — re-download."
         ),
         0xC000_0017 => Some(
             "STATUS_NO_MEMORY — out of system RAM. Close other apps or pick a smaller model."

@@ -291,6 +291,10 @@ type RoleData = {
   /// runtime hard-rejects anything outside the allowlist. ["all"] /
   /// undefined / empty = unrestricted.
   toolAllowlist?: string[];
+  /// SKILL.md pack ids associated with this role on the AGENT itself (Studio
+  /// agent card → Skills). Merged with the team template's per-agent
+  /// `extra_skills` and the per-project graph_json grant at dispatch.
+  skillAllowlist?: string[];
 };
 type GoalMsg = {
   role: string;
@@ -7199,6 +7203,8 @@ export default function AgentsPage() {
           toolAllowlist: Array.isArray(d.tool_allowlist)
             ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
             : undefined,
+          skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
+            .filter((s: unknown): s is string => typeof s === "string"),
         });
       }
       setRoleByName(m);
@@ -8971,7 +8977,11 @@ export default function AgentsPage() {
           // Resolve this agent's equipped skills (template extra_skills + the
           // per-project graph_json grant) and inject them (budgeted progressive
           // disclosure). Skills not installed are skipped.
-          const skillIds = [...(spec.extraSkills ?? []), ...(perAgentSkills.get(spec.name) ?? [])];
+          const skillIds = [
+            ...(roleByName.get(spec.base)?.skillAllowlist ?? []),  // Studio agent-card skills
+            ...(spec.extraSkills ?? []),                           // team template extra_skills
+            ...(perAgentSkills.get(spec.name) ?? []),              // per-project grant
+          ];
           const skillBlock = skillIds.length ? buildSkillBlock(await resolveAgentSkills(skillIds)) : "";
           let specText = "";
           try {
@@ -9181,7 +9191,7 @@ export default function AgentsPage() {
         } catch { /* fall back to shared cwd */ }
         const docCwd = docWt ? docWt.path : projectCwd;
         const docAllowed = roleByName.get(docSpec.base)?.toolAllowlist;
-        const docSkillIds = [...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
+        const docSkillIds = [...(roleByName.get(docSpec.base)?.skillAllowlist ?? []), ...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
         const docSkillBlock = docSkillIds.length ? buildSkillBlock(await resolveAgentSkills(docSkillIds)) : "";
         try {
           await streamChatCompletion(

@@ -204,6 +204,10 @@ type AgentDef = {
   systemPrompt?: string;
   temperature?: number;
   defaultModelId?: string;
+  /// SKILL.md pack ids associated with this agent (Studio agent card →
+  /// Skills). Persisted on the role JSON as `extra_skills`; the dispatch
+  /// merges them into the agent's effective skills (RoleData.skillAllowlist).
+  extraSkills?: string[];
   /// For SKILL.md packs: path on disk to the SKILL.md file so the
   /// Studio "Reveal in Finder" affordance can resolve it.
   path?: string;
@@ -1090,12 +1094,16 @@ type AggregatedMcpTool = {
 
 function AgentDetailPanel({
   agent,
+  availableSkills,
   onSave,
   onDuplicate,
   onDelete,
   onPickIcon,
 }: {
   agent: AgentDef | null;
+  /// Installed SKILL.md packs (cheap metadata) for the per-agent Skills
+  /// checklist — the "open an agent → tick the skills it gets" control.
+  availableSkills: { id: string; name: string; description: string; ctx: number }[];
   // onSave receives the edited fields the user has changed. Parent
   // calls the Rust save_agent_definition with the merged JSON.
   onSave: (edits: {
@@ -1103,6 +1111,7 @@ function AgentDetailPanel({
     canDispatch: boolean;
     temperature: number | null;
     defaultModelId: string;
+    extraSkills: string[];
   }) => void;
   onDuplicate: () => void;
   onDelete: () => void;
@@ -1127,12 +1136,16 @@ function AgentDetailPanel({
     agent?.temperature != null ? String(agent.temperature) : ""
   );
   const [draftModelId, setDraftModelId] = useState<string>(agent?.defaultModelId ?? "");
+  // Draft per-agent skills (SKILL.md pack ids). Persisted to the role JSON's
+  // `extra_skills`; the dispatch merges them into the agent's effective skills.
+  const [draftSkills, setDraftSkills] = useState<string[]>(agent?.extraSkills ?? []);
   // Re-seed every editable field when the user clicks a different card.
   useEffect(() => {
     setDraftMcp(agent?.mcpTools ?? null);
     setDraftCanDispatch(agent?.canDispatch ?? false);
     setDraftTemperature(agent?.temperature != null ? String(agent.temperature) : "");
     setDraftModelId(agent?.defaultModelId ?? "");
+    setDraftSkills(agent?.extraSkills ?? []);
   }, [agent?.name]);
   useEffect(() => {
     invoke<AggregatedMcpTool[]>("mcp_list_all_tools")
@@ -1145,7 +1158,8 @@ function AgentDetailPanel({
   const cdDirty    = draftCanDispatch !== (agent?.canDispatch ?? false);
   const tempDirty  = (parsedTemp ?? null) !== (agent?.temperature ?? null);
   const modelDirty = draftModelId !== (agent?.defaultModelId ?? "");
-  const dirty = mcpDirty || cdDirty || tempDirty || modelDirty;
+  const skillsDirty = JSON.stringify([...draftSkills].sort()) !== JSON.stringify([...(agent?.extraSkills ?? [])].sort());
+  const dirty = mcpDirty || cdDirty || tempDirty || modelDirty || skillsDirty;
   if (!agent) {
     return (
       <div style={{
@@ -1380,6 +1394,53 @@ function AgentDetailPanel({
         </div>
       )}
 
+      {/* SKILLS — associate SKILL.md packs with THIS agent. Tick the ones it
+          should have; they persist on the agent (role JSON `extra_skills`) and
+          the runtime merges them into its skills in every team (loading only
+          what a task needs). Distinct from tools. Hidden for skill packs
+          themselves (a skill can't have skills). */}
+      {!agent.isSkill && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+            <div style={{ fontSize: 10, color: "var(--fg-muted)", letterSpacing: 0.6, textTransform: "uppercase" }}>📚 Skills</div>
+            {draftSkills.length > 0 && (() => {
+              const ctx = draftSkills.reduce((s, id) => s + (availableSkills.find(a => a.id === id)?.ctx ?? 0), 0);
+              return <span style={{ fontSize: 9.5, color: ctx > 6000 ? "#ffd97a" : "var(--fg-subtle)" }}>{draftSkills.length} on · ~{Math.max(1, Math.round(ctx / 1000))}k ctx</span>;
+            })()}
+          </div>
+          {!editable ? (
+            <span style={{ fontSize: 10.5, color: "var(--fg-subtle)", fontStyle: "italic" }}>Built-in agent — Duplicate it first to give your copy skills.</span>
+          ) : availableSkills.length === 0 ? (
+            <span style={{ fontSize: 10.5, color: "var(--fg-subtle)", fontStyle: "italic" }}>No skills installed yet — add them in the 📚 Skills tab, then tick them here.</span>
+          ) : (
+            <>
+              <div style={{ maxHeight: 176, overflow: "auto", borderRadius: 8, border: `1px solid ${skillsDirty ? "#f0a832" : "var(--border)"}`, background: "var(--bg-surface)" }}>
+                {availableSkills.map((s, i) => {
+                  const on = draftSkills.includes(s.id);
+                  return (
+                    <button key={s.id} type="button"
+                      onClick={() => setDraftSkills(prev => on ? prev.filter(x => x !== s.id) : [...prev, s.id])}
+                      title={s.description || s.name}
+                      style={{ width: "100%", textAlign: "left", display: "flex", alignItems: "center", gap: 8, padding: "6px 9px",
+                        background: on ? "rgba(160,232,138,0.10)" : "transparent", border: "none",
+                        borderTop: i === 0 ? "none" : "1px solid var(--border)", cursor: "pointer" }}>
+                      <span style={{ width: 15, height: 15, borderRadius: 4, flexShrink: 0, display: "inline-flex", alignItems: "center", justifyContent: "center",
+                        border: `1.5px solid ${on ? "#6cd28e" : "var(--border-strong)"}`, background: on ? "#6cd28e" : "transparent", color: "#11231a", fontSize: 10, fontWeight: 900 }}>{on ? "✓" : ""}</span>
+                      <span style={{ minWidth: 0, flex: 1 }}>
+                        <span style={{ display: "block", fontSize: 12, fontWeight: 600, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.name}</span>
+                        {s.description && <span style={{ display: "block", fontSize: 10, color: "var(--fg-subtle)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{s.description}</span>}
+                      </span>
+                      <span style={{ fontSize: 9, color: "var(--fg-subtle)", flexShrink: 0 }}>~{Math.max(1, Math.round(s.ctx / 1000))}k</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <span style={{ fontSize: 9.5, color: "var(--fg-subtle)" }}>Tick the skills this agent should have in every team — only the ones a task needs get loaded. Click <b>Save</b> below to keep them.</span>
+            </>
+          )}
+        </div>
+      )}
+
       {/* Behaviour fields — Can dispatch / Temperature / Default model.
           Editable when the agent isn't a built-in. Native browser
           tooltips via the title attribute explain what each setting
@@ -1514,6 +1575,7 @@ function AgentDetailPanel({
             canDispatch: draftCanDispatch,
             temperature: parsedTemp,
             defaultModelId: draftModelId,
+            extraSkills: draftSkills,
           })}
           disabled={!editable || !tempValid}
           style={{
@@ -1601,6 +1663,8 @@ function toAgentDef(r: AgentRoleBackend): AgentDef {
     systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
     temperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
     defaultModelId: typeof d.default_model_id === "string" ? d.default_model_id : undefined,
+    extraSkills: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
+      .filter((x: unknown): x is string => typeof x === "string"),
     path: r.path,
   };
 }
@@ -1873,6 +1937,18 @@ export default function StudioPage() {
   const agentsWithIcons = useMemo(
     () => agents.map(a => iconOverrides[a.name] ? { ...a, icon: iconOverrides[a.name] } : a),
     [agents, iconOverrides],
+  );
+
+  // Cheap skill metadata for the per-agent Skills checklist (name + desc +
+  // a labelled context estimate). Derived from the installed SKILL.md packs.
+  const availableSkillMeta = useMemo(
+    () => skillBackends.map(p => ({
+      id: p.id,
+      name: (typeof p.frontmatter?.name === "string" && p.frontmatter.name) || p.id,
+      description: (typeof p.frontmatter?.description === "string" && p.frontmatter.description) || "",
+      ctx: Math.round((p.body?.length ?? 0) / 4),
+    })),
+    [skillBackends],
   );
 
   // Raw backend records (path + full JSON), keyed by the UI name — the
@@ -2267,6 +2343,7 @@ export default function StudioPage() {
             <div style={{ flex: 4, display: "flex", minWidth: 0 }}>
               <AgentDetailPanel
                 agent={view === "skills" ? skill : agent}
+                availableSkills={availableSkillMeta}
                 onSave={async (edits) => {
                   const target = view === "skills" ? skill : agent;
                   if (view === "skills" || target?.isSkill) {
@@ -2300,6 +2377,13 @@ export default function StudioPage() {
                       delete original.default_model_id;
                     } else {
                       original.default_model_id = edits.defaultModelId.trim();
+                    }
+                    // Per-agent skills → role JSON `extra_skills` (the dispatch
+                    // merges these into the agent's effective skills everywhere).
+                    if (edits.extraSkills.length) {
+                      original.extra_skills = edits.extraSkills;
+                    } else {
+                      delete original.extra_skills;
                     }
                     await invoke("save_agent_definition", { path: target.path, data: original });
                     await loadAll();   // reload so the UI shows the persisted state

@@ -453,6 +453,10 @@ export type RoleData = {
   /// edit_file, …). Passed to the Claude CLI as --allowedTools after
   /// translation in accounts.rs. ["all"] / undefined / [] → unrestricted.
   toolAllowlist?: string[];
+  /// SKILL.md pack ids associated with this role on the agent itself
+  /// (Studio agent card). Merged with template extra_skills + per-project
+  /// grants at dispatch. Mirror of the AgentsPage RoleData copy.
+  skillAllowlist?: string[];
 };
 export type ModelInfo = {
   model_id: string;
@@ -677,6 +681,8 @@ export function rolesFromBackend(rows: AgentRoleBackend[]): Map<string, RoleData
       toolAllowlist: Array.isArray(d.tool_allowlist)
         ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
         : undefined,
+      skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
+        .filter((s: unknown): s is string => typeof s === "string"),
     });
   }
   return m;

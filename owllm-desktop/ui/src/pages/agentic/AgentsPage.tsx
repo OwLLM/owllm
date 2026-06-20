@@ -4567,6 +4567,8 @@ function RightColumnTabs(props: {
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
+  criticSuperUser: boolean;
+  onToggleCriticSuper: () => void;
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -4672,6 +4674,8 @@ function RightColumnTabs(props: {
             onToggleAutoApprove={props.onToggleAutoApprove}
             directorMode={props.directorMode}
             onToggleDirectorMode={props.onToggleDirectorMode}
+            criticSuperUser={props.criticSuperUser}
+            onToggleCriticSuper={props.onToggleCriticSuper}
             team={props.team}
             roleByName={props.roleByName}
           />
@@ -4748,12 +4752,15 @@ function RightColumnTabs(props: {
 function SuperUserSettings({
   autoApprove, onToggleAutoApprove,
   directorMode, onToggleDirectorMode,
+  criticSuperUser, onToggleCriticSuper,
   team, roleByName,
 }: {
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
+  criticSuperUser: boolean;
+  onToggleCriticSuper: () => void;
   team: Team | null;
   roleByName: Map<string, RoleData>;
 }) {
@@ -4783,6 +4790,19 @@ function SuperUserSettings({
       <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
         <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
         <span>director mode (critic stands in for me)</span>
+      </label>
+      {/* Critic authority. OFF (default): the Critical Thinker is advisory — it
+          reviews in bounded loops but can NEVER block the team (so a guarded
+          critic can't stall a Red-Team run). ON: it is appointed Super User and
+          decides in your place — answers the orchestrator, approves/rejects the
+          plan + final answer, and gates the run (capped so it can't loop forever). */}
+      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: criticSuperUser ? "#ffb3e6" : "#7888a8", cursor:"pointer" }}>
+        <input type="checkbox" checked={criticSuperUser} onChange={onToggleCriticSuper} style={{ width:12, height:12, marginTop:2, accentColor:"#ff79d2" }} />
+        <span>critic = super user (decides for me)
+          <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
+            {criticSuperUser ? "critic approves/rejects the plan + answer" : "off: advisory only — never blocks the team"}
+          </span>
+        </span>
       </label>
     </div>
   );
@@ -5339,6 +5359,27 @@ function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Direct
     "Reply in 3-6 direct bullets of concrete guidance for the orchestrator.",
   ].join("\n");
 }
+
+// ── Critic loop guards ─────────────────────────────────────────────────────
+// The Critical Thinker is ADVISORY and can NEVER block, veto, or stall the team
+// (see its system prompt + #29). When the critic runs in a LOOP, these detect
+// the two ways a round should END the loop so the team dispatches regardless:
+//   • criticIsSatisfied — it has nothing left to add ("no concerns", "lgtm").
+//   • criticRefused      — it declined the task (a non-abliterated critic
+//                          objecting to a sanctioned Red-Team / abliterate job).
+// A refusal is NOT a veto: we note it and proceed. This is the hard guarantee —
+// the prompt asks the critic to defer, but a misaligned critic can ignore that,
+// so the CODE caps the rounds and never gates dispatch on the critic's approval.
+function criticIsSatisfied(t: string): boolean {
+  return /\bno (further |major |remaining |other |real |significant |additional )?(concerns?|issues?|objections?|changes?|problems?|blockers?)\b|\blooks? (good|solid|fine|reasonable|right)\b|\bready to (dispatch|proceed|go|build|start|ship)\b|\blgtm\b|\bapproved?\b|\bno changes? (needed|required)\b|\bproceed as planned\b|\bgo ahead\b|\bnothing (else |further |more )?to add\b/i.test(t);
+}
+function criticRefused(t: string): boolean {
+  return /\bI (can'?t|cannot|can not|won'?t|will not|am unable to|must decline|refuse|am not (going|willing|able) to)\b|\b(against|violates?) (my|the|our|its) (guidelines?|policy|policies|principles?|values?|terms)\b|\bnot (comfortable|able|willing) to\b|\bas an ai\b[^.]*\b(can'?t|cannot|won'?t|unable)\b|\bI('| a)?m not able to (help|assist|comply|continue|support)\b|\bI do not (feel )?(comfortable|able) (with|to)\b/i.test(t);
+}
+function criticConcluded(t: string): boolean {
+  return criticIsSatisfied(t) || criticRefused(t);
+}
+
 /// Return a team augmented with the synthetic critic node. Idempotent:
 /// if the team already has an agent literally named "critic" we return
 /// the team unchanged (the team author already accounted for it).
@@ -6941,6 +6982,12 @@ export default function AgentsPage() {
   // it survives restarts.
   const [directives, setDirectives] = useState<Directive[]>([]);
   const [directorMode, setDirectorModeState] = useState<boolean>(false);
+  // Critic-as-Super-User: when ON the Critical Thinker decides in the user's
+  // place (answers the orchestrator, approves/rejects plan + final, gets more
+  // gating rounds). OFF (default) it is strictly advisory and can NEVER block
+  // the team — so a non-abliterated critic can't stall a Red-Team run.
+  // Persisted on agent_projects.critic_super_user.
+  const [criticSuperUser, setCriticSuperUserState] = useState<boolean>(false);
   const [directivesPanelOpen, setDirectivesPanelOpen] = useState(false);
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
   // top-level so it can be reused later (e.g. from NewProjectDialog).
@@ -6959,22 +7006,25 @@ export default function AgentsPage() {
   // changes. Both fetches run in parallel; errors fall back to empty /
   // false so a fresh DB before the table exists doesn't break the UI.
   useEffect(() => {
-    if (!selectedProjectId) { setDirectives([]); setDirectorModeState(false); return; }
+    if (!selectedProjectId) { setDirectives([]); setDirectorModeState(false); setCriticSuperUserState(false); return; }
     let cancelled = false;
     (async () => {
       try {
-        const [list, mode] = await Promise.all([
+        const [list, mode, criticSuper] = await Promise.all([
           invoke<Directive[]>("directives_list", { projectId: selectedProjectId }),
           invoke<boolean>("project_get_director_mode", { projectId: selectedProjectId }),
+          invoke<boolean>("project_get_critic_super", { projectId: selectedProjectId }),
         ]);
         if (cancelled) return;
         setDirectives(list);
         setDirectorModeState(mode);
+        setCriticSuperUserState(criticSuper);
       } catch (e) {
         if (cancelled) return;
         console.warn("directives load failed", e);
         setDirectives([]);
         setDirectorModeState(false);
+        setCriticSuperUserState(false);
       }
     })();
     return () => { cancelled = true; };
@@ -6993,6 +7043,15 @@ export default function AgentsPage() {
       await invoke("project_set_director_mode", { projectId: selectedProjectId, enabled: v });
     } catch (e) {
       console.warn("set director_mode failed", e);
+    }
+  };
+  const setCriticSuperUser = async (v: boolean) => {
+    setCriticSuperUserState(v);
+    if (!selectedProjectId) return;
+    try {
+      await invoke("project_set_critic_super", { projectId: selectedProjectId, enabled: v });
+    } catch (e) {
+      console.warn("set critic_super_user failed", e);
     }
   };
 
@@ -8554,65 +8613,92 @@ export default function AgentsPage() {
         }
       }
 
-      // Director mode = "the Critical Thinker stands in for the user", so it
-      // must ALWAYS brainstorm the plan before dispatch — not only when the
-      // orchestrator happens to mention "critic". Without this, a model that
-      // never emits @critical_thinker leaves the thinker silent every run,
-      // which is exactly the "thinker is never involved" report.
-      if (!criticWasConsulted && (directorMode || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
+      // Critical Thinker — pre-dispatch review. It brainstorms the orchestrator's
+      // plan and the orchestrator re-plans after each round. Two modes:
+      //   • Advisory (default): up to 2 rounds, then dispatch NO MATTER WHAT. It
+      //     can never block — a refusal or a "no concerns" verdict just ends the
+      //     loop. This is the Red-Team safety guarantee: a guarded (non-abliterated)
+      //     critic cannot stall a sanctioned abliterate / red-team run.
+      //   • Critic = Super User: the user delegated the decision to the critic, so
+      //     it gets up to 3 rounds to gate the plan and the orchestrator is told to
+      //     satisfy it. Still hard-capped so it can't loop forever.
+      // Director mode forces a review even if the orchestrator never says "critic".
+      if (!criticWasConsulted && (directorMode || criticSuperUser || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
-        appendThought(orch.name, {
-          role: "dispatch", color: "#ff9ad9",
-          text: `critical thinker brainstorm before specialist dispatch`,
-        });
-        addActive(CRITIC_NAME);
-        appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
-        let criticReview = "";
-        try {
-          const criticModel = modelFor(CRITIC_NAME);
-          criticReview = await streamChatCompletion(
-            port, criticModel, providerFor(criticModel),
-            buildCriticalThinkerReviewPrompt(activeTeam, directives),
-            [
-              "The user's goal:",
-              text,
-              "",
-              "The orchestrator's current plan:",
-              orchReply,
-              "",
-              "Brainstorm with the orchestrator before implementation. Challenge architecture decisions, missing specialists, hidden assumptions, and safer alternatives.",
-            ].join("\n"),
-            0.3, ctrl.signal,
-            (delta) => { criticReview += delta; streamLog(CRITIC_NAME, delta); },
-            projectCwd,
-            undefined, undefined,
-            (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
-            READONLY_LOCAL_TOOLS,
-            undefined,
-            getClaudeSession(selectedProjectId, CRITIC_NAME),
-          );
-        } catch (e: any) {
-          if (ctrl.signal.aborted) throw e; // user cancelled → stop the run
-          // The Critical Thinker is ADVISORY — if its model fails (e.g. an
-          // expired Claude subscription → 401) the run must NOT crash. Note it
-          // and dispatch anyway, exactly as if the critic had nothing to add.
-          const msg = cleanAgentError(e);
-          appendThought(orch.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker unavailable (${msg}) — proceeding without its review.` });
-          appendLog(CRITIC_NAME, { role: "system", color: "#ff8c8c", text: `⚠ ${msg}` });
-          setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `⚠ Critical Thinker skipped: ${msg} (check the model on its card / re-auth the subscription).`, ts: Date.now() }]);
-          criticReview = "";
-        } finally {
-          removeActive(CRITIC_NAME);
-        }
-        speakAgentReply(CRITIC_NAME, criticReview);
-        if (criticReview.trim()) {
+        const MAX_PRE_ROUNDS = criticSuperUser ? 3 : 2;
+        for (let round = 0; round < MAX_PRE_ROUNDS && !ctrl.signal.aborted; round++) {
+          appendThought(orch.name, {
+            role: "dispatch", color: "#ff9ad9",
+            text: round === 0
+              ? `critical thinker review before specialist dispatch${criticSuperUser ? " (super user — it decides)" : ""}`
+              : `critical thinker follow-up (round ${round + 1}/${MAX_PRE_ROUNDS})`,
+          });
+          addActive(CRITIC_NAME);
+          appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
+          let criticReview = "";
+          let criticFailed = false;
+          try {
+            const criticModel = modelFor(CRITIC_NAME);
+            criticReview = await streamChatCompletion(
+              port, criticModel, providerFor(criticModel),
+              buildCriticalThinkerReviewPrompt(activeTeam, directives),
+              [
+                "The user's goal:",
+                text,
+                "",
+                "The orchestrator's current plan:",
+                orchReply,
+                "",
+                criticSuperUser
+                  ? "You are the Super User — the user delegated this decision to you. Approve the plan, or list the concrete changes you require. If it is ready, say 'no concerns' plainly."
+                  : "Brainstorm with the orchestrator before implementation. Challenge architecture decisions, missing specialists, hidden assumptions, and safer alternatives. If you have no remaining concerns, say 'no concerns'.",
+              ].join("\n"),
+              0.3, ctrl.signal,
+              (delta) => { criticReview += delta; streamLog(CRITIC_NAME, delta); },
+              projectCwd,
+              undefined, undefined,
+              (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
+              READONLY_LOCAL_TOOLS,
+              undefined,
+              getClaudeSession(selectedProjectId, CRITIC_NAME),
+            );
+          } catch (e: any) {
+            if (ctrl.signal.aborted) throw e; // user cancelled → stop the run
+            // The Critical Thinker is ADVISORY — if its model fails (e.g. an
+            // expired Claude subscription → 401) the run must NOT crash. Note it
+            // and dispatch anyway, exactly as if the critic had nothing to add.
+            const msg = cleanAgentError(e);
+            appendThought(orch.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker unavailable (${msg}) — proceeding without its review.` });
+            appendLog(CRITIC_NAME, { role: "system", color: "#ff8c8c", text: `⚠ ${msg}` });
+            setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `⚠ Critical Thinker skipped: ${msg} (check the model on its card / re-auth the subscription).`, ts: Date.now() }]);
+            criticReview = "";
+            criticFailed = true;
+          } finally {
+            removeActive(CRITIC_NAME);
+          }
+          if (criticFailed) break; // advisory — proceed without it
+          speakAgentReply(CRITIC_NAME, criticReview);
+          const review = criticReview.trim();
+          // The critic CANNOT hard-block: a refusal (a guarded critic objecting to
+          // a sanctioned Red-Team task) or a satisfied verdict ends the loop and the
+          // team dispatches regardless. A refusal is noted, never treated as a veto.
+          if (!review) break;
+          if (criticRefused(review)) {
+            appendThought(orch.name, { role: "system", color: "#ffb74d", text: `Critical Thinker declined to engage — proceeding (it is advisory, not a gate).` });
+            break;
+          }
+          if (criticIsSatisfied(review)) break; // approved / nothing to change
+          // Substantive feedback → orchestrator incorporates, then we loop and the
+          // critic reviews the UPDATED plan (until satisfied or the round cap).
           addActive(orch.name);
           appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
           try {
             orchReply = await streamChatCompletion(
               port, orchModel, providerFor(orchModel),
               orchPrompt,
-              `${text}\n\nCritical Thinker review before dispatch:\n${criticReview.trim()}\n\nIncorporate this review, then dispatch specialists.`,
+              criticSuperUser
+                ? `${text}\n\nThe Critic (acting as Super User — the user delegated the decision to it) requires these changes before dispatch:\n${review}\n\nApply them, then dispatch specialists.`
+                : `${text}\n\nCritical Thinker review (advisory — you decide what to use; you dispatch regardless):\n${review}\n\nRevise your plan if useful, then dispatch specialists.`,
               tempFor(orch, 0.4), ctrl.signal,
               (delta) => streamLog(orch.name, delta),
               projectCwd,
@@ -9042,6 +9128,97 @@ export default function AgentsPage() {
         removeActive(orch.name);
       }
       speakAgentReply(orch.name, finalReply);
+      // ----- Phase 3b: Critical Thinker post-review of the FINAL answer -----
+      // The critic reviews the assembled answer and the orchestrator may revise.
+      // Modes mirror the pre-dispatch loop:
+      //   • Advisory (default): one review → at most one revision → ship.
+      //   • Critic = Super User: up to 2 revise rounds until the critic signs off.
+      // STRICTLY NON-BLOCKING in both: a refusal, a satisfied verdict, or any
+      // error ships the current answer as-is. The critic can improve the output,
+      // never withhold it.
+      if (directorMode || criticSuperUser || needsCriticalThinkerReview(`${text}\n${finalReply}`)) {
+        const CRITIC_NAME = CRITIC_AGENT_NAME;
+        const MAX_POST_ROUNDS = criticSuperUser ? 2 : 1;
+        for (let round = 0; round < MAX_POST_ROUNDS && !ctrl.signal.aborted; round++) {
+          addActive(CRITIC_NAME);
+          appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
+          let postReview = "";
+          let reviewFailed = false;
+          try {
+            const criticModel = modelFor(CRITIC_NAME);
+            postReview = await streamChatCompletion(
+              port, criticModel, providerFor(criticModel),
+              buildCriticalThinkerReviewPrompt(activeTeam, directives),
+              [
+                "The user's goal:",
+                text,
+                "",
+                "The team's FINAL answer (about to be delivered to the user):",
+                finalReply,
+                "",
+                criticSuperUser
+                  ? "You are the Super User. Approve this answer, or list the concrete fixes it needs before it ships. If it is solid, say 'no concerns'."
+                  : "Review the FINAL answer for correctness, gaps, unsupported claims, and anything that would mislead the user. If it is solid, say 'no concerns'. Otherwise give concrete fixes — advisory only; the answer ships regardless.",
+              ].join("\n"),
+              0.3, ctrl.signal,
+              (delta) => { postReview += delta; streamLog(CRITIC_NAME, delta); },
+              projectCwd,
+              undefined, undefined,
+              (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
+              READONLY_LOCAL_TOOLS,
+              undefined,
+              getClaudeSession(selectedProjectId, CRITIC_NAME),
+            );
+          } catch (e: any) {
+            if (ctrl.signal.aborted) throw e;
+            const msg = cleanAgentError(e);
+            appendThought(orch.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker post-review unavailable (${msg}) — shipping the answer as-is.` });
+            postReview = "";
+            reviewFailed = true;
+          } finally {
+            removeActive(CRITIC_NAME);
+          }
+          if (reviewFailed) break;
+          speakAgentReply(CRITIC_NAME, postReview);
+          const pr = postReview.trim();
+          // Satisfied or refused → ship what we have. The critic never blocks.
+          if (!pr || criticConcluded(pr)) break;
+          // Substantive feedback → orchestrator revises ONCE this round. Still
+          // non-blocking: if the revision errors or returns empty, the prior
+          // answer ships unchanged.
+          addActive(orch.name);
+          appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+          try {
+            const revised = await streamChatCompletion(
+              port, finalModel, providerFor(finalModel),
+              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText),
+              [
+                "Your final answer:",
+                finalReply,
+                "",
+                criticSuperUser ? "Critical Thinker (Super User) requires these fixes:" : "Critical Thinker post-review (advisory):",
+                pr,
+                "",
+                "Revise the final answer to address the valid points, then output the improved final answer only. Do not dispatch again.",
+              ].join("\n"),
+              tempFor(orch, 0.4), ctrl.signal,
+              (delta) => streamLog(orch.name, delta),
+              projectCwd,
+              priorHistory, undefined,
+              (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+              undefined,
+              undefined,
+              getClaudeSession(selectedProjectId, orch.name),
+            );
+            if (revised.trim()) { finalReply = revised; speakAgentReply(orch.name, finalReply); }
+          } catch (e: any) {
+            if (ctrl.signal.aborted) throw e;
+            // revision failed → keep the prior finalReply (non-blocking)
+          } finally {
+            removeActive(orch.name);
+          }
+        }
+      }
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim(), ts: Date.now(), seq: nextSeq() }]);
 
       // ----- Phase 4: serial squash-merge each committed branch back -----
@@ -9734,6 +9911,8 @@ export default function AgentsPage() {
             onDirectivesChanged={reloadDirectives}
             directorMode={directorMode}
             onToggleDirectorMode={() => setDirectorMode(!directorMode)}
+            criticSuperUser={criticSuperUser}
+            onToggleCriticSuper={() => setCriticSuperUser(!criticSuperUser)}
             agentLogs={agentLogs}
             agentThoughts={agentThoughts}
             runError={runError}

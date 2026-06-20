@@ -218,6 +218,8 @@ pub fn run() {
             directives::directives_delete,
             directives::project_set_director_mode,
             directives::project_get_director_mode,
+            directives::project_set_critic_super,
+            directives::project_get_critic_super,
             fleet::path_is_dir,
             fleet::fleet_worktree_create,
             fleet::fleet_worktree_finalize,

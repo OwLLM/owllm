@@ -17,6 +17,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import SkillLibraryDialog from "./SkillLibraryDialog";
+import TeamWorkbench from "./TeamWorkbench";
+import { type ModelInfo, type AccountsStatusLite } from "./ModelPicker";
 import IconPickerDialog, {
   setStudioAgentIconOverride,
   loadStudioOverrides,
@@ -38,7 +40,7 @@ const TOPLEVEL_OWLS = new Set([
   "owl_sleeping", "owl_startup", "owl_startup1", "owl_studio_square",
   "owl_studio_square1", "owl_thunder", "owl_tools", "owl_training",
 ]);
-function owlSrc(iconRef: string): string {
+export function owlSrc(iconRef: string): string {
   if (iconRef.startsWith("owl:")) {
     const name = iconRef.slice(4);
     if (TOPLEVEL_OWLS.has(name)) return `${ICONS}/${name}.png`;
@@ -50,7 +52,7 @@ function owlSrc(iconRef: string): string {
 // agent_canvas._display_label / agent_studio_page._display_label —
 // "product_studio.product_owner" → "Product Owner". Acronyms uppercased.
 const _ACRONYMS = new Set(["ux","ui","api","mcp","gpu","be","fe","qa","cli","sql","db"]);
-function displayLabel(fullName: string): string {
+export function displayLabel(fullName: string): string {
   const short = fullName.includes(".") ? fullName.split(".").pop()! : fullName;
   if (!short) return fullName;
   const words: string[] = [];
@@ -89,7 +91,7 @@ const BASE_OWL: Record<string, string> = {
   webapp:        "owl:owl_webapp",
   assistant:     "owl:owl_asssitant",
 };
-function resolveAgentIcon(icon: string | null | undefined, base: string | null | undefined): string {
+export function resolveAgentIcon(icon: string | null | undefined, base: string | null | undefined): string {
   if (icon) return icon;
   if (base && BASE_OWL[base]) return BASE_OWL[base];
   return "owl:owl_asssitant";
@@ -646,12 +648,12 @@ function AgentMiniCard({ spec }: { spec: AgentSpec }) {
 // chip), description, AGENTS grid, ROUTING list, MCP NEEDED chips,
 // Delete (custom only) + primary CTA.
 function TeamDetailPanel({
-  team, onCreateProject, onEditTemplate, onDuplicateTemplate, onDeleteTemplate,
+  team, onCreateProject, onOpenWorkbench, onDuplicateTemplate, onDeleteTemplate,
   onInstallMcpPack, mcpInstallStatus, installingMcpPack,
 }: {
   team: Team | null;
   onCreateProject: (name: string) => void;
-  onEditTemplate: (name: string) => void;
+  onOpenWorkbench: (name: string) => void;
   onDuplicateTemplate: (name: string) => void;
   onDeleteTemplate: (name: string) => void;
   onInstallMcpPack: (team: Team) => void;
@@ -824,48 +826,38 @@ function TeamDetailPanel({
           shows Edit/Delete for non-built-ins; Duplicate is a Studio
           affordance the user asked us to add. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        {/* Open Workbench — the 3-pane editor (roster · graph · inspector).
+            Works for every team: a built-in opens read-to-customise and Save
+            lands a custom copy, so the user can tune any starting point. */}
+        <button
+          onClick={() => onOpenWorkbench(team.name)}
+          title={team.builtIn ? "Open the team workbench — editing a built-in saves a custom copy" : "Open the team workbench"}
+          style={{
+            minHeight: 34,
+            background: "rgba(var(--accent-rgb),0.16)", color: "var(--fg-strong)",
+            border: "1px solid rgba(var(--accent-rgb),0.45)", borderRadius: 8, padding: "0 14px",
+            cursor: "pointer", fontSize: 12, fontWeight: 700,
+          }}
+        >⚙ Open Workbench</button>
+        <button
+          onClick={() => onDuplicateTemplate(team.name)}
+          style={{
+            minHeight: 34,
+            background: "var(--bg-surface)", color: "var(--fg)",
+            border: "none", borderRadius: 8, padding: "0 14px",
+            cursor: "pointer", fontSize: 12,
+          }}
+        >Duplicate</button>
         {!team.builtIn && (
-          <>
-            <button
-              onClick={() => onEditTemplate(team.name)}
-              style={{
-                minHeight: 34,
-                background: "var(--bg-surface)", color: "var(--fg)",
-                border: "none", borderRadius: 8, padding: "0 14px",
-                cursor: "pointer", fontSize: 12,
-              }}
-            >Edit</button>
-            <button
-              onClick={() => onDuplicateTemplate(team.name)}
-              style={{
-                minHeight: 34,
-                background: "var(--bg-surface)", color: "var(--fg)",
-                border: "none", borderRadius: 8, padding: "0 14px",
-                cursor: "pointer", fontSize: 12,
-              }}
-            >Duplicate</button>
-            <button
-              onClick={() => onDeleteTemplate(team.name)}
-              style={{
-                minHeight: 34,
-                background: "rgba(255,140,140,0.12)", color: "#ff8c8c",
-                border: "none", borderRadius: 8, padding: "0 14px",
-                cursor: "pointer", fontSize: 12,
-              }}
-            >Delete</button>
-          </>
-        )}
-        {team.builtIn && (
-          // Built-ins can only be duplicated.
           <button
-            onClick={() => onDuplicateTemplate(team.name)}
+            onClick={() => onDeleteTemplate(team.name)}
             style={{
               minHeight: 34,
-              background: "var(--bg-surface)", color: "var(--fg)",
+              background: "rgba(255,140,140,0.12)", color: "#ff8c8c",
               border: "none", borderRadius: 8, padding: "0 14px",
               cursor: "pointer", fontSize: 12,
             }}
-          >Duplicate</button>
+          >Delete</button>
         )}
         <div style={{ flex: 1 }} />
         <button
@@ -1816,6 +1808,17 @@ export default function StudioPage() {
   // Team editor dialog (P0-3): null original = create from scratch.
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorOriginal, setEditorOriginal] = useState<TeamTemplateBackend | null>(null);
+  // Team Workbench — the 3-pane "Outfitter Inspector" editor. Non-null = open,
+  // editing this raw template backend.
+  const [workbenchTeam, setWorkbenchTeam] = useState<TeamTemplateBackend | null>(null);
+  const [skillBackends, setSkillBackends] = useState<SkillPackBackend[]>([]);
+  // Loaded for the Workbench's per-agent ModelPicker (shared picker + list_models).
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
+  useEffect(() => {
+    invoke<ModelInfo[]>("list_models").then(setModels).catch(() => {});
+    invoke<AccountsStatusLite>("accounts_status").then(setAccountsStatus).catch(() => {});
+  }, []);
 
   // Layer overrides on top of backend-loaded agent icons. Cheap pass
   // over the list whenever either dataset changes.
@@ -1848,6 +1851,7 @@ export default function StudioPage() {
         ...rawAgents.map(toAgentDef),
         ...rawSkills.map(skillToAgentDef),
       ]);
+      setSkillBackends(rawSkills);   // raw packs power the Workbench catalog
     } catch (e) {
       setLoadError(String(e));
     }
@@ -1936,17 +1940,13 @@ export default function StudioPage() {
     }
   };
   // ---- Team/agent CRUD (P0-3): real in-app operations, no manual JSON ----
-  const handleEditTemplate = (name: string) => {
-    const t = teams.find(x => x.name === name);
-    if (!t) return;
-    if (t.builtIn) {
-      alert(`'${t.display}' is a built-in template — duplicate it first, then edit your copy.`);
-      return;
-    }
+  // Open the 3-pane Workbench on a team (built-in or custom). The Workbench
+  // itself handles the built-in → save-as-copy flow, so no "duplicate first"
+  // gate here — any team is a valid starting point to customise.
+  const handleOpenWorkbench = (name: string) => {
     const backend = teamBackendsRef.current.get(name);
     if (!backend) { alert("Couldn't load this template from disk — refresh and try again."); return; }
-    setEditorOriginal(backend);
-    setEditorOpen(true);
+    setWorkbenchTeam(backend);
   };
   const handleDuplicateTemplate = async (name: string) => {
     const t = teams.find(x => x.name === name);
@@ -2084,17 +2084,28 @@ export default function StudioPage() {
       overflow: "hidden",
       background: "var(--bg-panel)",  // page background per style notes
     }}>
-      <div style={{ fontSize: 22, fontWeight: 800, color: "var(--fg-strong)" }}>Studio</div>
-      <ViewToggle view={view} onChange={setView} />
-      <div style={{ color: "var(--fg-muted)", fontSize: 12 }} dangerouslySetInnerHTML={{ __html: subLabel }} />
-      {bannerVisible && (
+      {!workbenchTeam && <div style={{ fontSize: 22, fontWeight: 800, color: "var(--fg-strong)" }}>Studio</div>}
+      {!workbenchTeam && <ViewToggle view={view} onChange={setView} />}
+      {!workbenchTeam && <div style={{ color: "var(--fg-muted)", fontSize: 12 }} dangerouslySetInnerHTML={{ __html: subLabel }} />}
+      {!workbenchTeam && bannerVisible && (
         <OnboardingBanner
           onOpen={handleOpenSkillLibrary}
           onDismiss={() => setBannerVisible(false)}
         />
       )}
 
-      {view === "teams" ? (
+      {workbenchTeam ? (
+        <TeamWorkbench
+          backend={workbenchTeam}
+          roleDefs={agentsWithIcons}
+          skillPacks={skillBackends}
+          models={models}
+          accountsStatus={accountsStatus}
+          onClose={() => setWorkbenchTeam(null)}
+          onSaved={async (newName) => { setWorkbenchTeam(null); await loadAll(); setSelectedTeam(newName); }}
+          onOpenSkillLibrary={() => setLibraryOpen(true)}
+        />
+      ) : view === "teams" ? (
         <>
           {/* Search + (no top-level "+ New Team" — the dashed
               CreateTeamCard at the bottom of the grid is Qt's
@@ -2119,7 +2130,7 @@ export default function StudioPage() {
               <TeamDetailPanel
                 team={team}
                 onCreateProject={handleCreateProjectFromTeam}
-                onEditTemplate={handleEditTemplate}
+                onOpenWorkbench={handleOpenWorkbench}
                 onDuplicateTemplate={handleDuplicateTemplate}
                 onDeleteTemplate={handleDeleteTemplate}
                 onInstallMcpPack={handleInstallMcpPack}

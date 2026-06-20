@@ -15,6 +15,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getServerCtx } from "../pages/core/serverContext";
 import {
   GoalMsg, ModelInfo, ServerStatus, Team, RoleData,
   ProjectRow, TeamTemplateBackend, AgentRoleBackend,
@@ -542,7 +543,7 @@ export function useBridgeDispatch() {
       if (!alreadyOk) {
         try {
           if (serverRef.current.running) await invoke("server_stop").catch(() => {});
-          await invoke("server_start", { modelId: baseModel });
+          await invoke("server_start", { modelId: baseModel, ctx: getServerCtx() });
         } catch (e) {
           const msg = `(failed to start local model '${baseModel}': ${String((e as any)?.message ?? e)})`;
           await send(transport, chatId, msg);

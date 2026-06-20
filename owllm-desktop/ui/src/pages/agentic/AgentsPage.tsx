@@ -68,6 +68,7 @@ import {
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS } from "./localTools";
 import { normalizeTeam, roleCanWrite } from "./teamConfig";
 import { resolveAgentSkills, buildSkillBlock } from "./skillRuntime";
+import { getServerCtx } from "../core/serverContext";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
@@ -8080,7 +8081,7 @@ export default function AgentsPage() {
     setServerAutoStarting(wanted);
     try {
       if (serverState.running) await invoke("server_stop").catch(() => {});
-      await invoke("server_start", { modelId: wanted });
+      await invoke("server_start", { modelId: wanted, ctx: getServerCtx() });
     } catch (e) {
       console.warn("[agents] lazy server start failed:", e);
       setServerAutoStarting(null);

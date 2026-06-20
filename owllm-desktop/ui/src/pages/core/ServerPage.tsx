@@ -23,6 +23,7 @@ import { bumpActivity } from "../../support/activityStats";
 import { listen } from "@tauri-apps/api/event";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getInferenceEndpoint, setInferenceEndpoint, setLocalServerKey, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
+import { getServerCtx, setServerCtx, SERVER_CTX_PRESETS, fmtCtx, approxKvGb } from "./serverContext";
 
 // Real Page_icons PNG served by vite.config.ts middleware
 // (same pattern as AgentsPage.tsx / CodePage.tsx).
@@ -134,9 +135,9 @@ async function listModels(): Promise<ModelInfo[]> {
 async function serverStatus(): Promise<ServerStatus> {
   return invoke<ServerStatus>("server_status");
 }
-async function serverStart(modelId: string): Promise<void> {
+async function serverStart(modelId: string, ctx?: number): Promise<void> {
   try { bumpActivity("model-server-start"); } catch { /* stats never block */ }
-  await invoke("server_start", { modelId });
+  await invoke("server_start", { modelId, ctx: ctx ?? getServerCtx() });
 }
 async function serverStop(): Promise<void> {
   await invoke("server_stop");
@@ -553,6 +554,7 @@ type ActiveServerRow = {
 
 function LLMServerColumn({
   models, busy, modelId, setModelId, serverState, onAction, error, appendLog,
+  ctx, setCtx,
 }: {
   models: ModelInfo[];
   busy: string | null;
@@ -562,6 +564,8 @@ function LLMServerColumn({
   onAction: (a: "start" | "stop" | "status") => void;
   error: string;
   appendLog: (s: string) => void;
+  ctx: number;
+  setCtx: (n: number) => void;
 }) {
   const selectedModel = models.find(m => m.model_id === modelId);
 
@@ -692,6 +696,40 @@ function LLMServerColumn({
         </span>
         <span style={{ color: "var(--fg-muted)" }}>Port:</span>
         <span style={{ color: "var(--fg)" }}>{selectedModel?.port ?? "-"}</span>
+      </div>
+
+      {/* Context window (-c). Bigger = remembers more, but the KV cache grows
+          linearly and lives in VRAM ON TOP of the weights — too big OOMs the GPU
+          even when the weights fit. Change takes effect on the next (re)start. */}
+      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)", marginTop: 6 }}
+           title="How many tokens the model keeps in context. Larger needs more VRAM for the KV cache.">
+        Context window:
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
+        {SERVER_CTX_PRESETS.map(p => {
+          const on = ctx === p;
+          return (
+            <button key={p} onClick={() => setCtx(p)}
+              title={`${p.toLocaleString()} tokens · KV cache ≈ ${approxKvGb(p).toFixed(1)} GB (30B-class)`}
+              style={{
+                minHeight: 26, padding: "0 10px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
+                background: on ? "var(--accent)" : "var(--bg-elevated)",
+                color: on ? "var(--accent-fg)" : "var(--fg)",
+                border: `1px solid ${on ? "var(--accent)" : "var(--border-strong)"}`,
+              }}>{fmtCtx(p)}</button>
+          );
+        })}
+        <input
+          type="number" min={512} step={1024} value={ctx}
+          onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= 512) setCtx(v); }}
+          title="Custom context size (tokens)"
+          style={{ width: 92, height: 26, borderRadius: 7, padding: "0 8px", fontSize: 12, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)" }}
+        />
+      </div>
+      <div style={{ fontSize: 10.5, color: ctx > 32768 ? "#ffb56a" : "var(--fg-subtle)", marginTop: 2 }}>
+        {serverState.toLowerCase().includes("running")
+          ? "Restart the server to apply a new context size."
+          : `KV cache ≈ ${approxKvGb(ctx).toFixed(1)} GB on top of the weights (30B-class estimate). Lower this if a model crashes on load.`}
       </div>
 
       <div style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)", marginTop: 6 }}>
@@ -1157,6 +1195,10 @@ export default function ServerPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string>("");
   const [models, setModels] = useState<ModelInfo[]>([]);
+  // User-chosen llama-server context window (-c); persisted so every start path
+  // (here + chat/agent auto-starts) honours it.
+  const [ctx, setCtxState] = useState<number>(() => getServerCtx());
+  const setCtx = (n: number) => { setCtxState(n); setServerCtx(n); };
   const [serverState, setServerState] = useState<string>("Not checked");
 
   function appendLog(line: string) {
@@ -1204,7 +1246,7 @@ export default function ServerPage() {
     setError("");
     try {
       if (action === "start") {
-        await serverStart(modelId);
+        await serverStart(modelId, ctx);
         appendLog(`[server] start requested for ${modelId}`);
       } else if (action === "stop") {
         await serverStop();
@@ -1284,6 +1326,8 @@ export default function ServerPage() {
           onAction={runServerAction}
           error={error}
           appendLog={appendLog}
+          ctx={ctx}
+          setCtx={setCtx}
         />
         <LogColumn logs={logs} onClear={() => SERVER_LOG_HUB.clear()} />
       </div>

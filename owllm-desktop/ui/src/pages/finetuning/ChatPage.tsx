@@ -28,6 +28,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import { resolveInferenceBase } from "../agentic/inferenceEndpoint";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
+import { getServerCtx } from "../core/serverContext";
 // Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
 // catalog the Agentic Team page uses, then parses each streamed reply
 // for tool_call blocks and runs them against agent_tools.rs. Shared
@@ -471,7 +472,7 @@ export default function ChatPage() {
     setAutoStarting(wanted);
     try {
       if (status.running) await invoke("server_stop").catch(() => {});
-      await invoke("server_start", { modelId: wanted });
+      await invoke("server_start", { modelId: wanted, ctx: getServerCtx() });
       return true;
     } catch (e) {
       updateCol("A", { error: `Failed to start server: ${e}` });

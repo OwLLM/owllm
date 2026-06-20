@@ -288,6 +288,10 @@ fn find_sibling_mmproj(base_model: &str) -> Option<std::path::PathBuf> {
 pub async fn server_start(
     app: AppHandle,
     model_id: String,
+    // User-chosen context window (-c tokens). None / out-of-range falls back to
+    // the safe 8192 default. The frontend persists the choice and passes it from
+    // every start path (Server page + chat/agent/code/bridge auto-starts).
+    ctx: Option<u32>,
     state: tauri::State<'_, ServerState>,
 ) -> Result<(), String> {
     // Resolve model entry by id.
@@ -413,13 +417,14 @@ pub async fn server_start(
     // ones (Qwen3 32K–256K+, Llama 3 128K). The KV cache scales linearly with
     // context, so a model whose WEIGHTS fit your VRAM still dies with a CUDA
     // "out of memory" because the full-context KV cache is tens of GB on top.
-    // Pairs with `-fit off` (which won't auto-shrink). 8192 is plenty for chat
-    // and agentic dispatch while keeping the KV cache to ~1–2 GB, so a model
-    // that fits actually LOADS. (A user-tunable context is a follow-up.)
-    cmd.arg("-c").arg("8192");
+    // Pairs with `-fit off` (which won't auto-shrink). Defaults to 8192 — plenty
+    // for chat + agentic dispatch with a ~1–2 GB KV cache so a model that fits
+    // actually LOADS — but the user can raise it (Server page) for a bigger GPU.
+    let ctx_size = ctx.filter(|&c| c >= 512).unwrap_or(8192);
+    cmd.arg("-c").arg(ctx_size.to_string());
     let _ = app.emit("server-log", ServerLogEvent {
         stream: "stdout".into(),
-        line: "[supervisor] context capped at 8192 tokens so the KV cache fits alongside the weights (the model's full trained context would OOM the GPU).".into(),
+        line: format!("[supervisor] context window = {ctx_size} tokens (KV cache sized to this; raise it on the Server page if your GPU has room)."),
     });
     // --jinja activates llama.cpp's jinja chat-template engine. WITHOUT
     // this flag, llama-server uses its built-in template fallback which

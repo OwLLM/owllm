@@ -12,6 +12,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import GitBar from "./GitBar";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
+import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
@@ -703,7 +704,7 @@ export default function CodePage() {
     const s = await invoke<ServerStatus>("server_status").catch(() => null);
     if (s && s.running && s.model_id === id && s.port) return s.port;
     setStatus(`Starting ${id}…`);
-    await invoke("server_start", { modelId: id });
+    await invoke("server_start", { modelId: id, ctx: getServerCtx() });
     for (let i = 0; i < 120 && !abortRef.current?.signal.aborted; i++) {
       const st = await invoke<ServerStatus>("server_status").catch(() => null);
       if (st && st.running && st.port) return st.port;

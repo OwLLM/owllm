@@ -408,6 +408,19 @@ pub async fn server_start(
     // is faking it. 99 is the conventional "all layers" sentinel.
     cmd.arg("-fit").arg("off");
     cmd.arg("-ngl").arg("99");
+    // Bound the context window. WITHOUT this, llama-server defaults to the
+    // model's FULL trained context (n_ctx_train) — and modern models ship huge
+    // ones (Qwen3 32K–256K+, Llama 3 128K). The KV cache scales linearly with
+    // context, so a model whose WEIGHTS fit your VRAM still dies with a CUDA
+    // "out of memory" because the full-context KV cache is tens of GB on top.
+    // Pairs with `-fit off` (which won't auto-shrink). 8192 is plenty for chat
+    // and agentic dispatch while keeping the KV cache to ~1–2 GB, so a model
+    // that fits actually LOADS. (A user-tunable context is a follow-up.)
+    cmd.arg("-c").arg("8192");
+    let _ = app.emit("server-log", ServerLogEvent {
+        stream: "stdout".into(),
+        line: "[supervisor] context capped at 8192 tokens so the KV cache fits alongside the weights (the model's full trained context would OOM the GPU).".into(),
+    });
     // --jinja activates llama.cpp's jinja chat-template engine. WITHOUT
     // this flag, llama-server uses its built-in template fallback which
     // SILENTLY ignores `tools=[…]` on the request body AND can't parse

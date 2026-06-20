@@ -135,9 +135,11 @@ async function listModels(): Promise<ModelInfo[]> {
 async function serverStatus(): Promise<ServerStatus> {
   return invoke<ServerStatus>("server_status");
 }
-async function serverStart(modelId: string, ctx?: number): Promise<void> {
+async function serverStart(modelId: string, ctx?: number | null): Promise<void> {
   try { bumpActivity("model-server-start"); } catch { /* stats never block */ }
-  await invoke("server_start", { modelId, ctx: ctx ?? getServerCtx() });
+  // null = Auto (backend sizes to VRAM); a number = explicit. undefined = read
+  // the persisted choice.
+  await invoke("server_start", { modelId, ctx: ctx === undefined ? getServerCtx() : ctx });
 }
 async function serverStop(): Promise<void> {
   await invoke("server_stop");
@@ -564,8 +566,8 @@ function LLMServerColumn({
   onAction: (a: "start" | "stop" | "status") => void;
   error: string;
   appendLog: (s: string) => void;
-  ctx: number;
-  setCtx: (n: number) => void;
+  ctx: number | null;
+  setCtx: (n: number | null) => void;
 }) {
   const selectedModel = models.find(m => m.model_id === modelId);
 
@@ -706,6 +708,14 @@ function LLMServerColumn({
         Context window:
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
+        <button onClick={() => setCtx(null)}
+          title="Let OWLLM size the context to your GPU — bigger card = bigger window (recommended)."
+          style={{
+            minHeight: 26, padding: "0 10px", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
+            background: ctx == null ? "var(--accent)" : "var(--bg-elevated)",
+            color: ctx == null ? "var(--accent-fg)" : "var(--fg)",
+            border: `1px solid ${ctx == null ? "var(--accent)" : "var(--border-strong)"}`,
+          }}>Auto</button>
         {SERVER_CTX_PRESETS.map(p => {
           const on = ctx === p;
           return (
@@ -720,16 +730,18 @@ function LLMServerColumn({
           );
         })}
         <input
-          type="number" min={512} step={1024} value={ctx}
+          type="number" min={512} step={1024} value={ctx ?? ""} placeholder="custom"
           onChange={e => { const v = Number(e.target.value); if (Number.isFinite(v) && v >= 512) setCtx(v); }}
           title="Custom context size (tokens)"
           style={{ width: 92, height: 26, borderRadius: 7, padding: "0 8px", fontSize: 12, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)" }}
         />
       </div>
-      <div style={{ fontSize: 10.5, color: ctx > 32768 ? "#ffb56a" : "var(--fg-subtle)", marginTop: 2 }}>
-        {serverState.toLowerCase().includes("running")
-          ? "Restart the server to apply a new context size."
-          : `KV cache ≈ ${approxKvGb(ctx).toFixed(1)} GB on top of the weights (30B-class estimate). Lower this if a model crashes on load.`}
+      <div style={{ fontSize: 10.5, color: (ctx ?? 0) > 32768 ? "#ffb56a" : "var(--fg-subtle)", marginTop: 2 }}>
+        {ctx == null
+          ? "Auto: OWLLM picks a context window that fits your GPU's VRAM (≈32K on a 24 GB card, less on smaller). Big enough for agentic teams; lower it manually if a model still won't load."
+          : serverState.toLowerCase().includes("running")
+            ? "Restart the server to apply the new context size."
+            : `KV cache ≈ ${approxKvGb(ctx).toFixed(1)} GB on top of the weights (30B-class estimate). Lower this if a model crashes on load.`}
       </div>
 
       <div style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)", marginTop: 6 }}>
@@ -1197,8 +1209,8 @@ export default function ServerPage() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   // User-chosen llama-server context window (-c); persisted so every start path
   // (here + chat/agent auto-starts) honours it.
-  const [ctx, setCtxState] = useState<number>(() => getServerCtx());
-  const setCtx = (n: number) => { setCtxState(n); setServerCtx(n); };
+  const [ctx, setCtxState] = useState<number | null>(() => getServerCtx());
+  const setCtx = (n: number | null) => { setCtxState(n); setServerCtx(n); };
   const [serverState, setServerState] = useState<string>("Not checked");
 
   function appendLog(line: string) {

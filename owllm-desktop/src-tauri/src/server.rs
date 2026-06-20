@@ -420,7 +420,21 @@ pub async fn server_start(
     // Pairs with `-fit off` (which won't auto-shrink). Defaults to 8192 — plenty
     // for chat + agentic dispatch with a ~1–2 GB KV cache so a model that fits
     // actually LOADS — but the user can raise it (Server page) for a bigger GPU.
-    let ctx_size = ctx.filter(|&c| c >= 512).unwrap_or(8192);
+    // No explicit choice → size the context to the GPU. 8192 is too small for
+    // AGENTIC teams: the orchestrator's integration prompt concatenates every
+    // specialist's reply + history and overflows ("Context size has been
+    // exceeded"). The KV cache grows linearly with context, so a bigger card
+    // affords a bigger window; a small card stays conservative so models load.
+    let ctx_size = match ctx {
+        Some(c) if c >= 512 => c,
+        _ => {
+            let vram = crate::recommendations::detect_vram_gb().await.unwrap_or(8.0);
+            if vram >= 20.0 { 32768 }
+            else if vram >= 12.0 { 16384 }
+            else if vram >= 6.0 { 8192 }
+            else { 4096 }
+        }
+    };
     cmd.arg("-c").arg(ctx_size.to_string());
     let _ = app.emit("server-log", ServerLogEvent {
         stream: "stdout".into(),

@@ -8,22 +8,28 @@
 // when the weights fit (see server.rs). 8192 is the safe default that loads on
 // most GPUs; a bigger card can push it higher — that's what this controls.
 const KEY = "owllm:server:ctx";
-export const DEFAULT_SERVER_CTX = 8192;
 export const SERVER_CTX_PRESETS = [4096, 8192, 16384, 32768, 65536, 131072];
 const MIN = 512;
 const MAX = 1_048_576;
 
-export function getServerCtx(): number {
+/// The chosen context window, or `null` for "Auto" — let the backend pick a size
+/// that fits the GPU (server.rs scales by detected VRAM). null is the default so
+/// a big card gets a roomy window (agentic prompts overflow a fixed 8192) while
+/// a small card stays conservative. Pass straight to server_start as `ctx`.
+export function getServerCtx(): number | null {
   try {
-    const v = Number(localStorage.getItem(KEY));
+    const raw = localStorage.getItem(KEY);
+    if (raw == null || raw === "auto") return null;
+    const v = Number(raw);
     if (Number.isFinite(v) && v >= MIN && v <= MAX) return v;
   } catch { /* ignore */ }
-  return DEFAULT_SERVER_CTX;
+  return null;
 }
 
-export function setServerCtx(n: number): void {
-  const clamped = Math.max(MIN, Math.min(MAX, Math.round(n)));
-  try { localStorage.setItem(KEY, String(clamped)); } catch { /* ignore */ }
+export function setServerCtx(n: number | null): void {
+  try {
+    localStorage.setItem(KEY, n == null ? "auto" : String(Math.max(MIN, Math.min(MAX, Math.round(n)))));
+  } catch { /* ignore */ }
 }
 
 /// "8192" → "8K", "131072" → "128K"; leaves non-round values as-is.

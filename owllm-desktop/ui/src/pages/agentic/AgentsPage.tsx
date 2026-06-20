@@ -8334,10 +8334,17 @@ export default function AgentsPage() {
       return;
     }
 
-    // Wipe the per-run log buffers but keep the SuperUserCard chat
-    // (which represents the user-facing thread of the conversation).
-    setAgentLogs(new Map());
-    setAgentThoughts(new Map());
+    // Wipe the per-agent card/thought buffers ONLY for a fresh Run-button
+    // dispatch. A CHAT message (onSupSend passes priorHistory — even [] for the
+    // first turn) is a CONTINUATION of the SAME conversation: wiping there
+    // deleted every agent's prior reply from its card on each send (the "all
+    // the history is deleted when I send a message" bug, and why clicking an
+    // agent right after a send showed only system notices). Keep the buffers so
+    // the cards build a running conversation. supChat is preserved either way.
+    if (priorHistory === undefined) {
+      setAgentLogs(new Map());
+      setAgentThoughts(new Map());
+    }
     setRunError(null);
     setBusy(true);
     setRunning(true); // store-backed: survives a page change so the run isn't orphaned

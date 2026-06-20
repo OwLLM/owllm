@@ -965,52 +965,70 @@ function AgentCard({
   );
 }
 
-// Skill categories — the Skills tab groups packs into "containers" by purpose
-// (orchestration, design, coding, …) instead of one flat wall. Keyword match
-// on name+description; FIRST match wins, so order = priority. Unmatched → Other.
-const SKILL_CATEGORIES: { key: string; label: string; match: RegExp }[] = [
-  { key: "orchestration", label: "🧭 Orchestration & Planning", match: /plan|dispatch|orchestrat|brainstorm|subagent|superpower|coordinat|delegat|workflow/i },
-  { key: "design",        label: "🎨 Design & Visual",          match: /design|art|brand|canvas|theme|visual|frontend|\bui\b|\bux\b|gif|web.?artifact|colou?r|logo/i },
-  { key: "coding",        label: "💻 Coding & Engineering",     match: /cod(e|ing)|debug|test|\bgit\b|build|review|develop|deploy|lint|refactor|worktree|\bapi\b|mcp|skill/i },
-  { key: "docs",          label: "📄 Documents & Content",      match: /\bdocx?\b|pdf|pptx|xlsx|word|excel|powerpoint|spreadsheet|writ|content|comms|slack|report|markdown|co-?author/i },
-  { key: "execution",     label: "⚙ Execution & Verification",  match: /execut|verif|finish|complete|ship|release/i },
+// Skill categories — the Skills tab groups packs into colour-coded "containers"
+// by purpose (orchestration, design, coding, …) instead of one flat green wall.
+// Keyword match on name+description; FIRST match wins, so order = priority.
+// Each category carries an accent colour so cards in different containers read
+// as visibly different. Unmatched → Other.
+const SKILL_CATEGORIES: { key: string; label: string; color: string; match: RegExp }[] = [
+  { key: "orchestration", label: "🧭 Orchestration & Planning", color: "#a78bfa", match: /plan|dispatch|orchestrat|brainstorm|subagent|superpower|coordinat|delegat|workflow/i },
+  { key: "design",        label: "🎨 Design & Visual",          color: "#f472b6", match: /design|art|brand|canvas|theme|visual|frontend|\bui\b|\bux\b|gif|web.?artifact|colou?r|logo/i },
+  { key: "coding",        label: "💻 Coding & Engineering",     color: "#60a5fa", match: /cod(e|ing)|debug|test|\bgit\b|build|review|develop|deploy|lint|refactor|worktree|\bapi\b|mcp|skill/i },
+  { key: "docs",          label: "📄 Documents & Content",      color: "#fbbf24", match: /\bdocx?\b|pdf|pptx|xlsx|word|excel|powerpoint|spreadsheet|writ|content|comms|slack|report|markdown|co-?author/i },
+  { key: "execution",     label: "⚙ Execution & Verification",  color: "#34d399", match: /execut|verif|finish|complete|ship|release/i },
 ];
-const SKILL_CATEGORY_OTHER = { key: "other", label: "📦 Other" };
+const SKILL_CATEGORY_OTHER = { key: "other", label: "📦 Other", color: "#94a3b8" };
 function categorizeSkill(name: string, description: string): string {
   const hay = `${name} ${description}`.toLowerCase();
   for (const c of SKILL_CATEGORIES) if (c.match.test(hay)) return c.key;
   return SKILL_CATEGORY_OTHER.key;
 }
+function categoryAccent(key: string): string {
+  return SKILL_CATEGORIES.find(c => c.key === key)?.color ?? SKILL_CATEGORY_OTHER.color;
+}
+/// "#rrggbb" → "r,g,b" for rgba() tints.
+function rgbOf(hex: string): string {
+  const h = hex.replace("#", "");
+  const n = parseInt(h.length === 3 ? h.split("").map(c => c + c).join("") : h, 16);
+  return `${(n >> 16) & 255},${(n >> 8) & 255},${n & 255}`;
+}
 
 // SkillCard — a SKILL.md pack rendered as a PACK, deliberately distinct from
-// an AgentCard so skills and agents never read as the same thing. Book-framed,
-// green accent, shows the context cost + the tools it grants.
-function SkillCard({ skill, selected, onClick }: {
-  skill: AgentDef; selected: boolean; onClick: () => void;
+// an AgentCard. Tinted with its CATEGORY accent (left rail + icon tile + label
+// + selected glow) so packs in different containers read as visibly different
+// instead of one flat green wall. Shows context cost + tools granted.
+function SkillCard({ skill, selected, onClick, accent }: {
+  skill: AgentDef; selected: boolean; onClick: () => void; accent: string;
 }) {
   const ctxK = Math.max(1, Math.round((skill.systemPrompt?.length ?? 0) / 4 / 1000));
   const tools = Array.isArray(skill.tools) ? skill.tools : [];
+  const rgb = rgbOf(accent);
   return (
     <div
       onClick={onClick}
       style={{
         cursor: "pointer",
-        background: selected ? "rgba(160,232,138,0.10)" : "var(--bg-surface)",
-        border: `1px solid ${selected ? "rgba(160,232,138,0.55)" : "var(--border)"}`,
+        position: "relative",
+        background: selected
+          ? `linear-gradient(135deg, rgba(${rgb},0.20) 0%, rgba(${rgb},0.06) 100%)`
+          : `linear-gradient(135deg, rgba(${rgb},0.08) 0%, var(--bg-surface) 70%)`,
+        border: `1px solid ${selected ? accent : `rgba(${rgb},0.35)`}`,
+        borderLeft: `4px solid ${accent}`,
         borderRadius: 12, padding: "12px 14px",
         display: "flex", flexDirection: "column", gap: 8,
-        boxShadow: selected ? "0 4px 12px rgba(108,210,142,0.16)" : "0 2px 6px rgba(0,0,0,0.35)",
+        boxShadow: selected ? `0 6px 18px rgba(${rgb},0.30)` : "0 2px 6px rgba(0,0,0,0.35)",
+        transition: "box-shadow 0.15s, border-color 0.15s, transform 0.1s",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <div style={{
           width: 40, height: 40, flexShrink: 0, fontSize: 21,
           display: "flex", alignItems: "center", justifyContent: "center",
-          borderRadius: 10, background: "rgba(160,232,138,0.12)", border: "1px solid rgba(160,232,138,0.3)",
+          borderRadius: 10, background: `rgba(${rgb},0.16)`, border: `1px solid rgba(${rgb},0.45)`,
         }}>📚</div>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{skill.name}</div>
-          <div style={{ fontSize: 10, color: "#9ee6b0", letterSpacing: 0.6, fontWeight: 700 }}>SKILL PACK · ~{ctxK}k ctx</div>
+          <div style={{ fontSize: 10, color: accent, letterSpacing: 0.6, fontWeight: 700 }}>SKILL PACK · ~{ctxK}k ctx</div>
         </div>
       </div>
       <div style={{
@@ -1022,6 +1040,77 @@ function SkillCard({ skill, selected, onClick }: {
           grants {tools.length} tool{tools.length > 1 ? "s" : ""}: {tools.slice(0, 4).join(", ")}{tools.length > 4 ? "…" : ""}
         </div>
       )}
+    </div>
+  );
+}
+
+// SkillDetailPanel — the RIGHT pane when a SKILL is selected. Shows the skill's
+// OWN info (what it does, the tools it grants, its SKILL.md instructions, source)
+// — NOT the agent editor (a skill has no model / temperature / can-dispatch).
+function SkillDetailPanel({ skill }: { skill: AgentDef | null }) {
+  if (!skill) {
+    return (
+      <div style={{
+        flex: 1, background: "var(--bg-elevated)", border: "1px solid var(--border)",
+        borderRadius: 12, padding: 24, color: "var(--fg-subtle)", fontSize: 12,
+        display: "flex", alignItems: "center", justifyContent: "center", textAlign: "center",
+      }}>
+        Click a skill on the left to see what it does,<br />the tools it grants, and its instructions.
+      </div>
+    );
+  }
+  const accent = categoryAccent(categorizeSkill(skill.name, skill.description ?? ""));
+  const rgb = rgbOf(accent);
+  const body = skill.systemPrompt ?? "";
+  const ctxK = Math.max(1, Math.round(body.length / 4 / 1000));
+  const tools = Array.isArray(skill.tools) ? skill.tools : [];
+  const mcp = Array.isArray(skill.mcpTools) ? skill.mcpTools : [];
+  const lbl: React.CSSProperties = { fontSize: 10, color: "var(--fg-muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.6 };
+  const chip: React.CSSProperties = { fontSize: 11, background: `rgba(${rgb},0.12)`, border: `1px solid rgba(${rgb},0.32)`, borderRadius: 6, padding: "2px 8px", color: "var(--fg)" };
+  return (
+    <div style={{
+      flex: 1, background: "var(--bg-elevated)", border: `1px solid rgba(${rgb},0.4)`,
+      borderRadius: 12, padding: 18, display: "flex", flexDirection: "column", gap: 14, overflow: "auto",
+    }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ width: 52, height: 52, fontSize: 28, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 12, background: `rgba(${rgb},0.16)`, border: `1px solid rgba(${rgb},0.45)` }}>📚</div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)" }}>{skill.name}</div>
+          <div style={{ fontSize: 11, color: accent, fontWeight: 700, letterSpacing: 0.5 }}>SKILL PACK · ~{ctxK}k ctx</div>
+        </div>
+      </div>
+
+      <div>
+        <div style={lbl}>What it does</div>
+        <div style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.55, marginTop: 5 }}>{skill.description || "No description provided."}</div>
+      </div>
+
+      {(tools.length > 0 || mcp.length > 0) && (
+        <div>
+          <div style={lbl}>Grants these tools</div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 6 }}>
+            {tools.map(t => <span key={t} style={chip}>⚙ {t}</span>)}
+            {mcp.map(t => <span key={`m-${t}`} style={chip}>🔌 {t}</span>)}
+          </div>
+        </div>
+      )}
+
+      <div style={{ fontSize: 12, color: "var(--fg)", background: `rgba(${rgb},0.08)`, border: `1px solid rgba(${rgb},0.25)`, borderRadius: 8, padding: "9px 11px", lineHeight: 1.55 }}>
+        To use this skill: <b>Agents → pick an agent → 📚 Skills</b> (or a team's Workbench) and tick it.
+        At runtime the agent loads these instructions only when a task needs them.
+      </div>
+
+      <div style={{ minHeight: 0 }}>
+        <div style={lbl}>Instructions · SKILL.md body ({body.length.toLocaleString()} chars)</div>
+        <pre style={{
+          marginTop: 6, fontSize: 11.5, color: "var(--fg)", background: "var(--bg-surface)",
+          border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px",
+          whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: 360, overflow: "auto",
+          fontFamily: "inherit", lineHeight: 1.55,
+        }}>{body || "(no body)"}</pre>
+      </div>
+
+      {skill.path && <div style={{ fontSize: 10, color: "var(--fg-subtle)", wordBreak: "break-all" }}>📁 {skill.path}</div>}
     </div>
   );
 }
@@ -2366,20 +2455,23 @@ export default function StudioPage() {
                 ) : (
                   // Grouped into purpose "containers" (Orchestration / Design /
                   // Coding / …) so the library is scannable, not one flat wall.
-                  skillSections.map(sec => (
+                  skillSections.map(sec => {
+                    const accent = categoryAccent(sec.key);
+                    return (
                     <div key={sec.key} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                        <span style={{ fontSize: 11.5, fontWeight: 800, color: "var(--fg)", letterSpacing: 0.4 }}>{sec.label}</span>
-                        <span style={{ fontSize: 10, color: "var(--fg-subtle)", fontWeight: 700 }}>{sec.skills.length}</span>
-                        <div style={{ flex: 1, height: 1, background: "var(--border)" }} />
+                        <span style={{ fontSize: 11.5, fontWeight: 800, color: accent, letterSpacing: 0.4 }}>{sec.label}</span>
+                        <span style={{ fontSize: 10, color: "var(--bg-panel)", fontWeight: 800, background: accent, borderRadius: 999, padding: "1px 7px" }}>{sec.skills.length}</span>
+                        <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, ${accent}55, transparent)` }} />
                       </div>
                       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
                         {sec.skills.map(a => (
-                          <SkillCard key={a.name} skill={a} selected={selectedSkill === a.name} onClick={() => setSelectedSkill(a.name)} />
+                          <SkillCard key={a.name} skill={a} selected={selectedSkill === a.name} onClick={() => setSelectedSkill(a.name)} accent={accent} />
                         ))}
                       </div>
                     </div>
-                  ))
+                    );
+                  })
                 )
               ) : (
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
@@ -2390,12 +2482,15 @@ export default function StudioPage() {
               )}
             </div>
             <div style={{ flex: 4, display: "flex", minWidth: 0 }}>
+              {view === "skills" ? (
+                <SkillDetailPanel skill={skill} />
+              ) : (
               <AgentDetailPanel
-                agent={view === "skills" ? skill : agent}
+                agent={agent}
                 availableSkills={availableSkillMeta}
                 onSave={async (edits) => {
-                  const target = view === "skills" ? skill : agent;
-                  if (view === "skills" || target?.isSkill) {
+                  const target = agent;
+                  if (target?.isSkill) {
                     alert("A skill is defined by its SKILL.md file and managed in the library — it isn't edited here. Equip the skill onto an agent instead.");
                     return;
                   }
@@ -2440,10 +2535,11 @@ export default function StudioPage() {
                     alert(`Save failed: ${String(e?.message ?? e)}`);
                   }
                 }}
-                onDuplicate={() => handleDuplicateAgent((view === "skills" ? skill : agent)?.name)}
-                onDelete={() => handleDeleteAgent((view === "skills" ? skill : agent)?.name)}
+                onDuplicate={() => handleDuplicateAgent(agent?.name)}
+                onDelete={() => handleDeleteAgent(agent?.name)}
                 onPickIcon={(name) => setIconPickerAgent(name)}
               />
+              )}
             </div>
           </div>
         </>

@@ -65,6 +65,9 @@ type TileAction = {
   // matching ModeBar toggle AND switches the SubTab in one step.
   targetPage: string;
   icon: string;
+  // Real icon art under /Page_icons/. When set, the action cell renders
+  // this image (the art already includes its label) instead of the emoji.
+  iconPng?: string;
 };
 
 type LauncherSpec = {
@@ -79,15 +82,16 @@ type LauncherSpec = {
 const LAUNCHERS: LauncherSpec[] = [
   {
     key: "finetuning",
-    title: "Fine Tuning",
+    title: "Local Models",
     iconPng: "owl_fine_tuning_home.png",
     accentLine: "#7989ff",
-    // TODO(icons): replace `icon` emojis with the supplied art.
+    // The local-model pipeline, with the user's supplied icon art: explore a
+    // model → abliterate (uncensor) → build a dataset → fine-tune.
     actions: [
-      { label: "Browse Models", targetPage: "models", icon: "📦" },
-      { label: "Fine Tune",     targetPage: "train",  icon: "🎯" },
-      { label: "Abliterate",    targetPage: "models", icon: "🚫" },
-      { label: "Chat",          targetPage: "chat",   icon: "💬" },
+      { label: "Explore Models", targetPage: "models", icon: "📦", iconPng: "ExploreModels.png" },
+      { label: "Abliterate",     targetPage: "models", icon: "🚫", iconPng: "Abliterate.png" },
+      { label: "Create Dataset", targetPage: "train",  icon: "🗂", iconPng: "CreateDataset.png" },
+      { label: "Fine Tune",      targetPage: "train",  icon: "🎯", iconPng: "FineTune.png" },
     ],
   },
   {
@@ -220,11 +224,21 @@ function LauncherTile({ spec }: { spec: LauncherSpec }) {
               b.style.transform = "translateY(0)";
             }}
           >
-            {/* Placeholder glyph — replaced by supplied icon art later. */}
-            <span style={{ fontSize: 30, lineHeight: 1 }}>{a.icon}</span>
-            <span style={{ fontSize: 14, fontWeight: 700, textAlign: "center", padding: "0 6px" }}>
-              {a.label}
-            </span>
+            {a.iconPng ? (
+              // Real art (label is baked into the image) — fill the cell.
+              <img
+                src={`${ICONS}/${a.iconPng}`}
+                alt={a.label}
+                style={{ width: "100%", height: "100%", objectFit: "contain", padding: 4, pointerEvents: "none" }}
+              />
+            ) : (
+              <>
+                <span style={{ fontSize: 30, lineHeight: 1 }}>{a.icon}</span>
+                <span style={{ fontSize: 14, fontWeight: 700, textAlign: "center", padding: "0 6px" }}>
+                  {a.label}
+                </span>
+              </>
+            )}
           </button>
         ))}
       </div>

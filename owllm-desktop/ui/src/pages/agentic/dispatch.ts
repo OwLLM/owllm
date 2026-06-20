@@ -355,6 +355,11 @@ export type AgentSpec = {
   icon?: string | null;
   description?: string;
   extraPrompt?: string;
+  /// Per-agent SKILL.md packs equipped on this agent (skill ids). Distinct from
+  /// tools: skills are instruction packs loaded on demand (progressive
+  /// disclosure), not function calls. Sourced from the team's agentSkills blob
+  /// and/or a template's per-agent `extra_skills`.
+  extraSkills?: string[];
 };
 export type Edge = { source: string; target: string };
 

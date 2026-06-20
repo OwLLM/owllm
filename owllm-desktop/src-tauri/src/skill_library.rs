@@ -503,6 +503,47 @@ pub async fn list_installed_skill_folders() -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+#[derive(Serialize)]
+pub struct SkillPack {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// Rough size of the full SKILL.md in tokens (chars/4). A LABELLED estimate
+    /// for the Studio "~Xk ctx" budget badge — never an exact token count.
+    pub ctx_estimate: u32,
+}
+
+/// List installed skill packs with the CHEAP metadata tier (folder id + name +
+/// description from frontmatter + a context-size estimate). Powers the Studio
+/// skill catalog and per-agent equip. The full SKILL.md body stays unloaded
+/// here — it's fetched lazily via read_skill_md / the load_skill tool — which
+/// is the progressive-disclosure cost model the UI mirrors.
+#[tauri::command]
+pub async fn list_skill_packs() -> Result<Vec<SkillPack>, String> {
+    let Some(inst) = installed_root() else { return Ok(Vec::new()); };
+    let Ok(read) = std::fs::read_dir(&inst) else { return Ok(Vec::new()); };
+    let mut out: Vec<SkillPack> = Vec::new();
+    for e in read.flatten() {
+        let Some(folder) = e.file_name().to_str().map(|s| s.to_string()) else { continue; };
+        if folder == "_remote" || folder.starts_with('.') || !e.path().is_dir() {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(e.path().join("SKILL.md")) else { continue; };
+        let (mut name, description) = peek_frontmatter(&text);
+        if name.is_empty() {
+            name = folder.clone();
+        }
+        out.push(SkillPack {
+            id: folder,
+            name,
+            description,
+            ctx_estimate: (text.len() / 4) as u32,
+        });
+    }
+    out.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(out)
+}
+
 #[tauri::command]
 pub async fn read_skill_md(path: String) -> Result<String, String> {
     // Whitelist: must be under the LLM/data/skills/_remote/ tree.

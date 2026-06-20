@@ -178,6 +178,30 @@ function loadAgentVoicesForProject(pid: string, graphJson?: string | null): Map<
   }
   return m;
 }
+// Per-agent SKILL packs + per-agent tool grants persist the same way models do:
+// project-scoped, DB graph_json authoritative (survives reinstall). Both are
+// string[] per agent. See [[project_chat_vs_run_dispatch_paths]] for the
+// graph_json blob convention.
+function loadAgentListMapForProject(
+  graphJson: string | null | undefined,
+  key: "agentSkills" | "agentToolExtras",
+): Map<string, string[]> {
+  const m = new Map<string, string[]>();
+  if (!graphJson || !graphJson.trim()) return m;
+  try {
+    const obj = JSON.parse(graphJson)?.[key];
+    if (obj && typeof obj === "object") {
+      for (const k of Object.keys(obj)) {
+        const v = (obj as Record<string, unknown>)[k];
+        if (Array.isArray(v)) m.set(k, v.filter((x): x is string => typeof x === "string"));
+      }
+    }
+  } catch { /* malformed graph_json → empty */ }
+  return m;
+}
+const loadAgentSkillsForProject = (gj?: string | null) => loadAgentListMapForProject(gj, "agentSkills");
+const loadAgentToolExtrasForProject = (gj?: string | null) => loadAgentListMapForProject(gj, "agentToolExtras");
+
 type TeamTemplateBackend = { id: string; path: string; built_in: boolean; data: any };
 type AgentRoleBackend    = { id: string; path: string; built_in: boolean; data: any };
 type TelegramCfg = { bot_token: string; project_id: string; auto_approve?: boolean };
@@ -205,6 +229,11 @@ type AgentSpec = {
   // specialist prompt builder can layer them.
   description?: string;
   extraPrompt?: string;
+  // Per-agent SKILL.md packs equipped on this agent (skill ids). Skills are
+  // instruction packs loaded on demand at dispatch (progressive disclosure),
+  // distinct from `tool_allowlist` function calls. Kept in sync with the
+  // dispatch.ts AgentSpec copy.
+  extraSkills?: string[];
 };
 type Edge = { source: string; target: string };
 type TeamVisibility = "recommended" | "more" | "examples" | "legacy" | "custom";

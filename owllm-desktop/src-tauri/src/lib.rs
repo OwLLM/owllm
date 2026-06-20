@@ -246,6 +246,7 @@ pub fn run() {
             skill_library::install_skill,
             skill_library::uninstall_skill,
             skill_library::list_installed_skill_folders,
+            skill_library::list_skill_packs,
             skill_library::read_skill_md,
             telegram::telegram_get_updates,
             telegram::telegram_send_message,

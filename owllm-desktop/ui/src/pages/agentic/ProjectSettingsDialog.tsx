@@ -71,7 +71,10 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [newLocation, setNewLocation] = useState("");
-  const [teamName, setTeamName] = useState("");
+  // Selected team by ID (NOT name) — two teams can share a display/name, and
+  // resolving the create by name returned the FIRST match ("always the first
+  // team"). The <select> options carry the id; create resolves the id.
+  const [teamId, setTeamId] = useState("");
   const [newTrust, setNewTrust] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -87,17 +90,23 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     setErr(null); setActMsg(null); setActBusy(null); setConfirmDelete(false);
     if (mode === "new") {
       setName(""); setDescription(""); setNewLocation(""); setNewTrust(false);
-      const initial = defaultTeamName && teams.some(t => t.name === defaultTeamName)
-        ? defaultTeamName : (teams[0]?.name ?? "");
-      setTeamName(initial);
+      const initialTeam = (defaultTeamName ? teams.find(t => t.name === defaultTeamName) : null) ?? teams[0] ?? null;
+      setTeamId(initialTeam?.id ?? "");
     } else {
       setRenameVal(project?.name ?? "");
     }
-  }, [open, mode, project?.id, defaultTeamName, teams]);
+  // Seed the form ONLY when the dialog opens (or mode/project changes) —
+  // deliberately NOT when `teams` or `defaultTeamName` change underneath. Those
+  // were in the deps before, so any background change reset the team picker back
+  // to teams[0] mid-dialog → "a new project always gets the first team" even
+  // after the user picked a different one. Reading them here is fine: the effect
+  // runs on the open transition, when they already hold their current value.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mode, project?.id]);
 
   if (!open) return null;
 
-  const team = teams.find(t => t.name === teamName) ?? null;
+  const team = teams.find(t => t.id === teamId) ?? null;
 
   // ---- shared actions ----
   const browse = async (set: (v: string) => void) => {
@@ -212,7 +221,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     <select value={value} onChange={e => onChange(e.target.value)} style={INPUT}>
       {teams.length === 0 ? <option value="">(no templates available)</option>
         : teams.map(t => (
-            <option key={t.id} value={t.name}>
+            <option key={t.id} value={t.id}>
               {t.visibility === "recommended" ? "Core: " : ""}{t.display} ({t.agents.length} agents)
             </option>
           ))}
@@ -259,7 +268,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <label style={LBL}>Team template</label>
-              {teamSelect(teamName, setTeamName)}
+              {teamSelect(teamId, setTeamId)}
               {team && <div style={{ color: "var(--fg-muted)", fontSize: 12, lineHeight: 1.5, padding: "4px 2px" }}>{team.description}</div>}
             </div>
             <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: newTrust ? "#ffb56a" : "var(--fg)" }}>
@@ -305,9 +314,9 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <label style={LBL}>Team template (shown on the canvas)</label>
               <div style={{ display: "flex", gap: 8 }}>
-                <select value={teams.find(t => t.id === pickedTeamId)?.name ?? ""} onChange={e => { const t = teams.find(x => x.name === e.target.value); onPickTeam(t ? t.id : null); }} style={{ ...INPUT, flex: 1 }}>
+                <select value={pickedTeamId ?? ""} onChange={e => onPickTeam(e.target.value || null)} style={{ ...INPUT, flex: 1 }}>
                   <option value="">(use project roster)</option>
-                  {teams.map(t => <option key={t.id} value={t.name}>{t.display} ({t.agents.length} agents)</option>)}
+                  {teams.map(t => <option key={t.id} value={t.id}>{t.display} ({t.agents.length} agents)</option>)}
                 </select>
                 <button type="button" onClick={() => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "bridges" } }))} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>{bridgeOn ? "📱 Bridge: ON" : "📱 Bridge: OFF"}</button>
               </div>

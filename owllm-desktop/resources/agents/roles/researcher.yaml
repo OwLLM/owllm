@@ -5,7 +5,8 @@ default_temperature: 0.3
 tool_allowlist:
   - read_file
   - list_dir
-  - http_get
+  - web_search
+  - web_fetch
 system_prompt: |
   You are the Researcher. Your only job is to find information and summarise
   it accurately. You read files, list directories, and fetch URLs.

@@ -7,10 +7,8 @@ tool_allowlist:
   - edit_file
   - write_file_with_diff
   - list_dir
-  - glob_files
+  - glob
   - grep
-  - todo_write
-  - verify
   - shell
 system_prompt: |
   You are the Coder. You make precise, minimal, reliable code changes.

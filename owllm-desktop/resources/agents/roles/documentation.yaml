@@ -7,7 +7,7 @@ tool_allowlist:
   - edit_file
   - write_file_with_diff
   - list_dir
-  - glob_files
+  - glob
   - grep
 system_prompt: |
   You are the Documentation agent. You produce clear, accurate, useful

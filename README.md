@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="assets/OWLLM_Hero.png" alt="OwLLM" width="450">
+<img src="assets/OWLLM_Hero.png" alt="OwLLM" width="600">
 
 # ⬇ [Download OwLLM for Windows](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)
 

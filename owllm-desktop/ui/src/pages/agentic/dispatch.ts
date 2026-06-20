@@ -1057,22 +1057,33 @@ type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
 // while it refreshes its OAuth access token in the background; the NEXT call
 // succeeds. That's exactly why clicking "Test" on the Accounts page (a
 // throwaway `claude --print ok`) made the first real chat work — Test
-// absorbed the cold-start 401 and refreshed the token. We now do that
-// warm-up automatically before the first subscription dispatch of each
-// backend, so the user never has to hit Test first.
-const _warmedCli = new Set<string>();
+// absorbed the cold-start 401 and refreshed the token. We do that warm-up
+// automatically before the first subscription dispatch of each backend, so the
+// user never has to hit Test first.
+//
+// CONCURRENCY (the real-world failure): a TEAM dispatches several specialists
+// in PARALLEL (Promise.allSettled). The previous implementation marked the
+// backend "warmed" with a Set BEFORE awaiting the refresh — so the first
+// specialist awaited the token refresh, but every other specialist saw the
+// flag already set, returned instantly, and fired its real CLI call against
+// the STILL-COLD token → 401 on all of them but the first. We now dedupe by
+// the in-flight PROMISE: every concurrent caller awaits the SAME warm-up to
+// COMPLETION before its real call, so the token is refreshed for all of them.
+const _warmCli = new Map<string, Promise<void>>();
 export async function ensureCliWarm(backend: "claude_cli" | "codex_cli"): Promise<void> {
-  if (_warmedCli.has(backend)) return;
-  _warmedCli.add(backend); // mark BEFORE awaiting so a slow warm can't double-fire
-  try {
+  let warming = _warmCli.get(backend);
+  if (!warming) {
     // Same minimal CLI round-trip the Accounts "Test" button runs; it
-    // refreshes the token as a side effect. Best-effort — if it fails we
-    // still attempt the real call (which may itself succeed or surface a
-    // clearer error).
-    await invoke("accounts_test_probe_live", { backend });
-  } catch {
-    /* ignore — warm-up is best-effort */
+    // refreshes the token as a side effect. Best-effort — a failure still lets
+    // the real call proceed (it may succeed or surface a clearer error).
+    warming = (async () => {
+      try { await invoke("accounts_test_probe_live", { backend }); }
+      catch { /* ignore — warm-up is best-effort */ }
+    })();
+    _warmCli.set(backend, warming);
   }
+  // ALL callers (including the parallel specialists) await the one warm-up.
+  await warming;
 }
 
 // ---------- Attachment helpers ----------

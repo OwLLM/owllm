@@ -5023,45 +5023,59 @@ function OrchAgentSettings({
         onChange={(partial) => onPickAgentVoice(focus, partial)}
         disabled={disabled}
       />
-      {/* SKILLS — equip SKILL.md capability packs onto this agent. Distinct
-          from tools: skills are instruction packs the runtime loads on demand
-          at dispatch (budgeted progressive disclosure via skillRuntime), and
-          they persist per-project in graph_json (agentSkills). */}
-      {!disabled && (
-        <div style={{ display:"flex", flexDirection:"column", gap:4 }}>
-          <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>
-            📚 Skills · forwarded only when needed
-          </span>
-          <div style={{ display:"flex", flexWrap:"wrap", gap:4, alignItems:"center" }}>
-            {equippedSkills.map(id => {
-              const p = availableSkills.find(s => s.id === id);
-              return (
-                <span key={id} title={p?.description || id} style={{ display:"inline-flex", alignItems:"center", gap:4, fontSize:11, background:"rgba(160,232,138,0.12)", border:"1px solid rgba(160,232,138,0.30)", borderRadius:999, padding:"2px 4px 2px 8px", color:"var(--fg)" }}>
-                  📚 {p?.name ?? id}
-                  {p && <span style={{ fontSize:9, color:"var(--fg-subtle)" }}>~{Math.max(1, Math.round(p.ctx_estimate/1000))}k</span>}
-                  <button onClick={() => onToggleAgentSkill(focus, id, false)} title="Unequip" style={{ background:"none", border:"none", color:"#ff8c8c", cursor:"pointer", fontSize:11, lineHeight:1, padding:"0 2px" }}>✕</button>
+      {/* SKILLS — an inline checklist of installed SKILL.md capability packs.
+          Tick the ones this agent may use; the runtime injects only the
+          relevant ones at dispatch (budgeted progressive disclosure via
+          skillRuntime). Skills are DISTINCT from tools and persist per-project
+          in graph_json (agentSkills). */}
+      {!disabled && (() => {
+        const equippedCtx = equippedSkills.reduce(
+          (sum, id) => sum + (availableSkills.find(a => a.id === id)?.ctx_estimate ?? 0), 0);
+        return (
+          <div style={{ display:"flex", flexDirection:"column", gap:5 }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
+              <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase" }}>📚 Skills</span>
+              {equippedSkills.length > 0 && (
+                <span style={{ fontSize:9.5, color: equippedCtx > 6000 ? "#ffd97a" : "var(--fg-subtle)" }}>
+                  {equippedSkills.length} on · ~{Math.max(1, Math.round(equippedCtx / 1000))}k ctx
                 </span>
-              );
-            })}
+              )}
+            </div>
             {availableSkills.length === 0 ? (
-              <span style={{ fontSize:10, color:"var(--fg-subtle)", fontStyle:"italic" }}>
-                No skills installed — add some in the Skill Library.
+              <span style={{ fontSize:10.5, color:"var(--fg-subtle)", fontStyle:"italic" }}>
+                No skills installed yet — add them in Studio → Skills.
               </span>
             ) : (
-              <select
-                value=""
-                onChange={e => { const v = e.target.value; if (v) onToggleAgentSkill(focus, v, true); e.currentTarget.value = ""; }}
-                style={{ fontSize:11, background:"var(--bg-surface)", border:"1px solid rgba(160,232,138,0.30)", borderRadius:6, color:"var(--fg)", padding:"2px 4px", cursor:"pointer" }}
-              >
-                <option value="">+ equip skill…</option>
-                {availableSkills.filter(s => !equippedSkills.includes(s.id)).map(s => (
-                  <option key={s.id} value={s.id}>{s.name} (~{Math.max(1, Math.round(s.ctx_estimate/1000))}k)</option>
-                ))}
-              </select>
+              <>
+                <div style={{ maxHeight:148, overflow:"auto", borderRadius:8, border:"1px solid var(--border)", background:"var(--bg-surface)" }}>
+                  {availableSkills.map((s, i) => {
+                    const on = equippedSkills.includes(s.id);
+                    return (
+                      <button key={s.id} onClick={() => onToggleAgentSkill(focus, s.id, !on)} title={s.description || s.name}
+                        style={{ width:"100%", textAlign:"left", display:"flex", alignItems:"center", gap:8, padding:"5px 8px",
+                          background: on ? "rgba(160,232,138,0.10)" : "transparent", border:"none",
+                          borderTop: i === 0 ? "none" : "1px solid var(--border)", cursor:"pointer" }}>
+                        <span style={{ width:15, height:15, borderRadius:4, flexShrink:0, display:"inline-flex", alignItems:"center", justifyContent:"center",
+                          border:`1.5px solid ${on ? "#6cd28e" : "var(--border-strong)"}`, background: on ? "#6cd28e" : "transparent", color:"#11231a", fontSize:10, fontWeight:900 }}>
+                          {on ? "✓" : ""}
+                        </span>
+                        <span style={{ minWidth:0, flex:1 }}>
+                          <span style={{ display:"block", fontSize:11.5, fontWeight:600, color:"var(--fg)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.name}</span>
+                          {s.description && <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", whiteSpace:"nowrap", overflow:"hidden", textOverflow:"ellipsis" }}>{s.description}</span>}
+                        </span>
+                        <span style={{ fontSize:9, color:"var(--fg-subtle)", flexShrink:0 }}>~{Math.max(1, Math.round(s.ctx_estimate / 1000))}k</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <span style={{ fontSize:9.5, color:"var(--fg-subtle)", lineHeight:1.35 }}>
+                  Tick the packs this agent may use — only the ones a task needs get loaded into its prompt.
+                </span>
+              </>
             )}
           </div>
-        </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

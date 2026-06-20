@@ -217,8 +217,9 @@ const AGENTS_FALLBACK: AgentDef[] = [];   // populated at mount from list_agent_
 // Toggle — mirrors _VIEW_TAB_LEFT_STYLE / _RIGHT_STYLE in
 // agent_studio_page.py:1551-1580. Checked state is #28406b on #fff
 // with #3a5fa0 border, idle is rgba(255,255,255,0.04).
+type StudioView = "teams" | "agents" | "skills";
 function ViewToggle({ view, onChange }: {
-  view: "teams" | "agents"; onChange: (v: "teams" | "agents") => void;
+  view: StudioView; onChange: (v: StudioView) => void;
 }) {
   const base: React.CSSProperties = {
     minHeight: 36,
@@ -231,31 +232,37 @@ function ViewToggle({ view, onChange }: {
     cursor: "pointer",
     letterSpacing: 0.3,
   };
+  // Agents and Skills are DIFFERENT things and now live in separate tabs:
+  // Agents = roles you build teams from; Skills = SKILL.md capability packs
+  // you equip onto an agent.
+  const tabs: { id: StudioView; label: string }[] = [
+    { id: "teams",  label: "🧩 Teams" },
+    { id: "agents", label: "🤖 Agents" },
+    { id: "skills", label: "📚 Skills" },
+  ];
   return (
     <div style={{ display: "flex", gap: 0, padding: "4px 0" }}>
-      <button
-        onClick={() => onChange("teams")}
-        style={{
-          ...base,
-          borderTopLeftRadius: 9, borderBottomLeftRadius: 9,
-          borderTopRightRadius: 0, borderBottomRightRadius: 0,
-          borderRight: "none",
-          background: view === "teams" ? "#28406b" : base.background,
-          color:      view === "teams" ? "#fff" : base.color,
-          borderColor: view === "teams" ? "#3a5fa0" : "var(--border)",
-        }}
-      >🧩 Teams</button>
-      <button
-        onClick={() => onChange("agents")}
-        style={{
-          ...base,
-          borderTopRightRadius: 9, borderBottomRightRadius: 9,
-          borderTopLeftRadius: 0, borderBottomLeftRadius: 0,
-          background: view === "agents" ? "#28406b" : base.background,
-          color:      view === "agents" ? "#fff" : base.color,
-          borderColor: view === "agents" ? "#3a5fa0" : "var(--border)",
-        }}
-      >🤖 Agents</button>
+      {tabs.map((t, i) => {
+        const on = view === t.id;
+        const first = i === 0, last = i === tabs.length - 1;
+        return (
+          <button
+            key={t.id}
+            onClick={() => onChange(t.id)}
+            style={{
+              ...base,
+              marginLeft: first ? 0 : -1,           // overlap so borders don't double
+              position: "relative",
+              zIndex: on ? 1 : 0,
+              borderTopLeftRadius: first ? 9 : 0, borderBottomLeftRadius: first ? 9 : 0,
+              borderTopRightRadius: last ? 9 : 0, borderBottomRightRadius: last ? 9 : 0,
+              background: on ? "#28406b" : base.background,
+              color:      on ? "#fff" : base.color,
+              borderColor: on ? "#3a5fa0" : "var(--border)",
+            }}
+          >{t.label}</button>
+        );
+      })}
     </div>
   );
 }
@@ -950,6 +957,50 @@ function AgentCard({
           overflow: "hidden",
         }}>{agent.description}</div>
       </div>
+    </div>
+  );
+}
+
+// SkillCard — a SKILL.md pack rendered as a PACK, deliberately distinct from
+// an AgentCard so skills and agents never read as the same thing. Book-framed,
+// green accent, shows the context cost + the tools it grants.
+function SkillCard({ skill, selected, onClick }: {
+  skill: AgentDef; selected: boolean; onClick: () => void;
+}) {
+  const ctxK = Math.max(1, Math.round((skill.systemPrompt?.length ?? 0) / 4 / 1000));
+  const tools = Array.isArray(skill.tools) ? skill.tools : [];
+  return (
+    <div
+      onClick={onClick}
+      style={{
+        cursor: "pointer",
+        background: selected ? "rgba(160,232,138,0.10)" : "var(--bg-surface)",
+        border: `1px solid ${selected ? "rgba(160,232,138,0.55)" : "var(--border)"}`,
+        borderRadius: 12, padding: "12px 14px",
+        display: "flex", flexDirection: "column", gap: 8,
+        boxShadow: selected ? "0 4px 12px rgba(108,210,142,0.16)" : "0 2px 6px rgba(0,0,0,0.35)",
+      }}
+    >
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        <div style={{
+          width: 40, height: 40, flexShrink: 0, fontSize: 21,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          borderRadius: 10, background: "rgba(160,232,138,0.12)", border: "1px solid rgba(160,232,138,0.3)",
+        }}>📚</div>
+        <div style={{ minWidth: 0, flex: 1 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{skill.name}</div>
+          <div style={{ fontSize: 10, color: "#9ee6b0", letterSpacing: 0.6, fontWeight: 700 }}>SKILL PACK · ~{ctxK}k ctx</div>
+        </div>
+      </div>
+      <div style={{
+        fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.4, minHeight: 34,
+        display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden",
+      }}>{skill.description || "—"}</div>
+      {tools.length > 0 && (
+        <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          grants {tools.length} tool{tools.length > 1 ? "s" : ""}: {tools.slice(0, 4).join(", ")}{tools.length > 4 ? "…" : ""}
+        </div>
+      )}
     </div>
   );
 }
@@ -1783,17 +1834,14 @@ function TeamEditorDialog({
 }
 
 export default function StudioPage() {
-  const [view, setView] = useState<"teams" | "agents">("teams");
+  const [view, setView] = useState<StudioView>("teams");
   const [selectedTeam, setSelectedTeam] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [selectedSkill, setSelectedSkill] = useState<string | null>(null);
   const [bannerVisible, setBannerVisible] = useState(true);
   const [teamQuery, setTeamQuery] = useState("");
   const [agentQuery, setAgentQuery] = useState("");
   const [showExampleTeams, setShowExampleTeams] = useState(false);
-  // "Skill Library" filter — flips on when the user clicks the
-  // banner CTA / 📚 Skill Library button. Hides plain roles so only
-  // SKILL.md packs remain.
-  const [skillsOnly, setSkillsOnly] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
   const [teams, setTeams] = useState<Team[]>(TEAMS_FALLBACK);
   const [agents, setAgents] = useState<AgentDef[]>(AGENTS_FALLBACK);
@@ -1882,23 +1930,28 @@ export default function StudioPage() {
     return filteredTeams.filter(t => !t.builtIn || t.visibility !== "examples");
   }, [filteredTeams, showExampleTeams, teamQuery]);
 
+  // Agents (roles) and Skills (SKILL.md packs) are different things and now
+  // live in separate tabs — never mixed in one grid.
   const filteredAgents = useMemo(() => {
     const q = agentQuery.trim().toLowerCase();
-    let base = skillsOnly ? agentsWithIcons.filter(a => a.isSkill) : agentsWithIcons;
+    let base = agentsWithIcons.filter(a => (view === "skills" ? a.isSkill : !a.isSkill));
     if (q) base = base.filter(a =>
       a.name.toLowerCase().includes(q) ||
       a.description.toLowerCase().includes(q)
     );
     return base;
-  }, [agentQuery, agentsWithIcons, skillsOnly]);
+  }, [agentQuery, agentsWithIcons, view]);
 
   const team = teams.find(t => t.name === selectedTeam) ?? null;
   const agent = agentsWithIcons.find(a => a.name === selectedAgent) ?? null;
+  const skill = agentsWithIcons.find(a => a.name === selectedSkill && a.isSkill) ?? null;
 
-  // Sub-label text per view — verbatim from agent_studio_page.py:1126-1136.
+  // Sub-label text per view.
   const subLabel = view === "teams"
     ? "Pick a workflow: Code Operator, Product Studio, Research Lab, Chief of Staff, n8n Workflow Builder, Data Room, or Content Studio. MCP packs configure the tools those workflows need."
-    : "Design individual agents — pick an avatar, a job, the tools they get to use. Built-ins ship with OWLLM and can't be edited; click Duplicate on any built-in to make your own copy.";
+    : view === "skills"
+      ? "Skills are SKILL.md capability packs (Anthropic-style). They're NOT agents — you equip a skill onto an agent (in a Team's Workbench, or per-agent on the Agents page) and the runtime loads it only when a task needs it. Install more from the library."
+      : "Design individual agents — pick an avatar, a job, the tools they get to use. Built-ins ship with OWLLM and can't be edited; click Duplicate on any built-in to make your own copy.";
 
   // Navigate to another top-level tab. AppShell listens for this
   // CustomEvent on the window and swaps activeKey accordingly.
@@ -2142,48 +2195,36 @@ export default function StudioPage() {
         </>
       ) : (
         <>
-          {/* Agents action row — mirrors agent_studio_page.py:1265
-              ("+ New custom agent", "📚 Skill Library", refresh). */}
+          {/* Action row — Agents (build roles) vs Skills (install packs). */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <button
-              onClick={handleNewAgent}
-              style={{
-                minHeight: 34,
-                background: "var(--accent)", color: "var(--fg-strong)",
-                border: "none", borderRadius: 8, padding: "0 16px",
-                fontWeight: 600, cursor: "pointer", fontSize: 12,
-              }}
-            >+ New custom agent</button>
-            <button
-              onClick={handleOpenSkillLibrary}
-              title="Browse SKILL.md packs (Anthropic helpers + anything installed under LLM/data/skills/)"
-              style={{
-                minHeight: 34,
-                background: skillsOnly ? "rgba(122,211,255,0.18)" : "var(--bg-surface)",
-                color: skillsOnly ? "#7ad3ff" : "#dadcdf",
-                border: skillsOnly ? "1px solid rgba(122,211,255,0.5)" : "none",
-                borderRadius: 8, padding: "0 14px",
-                cursor: "pointer", fontSize: 12,
-              }}
-            >📚 Skill Library</button>
-            {skillsOnly && (
+            {view === "agents" ? (
               <button
-                onClick={() => setSkillsOnly(false)}
-                title="Clear the skills-only filter"
+                onClick={handleNewAgent}
                 style={{
                   minHeight: 34,
-                  background: "transparent", color: "var(--fg-muted)",
-                  border: "1px solid var(--border-strong)",
-                  borderRadius: 8, padding: "0 12px",
-                  cursor: "pointer", fontSize: 12,
+                  background: "var(--accent)", color: "var(--fg-strong)",
+                  border: "none", borderRadius: 8, padding: "0 16px",
+                  fontWeight: 600, cursor: "pointer", fontSize: 12,
                 }}
-              >✕ Show all agents</button>
+              >+ New custom agent</button>
+            ) : (
+              <button
+                onClick={handleOpenSkillLibrary}
+                title="Install SKILL.md packs from a curated source (Anthropic, obra/superpowers) or a git URL"
+                style={{
+                  minHeight: 34,
+                  background: "rgba(160,232,138,0.16)", color: "#9ee6b0",
+                  border: "1px solid rgba(160,232,138,0.4)",
+                  borderRadius: 8, padding: "0 16px",
+                  fontWeight: 700, cursor: "pointer", fontSize: 12,
+                }}
+              >📚 Install skills…</button>
             )}
             <div style={{ flex: 1 }} />
             <SearchBar
               value={agentQuery}
               onChange={setAgentQuery}
-              placeholder={skillsOnly ? "Filter skills…" : "Filter agents…"}
+              placeholder={view === "skills" ? "Filter skills…" : "Filter agents…"}
             />
           </div>
           <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
@@ -2199,20 +2240,40 @@ export default function StudioPage() {
               paddingBottom: 12,
               minWidth: 0,
             }}>
-              {filteredAgents.map(a => (
-                <AgentCard
-                  key={a.name}
-                  agent={a}
-                  selected={selectedAgent === a.name}
-                  onClick={() => setSelectedAgent(a.name)}
-                />
-              ))}
+              {view === "skills"
+                ? filteredAgents.map(a => (
+                    <SkillCard
+                      key={a.name}
+                      skill={a}
+                      selected={selectedSkill === a.name}
+                      onClick={() => setSelectedSkill(a.name)}
+                    />
+                  ))
+                : filteredAgents.map(a => (
+                    <AgentCard
+                      key={a.name}
+                      agent={a}
+                      selected={selectedAgent === a.name}
+                      onClick={() => setSelectedAgent(a.name)}
+                    />
+                  ))}
+              {view === "skills" && filteredAgents.length === 0 && (
+                <div style={{ gridColumn: "1/-1", color: "var(--fg-subtle)", fontSize: 12.5, lineHeight: 1.6, padding: "8px 2px" }}>
+                  No skills installed yet. Click <b>📚 Install skills…</b> to add Anthropic-style SKILL.md packs,
+                  then equip them onto an agent (in a Team's Workbench, or per-agent on the Agents page).
+                </div>
+              )}
             </div>
             <div style={{ flex: 4, display: "flex", minWidth: 0 }}>
               <AgentDetailPanel
-                agent={agent}
+                agent={view === "skills" ? skill : agent}
                 onSave={async (edits) => {
-                  if (!agent || !agent.path) {
+                  const target = view === "skills" ? skill : agent;
+                  if (view === "skills" || target?.isSkill) {
+                    alert("A skill is defined by its SKILL.md file and managed in the library — it isn't edited here. Equip the skill onto an agent instead.");
+                    return;
+                  }
+                  if (!target || !target.path) {
                     alert("Can't save: no path on disk (built-in role or unloaded). Click Duplicate first.");
                     return;
                   }
@@ -2222,20 +2283,13 @@ export default function StudioPage() {
                   // description, etc.) would be silently lost.
                   try {
                     const allRoles = await invoke<AgentRoleBackend[]>("list_agent_roles");
-                    const row = allRoles.find(r => r.path === agent.path);
+                    const row = allRoles.find(r => r.path === target.path);
                     const original: any = (row?.data && typeof row.data === "object") ? { ...row.data } : {};
-                    // Apply edits. mcpAllowlist === null means "all
-                    // available" (remove the field entirely from JSON);
-                    // [] or non-empty array becomes mcp_allowlist.
                     if (edits.mcpAllowlist === null) {
                       delete original.mcp_allowlist;
                     } else {
                       original.mcp_allowlist = edits.mcpAllowlist;
                     }
-                    // Behaviour fields. canDispatch always written
-                    // (boolean has no "auto"); temperature + default
-                    // model removed when empty so the runtime falls
-                    // back to its per-task defaults.
                     original.can_dispatch = edits.canDispatch;
                     if (edits.temperature == null) {
                       delete original.default_temperature;
@@ -2247,14 +2301,14 @@ export default function StudioPage() {
                     } else {
                       original.default_model_id = edits.defaultModelId.trim();
                     }
-                    await invoke("save_agent_definition", { path: agent.path, data: original });
+                    await invoke("save_agent_definition", { path: target.path, data: original });
                     await loadAll();   // reload so the UI shows the persisted state
                   } catch (e: any) {
                     alert(`Save failed: ${String(e?.message ?? e)}`);
                   }
                 }}
-                onDuplicate={() => handleDuplicateAgent(agent?.name)}
-                onDelete={() => handleDeleteAgent(agent?.name)}
+                onDuplicate={() => handleDuplicateAgent((view === "skills" ? skill : agent)?.name)}
+                onDelete={() => handleDeleteAgent((view === "skills" ? skill : agent)?.name)}
                 onPickIcon={(name) => setIconPickerAgent(name)}
               />
             </div>

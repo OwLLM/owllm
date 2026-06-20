@@ -110,7 +110,11 @@ export function normalizeTeam<T extends Team>(team: T, roles: Map<string, RoleDa
   const names = new Set(agents.map((a) => a.name));
 
   // --- every base must map to a known role (skills + prompt come from it) ---
+  // The synthetic Critical Thinker (roleKind "critic") DELIBERATELY has no yaml
+  // role — it runs from a code-built prompt and an inline spec — so don't flag
+  // it as an "unknown role". Only real specialists need a backing role file.
   for (const a of agents) {
+    if (roleKind(a, roles) === "critic") continue;
     if (!roles.has(a.base)) {
       warnings.push(`Agent "${a.name}" uses role base "${a.base}", which isn't a known role — its skills and prompt can't be resolved.`);
     }

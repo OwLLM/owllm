@@ -66,7 +66,7 @@ import {
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS } from "./localTools";
-import { normalizeTeam } from "./teamConfig";
+import { normalizeTeam, roleCanWrite } from "./teamConfig";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
@@ -1227,7 +1227,16 @@ function AgentChatGrid({
   // densely-packed square grid.
   const filledArr = useMemo(() => team?.agents ?? [], [team]);
   const fourCol = useMemo(() => arrangeTilesFourCol(team), [team]);
-  const useFourCol = filledArr.length >= 6;
+  // Only use the 4-column build/design SPLIT when the team actually HAS a design
+  // sub-team. A single team with no design agents (e.g. an ops team like RED)
+  // was still forced into 4 columns, leaving the right two columns as empty
+  // cells — the cards only filled the LEFT HALF. With no design agents, fall
+  // through to the dense-packed grid below so cards expand to fill the full
+  // width. Design teams (product_studio, …) keep the reserved split.
+  const orchForLayout = orchestratorOf(filledArr);
+  const hasDesignAgents = filledArr.some(a =>
+    a.name !== orchForLayout?.name && a.name !== CRITIC_AGENT_NAME && groupForAgent(a) === "design");
+  const useFourCol = filledArr.length >= 6 && hasDesignAgents;
   const arranged: (AgentSpec | null)[] = useFourCol
     ? fourCol
     : (() => {
@@ -2673,7 +2682,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
       ))}
       {nodes.length === 0 && (
         <div style={{ position:"absolute", left:cx-180, top:cy + orchestrator_r * 2 + 20, width:360, textAlign:"center", fontSize:12, color:"var(--fg-subtle)", pointerEvents:"none" }}>
-          No specialists on this team yet. Click <b>Team…</b> above to load a template.
+          No specialists on this team yet — open project settings (the <b>⚙</b> at the top) to pick a team template, or start a fresh one with <b>+ New</b>.
         </div>
       )}
       </div>
@@ -8661,19 +8670,43 @@ export default function AgentsPage() {
       // loudly visible everywhere — Thought tab, system log AND user
       // chat — instead of silently treating it as "done".
       if (dispatches.length === 0) {
-        const clean = stripDispatchDirectives(orchReply).trim();
-        const noteText = parse.unresolved.length > 0
-          ? `🚫 0 dispatches ran — the orchestrator's dispatch lines named agents that don't exist (${parse.unresolved.map(u => "@" + u.name).join(", ")}) and a correction round didn't fix it. Specialists DID NOT run.`
-          : "🚫 0 dispatches parsed — orchestrator answered solo. Specialists DID NOT run. If you expected the team to fan out, the orchestrator's reply is missing `@<agent>: instruction` lines (check the Reply tab). Try rephrasing with an explicit goal that requires file edits / shell / external systems.";
-        appendThought(orch.name, { role: "system", color: "#ff8c8c", text: noteText });
-        appendLog("system", { role: "system", color: "#ff8c8c", text: noteText });
-        setSupChat(prev => [
-          ...prev,
-          { role: "system", color: "#ff8c8c", text: "⚠ Specialists did not run — orchestrator answered solo. See system log.", ts: Date.now() },
-          { role: "orchestrator", color: "#ffd97a", text: clean || orchReply, ts: Date.now() },
-        ]);
-        setPhase("done");
-        return;
+        // FALLBACK (one hop, can't recurse — this runs once from the initial
+        // parse and dispatches a SPECIALIST, never the orchestrator again).
+        // A weak orchestrator that answered solo or named only bogus agents
+        // would otherwise dead-end the whole team. Rather than give up, auto-
+        // route the user's goal to the single best available specialist so the
+        // team actually DOES something. Prefer one that can produce artifacts
+        // (write/edit/shell) over a read-only one.
+        const wired = wiredDispatchTargets(runTeam, orch.name); // null = no graph → all dispatchable
+        const candidates = runTeam.agents.filter(a =>
+          a.name !== orch.name &&
+          a.name !== CRITIC_AGENT_NAME &&
+          (wired === null || wired.has(a.name)));
+        const best = candidates.find(a => roleCanWrite(roleByName.get(a.base))) ?? candidates[0];
+        if (best) {
+          appendThought(orch.name, { role: "system", color: "#ffb74d",
+            text: `⚠ Orchestrator didn't route to anyone — auto-dispatching the goal to @${best.name} so the team acts (it answered solo / named no real agent).` });
+          setSupChat(prev => [...prev, { role: "system", color: "#ffb74d",
+            text: `⚠ Orchestrator answered solo — auto-routed the goal to @${best.name}.`, ts: Date.now() }]);
+          dispatches = [{ agentName: best.name, instruction:
+            `The orchestrator did not route this to a specialist. Carry out the user's goal yourself, directly and concretely:\n\n${text}` }];
+          // fall through to Phase 2 with this single dispatch.
+        } else {
+          // Genuinely no specialist to route to → keep the loud solo notice.
+          const clean = stripDispatchDirectives(orchReply).trim();
+          const noteText = parse.unresolved.length > 0
+            ? `🚫 0 dispatches ran — the orchestrator named agents that don't exist (${parse.unresolved.map(u => "@" + u.name).join(", ")}) and there's no specialist to fall back to.`
+            : "🚫 0 dispatches parsed — orchestrator answered solo, and this team has no specialist to route to. Add a specialist or rephrase the goal.";
+          appendThought(orch.name, { role: "system", color: "#ff8c8c", text: noteText });
+          appendLog("system", { role: "system", color: "#ff8c8c", text: noteText });
+          setSupChat(prev => [
+            ...prev,
+            { role: "system", color: "#ff8c8c", text: "⚠ Specialists did not run — orchestrator answered solo. See system log.", ts: Date.now() },
+            { role: "orchestrator", color: "#ffd97a", text: clean || orchReply, ts: Date.now() },
+          ]);
+          setPhase("done");
+          return;
+        }
       }
 
       // Short, sortable run id used by fleet.rs to bucket per-agent

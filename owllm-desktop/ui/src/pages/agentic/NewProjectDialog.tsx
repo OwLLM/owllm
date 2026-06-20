@@ -78,14 +78,20 @@ export default function NewProjectDialog({
     setBusy(true); setErr(null);
     try {
       const teamMembers = team.agents.map(a => a.name);
-      const graph = team.edges.length > 0 ? { edges: team.edges } : null;
       const row = await invoke<ProjectRow>("create_project", {
         input: {
           name: name.trim(),
           description: description.trim(),
           location: location.trim(),
           team: teamMembers,
-          graph_json: graph ? JSON.stringify(graph) : "",
+          // Persist the roster's roles (base) alongside the edges so every agent
+          // keeps its role on reload (the `team` field is names only). Matches
+          // ProjectSettingsDialog so new and edited projects behave identically —
+          // without this, roles reset to default after a reload.
+          graph_json: JSON.stringify({
+            edges: team.edges,
+            roster: team.agents.map(a => ({ name: a.name, base: a.base })),
+          }),
           team_default_model_id: "",
           trust_writes: trustWrites,
           auto_approve_all: false,

@@ -544,6 +544,90 @@ pub async fn delete_tuned_adapter(path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// One weight file inside a downloaded model directory (a GGUF quant variant,
+/// or a safetensors/bin shard). Powers the Downloaded model detail panel so the
+/// user can SEE every weight a model has on disk and delete the ones they don't
+/// want — a model often ships several GGUF quants (Q4_K_M / Q5_K_M / Q8_0 …).
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelWeightFile {
+    pub path: String,
+    pub name: String,
+    pub size_bytes: u64,
+}
+
+/// True if `canon` is rooted under one of the models dirs. Both sides are
+/// canonicalized so symlinks/.. can't escape the sandbox.
+fn under_models_root(canon: &std::path::Path) -> bool {
+    crate::paths::models_dirs_read().iter().any(|r| {
+        std::fs::canonicalize(r).map(|rc| canon.starts_with(&rc)).unwrap_or(false)
+    })
+}
+
+/// List the weight files (.gguf / .safetensors / .bin) inside a downloaded
+/// model. `dir` is the model directory from models_list_downloaded (or a single
+/// top-level .gguf path). Confined to the models roots.
+#[tauri::command]
+pub async fn model_weight_files(dir: String) -> Result<Vec<ModelWeightFile>, String> {
+    let canon = std::fs::canonicalize(std::path::PathBuf::from(&dir))
+        .map_err(|e| format!("canonicalize {dir}: {e}"))?;
+    if !under_models_root(&canon) {
+        return Err("path is not under a models root".into());
+    }
+    tokio::task::spawn_blocking(move || -> Result<Vec<ModelWeightFile>, String> {
+        let is_weight = |name: &str| {
+            let n = name.to_ascii_lowercase();
+            n.ends_with(".gguf") || n.ends_with(".safetensors") || n.ends_with(".bin")
+        };
+        let mut out: Vec<ModelWeightFile> = Vec::new();
+        if canon.is_file() {
+            if let Some(name) = canon.file_name().and_then(|s| s.to_str()) {
+                if is_weight(name) {
+                    let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
+                    out.push(ModelWeightFile { path: canon.to_string_lossy().into_owned(), name: name.to_string(), size_bytes: size });
+                }
+            }
+            return Ok(out);
+        }
+        // Walk up to 2 levels deep (covers GGUF repos that nest under a subdir).
+        let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(canon.clone(), 0)];
+        while let Some((d, depth)) = stack.pop() {
+            let rd = match std::fs::read_dir(&d) { Ok(r) => r, Err(_) => continue };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() { if depth < 2 { stack.push((p, depth + 1)); } continue; }
+                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
+                    if is_weight(name) {
+                        let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                        out.push(ModelWeightFile { path: p.to_string_lossy().into_owned(), name: name.to_string(), size_bytes: size });
+                    }
+                }
+            }
+        }
+        out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Delete a single weight file from a downloaded model. Confined to the models
+/// roots so a stray call can't remove an arbitrary file. Returns freed bytes.
+#[tauri::command]
+pub async fn delete_model_weight(path: String) -> Result<u64, String> {
+    let canon = std::fs::canonicalize(std::path::PathBuf::from(&path))
+        .map_err(|e| format!("canonicalize {path}: {e}"))?;
+    if !under_models_root(&canon) {
+        return Err(format!("refused: {} is not under a models root", canon.display()));
+    }
+    if !canon.is_file() {
+        return Err(format!("not a file: {}", canon.display()));
+    }
+    let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
+    std::fs::remove_file(&canon).map_err(|e| format!("remove_file {}: {e}", canon.display()))?;
+    Ok(size)
+}
+
 #[tauri::command]
 pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
     // Detect VRAM up-front so every row's compat tag uses the same

@@ -99,6 +99,10 @@ type DownloadedItem = {
   compat?: { color: "green" | "orange" | "red" | "gray"; text: string; tooltip?: string } | null;
 };
 
+// One weight file on disk inside a downloaded model (a GGUF quant variant or a
+// safetensors/bin shard). Mirrors Rust huggingface::ModelWeightFile.
+type ModelWeightFile = { path: string; name: string; sizeBytes: number };
+
 // Mirrors Rust TunedAdapter — list_tuned_adapters returns {name, path,
 // sizeMib, modified, baseHint, compat}. compat is computed Rust-side
 // from base_hint + the user's detected VRAM, mirroring what Browse
@@ -459,6 +463,98 @@ function deleteTunedAdapter(
     });
 }
 
+// DownloadedModelDetail — right-rail panel shown when a DOWNLOADED model is
+// selected. Fixes "clicking a downloaded model shows nothing": it surfaces the
+// model's info AND every weight file on disk, with per-file delete (a model
+// often holds several GGUF quants — Q4_K_M / Q5_K_M / Q8_0 …) plus an
+// Add-weights shortcut.
+function DownloadedModelDetail({ item, onAddWeights, onChanged }: {
+  item: DownloadedItem;
+  onAddWeights: () => void;
+  onChanged: () => void;
+}) {
+  const [weights, setWeights] = React.useState<ModelWeightFile[] | null>(null);
+  const [err, setErr] = React.useState<string | null>(null);
+  const [confirmPath, setConfirmPath] = React.useState<string | null>(null);
+  const [deleting, setDeleting] = React.useState<string | null>(null);
+
+  const load = React.useCallback(() => {
+    setErr(null);
+    invoke<ModelWeightFile[]>("model_weight_files", { dir: item.path })
+      .then(setWeights)
+      .catch((e) => { setWeights([]); setErr(String(e)); });
+  }, [item.path]);
+  React.useEffect(() => { setWeights(null); setConfirmPath(null); load(); }, [item.path, load]);
+
+  const del = async (path: string) => {
+    setDeleting(path); setErr(null);
+    try {
+      await invoke("delete_model_weight", { path });
+      setConfirmPath(null);
+      load();
+      onChanged();   // refresh the grid — size / onboarding may change
+    } catch (e) { setErr(String(e)); }
+    finally { setDeleting(null); }
+  };
+
+  const ob = item.onboarding ?? "NEW";
+  const obColor = ob === "READY" ? "#4CAF50" : ob === "BUILDING" ? "#f0a832" : ob === "BROKEN" ? "#f44336" : "#9aa0aa";
+  const totalBytes = (weights ?? []).reduce((s, w) => s + w.sizeBytes, 0);
+  const lbl: React.CSSProperties = { fontSize: 10, color: "var(--fg-muted)", fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.5 };
+
+  return (
+    <div style={{ background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 20 }}>📦</span>
+        <div style={{ fontSize: 13.5, fontWeight: 800, color: "var(--fg-strong)", wordBreak: "break-all", lineHeight: 1.2, minWidth: 0, flex: 1 }}>{item.name}</div>
+      </div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
+        <span style={{ fontSize: 10, fontWeight: 800, color: obColor, border: `1px solid ${obColor}66`, background: `${obColor}1a`, borderRadius: 999, padding: "1px 7px" }}>{ob}</span>
+        {item.compat && <span title={item.compat.tooltip} style={{ fontSize: 10, fontWeight: 700, color: "var(--fg)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 7px" }}>{item.compat.text}</span>}
+        {item.envKey && <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>⚙ {item.envKey}</span>}
+        {item.isIncomplete && <span style={{ fontSize: 10, fontWeight: 700, color: "#ffb56a" }}>⚠ incomplete download</span>}
+      </div>
+      <div style={{ fontSize: 10, color: "var(--fg-subtle)", wordBreak: "break-all" }} title={item.path}>📁 {item.path}</div>
+
+      <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+          <span style={lbl}>Weights on disk</span>
+          {weights && weights.length > 0 && <span style={{ fontSize: 9.5, color: "var(--fg-subtle)" }}>{weights.length} · {fmtBytes(totalBytes)}</span>}
+        </div>
+        {err && <div style={{ fontSize: 11, color: "#ff8080", marginTop: 4 }}>{err}</div>}
+        {weights === null ? (
+          <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 6 }}>Loading…</div>
+        ) : weights.length === 0 ? (
+          <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 6, fontStyle: "italic" }}>No weight files found in this folder.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 5, marginTop: 6 }}>
+            {weights.map((w) => {
+              const confirming = confirmPath === w.path;
+              return (
+                <div key={w.path} style={{ display: "flex", alignItems: "center", gap: 6, padding: "5px 7px", borderRadius: 6, background: "var(--bg-surface)", border: "1px solid var(--border)" }}>
+                  <span style={{ minWidth: 0, flex: 1 }}>
+                    <span title={w.name} style={{ display: "block", fontSize: 11, color: "var(--fg)", fontFamily: "ui-monospace, monospace", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{w.name}</span>
+                    <span style={{ fontSize: 9.5, color: "var(--fg-subtle)" }}>{fmtBytes(w.sizeBytes)}</span>
+                  </span>
+                  {confirming ? (
+                    <>
+                      <button onClick={() => del(w.path)} disabled={deleting === w.path} style={{ fontSize: 10, fontWeight: 800, color: "#fff", background: "#d23b3b", border: "none", borderRadius: 5, padding: "3px 8px", cursor: "pointer" }}>{deleting === w.path ? "…" : "Delete"}</button>
+                      <button onClick={() => setConfirmPath(null)} style={{ fontSize: 10, color: "var(--fg-muted)", background: "transparent", border: "1px solid var(--border-strong)", borderRadius: 5, padding: "3px 7px", cursor: "pointer" }}>✕</button>
+                    </>
+                  ) : (
+                    <button onClick={() => setConfirmPath(w.path)} title="Delete this weight file" style={{ fontSize: 13, color: "#ff8c8c", background: "transparent", border: "none", cursor: "pointer", padding: "2px 4px" }}>🗑</button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <button onClick={onAddWeights} style={{ marginTop: 8, width: "100%", height: 28, borderRadius: 7, border: "1px dashed var(--accent)", background: "rgba(var(--accent-rgb),0.10)", color: "var(--accent)", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>➕ Add / download more weights…</button>
+      </div>
+    </div>
+  );
+}
+
 export default function ModelsPage() {
   const [tab, setTab] = React.useState<SubTab>("browse");
   const [downloaded, setDownloaded] = React.useState<DownloadedItem[]>([]);
@@ -713,6 +809,14 @@ export default function ModelsPage() {
   const refreshTuned = React.useCallback(() => {
     invoke<TunedAdapterRow[]>("list_tuned_adapters")
       .then(setTuned)
+      .catch(() => { /* keep prior */ });
+  }, []);
+
+  // Re-fetch the downloaded list (after deleting a weight / adding weights) so
+  // the Downloaded grid + the detail panel reflect what's on disk now.
+  const refreshDownloaded = React.useCallback(() => {
+    invoke<DownloadedItem[]>("models_list_downloaded")
+      .then((d) => { setDownloaded(d); recordDownloadedModels(d.map((x) => x.name)); })
       .catch(() => { /* keep prior */ });
   }, []);
 
@@ -1346,7 +1450,21 @@ export default function ModelsPage() {
       {/* Shared right rail — tokens/info panel up top, GGUF export
           logs below. Same column for all three tabs. */}
       <div style={{ width: 280, flexShrink: 0, position: "sticky", top: 0, display: "flex", flexDirection: "column", gap: 10 }}>
-        <AccessTokensPane selectedModel={selectedModelForInfo} />
+        {(() => {
+          // A DOWNLOADED model is selected via selectedPath (separate from the
+          // browse-card selectedId). Show its detail + weights here; otherwise
+          // fall back to the access-tokens / browse-info pane.
+          const dl = selectedPath ? downloaded.find(d => d.path === selectedPath) : null;
+          return dl ? (
+            <DownloadedModelDetail
+              item={dl}
+              onChanged={refreshDownloaded}
+              onAddWeights={() => setPickerFor(dl.name.replace(/__/g, "/"))}
+            />
+          ) : (
+            <AccessTokensPane selectedModel={selectedModelForInfo} />
+          );
+        })()}
         {(exportLogs.length > 0 || exportStatus) && (
           <div>
             {/* Live status — single line, biggest emoji clue first.

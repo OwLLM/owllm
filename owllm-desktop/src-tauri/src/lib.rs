@@ -258,6 +258,8 @@ pub fn run() {
             huggingface::hf_cache_list,
             huggingface::hf_cache_delete,
             huggingface::models_list_downloaded,
+            huggingface::model_weight_files,
+            huggingface::delete_model_weight,
             recommendations::models_recommended,
             paths::shell_open_url,
             paths::paths_debug,

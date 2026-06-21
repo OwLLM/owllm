@@ -107,14 +107,6 @@ fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "ALTER TABLE agent_projects ADD COLUMN director_mode INTEGER NOT NULL DEFAULT 0",
         [],
     );
-    // Add critic_super_user: when ON, the Critical Thinker is appointed Super
-    // User and decides in the user's place (answers/approves/gates the run).
-    // OFF (default) it stays advisory and can NEVER block the team — the
-    // Red-Team safety guarantee. Idempotent ALTER (swallow duplicate-column).
-    let _ = conn.execute(
-        "ALTER TABLE agent_projects ADD COLUMN critic_super_user INTEGER NOT NULL DEFAULT 0",
-        [],
-    );
     Ok(())
 }
 
@@ -257,37 +249,6 @@ pub async fn project_get_director_mode(project_id: String) -> Result<bool, Strin
         let conn = open_conn()?;
         let v: i64 = conn.query_row(
             "SELECT director_mode FROM agent_projects WHERE id = ?1",
-            rusqlite::params![project_id],
-            |r| r.get(0),
-        ).unwrap_or(0);
-        Ok(v != 0)
-    }).await.map_err(|e| format!("join error: {e}"))?
-}
-
-/// Set the per-project critic_super_user flag. ON = the Critical Thinker is
-/// appointed Super User and decides in the user's place (answers the
-/// orchestrator's questions, approves/rejects the plan + final, gets more
-/// rounds to gate). OFF (default) = advisory only; bounded review loops that
-/// can NEVER block the team — so a non-abliterated critic cannot stall a
-/// sanctioned Red-Team / abliterate run.
-#[tauri::command]
-pub async fn project_set_critic_super(project_id: String, enabled: bool) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        let conn = open_conn()?;
-        conn.execute(
-            "UPDATE agent_projects SET critic_super_user = ?1, updated_at = ?2 WHERE id = ?3",
-            rusqlite::params![enabled as i64, now_iso(), project_id],
-        ).map_err(|e| format!("update critic_super_user: {e}"))?;
-        Ok(())
-    }).await.map_err(|e| format!("join error: {e}"))?
-}
-
-#[tauri::command]
-pub async fn project_get_critic_super(project_id: String) -> Result<bool, String> {
-    tokio::task::spawn_blocking(move || {
-        let conn = open_conn()?;
-        let v: i64 = conn.query_row(
-            "SELECT critic_super_user FROM agent_projects WHERE id = ?1",
             rusqlite::params![project_id],
             |r| r.get(0),
         ).unwrap_or(0);

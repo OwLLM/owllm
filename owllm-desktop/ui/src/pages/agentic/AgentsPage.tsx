@@ -4567,8 +4567,6 @@ function RightColumnTabs(props: {
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
-  criticSuperUser: boolean;
-  onToggleCriticSuper: () => void;
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -4674,8 +4672,6 @@ function RightColumnTabs(props: {
             onToggleAutoApprove={props.onToggleAutoApprove}
             directorMode={props.directorMode}
             onToggleDirectorMode={props.onToggleDirectorMode}
-            criticSuperUser={props.criticSuperUser}
-            onToggleCriticSuper={props.onToggleCriticSuper}
             team={props.team}
             roleByName={props.roleByName}
           />
@@ -4752,15 +4748,12 @@ function RightColumnTabs(props: {
 function SuperUserSettings({
   autoApprove, onToggleAutoApprove,
   directorMode, onToggleDirectorMode,
-  criticSuperUser, onToggleCriticSuper,
   team, roleByName,
 }: {
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
-  criticSuperUser: boolean;
-  onToggleCriticSuper: () => void;
   team: Team | null;
   roleByName: Map<string, RoleData>;
 }) {
@@ -4787,20 +4780,20 @@ function SuperUserSettings({
         <input type="checkbox" checked={autoApprove} onChange={onToggleAutoApprove} style={{ width:12, height:12, accentColor:"#ff6060" }} />
         <span>auto-approve tool requests</span>
       </label>
-      <label style={{ display:"flex", alignItems:"center", gap:6, fontSize:12, color: directorMode ? "#9af0a8" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, accentColor:"#60ff80" }} />
-        <span>director mode (critic stands in for me)</span>
-      </label>
-      {/* Critic authority. OFF (default): the Critical Thinker is advisory — it
-          reviews in bounded loops but can NEVER block the team (so a guarded
-          critic can't stall a Red-Team run). ON: it is appointed Super User and
-          decides in your place — answers the orchestrator, approves/rejects the
-          plan + final answer, and gates the run (capped so it can't loop forever). */}
-      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: criticSuperUser ? "#ffb3e6" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={criticSuperUser} onChange={onToggleCriticSuper} style={{ width:12, height:12, marginTop:2, accentColor:"#ff79d2" }} />
+      {/* The ONE critic-authority control (formerly two: "director mode" +
+          "critic = super user" — merged per user, they meant the same thing).
+          OFF (default): the Critical Thinker is advisory — it reviews in bounded
+          loops but can NEVER block the team (so a guarded critic can't stall a
+          Red-Team run). ON: it is the Super User and decides in your place —
+          answers the orchestrator's mid-run decisions AND approves/rejects the
+          plan + final answer, with higher (still capped) round limits. Backed by
+          the director_mode flag, which already drives the "answer my decisions"
+          prompt block. */}
+      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: directorMode ? "#ffb3e6" : "#7888a8", cursor:"pointer" }}>
+        <input type="checkbox" checked={directorMode} onChange={onToggleDirectorMode} style={{ width:12, height:12, marginTop:2, accentColor:"#ff79d2" }} />
         <span>critic = super user (decides for me)
           <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
-            {criticSuperUser ? "critic approves/rejects the plan + answer" : "off: advisory only — never blocks the team"}
+            {directorMode ? "answers my decisions + approves/rejects the plan + answer" : "off: advisory only — never blocks the team"}
           </span>
         </span>
       </label>
@@ -6981,13 +6974,14 @@ export default function AgentsPage() {
   // instead of stalling. Persisted on agent_projects.director_mode so
   // it survives restarts.
   const [directives, setDirectives] = useState<Directive[]>([]);
+  // The single critic-authority flag (the "critic = super user" toggle). OFF
+  // (default): the Critical Thinker is advisory and can NEVER block the team —
+  // a guarded critic can't stall a Red-Team run. ON: it decides in the user's
+  // place (answers mid-run decisions via the director-block prompt AND
+  // approves/rejects the plan + final, with higher capped rounds). Persisted on
+  // agent_projects.director_mode. (Was briefly split into a 2nd critic_super_user
+  // toggle in v0.5.86; merged back here in v0.5.87 — they meant the same thing.)
   const [directorMode, setDirectorModeState] = useState<boolean>(false);
-  // Critic-as-Super-User: when ON the Critical Thinker decides in the user's
-  // place (answers the orchestrator, approves/rejects plan + final, gets more
-  // gating rounds). OFF (default) it is strictly advisory and can NEVER block
-  // the team — so a non-abliterated critic can't stall a Red-Team run.
-  // Persisted on agent_projects.critic_super_user.
-  const [criticSuperUser, setCriticSuperUserState] = useState<boolean>(false);
   const [directivesPanelOpen, setDirectivesPanelOpen] = useState(false);
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
   // top-level so it can be reused later (e.g. from NewProjectDialog).
@@ -7006,25 +7000,22 @@ export default function AgentsPage() {
   // changes. Both fetches run in parallel; errors fall back to empty /
   // false so a fresh DB before the table exists doesn't break the UI.
   useEffect(() => {
-    if (!selectedProjectId) { setDirectives([]); setDirectorModeState(false); setCriticSuperUserState(false); return; }
+    if (!selectedProjectId) { setDirectives([]); setDirectorModeState(false); return; }
     let cancelled = false;
     (async () => {
       try {
-        const [list, mode, criticSuper] = await Promise.all([
+        const [list, mode] = await Promise.all([
           invoke<Directive[]>("directives_list", { projectId: selectedProjectId }),
           invoke<boolean>("project_get_director_mode", { projectId: selectedProjectId }),
-          invoke<boolean>("project_get_critic_super", { projectId: selectedProjectId }),
         ]);
         if (cancelled) return;
         setDirectives(list);
         setDirectorModeState(mode);
-        setCriticSuperUserState(criticSuper);
       } catch (e) {
         if (cancelled) return;
         console.warn("directives load failed", e);
         setDirectives([]);
         setDirectorModeState(false);
-        setCriticSuperUserState(false);
       }
     })();
     return () => { cancelled = true; };
@@ -7043,15 +7034,6 @@ export default function AgentsPage() {
       await invoke("project_set_director_mode", { projectId: selectedProjectId, enabled: v });
     } catch (e) {
       console.warn("set director_mode failed", e);
-    }
-  };
-  const setCriticSuperUser = async (v: boolean) => {
-    setCriticSuperUserState(v);
-    if (!selectedProjectId) return;
-    try {
-      await invoke("project_set_critic_super", { projectId: selectedProjectId, enabled: v });
-    } catch (e) {
-      console.warn("set critic_super_user failed", e);
     }
   };
 
@@ -8623,14 +8605,14 @@ export default function AgentsPage() {
       //     it gets up to 3 rounds to gate the plan and the orchestrator is told to
       //     satisfy it. Still hard-capped so it can't loop forever.
       // Director mode forces a review even if the orchestrator never says "critic".
-      if (!criticWasConsulted && (directorMode || criticSuperUser || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
+      if (!criticWasConsulted && (directorMode || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
-        const MAX_PRE_ROUNDS = criticSuperUser ? 3 : 2;
+        const MAX_PRE_ROUNDS = directorMode ? 3 : 2;
         for (let round = 0; round < MAX_PRE_ROUNDS && !ctrl.signal.aborted; round++) {
           appendThought(orch.name, {
             role: "dispatch", color: "#ff9ad9",
             text: round === 0
-              ? `critical thinker review before specialist dispatch${criticSuperUser ? " (super user — it decides)" : ""}`
+              ? `critical thinker review before specialist dispatch${directorMode ? " (super user — it decides)" : ""}`
               : `critical thinker follow-up (round ${round + 1}/${MAX_PRE_ROUNDS})`,
           });
           addActive(CRITIC_NAME);
@@ -8649,7 +8631,7 @@ export default function AgentsPage() {
                 "The orchestrator's current plan:",
                 orchReply,
                 "",
-                criticSuperUser
+                directorMode
                   ? "You are the Super User — the user delegated this decision to you. Approve the plan, or list the concrete changes you require. If it is ready, say 'no concerns' plainly."
                   : "Brainstorm with the orchestrator before implementation. Challenge architecture decisions, missing specialists, hidden assumptions, and safer alternatives. If you have no remaining concerns, say 'no concerns'.",
               ].join("\n"),
@@ -8696,7 +8678,7 @@ export default function AgentsPage() {
             orchReply = await streamChatCompletion(
               port, orchModel, providerFor(orchModel),
               orchPrompt,
-              criticSuperUser
+              directorMode
                 ? `${text}\n\nThe Critic (acting as Super User — the user delegated the decision to it) requires these changes before dispatch:\n${review}\n\nApply them, then dispatch specialists.`
                 : `${text}\n\nCritical Thinker review (advisory — you decide what to use; you dispatch regardless):\n${review}\n\nRevise your plan if useful, then dispatch specialists.`,
               tempFor(orch, 0.4), ctrl.signal,
@@ -9136,9 +9118,9 @@ export default function AgentsPage() {
       // STRICTLY NON-BLOCKING in both: a refusal, a satisfied verdict, or any
       // error ships the current answer as-is. The critic can improve the output,
       // never withhold it.
-      if (directorMode || criticSuperUser || needsCriticalThinkerReview(`${text}\n${finalReply}`)) {
+      if (directorMode || needsCriticalThinkerReview(`${text}\n${finalReply}`)) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
-        const MAX_POST_ROUNDS = criticSuperUser ? 2 : 1;
+        const MAX_POST_ROUNDS = directorMode ? 2 : 1;
         for (let round = 0; round < MAX_POST_ROUNDS && !ctrl.signal.aborted; round++) {
           addActive(CRITIC_NAME);
           appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
@@ -9156,7 +9138,7 @@ export default function AgentsPage() {
                 "The team's FINAL answer (about to be delivered to the user):",
                 finalReply,
                 "",
-                criticSuperUser
+                directorMode
                   ? "You are the Super User. Approve this answer, or list the concrete fixes it needs before it ships. If it is solid, say 'no concerns'."
                   : "Review the FINAL answer for correctness, gaps, unsupported claims, and anything that would mislead the user. If it is solid, say 'no concerns'. Otherwise give concrete fixes — advisory only; the answer ships regardless.",
               ].join("\n"),
@@ -9196,7 +9178,7 @@ export default function AgentsPage() {
                 "Your final answer:",
                 finalReply,
                 "",
-                criticSuperUser ? "Critical Thinker (Super User) requires these fixes:" : "Critical Thinker post-review (advisory):",
+                directorMode ? "Critical Thinker (Super User) requires these fixes:" : "Critical Thinker post-review (advisory):",
                 pr,
                 "",
                 "Revise the final answer to address the valid points, then output the improved final answer only. Do not dispatch again.",
@@ -9911,8 +9893,6 @@ export default function AgentsPage() {
             onDirectivesChanged={reloadDirectives}
             directorMode={directorMode}
             onToggleDirectorMode={() => setDirectorMode(!directorMode)}
-            criticSuperUser={criticSuperUser}
-            onToggleCriticSuper={() => setCriticSuperUser(!criticSuperUser)}
             agentLogs={agentLogs}
             agentThoughts={agentThoughts}
             runError={runError}

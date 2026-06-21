@@ -254,6 +254,12 @@ type AgentSpec = {
   name: string;
   base: string;
   icon?: string | null;
+  /// Team-structure role set in the Workbench (left column): "leader" = this agent
+  /// may dispatch to its own members (a sub-orchestrator); "agent" = a worker that
+  /// only takes a job and does it. Drives the dispatch engine's leader detection
+  /// REGARDLESS of base role, so any agent the user marks as a leader can direct a
+  /// sub-team. The orchestrator is always a leader (via its base).
+  role?: "leader" | "agent";
   // The team JSON ships rich per-agent text — a short description
   // shown in cards and a longer extra_prompt that augments the role's
   // base system prompt during dispatch. Keep both around so the
@@ -468,6 +474,7 @@ function toTeam(t: TeamTemplateBackend): Team {
         // on the React side so usage doesn't pierce snake_case.
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
         extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
+        role: a.role === "leader" ? "leader" : a.role === "agent" ? "agent" : undefined,
       }))
     : [];
   const edges: Edge[] = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
@@ -9227,7 +9234,7 @@ export default function AgentsPage() {
           // consolidated reply up. This is what makes "only the leader talks to the
           // orchestrator" real. Non-leaders run plain, exactly as before.
           const isLeader =
-            !!roleByName.get(spec.base)?.canDispatch && spec.name !== orch.name &&
+            (spec.role === "leader" || !!roleByName.get(spec.base)?.canDispatch) && spec.name !== orch.name &&
             (wiredDispatchTargets(runTeam, spec.name)?.size ?? 0) > 0;
           if (isLeader) return await runLeaderUnit(spec, instruction);
           if (!activeTeam) return { name: spec.name, text: "" };
@@ -9347,7 +9354,7 @@ export default function AgentsPage() {
           // A sub-leader already ran its members inside runLeaderUnit — treat it as
           // a leaf so we don't ALSO handoff to (and double-run) those same members.
           const ranAsLeader =
-            !!roleByName.get(spec.base)?.canDispatch && name !== orch.name &&
+            (spec.role === "leader" || !!roleByName.get(spec.base)?.canDispatch) && name !== orch.name &&
             (wiredDispatchTargets(runTeam, name)?.size ?? 0) > 0;
           if (ranAsLeader) return [out];
           const downstream = downstreamTargets(runTeam, name, orch.name).filter(t => !ran.has(t));

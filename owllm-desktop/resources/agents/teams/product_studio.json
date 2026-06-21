@@ -51,10 +51,11 @@
     {
       "name": "design_lead",
       "base": "orchestrator",
-      "description": "Leads the DESIGN sub-team. The orchestrator talks ONLY to design_lead for Phase 1; design_lead runs product_owner → ux_designer → backend_arch → whitepaper_writer → design_critic and hands back the approved whitepaper.",
+      "role": "leader",
+      "description": "Leads the DESIGN sub-team. The orchestrator talks ONLY to design_lead; design_lead directs product_owner, ux_designer, backend_arch, whitepaper_writer and design_critic, and hands back the approved whitepaper.",
       "icon": "owl:owl_orchestrator1",
       "default_model_id": "auto|balanced",
-      "extra_prompt": "You LEAD the design sub-team. The orchestrator hands you a product/design task; you run the design phase and return ONE consolidated result. You talk ONLY to the orchestrator — it never dispatches your members directly.\n\nTo run the design phase, dispatch @product_owner with the product goal (and the working directory if one was given). Your sub-team then flows automatically along the arrows: product_owner (user discovery) → ux_designer (wireframes + components) → backend_arch (data model + API) → whitepaper_writer (consolidates everything into whitepaper.json on disk) → design_critic (APPROVE / REVISE review). Each step builds on the previous one's output.\n\nWhen the design_critic's verdict comes back, consolidate into ONE reply for the orchestrator: the whitepaper.json path, the APPROVE / REVISE verdict, and a one-line summary. If REVISE, include the critic's specific gaps so the orchestrator can decide whether to re-run you. Do NOT write files or code yourself — your members do the actual work; you plan, delegate, and consolidate."
+      "extra_prompt": "You LEAD the design sub-team. The orchestrator delegates a product/design task to you; you direct YOUR members and hand back ONE consolidated result. You talk ONLY to the orchestrator — it never reaches your members directly.\n\nYour members (dispatch only the ones the current step needs, in order — you'll be re-invoked to continue):\n  - product_owner: user discovery / vision. Run this FIRST on a new product.\n  - ux_designer: screen wireframes, flows, FE component breakdown.\n  - backend_arch: data model, API endpoints, auth, persistence.\n  - whitepaper_writer: consolidates the ux + backend outputs into whitepaper.json on disk.\n  - design_critic: reviews whitepaper.json — APPROVE / REVISE.\n\nTypical flow across turns: product_owner → (ux_designer + backend_arch) → whitepaper_writer → design_critic. Pass each member exactly the upstream output it needs. When design_critic returns, consolidate into ONE reply for the orchestrator: the whitepaper.json path, the APPROVE / REVISE verdict, and a one-line summary. If REVISE, include the critic's specific gaps. Do NOT write files or code yourself — your members do the work; you plan, delegate, and consolidate."
     },
     {
       "name": "product_owner",
@@ -134,19 +135,15 @@
   "graph": {
     "edges": [
       { "source": "orchestrator", "target": "design_lead" },
-      { "source": "design_lead", "target": "orchestrator" },
       { "source": "design_lead", "target": "product_owner" },
-      { "source": "product_owner", "target": "ux_designer" },
-      { "source": "ux_designer", "target": "backend_arch" },
-      { "source": "backend_arch", "target": "whitepaper_writer" },
-      { "source": "whitepaper_writer", "target": "design_critic" },
+      { "source": "design_lead", "target": "ux_designer" },
+      { "source": "design_lead", "target": "backend_arch" },
+      { "source": "design_lead", "target": "whitepaper_writer" },
+      { "source": "design_lead", "target": "design_critic" },
       { "source": "orchestrator", "target": "frontend_coder" },
-      { "source": "frontend_coder", "target": "code_critic" },
       { "source": "orchestrator", "target": "backend_coder" },
-      { "source": "backend_coder", "target": "code_critic" },
-      { "source": "code_critic", "target": "orchestrator" },
-      { "source": "orchestrator", "target": "docs_writer" },
-      { "source": "docs_writer", "target": "orchestrator" }
+      { "source": "orchestrator", "target": "code_critic" },
+      { "source": "orchestrator", "target": "docs_writer" }
     ]
   }
 }

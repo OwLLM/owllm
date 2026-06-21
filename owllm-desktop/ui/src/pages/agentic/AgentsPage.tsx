@@ -5434,6 +5434,11 @@ function buildOrchestratorPrompt(
   /// DISPATCH guidance so editing the skill in Studio changes this prompt; falls
   /// back to a baked-in default when the skill is missing.
   parallelGuidance?: string,
+  /// Pre-built SKILL block (skillRuntime.buildSkillBlock) for the skills equipped
+  /// ON THE ORCHESTRATOR. Same mechanism specialists use — so ANY skill (incl.
+  /// downloaded community/Anthropic packs) equipped on the orchestrator is injected
+  /// here, not silently ignored. Resolved async by the caller.
+  orchSkillBlock?: string,
 ): string {
   // Edge-seeded roster (P0-2, §0.4 lockstep with dispatch.ts): with a
   // graph present the orchestrator only sees its edge-wired specialists.
@@ -5546,6 +5551,7 @@ function buildOrchestratorPrompt(
     directivesBlock,
     directorBlock,
     parallelBlock,
+    (orchSkillBlock && orchSkillBlock.trim()) ? `\n${orchSkillBlock.trim()}` : "",
     "",
     `YOUR SPECIALISTS (use their EXACT names when dispatching):`,
     [roster, criticRosterLine].filter(Boolean).join("\n") || "  (none — solo)",
@@ -8663,7 +8669,17 @@ export default function AgentsPage() {
           if (pp.length && pp[0].body.trim()) parallelGuidance = pp[0].body;
         } catch { /* fall back to the baked-in default */ }
       }
-      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance);
+      // The orchestrator consumes its OWN equipped skills exactly like specialists
+      // do — so any skill (incl. downloaded community/Anthropic packs) equipped on
+      // the orchestrator is injected, not silently dropped. Same id sources as the
+      // specialist path: role allowlist + team extras + per-project grant.
+      const orchSkillIds = [
+        ...(roleByName.get(orch.base)?.skillAllowlist ?? []),
+        ...(orch.extraSkills ?? []),
+        ...(perAgentSkills.get(orch.name) ?? []),
+      ];
+      const orchSkillBlock = orchSkillIds.length ? buildSkillBlock(await resolveAgentSkills(orchSkillIds)) : "";
+      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
       let orchReply: string;
@@ -9284,7 +9300,7 @@ export default function AgentsPage() {
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance), integrationInput,
+          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
@@ -9361,7 +9377,7 @@ export default function AgentsPage() {
           try {
             const revised = await streamChatCompletion(
               port, finalModel, providerFor(finalModel),
-              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance),
+              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock),
               [
                 "Your final answer:",
                 finalReply,

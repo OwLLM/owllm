@@ -15,6 +15,7 @@
 // now (one CardState entry per subscription OR api spec).
 
 import { useEffect, useRef, useState } from "react";
+import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { invoke, Channel } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -816,37 +817,12 @@ function TabButton({ label, active, disabled, onClick }: { label: string; active
 // -----------------------------------------------------------------------
 function InstallLogPanel({ stacked = false, embedded = false }: { stacked?: boolean; embedded?: boolean }) {
   const [lines, setLines] = useState<LogLine[]>(LOG_HUB.snapshot());
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-  // Track whether the user has scrolled up. While true, auto-scroll
-  // is suppressed so new lines don't yank them away from what they
-  // were reading. Re-arms (becomes false) as soon as they scroll back
-  // to the bottom. Default false so the first new line auto-pins.
-  const stuckBottomRef = useRef(true);
+  // Sticky auto-scroll: land at the bottom when the log first mounts, then
+  // follow new lines only while the user is near the bottom (contentKey = line
+  // count) — never yank a user who scrolled up to read.
+  const logSticky = useStickyScroll(lines.length);
 
   useEffect(() => LOG_HUB.subscribe(setLines), []);
-
-  // Listen to user scrolls and recompute the stuck-to-bottom flag.
-  // We use a 6 px slop so micro-pixels of rounding don't unstick us.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    const onScroll = () => {
-      const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-      stuckBottomRef.current = distFromBottom <= 6;
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, []);
-
-  // After every new batch of lines, snap to the bottom IFF the user
-  // hasn't scrolled away. requestAnimationFrame gives the browser a
-  // chance to lay out the new line so scrollHeight is up to date.
-  useEffect(() => {
-    if (!stuckBottomRef.current) return;
-    const el = scrollRef.current;
-    if (!el) return;
-    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
-  }, [lines]);
 
   // When `embedded`, the parent RightRail provides the chrome (tab bar
   // and clear button). Strip our own header so we don't double up.
@@ -881,7 +857,8 @@ function InstallLogPanel({ stacked = false, embedded = false }: { stacked?: bool
         </div>
       )}
       <div
-        ref={scrollRef}
+        ref={logSticky.ref}
+        onScroll={logSticky.onScroll}
         style={{
           flex: 1, overflowY: "auto",
           padding: "8px 12px",

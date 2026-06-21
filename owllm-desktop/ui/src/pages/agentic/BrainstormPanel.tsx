@@ -14,6 +14,7 @@
 
 import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useStickyScroll } from "../../hooks/useStickyScroll";
 import {
   type RoleData,
   type ModelInfo,
@@ -143,13 +144,10 @@ export default function BrainstormPanel(props: Props) {
   const [briefText, setBriefText] = useState("");
   const [boardView, setBoardView] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
-  const logRef = useRef<HTMLDivElement | null>(null);
-
-  // Sticky auto-scroll on new lines.
-  useEffect(() => {
-    const el = logRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [lines]);
+  // Sticky auto-scroll: land at the bottom when the panel (re)opens (openKey =
+  // open) and follow new log lines only while the user is near the bottom
+  // (contentKey = line count) — never yank a user who scrolled up to read.
+  const logSticky = useStickyScroll(lines.length, open);
 
   // Reset when reopened.
   useEffect(() => {
@@ -587,7 +585,8 @@ export default function BrainstormPanel(props: Props) {
           {/* Log viewer */}
           {!(done && boardView) && (
           <div
-            ref={logRef}
+            ref={logSticky.ref}
+            onScroll={logSticky.onScroll}
             style={{
               flex: 1, minHeight: 200, maxHeight: "50vh", overflowY: "auto",
               padding: 12,

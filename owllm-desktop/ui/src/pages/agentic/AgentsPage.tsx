@@ -115,19 +115,9 @@ function setAgentModelOverride(pid: string, agent: string, modelId: string): voi
 function loadAgentModelsForProject(pid: string, graphJson?: string | null): Map<string, string> {
   const m = new Map<string, string>();
   if (!pid) return m;
-  const prefix = `owllm:agent-model:${pid}:`;
-  try {
-    for (let i = 0; i < localStorage.length; i++) {
-      const k = localStorage.key(i);
-      if (!k || !k.startsWith(prefix)) continue;
-      const v = localStorage.getItem(k);
-      if (v && v.trim()) m.set(k.slice(prefix.length), v);
-    }
-  } catch { /* private mode */ }
-  // The project's DB graph_json is AUTHORITATIVE and survives an app
-  // reinstall/update — which wipes the WebView2 localStorage above and was the
-  // root cause of "I have to re-pick every agent's model on every reboot".
-  // Overlay it on top of any (legacy) localStorage values.
+  // BASE layer: the project's DB graph_json. It survives an app reinstall/update
+  // (which wipes WebView2 localStorage), so it's the fallback that keeps picks
+  // across reinstalls.
   if (graphJson && graphJson.trim()) {
     try {
       const am = JSON.parse(graphJson)?.agentModels;
@@ -137,8 +127,23 @@ function loadAgentModelsForProject(pid: string, graphJson?: string | null): Map<
           if (typeof v === "string" && v.trim()) m.set(k, v);
         }
       }
-    } catch { /* malformed graph_json → keep localStorage values */ }
+    } catch { /* malformed graph_json → fall through to localStorage */ }
   }
+  // OVERLAY: localStorage is written SYNCHRONOUSLY on every pick, so it is the
+  // FRESHEST source on a normal restart. It must WIN over graph_json, whose
+  // writer is debounced + guarded (skips while a template is active) and can lag
+  // behind — the stale graph_json overwriting the fresh pick is exactly the
+  // "old models come back at restart" bug. On a reinstall localStorage is empty,
+  // so the graph_json base above stands.
+  const prefix = `owllm:agent-model:${pid}:`;
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith(prefix)) continue;
+      const v = localStorage.getItem(k);
+      if (v && v.trim()) m.set(k.slice(prefix.length), v);
+    }
+  } catch { /* private mode */ }
   return m;
 }
 
@@ -156,6 +161,19 @@ function setAgentVoiceOverride(pid: string, agent: string, voice: VoiceConfig): 
 function loadAgentVoicesForProject(pid: string, graphJson?: string | null): Map<string, VoiceConfig> {
   const m = new Map<string, VoiceConfig>();
   if (!pid) return m;
+  // BASE: DB graph_json (survives reinstall). OVERLAY: localStorage wins (freshest
+  // per-pick write). Same precedence + reasoning as loadAgentModelsForProject.
+  if (graphJson && graphJson.trim()) {
+    try {
+      const av = JSON.parse(graphJson)?.agentVoices;
+      if (av && typeof av === "object") {
+        for (const k of Object.keys(av)) {
+          const v = (av as Record<string, unknown>)[k];
+          if (v && typeof v === "object") m.set(k, v as VoiceConfig);
+        }
+      }
+    } catch { /* malformed graph_json → fall through to localStorage */ }
+  }
   const prefix = `owllm:agent-voice:${pid}:`;
   try {
     for (let i = 0; i < localStorage.length; i++) {
@@ -167,18 +185,6 @@ function loadAgentVoicesForProject(pid: string, graphJson?: string | null): Map<
       catch { /* skip a corrupt entry */ }
     }
   } catch { /* private mode */ }
-  // DB graph_json is authoritative + survives reinstall (see model loader).
-  if (graphJson && graphJson.trim()) {
-    try {
-      const av = JSON.parse(graphJson)?.agentVoices;
-      if (av && typeof av === "object") {
-        for (const k of Object.keys(av)) {
-          const v = (av as Record<string, unknown>)[k];
-          if (v && typeof v === "object") m.set(k, v as VoiceConfig);
-        }
-      }
-    } catch { /* malformed graph_json → keep localStorage values */ }
-  }
   return m;
 }
 // Per-agent SKILL packs + per-agent tool grants persist the same way models do:
@@ -4147,12 +4153,19 @@ function OrchestratorPane({
   const thoughtRef = useRef<HTMLDivElement>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
   const fullRef = useRef<HTMLDivElement>(null);
+  // Sticky-scroll gate (user spec): land on the latest message when the view
+  // OPENS/switches, but NEVER yank the user back down once they've scrolled UP to
+  // read. true = following the bottom (auto-scroll on); false = reading above.
+  const pinnedRef = useRef(true);
   const tailSig = (
     `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}|` +
     `${thoughts.length}:${thoughts[thoughts.length - 1]?.text?.length ?? 0}|` +
     `${toolCalls.length}:${toolCalls[toolCalls.length - 1]?.text?.length ?? 0}|` +
     `${fullChat.length}:${fullChat[fullChat.length - 1]?.text?.length ?? 0}`
   );
+  // OPEN / switch tab or focus → re-pin so the freshly-shown pane jumps to the
+  // latest message. Runs before the streaming effect below (declaration order).
+  useLayoutEffect(() => { pinnedRef.current = true; }, [effTab, focus]);
   useLayoutEffect(() => {
     if (effTab === "rules" || effTab === "userinput") return; // no log to scroll
     const ref =
@@ -4161,29 +4174,26 @@ function OrchestratorPane({
                              fullRef;
     const el = ref.current;
     if (!el) return;
-    // Auto-scroll to the latest reply BY DEFAULT (that's the
-    // expected chat behavior). The ONLY suppression: if the user
-    // is currently mid-selection inside this pane — the per-token
-    // scrollTop jump kills the drag and the user can't highlight.
-    // No 'near bottom' gate: the user did not ask for that.
     const isSelecting = () => {
       const sel = window.getSelection?.();
       return !!(sel && !sel.isCollapsed && el.contains(sel.anchorNode));
     };
-    const toBottom = () => { if (!isSelecting()) el.scrollTop = el.scrollHeight; };
+    // Follow the bottom ONLY while pinned (user is near the bottom) and not
+    // selecting text. This is the gate the old code deliberately lacked — which
+    // is exactly why scrolling up to read got fought by the per-token re-scroll.
+    const toBottom = () => { if (pinnedRef.current && !isSelecting()) el.scrollTop = el.scrollHeight; };
+    // Track scroll position: leaving the bottom stops following; returning to it
+    // resumes. ~48px slack so a near-bottom position still counts as following.
+    const onScroll = () => { pinnedRef.current = (el.scrollHeight - el.scrollTop - el.clientHeight) <= 48; };
+    el.addEventListener("scroll", onScroll, { passive: true });
     toBottom();
-    // The synchronous scrollHeight above is measured BEFORE markdown blocks,
-    // tables, and pasted images finish committing their final height, and
-    // streamed tokens keep growing it after this layout pass — so a fixed
-    // 2-frame rAF landed SHORT of the latest line (the "auto-scroll doesn't
-    // follow the last message" report). A MutationObserver re-pins on every DOM
-    // change to this pane until the deps change again, so it reliably tracks the
-    // newest content. Cheap — it only assigns scrollTop, and pauses while the
-    // user is selecting text.
+    // Streamed tokens + late-committing markdown/images keep growing the height
+    // after this layout pass; a MutationObserver re-follows on every DOM change —
+    // but still GATED by pinnedRef, so a user who scrolled up is left alone.
     const mo = new MutationObserver(() => toBottom());
     mo.observe(el, { childList: true, subtree: true, characterData: true });
     const r1 = requestAnimationFrame(toBottom);
-    return () => { mo.disconnect(); cancelAnimationFrame(r1); };
+    return () => { el.removeEventListener("scroll", onScroll); mo.disconnect(); cancelAnimationFrame(r1); };
   }, [effTab, focus, tailSig]);
 
   // ---- User-Input dock (bottom of the pane, 2026-05-28 restructure) ----
@@ -7010,7 +7020,12 @@ export default function AgentsPage() {
   const supSendAbortRef = useRef<AbortController | null>(null);
   useEffect(() => {
     const onAbort = () => {
+      // Abort BOTH controllers. A team chat routes through dispatchGoal, which
+      // runs on abortRef (NOT supSendAbortRef) — so aborting only supSendAbortRef
+      // left the real dispatch running and the Stop button looked dead. Abort
+      // whichever is live; the dispatch's finally{} clears the busy/running flags.
       try { supSendAbortRef.current?.abort(); } catch { /* already aborted */ }
+      try { abortRef.current?.abort(); } catch { /* already aborted */ }
     };
     window.addEventListener("owllm:dispatch-abort", onAbort);
     return () => window.removeEventListener("owllm:dispatch-abort", onAbort);

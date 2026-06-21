@@ -14,6 +14,7 @@
 //   data-ui="tunedTabBtn"           → Qt tuned_tab_btn
 
 import React from "react";
+import { useStickyScroll } from "../../hooks/useStickyScroll";
 import ModelCard from "./widgets/ModelCard";
 import DownloadedModelCard from "./widgets/DownloadedModelCard";
 import { recordDownloadedModels, ghostedModels } from "./modelLibrary";
@@ -593,32 +594,10 @@ export default function ModelsPage() {
   // is keyed by sourceDir+outtype; cleared on Finished/Failed and
   // replaced by the real card via refreshTuned().
   const [phantomExport, setPhantomExport] = React.useState<{ sourceDir: string; outtype: string; baseName: string } | null>(null);
-  // Auto-scroll the log box so the user always sees the last line.
-  // Sticky-bottom by intent — flips off the instant the user scrolls
-  // up to read older lines, re-arms once they're back at the bottom
-  // (6 px slop for rounding).
-  const logScrollRef = React.useRef<HTMLDivElement | null>(null);
-  const logStuckBottomRef = React.useRef(true);
-  React.useEffect(() => {
-    const el = logScrollRef.current;
-    if (!el) return;
-    const onScroll = () => {
-      const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
-      logStuckBottomRef.current = dist <= 6;
-    };
-    el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
-  }, [exportLogsOpen]); // re-attach when the box mounts/unmounts
-  React.useLayoutEffect(() => {
-    // useLayoutEffect (not useEffect) so the scrollTop write happens
-    // BEFORE the browser paints — the user never sees the box stuck
-    // at an older position. requestAnimationFrame was racing with
-    // React's commit on fast log bursts.
-    if (!logStuckBottomRef.current) return;
-    const el = logScrollRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [exportLogs, exportLogsOpen, exportStatus]);
+  // Sticky auto-scroll for the export-log box: land at the bottom when the box
+  // is opened (openKey = exportLogsOpen) and follow new lines / status changes
+  // only while the user is near the bottom — never yank a user who scrolled up.
+  const logSticky = useStickyScroll(`${exportLogs.length}:${exportStatus ?? ""}`, exportLogsOpen);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   // Download state lives in a MODULE-LEVEL store (downloadStore.ts) so the
@@ -1511,7 +1490,8 @@ export default function ModelsPage() {
             >{exportLogsOpen ? "▼" : "▶"} GGUF export logs ({exportLogs.length})</button>
             {exportLogsOpen && (
               <div
-                ref={logScrollRef}
+                ref={logSticky.ref}
+                onScroll={logSticky.onScroll}
                 style={{
                   maxHeight: 320,
                   overflowY: "auto",

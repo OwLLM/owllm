@@ -15,6 +15,7 @@ import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
+import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import {
@@ -222,7 +223,6 @@ export default function CodePage() {
   const [chatDraft, setChatDraft] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   const [chatImages, setChatImages] = useState<Attachment[]>([]);
-  const chatEndRef = useRef<HTMLDivElement | null>(null);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
   // Fallback working dir for chats with NO workspace folder selected. A pasted
   // image needs somewhere to be saved so a CLI/subscription model can READ it
@@ -236,7 +236,10 @@ export default function CodePage() {
   // truth); persist the whole list whenever it changes.
   const chatMsgs: ChatMsg[] = chats.find((c) => c.id === chatId)?.messages ?? [];
   useEffect(() => { saveChats(chats); }, [chats]);
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "auto" }); }, [chats, chatId]);
+  // Sticky auto-scroll for the "Just chat" transcript: land at the bottom when
+  // the view opens or you switch threads (openKey = chatId), follow streaming
+  // content only while the user is near the bottom (contentKey = message count).
+  const chatSticky = useStickyScroll(chatMsgs.length, chatId);
   const updateThread = (id: string, fn: (m: ChatMsg[]) => ChatMsg[], title?: string) =>
     setChats((cs) => cs.map((c) => c.id === id
       ? { ...c, ts: Date.now(), title: (!c.title || c.title === "New chat") && title ? title : c.title, messages: fn(c.messages) }
@@ -262,8 +265,6 @@ export default function CodePage() {
     e.preventDefault();
     void addChatFiles(imgs);
   };
-  const scrollRef = useRef<HTMLDivElement | null>(null);
-
   // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
   // shared chatRuntime store so it survives leaving this page and coming back.
   // Setter shims keep the same signatures as useState so the rest of the file
@@ -348,11 +349,10 @@ export default function CodePage() {
     };
   }, []);
 
-  // Auto-scroll the transcript as tokens / tool events land.
-  useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages]);
+  // Sticky auto-scroll for the project transcript: land at the bottom when a
+  // project opens/switches (openKey = workspace), follow streaming tokens / tool
+  // events only while the user is near the bottom (contentKey = message count).
+  const transcriptSticky = useStickyScroll(messages.length, workspace);
 
   // Switch the page to a project folder: save whatever's open now, then load
   // THAT folder's saved session (conversation + Kanban + draft + model), or
@@ -993,7 +993,7 @@ export default function CodePage() {
           </div>
           {chatMsgs.length > 0 && <button onClick={() => chatId && updateThread(chatId, () => [])} title="Clear this conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
         </div>
-        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+        <div ref={chatSticky.ref} onScroll={chatSticky.onScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
           {chatMsgs.length === 0 && (
             <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", maxWidth: 440 }}>
               <div style={{ fontSize: 34, marginBottom: 8 }}>💬</div>
@@ -1009,7 +1009,6 @@ export default function CodePage() {
               <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} />
             );
           })}
-          <div ref={chatEndRef} />
         </div>
         <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
           {chatImages.length > 0 && (
@@ -1380,7 +1379,8 @@ export default function CodePage() {
           </div>
         )}
       <div
-        ref={scrollRef}
+        ref={transcriptSticky.ref}
+        onScroll={transcriptSticky.onScroll}
         className="selectable-chat"
         style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
       >

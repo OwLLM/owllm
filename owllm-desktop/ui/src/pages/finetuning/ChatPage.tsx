@@ -482,20 +482,35 @@ export default function ChatPage() {
     }
   }
 
-  // Auto-scroll each column's transcript when new tokens land. Depends on
-  // the store session versions (messages now live in the store).
+  // Sticky auto-scroll gate, per column. true = following the bottom; false =
+  // the user scrolled UP to read, so we leave their position alone. This is the
+  // gate the old unconditional `scrollTop = scrollHeight` deliberately lacked —
+  // which is exactly why scrolling up to read got fought by the per-token jump.
+  const pinnedRefs = useRef<Record<string, boolean>>({ A: true, B: true, C: true });
+  // Leaving the bottom stops following; returning to it resumes. ~48px slack so
+  // a near-bottom position still counts as following.
+  const onTranscriptScroll = (id: "A" | "B" | "C") => {
+    const el = transcriptRefs.current[id];
+    if (!el) return;
+    pinnedRefs.current[id] = (el.scrollHeight - el.scrollTop - el.clientHeight) <= 48;
+  };
+  // OPEN / add a column → re-pin so the freshly-shown transcript jumps to the
+  // latest message on the next paint.
+  useEffect(() => { pinnedRefs.current = { A: true, B: true, C: true }; }, [count]);
+  // New tokens land → follow the bottom ONLY while pinned (user near the bottom)
+  // and not mid-selection. Depends on the store session versions.
   useEffect(() => {
     for (const id of ["A", "B", "C"] as const) {
       const el = transcriptRefs.current[id];
       if (!el) continue;
-      // Always auto-scroll to bottom. ONLY skip while the user is
-      // mid-selection inside this transcript — the unconditional
-      // scrollTop jump used to break text highlighting.
+      if (!pinnedRefs.current[id]) continue;
+      // Skip while the user is mid-selection inside this transcript — the
+      // unconditional scrollTop jump used to break text highlighting.
       const sel = window.getSelection?.();
       if (sel && !sel.isCollapsed && el.contains(sel.anchorNode)) continue;
       el.scrollTop = el.scrollHeight;
     }
-  }, [sessA.version, sessB.version, sessC.version]);
+  }, [count, sessA.version, sessB.version, sessC.version]);
 
   // Config-only column patch (model/system/temperature/etc). Message,
   // busy and error patches are routed to the store instead.
@@ -1514,6 +1529,7 @@ export default function ChatPage() {
                 <div
                   className="selectable-chat"
                   ref={(el) => { transcriptRefs.current[col.id] = el; }}
+                  onScroll={() => onTranscriptScroll(col.id)}
                   style={{
                     flex: 1, overflowY: "auto", minHeight: 0,
                     padding: 12, marginTop: 6,

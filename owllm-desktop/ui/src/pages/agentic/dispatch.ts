@@ -1092,6 +1092,16 @@ export async function ensureCliWarm(backend: "claude_cli" | "codex_cli"): Promis
   await warming;
 }
 
+// Drop the cached warm-up so the NEXT ensureCliWarm() actually re-runs the
+// token-refresh round-trip. ensureCliWarm dedupes on the resolved promise and
+// keeps it for the whole app session, so it only ever refreshes the OAuth token
+// ONCE. That's wrong for a LONG agentic run: the CLI's access token has a TTL
+// and expires mid-workflow → every later call 401s with nothing re-warming.
+// Call this on a 401 to force a fresh refresh before retrying.
+export function clearCliWarm(backend: "claude_cli" | "codex_cli"): void {
+  _warmCli.delete(backend);
+}
+
 // ---------- Attachment helpers ----------
 
 export function imageAttachments(atts?: Attachment[]): Attachment[] {

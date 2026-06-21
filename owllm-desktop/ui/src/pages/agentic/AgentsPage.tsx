@@ -52,6 +52,7 @@ import {
   streamLocalChat,
   runCodexCliStream,
   ensureCliWarm,
+  clearCliWarm,
   parseDispatchesDetailed,
   unresolvedCorrectionMessage,
   resolveAutoModel,
@@ -5897,6 +5898,66 @@ function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem[]): st
   return lines.join("\n");
 }
 
+// ── Claude CLI auth-retry (mid-run 401 resilience) ─────────────────────────
+// The Claude Code CLI's OAuth access token has a TTL. A long agentic run can
+// outlive it, so a specialist's CLI call 401s ("Invalid authentication
+// credentials") even though sign-in is fine — and ensureCliWarm only refreshes
+// ONCE per session, so nothing recovers. On a 401 we: force a fresh token
+// refresh (clearCliWarm + ensureCliWarm), PAUSE the team, and retry on a
+// backoff (10s → 30s → 2min). After the schedule is exhausted the error
+// propagates (and the Critical-Thinker-style advisory handling still applies).
+const CLI_AUTH_BACKOFFS_MS = [10_000, 30_000, 120_000]; // 10s, 30s, 2min
+
+function isCliAuthError(msg: string): boolean {
+  return /\b401\b|invalid authentication|failed to authenticate|authentication_error|not logged in|unauthorized/i.test(msg);
+}
+
+/// Sleep that rejects immediately if the run is cancelled mid-wait.
+function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(new DOMException("aborted", "AbortError")); return; }
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); };
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/// Set by the AgentsPage component so the retry can surface a "team paused /
+/// retrying" notice (and a "recovered" notice) in the user-facing thread.
+/// Module-level to avoid threading a callback through every call site.
+type AuthWaitInfo =
+  | { kind: "wait"; attempt: number; total: number; waitMs: number; backend: string }
+  | { kind: "recovered"; backend: string };
+let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;
+
+/// Run a Claude CLI call, retrying on auth (401) failures with backoff. Forces a
+/// token refresh before each retry. Non-auth errors are NOT retried here (they
+/// bubble straight up). Honors the run's AbortSignal during the wait.
+async function withClaudeAuthRetry<T>(
+  backend: "claude_cli",
+  signal: AbortSignal,
+  fn: () => Promise<T>,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const result = await fn();
+      if (attempt > 0) _authWaitHandler?.({ kind: "recovered", backend }); // we recovered after a 401
+      return result;
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (signal.aborted) throw e;
+      if (!isCliAuthError(msg) || attempt >= CLI_AUTH_BACKOFFS_MS.length) throw e;
+      const waitMs = CLI_AUTH_BACKOFFS_MS[attempt];
+      // Root-cause mitigation: the one-time warm went stale; drop it and
+      // re-warm so the CLI refreshes its OAuth token before we retry.
+      try { clearCliWarm(backend); await ensureCliWarm(backend); } catch { /* retry regardless */ }
+      _authWaitHandler?.({ kind: "wait", attempt: attempt + 1, total: CLI_AUTH_BACKOFFS_MS.length, waitMs, backend });
+      try { await sleepAbortable(waitMs, signal); }
+      catch { throw e; } // run cancelled during the wait → surface original error
+    }
+  }
+}
+
 async function streamAnthropic(
   modelId: string,
   route: CloudRoute,
@@ -5972,18 +6033,20 @@ async function streamAnthropic(
       }
     };
     if (onThought) {
-      return await runWithSessionRetry((sid) => runClaudeCliStream({
-        systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
-        autoApprove: autoApprove ?? false, allowedTools,
-        model: cliModel, effort: claudeEffort, sessionId: sid,
-        onDelta, onThought,
-      }));
+      return await withClaudeAuthRetry("claude_cli", signal, () =>
+        runWithSessionRetry((sid) => runClaudeCliStream({
+          systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
+          autoApprove: autoApprove ?? false, allowedTools,
+          model: cliModel, effort: claudeEffort, sessionId: sid,
+          onDelta, onThought,
+        })));
     }
-    const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
-      systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
-      autoApprove: autoApprove ?? false,
-      model: cliModel, effort: claudeEffort, sessionId: sid,
-    }));
+    const reply = await withClaudeAuthRetry("claude_cli", signal, () =>
+      runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
+        systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
+        autoApprove: autoApprove ?? false,
+        model: cliModel, effort: claudeEffort, sessionId: sid,
+      })));
     if (reply) onDelta(reply);
     return reply;
   }
@@ -5996,20 +6059,20 @@ async function streamAnthropic(
       if (status?.claude_cli) {
         await ensureCliWarm("claude_cli");
         if (onThought) {
-          return await runClaudeCliStream({
+          return await withClaudeAuthRetry("claude_cli", signal, () => runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
             model: cliModel, effort: claudeEffort, sessionId,
             onDelta, onThought,
-          });
+          }));
         }
-        const reply = await invoke<string>("claude_cli_complete", {
+        const reply = await withClaudeAuthRetry("claude_cli", signal, () => invoke<string>("claude_cli_complete", {
           systemPrompt,
           userMessage: cliPrompt,
           cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
           model: cliModel, effort: claudeEffort, sessionId,
-        });
+        }));
         if (reply) onDelta(reply);
         return reply;
       }
@@ -7138,6 +7201,30 @@ export default function AgentsPage() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Register the Claude-CLI auth-retry notifier so a mid-run 401 surfaces a
+  // visible "team paused / retrying" notice in the user thread while the token
+  // refreshes and the call backs off (10s → 30s → 2min). See withClaudeAuthRetry.
+  useEffect(() => {
+    _authWaitHandler = (info) => {
+      if (info.kind === "recovered") {
+        setSupChat(prev => [...prev, {
+          role: "system", color: "#7ff0c5",
+          text: `✓ Claude re-authenticated — resuming the team.`,
+          ts: Date.now(),
+        }]);
+        return;
+      }
+      const secs = Math.round(info.waitMs / 1000);
+      const human = secs >= 60 ? `${Math.round(secs / 60)} min` : `${secs}s`;
+      setSupChat(prev => [...prev, {
+        role: "system", color: "#ffb74d",
+        text: `⏸ Claude sign-in returned 401 (token expired mid-run) — refreshing it and retrying in ${human} (attempt ${info.attempt}/${info.total}). The team is paused, not stopped.`,
+        ts: Date.now(),
+      }]);
+    };
+    return () => { _authWaitHandler = null; };
+  }, [setSupChat]);
 
   // Initial load — projects, teams, roles, bridges in parallel.
   useEffect(() => {

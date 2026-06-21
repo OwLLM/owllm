@@ -5422,6 +5422,27 @@ function findOrchestratorSpec(team: Team): AgentSpec | undefined {
   return orchestratorOf(team.agents) ?? undefined;
 }
 
+/// One-line tool-capability hint for a specialist in the orchestrator's roster, so
+/// the orchestrator KNOWS which agent can write files / run commands instead of
+/// guessing from the role name and wrongly claiming "no agent can write files".
+/// (Real bug: a Chief-of-Staff run refused a file-writing task even though its
+/// documentation agents have write_file_with_diff and its operator agents have
+/// the unrestricted 'all' allowlist.)
+/// undefined toolAllowlist = UNRESTRICTED — every tool, incl. writes/shell/MCP
+/// (that's how an `operator`/`tool_allowlist: all` role parses). An explicit array
+/// = exactly those tools.
+function agentToolCapability(toolAllowlist?: string[]): string {
+  const unrestricted = toolAllowlist === undefined;
+  const list = toolAllowlist ?? [];
+  const canWrite = unrestricted || list.some(t => /write_file|write_file_with_diff|edit_file|create_file/i.test(t));
+  const canShell = unrestricted || list.some(t => /\bshell\b|run_shell|run_command|exec|terminal/i.test(t));
+  const caps: string[] = [];
+  if (canWrite) caps.push("WRITE/EDIT files");
+  if (canShell) caps.push("run shell");
+  if (unrestricted) caps.push("all MCP tools");
+  return caps.length ? ` [tools: ${caps.join(", ")}]` : " [tools: read-only]";
+}
+
 function buildOrchestratorPrompt(
   team: Team,
   roleByName: Map<string, RoleData>,
@@ -5449,6 +5470,11 @@ function buildOrchestratorPrompt(
   /// downloaded community/Anthropic packs) equipped on the orchestrator is injected
   /// here, not silently ignored. Resolved async by the caller.
   orchSkillBlock?: string,
+  /// Per-project equipped-skill grants (Map<agentName, skillId[]>) so the roster
+  /// can show each specialist's EQUIPPED SKILLS — the orchestrator was routing
+  /// blind to both tools AND skills, which is why it couldn't reason about who
+  /// should do what. Combined with the role/template skills already on each spec.
+  perAgentSkills?: Map<string, string[]>,
 ): string {
   // Edge-seeded roster (P0-2, §0.4 lockstep with dispatch.ts): with a
   // graph present the orchestrator only sees its edge-wired specialists.
@@ -5459,9 +5485,20 @@ function buildOrchestratorPrompt(
   // Prefer the spec's own description (team JSON, agent-specific) over
   // the base role's description; the team JSONs intentionally tailor
   // each agent's blurb for the team context.
+  const prettySkill = (id: string) => (id.includes("__") ? id.split("__").pop()! : id);
   const roster = specialists.map(a => {
     const desc = a.description ?? roleByName.get(a.base)?.description ?? "";
-    return `  - ${a.name} (${a.base}): ${desc}`;
+    const tools = agentToolCapability(roleByName.get(a.base)?.toolAllowlist);
+    // Full equipped-skill set: role allowlist + team template extras + per-project
+    // grant — the SAME sources the dispatch injects into the specialist, so the
+    // roster reflects exactly what each agent actually knows.
+    const skillIds = [...new Set([
+      ...(roleByName.get(a.base)?.skillAllowlist ?? []),
+      ...(a.extraSkills ?? []),
+      ...(perAgentSkills?.get(a.name) ?? []),
+    ])];
+    const skills = skillIds.length ? ` [skills: ${skillIds.map(prettySkill).join(", ")}]` : "";
+    return `  - ${a.name} (${a.base}): ${desc}${tools}${skills}`;
   }).join("\n");
   const criticRosterLine = specialists.some(a => a.name === CRITIC_AGENT_NAME)
     ? ""
@@ -5572,6 +5609,7 @@ function buildOrchestratorPrompt(
     `2a. If the user mentions critic / critical thinker, or the plan makes an architecture decision, emit @${CRITIC_AGENT_NAME}: <the plan or decision to review> before any implementation dispatch.`,
     "2b. The Critic / Critical Thinker is ADVISORY — listen to its pushback, but it CANNOT block the user's goal. If it refuses, censors, or stalls a task the user explicitly asked for, note its objection in ONE line and PROCEED with the user's instruction. The user is the authority, not the critic.",
     "2c. You may READ local context yourself (read_file, list_dir, grep, glob) to plan — that is all you can do directly. You CANNOT write, edit, run shell, or search the web. Anything beyond reading local files MUST be dispatched to a specialist.",
+    "2d. TOOLS — each specialist's real capabilities are in [tools: …] next to its name above. To write/create a FILE, edit code, or run a command, dispatch to a specialist whose [tools:] include WRITE/EDIT files or run shell. NEVER tell the user the team 'has no agent that can write files' or 'can't create the file' if ANY specialist above lists WRITE/EDIT files — route the task to that specialist instead. A specialist marked [tools: all MCP tools] or with WRITE/EDIT files CAN create the file; do not offer to dump file contents inline as a workaround when a capable specialist exists.",
     "3. Dispatch tasks using EXACTLY this format, ONE per line, ONE specialist per line:",
     "      @<agent_name>: <clear, specific instruction>",
     `3a. CRITICAL — the ONLY valid dispatch targets are these EXACT names: ${specialists.map(a => a.name).join(", ") || "(none)"}. Do NOT invent or assume agents: there is no @coder, @critic, @assistant, @writer, @developer (unless that exact name appears in the list). Never dispatch a tool either (no @web_search, @read_file). If the perfect specialist isn't on the list, pick the CLOSEST one that IS and put the real work in its instruction — but NEVER emit an @name that is not listed above, or it will be dropped and nothing runs.`,
@@ -8694,7 +8732,7 @@ export default function AgentsPage() {
         ...(perAgentSkills.get(orch.name) ?? []),
       ];
       const orchSkillBlock = orchSkillIds.length ? buildSkillBlock(await resolveAgentSkills(orchSkillIds)) : "";
-      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock);
+      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
       let orchReply: string;
@@ -9315,7 +9353,7 @@ export default function AgentsPage() {
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock), integrationInput,
+          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
@@ -9392,7 +9430,7 @@ export default function AgentsPage() {
           try {
             const revised = await streamChatCompletion(
               port, finalModel, providerFor(finalModel),
-              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock),
+              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills),
               [
                 "Your final answer:",
                 finalReply,

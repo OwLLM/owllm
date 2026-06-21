@@ -16,12 +16,13 @@
 //
 // Inline-styled, no graph lib, no new deps — consistent with the rest of Studio.
 
-import React, { useMemo, useState } from "react";
+import React, { useMemo, useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import ModelPicker, { type ModelInfo, type AccountsStatusLite } from "./ModelPicker";
 import { normalizeTeam } from "./teamConfig";
 import type { RoleData, Edge, Team as DispatchTeam, AgentSpec as DispatchAgentSpec } from "./dispatch";
 import { owlSrc, resolveAgentIcon, displayLabel } from "./StudioPage";
+import { CRITIC_AGENT_NAME } from "./AgentsPage";
 
 // ---- shapes the workbench consumes (structurally satisfied by StudioPage) ----
 
@@ -55,6 +56,9 @@ type WAgent = {
   modelId?: string;
   temperature?: number;
   canDispatch?: boolean;
+  /// Team-structure role (left column). "leader" = directs its own members (a
+  /// sub-orchestrator); "agent" = a worker. Drives the dispatch leader-detection.
+  role?: "leader" | "agent";
   orig: any;
 };
 
@@ -99,6 +103,7 @@ function agentsFromData(data: any): WAgent[] {
     modelId: typeof a?.default_model_id === "string" ? a.default_model_id : undefined,
     temperature: typeof a?.default_temperature === "number" ? a.default_temperature : undefined,
     canDispatch: a?.can_dispatch === true,
+    role: a?.role === "leader" ? "leader" : a?.role === "agent" ? "agent" : undefined,
     orig: a ?? {},
   }));
 }
@@ -215,11 +220,28 @@ export default function TeamWorkbench({
   }, [agents, roleByName]);
   const orchName = orch?.name ?? null;
 
+  // The Critical Thinker is a synthetic top-level peer of the orchestrator
+  // (it's a runtime concept, never in team_json — see AgentsPage). The user
+  // wants it ALWAYS present + connected to the orchestrator, so we render it
+  // here too: a read-only peer node at tier 0. It is NOT saved into the
+  // template (it isn't in `agents`), so editing/dispatch are unaffected.
+  const synthCriticName = orchName && !agents.some(a => a.name === CRITIC_AGENT_NAME) ? CRITIC_AGENT_NAME : null;
+  const graphNodes = useMemo<WAgent[]>(() => {
+    if (!synthCriticName) return agents;
+    const synth: WAgent = {
+      name: CRITIC_AGENT_NAME, base: "critical_thinker", icon: "owl:owl_critic",
+      description: "Voice of the user — reviews the orchestrator's plan. Always present, advisory.",
+      extraPrompt: "", extraSkills: [], canDispatch: false, role: "agent", orig: {},
+    };
+    return [...agents, synth];
+  }, [agents, synthCriticName]);
+
   const tiers = useMemo(() => computeTiers(agents, edges, orchName), [agents, edges, orchName]);
   const rows = useMemo(() => {
     let mx = 0; tiers.forEach(v => { mx = Math.max(mx, v); }); return mx + 1;
   }, [tiers]);
-  // group agents by tier for x-positioning
+  // group agents by tier for x-positioning (the synthetic Critical Thinker
+  // joins the orchestrator's tier 0 as a peer)
   const tierGroups = useMemo(() => {
     const g = new Map<number, string[]>();
     for (const a of agents) {
@@ -227,8 +249,12 @@ export default function TeamWorkbench({
       if (!g.has(t)) g.set(t, []);
       g.get(t)!.push(a.name);
     }
+    if (synthCriticName) {
+      if (!g.has(0)) g.set(0, []);
+      g.get(0)!.push(synthCriticName);
+    }
     return g;
-  }, [agents, tiers]);
+  }, [agents, tiers, synthCriticName]);
   const nodePos = useMemo(() => {
     const pos = new Map<string, { x: number; y: number }>();
     tierGroups.forEach((names, t) => {
@@ -238,6 +264,33 @@ export default function TeamWorkbench({
     });
     return pos;
   }, [tierGroups, rows]);
+
+  // measure the graph canvas so edges can be routed in real pixel space (SVG
+  // <path> needs user units, not "%") — gives clean org-chart bezier connectors
+  // that leave the bottom of the source and enter the top of the target.
+  const graphRef = useRef<HTMLDivElement>(null);
+  const [graphSize, setGraphSize] = useState({ w: 640, h: 220 });
+  useEffect(() => {
+    const el = graphRef.current; if (!el) return;
+    const measure = () => setGraphSize({ w: el.clientWidth, h: el.clientHeight });
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [rows]);
+  const NODE_HALF = 15; // ~half the pill height, so arrows dock to node edges
+  const edgePath = (s: { x: number; y: number }, t: { x: number; y: number }) => {
+    const { w, h } = graphSize;
+    const sx = (s.x / 100) * w, sy = (s.y / 100) * h;
+    const tx = (t.x / 100) * w, ty = (t.y / 100) * h;
+    const down = ty >= sy;
+    const sy2 = sy + (down ? NODE_HALF : -NODE_HALF);
+    const ty2 = ty + (down ? -NODE_HALF : NODE_HALF);
+    const c1y = sy2 + (ty2 - sy2) * 0.5;
+    const c2y = ty2 - (ty2 - sy2) * 0.5;
+    return `M ${sx.toFixed(1)} ${sy2.toFixed(1)} C ${sx.toFixed(1)} ${c1y.toFixed(1)} ${tx.toFixed(1)} ${c2y.toFixed(1)} ${tx.toFixed(1)} ${ty2.toFixed(1)}`;
+  };
+  const selectedNodeName = selection.kind === "agent" ? selection.name : null;
 
   // ---- mutations ----
   const patchAgent = (name: string, patch: Partial<WAgent>) => {
@@ -293,6 +346,16 @@ export default function TeamWorkbench({
     setSelection({ kind: "team" });
     mark();
   };
+  /// Toggle a directed edge source→target on/off (used by the take-from /
+  /// dispatch-to pickers). No self-edges; idempotent.
+  const toggleEdge = (source: string, target: string) => {
+    if (source === target) return;
+    setEdges(es => {
+      const has = es.some(e => e.source === source && e.target === target);
+      return has ? es.filter(e => !(e.source === source && e.target === target)) : [...es, { source, target }];
+    });
+    mark();
+  };
   const swapEdge = (source: string, target: string) => {
     setEdges(es => es.map(e => (e.source === source && e.target === target ? { source: target, target: source } : e)));
     setSelection({ kind: "edge", source: target, target: source });
@@ -326,6 +389,7 @@ export default function TeamWorkbench({
         if (a.modelId?.trim()) out.default_model_id = a.modelId.trim(); else delete out.default_model_id;
         if (a.temperature != null) out.default_temperature = a.temperature; else delete out.default_temperature;
         if (a.canDispatch) out.can_dispatch = true; else delete out.can_dispatch;
+        if (a.role === "leader" || a.role === "agent") out.role = a.role; else delete out.role;
         return out;
       });
       data.graph = { ...(data.graph ?? {}), edges: normalized.edges };
@@ -419,7 +483,7 @@ export default function TeamWorkbench({
       {/* ---- 3 panes ---- */}
       <div style={{ flex: 1, display: "flex", gap: 10, minHeight: 0 }}>
         {/* LEFT — roster bench */}
-        <div style={{ flex: 3, display: "flex", flexDirection: "column", gap: 8, minWidth: 0, overflow: "auto" }}>
+        <div style={{ flex: "20 1 0", display: "flex", flexDirection: "column", gap: 8, minWidth: 0, overflow: "auto" }}>
           <div style={lbl}>Roster · loadout</div>
           {agents.map(a => {
             const role = roleByName.get(a.base);
@@ -429,8 +493,10 @@ export default function TeamWorkbench({
             const sel = selection.kind === "agent" && selection.name === a.name;
             const isOrch = a.name === orchName;
             const warn = report.warnings.some(w => w.includes(`"${a.name}"`));
+            const effRole = a.role ?? (a.canDispatch ? "leader" : "agent");
+            const isLeader = !isOrch && effRole === "leader";
             return (
-              <button key={a.name} onClick={() => setSelection({ kind: "agent", name: a.name })}
+              <div key={a.name} role="button" tabIndex={0} onClick={() => setSelection({ kind: "agent", name: a.name })}
                 style={{ ...card, textAlign: "left", cursor: "pointer", padding: "8px 10px", display: "flex", gap: 9, alignItems: "center",
                   borderColor: sel ? "var(--accent)" : warn ? "rgba(255,200,80,0.5)" : "var(--border)",
                   boxShadow: sel ? "0 0 0 1px var(--accent)" : undefined,
@@ -438,7 +504,8 @@ export default function TeamWorkbench({
                 <img src={owlSrc(resolveAgentIcon(a.icon, a.base))} alt="" width={30} height={30} style={{ borderRadius: 7, flexShrink: 0 }} />
                 <div style={{ minWidth: 0, flex: 1 }}>
                   <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-                    {displayLabel(a.name)} {isOrch && <span style={{ fontSize: 9, color: ACCENT }}>◆ orch</span>}
+                    {displayLabel(a.name)}
+                    {isOrch && <span style={{ fontSize: 9, color: ACCENT, marginLeft: 5 }}>◆ orch</span>}
                   </div>
                   <div style={{ fontSize: 10.5, color: "var(--fg-muted)", display: "flex", gap: 8, marginTop: 2 }}>
                     <span title="tools (from role)">⚙ {toolLabel}</span>
@@ -446,8 +513,26 @@ export default function TeamWorkbench({
                     {ctx > 0 && <span title="equipped skill context" style={{ color: ctx > 6000 ? "#ffd97a" : "var(--fg-subtle)" }}>{kLabel(ctx)} ctx</span>}
                   </div>
                 </div>
-                {warn && <span title="see notices" style={{ color: "#ffd97a", fontSize: 13 }}>⚠</span>}
-              </button>
+                {warn && <span title="see notices" style={{ color: "#ffd97a", fontSize: 13, flexShrink: 0 }}>⚠</span>}
+                {/* inline role toggle — the user assigns leader/agent right here */}
+                {isOrch ? (
+                  <span style={{ fontSize: 9, color: ACCENT, flexShrink: 0, fontWeight: 700 }}>orchestrator</span>
+                ) : (
+                  <div style={{ display: "flex", gap: 0, flexShrink: 0, border: "1px solid var(--border)", borderRadius: 7, overflow: "hidden" }}
+                    onClick={e => e.stopPropagation()}>
+                    <button title="Acts as a normal team member"
+                      onClick={() => patchAgent(a.name, { role: "agent", canDispatch: false })}
+                      style={{ border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700, padding: "3px 7px",
+                        background: !isLeader ? "rgba(var(--accent-rgb),0.16)" : "transparent",
+                        color: !isLeader ? "var(--fg-strong)" : "var(--fg-subtle)" }}>Agent</button>
+                    <button title="Leads a sub-team — dispatches to its own members"
+                      onClick={() => patchAgent(a.name, { role: "leader", canDispatch: true })}
+                      style={{ border: "none", cursor: "pointer", fontSize: 10, fontWeight: 700, padding: "3px 7px",
+                        background: isLeader ? "rgba(255,217,122,0.18)" : "transparent",
+                        color: isLeader ? "#ffd97a" : "var(--fg-subtle)" }}>👑</button>
+                  </div>
+                )}
+              </div>
             );
           })}
           {addOpen ? (
@@ -472,44 +557,73 @@ export default function TeamWorkbench({
         </div>
 
         {/* CENTER — derived graph + catalog */}
-        <div style={{ flex: 5, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
+        <div style={{ flex: "45 1 0", display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
           {/* derived graph */}
-          <div style={{ ...card, position: "relative", height: Math.max(150, rows * 78), overflow: "hidden", flexShrink: 0 }}>
-            <div style={{ ...lbl, position: "absolute", top: 6, left: 10, zIndex: 2 }}>Derived graph · click a node</div>
-            <svg width="100%" height="100%" style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
+          <div ref={graphRef} style={{ ...card, position: "relative", height: Math.max(170, rows * 88), overflow: "hidden", flexShrink: 0,
+            background: "linear-gradient(180deg, var(--bg-surface), var(--bg-panel))" }}>
+            <div style={{ ...lbl, position: "absolute", top: 6, left: 10, zIndex: 2 }}>Team graph · {rows} tier{rows === 1 ? "" : "s"} · click a node or arrow</div>
+            <svg width="100%" height="100%" viewBox={`0 0 ${graphSize.w} ${graphSize.h}`} preserveAspectRatio="none"
+              style={{ position: "absolute", inset: 0, pointerEvents: "none" }}>
               <defs>
-                <marker id="wb-arrow" markerWidth="8" markerHeight="8" refX="6.5" refY="3" orient="auto">
-                  <path d="M0,0 L7,3 L0,6 Z" fill="rgba(150,160,180,0.7)" />
+                <marker id="wb-arrow" markerWidth="9" markerHeight="9" refX="6.5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+                  <path d="M0,0 L7,3 L0,6 Z" fill="rgba(150,160,180,0.8)" />
+                </marker>
+                <marker id="wb-arrow-on" markerWidth="11" markerHeight="11" refX="6.5" refY="3" orient="auto" markerUnits="userSpaceOnUse">
+                  <path d="M0,0 L7,3 L0,6 Z" fill="var(--accent)" />
                 </marker>
               </defs>
               {edges.map((e, i) => {
                 const s = nodePos.get(e.source), t = nodePos.get(e.target);
                 if (!s || !t) return null;
                 const selEdge = selection.kind === "edge" && selection.source === e.source && selection.target === e.target;
+                const touches = selectedNodeName != null && (e.source === selectedNodeName || e.target === selectedNodeName);
+                const active = selEdge || touches;
+                const dim = !active && (selectedNodeName != null || selection.kind === "edge");
                 return (
-                  <line key={i} x1={`${s.x}%`} y1={`${s.y}%`} x2={`${t.x}%`} y2={`${t.y}%`}
-                    stroke={selEdge ? "var(--accent)" : "rgba(150,160,180,0.55)"} strokeWidth={selEdge ? 2.5 : 1.5}
-                    markerEnd="url(#wb-arrow)" style={{ pointerEvents: "stroke", cursor: "pointer" }}
+                  <path key={i} d={edgePath(s, t)} fill="none"
+                    stroke={active ? "var(--accent)" : "rgba(150,160,180,0.5)"}
+                    strokeWidth={active ? 2.6 : 1.6}
+                    opacity={dim ? 0.22 : 1}
+                    markerEnd={active ? "url(#wb-arrow-on)" : "url(#wb-arrow)"}
+                    style={{ pointerEvents: "stroke", cursor: "pointer", transition: "opacity .15s, stroke-width .15s" }}
                     onClick={() => setSelection({ kind: "edge", source: e.source, target: e.target })} />
                 );
               })}
+              {/* orchestrator ↔ Critical Thinker — the always-on advisory peer link (dashed, non-clickable) */}
+              {synthCriticName && orchName && (() => {
+                const s = nodePos.get(orchName), t = nodePos.get(synthCriticName);
+                if (!s || !t) return null;
+                return <path d={edgePath(s, t)} fill="none" stroke="rgba(255,184,76,0.55)" strokeWidth={1.6}
+                  strokeDasharray="5 4" markerEnd="url(#wb-arrow)" />;
+              })()}
             </svg>
-            {agents.map(a => {
+            {graphNodes.map(a => {
               const p = nodePos.get(a.name); if (!p) return null;
               const isOrch = a.name === orchName;
+              const isCritic = a.name === synthCriticName;
               const sel = selection.kind === "agent" && selection.name === a.name;
-              const unreach = (tiers.get(a.name) ?? 0) === rows - 1 && !isOrch && rows > 1 && report.changes.some(c => c.includes(`→ ${a.name}`));
+              const isLeader = !isOrch && !isCritic && (a.role === "leader" || a.canDispatch);
+              const connected = selectedNodeName != null && selectedNodeName !== a.name &&
+                edges.some(e => (e.source === selectedNodeName && e.target === a.name) || (e.target === selectedNodeName && e.source === a.name));
+              const dim = selectedNodeName != null && !sel && !connected && !isCritic;
+              const unreach = (tiers.get(a.name) ?? 0) === rows - 1 && !isOrch && !isCritic && rows > 1 && report.changes.some(c => c.includes(`→ ${a.name}`));
+              const ring = isCritic ? "rgba(255,184,76,0.7)" : sel ? "var(--accent)" : connected ? "var(--accent)" : isLeader ? "#ffd97a" : unreach ? "#ffd97a" : isOrch ? "var(--accent)" : "var(--border-strong)";
               return (
-                <button key={a.name} onClick={() => setSelection({ kind: "agent", name: a.name })}
-                  title={a.name}
+                <button key={a.name} onClick={() => { if (!isCritic) setSelection({ kind: "agent", name: a.name }); }}
+                  title={isCritic ? "Critical Thinker — always-present advisor (configure in Director Mode on the Agents page)" : a.name}
                   style={{ position: "absolute", left: `${p.x}%`, top: `${p.y}%`, transform: "translate(-50%,-50%)", zIndex: 2,
-                    display: "flex", alignItems: "center", gap: 5, cursor: "pointer",
-                    background: sel ? "rgba(var(--accent-rgb),0.18)" : isOrch ? "rgba(var(--accent-rgb),0.12)" : "var(--bg-elevated)",
-                    border: `1.5px solid ${sel ? "var(--accent)" : unreach ? "#ffd97a" : isOrch ? "var(--accent)" : "var(--border-strong)"}`,
+                    display: "flex", alignItems: "center", gap: 5, cursor: isCritic ? "default" : "pointer", opacity: dim ? 0.4 : 1,
+                    transition: "opacity .15s",
+                    background: sel ? "rgba(var(--accent-rgb),0.18)" : isOrch ? "rgba(var(--accent-rgb),0.12)" : isCritic ? "rgba(255,184,76,0.10)" : isLeader ? "rgba(255,217,122,0.10)" : "var(--bg-elevated)",
+                    border: `${sel || connected ? 2 : 1.5}px ${isCritic ? "dashed" : "solid"} ${ring}`,
+                    boxShadow: sel ? "0 0 0 3px rgba(var(--accent-rgb),0.18)" : undefined,
                     borderRadius: 999, padding: "3px 10px 3px 4px", maxWidth: "44%" }}>
                   <img src={owlSrc(resolveAgentIcon(a.icon, a.base))} alt="" width={20} height={20} style={{ borderRadius: 5 }} />
                   <span style={{ fontSize: 11.5, fontWeight: 700, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{displayLabel(a.name)}</span>
-                  {a.extraSkills.length > 0 && <span style={{ fontSize: 9, color: "#9ee6b0" }}>📚{a.extraSkills.length}</span>}
+                  {isOrch && <span title="orchestrator" style={{ fontSize: 10 }}>◆</span>}
+                  {isCritic && <span title="always-present advisor" style={{ fontSize: 10 }}>🧠</span>}
+                  {isLeader && <span title="team leader" style={{ fontSize: 10 }}>👑</span>}
+                  {!isCritic && a.extraSkills.length > 0 && <span style={{ fontSize: 9, color: "#9ee6b0" }}>📚{a.extraSkills.length}</span>}
                 </button>
               );
             })}
@@ -592,7 +706,7 @@ export default function TeamWorkbench({
         </div>
 
         {/* RIGHT — inspector */}
-        <div style={{ flex: 4, display: "flex", flexDirection: "column", minWidth: 0, overflow: "auto" }}>
+        <div style={{ flex: "35 1 0", display: "flex", flexDirection: "column", minWidth: 0, overflow: "auto" }}>
           <div key={selection.kind === "agent" ? selection.name : selection.kind} style={{ ...card, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
             {selection.kind === "team" && (
               <>
@@ -668,10 +782,59 @@ export default function TeamWorkbench({
                     <ModelPicker value={a.modelId ?? ""} onChange={id => patchAgent(a.name, { modelId: id })}
                       models={models} status={accountsStatus} fallbackLabel="(Auto · per-task selection)" />
                   </div>
-                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "var(--fg)", cursor: "pointer" }}>
-                    <input type="checkbox" checked={!!a.canDispatch} onChange={e => patchAgent(a.name, { canDispatch: e.target.checked })} />
-                    can dispatch (acts as an orchestrator)
-                  </label>
+                  {/* TEAM ROLE + WIRING — leader/agent + take-from/dispatch-to.
+                      This is the team structure: edits the arrows live, and the
+                      dispatch engine follows them exactly (v0.5.99+). */}
+                  {(() => {
+                    const effRole: "leader" | "agent" = a.role ?? (a.canDispatch ? "leader" : "agent");
+                    const others = agents.filter(x => x.name !== a.name);
+                    const takesFrom = new Set(edges.filter(e => e.target === a.name).map(e => e.source));
+                    const dispatchesTo = new Set(edges.filter(e => e.source === a.name).map(e => e.target));
+                    const chip = (name: string, on: boolean, onClick: () => void) => (
+                      <button key={name} onClick={onClick} style={{
+                        fontSize: 11, padding: "3px 9px", borderRadius: 999, cursor: "pointer",
+                        background: on ? SKILL_GREEN_BG : "transparent",
+                        border: `1px solid ${on ? "#6cd28e" : "var(--border)"}`,
+                        color: on ? "var(--fg-strong)" : "var(--fg-muted)", fontWeight: on ? 700 : 500,
+                      }}>{on ? "✓ " : ""}{displayLabel(name)}</button>
+                    );
+                    return (
+                      <>
+                        <div>
+                          <div style={lbl}>Team role</div>
+                          <div style={{ display: "flex", gap: 6, marginTop: 5 }}>
+                            <button onClick={() => patchAgent(a.name, { role: "agent", canDispatch: false })}
+                              style={{ flex: 1, height: 30, borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
+                                background: effRole === "agent" ? "var(--bg-elevated)" : "transparent",
+                                border: `1px solid ${effRole === "agent" ? "var(--accent)" : "var(--border)"}`,
+                                color: effRole === "agent" ? "var(--fg-strong)" : "var(--fg-muted)" }}>Agent</button>
+                            <button onClick={() => patchAgent(a.name, { role: "leader", canDispatch: true })}
+                              style={{ flex: 1, height: 30, borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
+                                background: effRole === "leader" ? "rgba(255,217,122,0.14)" : "transparent",
+                                border: `1px solid ${effRole === "leader" ? "#ffd97a" : "var(--border)"}`,
+                                color: effRole === "leader" ? "#ffd97a" : "var(--fg-muted)" }}>👑 Team Leader</button>
+                          </div>
+                          <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", marginTop: 4, lineHeight: 1.4 }}>
+                            {effRole === "leader"
+                              ? "Directs its own members — a sub-orchestrator. Only it talks to its boss; the agents it dispatches to are its team."
+                              : "A worker — takes a job from its boss and does it."}
+                          </div>
+                        </div>
+                        <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
+                          <div style={lbl}>↘ Takes job from</div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 5 }}>
+                            {others.length === 0 ? <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>(no other agents)</span>
+                              : others.map(x => chip(x.name, takesFrom.has(x.name), () => toggleEdge(x.name, a.name)))}
+                          </div>
+                          <div style={{ ...lbl, marginTop: 9 }}>↗ Dispatches to {effRole === "leader" ? "(its members)" : ""}</div>
+                          <div style={{ display: "flex", flexWrap: "wrap", gap: 5, marginTop: 5 }}>
+                            {others.length === 0 ? <span style={{ fontSize: 11, color: "var(--fg-subtle)" }}>(no other agents)</span>
+                              : others.map(x => chip(x.name, dispatchesTo.has(x.name), () => toggleEdge(a.name, x.name)))}
+                          </div>
+                        </div>
+                      </>
+                    );
+                  })()}
 
                   {/* TOOLS — cheap, role-inherited, read-only */}
                   <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>

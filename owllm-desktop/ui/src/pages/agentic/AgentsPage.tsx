@@ -13,6 +13,7 @@ import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
+import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import IconPickerDialog, {
   getAgentIconOverride,
   setAgentIconOverride,
@@ -866,6 +867,7 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
 function FlowHeader({
   viewMode, onSetView,
   canEdit, onDeleteEdge, onReverseEdge, onResetLayout,
+  teamLabel, onOpenWorkbench,
 }: {
   viewMode: "diagram" | "graph" | "chat";
   /// Three-state segmented switch — caller passes the target mode the
@@ -877,6 +879,10 @@ function FlowHeader({
   onDeleteEdge: () => void;
   onReverseEdge: () => void;
   onResetLayout: () => void;
+  /// The team this project runs. Rendered as a clickable chip next to the
+  /// title that opens the full Team Workbench (roles + arrows + skills).
+  teamLabel?: string | null;
+  onOpenWorkbench?: () => void;
 }) {
   const seg = (id: "diagram" | "graph" | "chat", label: string, title: string) => {
     const on = viewMode === id;
@@ -902,6 +908,23 @@ function FlowHeader({
   return (
     <div style={{ display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
       <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Orchestrated Workflow</div>
+      {teamLabel && (
+        <button
+          data-ui="FlowTeamChip"
+          onClick={onOpenWorkbench}
+          title="Open the Team Workbench — assign leaders, wire who dispatches to whom, equip skills"
+          style={{
+            display:"flex", alignItems:"center", gap:6, height:28, padding:"0 11px",
+            borderRadius:999, fontSize:12, fontWeight:700, cursor:"pointer",
+            background:"rgba(var(--accent-rgb),0.12)", border:"1px solid rgba(var(--accent-rgb),0.45)",
+            color:"var(--accent)",
+          }}
+        >
+          <span style={{ fontSize:13 }}>👥</span>
+          <span style={{ maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{teamLabel}</span>
+          <span style={{ fontSize:10, opacity:0.8 }}>⚙ edit team</span>
+        </button>
+      )}
       <div style={{ flex:1 }} />
       {showEditBtns && (
         <>
@@ -7041,6 +7064,10 @@ export default function AgentsPage() {
   // Selected node lives here so the canvas mode toggle preserves the
   // selection across views.
   const [viewMode, setViewMode] = useState<"diagram" | "graph" | "chat">("diagram");
+  // Team Workbench popup — opened by the team chip in the FlowHeader. Lets the
+  // user assign leaders, wire dispatch arrows, and equip skills on the team
+  // template the dispatch engine reads (see TeamWorkbenchModal).
+  const [workbenchOpen, setWorkbenchOpen] = useState(false);
   const [selectedNode, setSelectedNode] = useState<string | null>(null);
   // Editable edges + manual node positions, both local-only for now.
   // They reset whenever the active team changes (see effect below).
@@ -7372,6 +7399,39 @@ export default function AgentsPage() {
     };
     return () => { _authWaitHandler = null; };
   }, [setSupChat]);
+
+  // Re-fetch team templates + role defs and refresh derived state. Called
+  // after the Team Workbench saves so the active team picks up new roles /
+  // edges / skills without a full page reload.
+  const reloadTeamLibrary = useCallback(async () => {
+    const [rawTeams, rawRoles] = await Promise.all([
+      invoke<TeamTemplateBackend[]>("list_team_templates").catch(() => [] as TeamTemplateBackend[]),
+      invoke<AgentRoleBackend[]>("list_agent_roles").catch(() => [] as AgentRoleBackend[]),
+    ]);
+    setTeams(rawTeams.map(toTeam).sort((a, b) =>
+      (a.visibility === "recommended" ? 0 : 1) - (b.visibility === "recommended" ? 0 : 1) ||
+      (a.workflowRank - b.workflowRank) ||
+      a.display.localeCompare(b.display)
+    ));
+    const m = new Map<string, RoleData>();
+    for (const r of rawRoles) {
+      const d = r.data ?? {};
+      m.set(d.name ?? r.id, {
+        name: d.name ?? r.id,
+        icon: typeof d.icon === "string" ? d.icon : undefined,
+        description: typeof d.description === "string" ? d.description : undefined,
+        systemPrompt: typeof d.system_prompt === "string" ? d.system_prompt : undefined,
+        canDispatch: d.can_dispatch === true,
+        defaultTemperature: typeof d.default_temperature === "number" ? d.default_temperature : undefined,
+        toolAllowlist: Array.isArray(d.tool_allowlist)
+          ? d.tool_allowlist.filter((t: unknown): t is string => typeof t === "string")
+          : undefined,
+        skillAllowlist: (Array.isArray(d.extra_skills) ? d.extra_skills : Array.isArray(d.skills) ? d.skills : [])
+          .filter((s: unknown): s is string => typeof s === "string"),
+      });
+    }
+    setRoleByName(m);
+  }, []);
 
   // Initial load — projects, teams, roles, bridges in parallel.
   useEffect(() => {
@@ -10116,6 +10176,15 @@ export default function AgentsPage() {
         // template override + reload so the canvas shows the new team.
         onTeamApplied={() => { setPickedTeamId(null); reloadProjects(); }}
       />
+      {workbenchOpen && activeTeam && (
+        <TeamWorkbenchModal
+          teamName={activeTeam.name}
+          models={models}
+          accountsStatus={accountsStatus}
+          onClose={() => setWorkbenchOpen(false)}
+          onSaved={async () => { setWorkbenchOpen(false); await reloadTeamLibrary(); }}
+        />
+      )}
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{
           margin: "0 23px 6px",
@@ -10150,6 +10219,8 @@ export default function AgentsPage() {
             onDeleteEdge={deleteSelectedEdge}
             onReverseEdge={reverseSelectedEdge}
             onResetLayout={resetGraphLayout}
+            teamLabel={activeTeam?.display ?? null}
+            onOpenWorkbench={() => setWorkbenchOpen(true)}
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>
             {viewMode === "diagram" ? (

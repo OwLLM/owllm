@@ -1,4 +1,0 @@
-# Initial constraints (before torch selection)
-numpy>=2,<3
-sympy==1.13.1
-huggingface-hub>=0.30.0,<1.0

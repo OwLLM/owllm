@@ -4568,6 +4568,8 @@ function RightColumnTabs(props: {
   onDirectivesChanged: () => Promise<void> | void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
+  parallelMode: boolean;
+  onToggleParallel: () => void;
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -4673,6 +4675,8 @@ function RightColumnTabs(props: {
             onToggleAutoApprove={props.onToggleAutoApprove}
             directorMode={props.directorMode}
             onToggleDirectorMode={props.onToggleDirectorMode}
+            parallelMode={props.parallelMode}
+            onToggleParallel={props.onToggleParallel}
             team={props.team}
             roleByName={props.roleByName}
           />
@@ -4749,12 +4753,15 @@ function RightColumnTabs(props: {
 function SuperUserSettings({
   autoApprove, onToggleAutoApprove,
   directorMode, onToggleDirectorMode,
+  parallelMode, onToggleParallel,
   team, roleByName,
 }: {
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
   directorMode: boolean;
   onToggleDirectorMode: () => void;
+  parallelMode: boolean;
+  onToggleParallel: () => void;
   team: Team | null;
   roleByName: Map<string, RoleData>;
 }) {
@@ -4795,6 +4802,16 @@ function SuperUserSettings({
         <span>critic = super user (decides for me)
           <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
             {directorMode ? "answers my decisions + approves/rejects the plan + answer" : "off: advisory only — never blocks the team"}
+          </span>
+        </span>
+      </label>
+      {/* Parallel dispatch — lets the orchestrator fan out INDEPENDENT tasks in
+          one turn; the team already runs them concurrently in isolated worktrees. */}
+      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: parallelMode ? "#7fd4ff" : "#7888a8", cursor:"pointer" }}>
+        <input type="checkbox" checked={parallelMode} onChange={onToggleParallel} style={{ width:12, height:12, marginTop:2, accentColor:"#3aa0ff" }} />
+        <span>parallel dispatch (run independent agents at once)
+          <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
+            {parallelMode ? "orchestrator batches independent tasks into one wave" : "off: one task at a time (sequential)"}
           </span>
         </span>
       </label>
@@ -5408,6 +5425,10 @@ function buildOrchestratorPrompt(
   /// Without it the orchestrator falls back to free interpretation
   /// (legacy behaviour, fine for tiny tasks that didn't need a brief).
   briefText?: string,
+  /// When true, the orchestrator is told to dispatch INDEPENDENT tasks together
+  /// (multiple `@agent:` lines in one reply → they run concurrently in Phase 2b).
+  /// Off (default) keeps the legacy one-task-at-a-time sequential cadence.
+  parallelMode?: boolean,
 ): string {
   // Edge-seeded roster (P0-2, §0.4 lockstep with dispatch.ts): with a
   // graph present the orchestrator only sees its edge-wired specialists.
@@ -5481,6 +5502,22 @@ function buildOrchestratorPrompt(
         "",
       ].join("\n")
     : "";
+  // Parallel dispatch guidance (Stage 1 "unlock"): the Phase 2b runner already
+  // executes every @agent line emitted in ONE reply concurrently — this just
+  // tells the orchestrator it's allowed to, and should, batch independent work.
+  const parallelBlock = parallelMode
+    ? [
+        "",
+        "--- PARALLEL DISPATCH (this team runs agents concurrently) ---",
+        "When two or more tasks are INDEPENDENT — neither needs another's output —",
+        "dispatch them in the SAME reply: emit one `@agent: task` line per agent and",
+        "they run AT THE SAME TIME (in separate isolated worktrees).",
+        "Only split work across separate turns when a task genuinely DEPENDS on a",
+        "previous task's result. Prefer one wide parallel wave over many sequential",
+        "single-agent turns. Do NOT dispatch the same agent twice in one wave.",
+        "--- END PARALLEL DISPATCH ---",
+      ].join("\n")
+    : "";
   return [
     `You are the orchestrator of the '${team.display}' team.`,
     "",
@@ -5488,6 +5525,7 @@ function buildOrchestratorPrompt(
     briefBlock,
     directivesBlock,
     directorBlock,
+    parallelBlock,
     "",
     `YOUR SPECIALISTS (use their EXACT names when dispatching):`,
     [roster, criticRosterLine].filter(Boolean).join("\n") || "  (none — solo)",
@@ -7047,6 +7085,11 @@ export default function AgentsPage() {
   // agent_projects.director_mode. (Was briefly split into a 2nd critic_super_user
   // toggle in v0.5.86; merged back here in v0.5.87 — they meant the same thing.)
   const [directorMode, setDirectorModeState] = useState<boolean>(false);
+  // Parallel dispatch (Stage 1): when ON the orchestrator is told to fan out
+  // INDEPENDENT tasks in one reply (Phase 2b already runs them concurrently).
+  // Per-project UI preference in localStorage (no DB/Rust needed). Default OFF
+  // so existing sequential-pipeline teams aren't surprised.
+  const [parallelMode, setParallelModeState] = useState<boolean>(false);
   const [directivesPanelOpen, setDirectivesPanelOpen] = useState(false);
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
   // top-level so it can be reused later (e.g. from NewProjectDialog).
@@ -7100,6 +7143,20 @@ export default function AgentsPage() {
     } catch (e) {
       console.warn("set director_mode failed", e);
     }
+  };
+  // Parallel-mode is a per-project localStorage preference. Load on project
+  // switch; persist on toggle. (No DB column — it only shapes the orchestrator
+  // prompt at run time, nothing the backend needs to know about.)
+  const parallelKey = (pid: string) => `owllm:parallel:${pid}`;
+  useEffect(() => {
+    if (!selectedProjectId) { setParallelModeState(false); return; }
+    try { setParallelModeState(localStorage.getItem(parallelKey(selectedProjectId)) === "1"); }
+    catch { setParallelModeState(false); }
+  }, [selectedProjectId]);
+  const setParallelMode = (v: boolean) => {
+    setParallelModeState(v);
+    if (!selectedProjectId) return;
+    try { localStorage.setItem(parallelKey(selectedProjectId), v ? "1" : "0"); } catch { /* ignore */ }
   };
 
   async function onBrowseProjectFolder() {
@@ -8575,7 +8632,7 @@ export default function AgentsPage() {
     try {
       // ----- Phase 1: orchestrator plan + dispatches -----
       addActive(orch.name);
-      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText);
+      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
       let orchReply: string;
@@ -9036,6 +9093,15 @@ export default function AgentsPage() {
       // Each task runs the CLI in its own worktree path (or the shared
       // projectCwd if none was created), then finalizes (commits) any
       // edits the agent made before resolving.
+      // Surface a parallel wave in the user thread so concurrency is visible
+      // (Stage 1 "surface"). A single dispatch reads as the usual sequential step.
+      if (dispatches.length > 1) {
+        setSupChat(prev => [...prev, {
+          role: "system", color: "#7fd4ff",
+          text: `▶ Running ${dispatches.length} agents in parallel: ${dispatches.map(d => "@" + d.agentName).join(", ")}`,
+          ts: Date.now(),
+        }]);
+      }
       type SpecOutcome = {
         name: string;                                   // START agent (owns the worktree/branch)
         replies: { name: string; text: string }[];      // terminal results from the whole fan-out tree
@@ -9187,7 +9253,7 @@ export default function AgentsPage() {
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText), integrationInput,
+          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
@@ -9264,7 +9330,7 @@ export default function AgentsPage() {
           try {
             const revised = await streamChatCompletion(
               port, finalModel, providerFor(finalModel),
-              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText),
+              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode),
               [
                 "Your final answer:",
                 finalReply,
@@ -9984,6 +10050,8 @@ export default function AgentsPage() {
             onDirectivesChanged={reloadDirectives}
             directorMode={directorMode}
             onToggleDirectorMode={() => setDirectorMode(!directorMode)}
+            parallelMode={parallelMode}
+            onToggleParallel={() => setParallelMode(!parallelMode)}
             agentLogs={agentLogs}
             agentThoughts={agentThoughts}
             runError={runError}

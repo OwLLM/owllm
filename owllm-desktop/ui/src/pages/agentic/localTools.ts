@@ -24,6 +24,14 @@ import {
   getDisabledMcpTools,
 } from "./mcpSettings";
 import { bumpActivity } from "../../support/activityStats";
+import { loadSkillByRef, skillCatalogBrief, anySkillInstalled } from "./skillRuntime";
+
+/// Built-in tools that let an agent manage its OWN skills at runtime. These
+/// bypass the role tool_allowlist (skills are a separate capability axis from
+/// file/shell tools) and are advertised only when at least one skill pack is
+/// installed. Kept in LOCAL_TOOL_SPECS so the name normalizer + validator know
+/// them; force-added in formatToolsForOpenAI so an allowlist can't hide them.
+export const SKILL_TOOL_NAMES = new Set(["load_skill", "list_skills"]);
 
 export type ToolCall = {
   name: string;
@@ -98,10 +106,20 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
   );
 
   const searchMcpTools = activeMcp.filter(isMcpSearchTool);
+  // Skill tools are a separate capability axis — never gated by the role
+  // tool_allowlist. They're added unconditionally below (when skills exist),
+  // so drop them from the allowlist-gated set here to avoid double-adding.
   const localTools = (searchMcpTools.length > 0
     ? LOCAL_TOOL_SPECS.filter((t) => t.name !== "web_search")
     : LOCAL_TOOL_SPECS
-  ).filter((t) => !allowSet || allowSet.has(t.name));
+  ).filter((t) => !SKILL_TOOL_NAMES.has(t.name) && (!allowSet || allowSet.has(t.name)));
+  // Advertise the skill tools (load_skill / list_skills) regardless of the
+  // allowlist, but only when at least one skill pack is installed.
+  if (await anySkillInstalled()) {
+    for (const t of LOCAL_TOOL_SPECS.filter((t) => SKILL_TOOL_NAMES.has(t.name))) {
+      localTools.push(t);
+    }
+  }
   for (const t of localTools) {
     const properties: Record<string, unknown> = {};
     const required: string[] = [];
@@ -587,6 +605,28 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       { name: "out_png", required: true, description: "Absolute filesystem path for the output PNG.", aliases: ["out", "output", "output_path", "out_path", "png", "path"] },
     ],
   },
+  {
+    name: "list_skills",
+    aliases: ["skills", "available_skills", "show_skills", "discover_skills"],
+    description:
+      "List every SKILL pack available to you (name + one-line description). " +
+      "Skills are named capability guides bundled with the app. Use this to " +
+      "discover a skill you can load_skill() into context for the current task.",
+    args: [],
+  },
+  {
+    name: "load_skill",
+    aliases: ["use_skill", "open_skill", "skill", "get_skill", "read_skill", "switch_skill", "equip_skill"],
+    description:
+      "Load the FULL instructions for one SKILL pack into context, by name. " +
+      "Call this when the task matches a skill whose body you haven't loaded " +
+      "yet — then follow its instructions. You may call it again with a " +
+      "different skill to switch skills mid-task, as many times as needed. " +
+      "Run list_skills first if you're unsure what's available.",
+    args: [
+      { name: "name", required: true, description: "The skill's name or id (e.g. 'pdf-processing').", aliases: ["skill", "skill_name", "id", "skill_id", "pack", "ref", "query"] },
+    ],
+  },
 ];
 
 // ---- Canonical-name + arg-alias resolution (the "normalize" half of
@@ -905,6 +945,26 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
           outPng: call.args.out_png ?? "",
         });
         return { ok: true, output: `screenshot saved: ${saved}` };
+      }
+      case "list_skills": {
+        const brief = await skillCatalogBrief();
+        return { ok: true, output: `Available skills:\n${brief}\n\nLoad one with load_skill("<name>").` };
+      }
+      case "load_skill": {
+        const ref = call.args.name ?? call.args.skill ?? "";
+        if (!ref.trim()) return { ok: false, output: "load_skill: 'name' is required (the skill name or id)." };
+        const skill = await loadSkillByRef(ref);
+        if (!skill) {
+          const brief = await skillCatalogBrief();
+          return { ok: false, output: `No skill matching "${ref}". Available skills:\n${brief}` };
+        }
+        if (!skill.body.trim()) {
+          return { ok: true, output: `Skill "${skill.name}" has no instructions body.` };
+        }
+        return {
+          ok: true,
+          output: `Loaded skill "${skill.name}". Follow these instructions for the current task:\n\n${truncate(skill.body.trim(), 12000)}`,
+        };
       }
       default:
         return { ok: false, output: `unknown tool: ${call.name}` };

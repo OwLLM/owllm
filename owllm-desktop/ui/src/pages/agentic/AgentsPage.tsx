@@ -69,7 +69,7 @@ import {
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS } from "./localTools";
 import { normalizeTeam, roleCanWrite } from "./teamConfig";
-import { resolveAgentSkills, buildSkillBlock } from "./skillRuntime";
+import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
 import { getServerCtx } from "../core/serverContext";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
@@ -8798,7 +8798,7 @@ export default function AgentsPage() {
         ...(orch.extraSkills ?? []),
         ...(perAgentSkills.get(orch.name) ?? []),
       ];
-      const orchSkillBlock = orchSkillIds.length ? buildSkillBlock(await resolveAgentSkills(orchSkillIds)) : "";
+      const orchSkillBlock = await buildAgentSkillBlock(orchSkillIds);
       const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
@@ -9312,7 +9312,7 @@ export default function AgentsPage() {
             ...(spec.extraSkills ?? []),                           // team template extra_skills
             ...(perAgentSkills.get(spec.name) ?? []),              // per-project grant
           ];
-          const skillBlock = skillIds.length ? buildSkillBlock(await resolveAgentSkills(skillIds)) : "";
+          const skillBlock = await buildAgentSkillBlock(skillIds);
           let specText = "";
           try {
             specText = (await streamChatCompletion(
@@ -9685,7 +9685,7 @@ export default function AgentsPage() {
         const docCwd = docWt ? docWt.path : projectCwd;
         const docAllowed = roleByName.get(docSpec.base)?.toolAllowlist;
         const docSkillIds = [...(roleByName.get(docSpec.base)?.skillAllowlist ?? []), ...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
-        const docSkillBlock = docSkillIds.length ? buildSkillBlock(await resolveAgentSkills(docSkillIds)) : "";
+        const docSkillBlock = await buildAgentSkillBlock(docSkillIds);
         try {
           await streamChatCompletion(
             port, modelFor(docSpec.name), providerFor(modelFor(docSpec.name)),

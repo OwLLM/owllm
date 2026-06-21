@@ -79,10 +79,63 @@ export async function resolveAgentSkills(ids: string[]): Promise<ResolvedSkill[]
   return out;
 }
 
+/// Normalise a skill reference (display name OR id) to a comparable slug, so
+/// `load_skill("PDF Processing")`, `"pdf-processing"`, `"pdf_processing"` all
+/// resolve to the same pack.
+function skillSlug(s: string): string {
+  return (s ?? "").trim().toLowerCase().replace(/[\s_]+/g, "-").replace(/[^a-z0-9-]/g, "");
+}
+
+/// On-demand skill loader for the `load_skill` tool: resolve a model-supplied
+/// name/id to the pack's full body. Searches EVERY installed pack (not just
+/// equipped ones) so an agent can pull any bundled skill it judges relevant —
+/// the user's "the agent picks/switches its own skills" model. Returns null if
+/// nothing matches.
+export async function loadSkillByRef(ref: string): Promise<ResolvedSkill | null> {
+  const want = skillSlug(ref);
+  if (!want) return null;
+  const raw = await rawPacks();
+  const match = raw.find(p => {
+    const name = fmString(p.frontmatter, "name");
+    return skillSlug(p.id) === want || skillSlug(name) === want;
+  }) ?? raw.find(p => {
+    // looser contains-match as a fallback ("brand" → "brand-guidelines")
+    const name = fmString(p.frontmatter, "name");
+    return skillSlug(p.id).includes(want) || skillSlug(name).includes(want);
+  });
+  if (!match) return null;
+  return {
+    id: match.id,
+    name: fmString(match.frontmatter, "name") || match.id,
+    description: fmString(match.frontmatter, "description"),
+    body: match.body ?? "",
+  };
+}
+
+/// Brief catalog of EVERY installed skill (name + description), for the
+/// `list_skills` tool so an agent can discover skills beyond the ones equipped
+/// on it. Equipped ids are flagged so the agent knows what's already on it.
+export async function skillCatalogBrief(equippedIds: string[] = []): Promise<string> {
+  const packs = await listSkillPacks();
+  if (packs.length === 0) return "(no skills installed)";
+  const equipped = new Set(equippedIds.filter(Boolean));
+  return packs
+    .map(p => `- ${p.name}${equipped.has(p.id) ? " (equipped)" : ""}: ${p.description || "(no description)"}`)
+    .join("\n");
+}
+
+/// True if at least one skill pack is installed — gates whether the skill
+/// tools are advertised at all.
+export async function anySkillInstalled(): Promise<boolean> {
+  return (await rawPacks()).length > 0;
+}
+
 const SKILL_BODY_BUDGET = 8000; // chars (~2k tokens) of inlined skill instructions
 
 /// Build the SKILL block for a specialist prompt. Descriptions always shown;
-/// bodies inlined smallest-first within SKILL_BODY_BUDGET.
+/// bodies inlined smallest-first within SKILL_BODY_BUDGET. Whatever isn't
+/// inlined this turn, the agent can pull on demand with the `load_skill` tool
+/// (and discover more via `list_skills`) — and it may switch skills mid-task.
 export function buildSkillBlock(skills: ResolvedSkill[]): string {
   if (!skills || skills.length === 0) return "";
   // pick which bodies to inline (smallest-first within budget)
@@ -91,14 +144,45 @@ export function buildSkillBlock(skills: ResolvedSkill[]): string {
   for (const s of [...skills].sort((a, b) => a.body.length - b.body.length)) {
     if (s.body && used + s.body.length <= SKILL_BODY_BUDGET) { used += s.body.length; inlined.add(s.id); }
   }
-  const lines: string[] = ["--- YOUR SKILLS (capability packs equipped on you — use them when relevant) ---"];
+  const lines: string[] = ["--- YOUR SKILLS (capability packs available to you — use them when relevant) ---"];
   for (const s of skills) {
     if (inlined.has(s.id) && s.body) {
       lines.push(`\n### Skill: ${s.name}\n${s.body.trim()}`);
     } else {
-      lines.push(`- ${s.name}: ${s.description || "(no description)"} — full instructions not loaded this turn.`);
+      lines.push(`- ${s.name}: ${s.description || "(no description)"} — call load_skill("${s.name}") to load its full instructions.`);
     }
   }
+  lines.push(
+    "",
+    "You choose your own skills: call load_skill(\"<name>\") to pull a skill's full " +
+    "instructions into context when the task calls for it, and call it again with a " +
+    "different skill to switch — as many times as you need. Use list_skills to see " +
+    "every skill available (not just the ones above).",
+  );
   lines.push("--- END SKILLS ---");
   return lines.join("\n");
+}
+
+/// The ONE entry point dispatch should use to build an agent's skill block.
+/// - Has equipped skills → full block (descriptions + budgeted bodies + the
+///   load/switch guidance).
+/// - No equipped skills but packs ARE installed → a short discovery note so
+///   the agent still knows it can pull skills itself (the user's "every agent
+///   sees the catalog and picks its own" model).
+/// - No skills installed at all → empty string.
+/// Resolves everything async so call sites stay one-liners.
+export async function buildAgentSkillBlock(ids: string[]): Promise<string> {
+  const equipped = await resolveAgentSkills(ids);
+  if (equipped.length > 0) return buildSkillBlock(equipped);
+  if (!(await anySkillInstalled())) return "";
+  const brief = await skillCatalogBrief(ids);
+  return [
+    "--- SKILLS (available to you on demand) ---",
+    "You can equip a capability pack yourself when a task calls for it:",
+    brief,
+    "",
+    "Call load_skill(\"<name>\") to load one's full instructions, and call it again " +
+    "with a different skill to switch. Use list_skills to re-list them anytime.",
+    "--- END SKILLS ---",
+  ].join("\n");
 }

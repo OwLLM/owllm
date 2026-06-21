@@ -1245,6 +1245,12 @@ function AgentDetailPanel({
   // Draft per-agent skills (SKILL.md pack ids). Persisted to the role JSON's
   // `extra_skills`; the dispatch merges them into the agent's effective skills.
   const [draftSkills, setDraftSkills] = useState<string[]>(agent?.extraSkills ?? []);
+  // Skill-picker clarity: a search box + an "equipped-first" sort. The sort uses
+  // a SNAPSHOT of the equipped set taken when the agent loads (not live
+  // draftSkills) so ticking a row doesn't make it jump under the cursor — it just
+  // turns green in place; the reorder applies next time the panel opens.
+  const [skillQuery, setSkillQuery] = useState("");
+  const [equippedBasis, setEquippedBasis] = useState<Set<string>>(new Set(agent?.extraSkills ?? []));
   // Re-seed every editable field when the user clicks a different card.
   useEffect(() => {
     setDraftMcp(agent?.mcpTools ?? null);
@@ -1252,6 +1258,8 @@ function AgentDetailPanel({
     setDraftTemperature(agent?.temperature != null ? String(agent.temperature) : "");
     setDraftModelId(agent?.defaultModelId ?? "");
     setDraftSkills(agent?.extraSkills ?? []);
+    setSkillQuery("");
+    setEquippedBasis(new Set(agent?.extraSkills ?? []));
   }, [agent?.name]);
   useEffect(() => {
     invoke<AggregatedMcpTool[]>("mcp_list_all_tools")
@@ -1520,8 +1528,26 @@ function AgentDetailPanel({
             <span style={{ fontSize: 10.5, color: "var(--fg-subtle)", fontStyle: "italic" }}>No skills installed yet — add them in the 📚 Skills tab, then tick them here.</span>
           ) : (
             <>
+              <input
+                value={skillQuery}
+                onChange={e => setSkillQuery(e.target.value)}
+                placeholder={`Search ${availableSkills.length} installed skills…`}
+                style={{ width: "100%", boxSizing: "border-box", marginBottom: 6, padding: "5px 9px", fontSize: 11,
+                  background: "var(--bg-surface)", color: "var(--fg)", border: "1px solid var(--border)", borderRadius: 6 }}
+              />
+              {(() => {
+                const q = skillQuery.trim().toLowerCase();
+                // Equipped (snapshot) first, then alphabetical; filtered by query.
+                const rows = [...availableSkills]
+                  .filter(s => !q || `${s.name} ${s.description ?? ""}`.toLowerCase().includes(q))
+                  .sort((a, b) =>
+                    (equippedBasis.has(a.id) ? 0 : 1) - (equippedBasis.has(b.id) ? 0 : 1)
+                    || a.name.localeCompare(b.name));
+                return (
               <div style={{ maxHeight: 176, overflow: "auto", borderRadius: 8, border: `1px solid ${skillsDirty ? "#f0a832" : "var(--border)"}`, background: "var(--bg-surface)" }}>
-                {availableSkills.map((s, i) => {
+                {rows.length === 0 ? (
+                  <div style={{ padding: "8px 9px", fontSize: 10.5, color: "var(--fg-subtle)", fontStyle: "italic" }}>No skills match “{skillQuery}”.</div>
+                ) : rows.map((s, i) => {
                   const on = draftSkills.includes(s.id);
                   return (
                     <button key={s.id} type="button"
@@ -1541,6 +1567,8 @@ function AgentDetailPanel({
                   );
                 })}
               </div>
+                );
+              })()}
               <span style={{ fontSize: 9.5, color: "var(--fg-subtle)" }}>Tick the skills this agent should have in every team — only the ones a task needs get loaded. Click <b>Save</b> below to keep them.</span>
             </>
           )}

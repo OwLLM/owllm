@@ -113,6 +113,41 @@ pub fn migrate_user_state_if_needed() {
     let _ = write_sentinel(&sentinel, &summary);
 }
 
+/// One built-in skill pack embedded in the binary. `(dir_name, SKILL.md)`.
+/// Seeded into the user skills dir so it's listed by `list_skill_packs`,
+/// editable in Studio, and equippable — exactly like a downloaded pack.
+const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    (
+        "owllm__parallel-dispatch",
+        include_str!("../seed/owllm__parallel-dispatch.SKILL.md"),
+    ),
+];
+
+/// Write OWLLM's built-in skill packs into the user skills dir if they're not
+/// already there. Idempotent and NON-destructive: an existing SKILL.md (possibly
+/// user-edited) is left untouched, so we never clobber a customization.
+pub fn seed_builtin_skills() {
+    let Some(skills_root) = crate::paths::skills_dir() else {
+        eprintln!("[bootstrap] skills_dir unavailable, skipping built-in skill seed");
+        return;
+    };
+    for (dir_name, contents) in BUILTIN_SKILLS {
+        let dir = skills_root.join(dir_name);
+        let md = dir.join("SKILL.md");
+        if md.exists() {
+            continue; // user already has it (maybe edited) — don't overwrite
+        }
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            eprintln!("[bootstrap] seed skill {dir_name}: mkdir failed: {e}");
+            continue;
+        }
+        match std::fs::write(&md, contents) {
+            Ok(_) => eprintln!("[bootstrap] seeded built-in skill {dir_name}"),
+            Err(e) => eprintln!("[bootstrap] seed skill {dir_name}: write failed: {e}"),
+        }
+    }
+}
+
 fn write_sentinel(path: &Path, summary: &str) -> std::io::Result<()> {
     let body = format!(
         "OwLLM Desktop user-state migration ran at {}.\n{summary}\n",

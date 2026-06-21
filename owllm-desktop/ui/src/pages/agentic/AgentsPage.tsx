@@ -5429,6 +5429,11 @@ function buildOrchestratorPrompt(
   /// (multiple `@agent:` lines in one reply → they run concurrently in Phase 2b).
   /// Off (default) keeps the legacy one-task-at-a-time sequential cadence.
   parallelMode?: boolean,
+  /// Body of the equipped `owllm__parallel-dispatch` skill, when parallel mode is
+  /// on and the (seeded, user-editable) skill resolved. Used as the PARALLEL
+  /// DISPATCH guidance so editing the skill in Studio changes this prompt; falls
+  /// back to a baked-in default when the skill is missing.
+  parallelGuidance?: string,
 ): string {
   // Edge-seeded roster (P0-2, §0.4 lockstep with dispatch.ts): with a
   // graph present the orchestrator only sees its edge-wired specialists.
@@ -5505,16 +5510,31 @@ function buildOrchestratorPrompt(
   // Parallel dispatch guidance (Stage 1 "unlock"): the Phase 2b runner already
   // executes every @agent line emitted in ONE reply concurrently — this just
   // tells the orchestrator it's allowed to, and should, batch independent work.
+  const parallelInlineDefault = [
+    "Two tasks are INDEPENDENT when neither needs the other's output AND they",
+    "touch different files/areas (no shared state). Dispatch ALL independent",
+    "tasks in the SAME reply — one `@agent: task` line each — and they run AT THE",
+    "SAME TIME, each in its own isolated worktree (auto-merged when they finish).",
+    "",
+    "Because each agent runs with ISOLATED context (it never sees the others'",
+    "work or this conversation), make every parallel task SELF-CONTAINED: state",
+    "the full scope, the goal, any constraints (e.g. 'edit only X, don't refactor",
+    "Y'), and the exact output you expect back.",
+    "",
+    "Keep parallel tasks on DIFFERENT files/areas — two agents editing the same",
+    "file in one wave will collide when their worktrees merge.",
+    "",
+    "SEQUENCE only real dependencies: if B needs A's result, dispatch A now and B",
+    "next turn with A's output. Prefer one wide wave over many single-agent turns.",
+    "Never dispatch the same agent twice in one wave.",
+  ].join("\n");
+  // Prefer the equipped, user-editable parallel-dispatch skill body; fall back to
+  // the baked-in default so parallel mode still works if the skill was deleted.
   const parallelBlock = parallelMode
     ? [
         "",
         "--- PARALLEL DISPATCH (this team runs agents concurrently) ---",
-        "When two or more tasks are INDEPENDENT — neither needs another's output —",
-        "dispatch them in the SAME reply: emit one `@agent: task` line per agent and",
-        "they run AT THE SAME TIME (in separate isolated worktrees).",
-        "Only split work across separate turns when a task genuinely DEPENDS on a",
-        "previous task's result. Prefer one wide parallel wave over many sequential",
-        "single-agent turns. Do NOT dispatch the same agent twice in one wave.",
+        (parallelGuidance && parallelGuidance.trim()) ? parallelGuidance.trim() : parallelInlineDefault,
         "--- END PARALLEL DISPATCH ---",
       ].join("\n")
     : "";
@@ -8632,7 +8652,18 @@ export default function AgentsPage() {
     try {
       // ----- Phase 1: orchestrator plan + dispatches -----
       addActive(orch.name);
-      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode);
+      // Parallel mode: load the (seeded, user-editable) parallel-dispatch skill so
+      // its body drives the orchestrator's PARALLEL DISPATCH guidance. If the user
+      // edited it in Studio, that's what the orchestrator follows; if it's missing,
+      // buildOrchestratorPrompt falls back to its baked-in default.
+      let parallelGuidance: string | undefined;
+      if (parallelMode) {
+        try {
+          const pp = await resolveAgentSkills(["owllm__parallel-dispatch"]);
+          if (pp.length && pp[0].body.trim()) parallelGuidance = pp[0].body;
+        } catch { /* fall back to the baked-in default */ }
+      }
+      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
       let orchReply: string;
@@ -9253,7 +9284,7 @@ export default function AgentsPage() {
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode), integrationInput,
+          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
@@ -9330,7 +9361,7 @@ export default function AgentsPage() {
           try {
             const revised = await streamChatCompletion(
               port, finalModel, providerFor(finalModel),
-              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode),
+              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance),
               [
                 "Your final answer:",
                 finalReply,

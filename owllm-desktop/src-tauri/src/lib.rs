@@ -70,6 +70,10 @@ pub fn run() {
             // touches the SQLite state so we don't end up with two parallel
             // DBs on first launch.
             bootstrap::migrate_user_state_if_needed();
+            // Seed OWLLM's built-in skill packs (e.g. parallel-dispatch) into the
+            // user skills dir if absent, so they're visible + editable in Studio
+            // and equippable. Never clobbers a user-edited copy.
+            bootstrap::seed_builtin_skills();
             // Diagnostic: log the resolved paths on startup so missing
             // models / disappeared user state can be triaged from the
             // log file without F12 console acrobatics. Tries three

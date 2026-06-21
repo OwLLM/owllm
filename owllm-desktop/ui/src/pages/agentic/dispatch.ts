@@ -1075,29 +1075,37 @@ type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
 // the STILL-COLD token → 401 on all of them but the first. We now dedupe by
 // the in-flight PROMISE: every concurrent caller awaits the SAME warm-up to
 // COMPLETION before its real call, so the token is refreshed for all of them.
-const _warmCli = new Map<string, Promise<void>>();
+type WarmEntry = { at: number; p: Promise<void> };
+const _warmCli = new Map<string, WarmEntry>();
+// The subscription CLI's OAuth ACCESS token has a ~1h TTL. The old code warmed
+// ONCE per app session, so a run that lasted past the TTL hit "401 after it
+// worked for an hour" with nothing refreshing it. We now PROACTIVELY re-warm if
+// the last warm is older than this — running `claude --print` refreshes the
+// token as a side effect, so every long run keeps a fresh token well before the
+// ~1h expiry. The reactive 401 retry (clearCliWarm + retry) is the backstop.
+const WARM_TTL_MS = 25 * 60 * 1000; // 25 min — comfortably under the ~1h token TTL
 export async function ensureCliWarm(backend: "claude_cli" | "codex_cli"): Promise<void> {
-  let warming = _warmCli.get(backend);
-  if (!warming) {
-    // Same minimal CLI round-trip the Accounts "Test" button runs; it
-    // refreshes the token as a side effect. Best-effort — a failure still lets
-    // the real call proceed (it may succeed or surface a clearer error).
-    warming = (async () => {
+  const now = Date.now();
+  let entry = _warmCli.get(backend);
+  // Re-warm when there's no entry OR the cached warm has aged past the TTL.
+  if (!entry || now - entry.at > WARM_TTL_MS) {
+    // Same minimal CLI round-trip the Accounts "Test" button runs; it refreshes
+    // the token as a side effect. Best-effort — a failure still lets the real
+    // call proceed (it may succeed or surface a clearer error).
+    const p = (async () => {
       try { await invoke("accounts_test_probe_live", { backend }); }
       catch { /* ignore — warm-up is best-effort */ }
     })();
-    _warmCli.set(backend, warming);
+    entry = { at: now, p };
+    _warmCli.set(backend, entry);
   }
   // ALL callers (including the parallel specialists) await the one warm-up.
-  await warming;
+  await entry.p;
 }
 
 // Drop the cached warm-up so the NEXT ensureCliWarm() actually re-runs the
-// token-refresh round-trip. ensureCliWarm dedupes on the resolved promise and
-// keeps it for the whole app session, so it only ever refreshes the OAuth token
-// ONCE. That's wrong for a LONG agentic run: the CLI's access token has a TTL
-// and expires mid-workflow → every later call 401s with nothing re-warming.
-// Call this on a 401 to force a fresh refresh before retrying.
+// token-refresh round-trip. Called on a 401 to force a fresh refresh before
+// retrying (the reactive complement to the proactive WARM_TTL_MS re-warm above).
 export function clearCliWarm(backend: "claude_cli" | "codex_cli"): void {
   _warmCli.delete(backend);
 }

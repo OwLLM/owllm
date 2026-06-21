@@ -5930,11 +5930,13 @@ type AuthWaitInfo =
   | { kind: "recovered"; backend: string };
 let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;
 
-/// Run a Claude CLI call, retrying on auth (401) failures with backoff. Forces a
-/// token refresh before each retry. Non-auth errors are NOT retried here (they
-/// bubble straight up). Honors the run's AbortSignal during the wait.
-async function withClaudeAuthRetry<T>(
-  backend: "claude_cli",
+/// Run a subscription-CLI call (Claude OR Codex), retrying on auth (401)
+/// failures with backoff. Forces a token refresh before each retry. Non-auth
+/// errors are NOT retried here (they bubble straight up). Honors the run's
+/// AbortSignal during the wait. The token-expiry failure mode is identical for
+/// both CLIs, so this is deliberately backend-agnostic.
+async function withCliAuthRetry<T>(
+  backend: "claude_cli" | "codex_cli",
   signal: AbortSignal,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -6033,7 +6035,7 @@ async function streamAnthropic(
       }
     };
     if (onThought) {
-      return await withClaudeAuthRetry("claude_cli", signal, () =>
+      return await withCliAuthRetry("claude_cli", signal, () =>
         runWithSessionRetry((sid) => runClaudeCliStream({
           systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false, allowedTools,
@@ -6041,7 +6043,7 @@ async function streamAnthropic(
           onDelta, onThought,
         })));
     }
-    const reply = await withClaudeAuthRetry("claude_cli", signal, () =>
+    const reply = await withCliAuthRetry("claude_cli", signal, () =>
       runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false,
@@ -6059,14 +6061,14 @@ async function streamAnthropic(
       if (status?.claude_cli) {
         await ensureCliWarm("claude_cli");
         if (onThought) {
-          return await withClaudeAuthRetry("claude_cli", signal, () => runClaudeCliStream({
+          return await withCliAuthRetry("claude_cli", signal, () => runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
             model: cliModel, effort: claudeEffort, sessionId,
             onDelta, onThought,
           }));
         }
-        const reply = await withClaudeAuthRetry("claude_cli", signal, () => invoke<string>("claude_cli_complete", {
+        const reply = await withCliAuthRetry("claude_cli", signal, () => invoke<string>("claude_cli_complete", {
           systemPrompt,
           userMessage: cliPrompt,
           cwd: claudeCwd ?? null,
@@ -6240,13 +6242,13 @@ async function streamOpenAI(
     // Stream live activity (reasoning/commands/tools/web-search) into the
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
-      return await runCodexCliStream({
+      return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
         systemPrompt, userMessage: prompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, onDelta, onThought,
-      });
+      }));
     }
-    const reply = await invoke<string>("codex_cli_complete", {
+    const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
       systemPrompt, userMessage: prompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths,
-    });
+    }));
     if (reply) onDelta(reply);
     return reply;
   }
@@ -7202,15 +7204,17 @@ export default function AgentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Register the Claude-CLI auth-retry notifier so a mid-run 401 surfaces a
-  // visible "team paused / retrying" notice in the user thread while the token
-  // refreshes and the call backs off (10s → 30s → 2min). See withClaudeAuthRetry.
+  // Register the subscription-CLI auth-retry notifier so a mid-run 401 (Claude
+  // OR Codex) surfaces a visible "team paused / retrying" notice in the user
+  // thread while the token refreshes and the call backs off (10s → 30s → 2min).
+  // See withCliAuthRetry.
   useEffect(() => {
     _authWaitHandler = (info) => {
+      const cli = info.backend === "codex_cli" ? "Codex" : "Claude";
       if (info.kind === "recovered") {
         setSupChat(prev => [...prev, {
           role: "system", color: "#7ff0c5",
-          text: `✓ Claude re-authenticated — resuming the team.`,
+          text: `✓ ${cli} re-authenticated — resuming the team.`,
           ts: Date.now(),
         }]);
         return;
@@ -7219,7 +7223,7 @@ export default function AgentsPage() {
       const human = secs >= 60 ? `${Math.round(secs / 60)} min` : `${secs}s`;
       setSupChat(prev => [...prev, {
         role: "system", color: "#ffb74d",
-        text: `⏸ Claude sign-in returned 401 (token expired mid-run) — refreshing it and retrying in ${human} (attempt ${info.attempt}/${info.total}). The team is paused, not stopped.`,
+        text: `⏸ ${cli} sign-in returned 401 (token expired mid-run) — refreshing it and retrying in ${human} (attempt ${info.attempt}/${info.total}). The team is paused, not stopped.`,
         ts: Date.now(),
       }]);
     };

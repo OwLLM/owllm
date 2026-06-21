@@ -395,7 +395,16 @@ export default function TrainPage() {
   // Curated bases + any base the user has actually pulled that isn't curated.
   const baseOptions = React.useMemo(() => {
     const curated = new Set(DEFAULT_BASE_MODELS.map((m) => m.toLowerCase()));
-    const extras = downloadedBases.filter((b) => !curated.has(b.toLowerCase()));
+    // Only TRAINABLE formats belong here. GGUF (llama.cpp inference quant), GPTQ
+    // and AWQ are inference-only — you cannot fine-tune them (training needs the
+    // full Transformers/safetensors weights; bnb-4bit is fine — unsloth QLoRA).
+    // They were showing up because this listed EVERY downloaded model regardless
+    // of format. Exclude them so the Train picker only offers things it can train.
+    const trainable = (id: string) => {
+      const s = id.toLowerCase();
+      return !s.includes("gguf") && !s.includes("gptq") && !s.includes("awq");
+    };
+    const extras = downloadedBases.filter((b) => !curated.has(b.toLowerCase()) && trainable(b));
     return [...DEFAULT_BASE_MODELS, ...extras];
   }, [downloadedBases]);
   React.useEffect(() => {

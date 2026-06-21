@@ -9218,7 +9218,20 @@ export default function AgentsPage() {
         // arrows runs exactly one agent here — today's behavior, unchanged.
         const wt = worktreeBySpec.get(startSpec.name) ?? null;
         const chainCwd = wt ? wt.path : projectCwd;
-        const runAgent = async (spec: AgentSpec, instruction: string) => {
+        // Function DECLARATIONS (hoisted) so runAgent / runLeaderUnit / runFrom can
+        // mutually recurse: a leader runs its members via runFrom, which runs each
+        // via runAgent, which may itself be another leader.
+        async function runAgent(spec: AgentSpec, instruction: string): Promise<{ name: string; text: string }> {
+          // SUB-LEADER: a can_dispatch agent that has its OWN member edges acts as a
+          // sub-orchestrator — it plans, dispatches its members, and hands ONE
+          // consolidated reply up. This is what makes "only the leader talks to the
+          // orchestrator" real. Non-leaders run plain, exactly as before.
+          const isLeader =
+            !!roleByName.get(spec.base)?.canDispatch && spec.name !== orch.name &&
+            (wiredDispatchTargets(runTeam, spec.name)?.size ?? 0) > 0;
+          if (isLeader) return await runLeaderUnit(spec, instruction);
+          if (!activeTeam) return { name: spec.name, text: "" };
+
           addActive(spec.name);
           appendThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
           appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
@@ -9254,17 +9267,89 @@ export default function AgentsPage() {
           removeActive(spec.name);
           speakAgentReply(spec.name, specText);
           return { name: spec.name, text: specText };
-        };
+        }
+        // SUB-ORCHESTRATOR for a team leader: it plans over its OWN members (its
+        // wired targets), dispatches them through the SAME runFrom handoff (so the
+        // sub-team's internal arrows still work), then integrates ONE reply for the
+        // top orchestrator. buildOrchestratorPrompt with the leader as "orch" makes
+        // its roster exactly its members (with their real [tools:]/[skills:]).
+        async function runLeaderUnit(leader: AgentSpec, instruction: string): Promise<{ name: string; text: string }> {
+          if (!runTeam) return { name: leader.name, text: "" };
+          const members = wiredDispatchTargets(runTeam, leader.name) ?? new Set<string>();
+          const leaderModel = modelFor(leader.name);
+          const leaderPrompt = buildOrchestratorPrompt(
+            runTeam, roleByName, leader, directives, false, undefined, false, undefined, undefined, perAgentSkills,
+          );
+          // 1. Leader plans + emits @member dispatches.
+          addActive(leader.name);
+          appendThought(leader.name, { role: "dispatch", color: "#a578ff", text: `📩 (sub-team lead) ${instruction}` });
+          appendLog(leader.name, { role: leader.name, color: colorForAgent(leader), text: "" });
+          let plan = "";
+          try {
+            plan = (await streamChatCompletion(
+              port, leaderModel, providerFor(leaderModel),
+              leaderPrompt, instruction, tempFor(leader, 0.4), ctrl.signal,
+              (delta) => streamLog(leader.name, delta),
+              chainCwd, undefined, undefined,
+              (channel, role, delta) => streamThought(leader.name, channel, role, delta),
+              READONLY_LOCAL_TOOLS, undefined,
+              getClaudeSession(selectedProjectId, leader.name),
+            )).trim();
+          } catch (e: any) {
+            appendLog(leader.name, { role: "system", color: "#ff8c8c", text: `⚠ ${cleanAgentError(e)}` });
+          }
+          removeActive(leader.name);
+          // 2. Dispatch its members through runFrom (sub-team handoff honored).
+          const parsed = parseDispatchesDetailed(plan, runTeam, leader.name);
+          const memberDispatches = parsed.dispatches.filter(d => members.has(d.agentName));
+          const subReplies: { name: string; text: string }[] = [];
+          for (const md of memberDispatches) subReplies.push(...await runFrom(md.agentName, md.instruction));
+          // 3. Leader integrates ONE consolidated reply for the orchestrator.
+          addActive(leader.name);
+          appendLog(leader.name, { role: leader.name, color: colorForAgent(leader), text: "" });
+          let synthesis = subReplies.map(r => r.text).join("\n\n").trim() || plan;
+          if (subReplies.length > 0) {
+            const integrationInput = [
+              `Your sub-team handled this task:\n${instruction}`,
+              "",
+              "Their replies:",
+              ...subReplies.map(r => `\n— ${displayLabel(r.name)} —\n${r.text}`),
+              "",
+              "Consolidate this into ONE result to hand back to the orchestrator. Be concise; quote what matters.",
+            ].join("\n");
+            try {
+              synthesis = (await streamChatCompletion(
+                port, leaderModel, providerFor(leaderModel),
+                leaderPrompt, integrationInput, tempFor(leader, 0.4), ctrl.signal,
+                (delta) => streamLog(leader.name, delta),
+                chainCwd, undefined, undefined,
+                (channel, role, delta) => streamThought(leader.name, channel, role, delta),
+                undefined, undefined,
+                getClaudeSession(selectedProjectId, leader.name),
+              )).trim();
+            } catch { /* keep the concatenated fallback */ }
+          }
+          removeActive(leader.name);
+          speakAgentReply(leader.name, synthesis);
+          return { name: leader.name, text: synthesis };
+        }
         // Walk the graph: each node runs, then hands its output to ALL its
         // non-orchestrator arrow targets. `ran` (claimed before each await) +
         // MAX_CHAIN_HOPS dedupe fan-in and guarantee termination on cycles.
         const ran = new Set<string>();
-        const runFrom = async (name: string, input: string): Promise<{ name: string; text: string }[]> => {
+        async function runFrom(name: string, input: string): Promise<{ name: string; text: string }[]> {
+          if (!activeTeam) return [];
           if (ran.has(name) || ran.size >= MAX_CHAIN_HOPS) return [];
           ran.add(name);
           const spec = activeTeam.agents.find(a => a.name === name);
           if (!spec) return [];
           const out = await runAgent(spec, input);
+          // A sub-leader already ran its members inside runLeaderUnit — treat it as
+          // a leaf so we don't ALSO handoff to (and double-run) those same members.
+          const ranAsLeader =
+            !!roleByName.get(spec.base)?.canDispatch && name !== orch.name &&
+            (wiredDispatchTargets(runTeam, name)?.size ?? 0) > 0;
+          if (ranAsLeader) return [out];
           const downstream = downstreamTargets(runTeam, name, orch.name).filter(t => !ran.has(t));
           if (downstream.length === 0) return [out];   // leaf → a terminal result
           const handoff = `You are continuing a team workflow. @${out.name} produced the following — build on it for YOUR part of the task:\n\n${out.text}`;
@@ -9272,7 +9357,7 @@ export default function AgentsPage() {
           const results: { name: string; text: string }[] = [];
           for (const t of downstream) results.push(...await runFrom(t, handoff));
           return results.length ? results : [out];
-        };
+        }
         const replies = await runFrom(startSpec.name, d.instruction);
         if (replies.length === 0) return null;
         // Finalize the tree's worktree ONCE — captures the whole branch's edits.

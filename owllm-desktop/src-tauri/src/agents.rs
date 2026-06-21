@@ -68,16 +68,28 @@ pub struct SkillPack {
 
 #[tauri::command]
 pub async fn list_team_templates() -> Result<Vec<TeamTemplate>, String> {
-    let mut out = Vec::new();
     // Built-in teams ship as JSONs inside the app's resources tree.
+    let mut builtins = Vec::new();
     if let Some(builtin) = paths::teams_dir() {
-        collect_team_dir(&builtin, true, &mut out);
+        collect_team_dir(&builtin, true, &mut builtins);
     }
     // User-saved teams — Phase 2 home is %APPDATA%\OwLLM Desktop\teams/.
     // The helper returns BOTH the new and legacy LLM/data/teams/ dirs
     // during the migration window so existing teams stay visible.
+    let mut customs = Vec::new();
     for custom in paths::custom_teams_dirs_read() {
-        collect_team_dir(&custom, false, &mut out);
+        collect_team_dir(&custom, false, &mut customs);
+    }
+    // Dedup by id (= file stem): a custom team that shares a built-in's stem is
+    // an in-place EDIT of that built-in — saved to the writable custom dir
+    // because the bundled file is read-only — and SHADOWS it. Customs are
+    // visited first so they win; among customs the first dir (new home) wins.
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<TeamTemplate> = Vec::new();
+    for t in customs.into_iter().chain(builtins.into_iter()) {
+        if seen.insert(t.id.clone()) {
+            out.push(t);
+        }
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
@@ -216,13 +228,10 @@ pub async fn save_team_template(file_stem: String, data: JsonValue) -> Result<Te
     if stem.is_empty() {
         return Err("that name produces an empty file name — use letters or digits".into());
     }
-    if let Some(builtin) = paths::teams_dir() {
-        if builtin.join(format!("{stem}.json")).is_file() {
-            return Err(format!(
-                "'{stem}' is a built-in template name — pick a different name for your copy"
-            ));
-        }
-    }
+    // NOTE: saving with a built-in's stem is ALLOWED on purpose — it writes a
+    // custom OVERRIDE (into the writable custom dir below; the bundled file is
+    // never touched) which list_team_templates then prefers over the built-in.
+    // That's how "edit a built-in template to fix it" works.
     let dir = paths::custom_teams_dir().ok_or_else(|| "user-data root not found".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let path = dir.join(format!("{stem}.json"));

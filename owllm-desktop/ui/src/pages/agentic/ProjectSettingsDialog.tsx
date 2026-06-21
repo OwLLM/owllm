@@ -37,6 +37,10 @@ export type ProjectSettingsDialogProps = {
   teams: Team[];
   pickedTeamId: string | null;
   onPickTeam: (id: string | null) => void;
+  /// The team template this project actually runs (resolved from its roster
+  /// when no template is explicitly picked) — shown read-only in EDIT mode so
+  /// the card always names the team, not "(use project roster)".
+  resolvedTeamLabel?: string | null;
   // NEW mode
   defaultTeamName?: string | null;
   onCreated: (row: ProjectRow) => void;
@@ -61,7 +65,7 @@ const INPUT: React.CSSProperties = { height: 38, padding: "0 12px", borderRadius
 export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
   const {
     open, mode, onClose, teams, pickedTeamId, onPickTeam,
-    defaultTeamName, onCreated,
+    resolvedTeamLabel, defaultTeamName, onCreated,
     project, location, effectiveCwd, onChangeLocation,
     trustWrites, onToggleTrustWrites, fullAccess, onToggleFullAccess,
     bridgeOn, isolationRequested, onAfterRename, onAfterDelete,
@@ -312,10 +316,22 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
             </div>
             {/* Team template (canvas) + Bridge */}
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <label style={LBL}>Team template (shown on the canvas)</label>
+              <label style={LBL}>Team</label>
+              {/* Always name the team this project runs — resolved from the
+                  roster when no template is explicitly pinned. */}
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--fg-strong)", padding: "6px 10px", background: "var(--bg-elevated)", border: "1px solid var(--border)", borderRadius: 8 }}>
+                <span>👥</span>
+                <b style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                  {(pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.display : null) ?? resolvedTeamLabel ?? "Custom roster"}
+                </b>
+                <button type="button"
+                  onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-workbench"))}
+                  className="ghost-btn" style={{ height: 28, padding: "0 10px", fontSize: 12 }}>⚙ Edit team</button>
+              </div>
+              <label style={{ ...LBL, marginTop: 4 }}>Override the canvas team</label>
               <div style={{ display: "flex", gap: 8 }}>
                 <select value={pickedTeamId ?? ""} onChange={e => onPickTeam(e.target.value || null)} style={{ ...INPUT, flex: 1 }}>
-                  <option value="">(use project roster)</option>
+                  <option value="">(use project roster{resolvedTeamLabel ? ` — ${resolvedTeamLabel}` : ""})</option>
                   {teams.map(t => <option key={t.id} value={t.id}>{t.display} ({t.agents.length} agents)</option>)}
                 </select>
                 <button type="button" onClick={() => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "bridges" } }))} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>{bridgeOn ? "📱 Bridge: ON" : "📱 Bridge: OFF"}</button>

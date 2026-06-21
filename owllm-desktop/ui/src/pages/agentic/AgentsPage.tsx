@@ -74,7 +74,7 @@ import { getServerCtx } from "../core/serverContext";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
-import { routeEdge, bundleOffsets, type Rect } from "./edgeRouter";
+import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock, fmtTime } from "../../components/ChatBubble";
 import { chatRuntime } from "../../runtime/chatRuntime";
@@ -2362,7 +2362,11 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   // drawn at orchestrator_r * 1.12 from centre; placing the critic at
   // orchestrator_r * 1.6 puts it clearly past the hub edge.
   const NODE_R = 22;
-  const orchestrator_r = Math.max(48, Math.min(w, h) * 0.10);
+  // Center hub size. Everything in the hub (owl icon 1.9×, core 1.5×, halo 3×,
+  // arcs, the critic peer offset, the label) scales from this, so shrinking it
+  // shrinks the whole center cluster. Kept well inside the inner ring (130px),
+  // so a smaller hub just opens up breathing room — no overlap.
+  const orchestrator_r = Math.max(38, Math.min(w, h) * 0.07);
 
   type Node = { name: string; x: number; y: number; label: string; iconRef: string; active: boolean; depth: number; group: TeamGroup };
   const nodes: Node[] = [];
@@ -3162,30 +3166,31 @@ function GraphCanvas({
     if (p.side === "bottom") return { x: p.x, y: p.y + Math.max(40, Math.abs(other.y - p.y) * k) };
     return                          { x: p.x, y: p.y - Math.max(40, Math.abs(other.y - p.y) * k) };
   };
-  const edgePath = (sName: string, tName: string, s: { x: number; y: number }, t: { x: number; y: number }) => {
+  const edgePath = (sName: string, tName: string, s: { x: number; y: number }, t: { x: number; y: number }, bundleShift = 0) => {
     const sP = outPortFor(sName, s);
     const tP = inPortFor(tName, t);
     const sCtl = ctlFor(sP, tP, 0.55);
     const tCtl = ctlFor(tP, sP, 0.55);
+    // Fan parallel edges apart laterally (perpendicular to the s→t line) so
+    // duplicate source→target pairs don't draw on top of each other.
+    if (bundleShift) {
+      const dx = tP.x - sP.x, dy = tP.y - sP.y;
+      const len = Math.hypot(dx, dy) || 1;
+      const nx = -dy / len, ny = dx / len;
+      sCtl.x += nx * bundleShift; sCtl.y += ny * bundleShift;
+      tCtl.x += nx * bundleShift; tCtl.y += ny * bundleShift;
+    }
     return `M ${sP.x} ${sP.y} C ${sCtl.x} ${sCtl.y}, ${tCtl.x} ${tCtl.y}, ${tP.x} ${tP.y}`;
   };
 
-  // Routed edge paths (P0-2b): obstacle avoidance around every card that
-  // isn't an endpoint, parallel-edge bundling. Plain per-render compute
-  // (NOT a hook — this code can sit below conditional logic) so dragging
-  // a card re-routes live; ~30k arithmetic ops worst case, fine at 60fps.
+  // Edges are drawn as clean bottom→top Bezier connectors (edgePath below).
+  // We deliberately DON'T run the obstacle-avoiding router here anymore: in a
+  // dense tiered layout it swung edges far around the card clusters (and out
+  // to the canvas edge via the Manhattan-lane fallback), which read as
+  // spaghetti. A gentle curve that may graze a card is far more legible than
+  // a giant detour — same approach as the Team Workbench graph. Parallel
+  // edges between the same pair get a small lateral fan so they don't overlap.
   const routeOffsets = bundleOffsets(liveEdges);
-  const routedPaths = liveEdges.map((e, i) => {
-    const s = effective.get(e.source);
-    const t = effective.get(e.target);
-    if (!s || !t) return null;
-    const obstacles: Rect[] = [];
-    for (const [name, p] of effective) {
-      if (name === e.source || name === e.target) continue;
-      obstacles.push({ x: p.x, y: p.y, w: NODE_W, h: NODE_H });
-    }
-    return routeEdge(outPortFor(e.source, s), inPortFor(e.target, t), obstacles, routeOffsets[i]);
-  });
 
   return (
     <div
@@ -3237,9 +3242,8 @@ function GraphCanvas({
             const t = effective.get(e.target)!;
             const synthetic = (e as any).synthetic === true;
             const sel = !synthetic && selectedEdgeIdx === i;
-            // Routed path (obstacle-avoiding + bundled); falls back to the
-            // plain Bezier if routing returned null (missing endpoint).
-            const d = routedPaths[i]?.d ?? edgePath(e.source, e.target, s, t);
+            // Clean bottom→top Bezier (with a small fan for parallel edges).
+            const d = edgePath(e.source, e.target, s, t, routeOffsets[i]);
             const live = activeAgents.has(e.target) && activeAgents.has(e.source);
             return (
               <g key={"ge"+i}>
@@ -7425,6 +7429,13 @@ export default function AgentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // "⚙ Edit team" in the project settings card opens the Team Workbench.
+  useEffect(() => {
+    const onOpen = () => { setNewProjOpen(false); setWorkbenchOpen(true); };
+    window.addEventListener("owllm:open-workbench", onOpen as EventListener);
+    return () => window.removeEventListener("owllm:open-workbench", onOpen as EventListener);
+  }, []);
+
   // Register the subscription-CLI auth-retry notifier so a mid-run 401 (Claude
   // OR Codex) surfaces a visible "team paused / retrying" notice in the user
   // thread while the token refreshes and the call backs off (10s → 30s → 2min).
@@ -10126,6 +10137,7 @@ export default function AgentsPage() {
         teams={teams}
         pickedTeamId={pickedTeamId}
         onPickTeam={setPickedTeamId}
+        resolvedTeamLabel={activeTeamTemplate?.display ?? null}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
         onCreated={onProjectCreated}
         project={selectedProject}

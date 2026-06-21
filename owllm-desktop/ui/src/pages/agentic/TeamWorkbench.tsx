@@ -395,15 +395,12 @@ export default function TeamWorkbench({
       data.graph = { ...(data.graph ?? {}), edges: normalized.edges };
       if (!data.icon) data.icon = "owl:owl_asssitant";
 
-      let fileStem = backend.id;
-      if (builtIn) {
-        // built-ins are read-only on disk — Save creates a custom copy.
-        const copyName = `${display.trim() || backend.id} copy`;
-        data.display_name = copyName;
-        delete data.visibility;
-        delete data.workflow_rank;
-        fileStem = copyName;
-      }
+      // Save under the SAME id — for a built-in this writes a custom OVERRIDE
+      // with the built-in's own stem (the bundled file is read-only; the
+      // override goes to the writable custom dir and the loader prefers it).
+      // So editing a built-in actually FIXES that template instead of forking
+      // a divergent "… copy" the team's projects never see.
+      const fileStem = backend.id;
       const saved = await invoke<TeamTemplateBackend>("save_team_template", { fileStem, data });
       invoke("vault_sync_teams").catch(() => {});
       setDirty(false);
@@ -441,7 +438,7 @@ export default function TeamWorkbench({
           style={{ background: "none", border: "none", color: "var(--fg-strong)", fontSize: 16, fontWeight: 800, cursor: "pointer", padding: 0 }}>
           {display || backend.id}
         </button>
-        {builtIn && <span style={{ fontSize: 10, color: "#ffd97a", border: "1px solid rgba(255,217,122,0.4)", background: "rgba(255,217,122,0.1)", borderRadius: 999, padding: "1px 7px", fontWeight: 700 }}>built-in · Save makes a copy</span>}
+        {builtIn && <span title="The bundled file stays read-only; Save writes an editable override that the app loads instead — so your changes take effect and persist." style={{ fontSize: 10, color: "#ffd97a", border: "1px solid rgba(255,217,122,0.4)", background: "rgba(255,217,122,0.1)", borderRadius: 999, padding: "1px 7px", fontWeight: 700 }}>built-in · Save edits it in place (as an override)</span>}
         <div style={{ flex: 1 }} />
         {noticeCount > 0 && (
           <button onClick={() => setShowNotices(v => !v)} title="Configuration notices from the team normalizer"

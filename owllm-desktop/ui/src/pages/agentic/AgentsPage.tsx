@@ -7374,6 +7374,17 @@ export default function AgentsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The Vault sync (vaultSync.syncProjectsNow) imports newer project rows +
+  // chat transcripts from the user's other devices, then fires this event so
+  // the project list + the active project's chat repaint without a restart.
+  // This is what makes "your chats follow you to every device" actually true.
+  useEffect(() => {
+    const onProjects = () => { reloadProjects(); };
+    window.addEventListener("owllm:projects:refresh", onProjects as EventListener);
+    return () => window.removeEventListener("owllm:projects:refresh", onProjects as EventListener);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Register the subscription-CLI auth-retry notifier so a mid-run 401 (Claude
   // OR Codex) surfaces a visible "team paused / retrying" notice in the user
   // thread while the token refreshes and the call backs off (10s → 30s → 2min).

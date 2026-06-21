@@ -330,6 +330,7 @@ pub fn run() {
             vault::vault_unpublish_server,
             vault::vault_read_server,
             vault::vault_sync_teams,
+            vault::vault_sync_projects,
             sandbox::sandbox_status,
             sandbox::agent_save_inbox_images,
             sandbox::agent_full_access_get,

@@ -370,6 +370,207 @@ pub async fn vault_sync_teams() -> Result<(), String> {
     .map_err(|e| format!("join error: {e}"))?
 }
 
+// --------------------------------------------------------------------------
+// Project (chat) sync.
+//
+// Chats + per-project team wiring + routing graph live in the SQLite
+// `agent_projects` table, NOT in localStorage — so the localStorage blob sync
+// (vault_write_state) and the team-file sync (vault_sync_teams) both miss them.
+// That made the "your chats follow you to every device" promise hollow. This
+// closes the gap: each project row is mirrored to `state/projects/<id>.json`
+// and remote rows are merged back in, last-writer-wins per project by
+// updated_at. Device-LOCAL fields (the on-disk folder path, the trust flags)
+// are NEVER overwritten on a project that already exists locally — only the
+// content (name, description, team, graph, chat transcript, agent logs,
+// team model) follows the user across devices.
+// --------------------------------------------------------------------------
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct VaultProject {
+    id: String,
+    name: String,
+    description: String,
+    team_json: String,
+    model_overrides_json: String,
+    graph_json: String,
+    chat_json: String,
+    agent_logs_json: String,
+    team_default_model_id: String,
+    created_at: String,
+    updated_at: String,
+    /// Carried so a BRAND-NEW device has a starting path; never overwrites an
+    /// existing local project's location (see import_project).
+    location: String,
+}
+
+/// Keep a project id safe as a filename (ids are `{hex}_{hex}` already, but be
+/// defensive against anything hand-edited into the DB).
+fn safe_id(id: &str) -> String {
+    id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
+}
+
+fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
+    if !db.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = rusqlite::Connection::open(db).map_err(|e| format!("open db: {e}"))?;
+    let exists: i64 = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_projects'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if exists == 0 {
+        return Ok(Vec::new());
+    }
+    crate::projects::ensure_schema(&conn)?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, description, team_json, model_overrides_json, graph_json, \
+             COALESCE(chat_json,''), COALESCE(agent_logs_json,''), team_default_model_id, \
+             created_at, updated_at, location FROM agent_projects",
+        )
+        .map_err(|e| format!("prepare export: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(VaultProject {
+                id: r.get(0)?,
+                name: r.get(1)?,
+                description: r.get::<_, String>(2).unwrap_or_default(),
+                team_json: r.get::<_, String>(3).unwrap_or_else(|_| "[]".into()),
+                model_overrides_json: r.get::<_, String>(4).unwrap_or_else(|_| "{}".into()),
+                graph_json: r.get::<_, String>(5).unwrap_or_default(),
+                chat_json: r.get::<_, String>(6).unwrap_or_default(),
+                agent_logs_json: r.get::<_, String>(7).unwrap_or_default(),
+                team_default_model_id: r.get::<_, String>(8).unwrap_or_default(),
+                created_at: r.get::<_, String>(9).unwrap_or_default(),
+                updated_at: r.get::<_, String>(10).unwrap_or_default(),
+                location: r.get::<_, String>(11).unwrap_or_default(),
+            })
+        })
+        .map_err(|e| format!("query export: {e}"))?;
+    let out: Result<Vec<_>, _> = rows.collect();
+    out.map_err(|e| format!("decode export: {e}"))
+}
+
+/// Upsert one remote project into the local DB. Returns true when the local DB
+/// changed (new project, or remote was newer). Existing projects keep their
+/// device-local location + trust/auto-approve flags.
+fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool, String> {
+    let local_updated: Option<String> = match conn.query_row(
+        "SELECT updated_at FROM agent_projects WHERE id = ?",
+        rusqlite::params![p.id],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(s) => Some(s),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(format!("probe project: {e}")),
+    };
+    match local_updated {
+        None => {
+            conn.execute(
+                "INSERT INTO agent_projects (id, name, description, location, trust_writes, \
+                 auto_approve_all, team_json, model_overrides_json, graph_json, created_at, \
+                 updated_at, team_default_model_id, chat_json, agent_logs_json) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                rusqlite::params![
+                    p.id, p.name, p.description, p.location, p.team_json,
+                    p.model_overrides_json, p.graph_json,
+                    if p.created_at.is_empty() { p.updated_at.clone() } else { p.created_at.clone() },
+                    p.updated_at, p.team_default_model_id, p.chat_json, p.agent_logs_json,
+                ],
+            )
+            .map_err(|e| format!("insert project: {e}"))?;
+            Ok(true)
+        }
+        Some(local) => {
+            if p.updated_at > local {
+                // Remote is newer → adopt CONTENT, keep local path + trust flags.
+                conn.execute(
+                    "UPDATE agent_projects SET name = ?2, description = ?3, team_json = ?4, \
+                     model_overrides_json = ?5, graph_json = ?6, chat_json = ?7, \
+                     agent_logs_json = ?8, team_default_model_id = ?9, updated_at = ?10 \
+                     WHERE id = ?1",
+                    rusqlite::params![
+                        p.id, p.name, p.description, p.team_json, p.model_overrides_json,
+                        p.graph_json, p.chat_json, p.agent_logs_json, p.team_default_model_id,
+                        p.updated_at,
+                    ],
+                )
+                .map_err(|e| format!("update project: {e}"))?;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+    }
+}
+
+/// Sync the project/chat rows through the vault: pull every other device's
+/// projects into the local DB (last-writer-wins per project), then publish
+/// ours. Returns true when the local DB changed (so the UI can reload).
+#[tauri::command]
+pub async fn vault_sync_projects() -> Result<bool, String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Ok(false);
+    }
+    let db = crate::projects::project_db_path().ok_or_else(|| "no project db path".to_string())?;
+    tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let branch = current_branch(&dir);
+        // Bring the working tree to the latest remote first (same as teams).
+        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
+        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let proj_dir = dir.join("state").join("projects");
+        std::fs::create_dir_all(&proj_dir).map_err(|e| format!("mkdir projects: {e}"))?;
+
+        // 1) remote → local DB.
+        let mut imported = false;
+        {
+            // Ensure the DB + schema exist even on a fresh device that has
+            // never created a project (so the first import can INSERT).
+            if let Some(parent) = db.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let conn = rusqlite::Connection::open(&db).map_err(|e| format!("open db: {e}"))?;
+            crate::projects::ensure_schema(&conn)?;
+            if let Ok(rd) = std::fs::read_dir(&proj_dir) {
+                for e in rd.flatten() {
+                    let p = e.path();
+                    if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                        continue;
+                    }
+                    let Ok(txt) = std::fs::read_to_string(&p) else { continue };
+                    let Ok(vp) = serde_json::from_str::<VaultProject>(&txt) else { continue };
+                    if vp.id.is_empty() {
+                        continue;
+                    }
+                    if import_project(&conn, &vp)? {
+                        imported = true;
+                    }
+                }
+            }
+        }
+
+        // 2) local DB → files (so locally-newer projects propagate up).
+        for vp in export_projects(&db)? {
+            if vp.id.is_empty() {
+                continue;
+            }
+            let json = serde_json::to_string_pretty(&vp).map_err(|e| e.to_string())?;
+            let _ = std::fs::write(proj_dir.join(format!("{}.json", safe_id(&vp.id))), json);
+        }
+
+        // 3) commit + push.
+        commit_push(&dir, &branch)?;
+        Ok(imported)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// The clone's current branch (GitHub auto_init defaults to `main`).
 fn current_branch(dir: &std::path::Path) -> String {
     run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(dir))

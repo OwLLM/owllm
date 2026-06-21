@@ -60,7 +60,7 @@ pub async fn list_projects() -> Result<Vec<ProjectRow>, String> {
         .map_err(|e| format!("join error: {e}"))?
 }
 
-fn project_db_path() -> Option<PathBuf> {
+pub(crate) fn project_db_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_PROJECT_DB") {
         return Some(PathBuf::from(p));
     }
@@ -70,7 +70,7 @@ fn project_db_path() -> Option<PathBuf> {
     paths::state_db_path()
 }
 
-fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
+pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     // Idempotent CREATE TABLE so opening a fresh database doesn't fail
     // when the user creates their first project before the legacy
     // Python app has touched the file.

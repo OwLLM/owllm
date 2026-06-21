@@ -131,6 +131,30 @@ function schedulePush(): void {
   _pushTimer = setTimeout(() => { _pushTimer = null; void pushNow(); }, 4000);
 }
 
+// Projects + chats live in SQLite, not localStorage, so the blob sync above
+// never carries them. vault_sync_projects mirrors the agent_projects rows
+// (name, team, graph, chat transcript, agent logs) through the vault,
+// last-writer-wins per project. When it imports a newer copy from another
+// device we fire owllm:projects:refresh so the Agents page reloads.
+let _projSyncing = false;
+export async function syncProjectsNow(): Promise<boolean> {
+  if (!_enabled || _projSyncing) return false;
+  _projSyncing = true;
+  try {
+    const changed = await invoke<boolean>("vault_sync_projects");
+    if (changed) {
+      // Refresh the project list + active chat in place (mid-session callers).
+      try { window.dispatchEvent(new CustomEvent("owllm:projects:refresh")); } catch { /* non-browser */ }
+    }
+    return changed;
+  } catch (e) {
+    console.warn("[vaultSync] project sync failed", e);
+    return false;
+  } finally {
+    _projSyncing = false;
+  }
+}
+
 /// Start the sync engine once at app launch. Safe to call when logged out /
 /// no vault — it just no-ops. Wired from ChatRuntimeProvider.
 export async function startVaultSync(): Promise<void> {
@@ -155,6 +179,11 @@ export async function startVaultSync(): Promise<void> {
   //     across devices. Fire-and-forget; failures don't block.
   invoke("vault_sync_teams").catch(() => {});
 
+  // 2c) Sync projects + chats (SQLite rows) so conversations follow the user.
+  //     If we pulled in newer projects/chats from another device, reload so
+  //     the whole UI repaints from the freshly-synced database.
+  if (await syncProjectsNow()) { location.reload(); return; }
+
   // 3) Keep pushing on the moments that matter.
   wireListeners();
 }
@@ -169,6 +198,7 @@ export async function onVaultConnected(): Promise<void> {
   _lastSnapshotJson = JSON.stringify(snapshot());
   await pushNow(true);
   invoke("vault_sync_teams").catch(() => {});
+  if (await syncProjectsNow()) location.reload();
 }
 
 /// Push on tab-hidden, app-close, and a debounced diff poll (localStorage's
@@ -176,9 +206,9 @@ export async function onVaultConnected(): Promise<void> {
 function wireListeners(): void {
   if (_listenersWired) return;
   _listenersWired = true;
-  const onHide = () => { if (document.visibilityState === "hidden") void pushNow(); };
+  const onHide = () => { if (document.visibilityState === "hidden") { void pushNow(); void syncProjectsNow(); } };
   document.addEventListener("visibilitychange", onHide);
-  window.addEventListener("beforeunload", () => { void pushNow(); });
+  window.addEventListener("beforeunload", () => { void pushNow(); void syncProjectsNow(); });
   window.setInterval(() => {
     if (!_enabled) return;
     const j = JSON.stringify(snapshot());

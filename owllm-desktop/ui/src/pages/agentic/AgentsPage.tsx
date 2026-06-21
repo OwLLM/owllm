@@ -539,6 +539,46 @@ function projectToTeam(p: ProjectRow): Team {
   };
 }
 
+/// The Workbench edits team TEMPLATES, but a project stores only its roster (no
+/// template id). Recover the template the project is running so the header chip
+/// can NAME the team (not the project) and the Workbench can open it. Match
+/// strategy, most reliable first: the active team is already a template (the
+/// user picked one) → use it; else exact agent-NAME set; else exact base-ROLE
+/// multiset (survives per-agent renames); else best name overlap ≥ 60%.
+/// Returns null for a genuinely custom roster that matches no template.
+function teamTemplateForActive(active: Team | null, teams: Team[]): Team | null {
+  if (!active) return null;
+  if (!active.id.startsWith("project:")) return active; // already a real template
+  const projNames = active.agents.map(a => a.name).filter(Boolean);
+  if (projNames.length === 0) return null;
+  const nameSet = new Set(projNames);
+  const baseKey = (ags: { base: string }[]) => ags.map(a => a.base).filter(Boolean).sort().join("|");
+  const projBaseKey = baseKey(active.agents);
+
+  // 1) exact agent-NAME set.
+  const byName = teams.find(t => {
+    const tn = t.agents.map(a => a.name);
+    return tn.length === nameSet.size && tn.every(n => nameSet.has(n));
+  });
+  if (byName) return byName;
+  // 2) exact base-ROLE multiset (renamed agents still match).
+  if (projBaseKey) {
+    const byBase = teams.find(t => baseKey(t.agents) === projBaseKey);
+    if (byBase) return byBase;
+  }
+  // 3) best agent-name overlap (Jaccard) ≥ 0.6.
+  let best: Team | null = null, bestScore = 0;
+  for (const t of teams) {
+    const tn = t.agents.map(a => a.name);
+    if (tn.length === 0) continue;
+    const inter = tn.filter(n => nameSet.has(n)).length;
+    const union = new Set([...tn, ...projNames]).size;
+    const score = union ? inter / union : 0;
+    if (score > bestScore) { bestScore = score; best = t; }
+  }
+  return bestScore >= 0.6 ? best : null;
+}
+
 // Layered depth computation:
 //
 //   layer(orchestrator) = 0  — the hub sits at the centre and can
@@ -7666,6 +7706,14 @@ export default function AgentsPage() {
     return teams[0] ?? null;
   }, [pickedTeamId, teams, selectedProject]);
 
+  // The TEAM TEMPLATE behind the active project — what the header chip names
+  // and what the Workbench opens (the project itself isn't a template). null
+  // for a custom roster that matches no template (then the chip hides).
+  const activeTeamTemplate = useMemo(
+    () => teamTemplateForActive(activeTeam, teams),
+    [activeTeam, teams],
+  );
+
   // Reset edge edits + node positions whenever the active team flips.
   // Without this, edges/positions from a previous team would leak onto
   // the next one and reference agents that don't exist.
@@ -10187,9 +10235,9 @@ export default function AgentsPage() {
         // template override + reload so the canvas shows the new team.
         onTeamApplied={() => { setPickedTeamId(null); reloadProjects(); }}
       />
-      {workbenchOpen && activeTeam && (
+      {workbenchOpen && activeTeamTemplate && (
         <TeamWorkbenchModal
-          teamName={activeTeam.name}
+          teamName={activeTeamTemplate.name}
           models={models}
           accountsStatus={accountsStatus}
           onClose={() => setWorkbenchOpen(false)}
@@ -10230,7 +10278,7 @@ export default function AgentsPage() {
             onDeleteEdge={deleteSelectedEdge}
             onReverseEdge={reverseSelectedEdge}
             onResetLayout={resetGraphLayout}
-            teamLabel={activeTeam?.display ?? null}
+            teamLabel={activeTeamTemplate?.display ?? null}
             onOpenWorkbench={() => setWorkbenchOpen(true)}
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>

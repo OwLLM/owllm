@@ -145,11 +145,14 @@ pub async fn fleet_worktree_create(
     if !is_git_repo(&cwd) {
         return Ok(CreateOutcome::NotAGitRepo);
     }
-    // Reject if the working tree is dirty — the agent's branch would
-    // be cut from HEAD, so the user's WIP edits would be silently
-    // missing from the agent's view. Surface so the user can commit
-    // or stash first instead of getting confusing results.
-    let (_, status_out, _) = git(&cwd, &["status", "--porcelain"])?;
+    // Reject if there are uncommitted TRACKED changes — the branch is cut from
+    // HEAD, so those edits would be silently missing from the new worktree.
+    // CRITICAL perf: `--untracked-files=no` skips enumerating untracked files.
+    // A plain `git status --porcelain` walks the ENTIRE working tree (node_modules,
+    // venvs, build output) — a 20-40s stall on a real project, which is exactly
+    // why opening a Code page on a recent folder felt frozen. Untracked files
+    // aren't in HEAD anyway, so not warning about them costs nothing.
+    let (_, status_out, _) = git(&cwd, &["status", "--porcelain", "--untracked-files=no"])?;
     if !status_out.trim().is_empty() {
         return Ok(CreateOutcome::DirtyWorkingTree {
             details: status_out.lines().take(20).collect::<Vec<_>>().join("\n"),

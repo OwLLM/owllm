@@ -99,6 +99,58 @@ static TRAIN_STATE: Mutex<TrainState> = Mutex::new(TrainState {
     log_tail: Vec::new(),
 });
 
+/// Does `p` look like an on-disk model directory (HF transformers or a LoRA
+/// adapter)?
+fn looks_like_model_dir(p: &std::path::Path) -> bool {
+    p.is_dir()
+        && (p.join("config.json").is_file()
+            || p.join("adapter_config.json").is_file()
+            || std::fs::read_dir(p)
+                .map(|it| {
+                    it.flatten().any(|e| {
+                        let n = e.file_name();
+                        let n = n.to_string_lossy();
+                        n.ends_with(".safetensors") || n.ends_with(".bin")
+                    })
+                })
+                .unwrap_or(false))
+}
+
+/// Resolve the base-model value the trainer should receive. A model that is
+/// DOWNLOADED on disk is passed as its ABSOLUTE LOCAL PATH so transformers
+/// loads the weights directly; otherwise the value passes through as a
+/// HuggingFace id for the trainer to fetch.
+///
+/// Fixes "<name> is not a local folder and is not a valid model identifier"
+/// when the picker handed over a bare safe-name (e.g.
+/// "unsloth__gemma-2-2b-it-bnb-4bit") for a model that IS downloaded — it lives
+/// at <models-root>/<safe-name>/ but was passed as a name, not a path, so the
+/// trainer treated it as an (invalid) HF id.
+fn resolve_base_model_arg(base: &str) -> String {
+    // Already an absolute path to a real model dir.
+    let direct = std::path::Path::new(base);
+    if direct.is_absolute() && looks_like_model_dir(direct) {
+        return base.to_string();
+    }
+    let safe = base.replace('/', "__");
+    for root in crate::paths::models_dirs_read() {
+        // Flat safe-name dir: <root>/<owner__model>/.
+        let flat = root.join(&safe);
+        if looks_like_model_dir(&flat) {
+            return flat.to_string_lossy().into_owned();
+        }
+        // Nested HF layout: <root>/<owner>/<model>/.
+        if let Some((owner, model)) = base.split_once('/') {
+            let nested = root.join(owner).join(model);
+            if looks_like_model_dir(&nested) {
+                return nested.to_string_lossy().into_owned();
+            }
+        }
+    }
+    // Not found locally → pass through as a HuggingFace id.
+    base.to_string()
+}
+
 /// Start a training run. Returns once the subprocess has been
 /// spawned (or immediately on validation failure). Progress events
 /// stream over the Channel for the rest of the run.
@@ -182,7 +234,8 @@ pub async fn train_start(
     // saved LoRA adapter is named after the run instead of a generic timestamp.
     let argv: Vec<String> = vec![
         script.to_string_lossy().into_owned(),
-        "--model-name".into(), config.base_model.clone(),
+        // Downloaded model → its local path (load from disk); else a HF id.
+        "--model-name".into(), resolve_base_model_arg(&config.base_model),
         "--data-path".into(), config.dataset.clone(),
         "--output-dir".into(), run_dir.to_string_lossy().into_owned(),
         "--adapter-name".into(), config.run_name.clone(),
@@ -768,16 +821,18 @@ async fn spawn_abliterator(
     channel: &Channel<AbliterateEvent>,
 ) -> Result<(), String> {
     use tokio::io::AsyncBufReadExt;
-    use tokio::process::Command;
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-    let mut cmd = Command::new(python_exe);
-    cmd.args(argv)
-        .stdout(std::process::Stdio::piped())
+    // Reuse the trainer's WSL-aware command builder: on Windows the env's
+    // python is a POSIX/WSL path that must run via `wsl.exe -- bash -lc` with
+    // /mnt-translated args. Spawning it directly as a Windows process gave
+    // "The system cannot find the path specified (os error 3)". Empty CUDA
+    // string = no pinning; abliterate uses whatever GPU torch selects.
+    let mut cmd = build_trainer_command(python_exe, argv, "")?;
+    cmd.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .stdin(std::process::Stdio::null());
-    cmd.env("PYTHONUNBUFFERED", "1");
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

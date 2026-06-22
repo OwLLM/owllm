@@ -23,6 +23,7 @@ import {
 } from "./envProfiles";
 import EnvironmentModal from "./EnvironmentModal";
 import { isInstalling, subscribeEnvInstall } from "./envInstall";
+import * as dl from "./downloadStore";
 
 // Mirrors Rust TrainStatus (finetuning.rs). All numeric fields can be
 // null when the run hasn't reported them yet — every read site must
@@ -341,7 +342,9 @@ function TrainingHistory() {
 // TrainPage
 // ──────────────────────────────────────────────────────────────────
 export default function TrainPage() {
-  const [baseModel, setBaseModel] = React.useState(DEFAULT_BASE_MODELS[0]);
+  // Start with NO base model selected — the dropdown opens on "Select a model"
+  // instead of silently picking a random one the user never chose.
+  const [baseModel, setBaseModel] = React.useState("");
   const [runName, setRunName] = React.useState("");
   const [datasetPath, setDatasetPath] = React.useState("");
   const [datasetStatus, setDatasetStatus] = React.useState("No dataset loaded");
@@ -407,32 +410,32 @@ export default function TrainPage() {
     const extras = downloadedBases.filter((b) => !curated.has(b.toLowerCase()) && trainable(b));
     return [...DEFAULT_BASE_MODELS, ...extras];
   }, [downloadedBases]);
-  React.useEffect(() => {
-    let dead = false;
-    // SINGLE SOURCE OF TRUTH for "what's downloaded": models_list_downloaded.
-    // Its `name` is already "<owner>/<model>" (e.g.
-    // "unsloth/Qwen2.5-7B-Instruct-bnb-4bit"), so it matches the curated
-    // DEFAULT_BASE_MODELS ids verbatim — no reconstruction needed.
-    //
-    // Why this was broken: it previously called hf_cache_list, the disk-
-    // CLEANUP enumerator. That reports the app models tree under cacheRoot
-    // "owllm-models" with repoId = only the *owner* dir ("unsloth"), because
-    // it never descends into <owner>/<model>. The old filter
-    // `cacheRoot.startsWith("hf-") && repoId.includes("/")` therefore dropped
-    // EVERY real base on both conditions → "none downloaded yet" forever, for
-    // every model. Meanwhile the bases were sitting on disk the whole time,
-    // visible on the Models page (which uses this exact command).
+  // SINGLE SOURCE OF TRUTH for "what's downloaded": models_list_downloaded.
+  // Its `name` is already "<owner>/<model>", matching the curated
+  // DEFAULT_BASE_MODELS ids verbatim. Re-runs on `owllm:models:refresh` (fired
+  // by the download store) so a model just pulled via the inline Download
+  // button immediately moves to the "Downloaded" group.
+  const refreshDownloaded = React.useCallback(() => {
     invoke<{ name: string; isIncomplete?: boolean }[]>("models_list_downloaded")
       .then((items) => {
-        if (dead) return;
         const bases = (items || [])
           .filter((m) => m && m.name && !m.isIncomplete)
           .map((m) => m.name);
         setDownloadedBases(bases);
       })
       .catch(() => { /* scan best-effort; dropdown still shows curated list */ });
-    return () => { dead = true; };
   }, []);
+  React.useEffect(() => {
+    refreshDownloaded();
+    const onRefresh = () => refreshDownloaded();
+    window.addEventListener("owllm:models:refresh", onRefresh);
+    return () => window.removeEventListener("owllm:models:refresh", onRefresh);
+  }, [refreshDownloaded]);
+  // Subscribe to the shared download store so the inline Download button shows
+  // live progress and survives navigation.
+  const dlSnap = React.useSyncExternalStore(dl.subscribe, dl.getSnapshot);
+  const baseDownloading = baseModel ? dlSnap.downloading.has(baseModel) : false;
+  const baseDlProgress = baseModel ? dlSnap.progress.get(baseModel) : undefined;
 
   // Poll training status every 1.5s while a run is in flight.
   React.useEffect(() => {
@@ -503,6 +506,19 @@ export default function TrainPage() {
     : "Environment";
 
   const start = async () => {
+    // A base model must be SELECTED and DOWNLOADED. Training does not auto-fetch
+    // (the old "fetched at start" promise silently did nothing), so block here
+    // with a clear instruction instead of crashing inside the trainer.
+    if (!baseModel.trim() || baseModel === "__custom__") {
+      setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
+        message: "Select a base model first (Base Model card above)." });
+      return;
+    }
+    if (!isDownloaded(baseModel)) {
+      setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
+        message: "Download the base model first — use the Download button under Base Model." });
+      return;
+    }
     if (envState?.kind !== "ready") {
       setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
         message: "Install the fine-tuning environment first — open Environment (button next to the model)." });
@@ -700,6 +716,7 @@ export default function TrainPage() {
             }}
             style={inputStyle}
           >
+            <option value="">— Select a model —</option>
             <optgroup label="Downloaded (ready to train)">
               {baseOptions.filter((m) => isDownloaded(m)).map((m) => (
                 <option key={m} value={m}>✓ {m}</option>
@@ -708,7 +725,7 @@ export default function TrainPage() {
                 <option disabled>— none downloaded yet —</option>
               )}
             </optgroup>
-            <optgroup label="Not downloaded (fetched from HuggingFace at start)">
+            <optgroup label="Not downloaded (download first ↓)">
               {baseOptions.filter((m) => !isDownloaded(m)).map((m) => (
                 <option key={m} value={m}>⬇ {m}</option>
               ))}
@@ -724,13 +741,34 @@ export default function TrainPage() {
               style={inputStyle}
             />
           )}
-          {baseModel.trim() && !isDownloaded(baseModel) && (
+          {baseModel.trim() && baseModel !== "__custom__" && !isDownloaded(baseModel) && (
             <div style={{
+              display: "flex", flexDirection: "column", gap: 6,
               color: "#ffcc80", fontSize: 11, lineHeight: 1.4,
               background: "rgba(255,179,0,0.10)", border: "1px solid rgba(255,179,0,0.35)",
-              borderRadius: 6, padding: "6px 8px",
+              borderRadius: 6, padding: "8px 10px",
             }}>
-              ⚠ Not downloaded — training will fetch this base from HuggingFace (several GB) when you press Start. Needs internet, and a HuggingFace login for gated repos. Download it on the Models tab first to avoid the wait.
+              <div>⚠ Not on disk yet — download it before training (training does not auto-fetch).</div>
+              {baseDownloading ? (
+                <div style={{ fontSize: 11, color: "#9ad9ff" }}>
+                  {baseDlProgress?.error
+                    ? `Download failed: ${baseDlProgress.error}`
+                    : baseDlProgress?.total
+                      ? `Downloading… ${Math.floor((baseDlProgress.received / baseDlProgress.total) * 100)}%${baseDlProgress.fileCount > 1 ? ` · file ${baseDlProgress.fileIndex + 1}/${baseDlProgress.fileCount}` : ""}`
+                      : "Downloading…"}
+                </div>
+              ) : (
+                <button
+                  data-ui="train_download_base"
+                  onClick={() => { void dl.startDownload(baseModel, []); }}
+                  style={{
+                    alignSelf: "flex-start",
+                    padding: "5px 12px", borderRadius: 6, border: "1px solid #56d3c8",
+                    background: "rgba(86,211,200,0.15)", color: "#7ff0c5",
+                    fontSize: 12, fontWeight: 700, cursor: "pointer",
+                  }}
+                >⬇ Download this model</button>
+              )}
             </div>
           )}
           <div style={{ color: "#8595ad", fontSize: 11, lineHeight: 1.4 }}>

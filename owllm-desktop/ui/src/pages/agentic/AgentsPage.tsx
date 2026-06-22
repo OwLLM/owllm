@@ -7747,7 +7747,14 @@ export default function AgentsPage() {
       // maps to a team template, take the TEMPLATE's edges. Now the canvas, the
       // dispatch (normalizeTeam(activeTeam)), and the Workbench all match.
       const tmpl = teamTemplateForActive(proj, teams);
-      if (tmpl && tmpl.edges.length > 0) return { ...proj, edges: tmpl.edges };
+      // Carry the template's AGENTS (so per-agent role=leader is present for
+      // sub-orchestrator detection) AND edges. Without the agents, the wiring
+      // edges would render but the design leader wouldn't be DETECTED as a
+      // leader (the project roster drops role), so dispatch wouldn't run the
+      // fan-out. Per-agent model/voice/skill picks still apply — they're keyed
+      // by agent name, which matches. (Names must match for the edges to
+      // resolve too; teamTemplateForActive already required a roster match.)
+      if (tmpl && tmpl.agents.length > 0) return { ...proj, agents: tmpl.agents, edges: tmpl.edges };
       return proj;
     }
     return teams[0] ?? null;

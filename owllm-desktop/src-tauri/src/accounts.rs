@@ -1070,7 +1070,16 @@ pub async fn claude_cli_complete(
                 ));
             }
             let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
-            Ok(stdout.trim().to_string())
+            let trimmed = stdout.trim().to_string();
+            // Exit 0 but the body is an auth-failure envelope (the CLI prints
+            // "… API Error: 401 Invalid authentication credentials" and exits 0
+            // when its OAuth token has expired) → surface as Err so the caller's
+            // auth-retry (clearCliWarm + re-warm + backoff) runs, instead of
+            // handing the 401 text back as the reply. See looks_like_cli_auth_error.
+            if looks_like_cli_auth_error(&trimmed) {
+                return Err(trimmed);
+            }
+            Ok(trimmed)
         };
         match run_once(&args) {
             Err(e) if session_was_set && is_session_in_use(&e) => run_once(&strip_session_arg(&args)),
@@ -1079,6 +1088,25 @@ pub async fn claude_cli_complete(
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
+}
+
+/// The Claude / Codex subscription CLI can REPORT an authentication failure as a
+/// *successful* response instead of a non-zero exit: in `--print` text mode it
+/// prints `… API Error: 401 Invalid authentication credentials` to stdout and
+/// exits 0; in `--output-format stream-json` it emits a `result` event with
+/// `is_error: true` carrying the same text. In BOTH cases `status.success()` is
+/// true, so without this check the 401 sails through as the agent's reply and
+/// the frontend's auth-retry / token-refresh (which only triggers on a THROWN
+/// error) never runs — the user just sees "Failed to authenticate…" as the
+/// answer. This was the root cause behind every recurring "401 mid-run" report:
+/// the retry machinery was downstream of a throw that never happened. Detect the
+/// envelope so the command returns Err and the existing retry finally fires.
+fn looks_like_cli_auth_error(text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    low.contains("invalid authentication credentials")
+        || low.contains("failed to authenticate")
+        || low.contains("api error: 401")
+        || low.contains("authentication_error")
 }
 
 /// One-shot completion via the OpenAI Codex CLI — the OpenAI-subscription
@@ -1415,6 +1443,11 @@ pub async fn claude_cli_stream(
             .ok_or_else(|| "no stdout pipe".to_string())?;
         let reader = BufReader::new(stdout);
         let mut assembled = String::new();
+        // Set when the CLI reports a failure via a `result` event with
+        // `is_error:true` while still exiting 0 (auth 401, exec error). Without
+        // this the error text is handed back as the reply and the frontend's
+        // auth-retry never fires. Drained into an Err after the loop.
+        let mut result_error: Option<String> = None;
         for line_res in reader.lines() {
             let line = match line_res {
                 Ok(l) => l,
@@ -1547,18 +1580,40 @@ pub async fn claude_cli_stream(
                     }
                 }
                 "result" => {
-                    // Final summary event — carries the full assistant
-                    // text in the `result` field. We've already streamed
-                    // it via assistant text blocks, but if no assistant
-                    // event ever fired (ultra-fast result), surface this
-                    // as the reply.
-                    if let Some(t) = v.get("result").and_then(|r| r.as_str()) {
-                        if assembled.is_empty() && !t.is_empty() {
-                            assembled.push_str(t);
-                            let _ = on_event.send(ClaudeStreamEvent::Text {
-                                delta: t.to_string(),
-                            });
-                        }
+                    // Final summary event — carries the full assistant text in
+                    // the `result` field AND an `is_error` flag. The CLI sets
+                    // is_error:true (e.g. an expired-token 401, or an exec error)
+                    // while STILL exiting 0, so we must inspect this flag — not
+                    // just the process exit code — to know the run actually
+                    // failed. When it did, capture the message and return Err
+                    // after the loop so the caller's auth-retry path runs instead
+                    // of treating "Failed to authenticate…" as the agent's reply.
+                    let is_err = v.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false);
+                    let subtype = v.get("subtype").and_then(|s| s.as_str()).unwrap_or("");
+                    let result_text = v.get("result").and_then(|r| r.as_str()).unwrap_or("");
+                    let is_auth = looks_like_cli_auth_error(result_text);
+                    if is_err && (assembled.trim().is_empty() || is_auth) {
+                        // Clean failure (no usable content) OR an auth failure at
+                        // any point → surface it. We keep partial content for
+                        // non-auth errors that DID produce output (e.g. a
+                        // max-turns cutoff), so a useful partial answer isn't
+                        // discarded.
+                        let msg = if !result_text.is_empty() {
+                            result_text.to_string()
+                        } else if !subtype.is_empty() {
+                            format!("claude CLI error: {subtype}")
+                        } else {
+                            "claude CLI reported an error".to_string()
+                        };
+                        let _ = on_event.send(ClaudeStreamEvent::Error { message: msg.clone() });
+                        result_error = Some(msg);
+                    } else if assembled.is_empty() && !result_text.is_empty() {
+                        // No assistant event ever fired (ultra-fast result) —
+                        // surface the final text as the reply.
+                        assembled.push_str(result_text);
+                        let _ = on_event.send(ClaudeStreamEvent::Text {
+                            delta: result_text.to_string(),
+                        });
                     }
                 }
                 _ => {}
@@ -1581,7 +1636,22 @@ pub async fn claude_cli_stream(
                 }
             ));
         }
-        Ok(assembled.trim().to_string())
+        // Exit 0 but the CLI flagged the run as failed via a `result` event
+        // (is_error:true) — most importantly an expired-token 401. Return Err so
+        // withCliAuthRetry refreshes the token and retries instead of handing the
+        // error text back as the agent's answer.
+        if let Some(err) = result_error {
+            return Err(err);
+        }
+        let out = assembled.trim().to_string();
+        // Belt-and-suspenders: some CLI versions surface the 401 as plain
+        // assistant text (no is_error result event) while still exiting 0. Only
+        // treat a SHORT reply that IS the auth envelope as an error — a long
+        // substantive answer that merely mentions a 401 must not be discarded.
+        if out.len() < 600 && looks_like_cli_auth_error(&out) {
+            return Err(out);
+        }
+        Ok(out)
         };
         let session_was_set = session_id.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
         match run_once(&args) {

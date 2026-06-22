@@ -1,13 +1,43 @@
 {
   "name": "data_analyst",
-  "display_name": "Data Analyst",
-  "category": "Software",
-  "description": "SQL writer, notebook runner, visualizer, narrator. Turns a question into a chart + a paragraph.",
+  "display_name": "Data Room",
+  "category": "Knowledge",
+  "description": "Analysis workflow for databases and local datasets. Introspects schema, writes read-only queries, shapes results, charts, and explains the answer.",
+  "visibility": "recommended",
+  "workflow_rank": 60,
   "icon": "owl:owl_coder",
   "required_mcp": [
     "mcp.db",
-    "mcp.notebook"
+    "mcp.files"
   ],
+  "mcp_pack": {
+    "summary": "Configures SQLite, Postgres, and filesystem MCP presets. Edit the database paths/URLs in MCP settings before running real analysis.",
+    "risk": "read_only",
+    "approval_required": [],
+    "servers": [
+      {
+        "name": "sqlite",
+        "command": "uvx",
+        "args": ["mcp-server-sqlite", "--db-path", "C:/path/to/db.sqlite"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "postgres",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-postgres", "postgresql://user:pass@host/db"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "env": {},
+        "enabled": true
+      }
+    ]
+  },
   "agents": [
     {
       "name": "orchestrator",

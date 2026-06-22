@@ -1,10 +1,44 @@
 {
   "name": "code_artisan",
-  "display_name": "Code Artisan",
+  "display_name": "Code Operator",
   "category": "Software",
-  "description": "Quality-first coding team. Design before coding, tests alongside the implementation, refactor before review, multi-axis review at the end. Bias toward small reversible steps and matching the existing codebase's style.",
+  "description": "Quality-first local coding workflow. The orchestrator plans with the architect, must use the critical thinker for architecture decisions, then routes implementation, cleanup, review, and docs.",
+  "visibility": "recommended",
+  "workflow_rank": 10,
   "icon": "owl:owl_coder",
-  "required_mcp": [],
+  "required_mcp": [
+    "mcp.files",
+    "mcp.git",
+    "mcp.sequential-thinking"
+  ],
+  "mcp_pack": {
+    "summary": "Configures local filesystem, git, and structured-reasoning MCP servers for code work. File writes still follow the project's trust settings.",
+    "risk": "approval_required",
+    "approval_required": ["file writes", "git mutations", "shell-like project actions"],
+    "servers": [
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "git",
+        "command": "uvx",
+        "args": ["mcp-server-git", "--repository", "C:/1_Git/LocaLLM"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "sequential-thinking",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        "env": {},
+        "enabled": true
+      }
+    ]
+  },
   "agents": [
     {
       "name": "orchestrator",

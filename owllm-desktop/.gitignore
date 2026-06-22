@@ -20,3 +20,6 @@ ui/src/**/*_PATCH_*.tsx
 ui/src/**/*_PREPATCH_*.tsx
 ui/src/**/*_PATCH_*.css
 ui/src/**/*_PREPATCH_*.css
+
+# Tauri auto-update signing key. PRIVATE — never commit.
+.tauri-keys/

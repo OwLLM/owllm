@@ -1,0 +1,101 @@
+{
+  "name": "n8n_workflow_builder",
+  "display_name": "n8n Workflow Builder",
+  "category": "Ops",
+  "description": "Automation workflow for n8n-style agentic operations. Turns a business process into a trigger, nodes, credentials checklist, failure paths, and an import-ready implementation plan.",
+  "visibility": "recommended",
+  "workflow_rank": 50,
+  "icon": "owl:owl_tools",
+  "required_mcp": [
+    "mcp.files",
+    "mcp.browser",
+    "mcp.n8n"
+  ],
+  "mcp_pack": {
+    "summary": "Configures local files, fetch, browser automation, and structured reasoning. Add an n8n MCP/API server with your n8n URL and key before direct deployment.",
+    "risk": "approval_required",
+    "approval_required": ["workflow activation", "credential use", "external API mutations"],
+    "servers": [
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "fetch",
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "puppeteer",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+        "env": {},
+        "enabled": false
+      },
+      {
+        "name": "sequential-thinking",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-sequential-thinking"],
+        "env": {},
+        "enabled": true
+      }
+    ]
+  },
+  "agents": [
+    {
+      "name": "orchestrator",
+      "base": "orchestrator",
+      "description": "Runs automation discovery, design, implementation planning, and safety review.",
+      "icon": "owl:owl_orchestrator1",
+      "extra_prompt": "Your team for this project:\n  - process_mapper    : extracts the trigger, inputs, systems, and desired outcome\n  - workflow_arch     : designs the node graph, data mapping, retries, and error handling\n  - node_builder      : produces n8n node specs / JSON fragments / setup steps\n  - credentials_guard : reviews secrets, scopes, and dangerous side effects\n  - runbook_writer    : writes activation, test, rollback, and monitoring notes\n\nArchitecture decision gate: before locking workflow topology, credential scopes, retry policy, or any side-effecting node, brainstorm with credentials_guard as the critical thinker. The guard must challenge assumptions and approve the safer path before node_builder proceeds.\n\nFlow: process_mapper -> workflow_arch -> credentials_guard -> node_builder -> credentials_guard -> runbook_writer. Never activate a workflow or mutate an external service without explicit user approval."
+    },
+    {
+      "name": "process_mapper",
+      "base": "operator",
+      "description": "Turns a vague automation idea into concrete inputs, triggers, outputs, and success criteria.",
+      "extra_prompt": "Focus: interview or parse the user's process. Output: trigger, source systems, destination systems, sample payloads, success criteria, non-goals, and required credentials. If the trigger or destination is ambiguous, ask one focused question."
+    },
+    {
+      "name": "workflow_arch",
+      "base": "researcher",
+      "description": "Designs the n8n node graph and data contract before implementation.",
+      "mcp_allowlist": ["mcp.browser.*", "mcp.files.*"],
+      "extra_prompt": "Focus: design a deterministic workflow graph. Include nodes, edges, expressions, data transformations, idempotency key, retry policy, dead-letter/failure path, and manual approval gates. Do not write final JSON until credentials_guard has reviewed the architecture."
+    },
+    {
+      "name": "node_builder",
+      "base": "coder",
+      "description": "Builds import-ready node specs, expressions, and local files.",
+      "mcp_allowlist": ["mcp.files.*", "mcp.browser.*", "mcp.n8n.*"],
+      "extra_prompt": "Focus: implement the approved workflow design as n8n-compatible JSON or precise setup steps. Use placeholder credential names rather than secrets. Mark any step that requires the user to create credentials in n8n."
+    },
+    {
+      "name": "credentials_guard",
+      "base": "critic",
+      "description": "Critical thinker for architecture, credentials, side effects, retries, and privacy.",
+      "extra_prompt": "Review the workflow as the mandatory critical thinker. Challenge whether each external permission is necessary, whether side effects are approval-gated, whether retries can duplicate actions, and whether logs could leak secrets or personal data. End with APPROVE / REVISE / REJECT."
+    },
+    {
+      "name": "runbook_writer",
+      "base": "documentation",
+      "description": "Writes test, activation, rollback, and monitoring instructions.",
+      "extra_prompt": "Focus: produce a concise runbook with local test payloads, activation checklist, rollback steps, known failure modes, and monitoring signals. Include exactly which user approvals remain before production use."
+    }
+  ],
+  "graph": {
+    "edges": [
+      { "source": "orchestrator", "target": "process_mapper" },
+      { "source": "process_mapper", "target": "workflow_arch" },
+      { "source": "workflow_arch", "target": "credentials_guard" },
+      { "source": "credentials_guard", "target": "orchestrator" },
+      { "source": "orchestrator", "target": "node_builder" },
+      { "source": "node_builder", "target": "credentials_guard" },
+      { "source": "orchestrator", "target": "runbook_writer" }
+    ]
+  }
+}

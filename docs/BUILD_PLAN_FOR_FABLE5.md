@@ -235,16 +235,20 @@ without duplicating them.
 **Approach — ship in slices:**
 - **Slice 1 — Watcher summon.** The top-center owl icon in the HybridFrame becomes the support entry
   point. Keep it unlabeled by default, but once per minute a small animated satellite label orbit/slide
-  around it with the text **"The Watcher"** to suggest the click without cluttering the chrome. Clicking
-  the owl opens an animated Watcher drawer/modal with assistant chat, "What page am I on?", "Check my
-  setup", and "Report a bug" actions.
+  around it with the text **"The Watcher"** to suggest the click without cluttering the chrome. After
+  the user opens The Watcher once, stop the periodic label by default (keep a subtle hover tooltip).
+  Clicking the owl opens an animated Watcher drawer/modal with assistant chat, "What page am I on?",
+  "Check my setup", and "Report a bug" actions.
 - **Slice 2 — app context snapshot.** Build a local `support_snapshot` command that returns: app version,
   OS, GPU/hardware snapshot, selected page, current model/server status, WSL/sandbox status, fine-tuning
   env status, installed modules, recent non-secret errors/log lines, and current project/team ids/names.
 - **Slice 3 — screenshot capture.** Implement a user-approved "Capture current app" button. It must
   capture the actual app window including in-app modals/popups. If OS-level window capture is unavailable
   on a platform, fall back to a WebView/DOM screenshot and say what was not captured. Never capture other
-  monitors/windows without an explicit warning.
+  monitors/windows without an explicit warning. Note: `screenshot_url.py` captures web URLs, not the app
+  window; app-window capture is a new platform path (Windows: Win32 window capture such as PrintWindow /
+  BitBlt where appropriate; macOS/Linux need their own implementations or explicit fallback messaging).
+  The "compose existing probes" rule applies to diagnostics, not to this new screenshot subsystem.
 - **Slice 4 — activity statistics.** Keep local-only rolling counters: pages visited, feature attempts,
   failed actions, model loads, env installs, bridge starts, tool-call failures, time-to-error. Store only
   product telemetry, not prompt contents, file contents, API keys, tokens, paths with secrets, or personal
@@ -258,19 +262,23 @@ without duplicating them.
   optional screenshot + user description and produces: likely cause, immediate fix steps, whether this
   looks like a product bug, and the minimum repro steps.
 - **Slice 6 — send report.** Add "Send to OWLLM" that posts a redacted report bundle to the chosen
-  backend (GitHub issue, private endpoint, or email/export file). The report should include screenshot
-  attachment, structured diagnostics JSON, app logs, user-written description, assistant summary, repro
-  steps, severity, and release/version. If no backend is configured, save an export bundle locally.
+  backend. Default to a **private** path (private endpoint, private repository issue, private email inbox,
+  or local export file). A public GitHub issue is a privacy footgun and must be explicit opt-in with a
+  warning that screenshots/logs may reveal user data. The report should include screenshot attachment,
+  structured diagnostics JSON, app logs, user-written description, assistant summary, repro steps,
+  severity, and release/version. If no private backend is configured, save an export bundle locally.
 **Done-when:** from any page, the top-center owl summons The Watcher; the animated "The Watcher"
 satellite label appears periodically without disturbing the frame; "Capture current app" captures a
 modal-over-app state; the assistant chooses an available model/subscription or offers the tiny Gemma
 fallback when none exists; it summarizes a real broken-env or failed-model-load state; "Send report"
 creates a redacted bundle with screenshot + diagnostics + repro; user can preview exactly what will be
 sent before sending.
-**Guardrails:** §0.7 is absolute: secrets never leave the device. Bug reports require explicit user
-approval and a preview. Redact API keys, tokens, auth files, local home paths when possible, prompt/file
-contents by default, and screenshots if the user cancels. Never auto-send diagnostics. Do not build a
-parallel diagnostics system — compose the existing status/probe commands.
+**Guardrails:** §0.7 is absolute: secrets never leave the device. This feature is allowed to egress
+non-secret diagnostics only because the user explicitly approves, redaction runs first, and the full
+bundle is previewed before sending. Bug reports require explicit user approval and a preview. Redact API
+keys, tokens, auth files, local home paths when possible, prompt/file contents by default, and screenshots
+if the user cancels. Never auto-send diagnostics. Do not build a parallel diagnostics system — compose
+the existing status/probe commands.
 
 ---
 

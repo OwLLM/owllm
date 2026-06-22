@@ -1,13 +1,43 @@
 {
   "name": "writers_room",
-  "display_name": "Writers' Room",
+  "display_name": "Content Studio",
   "category": "Knowledge",
-  "description": "Outlines, drafts, edits, SEO-checks, and publishes long-form content.",
+  "description": "Content workflow for articles, docs, newsletters, and web copy. Outlines, drafts, edits, checks SEO, and publishes only with approval.",
+  "visibility": "recommended",
+  "workflow_rank": 70,
   "icon": "owl:owl_documentation",
   "required_mcp": [
     "mcp.files",
     "mcp.browser"
   ],
+  "mcp_pack": {
+    "summary": "Configures filesystem, fetch, and no-key web search for source-aware drafting and local publishing targets.",
+    "risk": "approval_required",
+    "approval_required": ["publishing", "file writes"],
+    "servers": [
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "fetch",
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "duckduckgo",
+        "command": "uvx",
+        "args": ["duckduckgo-mcp-server"],
+        "env": {},
+        "enabled": true
+      }
+    ]
+  },
   "agents": [
     {
       "name": "orchestrator",

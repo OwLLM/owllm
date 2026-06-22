@@ -2,12 +2,42 @@
   "name": "research_lab",
   "display_name": "Research Lab",
   "category": "Knowledge",
-  "description": "Deep-research team. Gathers sources, reads them carefully, synthesises, fact-checks, cites.",
+  "description": "Deep-research workflow. Finds sources, reads them carefully, synthesises, fact-checks, and cites with source traceability.",
+  "visibility": "recommended",
+  "workflow_rank": 30,
   "icon": "owl:owl_researcher",
   "required_mcp": [
     "mcp.browser",
     "mcp.files"
   ],
+  "mcp_pack": {
+    "summary": "Configures no-key search/fetch plus filesystem access for source gathering and local document reading.",
+    "risk": "read_only",
+    "approval_required": [],
+    "servers": [
+      {
+        "name": "duckduckgo",
+        "command": "uvx",
+        "args": ["duckduckgo-mcp-server"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "fetch",
+        "command": "uvx",
+        "args": ["mcp-server-fetch"],
+        "env": {},
+        "enabled": true
+      },
+      {
+        "name": "filesystem",
+        "command": "npx",
+        "args": ["-y", "@modelcontextprotocol/server-filesystem", "C:/1_Git"],
+        "env": {},
+        "enabled": true
+      }
+    ]
+  },
   "agents": [
     {
       "name": "orchestrator",

@@ -7736,7 +7736,20 @@ export default function AgentsPage() {
   // built-in template so the canvas is never empty.
   const activeTeam: Team | null = useMemo(() => {
     if (pickedTeamId) return teams.find(t => t.id === pickedTeamId) ?? null;
-    if (selectedProject && selectedProject.team.length > 0) return projectToTeam(selectedProject);
+    if (selectedProject && selectedProject.team.length > 0) {
+      const proj = projectToTeam(selectedProject);
+      // ONE source of truth for the team WIRING. A project stores its own edges
+      // in graph_json, frozen from the template AT CREATION — so a project made
+      // from an older Product Studio kept the old star wiring (orchestrator →
+      // every design member) even after the template was fixed to fan out
+      // through the Design Leader. That made the canvas + dispatch disagree with
+      // the Workbench (which reads the template). Fix: if the project's roster
+      // maps to a team template, take the TEMPLATE's edges. Now the canvas, the
+      // dispatch (normalizeTeam(activeTeam)), and the Workbench all match.
+      const tmpl = teamTemplateForActive(proj, teams);
+      if (tmpl && tmpl.edges.length > 0) return { ...proj, edges: tmpl.edges };
+      return proj;
+    }
     return teams[0] ?? null;
   }, [pickedTeamId, teams, selectedProject]);
 

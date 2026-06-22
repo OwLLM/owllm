@@ -411,10 +411,69 @@ export function downstreamTargets(
   return out;
 }
 
-/// The maximum number of agents a single handoff chain may run before it stops —
-/// a hard backstop against cyclic graphs (critic→coder→critic→…). Combined with
-/// a per-chain visited set this guarantees termination.
-export const MAX_CHAIN_HOPS = 8;
+/// Global backstop: the maximum TOTAL agent runs a single handoff chain may make
+/// before it stops — guards against runaway loops no matter how the graph is
+/// drawn. Combined with the per-agent re-run cap below this guarantees
+/// termination even with intentional cycles (critic→coder→critic→…).
+export const MAX_CHAIN_HOPS = 12;
+
+/// How many times ONE agent may run within a single chain. Lets a critic↔coder
+/// loop iterate a few rounds, then forces a stop. The per-agent cap (not a
+/// run-once visited set) is what makes real loops possible while staying finite.
+export const MAX_AGENT_RERUNS = 3;
+
+/// Routing instruction appended to a specialist's prompt. THIS is what turns the
+/// edges into an allow-list the agent CHOOSES from, instead of a forced pipe.
+/// If the agent has arrows to other (non-orchestrator) teammates it MAY hand off
+/// by ending with `@<name>: <task>` (agent-decided routing — a critic loops back
+/// to @coder when unsatisfied, returns up when satisfied). No such arrows → it
+/// stays a leaf: do its work and return (exactly today's behavior).
+export function routingHint(team: Team, spec: AgentSpec): string {
+  const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
+  const allowed = downstreamTargets(team, spec.name, orchName);
+  if (allowed.length === 0) {
+    return [
+      "The orchestrator has dispatched the task below. Reply concisely and directly with your work.",
+      "Do NOT dispatch further — only the orchestrator may dispatch. Stay in your role.",
+    ].join("\n");
+  }
+  const targets = allowed.map((t) => "@" + t).join(", ");
+  return [
+    "The task below was dispatched to you. Do YOUR part, then decide where it goes next:",
+    "  - To hand work to a teammate you're connected to, END your reply with a line:  @<name>: <exactly what they should do>.",
+    `  - You may route ONLY to: ${targets}.`,
+    "  - If your work is complete and no teammate needs it, just give your answer — it returns to whoever dispatched you.",
+    "  - Reviewer/critic: when NOT satisfied, route back with concrete fixes (e.g. `@coder: <fixes>`); when satisfied, state your verdict and DON'T route — it returns up for integration.",
+    "  - Loops are capped — be decisive, don't ping-pong without making progress.",
+  ].join("\n");
+}
+
+/// Decide where an agent's OUTPUT goes next — the heart of agent-decided routing.
+/// Edges are an ALLOW-LIST. If the agent explicitly @-routed to allowed targets,
+/// honor that (and let those targets re-run up to MAX_AGENT_RERUNS, enabling
+/// loops). Otherwise fall back to LEGACY auto-flow along every arrow, run-once —
+/// so teams that don't @-route behave exactly as before. `runCount` bounds it.
+export function nextHandoffs(
+  team: Team,
+  agentName: string,
+  agentOutput: string,
+  runCount: Map<string, number>,
+): Array<{ name: string; input: string; explicit: boolean }> {
+  const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
+  const allowed = downstreamTargets(team, agentName, orchName);
+  if (allowed.length === 0) return [];
+  const explicit = parseDispatches(agentOutput, team, agentName).filter(
+    (d) => allowed.includes(d.agentName) && (runCount.get(d.agentName) ?? 0) < MAX_AGENT_RERUNS,
+  );
+  if (explicit.length > 0) {
+    return explicit.map((d) => ({ name: d.agentName, input: d.instruction, explicit: true }));
+  }
+  // Legacy auto-flow: each downstream runs ONCE (run-once == today's behavior).
+  const handoff = `You are continuing a team workflow. @${agentName} produced the following — build on it for YOUR part of the task:\n\n${agentOutput}`;
+  return allowed
+    .filter((t) => (runCount.get(t) ?? 0) === 0)
+    .map((t) => ({ name: t, input: handoff, explicit: false }));
+}
 
 /// Model-visible correction for dispatch lines that named REAL team members
 /// the graph doesn't wire to the orchestrator. Distinct wording from the
@@ -838,8 +897,7 @@ export function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
-  layers.push("The orchestrator has dispatched the task below. Reply concisely and directly with your work.");
-  layers.push("Do NOT dispatch further — only the orchestrator may dispatch. Stay in your role.");
+  layers.push(routingHint(team, spec));
   return layers.join("\n");
 }
 
@@ -2998,22 +3056,25 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // last cleanly); leaves (no non-orchestrator arrow) are the terminal results
   // the orchestrator integrates. A per-tree `ran` set (claimed synchronously
   // before each await) + MAX_CHAIN_HOPS dedupe fan-in and guarantee termination.
-  const runFrom = async (name: string, input: string, ran: Set<string>): Promise<Array<{ name: string; text: string }>> => {
-    if (ran.has(name) || ran.size >= MAX_CHAIN_HOPS) return [];
-    ran.add(name);
+  const runFrom = async (name: string, input: string, runCount: Map<string, number>): Promise<Array<{ name: string; text: string }>> => {
+    const total = Array.from(runCount.values()).reduce((a, b) => a + b, 0);
+    if (total >= MAX_CHAIN_HOPS) return [];                      // global backstop
+    if ((runCount.get(name) ?? 0) >= MAX_AGENT_RERUNS) return []; // per-agent cap
+    runCount.set(name, (runCount.get(name) ?? 0) + 1);
     const spec = team.agents.find(a => a.name === name);
     if (!spec) return [];
     const out = await runOneAgent(spec, input);
-    const downstream = downstreamTargets(team, name, orch.name).filter(t => !ran.has(t));
-    if (downstream.length === 0) return [out];      // leaf → a terminal result
-    const handoff = `You are continuing a team workflow. @${out.name} produced the following — build on it for YOUR part of the task:\n\n${out.text}`;
+    // Agent-decided routing: the agent's reply picks where its output goes next
+    // (explicit @target among its allowed edges), else legacy run-once auto-flow.
+    const hands = nextHandoffs(team, name, out.text, runCount);
+    if (hands.length === 0) return [out];      // returns to caller (terminal)
     hooks.onThought(name, { role: "dispatch", color: "#a578ff",
-      text: `➡ handing off to ${downstream.map(x => "@" + x).join(", ")}` });
+      text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
     const results: Array<{ name: string; text: string }> = [];
-    for (const t of downstream) results.push(...await runFrom(t, handoff, ran));
+    for (const h of hands) results.push(...await runFrom(h.name, h.input, runCount));
     return results.length ? results : [out];
   };
-  const settled = await Promise.allSettled(dispatches.map(d => runFrom(d.agentName, d.instruction, new Set<string>())));
+  const settled = await Promise.allSettled(dispatches.map(d => runFrom(d.agentName, d.instruction, new Map<string, number>())));
   const specialistReplies: Array<{ name: string; text: string }> = [];
   for (const r of settled) {
     if (r.status === "fulfilled" && r.value) specialistReplies.push(...r.value);

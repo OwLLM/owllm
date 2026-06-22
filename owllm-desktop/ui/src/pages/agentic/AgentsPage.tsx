@@ -59,8 +59,10 @@ import {
   resolveAutoModel,
   wiredDispatchTargets,
   unwiredCorrectionMessage,
-  downstreamTargets,
   MAX_CHAIN_HOPS,
+  MAX_AGENT_RERUNS,
+  routingHint,
+  nextHandoffs,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -2466,7 +2468,7 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
       style={{ position:"relative", width:w, height:h, background:`radial-gradient(ellipse at ${w/2}px ${h/2}px, rgba(192,138,255,0.10) 0%, rgba(116,164,255,0.06) 30%, rgba(40,60,110,0.04) 60%, rgba(0,0,0,0) 85%), linear-gradient(180deg, #101522 0%, #06080d 100%)`, overflow:"hidden", cursor: panDragging ? "grabbing" : "default", userSelect: "none" }}
     >
       <div style={{ position:"absolute", left:0, top:0, width:w, height:h, transform:`translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, transformOrigin:"0 0" }}>
-      <svg width={w} height={h} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
+      <svg width={w} height={h} style={{ position:"absolute", left:0, top:0, pointerEvents:"none", overflow:"visible" }}>
         <defs>
           <radialGradient id="halo" cx="50%" cy="50%" r="50%">
             <stop offset="0%" stopColor="rgba(var(--accent-rgb),0.85)" />
@@ -3264,7 +3266,7 @@ function GraphCanvas({
         transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
         transformOrigin: "0 0",
       }}>
-        <svg width={canvasW} height={canvasH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none", zIndex:1 }}>
+        <svg width={canvasW} height={canvasH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none", zIndex:1, overflow:"visible" }}>
           <defs>
             <marker id="graphArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(var(--accent-rgb),0.85)" />
@@ -5766,8 +5768,7 @@ function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
-  layers.push("The orchestrator has dispatched the task below. Reply concisely and directly with your work.");
-  layers.push("Do NOT dispatch further — only the orchestrator may dispatch. Stay in your role.");
+  layers.push(routingHint(team, spec));
   return layers.join("\n");
 }
 
@@ -9526,11 +9527,13 @@ export default function AgentsPage() {
         // Walk the graph: each node runs, then hands its output to ALL its
         // non-orchestrator arrow targets. `ran` (claimed before each await) +
         // MAX_CHAIN_HOPS dedupe fan-in and guarantee termination on cycles.
-        const ran = new Set<string>();
+        const runCount = new Map<string, number>();
         async function runFrom(name: string, input: string): Promise<{ name: string; text: string }[]> {
           if (!activeTeam) return [];
-          if (ran.has(name) || ran.size >= MAX_CHAIN_HOPS) return [];
-          ran.add(name);
+          const total = Array.from(runCount.values()).reduce((a, b) => a + b, 0);
+          if (total >= MAX_CHAIN_HOPS) return [];                       // global backstop
+          if ((runCount.get(name) ?? 0) >= MAX_AGENT_RERUNS) return []; // per-agent cap
+          runCount.set(name, (runCount.get(name) ?? 0) + 1);
           const spec = activeTeam.agents.find(a => a.name === name);
           if (!spec) return [];
           const out = await runAgent(spec, input);
@@ -9540,12 +9543,13 @@ export default function AgentsPage() {
             (spec.role === "leader" || !!roleByName.get(spec.base)?.canDispatch) && name !== orch.name &&
             (wiredDispatchTargets(runTeam, name)?.size ?? 0) > 0;
           if (ranAsLeader) return [out];
-          const downstream = downstreamTargets(runTeam, name, orch.name).filter(t => !ran.has(t));
-          if (downstream.length === 0) return [out];   // leaf → a terminal result
-          const handoff = `You are continuing a team workflow. @${out.name} produced the following — build on it for YOUR part of the task:\n\n${out.text}`;
-          appendThought(name, { role: "dispatch", color: "#a578ff", text: `➡ handing off to ${downstream.map(x => "@" + x).join(", ")}` });
+          // Agent-decided routing: the agent's reply picks where its output goes next
+          // (explicit @target among its allowed edges), else legacy run-once auto-flow.
+          const hands = nextHandoffs(runTeam, name, out.text, runCount);
+          if (hands.length === 0) return [out];   // returns to caller (terminal)
+          appendThought(name, { role: "dispatch", color: "#a578ff", text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
           const results: { name: string; text: string }[] = [];
-          for (const t of downstream) results.push(...await runFrom(t, handoff));
+          for (const h of hands) results.push(...await runFrom(h.name, h.input));
           return results.length ? results : [out];
         }
         const replies = await runFrom(startSpec.name, d.instruction);

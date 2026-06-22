@@ -663,6 +663,45 @@ pub async fn dataset_ingest(manifest_json: String) -> Result<String, String> {
         .unwrap_or(0);
     let manifest_path = dir.join(format!("owllm_ds_manifest_{stamp}.json"));
     let result_path = dir.join(format!("owllm_ds_result_{stamp}.json"));
+
+    // PDF text extraction in RUST (compiled in — no Python 'pypdf' to install, so
+    // PDFs work for everyone). We pull the text here and inject it into the
+    // manifest as a per-source `text` (success) or `error` (scanned/encrypted),
+    // so the Python ingest uses it directly and keeps the original filename for
+    // display. Non-PDF sources are untouched (DOCX/TXT/MD/URL already work on the
+    // Python standard library).
+    let manifest_json = {
+        let mut v: serde_json::Value =
+            serde_json::from_str(&manifest_json).map_err(|e| format!("parse manifest: {e}"))?;
+        if let Some(arr) = v.get_mut("sources").and_then(|s| s.as_array_mut()) {
+            for src in arr.iter_mut() {
+                let is_file = src.get("type").and_then(|t| t.as_str()).unwrap_or("file") == "file";
+                let val = src.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                if !is_file || !val.to_lowercase().ends_with(".pdf") {
+                    continue;
+                }
+                let extracted = tokio::task::spawn_blocking(move || pdf_extract::extract_text(&val))
+                    .await
+                    .map_err(|e| format!("pdf task join: {e}"))?;
+                if let Some(obj) = src.as_object_mut() {
+                    match extracted {
+                        Ok(text) if !text.trim().is_empty() => {
+                            obj.insert("text".into(), serde_json::Value::String(text));
+                        }
+                        Ok(_) => {
+                            obj.insert("error".into(), serde_json::Value::String(
+                                "no extractable text in this PDF — it looks scanned/image-only (OCR isn't supported yet)".into()));
+                        }
+                        Err(e) => {
+                            obj.insert("error".into(), serde_json::Value::String(format!("couldn't read this PDF: {e}")));
+                        }
+                    }
+                }
+            }
+        }
+        serde_json::to_string(&v).map_err(|e| format!("serialize manifest: {e}"))?
+    };
+
     std::fs::write(&manifest_path, manifest_json.as_bytes())
         .map_err(|e| format!("write manifest: {e}"))?;
 

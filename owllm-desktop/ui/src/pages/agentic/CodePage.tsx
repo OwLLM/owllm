@@ -504,7 +504,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     chatRuntime.setPayload(SID, () => ({
       ...DEFAULT_CODE_STATE, projectRoot: dir, workspace: "", modelId,
       preparing: true,
-      status: `⏳ Preparing an isolated workspace for ${name}… (you can type your request now)`,
+      status: `⏳ Preparing a private workspace for ${name} on its own branch… (you can type your request now)`,
     }));
     setRecents(rememberCodeProject(dir));
     const t0 = Date.now();
@@ -524,7 +524,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         ...((p as CodeState) ?? DEFAULT_CODE_STATE),
         workspace: outcome.path, projectRoot: dir, branch: outcome.branch, baseSha: outcome.baseSha,
         isolated: true, preparing: false,
-        status: `Isolated on ${outcome.branch} (ready in ${secs}s) — edits stay in this page until you Merge to ${name}.`,
+        status: `On branch ${outcome.branch} — a private copy (ready in ${secs}s). Your edits stay in this page until you Merge to ${name}.`,
       }));
     } else if (outcome.status === "notAGitRepo") {
       chatRuntime.setPayload(SID, (p) => ({
@@ -1547,10 +1547,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         {isolated && (
           <>
             <span
-              title={`Isolated git worktree branch, cut from ${projectRoot}. Your real folder is untouched until you Merge.`}
+              title={`This page edits a PRIVATE git worktree on its own branch, cut from ${projectRoot}. Your real folder is untouched until you Merge. (This is unrelated to the WSL "isolation" badge, which is about whether the agent's tools run inside Linux vs. on the host.)`}
               style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, whiteSpace: "nowrap", background: "rgba(127,240,197,0.12)", color: "#7ff0c5", border: "1px solid rgba(127,240,197,0.35)" }}
             >
-              ⎇ {branch ? branch.replace(/^owllm-fleet\//, "") : "isolated"}
+              ⎇ {branch ? branch.replace(/^owllm-fleet\//, "") : "branch"}
             </span>
             <button
               onClick={mergeToMain}
@@ -1623,8 +1623,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           preparing ? (
             <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 480, lineHeight: 1.6 }}>
               <div style={{ fontSize: 30, marginBottom: 8 }}>⏳</div>
-              Preparing an isolated workspace for <b>{(projectRoot || "").replace(/^.*[\\/]/, "")}</b>…<br />
-              <span style={{ fontSize: 12 }}>A private git worktree is being checked out (a few seconds on a large repo). You can type your request now — Send unlocks the moment it's ready.</span>
+              Preparing a private workspace for <b>{(projectRoot || "").replace(/^.*[\\/]/, "")}</b> on its own branch…<br />
+              <span style={{ fontSize: 12 }}>A private git worktree is being checked out (a few seconds on a large repo). Your real folder stays untouched until you Merge. You can type your request now — Send unlocks the moment it's ready.</span>
             </div>
           ) : (
           <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
@@ -1730,7 +1730,7 @@ export default function CodePage() {
       try {
         const { confirm } = await import("@tauri-apps/plugin-dialog");
         const ok = await confirm(
-          `Close this page? Its isolated worktree (${st.branch}) and any unmerged changes are removed. Merge to main first to keep them.`,
+          `Close this page? Its private worktree (${st.branch}) and any unmerged changes are removed. Merge first to keep them.`,
           { title: "Close page", kind: "warning" },
         );
         if (!ok) return;
@@ -1783,7 +1783,7 @@ export default function CodePage() {
             </div>
           );
         })}
-        <button onClick={newPage} title="Open another page on its own isolated worktree" style={{ ...btn, height: 26, padding: "0 10px", marginLeft: 4 }}>＋ New page</button>
+        <button onClick={newPage} title="Open another page on its own branch (a private worktree of the same project)" style={{ ...btn, height: 26, padding: "0 10px", marginLeft: 4 }}>＋ New page</button>
       </div>
       {/* Active page — keyed so each page is an isolated component instance. */}
       <div style={{ flex: 1, minHeight: 0 }}>

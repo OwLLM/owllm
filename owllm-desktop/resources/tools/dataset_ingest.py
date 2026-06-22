@@ -219,7 +219,15 @@ def main() -> int:
         emit({"event": "progress", "stage": "extract", "step": i + 1, "total": total, "detail": value})
         entry: dict = {"type": kind, "value": value, "ok": False, "chars": 0, "chunks": 0, "error": None}
         try:
-            text = extract_one(kind, value)
+            # The Rust side pre-extracts PDFs (no 'pypdf' needed — works for
+            # everyone) and injects the resulting text, or an error for a
+            # scanned/encrypted PDF. Honor those when present; otherwise extract
+            # here (TXT/MD/DOCX/URL on the standard library).
+            pre_error = src.get("error")
+            if pre_error:
+                raise RuntimeError(pre_error)
+            pre_text = src.get("text")
+            text = pre_text if pre_text is not None else extract_one(kind, value)
             chunks = chunk_text(text, size, overlap)
             entry.update(ok=True, chars=len(text), chunks=len(chunks), text=text, chunkList=chunks)
             total_chunks += len(chunks)

@@ -124,6 +124,11 @@ regex = { version = "1", default-features = false, features = ["std", "perf"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 tar = "0.4"
+# Pure-Rust PDF text extraction for the Dataset Builder, so PDFs work for
+# EVERYONE with no Python 'pypdf' to install — the text is extracted in Rust
+# (compiled in) and injected into the ingest. Scanned/image-only PDFs have no
+# text layer and surface a clear per-source error (no OCR).
+pdf-extract = "0.7"
 # Pure-Rust audio decoder: turns the user's mp3/m4a/ogg/wav/etc into
 # raw PCM samples without spawning ffmpeg. Supports the formats the
 # Telegram bot + WhatsApp + in-app uploader will realistically deliver.

@@ -267,6 +267,37 @@ function parseSteps(text: string): string[] {
     .slice(0, 8);
 }
 
+// WSL/sandbox status is GLOBAL (not per-page) and a COLD wsl.exe probe can take
+// 10-40s. The Code page now mounts a fresh body per tab, so without caching this
+// re-ran the probe on EVERY new page / tab switch / close — THE cause of
+// "opening (and closing) a page takes 40s". Cache the probe so only the FIRST
+// page pays it; every later page reuses the resolved result instantly. Reset on
+// hard failure so a transient wsl.exe miss can retry on the next page.
+let _sandboxProbe: Promise<{ st: WslStatus; iso: WslIsolation; s: SandboxStatus }> | null = null;
+function probeSandboxOnce(): Promise<{ st: WslStatus; iso: WslIsolation; s: SandboxStatus }> {
+  if (!_sandboxProbe) {
+    _sandboxProbe = (async () => {
+      const [st, iso0] = await Promise.all([wslStatus(), wslIsolationGet()]);
+      // Retry while the sandbox reports "not available" — the first wsl.exe call
+      // after boot can transiently miss the distro while the service warms up.
+      let s = await sandboxStatus();
+      for (let i = 0; i < 3 && !s.available; i++) {
+        await new Promise((r) => setTimeout(r, 800));
+        s = await sandboxStatus();
+      }
+      // Sandbox present + isolation off → enable it once (every new project is
+      // isolated by default; the user can still opt out per project).
+      let iso = iso0;
+      if (s.available && !iso0.enabled) {
+        try { iso = await wslIsolationSet(true, s.defaultTarget ?? null); } catch { iso = iso0; }
+      }
+      return { st, iso, s };
+    })();
+    _sandboxProbe.catch(() => { _sandboxProbe = null; });
+  }
+  return _sandboxProbe;
+}
+
 function CodeWorkspace({ pageId, seedProject, onTitle }: {
   pageId: string;
   /// When set, this page auto-opens this project on first mount — used by
@@ -599,38 +630,33 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       setSboxProjects([]);
     }
   };
+  // WSL/sandbox STATUS — from the app-wide cache, so a new page never re-pays
+  // the cold wsl.exe probe (the 40s "opening a page" stall). See probeSandboxOnce.
   useEffect(() => {
     let dead = false;
-    (async () => {
-      const [st, iso0] = await Promise.all([wslStatus(), wslIsolationGet()]);
+    probeSandboxOnce().then(({ st, iso, s }) => {
       if (dead) return;
-      // Probe the sandbox, retrying while it reports "not available" — the first
-      // wsl.exe call after boot can transiently miss the distro while the WSL
-      // service warms up. `sbox` stays null (UI shows "Checking…") until a
-      // definitive answer, so we never flash the "not installed" warning.
-      let s = await sandboxStatus();
-      for (let i = 0; i < 3 && !s.available && !dead; i++) {
-        await new Promise((r) => setTimeout(r, 800));
-        s = await sandboxStatus();
-      }
-      if (dead) return;
-      // If a sandbox engine is present, isolation is ON by default — every new
-      // project is isolated automatically (the user can still opt out per
-      // project in the New-project dialog).
-      let iso = iso0;
-      if (s.available && !iso0.enabled) {
-        try { iso = await wslIsolationSet(true, s.defaultTarget ?? null); } catch { iso = iso0; }
-        if (dead) return;
-      }
       setWslStat(st);
       setIsolation(iso);
       setSbox(s);
+    }).catch(() => { /* leave UI in "checking" */ });
+    return () => { dead = true; };
+  }, []);
+  // Onboarding lists (WSL/sandbox projects + toolchain) only populate the PICKER
+  // screen, so fetch them ONLY when this page has no project and isn't about to
+  // open one (seeded) — a page opening a project skips these extra wsl.exe calls.
+  useEffect(() => {
+    if (workspace || seedProject) return;
+    let dead = false;
+    probeSandboxOnce().then(({ st, iso, s }) => {
+      if (dead) return;
       refreshWslProjects(iso, st);
       refreshToolchain(st);
       refreshSboxProjects(iso, s);
-    })();
+    }).catch(() => { /* onboarding lists are best-effort */ });
     return () => { dead = true; };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspace]);
 
   // Install WSL itself (elevated; needs reboot) for PCs without it.
   const installWsl = async () => {

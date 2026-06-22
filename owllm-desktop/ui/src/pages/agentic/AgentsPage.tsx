@@ -3235,7 +3235,7 @@ function GraphCanvas({
         transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
         transformOrigin: "0 0",
       }}>
-        <svg width={canvasW} height={canvasH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
+        <svg width={canvasW} height={canvasH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none", zIndex:1 }}>
           <defs>
             <marker id="graphArrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill="rgba(var(--accent-rgb),0.85)" />
@@ -3408,6 +3408,10 @@ function GraphCanvas({
               onClick={(e) => { e.stopPropagation(); onSelectNode(n.name); onSelectEdge(null); }}
               style={{
                 position: "absolute", left: n.x, top: n.y,
+                // zIndex 2 keeps cards above the edge SVG (zIndex 1), which is
+                // itself above the cluster backdrops (zIndex 0) so edges are no
+                // longer hidden behind the DESIGN/BUILD TEAM boxes.
+                zIndex: 2,
                 width: NODE_W, height: NODE_H, borderRadius: 14,
                 opacity: dimNode ? 0.3 : 1, transition: "opacity .15s",
                 background: baseBg,

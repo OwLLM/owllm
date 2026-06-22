@@ -446,14 +446,20 @@ export default function TrainPage() {
     return () => { dead = true; window.clearInterval(id); };
   }, []);
 
-  // Load env profiles once; default the selection to the first one.
+  // Load env profiles once; default the selection to the RECOMMENDED one
+  // (Unsloth — same one the Environment popup stars) so the page and the popup
+  // agree on which env a run will use. Falls back to the first profile if the
+  // unsloth profile isn't present.
   React.useEffect(() => {
     let dead = false;
     listEnvProfiles()
       .then((ps) => {
         if (dead) return;
         setEnvProfiles(ps);
-        if (ps.length > 0) setEnvProfile((cur) => cur || ps[0].name);
+        if (ps.length > 0) {
+          const recommended = ps.find((p) => p.name === "unsloth")?.name ?? ps[0].name;
+          setEnvProfile((cur) => cur || recommended);
+        }
       })
       .catch(() => { /* picker just stays empty */ });
     return () => { dead = true; };
@@ -487,6 +493,14 @@ export default function TrainPage() {
   const envPill = isInstalling(envProfile)
     ? { text: "installing…", color: "#d9b24a" }
     : envStateLabel(envState);
+  // WHICH env a run will use, shown on the button so the user doesn't have to
+  // open the popup to find out (their report: "no info about the environment
+  // that will be used"). Short label = display up to the first "·"
+  // (e.g. "Unsloth (fast)", "Standard fine-tuning").
+  const selectedEnvProfile = envProfiles.find((p) => p.name === envProfile) ?? null;
+  const envShortLabel = selectedEnvProfile
+    ? selectedEnvProfile.display.split("·")[0].trim()
+    : "Environment";
 
   const start = async () => {
     if (envState?.kind !== "ready") {
@@ -638,7 +652,7 @@ export default function TrainPage() {
               }}
             >
               <span style={{ fontSize: 15, lineHeight: 1 }}>🐧</span>
-              <span style={{ fontSize: 12, fontWeight: 700 }}>Environment</span>
+              <span style={{ fontSize: 12, fontWeight: 700 }} title="The fine-tuning environment this run will use — click to change">{envShortLabel}</span>
               <span style={{
                 fontSize: 10, fontWeight: 700, color: envPill.color,
                 border: `1px solid ${envPill.color}`, borderRadius: 999, padding: "1px 7px",
@@ -1025,6 +1039,10 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
       }
     };
     try {
+      // No envProfile passed: abliterate_start resolves a READY env from the
+      // profile registry itself (WSL-aware, prefers "standard"). It used to
+      // scan for a Windows .venv that never exists on a WSL install, so it
+      // reported "No Python environment found" even with both envs installed.
       await invoke<void>("abliterate_start", {
         config: { model: baseModel },
         channel,

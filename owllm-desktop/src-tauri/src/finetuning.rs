@@ -419,6 +419,61 @@ pub struct DatasetSummary {
     pub format: String,
 }
 
+// Mirror finetune.py's accepted field names so the Check button flags a
+// dataset that will FAIL format detection at train time. Previously Check only
+// counted rows, so a prompts-only file showed a green "N examples" and then
+// crashed the run with "Could not detect dataset format" — the "crashed
+// without a clear reason" report.
+const DS_INPUT_KEYS: &[&str] = &[
+    "instruction", "prompt", "input", "question", "query", "text", "user",
+    "human", "customer_message", "customer", "message", "query_text",
+];
+const DS_OUTPUT_KEYS: &[&str] = &[
+    "output", "response", "completion", "answer", "reply", "assistant", "gpt",
+    "bot", "assistant_response", "response_text", "answer_text",
+];
+
+/// First example object out of a parsed JSON value (array, {"data":[...]}, or
+/// a single object).
+fn first_json_example(v: &serde_json::Value) -> Option<&serde_json::Value> {
+    match v {
+        serde_json::Value::Array(a) => a.first(),
+        serde_json::Value::Object(m) => m
+            .get("data")
+            .and_then(|d| d.as_array())
+            .and_then(|a| a.first())
+            .or(Some(v)),
+        _ => None,
+    }
+}
+
+/// `None` if the first example looks trainable (input+output pair or messages
+/// format); otherwise a clear warning the Check button can show.
+fn dataset_format_note(first: &serde_json::Value) -> Option<String> {
+    let obj = first.as_object()?;
+    if obj.contains_key("messages") {
+        return None;
+    }
+    let has_in = DS_INPUT_KEYS.iter().any(|k| obj.contains_key(*k));
+    let has_out = DS_OUTPUT_KEYS.iter().any(|k| obj.contains_key(*k));
+    if has_in && has_out {
+        return None;
+    }
+    let keys = obj.keys().cloned().collect::<Vec<_>>().join(", ");
+    if has_in {
+        Some(format!(
+            "⚠ no response/output field (keys: {keys}). Each example needs a target — \
+             add an \"output\" or \"response\" per example, or use the messages format. \
+             Training will reject this dataset as-is."
+        ))
+    } else {
+        Some(format!(
+            "⚠ no recognized input/output fields (keys: {keys}). Expected an input \
+             (instruction/prompt/…) AND an output (output/response/…), or a messages array."
+        ))
+    }
+}
+
 #[tauri::command]
 pub async fn dataset_check(path: String) -> Result<DatasetSummary, String> {
     let p = std::path::PathBuf::from(&path);
@@ -434,7 +489,17 @@ pub async fn dataset_check(path: String) -> Result<DatasetSummary, String> {
         "jsonl" => {
             let text = std::fs::read_to_string(&p).map_err(|e| format!("read {path}: {e}"))?;
             let count = text.lines().filter(|l| !l.trim().is_empty()).count() as u64;
-            Ok(DatasetSummary { count, format: "jsonl".to_string() })
+            let note = text
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .and_then(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+                .as_ref()
+                .and_then(dataset_format_note);
+            let format = match note {
+                Some(n) => format!("jsonl · {n}"),
+                None => "jsonl".to_string(),
+            };
+            Ok(DatasetSummary { count, format })
         }
         "json" => {
             let text = std::fs::read_to_string(&p).map_err(|e| format!("read {path}: {e}"))?;
@@ -451,7 +516,12 @@ pub async fn dataset_check(path: String) -> Result<DatasetSummary, String> {
                 }
                 _ => 1,
             };
-            Ok(DatasetSummary { count, format: "json".to_string() })
+            let note = first_json_example(&v).and_then(dataset_format_note);
+            let format = match note {
+                Some(n) => format!("json · {n}"),
+                None => "json".to_string(),
+            };
+            Ok(DatasetSummary { count, format })
         }
         "csv" => {
             let text = std::fs::read_to_string(&p).map_err(|e| format!("read {path}: {e}"))?;
@@ -584,6 +654,27 @@ pub async fn abliterate_start(
             }
         }
     }
+    // Fallback 1: ANY ready REGISTERED env profile. On Windows these are WSL
+    // venvs (bin/python), so the raw Windows ".venv/Scripts/python.exe" scan
+    // below never matched — abliterate reported "No Python environment found"
+    // even with both envs installed. Abliteration needs torch + transformers,
+    // which both "standard" and "unsloth" provide; prefer "standard" (the full
+    // transformers stack) for the cleanest raw model load.
+    if python_exe.is_none() {
+        if let Ok(profiles) = crate::env_manager::env_profiles_list().await {
+            let mut names: Vec<String> = profiles.iter().map(|p| p.name.clone()).collect();
+            names.sort_by_key(|n| if n == "standard" { 0 } else { 1 });
+            for name in names {
+                if let Ok(crate::env_manager::EnvProfileState::Ready { python_exe: p }) =
+                    crate::env_manager::env_profile_status(name).await
+                {
+                    python_exe = Some(p);
+                    break;
+                }
+            }
+        }
+    }
+    // Fallback 2 (legacy): a raw local Windows venv from the old app tree.
     if python_exe.is_none() {
         if let Some(root) = crate::paths::llm_root() {
             let envs_dir = root.join(".envs");

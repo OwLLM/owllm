@@ -3122,6 +3122,35 @@ function GraphCanvas({
   const canvasH = Math.max(h, contentBottom);
   const canvasW = Math.max(w, contentRight);
 
+  // Cluster bounding regions (Design / Build). Computed ONCE here so the
+  // translucent backdrop can be drawn as an SVG <rect> INSIDE the edge svg
+  // (before the edges) — SVG document order then guarantees edges paint OVER
+  // the backdrop. (Cross-element z-index between an HTML backdrop div and the
+  // svg proved unreliable: edges kept hiding behind the cluster boxes.) The
+  // labels stay as HTML badges, rendered above.
+  const clusterRegions: Array<{ group: TeamGroup; label: string; x: number; y: number; w: number; h: number }> = (() => {
+    const byGroup: Record<TeamGroup, GNode[]> = { design: [], build: [], critic: [] };
+    for (const n of placed) {
+      if (n.name === orchName) continue;
+      if (n.name === CRITIC_AGENT_NAME) continue;
+      if (n.spec.base === "orchestrator") continue;
+      byGroup[groupForAgent(n.spec)].push(n);
+    }
+    const PAD = 18, LABEL_TOP = 22;
+    const out: Array<{ group: TeamGroup; label: string; x: number; y: number; w: number; h: number }> = [];
+    const add = (group: TeamGroup, nodes: GNode[], label: string) => {
+      if (nodes.length === 0) return;
+      const minX = Math.min(...nodes.map(n => n.x)) - PAD;
+      const minY = Math.min(...nodes.map(n => n.y)) - PAD - LABEL_TOP;
+      const maxX = Math.max(...nodes.map(n => n.x + NODE_W)) + PAD;
+      const maxY = Math.max(...nodes.map(n => n.y + NODE_H)) + PAD;
+      out.push({ group, label, x: minX, y: minY, w: maxX - minX, h: maxY - minY });
+    };
+    add("design", byGroup.design, "Design Team");
+    add("build", byGroup.build, "Build Team");
+    return out;
+  })();
+
   // Resolve edges into endpoints (skip stale references). The synthetic
   // Critical Thinker isn't in the project's team_json, so persisted edges
   // can't reference it — we inject a virtual orchestrator ↔ critical_thinker
@@ -3244,6 +3273,15 @@ function GraphCanvas({
               <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
             </marker>
           </defs>
+          {/* Cluster backdrops — drawn FIRST inside the svg so the edges below
+              paint over them (was an HTML div that covered the edges). */}
+          {clusterRegions.map(r => {
+            const t = tintForGroup(r.group);
+            return (
+              <rect key={"clusterbg-" + r.group} x={r.x} y={r.y} width={r.w} height={r.h} rx={18}
+                fill={t.bg} stroke={t.border} strokeWidth={1.5} strokeDasharray="6 4" />
+            );
+          })}
           {/* Existing edges. Synthetic edges (orchestrator ↔ critical_thinker)
               get a softer dashed style and are NOT clickable — they aren't
               in the project's graph_json, so selecting them for delete/reverse
@@ -3311,53 +3349,21 @@ function GraphCanvas({
             );
           })()}
         </svg>
-        {/* Cluster bounding regions — translucent backdrops behind the
-            Design and Build cards so each group reads as one block. Goes
-            before the cards so it sits underneath in stacking order. */}
-        {(() => {
-          const byGroup: Record<TeamGroup, GNode[]> = { design: [], build: [], critic: [] };
-          for (const n of placed) {
-            // Outsiders (orchestrator + synthetic critic) sit ABOVE the
-            // teams — they're not part of either cluster, so excluding
-            // them keeps the bounding boxes tight.
-            if (n.name === orchName) continue;
-            if (n.name === CRITIC_AGENT_NAME) continue;
-            if (n.spec.base === "orchestrator") continue;
-            byGroup[groupForAgent(n.spec)].push(n);
-          }
-          const PAD = 18;
-          const LABEL_TOP = 22;
-          const regions: Array<{ group: TeamGroup; nodes: GNode[]; label: string }> = [];
-          if (byGroup.design.length > 0) regions.push({ group: "design", nodes: byGroup.design, label: "Design Team" });
-          if (byGroup.build.length  > 0) regions.push({ group: "build",  nodes: byGroup.build,  label: "Build Team" });
-          return regions.map(r => {
-            const minX = Math.min(...r.nodes.map(n => n.x)) - PAD;
-            const minY = Math.min(...r.nodes.map(n => n.y)) - PAD - LABEL_TOP;
-            const maxX = Math.max(...r.nodes.map(n => n.x + NODE_W)) + PAD;
-            const maxY = Math.max(...r.nodes.map(n => n.y + NODE_H)) + PAD;
-            const t = tintForGroup(r.group);
-            const labelBg = r.group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)";
-            return (
-              <div key={"cluster-" + r.group} data-ui={`Cluster-${r.group}`} style={{
-                position: "absolute",
-                left: minX, top: minY,
-                width: maxX - minX, height: maxY - minY,
-                borderRadius: 18,
-                background: t.bg,
-                border: `1.5px dashed ${t.border}`,
-                pointerEvents: "none",
-                zIndex: 0,
-              }}>
-                <div style={{
-                  position: "absolute", top: -11, left: 16, padding: "2px 10px",
-                  background: labelBg, color: "#0a1208",
-                  fontSize: 11, fontWeight: 800, letterSpacing: 0.7,
-                  borderRadius: 7, textTransform: "uppercase",
-                }}>{r.label}</div>
-              </div>
-            );
-          });
-        })()}
+        {/* Cluster LABEL badges only — the translucent backdrop itself is now
+            an SVG <rect> drawn inside the edge svg above (so edges paint over
+            it). zIndex 2 keeps the badge above the svg backdrop. */}
+        {clusterRegions.map(r => {
+          const labelBg = r.group === "design" ? "rgba(64, 168, 96, 0.95)" : "rgba(58, 120, 220, 0.95)";
+          return (
+            <div key={"cluster-label-" + r.group} data-ui={`Cluster-${r.group}`} style={{
+              position: "absolute", left: r.x + 16, top: r.y - 11,
+              padding: "2px 10px", background: labelBg, color: "#0a1208",
+              fontSize: 11, fontWeight: 800, letterSpacing: 0.7,
+              borderRadius: 7, textTransform: "uppercase",
+              pointerEvents: "none", zIndex: 2,
+            }}>{r.label}</div>
+          );
+        })}
         {placed.map(n => {
           const isOrch = n.name === orchName;
           const accent = isOrch ? "#ffd76a" : LAYER_COLORS[(n.depth + 1) % LAYER_COLORS.length];

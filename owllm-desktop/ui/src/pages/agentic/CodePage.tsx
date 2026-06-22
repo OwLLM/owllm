@@ -54,23 +54,84 @@ const CODING_SYSTEM = (ws: string) =>
 // the board. Inspired by Cline's task UX, built on OWLLM's own engine.
 type Task = { id: number; title: string; status: "pending" | "running" | "done" | "failed" };
 
-// The whole Code-page session lives in the shared chatRuntime store under this
-// id, so it survives navigating away and back (same mechanism the Chat page
-// uses — the store keeps the snapshot in memory across unmount/remount).
-const SID = "code:main";
+// Each open Code PAGE has its own chatRuntime session, keyed by the page id, so
+// pages are fully INDEPENDENT — separate conversation, workspace, and (when the
+// folder is a git repo) a separate git worktree on its own branch. The shell
+// (CodePages, the default export) owns the tab list; CodeWorkspace below is one
+// page. Sessions survive navigating away/back via the in-memory store, and are
+// debounce-persisted per page id (decoupled from the churning worktree path).
+const sidForPage = (pageId: string) => `code:ws:${pageId}`;
 type CodeState = {
   messages: Msg[];
   tasks: Task[];
-  workspace: string;
+  workspace: string;       // where edits happen — the worktree path when isolated
   modelId: string;
   draft: string;
   busy: boolean;
   status: string;
+  // ---- per-page git-worktree isolation (every page = its own branch off HEAD) ----
+  projectRoot?: string;    // the REAL repo the worktree was cut from (merge target)
+  branch?: string;         // the worktree's branch
+  baseSha?: string;        // base commit the branch was cut from (for diff/merge)
+  isolated?: boolean;      // true when `workspace` is an OWLLM-managed worktree
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
   status: "Pick a folder and a local model, then describe what to build or fix.",
 };
+
+// Worktree command outcomes — serde-tagged "status", camelCase. Mirror of the
+// Rust enums in fleet.rs (fleet_worktree_create / _merge / _finalize), reused
+// AS-IS for the Code page (zero new Rust commands).
+type WtCreate =
+  | { status: "ready"; path: string; branch: string; baseSha: string }
+  | { status: "notAGitRepo" }
+  | { status: "dirtyWorkingTree"; details: string }
+  | { status: "error"; message: string };
+type WtMerge =
+  | { status: "merged"; commitSha: string; filesChanged: number }
+  | { status: "conflict"; files: string[] }
+  | { status: "noChanges" }
+  | { status: "error"; message: string };
+type WtFinalize =
+  | { status: "committed"; commitSha: string; filesChanged: number; files: string[] }
+  | { status: "noChanges" }
+  | { status: "error"; message: string };
+
+// ---- Multi-page shell state (the tab strip) --------------------------------
+type CodePageMeta = { id: string; title: string };
+const PAGES_KEY = "owllm:code:pages";
+const ACTIVE_PAGE_KEY = "owllm:code:activePage";
+const PAGE_SESSION_PREFIX = "owllm:code:page:";
+function newPageId(): string { return `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
+function loadPages(): CodePageMeta[] {
+  try {
+    const a = JSON.parse(localStorage.getItem(PAGES_KEY) || "[]");
+    return Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
+  } catch { return []; }
+}
+function savePages(pages: CodePageMeta[]): void {
+  try { localStorage.setItem(PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
+}
+// Per-PAGE session persistence (keyed by page id, NOT the folder/worktree path,
+// so an isolated page survives the worktree being re-created at a new path).
+function pageSessionKey(pageId: string): string { return PAGE_SESSION_PREFIX + pageId; }
+function loadPageSession(pageId: string): CodeState | null {
+  try {
+    const raw = localStorage.getItem(pageSessionKey(pageId));
+    if (!raw) return null;
+    const s = JSON.parse(raw) as Partial<CodeState>;
+    return { ...DEFAULT_CODE_STATE, ...s, busy: false };
+  } catch { return null; }
+}
+function savePageSession(pageId: string, s: CodeState | null | undefined): void {
+  if (!s) return;
+  try { localStorage.setItem(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false })); }
+  catch { /* quota / unavailable */ }
+}
+function dropPageSession(pageId: string): void {
+  try { localStorage.removeItem(pageSessionKey(pageId)); } catch { /* best effort */ }
+}
 
 // ---- Per-project persistence (the thing that was missing) ------------------
 //
@@ -206,7 +267,13 @@ function parseSteps(text: string): string[] {
     .slice(0, 8);
 }
 
-export default function CodePage() {
+function CodeWorkspace({ pageId, onTitle }: {
+  pageId: string;
+  /// Report this page's display title (folder name) to the shell so the tab
+  /// label stays in sync.
+  onTitle: (title: string) => void;
+}) {
+  const SID = sidForPage(pageId);
   // The model LIST is re-fetched on mount, so it stays plain component state.
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
@@ -273,15 +340,18 @@ export default function CodePage() {
   const hydratedRef = useRef(false);
   if (!hydratedRef.current) {
     hydratedRef.current = true;
-    // Restore the last project the user had open (its saved conversation,
-    // Kanban, draft, model) — or fall back to the empty onboarding state.
-    const restored = loadCodeSession(getLastCodeProject());
+    // Restore THIS page's saved session (conversation, Kanban, draft, model, and
+    // its worktree meta) — keyed by page id so it's independent of every other
+    // open page and survives the worktree path changing underneath it. On first
+    // launch after upgrading, the default page also adopts the LEGACY per-folder
+    // session so existing users don't see their Code history vanish.
+    const restored = loadPageSession(pageId)
+      ?? (pageId === "main" ? loadCodeSession(getLastCodeProject()) : null);
     chatRuntime.hydrateIfIdle(SID, restored ?? DEFAULT_CODE_STATE);
-    // Register the persister so EVERY mutation is debounce-saved to
-    // localStorage (per workspace), and a final flush fires even after the
-    // page unmounts or a stream ends. This is the fix for "I coded for an
-    // hour, closed the app, and nothing was saved".
-    chatRuntime.registerPersister(SID, (payload) => saveCodeSession(payload as CodeState));
+    // Persist EVERY mutation (debounced) under this page id, with a final flush
+    // after unmount / stream-end — the "coded for an hour, closed the app,
+    // nothing saved" fix, now per page.
+    chatRuntime.registerPersister(SID, (payload) => savePageSession(pageId, payload as CodeState));
   }
   // Recent projects, for the onboarding screen shown when no folder is open.
   const [recents, setRecents] = useState<string[]>(getCodeRecents);
@@ -304,7 +374,16 @@ export default function CodePage() {
   // True on Windows, where the WSL-specific toolchain probe + installer apply.
   const isWsl = sbox ? sbox.kind === "wsl" : true;
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
-  const { messages, tasks, workspace, modelId, draft, busy, status } = stx;
+  const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated } = stx;
+  const [mergeBusy, setMergeBusy] = useState(false);
+  // Keep the shell's tab label in sync with this page's project.
+  useEffect(() => {
+    const label = projectRoot ? projectRoot.replace(/^.*[\\/]/, "")
+      : workspace ? workspace.replace(/^.*[\\/]/, "")
+      : "New page";
+    onTitle(label);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectRoot, workspace]);
   function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
@@ -358,14 +437,81 @@ export default function CodePage() {
   // THAT folder's saved session (conversation + Kanban + draft + model), or
   // start a fresh one carrying the current model selection over. Updates the
   // recent-projects list so the onboarding screen can offer it next time.
-  const openWorkspace = (dir: string) => {
+  // Open a project in THIS page. Per the user's choice EVERY page is isolated:
+  // we cut a git worktree off the folder's HEAD and the page edits THAT, so the
+  // real folder stays untouched until "Merge to main". A non-git folder can't be
+  // isolated — fall back to editing it directly (old behaviour) with a notice.
+  const openWorkspace = async (dir: string) => {
     if (!dir || busy) return;
-    saveCodeSession(stx); // flush the outgoing project before we swap it out
-    const restored = loadCodeSession(dir);
-    chatRuntime.setPayload(SID, () =>
-      restored ?? { ...DEFAULT_CODE_STATE, workspace: dir, modelId, status: `Workspace: ${dir}` },
-    );
-    setRecents(rememberCodeProject(dir));
+    // Switching THIS page to a different project: drop the old worktree first so
+    // we don't leak it. (Unmerged work is the user's to merge before switching.)
+    if (stx.isolated && stx.workspace && stx.projectRoot && stx.workspace !== dir) {
+      await removeWorktree(stx);
+    }
+    setStatus(`Creating an isolated worktree for ${dir.replace(/^.*[\\/]/, "")}…`);
+    let outcome: WtCreate;
+    try {
+      outcome = await invoke<WtCreate>("fleet_worktree_create", {
+        projectCwd: dir, agentName: "code", runId: pageId,
+      });
+    } catch (e: any) {
+      outcome = { status: "error", message: String(e?.message ?? e) };
+    }
+    if (outcome.status === "ready") {
+      chatRuntime.setPayload(SID, () => ({
+        ...DEFAULT_CODE_STATE, workspace: outcome.path, modelId,
+        projectRoot: dir, branch: outcome.branch, baseSha: outcome.baseSha, isolated: true,
+        status: `Isolated on ${outcome.branch} — edits stay in this page until you Merge to ${dir.replace(/^.*[\\/]/, "")}.`,
+      }));
+      setRecents(rememberCodeProject(dir));
+    } else if (outcome.status === "notAGitRepo") {
+      chatRuntime.setPayload(SID, () => ({
+        ...DEFAULT_CODE_STATE, workspace: dir, modelId, isolated: false,
+        status: `Not a git repo — editing this folder directly (no isolation). Run "git init" in it to enable per-page worktrees.`,
+      }));
+      setRecents(rememberCodeProject(dir));
+    } else if (outcome.status === "dirtyWorkingTree") {
+      setStatus(`"${dir.replace(/^.*[\\/]/, "")}" has uncommitted changes — commit or stash them first, then reopen so the worktree includes them.\n${outcome.details.split("\n").slice(0, 3).join("\n")}`);
+    } else {
+      setStatus(`Couldn't create the worktree: ${outcome.message}`);
+    }
+  };
+
+  // Best-effort: drop a page's worktree + branch. Discards uncommitted work in
+  // the worktree, so callers warn the user first when there may be unmerged work.
+  const removeWorktree = async (st: CodeState): Promise<void> => {
+    if (!st.isolated || !st.workspace || !st.projectRoot) return;
+    try {
+      await invoke("fleet_worktree_remove", {
+        args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
+      });
+    } catch { /* best-effort cleanup */ }
+  };
+
+  // Merge to main: commit whatever's pending in the worktree, then squash-merge
+  // the page's branch back into the REAL project. This is the only moment the
+  // user's actual folder changes. Conflicts abort cleanly (nothing touched).
+  const mergeToMain = async () => {
+    if (!stx.isolated || !stx.projectRoot || !stx.branch || mergeBusy || busy) return;
+    setMergeBusy(true);
+    try {
+      const fin = await invoke<WtFinalize>("fleet_worktree_finalize", {
+        worktreePath: stx.workspace, agentName: "code", summary: "Code page session",
+      });
+      if (fin.status === "error") { setStatus(`Merge aborted — commit failed: ${fin.message}`); return; }
+      const mg = await invoke<WtMerge>("fleet_worktree_merge", {
+        projectCwd: stx.projectRoot, agentName: "code", branch: stx.branch,
+      });
+      const root = stx.projectRoot.replace(/^.*[\\/]/, "");
+      if (mg.status === "merged") setStatus(`✓ Merged ${mg.filesChanged} file(s) into ${root} (commit ${mg.commitSha.slice(0, 7)}). Keep working — Merge again anytime.`);
+      else if (mg.status === "noChanges") setStatus(`Nothing new to merge — ${root} is already up to date with this page.`);
+      else if (mg.status === "conflict") setStatus(`⚠ Merge conflict in: ${mg.files.join(", ")}. Your project was NOT changed. Resolve on branch ${stx.branch} in your git tool, or adjust this page and retry.`);
+      else setStatus(`Merge failed: ${mg.message}`);
+    } catch (e: any) {
+      setStatus(`Merge failed: ${String(e?.message ?? e)}`);
+    } finally {
+      setMergeBusy(false);
+    }
   };
 
   const pickWorkspace = async () => {
@@ -381,9 +527,19 @@ export default function CodePage() {
 
   // Close the current project back to the onboarding screen (its session stays
   // saved on disk and reappears in Recent projects).
-  const closeProject = () => {
+  const closeProject = async () => {
     if (busy) return;
-    saveCodeSession(stx);
+    if (stx.isolated && stx.workspace) {
+      try {
+        const { confirm } = await import("@tauri-apps/plugin-dialog");
+        const ok = await confirm(
+          `Close this project? Unmerged changes in its worktree (${stx.branch}) will be discarded. Merge to main first to keep them.`,
+          { title: "Close project", kind: "warning" },
+        );
+        if (!ok) return;
+      } catch { /* dialog unavailable — proceed */ }
+      await removeWorktree(stx);
+    }
     setRecents(getCodeRecents());
     chatRuntime.setPayload(SID, () => ({ ...DEFAULT_CODE_STATE }));
     try { localStorage.removeItem(CODE_LAST_KEY); } catch { /* best effort */ }
@@ -956,7 +1112,7 @@ export default function CodePage() {
     setDraft((d) => (d.trim() ? `${d.replace(/\s*$/, "")} @${rel} ` : `@${rel} `));
   };
 
-  const wsShort = workspace ? workspace.replace(/^.*[\\/]/, "") : "No folder";
+  const wsShort = (projectRoot || workspace) ? (projectRoot || workspace)!.replace(/^.*[\\/]/, "") : "No folder";
 
   // ---- Just-chat mode (no folder): the everyday-chat surface --------------
   if (!workspace && chatMode) {
@@ -1327,6 +1483,24 @@ export default function CodePage() {
           </button>
         )}
         <GitBar workspace={workspace} busy={busy} />
+        {isolated && (
+          <>
+            <span
+              title={`Isolated git worktree branch, cut from ${projectRoot}. Your real folder is untouched until you Merge.`}
+              style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, whiteSpace: "nowrap", background: "rgba(127,240,197,0.12)", color: "#7ff0c5", border: "1px solid rgba(127,240,197,0.35)" }}
+            >
+              ⎇ {branch ? branch.replace(/^owllm-fleet\//, "") : "isolated"}
+            </span>
+            <button
+              onClick={mergeToMain}
+              disabled={mergeBusy || busy}
+              title={`Commit this page's work and squash-merge it into ${projectRoot}. Your real folder changes ONLY when you click this.`}
+              style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "#7ff0c5", fontWeight: 700, opacity: mergeBusy ? 0.6 : 1 }}
+            >
+              {mergeBusy ? "⏳ Merging…" : `⤴ Merge to ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`}
+            </button>
+          </>
+        )}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
         <div style={{ minWidth: 260, maxWidth: 360 }}>
@@ -1439,6 +1613,111 @@ export default function CodePage() {
             <button onClick={planAndExecute} disabled={!draft.trim()} title="Break the goal into ordered steps, then build them one by one (Kanban)" style={{ ...btn, height: 44, padding: "0 14px", opacity: draft.trim() ? 1 : 0.5 }}>📋 Plan</button>
             <button onClick={send} disabled={!draft.trim()} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: draft.trim() ? 1 : 0.5 }}>Send</button>
           </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---- The Code page = a tab strip of independent CodeWorkspace pages ----------
+// Each tab is its OWN page: separate conversation, model, and (for a git repo) a
+// separate worktree on its own branch — so you can drive two lines of change on
+// the same project at once without them colliding. Only the active page renders
+// (keyed by id) so each page's state stays isolated; switching tabs preserves
+// every page via chatRuntime + per-page localStorage.
+export default function CodePage() {
+  const [pages, setPages] = useState<CodePageMeta[]>(() => {
+    const p = loadPages();
+    return p.length ? p : [{ id: "main", title: "New page" }];
+  });
+  const [activeId, setActiveId] = useState<string>(() => {
+    try { return localStorage.getItem(ACTIVE_PAGE_KEY) || ""; } catch { return ""; }
+  });
+  const active = pages.find((p) => p.id === activeId) ?? pages[0];
+  useEffect(() => { savePages(pages); }, [pages]);
+  useEffect(() => { try { if (active) localStorage.setItem(ACTIVE_PAGE_KEY, active.id); } catch { /* best effort */ } }, [active]);
+
+  const setTitle = (id: string, title: string) =>
+    setPages((ps) => ps.map((p) => (p.id === id ? (p.title === title ? p : { ...p, title }) : p)));
+
+  const newPage = () => {
+    const id = newPageId();
+    setPages((ps) => [...ps, { id, title: "New page" }]);
+    setActiveId(id);
+  };
+
+  const closePage = async (id: string) => {
+    // Clean up the page's worktree (discards uncommitted work — Merge first to
+    // keep it). Prefer the LIVE in-memory session (a just-created worktree may
+    // not have hit the debounced localStorage yet); fall back to disk.
+    const live = chatRuntime.getSnapshot(sidForPage(id)).payload as CodeState | null;
+    const st = live ?? loadPageSession(id);
+    if (st?.isolated && st.workspace && st.projectRoot) {
+      try {
+        const { confirm } = await import("@tauri-apps/plugin-dialog");
+        const ok = await confirm(
+          `Close this page? Its isolated worktree (${st.branch}) and any unmerged changes are removed. Merge to main first to keep them.`,
+          { title: "Close page", kind: "warning" },
+        );
+        if (!ok) return;
+      } catch { /* dialog unavailable — proceed */ }
+      try {
+        await invoke("fleet_worktree_remove", {
+          args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
+        });
+      } catch { /* best-effort */ }
+    }
+    dropPageSession(id);
+    setPages((ps) => {
+      const next = ps.filter((p) => p.id !== id);
+      if (next.length === 0) {
+        const nid = newPageId();
+        setActiveId(nid);
+        return [{ id: nid, title: "New page" }];
+      }
+      if (id === activeId) setActiveId(next[next.length - 1].id);
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg-panel)" }}>
+      {/* Tab strip */}
+      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "5px 6px 0", flexShrink: 0, overflowX: "auto" }}>
+        {pages.map((p) => {
+          const on = p.id === active?.id;
+          return (
+            <div
+              key={p.id}
+              onClick={() => setActiveId(p.id)}
+              title={p.title}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "5px 10px",
+                borderRadius: "7px 7px 0 0", cursor: "pointer", maxWidth: 200, flexShrink: 0,
+                background: on ? "var(--bg-input)" : "transparent",
+                border: "1px solid", borderColor: on ? "var(--border-strong)" : "transparent", borderBottom: "none",
+                color: on ? "var(--fg-strong)" : "var(--fg-muted)", fontSize: 12, fontWeight: on ? 700 : 500,
+              }}
+            >
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title || "New page"}</span>
+              <span
+                onClick={(e) => { e.stopPropagation(); void closePage(p.id); }}
+                title="Close this page (its worktree is removed)"
+                style={{ opacity: 0.55, fontSize: 14, lineHeight: 1, padding: "0 2px" }}
+              >×</span>
+            </div>
+          );
+        })}
+        <button onClick={newPage} title="Open another page on its own isolated worktree" style={{ ...btn, height: 26, padding: "0 10px", marginLeft: 4 }}>＋ New page</button>
+      </div>
+      {/* Active page — keyed so each page is an isolated component instance. */}
+      <div style={{ flex: 1, minHeight: 0 }}>
+        {active && (
+          <CodeWorkspace
+            key={active.id}
+            pageId={active.id}
+            onTitle={(t) => setTitle(active.id, t)}
+          />
         )}
       </div>
     </div>

@@ -604,7 +604,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         );
         if (!ok) return;
       } catch { /* dialog unavailable — proceed */ }
-      await removeWorktree(stx);
+      void removeWorktree(stx); // background cleanup — return to onboarding instantly
     }
     setRecents(getCodeRecents());
     chatRuntime.setPayload(SID, () => ({ ...DEFAULT_CODE_STATE }));
@@ -1735,11 +1735,12 @@ export default function CodePage() {
         );
         if (!ok) return;
       } catch { /* dialog unavailable — proceed */ }
-      try {
-        await invoke("fleet_worktree_remove", {
-          args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
-        });
-      } catch { /* best-effort */ }
+      // Remove the worktree in the BACKGROUND — deleting a large checkout is slow,
+      // and (like opening) the user shouldn't wait for cleanup. Fire-and-forget so
+      // the tab vanishes instantly.
+      void invoke("fleet_worktree_remove", {
+        args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
+      }).catch(() => { /* best-effort */ });
     }
     dropPageSession(id);
     setPages((ps) => {

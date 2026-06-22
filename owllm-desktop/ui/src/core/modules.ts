@@ -19,6 +19,7 @@ import InfoPage from "../pages/core/InfoPage";
 
 // Fine-tuning mode:
 import ModelsPage from "../pages/finetuning/ModelsPage";
+import DatasetBuilderPage from "../pages/finetuning/DatasetBuilderPage";
 import TrainPage from "../pages/finetuning/TrainPage";
 import ChatPage from "../pages/finetuning/ChatPage";
 
@@ -96,9 +97,10 @@ export const FINETUNING: ModuleDef = {
   toggleLabel: "🛠\nFine Tuning",
   toggleIconPng: "/Page_icons/owl_FineTuning.png",
   pages: [
-    { key: "models", label: "📦 Models", component: ModelsPage },
-    { key: "train",  label: "🎯 Train",  component: TrainPage  },
-    { key: "chat",   label: "💬 Chat",   component: ChatPage   },
+    { key: "models",  label: "📦 Models",  component: ModelsPage         },
+    { key: "dataset", label: "📚 Dataset", component: DatasetBuilderPage },
+    { key: "train",   label: "🎯 Train",   component: TrainPage          },
+    { key: "chat",    label: "💬 Chat",    component: ChatPage           },
   ],
   firstTab: "models",  // Qt _GROUP_FIRST_TAB["finetuning"] = "models"
 };

@@ -626,6 +626,100 @@ pub async fn dataset_check(path: String) -> Result<DatasetSummary, String> {
     }
 }
 
+// ---------------------------------------------------------------------
+// Dataset Builder — turn documents/URLs into training data.
+//
+// Phase 1 (here): run the bundled, GPU-free dataset_ingest.py to extract clean
+// text and chunk it. Phase 2 (LLM generation of {instruction, output} pairs from
+// each chunk) lives in the UI, reusing the user's picked model via the normal
+// chat dispatch. dataset_save writes the final JSONL.
+// ---------------------------------------------------------------------
+
+/// Run dataset_ingest.py over a manifest JSON and return its result JSON (the
+/// per-source extracted text + chunk lists). Runs on the bundled host Python
+/// (no GPU/torch needed); the script degrades gracefully per source so one bad
+/// file/URL can't fail the batch.
+#[tauri::command]
+pub async fn dataset_ingest(manifest_json: String) -> Result<String, String> {
+    use tokio::process::Command;
+    #[cfg(windows)]
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    let script = crate::paths::tools_dir()
+        .map(|d| d.join("dataset_ingest.py"))
+        .filter(|p| p.is_file())
+        .ok_or_else(|| "dataset_ingest.py not found in resources/tools/".to_string())?;
+    // Bundled host Python first; fall back to a system interpreter so the builder
+    // still works before the heavy runtime is installed (the script is stdlib-only
+    // for txt/md/docx/url; PDF wants pypdf and degrades to a per-source error).
+    let python = crate::paths::bundled_python_exe()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| if cfg!(windows) { "python".to_string() } else { "python3".to_string() });
+
+    let dir = std::env::temp_dir();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let manifest_path = dir.join(format!("owllm_ds_manifest_{stamp}.json"));
+    let result_path = dir.join(format!("owllm_ds_result_{stamp}.json"));
+    std::fs::write(&manifest_path, manifest_json.as_bytes())
+        .map_err(|e| format!("write manifest: {e}"))?;
+
+    let mut cmd = Command::new(&python);
+    cmd.arg(&script)
+        .arg("--input").arg(&manifest_path)
+        .arg("--output").arg(&result_path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let output = cmd.output().await.map_err(|e| format!("spawn python ({python}): {e}"))?;
+    let _ = std::fs::remove_file(&manifest_path);
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&result_path);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // The script emits {"event":"failed","error":...} on stdout on a clean
+        // failure; prefer that, else the stderr tail.
+        let msg = stdout
+            .lines()
+            .rev()
+            .find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
+            .unwrap_or_else(|| stderr.trim().lines().last().unwrap_or("dataset ingest failed").to_string());
+        return Err(format!("dataset ingest failed: {msg}"));
+    }
+    let result = std::fs::read_to_string(&result_path)
+        .map_err(|e| format!("read ingest result: {e}"))?;
+    let _ = std::fs::remove_file(&result_path);
+    Ok(result)
+}
+
+/// Write the generated dataset (JSONL text) to `path`, creating parent dirs.
+/// Returns the absolute path written.
+#[tauri::command]
+pub async fn dataset_save(path: String, content: String) -> Result<String, String> {
+    let p = std::path::PathBuf::from(&path);
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&p, content.as_bytes()).map_err(|e| format!("write {path}: {e}"))?;
+    Ok(p.to_string_lossy().into_owned())
+}
+
+/// Default directory for generated datasets (`<llm_root>/datasets`), created on
+/// demand so the UI can default its save dialog there and the Train page can
+/// find them. Empty string if no root resolves (the UI then just uses a dialog).
+#[tauri::command]
+pub async fn dataset_default_dir() -> Result<String, String> {
+    let Some(root) = crate::paths::llm_root() else { return Ok(String::new()); };
+    let dir = root.join("datasets");
+    let _ = std::fs::create_dir_all(&dir);
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 /// Ask the running trainer to stop at the next safe boundary.
 /// finetune.py polls the stop-file path so we just write the sentinel
 /// — the trainer commits the in-flight step and saves the partial

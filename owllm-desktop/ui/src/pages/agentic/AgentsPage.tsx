@@ -63,6 +63,7 @@ import {
   MAX_AGENT_RERUNS,
   routingHint,
   nextHandoffs,
+  loopExhaustedNotice,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -9545,11 +9546,18 @@ export default function AgentsPage() {
           if (ranAsLeader) return [out];
           // Agent-decided routing: the agent's reply picks where its output goes next
           // (explicit @target among its allowed edges), else legacy run-once auto-flow.
-          const hands = nextHandoffs(runTeam, name, out.text, runCount);
-          if (hands.length === 0) return [out];   // returns to caller (terminal)
-          appendThought(name, { role: "dispatch", color: "#a578ff", text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
+          const { hands, capped } = nextHandoffs(runTeam, name, out.text, runCount);
           const results: { name: string; text: string }[] = [];
-          for (const h of hands) results.push(...await runFrom(h.name, h.input));
+          if (hands.length > 0) {
+            appendThought(name, { role: "dispatch", color: "#a578ff", text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
+            for (const h of hands) results.push(...await runFrom(h.name, h.input));
+          }
+          if (capped.length > 0) {
+            // P2 supervision: exhausted loop → surface a digest the orchestrator integrates.
+            const notice = loopExhaustedNotice(name, capped, runCount);
+            appendThought(name, { role: "dispatch", color: "#ffb45a", text: notice });
+            results.push({ name, text: notice });
+          }
           return results.length ? results : [out];
         }
         const replies = await runFrom(startSpec.name, d.instruction);

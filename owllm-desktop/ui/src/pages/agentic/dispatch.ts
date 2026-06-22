@@ -448,31 +448,71 @@ export function routingHint(team: Team, spec: AgentSpec): string {
   ].join("\n");
 }
 
+export type Handoff = { name: string; input: string; explicit: boolean };
+export type HandoffPlan = {
+  /// Targets to actually run next.
+  hands: Handoff[];
+  /// Targets the agent EXPLICITLY tried to route to but which were blocked by
+  /// the per-agent re-run cap — i.e. a loop that did NOT converge. The chain
+  /// surfaces these to the orchestrator (P2 supervision) instead of silently
+  /// dropping them.
+  capped: string[];
+};
+
 /// Decide where an agent's OUTPUT goes next — the heart of agent-decided routing.
 /// Edges are an ALLOW-LIST. If the agent explicitly @-routed to allowed targets,
 /// honor that (and let those targets re-run up to MAX_AGENT_RERUNS, enabling
 /// loops). Otherwise fall back to LEGACY auto-flow along every arrow, run-once —
 /// so teams that don't @-route behave exactly as before. `runCount` bounds it.
+/// Pure + unit-tested.
 export function nextHandoffs(
   team: Team,
   agentName: string,
   agentOutput: string,
   runCount: Map<string, number>,
-): Array<{ name: string; input: string; explicit: boolean }> {
+): HandoffPlan {
   const orchName = findOrchestratorSpec(team)?.name ?? "orchestrator";
   const allowed = downstreamTargets(team, agentName, orchName);
-  if (allowed.length === 0) return [];
-  const explicit = parseDispatches(agentOutput, team, agentName).filter(
-    (d) => allowed.includes(d.agentName) && (runCount.get(d.agentName) ?? 0) < MAX_AGENT_RERUNS,
+  if (allowed.length === 0) return { hands: [], capped: [] };
+  const dispatched = parseDispatches(agentOutput, team, agentName).filter((d) =>
+    allowed.includes(d.agentName),
   );
-  if (explicit.length > 0) {
-    return explicit.map((d) => ({ name: d.agentName, input: d.instruction, explicit: true }));
+  if (dispatched.length > 0) {
+    // Agent-decided routing. Split into runnable vs cap-blocked (exhausted loop).
+    const hands: Handoff[] = [];
+    const capped: string[] = [];
+    for (const d of dispatched) {
+      if ((runCount.get(d.agentName) ?? 0) < MAX_AGENT_RERUNS) {
+        hands.push({ name: d.agentName, input: d.instruction, explicit: true });
+      } else {
+        capped.push(d.agentName);
+      }
+    }
+    return { hands, capped };
   }
   // Legacy auto-flow: each downstream runs ONCE (run-once == today's behavior).
   const handoff = `You are continuing a team workflow. @${agentName} produced the following — build on it for YOUR part of the task:\n\n${agentOutput}`;
-  return allowed
+  const hands = allowed
     .filter((t) => (runCount.get(t) ?? 0) === 0)
     .map((t) => ({ name: t, input: handoff, explicit: false }));
+  return { hands, capped: [] };
+}
+
+/// P2 SUPERVISION: when an agent tried to loop work back to teammate(s) that hit
+/// the re-run cap, the chain emits THIS as a result instead of silently dying.
+/// The orchestrator integrates it (and, in director mode, the Critical Thinker
+/// reviews it) and decides the next step — ship, re-scope, or ask the user.
+/// Pure + unit-tested.
+export function loopExhaustedNotice(
+  agentName: string,
+  capped: string[],
+  runCount: Map<string, number>,
+): string {
+  const who = capped.map((t) => `@${t} (ran ${runCount.get(t) ?? 0}×)`).join(", ");
+  return [
+    `⚠ SUPERVISOR — loop did not converge: @${agentName} tried to route back to ${who}, but they reached the ${MAX_AGENT_RERUNS}-round per-agent cap.`,
+    `Orchestrator: decide the next step — ship what we have, give the agent fresh direction, or ask the user. Do NOT silently re-loop.`,
+  ].join("\n");
 }
 
 /// Model-visible correction for dispatch lines that named REAL team members
@@ -3066,12 +3106,19 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     const out = await runOneAgent(spec, input);
     // Agent-decided routing: the agent's reply picks where its output goes next
     // (explicit @target among its allowed edges), else legacy run-once auto-flow.
-    const hands = nextHandoffs(team, name, out.text, runCount);
-    if (hands.length === 0) return [out];      // returns to caller (terminal)
-    hooks.onThought(name, { role: "dispatch", color: "#a578ff",
-      text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
+    const { hands, capped } = nextHandoffs(team, name, out.text, runCount);
     const results: Array<{ name: string; text: string }> = [];
-    for (const h of hands) results.push(...await runFrom(h.name, h.input, runCount));
+    if (hands.length > 0) {
+      hooks.onThought(name, { role: "dispatch", color: "#a578ff",
+        text: `➡ ${hands.map(h => "@" + h.name + (h.explicit ? "" : " (auto)")).join(", ")}` });
+      for (const h of hands) results.push(...await runFrom(h.name, h.input, runCount));
+    }
+    if (capped.length > 0) {
+      // P2 supervision: exhausted loop → surface a digest the orchestrator integrates.
+      const notice = loopExhaustedNotice(name, capped, runCount);
+      hooks.onThought(name, { role: "dispatch", color: "#ffb45a", text: notice });
+      results.push({ name, text: notice });
+    }
     return results.length ? results : [out];
   };
   const settled = await Promise.allSettled(dispatches.map(d => runFrom(d.agentName, d.instruction, new Map<string, number>())));

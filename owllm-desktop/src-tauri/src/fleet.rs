@@ -52,11 +52,29 @@ fn safe_seg(s: &str) -> String {
         .collect()
 }
 
+/// Suppresses the console window that a spawned `git` would otherwise FLASH on
+/// Windows. Without this every git call (and fleet_worktree_create makes ~6)
+/// pops a black CMD window — the storm of flashing the user hit when opening a
+/// project on the Code page. The other git helper (git.rs) already does this.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// A `git` Command rooted at `dir` that never flashes a console window.
+fn git_cmd(dir: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Is `dir` the root of a git repo (or inside one)?
 fn is_git_repo(dir: &Path) -> bool {
-    Command::new("git")
+    git_cmd(dir)
         .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(dir)
         .output()
         .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
         .unwrap_or(false)
@@ -64,9 +82,8 @@ fn is_git_repo(dir: &Path) -> bool {
 
 /// Run a git command in `dir`, capture stdout+stderr+status.
 fn git(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
-    let out = Command::new("git")
+    let out = git_cmd(dir)
         .args(args)
-        .current_dir(dir)
         .output()
         .map_err(|e| format!("git {} in {}: {}", args.join(" "), dir.display(), e))?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();

@@ -99,7 +99,7 @@ type WtFinalize =
   | { status: "error"; message: string };
 
 // ---- Multi-page shell state (the tab strip) --------------------------------
-type CodePageMeta = { id: string; title: string };
+type CodePageMeta = { id: string; title: string; seedProject?: string };
 const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
 const PAGE_SESSION_PREFIX = "owllm:code:page:";
@@ -267,8 +267,12 @@ function parseSteps(text: string): string[] {
     .slice(0, 8);
 }
 
-function CodeWorkspace({ pageId, onTitle }: {
+function CodeWorkspace({ pageId, seedProject, onTitle }: {
   pageId: string;
+  /// When set, this page auto-opens this project on first mount — used by
+  /// "New page" to start ANOTHER isolated worktree of the SAME project so the
+  /// user gets a parallel workspace instead of a blank folder picker.
+  seedProject?: string;
   /// Report this page's display title (folder name) to the shell so the tab
   /// label stays in sync.
   onTitle: (title: string) => void;
@@ -384,6 +388,16 @@ function CodeWorkspace({ pageId, onTitle }: {
     onTitle(label);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot, workspace]);
+  // "New page on the same project": auto-open the seeded project once on mount,
+  // but only if this page doesn't already have a workspace (restored session).
+  const seededRef = useRef(false);
+  useEffect(() => {
+    if (seededRef.current || !seedProject) return;
+    seededRef.current = true;
+    const cur = chatRuntime.getSnapshot(SID).payload as CodeState | null;
+    if (!cur?.workspace) void openWorkspace(seedProject);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
@@ -1641,8 +1655,13 @@ export default function CodePage() {
     setPages((ps) => ps.map((p) => (p.id === id ? (p.title === title ? p : { ...p, title }) : p)));
 
   const newPage = () => {
+    // "New page" on the SAME project: seed the new page with the active page's
+    // project so it spins up ANOTHER isolated worktree of it (a parallel
+    // workspace) instead of a blank picker. No current project → a blank page.
+    const cur = active ? (chatRuntime.getSnapshot(sidForPage(active.id)).payload as CodeState | null) : null;
+    const seed = cur?.projectRoot || undefined;
     const id = newPageId();
-    setPages((ps) => [...ps, { id, title: "New page" }]);
+    setPages((ps) => [...ps, { id, title: seed ? seed.replace(/^.*[\\/]/, "") : "New page", seedProject: seed }]);
     setActiveId(id);
   };
 
@@ -1716,6 +1735,7 @@ export default function CodePage() {
           <CodeWorkspace
             key={active.id}
             pageId={active.id}
+            seedProject={active.seedProject}
             onTitle={(t) => setTitle(active.id, t)}
           />
         )}

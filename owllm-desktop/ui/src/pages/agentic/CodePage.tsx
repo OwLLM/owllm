@@ -74,6 +74,8 @@ type CodeState = {
   branch?: string;         // the worktree's branch
   baseSha?: string;        // base commit the branch was cut from (for diff/merge)
   isolated?: boolean;      // true when `workspace` is an OWLLM-managed worktree
+  preparing?: boolean;     // worktree is being created in the background (page is
+                           // shown immediately; Send is gated until it's ready)
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
@@ -409,7 +411,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // True on Windows, where the WSL-specific toolchain probe + installer apply.
   const isWsl = sbox ? sbox.kind === "wsl" : true;
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
-  const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated } = stx;
+  const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing } = stx;
   const [mergeBusy, setMergeBusy] = useState(false);
   // Keep the shell's tab label in sync with this page's project.
   useEffect(() => {
@@ -488,37 +490,56 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // isolated — fall back to editing it directly (old behaviour) with a notice.
   const openWorkspace = async (dir: string) => {
     if (!dir || busy) return;
-    // Switching THIS page to a different project: drop the old worktree first so
-    // we don't leak it. (Unmerged work is the user's to merge before switching.)
+    const name = dir.replace(/^.*[\\/]/, "");
+    // Switching THIS page to a different project: drop the old worktree in the
+    // BACKGROUND so it doesn't block (or leak). Unmerged work is the user's to
+    // merge before switching.
     if (stx.isolated && stx.workspace && stx.projectRoot && stx.workspace !== dir) {
-      await removeWorktree(stx);
+      void removeWorktree(stx);
     }
-    setStatus(`Creating an isolated worktree for ${dir.replace(/^.*[\\/]/, "")}…`);
+    // Show the page IMMEDIATELY in a "preparing" state — never make the user stare
+    // at the picker while a (possibly large) checkout runs. The worktree is built
+    // in the BACKGROUND; Send is gated until it's ready (see the composer). The
+    // invoke below is async (runs on a Rust thread), so the UI stays responsive.
+    chatRuntime.setPayload(SID, () => ({
+      ...DEFAULT_CODE_STATE, projectRoot: dir, workspace: "", modelId,
+      preparing: true,
+      status: `⏳ Preparing an isolated workspace for ${name}… (you can type your request now)`,
+    }));
+    setRecents(rememberCodeProject(dir));
+    const t0 = Date.now();
     let outcome: WtCreate;
     try {
-      outcome = await invoke<WtCreate>("fleet_worktree_create", {
-        projectCwd: dir, agentName: "code", runId: pageId,
-      });
+      outcome = await invoke<WtCreate>("fleet_worktree_create", { projectCwd: dir, agentName: "code", runId: pageId });
     } catch (e: any) {
       outcome = { status: "error", message: String(e?.message ?? e) };
     }
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    // The user may have switched/closed this page mid-prep — only apply the
+    // result if the page still wants THIS project.
+    const cur = chatRuntime.getSnapshot(SID).payload as CodeState | null;
+    if (cur && cur.projectRoot !== dir) return;
     if (outcome.status === "ready") {
-      chatRuntime.setPayload(SID, () => ({
-        ...DEFAULT_CODE_STATE, workspace: outcome.path, modelId,
-        projectRoot: dir, branch: outcome.branch, baseSha: outcome.baseSha, isolated: true,
-        status: `Isolated on ${outcome.branch} — edits stay in this page until you Merge to ${dir.replace(/^.*[\\/]/, "")}.`,
+      chatRuntime.setPayload(SID, (p) => ({
+        ...((p as CodeState) ?? DEFAULT_CODE_STATE),
+        workspace: outcome.path, projectRoot: dir, branch: outcome.branch, baseSha: outcome.baseSha,
+        isolated: true, preparing: false,
+        status: `Isolated on ${outcome.branch} (ready in ${secs}s) — edits stay in this page until you Merge to ${name}.`,
       }));
-      setRecents(rememberCodeProject(dir));
     } else if (outcome.status === "notAGitRepo") {
-      chatRuntime.setPayload(SID, () => ({
-        ...DEFAULT_CODE_STATE, workspace: dir, modelId, isolated: false,
+      chatRuntime.setPayload(SID, (p) => ({
+        ...((p as CodeState) ?? DEFAULT_CODE_STATE),
+        workspace: dir, projectRoot: undefined, branch: undefined, baseSha: undefined,
+        isolated: false, preparing: false,
         status: `Not a git repo — editing this folder directly (no isolation). Run "git init" in it to enable per-page worktrees.`,
       }));
-      setRecents(rememberCodeProject(dir));
     } else if (outcome.status === "dirtyWorkingTree") {
-      setStatus(`"${dir.replace(/^.*[\\/]/, "")}" has uncommitted changes — commit or stash them first, then reopen so the worktree includes them.\n${outcome.details.split("\n").slice(0, 3).join("\n")}`);
+      chatRuntime.setPayload(SID, () => ({
+        ...DEFAULT_CODE_STATE,
+        status: `"${name}" has uncommitted changes — commit or stash them first, then reopen so the worktree includes them.\n${outcome.details.split("\n").slice(0, 3).join("\n")}`,
+      }));
     } else {
-      setStatus(`Couldn't create the worktree: ${outcome.message}`);
+      chatRuntime.setPayload(SID, () => ({ ...DEFAULT_CODE_STATE, status: `Couldn't create the worktree: ${outcome.message}` }));
     }
   };
 
@@ -1000,7 +1021,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const send = async () => {
     const text = draft.trim();
     if (!text || busy) return;
-    if (!workspace) { setStatus("Pick a workspace folder first (Browse)."); return; }
+    if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setStatus("No model selected — pick one above."); return; }
     setDraft("");
     setBusy(true);
@@ -1092,7 +1113,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const planAndExecute = async () => {
     const goal = draft.trim();
     if (!goal || busy) return;
-    if (!workspace) { setStatus("Pick a workspace folder first (Browse)."); return; }
+    if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setStatus("No local model available — load one on the Models page."); return; }
     setDraft("");
     setBusy(true);
@@ -1244,7 +1265,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // The coding agent does nothing without a workspace, so instead of showing
   // the full (dead) IDE chrome that silently ignores input, show a real
   // get-started screen: open a folder, or reopen a recent project.
-  if (!workspace) {
+  if (!workspace && !preparing) {
     return (
       <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -1599,12 +1620,20 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
       >
         {messages.length === 0 ? (
+          preparing ? (
+            <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 480, lineHeight: 1.6 }}>
+              <div style={{ fontSize: 30, marginBottom: 8 }}>⏳</div>
+              Preparing an isolated workspace for <b>{(projectRoot || "").replace(/^.*[\\/]/, "")}</b>…<br />
+              <span style={{ fontSize: 12 }}>A private git worktree is being checked out (a few seconds on a large repo). You can type your request now — Send unlocks the moment it's ready.</span>
+            </div>
+          ) : (
           <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
             <div style={{ fontSize: 30, marginBottom: 8 }}>🛠️</div>
             Your local model codes directly in <b>{workspace || "a folder you pick"}</b>.<br />
             It can read, search, edit and create files and run commands there.<br />
             <span style={{ fontSize: 12 }}>Pick a folder, choose a model, and describe the change.</span>
           </div>
+          )
         ) : (
           messages.map((m, i) => {
             if (m.role === "tool") {
@@ -1642,7 +1671,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           value={draft}
           onChange={(e) => setDraft(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder={workspace ? "Describe the change, bug, or feature…  (Enter to send, Shift+Enter for newline)" : "Pick a workspace folder first…"}
+          placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? "Describe the change, bug, or feature…  (Enter to send, Shift+Enter for newline)" : "Pick a workspace folder first…"}
           rows={2}
           style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 160, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
         />
@@ -1650,8 +1679,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
         ) : (
           <>
-            <button onClick={planAndExecute} disabled={!draft.trim()} title="Break the goal into ordered steps, then build them one by one (Kanban)" style={{ ...btn, height: 44, padding: "0 14px", opacity: draft.trim() ? 1 : 0.5 }}>📋 Plan</button>
-            <button onClick={send} disabled={!draft.trim()} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: draft.trim() ? 1 : 0.5 }}>Send</button>
+            <button onClick={planAndExecute} disabled={!draft.trim() || preparing} title="Break the goal into ordered steps, then build them one by one (Kanban)" style={{ ...btn, height: 44, padding: "0 14px", opacity: (draft.trim() && !preparing) ? 1 : 0.5 }}>📋 Plan</button>
+            <button onClick={send} disabled={!draft.trim() || preparing} title={preparing ? "Preparing the workspace — unlocks in a moment" : undefined} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: (draft.trim() && !preparing) ? 1 : 0.5 }}>{preparing ? "⏳ Preparing…" : "Send"}</button>
           </>
         )}
       </div>

@@ -39,6 +39,7 @@ type TrainStatus = {
   loss: number | null;
   evalLoss: number | null;
   learningRate: number | null;
+  samplesPerSec: number | null;
   vramUsedGb: number | null;
   elapsedSec: number | null;
   message: string | null;
@@ -55,6 +56,7 @@ const EMPTY_STATUS: TrainStatus = {
   loss: null,
   evalLoss: null,
   learningRate: null,
+  samplesPerSec: null,
   vramUsedGb: null,
   elapsedSec: null,
   message: null,
@@ -256,12 +258,34 @@ function TrainingHistory() {
 
   const refresh = React.useCallback(async () => {
     setLoading(true);
-    const r = await tryInvoke<TrainHistoryRow[]>("train_history_list", {}, []);
-    setRows(r);
+    // NOTE: there is no `train_history_list` Rust command — calling it returned
+    // [] forever, so the history was ALWAYS empty (a finished run never showed).
+    // Use the real `list_tuned_adapters` (every fine-tuned output on disk) and
+    // map it to the history columns. Per-run metadata (epochs / steps / final
+    // loss) isn't persisted on the adapter dir, so those show "—".
+    const adapters = await tryInvoke<Array<{ name: string; modified: string | null; baseHint: string | null }>>(
+      "list_tuned_adapters", {}, [],
+    );
+    setRows(adapters.map((a) => ({
+      when_pretty: a.modified ? new Date(a.modified).toLocaleString() : null,
+      adapter: a.name,
+      base: a.baseHint ?? null,
+      epochs: null,
+      steps: null,
+      final_loss: null,
+      status: "done",
+    })));
     setLoading(false);
   }, []);
 
-  React.useEffect(() => { refresh(); }, [refresh]);
+  React.useEffect(() => {
+    refresh();
+    // A run finishing on the Train page fires this so the new adapter appears
+    // without a manual refresh.
+    const onFinished = () => { refresh(); };
+    window.addEventListener("owllm:train:finished", onFinished as EventListener);
+    return () => window.removeEventListener("owllm:train:finished", onFinished as EventListener);
+  }, [refresh]);
 
   return (
     <div
@@ -564,7 +588,7 @@ export default function TrainPage() {
     type TrainEvent =
       | { kind: "started"; runName: string }
       | { kind: "log"; stream: string; line: string }
-      | { kind: "metric"; step: number; loss: number; learningRate: number }
+      | { kind: "metric"; step: number; totalSteps: number | null; loss: number | null; learningRate: number | null; samplesPerSec: number | null; etaSec: number | null; epoch: number | null }
       | { kind: "finished"; outputDir: string }
       | { kind: "failed"; error: string };
     const channel = new Channel<TrainEvent>();
@@ -578,12 +602,20 @@ export default function TrainPage() {
         setStatus((s) => ({
           ...s,
           step: ev.step,
-          loss: ev.loss,
-          learningRate: ev.learningRate,
-          lossHistory: [...(s.lossHistory ?? []), { step: ev.step, loss: ev.loss }].slice(-500),
+          totalSteps: ev.totalSteps ?? s.totalSteps,
+          // loss / lr are null on the warm-up emission — keep the last good value.
+          loss: ev.loss ?? s.loss,
+          learningRate: ev.learningRate ?? s.learningRate,
+          samplesPerSec: ev.samplesPerSec ?? s.samplesPerSec,
+          // Only extend the loss curve when there's an actual loss value.
+          lossHistory: ev.loss != null
+            ? [...(s.lossHistory ?? []), { step: ev.step, loss: ev.loss }].slice(-500)
+            : s.lossHistory,
         }));
       } else if (ev.kind === "finished") {
         setStatus((s) => ({ ...s, running: false, state: "idle", message: `Finished → ${ev.outputDir}` }));
+        // Tell the history list (separate component) to reload so the new run shows.
+        try { window.dispatchEvent(new CustomEvent("owllm:train:finished")); } catch { /* non-browser */ }
       } else if (ev.kind === "failed") {
         setStatus((s) => ({ ...s, running: false, state: "idle", message: `Failed: ${ev.error}` }));
       }
@@ -895,7 +927,7 @@ export default function TrainPage() {
           <MetricCard title="Loss"      icon="📉" value={status.loss      != null ? status.loss.toFixed(4)            : "—"} accent="#FF9800" />
           <MetricCard title="Eval loss" icon="🎯" value={status.evalLoss  != null ? status.evalLoss.toFixed(4)        : "—"} accent="#4CAF50" />
           <MetricCard title="LR"        icon="⚡" value={status.learningRate != null ? status.learningRate.toExponential(2)  : "—"} accent="#9C27B0" />
-          <MetricCard title="Speed"     icon="🚀" value={status.elapsedSec != null && status.step ? `${(status.step / Math.max(status.elapsedSec, 1)).toFixed(2)} s/s` : "— s/s"} accent="#00A4EF" />
+          <MetricCard title="Speed"     icon="🚀" value={status.samplesPerSec != null ? `${status.samplesPerSec.toFixed(2)} s/s` : "— s/s"} accent="#00A4EF" />
           <MetricCard title="VRAM"      icon="🧠" value={status.vramUsedGb   != null ? `${status.vramUsedGb.toFixed(1)} GB` : "—"} accent="#00A4EF" />
         </div>
 
@@ -938,29 +970,16 @@ export default function TrainPage() {
           flex: 1,
           minHeight: 200,
         }}>
-          <div style={{ display: "flex", alignItems: "center" }}>
-            <div style={{ color: "#fff", fontSize: 13, fontWeight: 800, flex: 1 }}>📋 Training Logs</div>
-            <button style={{ ...cardBtn, padding: "5px 15px", background: "rgba(var(--accent-rgb),0.3)", border: "none" }}>
-              ▼ Show Logs
-            </button>
-          </div>
-          <div data-ui="train_log" style={{
-            flex: 1,
-            background: "linear-gradient(180deg, rgba(10,10,15,0.9), rgba(20,20,25,0.9))",
-            color: "#00ff00",
-            fontFamily: "'Consolas', 'Courier New', monospace",
-            fontSize: 11,
-            border: "1px solid rgba(var(--accent-rgb),0.3)",
-            borderRadius: 8,
-            padding: 10,
-            overflow: "auto",
-            whiteSpace: "pre-wrap",
-            minHeight: 160,
-          }}>
-            {status.lastLogTail && status.lastLogTail.length > 0
-              ? status.lastLogTail.join("\n")
-              : "Waiting for training process to start..."}
-          </div>
+          {/* Shared LogBox: scrollable, Ctrl+A scoped to the box, and the
+              "📋 Training Logs" name is clickable → full-log popup. */}
+          <LogBox
+            header="📋 Training Logs"
+            fill
+            text={status.lastLogTail?.join("\n") ?? ""}
+            title="Training Logs"
+            placeholder="Waiting for training process to start…"
+            style={{ color: "#00ff00" }}
+          />
         </div>
       </div>
 

@@ -27,10 +27,17 @@ export type LogBoxProps = {
   height?: number | string;
   /** Shown when there's no content yet. */
   placeholder?: string;
-  /** Merged onto the inline box style. */
+  /** Merged onto the inline box (or the wrapper when `header` is set). */
   style?: React.CSSProperties;
   /** Disable click-to-expand (the box is then plain-selectable text). */
   noExpand?: boolean;
+  /** Optional clickable title row above the box — clicking it (or the box)
+   *  opens the full-log popup. Use this when the user wants "the name of the
+   *  log clickable". */
+  header?: React.ReactNode;
+  /** Fill the parent's height (flex:1 + scroll) instead of a fixed height —
+   *  for logs that should grow to fill a column and scroll internally. */
+  fill?: boolean;
 };
 
 const boxBase: React.CSSProperties = {
@@ -73,7 +80,7 @@ function scopedSelectAll(ref: React.RefObject<HTMLElement | null>) {
 
 export function LogBox({
   text, lines, title = "Log", height = 160,
-  placeholder = "(no output yet)", style, noExpand,
+  placeholder = "(no output yet)", style, noExpand, header, fill,
 }: LogBoxProps) {
   const content = (lines ? lines.join("\n") : (text ?? "")).replace(/\s+$/, "");
   const [open, setOpen] = useState(false);
@@ -87,20 +94,47 @@ export function LogBox({
     setOpen(true);
   };
 
+  const box = (
+    <div
+      ref={sticky.ref}
+      onScroll={sticky.onScroll}
+      tabIndex={0}
+      onKeyDown={scopedSelectAll(sticky.ref)}
+      onClick={tryExpand}
+      title={noExpand ? undefined : "Click to expand · Ctrl+A selects this box"}
+      style={{
+        ...boxBase,
+        ...(fill ? { flex: 1, minHeight: 0 } : { height }),
+        cursor: noExpand ? "text" : "pointer",
+        ...(header == null ? style : {}),
+      }}
+    >
+      {content || <span style={{ color: "var(--fg-subtle)", fontStyle: "italic" }}>{placeholder}</span>}
+    </div>
+  );
+
+  const modal = open ? <LogModal title={title} content={content} onClose={() => setOpen(false)} /> : null;
+
+  if (header == null) {
+    return <>{box}{modal}</>;
+  }
+
+  // Header variant: a clickable title row (the "name") above the box; clicking
+  // either the name or the box opens the full-log popup.
   return (
     <>
-      <div
-        ref={sticky.ref}
-        onScroll={sticky.onScroll}
-        tabIndex={0}
-        onKeyDown={scopedSelectAll(sticky.ref)}
-        onClick={tryExpand}
-        title={noExpand ? undefined : "Click to expand · Ctrl+A selects this box"}
-        style={{ ...boxBase, height, cursor: noExpand ? "text" : "pointer", ...style }}
-      >
-        {content || <span style={{ color: "var(--fg-subtle)", fontStyle: "italic" }}>{placeholder}</span>}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, minHeight: 0, ...(fill ? { flex: 1 } : {}), ...style }}>
+        <div
+          onClick={() => { if (!noExpand) setOpen(true); }}
+          title={noExpand ? undefined : "Click to open the full log"}
+          style={{ display: "flex", alignItems: "center", gap: 8, cursor: noExpand ? "default" : "pointer" }}
+        >
+          <span style={{ fontSize: 13, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>{header}</span>
+          {!noExpand && <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>⤢ open</span>}
+        </div>
+        {box}
       </div>
-      {open && <LogModal title={title} content={content} onClose={() => setOpen(false)} />}
+      {modal}
     </>
   );
 }

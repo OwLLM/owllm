@@ -58,8 +58,12 @@ pub enum TrainEvent {
     /// regexing the log.
     Metric {
         step: u64,
-        loss: f64,
-        learning_rate: f64,
+        total_steps: Option<u64>,
+        loss: Option<f64>,
+        learning_rate: Option<f64>,
+        samples_per_sec: Option<f64>,
+        eta_sec: Option<f64>,
+        epoch: Option<f64>,
     },
     Finished { output_dir: String },
     Failed { error: String },
@@ -81,8 +85,10 @@ struct TrainState {
     /// mounted TrainPage shows the current numbers without replaying
     /// the log.
     last_step: Option<u64>,
+    last_total_steps: Option<u64>,
     last_loss: Option<f64>,
     last_lr: Option<f64>,
+    last_sps: Option<f64>,
     /// Rolling tail of stdout lines (last 30). Same use case as the
     /// metrics — handy for `train_status` after a tab switch.
     log_tail: Vec<String>,
@@ -94,8 +100,10 @@ static TRAIN_STATE: Mutex<TrainState> = Mutex::new(TrainState {
     output_dir: None,
     stop_file: None,
     last_step: None,
+    last_total_steps: None,
     last_loss: None,
     last_lr: None,
+    last_sps: None,
     log_tail: Vec::new(),
 });
 
@@ -260,8 +268,10 @@ pub async fn train_start(
         st.output_dir = Some(run_dir.clone());
         st.stop_file = Some(stop_file.clone());
         st.last_step = None;
+        st.last_total_steps = None;
         st.last_loss = None;
         st.last_lr = None;
+        st.last_sps = None;
         st.log_tail.clear();
     }
 
@@ -434,30 +444,50 @@ fn on_log_line(ch: &Channel<TrainEvent>, stream: &str, line: &str) {
         }
     }
     let trimmed = line.trim();
-    if !trimmed.starts_with('{') {
+    // finetune.py prints `DASHBOARD_METRICS: {json}` (prefixed, on purpose, so
+    // it's easy to spot and hard to mis-parse). Strip that prefix; also accept
+    // a bare `{json}` line for forward-compat. Anything else isn't a metric.
+    let json_part = trimmed
+        .strip_prefix("DASHBOARD_METRICS:")
+        .map(|s| s.trim())
+        .unwrap_or(trimmed);
+    if !json_part.starts_with('{') {
         return;
     }
-    let value: serde_json::Value = match serde_json::from_str(trimmed) {
+    let value: serde_json::Value = match serde_json::from_str(json_part) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(_) => return, // e.g. the single-quoted Python-dict repr — skip
     };
-    let step = value.get("step").and_then(|v| v.as_u64());
+    // `step` is the one field every metric line carries; loss / lr can be null
+    // on the warm-up emission, so they're optional. Emit on EVERY metric line
+    // (the dashboard needs step / total_steps / speed even before the first loss).
+    let Some(step) = value.get("step").and_then(|v| v.as_u64()) else {
+        return;
+    };
+    let total_steps = value.get("total_steps").and_then(|v| v.as_u64());
     let loss = value.get("loss").and_then(|v| v.as_f64());
     let lr = value
         .get("learning_rate")
         .or_else(|| value.get("lr"))
         .and_then(|v| v.as_f64());
-    if let (Some(step), Some(loss), Some(lr)) = (step, loss, lr) {
-        let _ = ch.send(TrainEvent::Metric {
-            step,
-            loss,
-            learning_rate: lr,
-        });
-        if let Ok(mut st) = TRAIN_STATE.lock() {
-            st.last_step = Some(step);
-            st.last_loss = Some(loss);
-            st.last_lr = Some(lr);
-        }
+    let sps = value.get("samples_per_sec").and_then(|v| v.as_f64());
+    let eta = value.get("eta_sec").and_then(|v| v.as_f64());
+    let epoch = value.get("epoch").and_then(|v| v.as_f64());
+    let _ = ch.send(TrainEvent::Metric {
+        step,
+        total_steps,
+        loss,
+        learning_rate: lr,
+        samples_per_sec: sps,
+        eta_sec: eta,
+        epoch,
+    });
+    if let Ok(mut st) = TRAIN_STATE.lock() {
+        st.last_step = Some(step);
+        if total_steps.is_some() { st.last_total_steps = total_steps; }
+        if loss.is_some() { st.last_loss = loss; }
+        if lr.is_some() { st.last_lr = lr; }
+        if sps.is_some() { st.last_sps = sps; }
     }
 }
 
@@ -631,6 +661,7 @@ pub struct TrainStatus {
     pub loss: Option<f64>,
     pub eval_loss: Option<f64>,
     pub learning_rate: Option<f64>,
+    pub samples_per_sec: Option<f64>,
     pub vram_used_gb: Option<f64>,
     pub elapsed_sec: Option<u64>,
     pub message: Option<String>,
@@ -645,10 +676,11 @@ pub async fn train_status() -> Result<TrainStatus, String> {
         state: if st.running { "running".into() } else { "idle".into() },
         run_name: st.run_name.clone(),
         step: st.last_step,
-        total_steps: None,
+        total_steps: st.last_total_steps,
         loss: st.last_loss,
         eval_loss: None,
         learning_rate: st.last_lr,
+        samples_per_sec: st.last_sps,
         vram_used_gb: None,
         elapsed_sec: None,
         message: None,

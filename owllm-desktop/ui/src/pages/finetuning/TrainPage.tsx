@@ -8,6 +8,7 @@
 
 import React from "react";
 import { invoke, Channel } from "@tauri-apps/api/core";
+import { LogBox } from "../../components/LogBox";
 import {
   MetricCard,
   RunMode,
@@ -1196,26 +1197,7 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
             }}
           >{showLogs ? "▼" : "▶"} Logs ({logLines.length})</button>
           {showLogs && (
-            <div style={{
-              maxHeight: 220,
-              overflowY: "auto",
-              background: "rgba(0,0,0,0.35)",
-              border: "1px solid rgba(255,255,255,0.08)",
-              borderRadius: 4,
-              padding: 6,
-              fontFamily: "Consolas, monospace",
-              fontSize: 10,
-              color: "#cfd4e1",
-              whiteSpace: "pre-wrap",
-              wordBreak: "break-all",
-            }}>
-              {logLines.map((l, i) => (
-                <div
-                  key={i}
-                  style={{ color: l.startsWith("⚠ ") ? "#ffb3b3" : undefined }}
-                >{l}</div>
-              ))}
-            </div>
+            <LogBox lines={logLines} title="Training log" height={220} />
           )}
         </div>
       )}

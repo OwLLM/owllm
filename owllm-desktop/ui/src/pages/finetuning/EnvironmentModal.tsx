@@ -14,6 +14,7 @@
 // snapping back to an Install button.
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { LogBox } from "../../components/LogBox";
 import {
   EnvProfile,
   EnvProfileState,
@@ -406,13 +407,7 @@ export default function EnvironmentModal({
                 )}
 
                 {openLog === p.name && inst.log.length > 0 && (
-                  <pre style={{
-                    marginTop: 10, maxHeight: 200, overflow: "auto",
-                    background: "rgba(0,0,0,0.35)", border: "1px solid var(--border)",
-                    borderRadius: 8, padding: "8px 10px", fontSize: 11,
-                    fontFamily: "Consolas, monospace", color: "var(--fg)",
-                    whiteSpace: "pre-wrap", wordBreak: "break-all",
-                  }}>{inst.log.join("\n")}</pre>
+                  <LogBox lines={inst.log} title={`${p.name} — environment log`} height={200} style={{ marginTop: 10 }} />
                 )}
               </div>
             );

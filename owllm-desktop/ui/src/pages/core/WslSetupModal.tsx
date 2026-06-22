@@ -10,7 +10,7 @@
 // to do by hand is the firmware virtualization toggle, and only when it's
 // genuinely off — with exact steps instead of a cryptic failure.
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useStickyScroll } from "../../hooks/useStickyScroll";
+import { LogBox } from "../../components/LogBox";
 import { invoke, Channel } from "@tauri-apps/api/core";
 
 type WslSetupStatus = {
@@ -48,8 +48,7 @@ export default function WslSetupModal({
   const [err, setErr] = useState<string | null>(null);
   // Sticky auto-scroll: land at the bottom when the modal (re)opens (openKey =
   // open) and follow new log lines only while the user is near the bottom
-  // (contentKey = line count) — never yank a user who scrolled up to read.
-  const logSticky = useStickyScroll(log.length, open);
+  // (log scrolling handled by the shared LogBox)
   // WSL Linux account form (created non-interactively so the user never sees
   // the Ubuntu first-run console). Pre-filled with a sensible default; saved
   // encrypted (DPAPI) on the Windows side.
@@ -382,18 +381,7 @@ export default function WslSetupModal({
           )}
 
           {log.length > 0 && (
-            <div
-              ref={logSticky.ref}
-              onScroll={logSticky.onScroll}
-              style={{
-                marginTop: 12, padding: "10px 12px", borderRadius: 8,
-                background: "rgba(0,0,0,0.35)", border: "1px solid var(--border)",
-                color: "var(--fg)", fontSize: 12.5, fontFamily: "Consolas, monospace",
-                maxHeight: 220, overflow: "auto", whiteSpace: "pre-wrap",
-              }}
-            >
-              {log.map((l, i) => <div key={i}>{l}</div>)}
-            </div>
+            <LogBox lines={log} title="WSL setup log" height={220} style={{ marginTop: 12 }} />
           )}
         </div>
 

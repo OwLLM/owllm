@@ -1,11 +1,13 @@
 # Windows release build for OwLLM Desktop on GitHub Actions.
 #
-# WHY this exists: the local i9-13900KF has degraded under the Raptor
-# Lake Vmin-shift issue (WHEA-Logger ID 19 — TLB error on APIC 32),
-# causing rustc to crash with STATUS_HEAP_CORRUPTION on any non-trivial
-# build. This workflow runs the same build on a clean Microsoft-hosted
-# Windows runner with healthy hardware + the MSVC toolchain (faster +
-# more stable than mingw on Windows).
+# WHY this exists: a clean-room fallback builder. Runs the build on a
+# Microsoft-hosted Windows runner with the MSVC toolchain (faster + more
+# stable than mingw on Windows), independent of local hardware/toolchain
+# state. Originally created to dodge a degraded local i9-13900KF (Raptor
+# Lake Vmin-shift, WHEA-Logger ID 19 TLB error on APIC 32) that crashed
+# rustc with STATUS_HEAP_CORRUPTION; that CPU has since been replaced with
+# a healthy Ryzen 9 5950X, so local build-release.bat is the default again
+# and this workflow is now just the fallback.
 #
 # TRIGGER: manual only (workflow_dispatch). You click "Run workflow"
 # in the Actions tab on github.com when you want a fresh exe. Avoids
@@ -125,7 +127,7 @@ jobs:
   # SmartScreen pause) or something else entirely. The user reported pre-MSVC
   # GNU builds were sub-1s to usable; this job rebuilds the same source under
   # GNU on a healthy CI runner so the toolchains can be compared apples-to-
-  # apples, without the local i9-13900KF TLB-error noise.
+  # apples on a clean CI runner.
   # ---------------------------------------------------------------------------
   windows-release-gnu:
     name: Build Windows GNU/mingw exe (A/B comparison)

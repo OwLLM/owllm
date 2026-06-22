@@ -9,16 +9,6 @@ rem Default -O3 trips an internal compiler error in the integrated
 rem register allocator; -O1 keeps optimisation but skips the failing
 rem pass. Applied per-target so host build scripts use default flags.
 set "CFLAGS_x86_64_pc_windows_gnu=-O1"
-rem CPU is an i9-13900KF that has degraded under the Raptor Lake
-rem Vmin-shift issue. WHEA-Logger ID 19 logged a Translation Lookaside
-rem Buffer error on Processor APIC ID 32 (E-core range). To finish
-rem builds while waiting for Intel RMA, pin every cargo/rustc child
-rem to P-cores only via the cmd-affinity wrapper below. Affinity mask
-rem 0xFFFF covers logical processors 0-15 = the 8 P-cores with HT;
-rem the E-cores at 16-31 (including the failing one) are excluded.
-rem CARGO_BUILD_JOBS=8 keeps per-rustc memory pressure moderate while
-rem still using half the P-core threads for throughput.
-set "CARGO_BUILD_JOBS=8"
 
 where cargo >nul 2>nul
 if errorlevel 1 (
@@ -39,7 +29,7 @@ if errorlevel 1 exit /b 1
 
 rem Ensure module ZIPs exist for the bundle. bootstrap.bat is idempotent
 rem and re-uses cached downloads. Skip if dist\modules\manifest.json
-rem is already present (build-release was run recently) â€” bypass with
+rem is already present (build-release was run recently) -- bypass with
 rem `set OWLLM_REBUILD_MODULES=1` to force a refresh.
 if not defined OWLLM_REBUILD_MODULES (
   if exist "%cd%\dist\modules\manifest.json" goto :modules_ready
@@ -47,7 +37,7 @@ if not defined OWLLM_REBUILD_MODULES (
 echo [owllm-desktop] Bootstrapping module ZIPs ^(first run or rebuild^)...
 call "%cd%\bootstrap.bat"
 if errorlevel 1 (
-  echo [owllm-desktop] bootstrap.bat failed â€” see error above. Aborting.
+  echo [owllm-desktop] bootstrap.bat failed -- see error above. Aborting.
   exit /b 1
 )
 :modules_ready
@@ -56,15 +46,8 @@ echo [owllm-desktop] Building web UI...
 call npm run build
 if errorlevel 1 exit /b 1
 
-echo [owllm-desktop] Building Tauri release with GNU toolchain on P-cores only ^(E-cores excluded to dodge CPU TLB errors^)...
-rem PowerShell sets affinity on the cmd that runs npm run tauri build
-rem â€” same effect as the previous `start /affinity FFFF /b /wait`
-rem invocation but WITHOUT swallowing the child's stdout/stderr (the
-rem old form ate every "Compiling owllm-desktop" + "Finished release"
-rem line, so silent cargo skips were invisible). Affinity FFFF =
-rem logical processors 0-15 (P-cores w/ HT); grandchildren inherit
-rem the mask via Windows CreateProcess unless they explicitly reset it.
-powershell -NoProfile -Command "$p = Start-Process -FilePath cmd -ArgumentList '/c','npm run tauri -- build --target x86_64-pc-windows-gnu' -PassThru -NoNewWindow; $p.ProcessorAffinity = [System.IntPtr]0xFFFF; $p.WaitForExit(); exit $p.ExitCode"
+echo [owllm-desktop] Building Tauri release with GNU toolchain...
+call npm run tauri -- build --target x86_64-pc-windows-gnu
 if errorlevel 1 exit /b 1
 
 echo.
@@ -74,7 +57,7 @@ set "DIST=%cd%\dist"
 if not exist "%DIST%" mkdir "%DIST%"
 copy /Y "%RELEASE%\owllm-desktop.exe" "%cd%\OwLLM Desktop.exe" >nul
 copy /Y "%RELEASE%\owllm-desktop.exe" "%DIST%\OwLLM Desktop.exe" >nul
-rem WebView2Loader.dll MUST sit next to the exe â€” without it Windows
+rem WebView2Loader.dll MUST sit next to the exe -- without it Windows
 rem aborts startup with "WebView2Loader.dll was not found". The release
 rem build emits it into %RELEASE%; copy alongside both portable exes.
 if exist "%RELEASE%\WebView2Loader.dll" (

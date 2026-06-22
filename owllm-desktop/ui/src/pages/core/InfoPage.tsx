@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { Card, Row } from "./infoCards";
 import SandboxDiskCard from "./SandboxDiskCard";
+import { CacheTab } from "../finetuning/ModelsPage";
 import {
   fetchReadiness,
   getCachedReadiness,
@@ -79,6 +80,7 @@ export default function InfoPage() {
   const [llamaPath, setLlamaPath] = useState<string | null>(null);
   const [server, setServer] = useState<ServerStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cacheMsg, setCacheMsg] = useState<string | null>(null);
 
   // Environment readiness shares the session cache with Home (readinessStore),
   // so opening Info doesn't re-shell wsl.exe/nvidia-smi unless you press Refresh.
@@ -173,6 +175,21 @@ export default function InfoPage() {
         gap: 14,
         alignItems: "start",
       }}>
+        {/* First row: Cache (moved here off the Fine-Tuning › Models page) +
+            Sandbox disk — the two disk-reclaim panels live together. */}
+        <Card title="💽 Cache">
+          {cacheMsg && (
+            <div style={{
+              fontSize: 11, color: "var(--fg)", marginBottom: 8, padding: "6px 8px",
+              borderRadius: 6, background: "rgba(var(--accent-rgb),0.10)",
+              border: "1px solid rgba(var(--accent-rgb),0.3)", wordBreak: "break-word",
+            }}>{cacheMsg}</div>
+          )}
+          <CacheTab setBanner={setCacheMsg} />
+        </Card>
+
+        <SandboxDiskCard />
+
         <Card title="📦 Application">
           <Row label="Product" value="OwLLM Desktop" />
           <Row label="Version" value={version} />
@@ -256,9 +273,6 @@ export default function InfoPage() {
             value={<code style={{ color: "var(--accent)", fontSize: 11, wordBreak: "break-all" }}>{llamaRuntime}</code>}
           />
         </Card>
-
-        {/* Sandbox disk usage + reclaim controls (moved here off the Home page). */}
-        <SandboxDiskCard />
 
         <Card title="📜 About OwLLM">
           <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6 }}>

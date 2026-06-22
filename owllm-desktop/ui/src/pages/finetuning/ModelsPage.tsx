@@ -850,7 +850,7 @@ export default function ModelsPage() {
           { key: "browse",     dataUi: "browseTabBtn",     label: "🚀 Browse Models" },
           { key: "downloaded", dataUi: "downloadedTabBtn", label: "💾 Downloaded"    },
           { key: "tuned",      dataUi: "tunedTabBtn",      label: "🎯 Tuned Models"  },
-          { key: "cache",      dataUi: "cacheTabBtn",      label: "💽 Cache"          },
+          // 💽 Cache moved to the Info page (next to Sandbox disk).
         ] as const).map((t) => {
           const active = tab === t.key;
           return (
@@ -1527,9 +1527,7 @@ export default function ModelsPage() {
       </div>
       )}
 
-      {tab === "cache" && (
-        <CacheTab setBanner={setHfError} />
-      )}
+      {/* 💽 Cache moved to the Info page (CacheTab is exported + rendered there). */}
 
       {tab === "browse" && (
       <div
@@ -1680,7 +1678,7 @@ function isCleanupBucket(bucket: StorageBucket): bucket is CleanupBucket {
   return bucket !== "models" && bucket !== "fineTuned";
 }
 
-function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
+export function CacheTab({ setBanner }: { setBanner: (msg: string | null) => void }) {
   const [summary, setSummary] = React.useState<HfCacheSummary | null>(null);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState<string | null>(null);

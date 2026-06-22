@@ -509,6 +509,37 @@ export default function TrainPage() {
       setEnvModalOpen(true);
       return;
     }
+    // Validate the dataset BEFORE spawning the trainer. Without this gate a bad
+    // file (no response/output field, empty, unparseable) only failed deep
+    // inside finetune.py after env warm-up + dataset load — the "crashed after
+    // start without a clear reason" reports. Fail fast here with the reason.
+    if (!datasetPath.trim()) {
+      setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
+        message: "Pick a training dataset first (Dataset card above)." });
+      return;
+    }
+    try {
+      const ds = await invoke<{ count: number; format: string }>(
+        "dataset_check", { path: datasetPath },
+      );
+      setDatasetStatus(`${ds.count} examples · ${ds.format}`);
+      if (ds.count === 0) {
+        setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
+          message: "Dataset has 0 examples — nothing to train on." });
+        return;
+      }
+      if (ds.format.includes("⚠")) {
+        // dataset_check embeds a "⚠ no response/output field…" note when the
+        // format won't train. Strip the leading "json · " / "jsonl · " prefix.
+        setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
+          message: `Dataset can't train as-is — ${ds.format.replace(/^[a-z]+ · /, "")}` });
+        return;
+      }
+    } catch (e) {
+      setStatus({ ...EMPTY_STATUS, state: "idle", running: false,
+        message: `Dataset check failed: ${e}` });
+      return;
+    }
     setStatus({ ...EMPTY_STATUS, state: "running", running: true, message: "Starting…" });
     // Open a Tauri Channel — finetuning::train_start sends TrainEvents
     // (Started / Log / Metric / Finished / Failed) through it. Without

@@ -343,6 +343,21 @@ type GoalMsg = {
 // streams in arrival order regardless of which Map they're stored in.
 let _entrySeq = 0;
 function nextSeq(): number { return ++_entrySeq; }
+// Advance the sequence floor past anything restored from disk. CRITICAL:
+// _entrySeq restarts at 0 on every app launch, but entries rehydrated from the
+// DB (chat_json / agent_logs_json) keep LAST session's seq values (1..N). Without
+// this, the first new entries after a restart get seq 1,2,3… and collide with the
+// restored ones — which (a) scrambled the Full Chat's seq-sort so a focused
+// agent showed its messages in random order, and (b) duplicated the React keys
+// (`r-${seq}` / `u-${seq}`) so colliding entries silently dropped from the render
+// ("not everything appears"). Call on every rehydrate so new entries always sort
+// AFTER — and key uniquely against — everything restored.
+function ensureSeqAbove(n: number): void { if (n > _entrySeq) _entrySeq = n; }
+function maxSeqOf(entries: Iterable<GoalMsg>): number {
+  let mx = 0;
+  for (const e of entries) if (typeof e.seq === "number" && e.seq > mx) mx = e.seq;
+  return mx;
+}
 
 // ---------- Icon + label helpers ----------
 // A handful of owl icons live in /Page_icons/ at the top level rather
@@ -7733,6 +7748,13 @@ export default function AgentsPage() {
             }
           }
         } catch { /* fresh logs */ }
+        // Bump the seq floor past every restored entry BEFORE the session goes
+        // live, so the next streamed reply/thought can't collide with last
+        // session's ids (see ensureSeqAbove — this is the "random messages" /
+        // vanishing-entries fix for a focused agent after an app restart).
+        let restoredMax = maxSeqOf(parsedChat);
+        for (const arr of m.values()) restoredMax = Math.max(restoredMax, maxSeqOf(arr));
+        ensureSeqAbove(restoredMax);
         chatRuntime.setPayload(psid, () => ({ supChat: parsedChat, agentLogs: m }));
       }
       // Thought traffic is ephemeral per-run (dispatches + tool calls

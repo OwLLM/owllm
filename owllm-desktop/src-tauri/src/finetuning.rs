@@ -5,7 +5,7 @@
 //   1. UI calls `train_start` with a TrainConfig + env profile name.
 //   2. Rust looks up the env profile, confirms it's Ready (matching
 //      manifest hash), resolves its venv python.exe.
-//   3. Spawn `<venv-python> finetune.py --base ... --dataset ...` with
+//   3. Spawn `<venv-python> finetune.py --model-name ... --data-path ...` with
 //      CUDA_VISIBLE_DEVICES set per the GPU selection. stdout/stderr
 //      are line-buffered and re-emitted as TrainEvent::Log + JSON
 //      lines matching `{"step": N, "loss": X, "lr": Y}` are also
@@ -175,16 +175,21 @@ pub async fn train_start(
 
     // Build the argv list — keep this in lockstep with finetune.py's
     // argparse. New flags must land here AND in the Python.
+    // Flag names MUST match finetune.py's argparse exactly. They had drifted
+    // (--base/--dataset/--run-name/--max-seq-len) and argparse rejected the run
+    // with "unrecognized arguments". The script defines --model-name/--data-path/
+    // --adapter-name/--max-seq-length; run_name is piped to --adapter-name so the
+    // saved LoRA adapter is named after the run instead of a generic timestamp.
     let argv: Vec<String> = vec![
         script.to_string_lossy().into_owned(),
-        "--base".into(), config.base_model.clone(),
-        "--dataset".into(), config.dataset.clone(),
+        "--model-name".into(), config.base_model.clone(),
+        "--data-path".into(), config.dataset.clone(),
         "--output-dir".into(), run_dir.to_string_lossy().into_owned(),
-        "--run-name".into(), config.run_name.clone(),
+        "--adapter-name".into(), config.run_name.clone(),
         "--epochs".into(), config.epochs.to_string(),
         "--learning-rate".into(), format!("{}", config.learning_rate),
         "--lora-r".into(), config.lora_r.to_string(),
-        "--max-seq-len".into(), config.max_seq_len.to_string(),
+        "--max-seq-length".into(), config.max_seq_len.to_string(),
         "--stop-file".into(), stop_file.to_string_lossy().into_owned(),
     ];
 

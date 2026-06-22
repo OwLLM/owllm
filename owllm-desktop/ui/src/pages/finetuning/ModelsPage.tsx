@@ -14,7 +14,7 @@
 //   data-ui="tunedTabBtn"           → Qt tuned_tab_btn
 
 import React from "react";
-import { useStickyScroll } from "../../hooks/useStickyScroll";
+import { LogBox } from "../../components/LogBox";
 import ModelCard from "./widgets/ModelCard";
 import DownloadedModelCard from "./widgets/DownloadedModelCard";
 import { recordDownloadedModels, ghostedModels } from "./modelLibrary";
@@ -594,10 +594,7 @@ export default function ModelsPage() {
   // is keyed by sourceDir+outtype; cleared on Finished/Failed and
   // replaced by the real card via refreshTuned().
   const [phantomExport, setPhantomExport] = React.useState<{ sourceDir: string; outtype: string; baseName: string } | null>(null);
-  // Sticky auto-scroll for the export-log box: land at the bottom when the box
-  // is opened (openKey = exportLogsOpen) and follow new lines / status changes
-  // only while the user is near the bottom — never yank a user who scrolled up.
-  const logSticky = useStickyScroll(`${exportLogs.length}:${exportStatus ?? ""}`, exportLogsOpen);
+  // (export-log scrolling handled by the shared LogBox)
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [selectedPath, setSelectedPath] = React.useState<string | null>(null);
   // Download state lives in a MODULE-LEVEL store (downloadStore.ts) so the
@@ -1489,37 +1486,7 @@ export default function ModelsPage() {
               }}
             >{exportLogsOpen ? "▼" : "▶"} GGUF export logs ({exportLogs.length})</button>
             {exportLogsOpen && (
-              <div
-                ref={logSticky.ref}
-                onScroll={logSticky.onScroll}
-                style={{
-                  maxHeight: 320,
-                  overflowY: "auto",
-                  background: "rgba(0,0,0,0.55)",
-                  border: "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 4,
-                  padding: 6,
-                  fontFamily: "Consolas, monospace",
-                  fontSize: 10,
-                  color: "#cfd4e1",
-                  whiteSpace: "pre-wrap",
-                  wordBreak: "break-all",
-                }}
-              >
-                {exportLogs.map((l, i) => {
-                  // Lines arrive tagged "[ERR] …" / "[WRN] …" / "[INF] …".
-                  // Map tag → colour so real errors stand out and the
-                  // INFO firehose stays neutral.
-                  let color: string | undefined;
-                  let text = l;
-                  if (l.startsWith("[ERR] ")) { color = "#ff9b9b"; text = l.slice(6); }
-                  else if (l.startsWith("[WRN] ")) { color = "#f5d76e"; text = l.slice(6); }
-                  else if (l.startsWith("[INF] ")) { color = "#a0a8b6"; text = l.slice(6); }
-                  return (
-                    <div key={i} style={{ color }}>{text}</div>
-                  );
-                })}
-              </div>
+              <LogBox lines={exportLogs} title="GGUF export log" height={320} />
             )}
           </div>
         )}

@@ -20,6 +20,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { bumpActivity } from "../../support/activityStats";
+import { LogBox } from "../../components/LogBox";
 import { listen } from "@tauri-apps/api/event";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getInferenceEndpoint, setInferenceEndpoint, setLocalServerKey, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
@@ -968,24 +969,15 @@ function LogColumn({ logs, onClear }: { logs: string[]; onClear: () => void }) {
         >📋</button>
       </div>
 
-      <pre style={{
-        flex: 1,
-        // Qt log_text minHeight=300, maxHeight=400 (server_page.py:973-974)
-        minHeight: 300,
-        maxHeight: 460,
-        margin: 0,
-        padding: 12,
-        background: "var(--bg-elevated)",
-        color: "var(--fg)",
-        borderRadius: 6,
-        fontSize: 11,
-        lineHeight: 1.45,
-        fontFamily: "Consolas, monospace",
-        overflow: "auto",
-        whiteSpace: "pre-wrap",
-      }}>
-        {visible.length ? visible.join("\n") : "No engine output yet."}
-      </pre>
+      {/* Shared LogBox — scrollable, Ctrl+A scoped to the box, click to open
+          the full log in a popup. The filter + copy controls above stay. */}
+      <LogBox
+        text={visible.join("\n")}
+        title="Server log"
+        placeholder="No engine output yet."
+        fill
+        style={{ minHeight: 300, maxHeight: 460 }}
+      />
 
       {/* 🗑️ Clear Log button — Qt clear_btn (server_page.py:983-1006).
           Qt fixes minWidth=170, minHeight=40 and pushes it left with a

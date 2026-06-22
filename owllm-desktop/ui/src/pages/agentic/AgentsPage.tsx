@@ -3136,6 +3136,20 @@ function GraphCanvas({
        { source: CRITIC_AGENT_NAME, target: orchName, synthetic: true } as any]
     : baseLive;
 
+  // Click a card to VERIFY its real connections: its incident edges + the
+  // nodes on the other end light up, everything else dims. This is how you
+  // confirm the graph is drawn from the actual team config (graph_json /
+  // template) and not invented — selecting design_lead lights up exactly its
+  // 5 members + its 1 parent, nothing more.
+  const selNeighbors = new Set<string>();
+  if (selectedNode) {
+    selNeighbors.add(selectedNode);
+    for (const e of liveEdges) {
+      if (e.source === selectedNode) selNeighbors.add(e.target);
+      if (e.target === selectedNode) selNeighbors.add(e.source);
+    }
+  }
+
   // Port geometry:
   //   - Orchestrator + synthetic Critical Thinker: output on BOTTOM
   //     (matches every other card so dispatch flows visibly down) and
@@ -3245,8 +3259,14 @@ function GraphCanvas({
             // Clean bottom→top Bezier (with a small fan for parallel edges).
             const d = edgePath(e.source, e.target, s, t, routeOffsets[i]);
             const live = activeAgents.has(e.target) && activeAgents.has(e.source);
+            // Node-selection highlight: when a card is selected, only the edges
+            // touching it stay bright — the rest fade so its true wiring is
+            // unmistakable against a busy graph.
+            const incident = selectedNode != null && (e.source === selectedNode || e.target === selectedNode);
+            const dimEdge = selectedNode != null && !incident;
+            const baseStroke = live ? "#7ff0c5" : sel ? "var(--accent)" : synthetic ? "rgba(200,180,255,0.55)" : "rgba(var(--accent-rgb),0.55)";
             return (
-              <g key={"ge"+i}>
+              <g key={"ge"+i} opacity={dimEdge ? 0.08 : 1} style={{ transition: "opacity .15s" }}>
                 {!synthetic && (
                   /* Fat invisible hit-target so click is forgiving. */
                   <path
@@ -3260,12 +3280,12 @@ function GraphCanvas({
                 )}
                 <path
                   d={d}
-                  stroke={live ? "#7ff0c5" : sel ? "var(--accent)" : synthetic ? "rgba(200,180,255,0.55)" : "rgba(var(--accent-rgb),0.55)"}
-                  strokeWidth={live ? 2.8 : sel ? 2.6 : synthetic ? 1.4 : 1.6}
+                  stroke={incident ? (synthetic ? "rgba(200,180,255,0.9)" : "var(--accent)") : baseStroke}
+                  strokeWidth={incident ? 2.8 : live ? 2.8 : sel ? 2.6 : synthetic ? 1.4 : 1.6}
                   strokeDasharray={live ? "10 6" : synthetic ? "5 4" : undefined}
                   style={live ? { animation: "owllm-edge-flow 0.7s linear infinite" } : undefined}
                   fill="none"
-                  markerEnd={sel ? "url(#graphArrowSel)" : "url(#graphArrow)"}
+                  markerEnd={sel || incident ? "url(#graphArrowSel)" : "url(#graphArrow)"}
                 />
               </g>
             );
@@ -3342,6 +3362,8 @@ function GraphCanvas({
           const isOrch = n.name === orchName;
           const accent = isOrch ? "#ffd76a" : LAYER_COLORS[(n.depth + 1) % LAYER_COLORS.length];
           const sel = selectedNode === n.name;
+          // Dim cards not connected to the selected one (verify-connections mode).
+          const dimNode = selectedNode != null && !selNeighbors.has(n.name);
           const isActive = activeAgents.has(n.name);
           const isDragTarget = drag?.over === n.name;
           const group = groupForAgent(n.spec);
@@ -3387,6 +3409,7 @@ function GraphCanvas({
               style={{
                 position: "absolute", left: n.x, top: n.y,
                 width: NODE_W, height: NODE_H, borderRadius: 14,
+                opacity: dimNode ? 0.3 : 1, transition: "opacity .15s",
                 background: baseBg,
                 border: `1.8px solid ${borderColor}`,
                 boxShadow: isActive

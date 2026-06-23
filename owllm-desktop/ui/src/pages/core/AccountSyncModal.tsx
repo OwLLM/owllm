@@ -240,16 +240,21 @@ export default function AccountSyncModal() {
         </div>
 
         <div style={{ padding: "18px 22px", overflow: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
-          {/* Why */}
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            {[
-              ["💬", <>Your <b>chats, settings, model library and agent teams</b> follow you to every computer you sign in on.</>],
-              ["🔒", <>Everything lives in <b>your own private GitHub repo</b> (<code>owllm-vault</code>). You own it — we host nothing and can’t see it.</>],
-              ["🔑", <>Nothing to lose: forget your password? Just <b>reset it on GitHub</b>. Your provider API keys stay on each device and never sync.</>],
-            ].map(([icon, text], i) => (
-              <div key={i} style={{ display: "flex", gap: 11, alignItems: "flex-start" }}>
-                <span style={{ fontSize: 18, lineHeight: 1.3 }}>{icon as string}</span>
-                <span style={{ fontSize: 13.5, lineHeight: 1.5, color: "var(--fg)" }}>{text}</span>
+          {/* Why — synthetic, scannable benefit chips. */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {([
+              ["🔄", "Everywhere you sign in", "Chats, settings & agent teams sync to every device."],
+              ["🔒", "Totally private", "Lives in your own GitHub repo — we host nothing, see nothing."],
+              ["🤖", "Agents that ship code", "They clone your private repos and push commits, safely sandboxed."],
+              ["🐞", "One-click bug reports", "Report it from inside the app — and get it fixed."],
+              ["🔑", "Never locked out", "Forgot your password? Reset it on GitHub. API keys never sync."],
+            ] as [string, string, string][]).map(([icon, title, sub], i) => (
+              <div key={i} style={{ display: "flex", gap: 12, alignItems: "center", padding: "9px 11px", borderRadius: 10, background: "var(--bg-card)", border: "1px solid var(--border)" }}>
+                <span style={{ fontSize: 19, width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 9, background: "rgba(var(--accent-rgb),0.12)", flexShrink: 0 }}>{icon}</span>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 800, color: "var(--fg-strong)" }}>{title}</div>
+                  <div style={{ fontSize: 12, color: "var(--fg-muted)", lineHeight: 1.4 }}>{sub}</div>
+                </div>
               </div>
             ))}
           </div>

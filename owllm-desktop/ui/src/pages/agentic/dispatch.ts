@@ -1790,6 +1790,25 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // model is resident.
   const LOAD_RETRY_MS = 120_000;
   const LOAD_RETRY_DELAY = 1500;
+  // Live generation-speed meter: count visible reply tokens (~1 per SSE delta in
+  // llama-server token streaming) over wall-clock and broadcast tok/s so a global
+  // badge can show "⚡ N tok/s". Throttled to ~5/s; the badge auto-hides when the
+  // stream stops emitting. Local generation only (where tok/s reflects the user's
+  // own hardware and is the meaningful number).
+  let _genTok = 0, _genT0 = 0, _genLast = 0;
+  const countingDelta: StreamHandler = (d) => {
+    if (_genT0 === 0) _genT0 = Date.now();
+    _genTok += 1;
+    const now = Date.now();
+    if (now - _genLast > 200) {
+      _genLast = now;
+      const secs = (now - _genT0) / 1000;
+      if (secs > 0.1) {
+        try { window.dispatchEvent(new CustomEvent("owllm:gen-stats", { detail: { toksPerSec: _genTok / secs, tokens: _genTok } })); } catch { /* never break the turn */ }
+      }
+    }
+    p.onDelta(d);
+  };
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
     let resp: Response | undefined;
@@ -1861,7 +1880,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     // reasoning/thinking to onThought, and harvests native
     // delta.tool_calls into nativeCalls.
     const nativeCalls: RawNativeCall[] = [];
-    lastReply = await consumeOpenAISse(resp, p.onDelta, p.onThought, nativeCalls);
+    lastReply = await consumeOpenAISse(resp, countingDelta, p.onThought, nativeCalls);
     // No tools available at all → single-shot, done.
     if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
     // Canonicalise native calls to registry tool + arg names.
@@ -1921,7 +1940,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         signal: p.signal,
       });
       if (fresp.ok) {
-        const finalText = await consumeOpenAISse(fresp, p.onDelta, p.onThought, []);
+        const finalText = await consumeOpenAISse(fresp, countingDelta, p.onThought, []);
         if (finalText.trim()) lastReply = finalText;
       }
     } catch (e) {

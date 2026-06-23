@@ -39,6 +39,7 @@ import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRec
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
 import AccountSyncModal from "./pages/core/AccountSyncModal";
 import WatcherDrawer from "./support/WatcherDrawer";
+import GenSpeedBadge from "./components/GenSpeedBadge";
 import { bumpActivity } from "./support/activityStats";
 
 // tauri.conf.json now sets decorations:false again — the OS title
@@ -1192,6 +1193,9 @@ export default function AppShell() {
           `owllm:open-sync` event. Invites GitHub sign-in so chats/settings
           follow the user across devices (their own private owllm-vault). */}
       <AccountSyncModal />
+      {/* Global live "⚡ N tok/s" badge — shows local generation speed on every
+          page while a model streams, then fades. */}
+      <GenSpeedBadge />
     </>
   );
 }

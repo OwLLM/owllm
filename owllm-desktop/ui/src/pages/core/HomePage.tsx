@@ -597,6 +597,20 @@ export default function HomePage() {
           }}>{account.connected ? "Manage →" : "Sign in →"}</span>
         </button>
 
+        {/* "Why?" teaser — opens the same popup, for users who want to read the
+            benefits before committing to sign-in. Hidden once connected. */}
+        {!account.connected && (
+          <button
+            onClick={openSyncOnboarding}
+            title="See everything you unlock with a free GitHub account"
+            style={{
+              alignSelf: "flex-start", marginLeft: 6, marginTop: -2,
+              background: "none", border: "none", cursor: "pointer",
+              color: "var(--accent)", fontSize: 12, fontWeight: 700, padding: "2px 2px",
+            }}
+          >✨ Why connect GitHub? — see what you unlock</button>
+        )}
+
         {/* Square, image-only launcher tiles. Three equal columns that
             stretch to the full window width (1fr each) so the row never
             leaves dead space on the sides; each tile stays square via

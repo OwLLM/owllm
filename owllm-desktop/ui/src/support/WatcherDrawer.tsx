@@ -49,6 +49,7 @@ type ServerStatusT = { running: boolean; model_id: string | null; port: number |
 type ModelChoice =
   | { kind: "local"; modelId: string; port: number; label: string }
   | { kind: "cloud"; modelId: string; provider: string; label: string; preconsented?: boolean }
+  | { kind: "cloud-unavailable"; provider: string; label: string } // picked, but its account isn't connected
   | { kind: "local-cold"; label: string }   // local models exist, server not running
   | { kind: "none" };
 
@@ -289,14 +290,22 @@ export default function WatcherDrawer({
     // 1) Explicit user choice from the picker.
     if (pickedModel) {
       const prov = providerFor(pickedModel, models);
-      const label = entries.find((e) => e.id === pickedModel)?.label ?? pickedModel;
+      const entry = entries.find((e) => e.id === pickedModel);
+      const label = entry?.label ?? pickedModel;
       if (prov === "local" || prov === "tuned") {
         if (server?.running && server.model_id) {
           return { kind: "local", modelId: server.model_id, port: server.port ?? 0, label: `${server.model_id} (local)` };
         }
         return { kind: "local-cold", label };
       }
-      // cloud / subscription / API / auto — explicitly chosen ⇒ pre-consented.
+      // Cloud / subscription / API: if its account ISN'T connected, say so instead
+      // of attempting a chat that just 401s. The default policy below already
+      // filters to available accounts; the explicit pick must too (this is the
+      // "chat with a not-registered account bugs out" fix).
+      if (entry && !entry.available) {
+        return { kind: "cloud-unavailable", provider: prov, label };
+      }
+      // explicitly chosen + connected ⇒ pre-consented.
       return { kind: "cloud", modelId: pickedModel, provider: prov, label, preconsented: true };
     }
     // 2) Default policy.
@@ -423,6 +432,13 @@ export default function WatcherDrawer({
       say(
         "You have local models, but the model server isn't running — start one on the Server page and ask me again. " +
         "(I only use what's already running; I won't load gigabytes into your GPU unannounced.)",
+      );
+      return;
+    }
+    if (choice.kind === "cloud-unavailable") {
+      say(
+        `${choice.label} isn't connected on this device, so I can't chat with it. Open the Accounts page (🔐 below) and ` +
+        `connect ${choice.provider} (sign in, or paste an API key), then ask me again — or pick a local / already-connected model below.`,
       );
       return;
     }

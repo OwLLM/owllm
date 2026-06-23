@@ -246,6 +246,9 @@ exec bwrap \
   --bind-try "$HOME/.claude.json" "$SB/.claude.json" \
   --bind-try "$HOME/.gemini" "$SB/.gemini" \
   --bind-try "$HOME/.kimi" "$SB/.kimi" \
+  --bind-try "$HOME/.gitconfig" "$SB/.gitconfig" \
+  --bind-try "$HOME/.git-credentials" "$SB/.git-credentials" \
+  --bind-try "$HOME/.config/gh" "$SB/.config/gh" \
   --bind-try "$HOME/.owllm/agent_env.sh" "$SB/.owllm/agent_env.sh" \
   --bind "$CWD" "$CWD" --chdir "$CWD" \
   --unshare-user-try --unshare-ipc --unshare-pid --unshare-uts --unshare-cgroup-try \

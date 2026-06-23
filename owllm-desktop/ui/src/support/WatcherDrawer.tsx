@@ -291,6 +291,7 @@ export default function WatcherDrawer({
   const [ghLogin, setGhLogin] = React.useState<string | null>(null);
   const [ghDevice, setGhDevice] = React.useState<{ userCode: string; verificationUri: string } | null>(null);
   const [ghErr, setGhErr] = React.useState<string | null>(null);
+  const [ghCopied, setGhCopied] = React.useState(false);
   const ghPollAlive = React.useRef(false);
   React.useEffect(() => {
     if (!open) { ghPollAlive.current = false; return; }
@@ -819,9 +820,10 @@ export default function WatcherDrawer({
                     </div>
                     {ghDevice ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11.5, color: "var(--fg-muted)" }}>
-                        <div>1. We opened <b>github.com/login/device</b> and copied your code:</div>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <code style={{ fontSize: 15, fontWeight: 800, letterSpacing: 2, color: "var(--fg-strong)", background: "var(--bg-input)", padding: "3px 10px", borderRadius: 6 }}>{ghDevice.userCode}</code>
+                        <div>1. We opened <b>github.com/login/device</b> — copy this code and paste it there:</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                          <code style={{ fontSize: 15, fontWeight: 800, letterSpacing: 2, color: "var(--fg-strong)", background: "var(--bg-input)", padding: "3px 10px", borderRadius: 6, userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}>{ghDevice.userCode}</code>
+                          <button style={actionBtn} title="Copy the code" onClick={() => { setGhCopied(false); navigator.clipboard?.writeText(ghDevice.userCode).then(() => setGhCopied(true)).catch(() => {}); }}>{ghCopied ? "✓ Copied" : "📋 Copy"}</button>
                           <button style={actionBtn} onClick={() => openExternal(ghDevice.verificationUri)}>Open page</button>
                         </div>
                         <div>2. Sign in (or <b>create a free account</b>) and paste the code. Waiting for you…</div>

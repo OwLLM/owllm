@@ -1182,7 +1182,14 @@ const _warmCli = new Map<string, WarmEntry>();
 // token as a side effect, so every long run keeps a fresh token well before the
 // ~1h expiry. The reactive 401 retry (clearCliWarm + retry) is the backstop.
 const WARM_TTL_MS = 25 * 60 * 1000; // 25 min — comfortably under the ~1h token TTL
-export async function ensureCliWarm(backend: "claude_cli" | "codex_cli"): Promise<void> {
+export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli";
+export async function ensureCliWarm(backend: CliBackend): Promise<void> {
+  // Only Claude/Codex expose the `accounts_test_probe_live` warm round-trip that
+  // refreshes an OAuth token as a side effect. Gemini/Kimi have no such probe, so
+  // warming them would just fire a guaranteed-failing invoke on every retry —
+  // skip it. Their retry path still gets the backoff+retry (covers the common
+  // transient-network case); a hard auth failure surfaces after the retries.
+  if (backend !== "claude_cli" && backend !== "codex_cli") return;
   const now = Date.now();
   let entry = _warmCli.get(backend);
   // Re-warm when there's no entry OR the cached warm has aged past the TTL.
@@ -1204,7 +1211,7 @@ export async function ensureCliWarm(backend: "claude_cli" | "codex_cli"): Promis
 // Drop the cached warm-up so the NEXT ensureCliWarm() actually re-runs the
 // token-refresh round-trip. Called on a 401 to force a fresh refresh before
 // retrying (the reactive complement to the proactive WARM_TTL_MS re-warm above).
-export function clearCliWarm(backend: "claude_cli" | "codex_cli"): void {
+export function clearCliWarm(backend: CliBackend): void {
   _warmCli.delete(backend);
 }
 

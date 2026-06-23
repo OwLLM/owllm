@@ -6183,7 +6183,7 @@ let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;
 /// AbortSignal during the wait. The token-expiry failure mode is identical for
 /// both CLIs, so this is deliberately backend-agnostic.
 async function withCliAuthRetry<T>(
-  backend: "claude_cli" | "codex_cli",
+  backend: "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli",
   signal: AbortSignal,
   fn: () => Promise<T>,
 ): Promise<T> {
@@ -6557,12 +6557,15 @@ async function streamMoonshot(
       .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
       .join("\n\n");
     const composed = folded ? `${folded}\n\nuser: ${userMessage}` : userMessage;
-    const reply = await invoke<string>("kimi_cli_complete", {
+    // Retry transient network blips (and surface a clear auth error) like the
+    // Claude/Codex subscription paths — a Rust-side non-zero exit now carries the
+    // real auth/network text, so withCliAuthRetry can recognize and retry it.
+    const reply = await withCliAuthRetry("kimi_cli", signal, () => invoke<string>("kimi_cli_complete", {
       systemPrompt,
       userMessage: composed,
       cwd: projectCwd ?? null,
       model: modelId,
-    });
+    }));
     if (reply) onDelta(reply);
     // No thought stream for --print mode; CLI emits a single blob.
     return reply;
@@ -6659,12 +6662,14 @@ async function streamGemini(
       .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
       .join("\n\n");
     const composed = folded ? `${folded}\n\nuser: ${userMessage}` : userMessage;
-    const reply = await invoke<string>("gemini_cli_complete", {
+    // Retry transient network blips / surface real auth errors, as for the other
+    // subscription CLIs (the Rust non-zero-exit path now carries the auth text).
+    const reply = await withCliAuthRetry("gemini_cli", signal, () => invoke<string>("gemini_cli_complete", {
       systemPrompt,
       userMessage: composed,
       cwd: projectCwd ?? null,
       model: modelId,
-    }).catch((e) => { throw new Error(`Gemini CLI: ${e}`); });
+    })).catch((e) => { throw new Error(`Gemini CLI: ${e}`); });
     if (reply) onDelta(reply);
     return reply;
   }
@@ -7510,7 +7515,10 @@ export default function AgentsPage() {
   // See withCliAuthRetry.
   useEffect(() => {
     _authWaitHandler = (info) => {
-      const cli = info.backend === "codex_cli" ? "Codex" : "Claude";
+      const cli = info.backend === "codex_cli" ? "Codex"
+        : info.backend === "gemini_cli" ? "Gemini"
+        : info.backend === "kimi_cli" ? "Kimi"
+        : "Claude";
       if (info.kind === "recovered") {
         setSupChat(prev => [...prev, {
           role: "system", color: "#7ff0c5",

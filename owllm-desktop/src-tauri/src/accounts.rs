@@ -1062,12 +1062,11 @@ pub async fn claude_cli_complete(
                 .wait_with_output()
                 .map_err(|e| format!("wait claude: {e}"))?;
             if !output.status.success() {
+                // Non-zero exit can still carry a 401 in stdout with empty stderr —
+                // surface the auth text (not a generic "exited N") so the retry fires.
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                return Err(format!(
-                    "claude CLI exited {} — {}",
-                    output.status.code().unwrap_or(-1),
-                    if stderr.is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
-                ));
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                return Err(cli_exit_err("claude", output.status.code().unwrap_or(-1), &stdout, &stderr));
             }
             let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
             let trimmed = stdout.trim().to_string();
@@ -1107,6 +1106,34 @@ fn looks_like_cli_auth_error(text: &str) -> bool {
         || low.contains("failed to authenticate")
         || low.contains("api error: 401")
         || low.contains("authentication_error")
+        || low.contains("401 unauthorized")
+        || low.contains("oauth token has expired")
+        || low.contains("please run /login")
+        || low.contains("please log in")
+}
+
+/// Build the Err string for any subscription CLI (claude/codex/gemini/kimi) that
+/// exited NON-ZERO. The CLIs frequently print the real cause — most importantly an
+/// expired-token 401 — into their STDOUT / streamed body and exit non-zero with an
+/// EMPTY stderr. A generic "<cli> CLI exited N — no stderr" then hides the auth
+/// envelope, so the frontend's `isCliAuthError` can't match it and the token-refresh
+/// retry (`withCliAuthRetry`) never fires → the 401 surfaces and the agent dies.
+/// Prefer the auth text (from body, else stderr) so the retry engages; otherwise
+/// fall back to the generic exit message. This is the cross-model counterpart to the
+/// exit-0 envelope detection done by `looks_like_cli_auth_error` callers.
+fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
+    let body = body.trim();
+    if looks_like_cli_auth_error(body) {
+        return body.to_string();
+    }
+    let stderr = stderr.trim();
+    if looks_like_cli_auth_error(stderr) {
+        return stderr.to_string();
+    }
+    format!(
+        "{cli} CLI exited {code} — {}",
+        if stderr.is_empty() { "no stderr".to_string() } else { stderr.to_string() }
+    )
 }
 
 /// One-shot completion via the OpenAI Codex CLI — the OpenAI-subscription
@@ -1178,11 +1205,8 @@ pub async fn codex_cli_complete(
             let output = child.wait_with_output().map_err(|e| format!("wait codex: {e}"))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-                return Err(format!(
-                    "codex CLI exited {} — {}",
-                    output.status.code().unwrap_or(-1),
-                    if stderr.trim().is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
-                ));
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                return Err(cli_exit_err("codex", output.status.code().unwrap_or(-1), &stdout, &stderr));
             }
             let reply = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if reply.is_empty() {
@@ -1236,11 +1260,10 @@ pub async fn codex_cli_complete(
         let _ = std::fs::remove_file(&out_file);
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(format!(
-                "codex CLI exited {} — {}",
-                output.status.code().unwrap_or(-1),
-                if stderr.trim().is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
-            ));
+            let body = from_file
+                .clone()
+                .unwrap_or_else(|| String::from_utf8_lossy(&output.stdout).into_owned());
+            return Err(cli_exit_err("codex", output.status.code().unwrap_or(-1), &body, &stderr));
         }
         let reply = from_file
             .map(|s| s.trim().to_string())
@@ -1626,14 +1649,23 @@ pub async fn claude_cli_stream(
             if let Some(mut stderr) = child.stderr.take() {
                 let _ = stderr.read_to_string(&mut stderr_buf);
             }
-            return Err(format!(
-                "claude CLI exited {} — {}",
-                status.code().unwrap_or(-1),
-                if stderr_buf.is_empty() {
-                    "no stderr".to_string()
-                } else {
-                    stderr_buf.trim().to_string()
+            // CRITICAL (the recurring "claude CLI exited 1 — no stderr" / 401): the
+            // CLI prints an expired-token 401 into its STREAMED output (a result
+            // event with is_error, or plain assistant text in `assembled`) and exits
+            // NON-ZERO with EMPTY stderr. The is_error text is the most precise, then
+            // the assembled body; surface whichever is the auth envelope so the
+            // frontend's isCliAuthError matches and withCliAuthRetry refreshes the
+            // token — instead of the generic exit string the retry can't recognize.
+            if let Some(err) = result_error.as_ref() {
+                if looks_like_cli_auth_error(err) {
+                    return Err(err.clone());
                 }
+            }
+            return Err(cli_exit_err(
+                "claude",
+                status.code().unwrap_or(-1),
+                assembled.trim(),
+                &stderr_buf,
             ));
         }
         // Exit 0 but the CLI flagged the run as failed via a `result` event
@@ -1956,7 +1988,8 @@ pub async fn codex_cli_stream(
             }
         }
         let status = child.wait().map_err(|e| format!("wait codex: {e}"))?;
-        if !status.success() && assembled.trim().is_empty() {
+        let asm = assembled.trim().to_string();
+        if !status.success() && asm.is_empty() {
             // Only an error if we got NO usable reply — codex can exit
             // nonzero after the read-only sandbox denies a write it tried,
             // even though it produced a perfectly good message.
@@ -1964,17 +1997,21 @@ pub async fn codex_cli_stream(
             if let Some(mut stderr) = child.stderr.take() {
                 let _ = stderr.read_to_string(&mut stderr_buf);
             }
-            return Err(format!(
-                "codex CLI exited {} — {}",
+            return Err(cli_exit_err(
+                "codex",
                 status.code().unwrap_or(-1),
-                if stderr_buf.trim().is_empty() {
-                    "no stderr".to_string()
-                } else {
-                    stderr_buf.trim().to_string()
-                }
+                "",
+                &stderr_buf,
             ));
         }
-        Ok(assembled.trim().to_string())
+        // Belt-and-suspenders (same 401-as-reply hazard as Claude): codex can print
+        // "API Error: 401 …" / "Failed to authenticate" as its ONLY message and exit
+        // 0. Treat a SHORT reply that IS the auth envelope as an error so the
+        // token-refresh retry runs, instead of handing the 401 back as the answer.
+        if asm.len() < 600 && looks_like_cli_auth_error(&asm) {
+            return Err(asm);
+        }
+        Ok(asm)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -2546,11 +2583,8 @@ pub async fn gemini_cli_complete(
             .map_err(|e| format!("wait gemini: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(format!(
-                "gemini CLI exited {} — {}",
-                output.status.code().unwrap_or(-1),
-                if stderr.is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
-            ));
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            return Err(cli_exit_err("gemini", output.status.code().unwrap_or(-1), &stdout, &stderr));
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
         Ok(stdout.trim().to_string())
@@ -2643,11 +2677,8 @@ pub async fn kimi_cli_complete(
             .map_err(|e| format!("wait kimi: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-            return Err(format!(
-                "kimi CLI exited {} — {}",
-                output.status.code().unwrap_or(-1),
-                if stderr.is_empty() { "no stderr".to_string() } else { stderr.trim().to_string() }
-            ));
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            return Err(cli_exit_err("kimi", output.status.code().unwrap_or(-1), &stdout, &stderr));
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
         Ok(stdout.trim().to_string())

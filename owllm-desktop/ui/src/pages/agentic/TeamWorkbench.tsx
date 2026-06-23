@@ -784,6 +784,7 @@ export default function TeamWorkbench({
                       dispatch engine follows them exactly (v0.5.99+). */}
                   {(() => {
                     const effRole: "leader" | "agent" = a.role ?? (a.canDispatch ? "leader" : "agent");
+                    const isOrch = a.name === orchName;
                     const others = agents.filter(x => x.name !== a.name);
                     const takesFrom = new Set(edges.filter(e => e.target === a.name).map(e => e.source));
                     const dispatchesTo = new Set(edges.filter(e => e.source === a.name).map(e => e.target));
@@ -799,23 +800,37 @@ export default function TeamWorkbench({
                       <>
                         <div>
                           <div style={lbl}>Team role</div>
-                          <div style={{ display: "flex", gap: 6, marginTop: 5 }}>
-                            <button onClick={() => patchAgent(a.name, { role: "agent", canDispatch: false })}
-                              style={{ flex: 1, height: 30, borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
-                                background: effRole === "agent" ? "var(--bg-elevated)" : "transparent",
-                                border: `1px solid ${effRole === "agent" ? "var(--accent)" : "var(--border)"}`,
-                                color: effRole === "agent" ? "var(--fg-strong)" : "var(--fg-muted)" }}>Agent</button>
-                            <button onClick={() => patchAgent(a.name, { role: "leader", canDispatch: true })}
-                              style={{ flex: 1, height: 30, borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
-                                background: effRole === "leader" ? "rgba(255,217,122,0.14)" : "transparent",
-                                border: `1px solid ${effRole === "leader" ? "#ffd97a" : "var(--border)"}`,
-                                color: effRole === "leader" ? "#ffd97a" : "var(--fg-muted)" }}>👑 Team Leader</button>
-                          </div>
-                          <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", marginTop: 4, lineHeight: 1.4 }}>
-                            {effRole === "leader"
-                              ? "Directs its own members — a sub-orchestrator. Only it talks to its boss; the agents it dispatches to are its team."
-                              : "A worker — takes a job from its boss and does it."}
-                          </div>
+                          {isOrch ? (
+                            <>
+                              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 5, height: 30, padding: "0 10px", borderRadius: 7,
+                                background: "rgba(var(--accent-rgb),0.12)", border: "1px solid var(--accent)", color: "var(--fg-strong)", fontSize: 12, fontWeight: 700 }}>
+                                ◆ Orchestrator
+                              </div>
+                              <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", marginTop: 4, lineHeight: 1.4 }}>
+                                Leads the whole team — it always dispatches. (Not an Agent/Leader choice; that's only for the other agents.)
+                              </div>
+                            </>
+                          ) : (
+                            <>
+                              <div style={{ display: "flex", gap: 6, marginTop: 5 }}>
+                                <button onClick={() => patchAgent(a.name, { role: "agent", canDispatch: false })}
+                                  style={{ flex: 1, height: 30, borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
+                                    background: effRole === "agent" ? "var(--bg-elevated)" : "transparent",
+                                    border: `1px solid ${effRole === "agent" ? "var(--accent)" : "var(--border)"}`,
+                                    color: effRole === "agent" ? "var(--fg-strong)" : "var(--fg-muted)" }}>Agent</button>
+                                <button onClick={() => patchAgent(a.name, { role: "leader", canDispatch: true })}
+                                  style={{ flex: 1, height: 30, borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 700,
+                                    background: effRole === "leader" ? "rgba(255,217,122,0.14)" : "transparent",
+                                    border: `1px solid ${effRole === "leader" ? "#ffd97a" : "var(--border)"}`,
+                                    color: effRole === "leader" ? "#ffd97a" : "var(--fg-muted)" }}>👑 Team Leader</button>
+                              </div>
+                              <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", marginTop: 4, lineHeight: 1.4 }}>
+                                {effRole === "leader"
+                                  ? "Directs its own members — a sub-orchestrator. Only it talks to its boss; the agents it dispatches to are its team."
+                                  : "A worker — takes a job from its boss and does it."}
+                              </div>
+                            </>
+                          )}
                         </div>
                         <div style={{ borderTop: "1px solid var(--border)", paddingTop: 8 }}>
                           <div style={lbl}>↘ Takes job from</div>

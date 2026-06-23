@@ -1739,6 +1739,36 @@ export type StreamLocalChatParams = {
 /// path: native tools, model-family sampling, 503 slot-warmup retry,
 /// validate → execute → feed results back → iterate until the model
 /// answers with no tool calls.
+/// Retry a fetch THUNK on a thrown TRANSIENT network error — "Failed to fetch"
+/// (the model API momentarily unreachable: a VPN/Wi-Fi blip, DNS hiccup, the
+/// server cycling). A few attempts with backoff. The LOCAL model path already
+/// does this (its 120s load-retry); the CLOUD paths didn't, so one network
+/// hiccup mid-run threw a raw "Failed to fetch" and killed the whole agentic run.
+/// Only connection-level THROWS are retried — never an HTTP error RESPONSE
+/// (4xx/5xx bubble straight up). Honors the abort signal.
+export async function fetchNetRetry(doFetch: () => Promise<Response>, signal: AbortSignal, attempts = 4): Promise<Response> {
+  const backoff = [600, 1500, 4000];
+  for (let i = 0; i < attempts; i++) {
+    if (signal.aborted) throw new DOMException("aborted", "AbortError");
+    try {
+      return await doFetch();
+    } catch (e: unknown) {
+      if (signal.aborted) throw e;
+      const msg = String((e as { message?: string })?.message ?? e).toLowerCase();
+      const transient =
+        (e as { name?: string })?.name === "TypeError" ||
+        msg.includes("failed to fetch") || msg.includes("network") ||
+        msg.includes("load failed") || msg.includes("connection") || msg.includes("dns");
+      if (!transient) throw e;
+      if (i === attempts - 1) {
+        throw new Error(`couldn't reach the model API after ${attempts} tries — looks like a network/VPN/Wi-Fi hiccup, not the model. Last error: ${String((e as { message?: string })?.message ?? e)}`);
+      }
+      await new Promise((r) => setTimeout(r, backoff[i] ?? 4000));
+    }
+  }
+  throw new Error("unreachable"); // loop always returns or throws
+}
+
 export async function streamLocalChat(p: StreamLocalChatParams): Promise<string> {
   const openaiTools = await formatToolsForOpenAI(p.allowedTools);
   // Instrumentation: the exact tools advertised to llama-server this turn.
@@ -2075,7 +2105,7 @@ async function streamAnthropic(
       "Either save a key on the Accounts page OR install + sign in to Claude Code (`claude /login`)."
     );
   }
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const resp = await fetchNetRetry(() => fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -2085,7 +2115,7 @@ async function streamAnthropic(
     },
     body: JSON.stringify(buildAnthropicBody(modelId, systemPrompt, history, userMessage, imgList, temperature)),
     signal,
-  });
+  }), signal);
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }
@@ -2272,7 +2302,7 @@ async function streamOpenAI(
   const effort = sep === -1 ? null : modelId.slice(sep + 1);
   const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
   if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+  const resp = await fetchNetRetry(() => fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -2290,7 +2320,7 @@ async function streamOpenAI(
       temperature,
     }),
     signal,
-  });
+  }), signal);
   return consumeOpenAISse(resp, onDelta, onThought);
 }
 

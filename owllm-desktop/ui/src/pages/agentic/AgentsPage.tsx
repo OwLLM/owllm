@@ -64,6 +64,7 @@ import {
   routingHint,
   nextHandoffs,
   loopExhaustedNotice,
+  fetchNetRetry,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -6322,7 +6323,7 @@ async function streamAnthropic(
       "Either save a key on the Accounts page OR install + sign in to Claude Code (`claude /login`)."
     );
   }
-  const resp = await fetch("https://api.anthropic.com/v1/messages", {
+  const resp = await fetchNetRetry(() => fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -6332,7 +6333,7 @@ async function streamAnthropic(
     },
     body: JSON.stringify(buildAnthropicBody(modelId, systemPrompt, history, userMessage, imgList, temperature)),
     signal,
-  });
+  }), signal);
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }
@@ -6491,7 +6492,7 @@ async function streamOpenAI(
   // API path — needs a saved key.
   const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
   if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+  const resp = await fetchNetRetry(() => fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -6508,7 +6509,7 @@ async function streamOpenAI(
       temperature,
     }),
     signal,
-  });
+  }), signal);
   return consumeOpenAISse(resp, onDelta, onThought);
 }
 
@@ -6552,7 +6553,7 @@ async function streamMoonshot(
   // API path — OpenAI-compatible streaming.
   const key = await invoke<string | null>("accounts_get_secret", { name: "MOONSHOT_API_KEY" });
   if (!key) throw new Error("No MOONSHOT_API_KEY saved — set it on the Accounts page.");
-  const resp = await fetch("https://api.moonshot.ai/v1/chat/completions", {
+  const resp = await fetchNetRetry(() => fetch("https://api.moonshot.ai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -6569,7 +6570,7 @@ async function streamMoonshot(
       temperature,
     }),
     signal,
-  });
+  }), signal);
   return consumeOpenAISse(resp, onDelta, onThought);
 }
 
@@ -6593,7 +6594,7 @@ async function streamOpenAICompatible(args: {
 }): Promise<string> {
   const key = await invoke<string | null>("accounts_get_secret", { name: args.keyName });
   if (!key) throw new Error(`No ${args.keyName} saved — set it on the Accounts page (${args.providerLabel}).`);
-  const resp = await fetch(args.url, {
+  const resp = await fetchNetRetry(() => fetch(args.url, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -6610,7 +6611,7 @@ async function streamOpenAICompatible(args: {
       temperature: args.temperature,
     }),
     signal: args.signal,
-  });
+  }), args.signal);
   return consumeOpenAISse(resp, args.onDelta, args.onThought);
 }
 
@@ -6662,7 +6663,7 @@ async function streamGemini(
   }));
   contents.push({ role: "user", parts: [{ text: userMessage }] });
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(fallbackKey)}`;
-  const resp = await fetch(url, {
+  const resp = await fetchNetRetry(() => fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -6671,7 +6672,7 @@ async function streamGemini(
       generationConfig: { temperature },
     }),
     signal,
-  });
+  }), signal);
   if (!resp.ok || !resp.body) {
     throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
   }

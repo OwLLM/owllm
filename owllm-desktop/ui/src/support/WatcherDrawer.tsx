@@ -23,6 +23,18 @@ import {
   type HistoryItem,
   type Attachment,
 } from "../pages/agentic/dispatch";
+// Bug reports are sent to GitHub. When the user isn't connected, the bug view
+// walks them through a one-time GitHub sign-in (Device Flow — no token to paste;
+// the sign-in page also lets them CREATE a free account). Reuses the shared
+// github bindings so there's no parallel auth path.
+import { githubStatus, githubDeviceStart, githubDevicePoll, GITHUB_TOKEN_URL } from "../pages/agentic/github";
+
+/// Open a URL in the user's real browser (native shell; window.open fallback).
+function openExternal(url: string) {
+  invoke("shell_open_url", { url }).catch(() => {
+    try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* ignore */ }
+  });
+}
 
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
 type SupportSnapshot = {
@@ -273,6 +285,46 @@ export default function WatcherDrawer({
   // Always land on the home menu when the drawer (re)opens.
   React.useEffect(() => { if (open) setView("home"); }, [open]);
 
+  // GitHub connection — bug reports are sent as GitHub issues, so reporting
+  // needs a connected account. Checked when the drawer opens.
+  const [ghConnected, setGhConnected] = React.useState<boolean | null>(null);
+  const [ghLogin, setGhLogin] = React.useState<string | null>(null);
+  const [ghDevice, setGhDevice] = React.useState<{ userCode: string; verificationUri: string } | null>(null);
+  const [ghErr, setGhErr] = React.useState<string | null>(null);
+  const ghPollAlive = React.useRef(false);
+  React.useEffect(() => {
+    if (!open) { ghPollAlive.current = false; return; }
+    githubStatus().then((s) => { setGhConnected(s.connected); setGhLogin(s.login); }).catch(() => setGhConnected(false));
+    return () => { ghPollAlive.current = false; };
+  }, [open]);
+  // Device Flow: get a code, open github.com/login/device (where the user signs
+  // in OR creates a free account), poll until authorized. No token to paste.
+  const connectGithub = async () => {
+    setGhErr(null);
+    try {
+      const d = await githubDeviceStart();
+      setGhDevice({ userCode: d.userCode, verificationUri: d.verificationUri });
+      try { await navigator.clipboard?.writeText(d.userCode); } catch { /* ok */ }
+      openExternal(d.verificationUri);
+      ghPollAlive.current = true;
+      const poll = async () => {
+        if (!ghPollAlive.current) return;
+        let r;
+        try { r = await githubDevicePoll(d.deviceCode); }
+        catch (e) { setGhErr(String(e)); setGhDevice(null); ghPollAlive.current = false; return; }
+        if (!ghPollAlive.current) return;
+        if (r.status === "authorized") { ghPollAlive.current = false; setGhDevice(null); setGhConnected(true); setGhLogin(r.login); return; }
+        if (r.status === "denied" || r.status === "expired" || r.status === "error") {
+          ghPollAlive.current = false; setGhDevice(null);
+          setGhErr(r.detail || (r.status === "expired" ? "The code expired — sign in again." : r.status === "denied" ? "Authorization was declined." : "Sign-in failed."));
+          return;
+        }
+        setTimeout(poll, (r.status === "slowDown" ? d.interval + 5 : d.interval) * 1000);
+      };
+      setTimeout(poll, d.interval * 1000);
+    } catch (e) { setGhErr(String(e)); }
+  };
+
   React.useEffect(() => {
     if (!open) return;
     invoke<ModelInfo[]>("list_models").then((m) => setModels(Array.isArray(m) ? m : [])).catch(() => {});
@@ -394,13 +446,15 @@ export default function WatcherDrawer({
       });
       say(`✅ Sent to the OwLLM team — they (and the AI fixer) can see it here:\n${sent.issueUrl}`);
     } catch (e) {
-      // GitHub not connected / network → save locally so it isn't lost.
+      // GitHub not connected / network → refresh the connection state (so the
+      // "Connect GitHub" step shows next time) and save locally so it isn't lost.
+      void githubStatus().then((s) => { setGhConnected(s.connected); setGhLogin(s.login); }).catch(() => setGhConnected(false));
       try {
         const dir = await invoke<string>("support_export_report", {
           reportJson: redactForReport(JSON.stringify({ userNote: userNote || null, reportedMessage }, null, 2)),
           pngBase64: pngFromEntry,
         });
-        say(`Couldn't send it directly (${e}).\n\nMost likely GitHub isn't connected — sign in on the Home page, then report again to send with one click. I saved a copy locally meanwhile:\n${dir}`);
+        say(`Couldn't send it directly (${e}).\n\nMost likely GitHub isn't connected — click "Report a bug" again and I'll walk you through connecting it (free, one-time). I saved a copy locally meanwhile:\n${dir}`);
       } catch (e2) {
         say(`Couldn't send the report (${e}) and the local fallback also failed (${e2}).`);
       }
@@ -758,12 +812,43 @@ export default function WatcherDrawer({
                     background: "var(--bg-input)", color: "var(--fg-strong)", border: "1px solid var(--border)",
                   }}
                 />
+                {ghConnected === false && (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7, padding: 10, borderRadius: 8, background: "rgba(122,162,255,0.08)", border: "1px solid rgba(122,162,255,0.35)" }}>
+                    <div style={{ fontSize: 11.5, color: "var(--fg-strong)", lineHeight: 1.45 }}>
+                      🔗 <b>Connect GitHub to send</b> — reports go to the OwLLM team as GitHub issues, so you need a (free) GitHub account connected. One time, then it's one click from any PC you sign in on.
+                    </div>
+                    {ghDevice ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11.5, color: "var(--fg-muted)" }}>
+                        <div>1. We opened <b>github.com/login/device</b> and copied your code:</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <code style={{ fontSize: 15, fontWeight: 800, letterSpacing: 2, color: "var(--fg-strong)", background: "var(--bg-input)", padding: "3px 10px", borderRadius: 6 }}>{ghDevice.userCode}</code>
+                          <button style={actionBtn} onClick={() => openExternal(ghDevice.verificationUri)}>Open page</button>
+                        </div>
+                        <div>2. Sign in (or <b>create a free account</b>) and paste the code. Waiting for you…</div>
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                        <button
+                          style={{ ...actionBtn, background: "#24292f", color: "#fff", border: "1px solid #444", fontWeight: 700, alignSelf: "flex-start" }}
+                          onClick={connectGithub}
+                        >🔗 Sign in with GitHub</button>
+                        <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", lineHeight: 1.4 }}>
+                          No account yet? The sign-in page lets you create one free in a minute — come back here and it connects automatically. (Or <span onClick={() => openExternal(GITHUB_TOKEN_URL)} style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>create a token</span> and paste it on the Home page.)
+                        </div>
+                      </div>
+                    )}
+                    {ghErr && <div style={{ fontSize: 11, color: "#ff8c8c" }}>{ghErr}</div>}
+                  </div>
+                )}
+                {ghConnected === true && ghLogin && (
+                  <div style={{ fontSize: 11, color: "#7ff0c5" }}>✓ GitHub connected as {ghLogin} — ready to send.</div>
+                )}
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <button
-                    style={{ ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800, opacity: busy || !reportNote.trim() ? 0.5 : 1 }}
-                    disabled={busy || !reportNote.trim()}
+                    style={{ ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800, opacity: (busy || !reportNote.trim() || ghConnected === false) ? 0.5 : 1 }}
+                    disabled={busy || !reportNote.trim() || ghConnected === false}
                     onClick={async () => { const ent = reportingEntry; const note = reportNote; setReportingEntry(null); setReportNote(""); await reportEntry(ent, note); }}
-                    title="Send your description + this view + diagnostics + any screenshot to the OwLLM team."
+                    title={ghConnected === false ? "Connect GitHub above first." : "Send your description + this view + diagnostics + any screenshot to the OwLLM team."}
                   >📤 Send report</button>
                   <button style={actionBtn} disabled={busy} onClick={() => { setReportNote(""); if (view === "bug") goHome(); else setReportingEntry(null); }}>Cancel</button>
                 </div>

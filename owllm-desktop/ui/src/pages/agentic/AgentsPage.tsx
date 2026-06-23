@@ -6149,6 +6149,16 @@ function isCliAuthError(msg: string): boolean {
   return /\b401\b|invalid authentication|failed to authenticate|authentication_error|not logged in|unauthorized/i.test(msg);
 }
 
+// Transient NETWORK failures the subscription CLI surfaces ("Failed to fetch"
+// from its own internal API call, DNS/connection blips) — NOT auth. These clear
+// on a quick retry, so the subscription path now retries them too (the API path
+// already did). Without this, ONE network hiccup mid-run killed the whole team
+// with a raw "failed to fetch" — the exact recurring "works and doesn't work".
+const CLI_NET_BACKOFFS_MS = [1500, 4000, 8000]; // fast — a blip clears in seconds
+function isTransientNetError(msg: string): boolean {
+  return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake/i.test(msg);
+}
+
 /// Sleep that rejects immediately if the run is cancelled mid-wait.
 function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -6163,7 +6173,7 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
 /// retrying" notice (and a "recovered" notice) in the user-facing thread.
 /// Module-level to avoid threading a callback through every call site.
 type AuthWaitInfo =
-  | { kind: "wait"; attempt: number; total: number; waitMs: number; backend: string }
+  | { kind: "wait"; attempt: number; total: number; waitMs: number; backend: string; reason: "auth" | "network" }
   | { kind: "recovered"; backend: string };
 let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;
 
@@ -6185,12 +6195,19 @@ async function withCliAuthRetry<T>(
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       if (signal.aborted) throw e;
-      if (!isCliAuthError(msg) || attempt >= CLI_AUTH_BACKOFFS_MS.length) throw e;
-      const waitMs = CLI_AUTH_BACKOFFS_MS[attempt];
-      // Root-cause mitigation: the one-time warm went stale; drop it and
-      // re-warm so the CLI refreshes its OAuth token before we retry.
-      try { clearCliWarm(backend); await ensureCliWarm(backend); } catch { /* retry regardless */ }
-      _authWaitHandler?.({ kind: "wait", attempt: attempt + 1, total: CLI_AUTH_BACKOFFS_MS.length, waitMs, backend });
+      // Retry on auth (token expired) OR a transient network blip. Different
+      // schedules: auth refresh is slow (10s/30s/2min); a network blip clears
+      // fast (1.5s/4s/8s).
+      const isAuth = isCliAuthError(msg);
+      const isNet = !isAuth && isTransientNetError(msg);
+      const schedule = isAuth ? CLI_AUTH_BACKOFFS_MS : CLI_NET_BACKOFFS_MS;
+      if ((!isAuth && !isNet) || attempt >= schedule.length) throw e;
+      const waitMs = schedule[attempt];
+      // Auth → the one-time warm went stale; drop it + re-warm so the CLI
+      // refreshes its OAuth token before we retry. Network → just wait + retry;
+      // the CLI's own API call hit a transient blip that clears on its own.
+      if (isAuth) { try { clearCliWarm(backend); await ensureCliWarm(backend); } catch { /* retry regardless */ } }
+      _authWaitHandler?.({ kind: "wait", attempt: attempt + 1, total: schedule.length, waitMs, backend, reason: isAuth ? "auth" : "network" });
       try { await sleepAbortable(waitMs, signal); }
       catch { throw e; } // run cancelled during the wait → surface original error
     }
@@ -7497,16 +7514,20 @@ export default function AgentsPage() {
       if (info.kind === "recovered") {
         setSupChat(prev => [...prev, {
           role: "system", color: "#7ff0c5",
-          text: `✓ ${cli} re-authenticated — resuming the team.`,
+          text: `✓ ${cli} reconnected — resuming the team.`,
           ts: Date.now(),
         }]);
         return;
       }
       const secs = Math.round(info.waitMs / 1000);
       const human = secs >= 60 ? `${Math.round(secs / 60)} min` : `${secs}s`;
+      const why = info.reason === "network"
+        ? `hit a network hiccup ("failed to fetch")`
+        : `sign-in returned 401 (token expired mid-run)`;
+      const action = info.reason === "network" ? "retrying" : "refreshing it and retrying";
       setSupChat(prev => [...prev, {
         role: "system", color: "#ffb74d",
-        text: `⏸ ${cli} sign-in returned 401 (token expired mid-run) — refreshing it and retrying in ${human} (attempt ${info.attempt}/${info.total}). The team is paused, not stopped.`,
+        text: `⏸ ${cli} ${why} — ${action} in ${human} (attempt ${info.attempt}/${info.total}). The team is paused, not stopped.`,
         ts: Date.now(),
       }]);
     };

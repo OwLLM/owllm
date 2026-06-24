@@ -1464,6 +1464,44 @@ pub fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, String>
     sync_logins_impl(distro)
 }
 
+/// Pre-flight for an isolated run: make sure WSL is warm and the project folder is
+/// actually reachable BEFORE dispatching. After a PC reboot WSL comes back COLD —
+/// the distro isn't started and /mnt isn't mounted yet — so a project reached
+/// through WSL (`\\wsl.localhost\<distro>\mnt\c\...`) is temporarily unreachable.
+/// Without this guard the run silently falls into an empty scratch dir and agents
+/// report "can't find the code" (the post-reboot regression). For a WSL path this
+/// STARTS the distro (which mounts /mnt) and tests the folder — both warming AND
+/// verifying in one round-trip. For a plain host path it just stats it. Returns
+/// true when the agents will actually be able to see the folder.
+#[tauri::command]
+pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<bool, String> {
+    let Some(cwd) = cwd.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
+        return Ok(false);
+    };
+    tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        #[cfg(windows)]
+        {
+            if let Some((distro, linux_cwd)) = crate::wsl::parse_wsl_unc(&cwd) {
+                // Running ANY command starts the distro + mounts /mnt; `test -d`
+                // then verifies the project folder is present. This both warms and
+                // checks in a single trip (run_in_distro_script is mangle-proof).
+                let script = format!(
+                    "test -d {} && echo OWLLM_REACH_OK || echo OWLLM_REACH_NO",
+                    crate::wsl::sh_quote(&linux_cwd)
+                );
+                return match crate::wsl::run_in_distro_script(&distro, &script) {
+                    Ok(o) => Ok(o.contains("OWLLM_REACH_OK")),
+                    Err(_) => Ok(false),
+                };
+            }
+        }
+        // Plain host path (or non-Windows): stat it directly.
+        Ok(std::path::Path::new(&cwd).is_dir())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

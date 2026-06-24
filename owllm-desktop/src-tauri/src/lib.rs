@@ -356,6 +356,7 @@ pub fn run() {
             sandbox::sandbox_list_projects,
             sandbox::sandbox_provision,
             sandbox::sandbox_sync_logins,
+            sandbox::sandbox_warm_and_check,
             sandbox::sandbox_login_status,
             sandbox::sandbox_convert_project,
             mcp::mcp_load_config,

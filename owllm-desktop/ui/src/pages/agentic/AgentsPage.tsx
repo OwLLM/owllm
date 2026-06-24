@@ -8862,6 +8862,30 @@ export default function AgentsPage() {
       setRunError("A run is already in progress for this project.");
       return;
     }
+    // PRE-FLIGHT: warm WSL + verify the project folder is actually reachable before
+    // we dispatch. After a PC reboot WSL comes back COLD (distro not started, /mnt
+    // not mounted), so an isolated project's folder — reached through WSL — is
+    // temporarily unreachable. Without this the run would silently fall into an
+    // empty scratch dir and the agents would report "can't find the code" (a real
+    // regression after a reboot). The check itself STARTS the distro / mounts /mnt,
+    // so a single retry usually recovers it; if it's still unreachable we STOP with
+    // a clear message instead of sending agents into an empty box. Files on disk are
+    // never touched — this is only about reachability.
+    if (runCwd && runCwd.trim()) {
+      let reachable = await invoke<boolean>("sandbox_warm_and_check", { cwd: runCwd }).catch(() => true);
+      if (!reachable) {
+        // The first call started the distro / mounted /mnt — try once more.
+        reachable = await invoke<boolean>("sandbox_warm_and_check", { cwd: runCwd }).catch(() => true);
+      }
+      if (!reachable) {
+        setRunError(
+          `Project folder isn't reachable yet: ${rawLocation || runCwd}. ` +
+          `If you just rebooted, WSL is still starting up — wait a few seconds and run again. ` +
+          `Your files on disk are safe.`,
+        );
+        return;
+      }
+    }
     // Require the local server only when the orchestrator (or any
     // dispatched specialist) actually resolves to a local model. Cloud-
     // only teams should run without one.

@@ -1107,7 +1107,7 @@ pub async fn claude_cli_complete(
             // when its OAuth token has expired) → surface as Err so the caller's
             // auth-retry (clearCliWarm + re-warm + backoff) runs, instead of
             // handing the 401 text back as the reply. See looks_like_cli_auth_error.
-            if looks_like_cli_auth_error(&trimmed) {
+            if looks_like_cli_auth_error(&trimmed) || looks_like_transient_server_error(&trimmed) {
                 return Err(trimmed);
             }
             Ok(trimmed)
@@ -1142,6 +1142,25 @@ fn looks_like_cli_auth_error(text: &str) -> bool {
         || low.contains("oauth token has expired")
         || low.contains("please run /login")
         || low.contains("please log in")
+}
+
+/// A TRANSIENT server-side error the CLI prints as its reply — Anthropic 529
+/// "Overloaded", 503/502 service-unavailable, 429 rate-limit. These mean "try
+/// again in a moment", not a real failure of the agent's work, so we surface them
+/// as `Err` (like the auth envelope) — the frontend's withCliAuthRetry then matches
+/// them via isTransientNetError and retries on a backoff instead of handing the
+/// "API Error: 529 Overloaded" text back as the agent's answer.
+fn looks_like_transient_server_error(text: &str) -> bool {
+    let low = text.to_ascii_lowercase();
+    low.contains("overloaded")
+        || low.contains("api error: 529")
+        || low.contains("error: 529")
+        || low.contains("api error: 503")
+        || low.contains("api error: 502")
+        || low.contains("service unavailable")
+        || low.contains("api error: 429")
+        || low.contains("rate limit")
+        || low.contains("too many requests")
 }
 
 /// Build the Err string for any subscription CLI (claude/codex/gemini/kimi) that
@@ -1712,7 +1731,7 @@ pub async fn claude_cli_stream(
         // assistant text (no is_error result event) while still exiting 0. Only
         // treat a SHORT reply that IS the auth envelope as an error — a long
         // substantive answer that merely mentions a 401 must not be discarded.
-        if out.len() < 600 && looks_like_cli_auth_error(&out) {
+        if out.len() < 600 && (looks_like_cli_auth_error(&out) || looks_like_transient_server_error(&out)) {
             return Err(out);
         }
         Ok(out)
@@ -2040,7 +2059,7 @@ pub async fn codex_cli_stream(
         // "API Error: 401 …" / "Failed to authenticate" as its ONLY message and exit
         // 0. Treat a SHORT reply that IS the auth envelope as an error so the
         // token-refresh retry runs, instead of handing the 401 back as the answer.
-        if asm.len() < 600 && looks_like_cli_auth_error(&asm) {
+        if asm.len() < 600 && (looks_like_cli_auth_error(&asm) || looks_like_transient_server_error(&asm)) {
             return Err(asm);
         }
         Ok(asm)

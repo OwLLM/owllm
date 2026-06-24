@@ -34,13 +34,52 @@ pub struct ShellResult {
 /// Resolve a tool path against an optional project CWD. If the path
 /// is absolute we accept it as-is; if it's relative the CWD is the
 /// anchor (matches the Python tool runtime's behavior).
+/// A project on a Windows drive accessed through WSL isolation arrives as a
+/// `\\wsl.localhost\<distro>\mnt\<drive>\...` (or `\\wsl$\...`) UNC — the SANDBOX's
+/// view (host → WSL → /mnt/<drive> → back to the host drive). The HOST file tools
+/// (list_dir / read_file / write_file) must read the drive DIRECTLY: that round-trip
+/// UNC is slow and routinely returns "access denied", which is exactly why an
+/// isolated project's agents couldn't list or read their own files. Unwrap e.g.
+/// `\\wsl.localhost\Ubuntu\mnt\c\1_Git\RED` → `C:\1_Git\RED`. Returns None when the
+/// path is NOT a WSL-mount-of-a-drive UNC (e.g. a genuine in-WSL `…\home\…` path),
+/// so real WSL-side projects keep using the UNC.
+fn wsl_mnt_unc_to_windows(p: &str) -> Option<String> {
+    // Normalise to backslashes so a `//wsl.localhost/...` form parses too.
+    let norm = p.replace('/', "\\");
+    let rest = norm
+        .strip_prefix(r"\\wsl.localhost\")
+        .or_else(|| norm.strip_prefix(r"\\wsl$\"))?;
+    let after_distro = rest.split_once('\\')?.1; // drop "<distro>\"
+    let mnt = after_distro.strip_prefix(r"mnt\")?; // must be a /mnt mount
+    let (drive, tail) = mnt.split_once('\\').unwrap_or((mnt, ""));
+    let d = drive.chars().next()?;
+    if drive.len() != 1 || !d.is_ascii_alphabetic() {
+        return None;
+    }
+    Some(if tail.is_empty() {
+        format!("{}:\\", d.to_ascii_uppercase())
+    } else {
+        format!("{}:\\{}", d.to_ascii_uppercase(), tail)
+    })
+}
+
+/// The host-fs base for a cwd: a WSL-mount UNC of a Windows drive is unwrapped to
+/// the native drive path (direct + reliable); anything else is used as-is.
+fn host_cwd(cwd: &str) -> String {
+    wsl_mnt_unc_to_windows(cwd).unwrap_or_else(|| cwd.to_string())
+}
+
 fn resolve(path: &str, cwd: &Option<String>) -> PathBuf {
+    // An absolute path may itself be a WSL-mount UNC — unwrap to the native drive.
+    if let Some(win) = wsl_mnt_unc_to_windows(path) {
+        return PathBuf::from(win);
+    }
     let p = Path::new(path);
     if p.is_absolute() {
         return p.to_path_buf();
     }
     match cwd.as_deref() {
-        Some(c) if !c.is_empty() => Path::new(c).join(p),
+        Some(c) if !c.is_empty() => Path::new(&host_cwd(c)).join(p),
         _ => p.to_path_buf(),
     }
 }
@@ -96,7 +135,10 @@ fn is_within(root: &Path, path: &Path) -> bool {
 fn write_allowed_roots(cwd: &Option<String>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(c) = cwd.as_deref().filter(|s| !s.is_empty()) {
-        roots.push(normalize_lexical(Path::new(c)));
+        // Unwrap a WSL-mount UNC to the native drive so the allowed root matches the
+        // (also-unwrapped) resolved write target — otherwise every write would be
+        // wrongly blocked as "outside the workspace".
+        roots.push(normalize_lexical(Path::new(&host_cwd(c))));
     }
     roots.push(normalize_lexical(&std::env::temp_dir()));
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {

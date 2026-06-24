@@ -925,6 +925,33 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
   );
 }
 
+// ---- Run timers (team-wide + per-agent) ----
+// h:mm:ss once past an hour, else m:ss. For the header stopwatch + per-agent cards.
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+/// Force a 1-s re-render while `active` so a running stopwatch ticks live; stops
+/// the interval (no churn) once the clock freezes. Each timer ticks itself.
+function useTick(active: boolean): void {
+  const [, force] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    const id = setInterval(() => force(x => (x + 1) % 1_000_000), 1000);
+    return () => clearInterval(id);
+  }, [active]);
+}
+/// Per-agent active timing: cumulative working time, ticking while active.
+export type AgentTiming = { activeSince: number | null; accumMs: number };
+function agentElapsedMs(t: AgentTiming | undefined): number {
+  if (!t) return 0;
+  return t.accumMs + (t.activeSince != null ? Date.now() - t.activeSince : 0);
+}
+
 // FlowHeader — canvas_header in agents_page.py:2540-2596.
 // Action buttons operate on whichever edge is currently selected in
 // the graph view. The view toggle flips between the orbital diagram
@@ -933,6 +960,7 @@ function FlowHeader({
   viewMode, onSetView,
   canEdit, onDeleteEdge, onReverseEdge, onResetLayout,
   teamLabel, onOpenWorkbench,
+  runStartedAt, runEndedAt,
 }: {
   viewMode: "diagram" | "graph" | "chat";
   /// Three-state segmented switch — caller passes the target mode the
@@ -948,7 +976,13 @@ function FlowHeader({
   /// title that opens the full Team Workbench (roles + arrows + skills).
   teamLabel?: string | null;
   onOpenWorkbench?: () => void;
+  /// Team stopwatch: when the current/last run started and ended. Ticks live
+  /// while endedAt is null; freezes on the final duration when the run stops.
+  runStartedAt?: number | null;
+  runEndedAt?: number | null;
 }) {
+  const runActive = runStartedAt != null && runEndedAt == null;
+  useTick(runActive);
   const seg = (id: "diagram" | "graph" | "chat", label: string, title: string) => {
     const on = viewMode === id;
     return (
@@ -971,8 +1005,29 @@ function FlowHeader({
   // to invisible in the other modes so the toolbar reads cleaner.
   const showEditBtns = viewMode === "graph";
   return (
-    <div style={{ display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
+    <div style={{ position:"relative", display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
       <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Orchestrated Workflow</div>
+      {/* Team stopwatch — absolute-centered so it sits in the middle of the header
+          regardless of the buttons on either side. Shows how long the team has run
+          autonomously; green + ⏱ while live, muted + ✓ once the run stops. */}
+      {runStartedAt != null && (
+        <div
+          data-ui="FlowRunTimer"
+          title={runActive ? "The team is running — elapsed time" : "How long the last run took"}
+          style={{
+            position:"absolute", left:"50%", top:"50%", transform:"translate(-50%,-50%)",
+            display:"flex", alignItems:"center", gap:6, height:24, padding:"0 12px",
+            borderRadius:999, fontSize:13, fontWeight:700, fontVariantNumeric:"tabular-nums",
+            color: runActive ? "#5af09c" : "var(--fg-muted)",
+            background: runActive ? "rgba(60,242,107,0.12)" : "rgba(255,255,255,0.05)",
+            border: `1px solid ${runActive ? "rgba(60,242,107,0.45)" : "var(--border)"}`,
+            pointerEvents:"none",
+          }}
+        >
+          <span style={{ fontSize:12 }}>{runActive ? "⏱" : "✓"}</span>
+          {formatDuration((runEndedAt ?? Date.now()) - runStartedAt)}
+        </div>
+      )}
       {teamLabel && (
         <button
           data-ui="FlowTeamChip"
@@ -1357,7 +1412,7 @@ function hexToRgbStr(hex: string): string {
 // clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
-  selectedAgent, onSelectAgent,
+  selectedAgent, onSelectAgent, agentTiming,
 }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
@@ -1366,6 +1421,8 @@ function AgentChatGrid({
   agentIconOverrides: Record<string, string>;
   selectedAgent: string | null;
   onSelectAgent: (name: string) => void;
+  /// Per-agent working-time map (name → cumulative timing), for the card clocks.
+  agentTiming?: Map<string, AgentTiming>;
 }) {
   // Same pulse generator used by the canvas so the ring beat matches
   // the diagram + graph active-state visuals (30 fps, ~1.5 Hz pulse).
@@ -1478,6 +1535,7 @@ function AgentChatGrid({
             outerPx={outerPx}
             alphaA={alphaA}
             alphaB={alphaB}
+            timing={agentTiming?.get(a.name)}
           />
         );
       })}
@@ -1492,11 +1550,14 @@ function AgentChatTile({
   name, icon, messages,
   isActive, isSelected, accent, onClick,
   ringPx, outerPx, alphaA, alphaB,
+  timing,
 }: {
   name: string;
   icon: string;
   messages: GoalMsg[];
   isActive: boolean;
+  /// This agent's cumulative working time this run (ticks while active).
+  timing?: AgentTiming;
   /// True when this agent is the one selected on the left workspace —
   /// drawn with the team-accent ring so the user can see at a glance
   /// which tile maps to the right-pane chat column.
@@ -1514,6 +1575,8 @@ function AgentChatTile({
   alphaB: number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  useTick(timing?.activeSince != null); // tick this card's clock while it's working
+  const elapsedMs = agentElapsedMs(timing);
   const tailSig = `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}`;
   useLayoutEffect(() => {
     const el = scrollRef.current;
@@ -1581,6 +1644,19 @@ function AgentChatTile({
           color: "var(--fg-strong)", fontSize: 12, fontWeight: 700,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
         }}>{displayLabel(name)}</div>
+        {/* Per-agent working time — to the RIGHT of the name. Green while this
+            agent is active, muted once it's done; shows cumulative work time. */}
+        {elapsedMs > 0 && (
+          <span
+            title="How long this agent has worked (cumulative)"
+            style={{
+              fontSize: 10, fontWeight: 700, fontVariantNumeric: "tabular-nums",
+              color: timing?.activeSince != null ? "#3cf26b" : "var(--fg-muted)",
+              background: "rgba(0,0,0,0.25)", borderRadius: 4, padding: "1px 5px",
+              flexShrink: 0,
+            }}
+          >⏱ {formatDuration(elapsedMs)}</span>
+        )}
         {isActive && (
           <span style={{
             color: "#3cf26b", fontSize: 9, fontWeight: 800,
@@ -6216,7 +6292,10 @@ function isCliAuthError(msg: string): boolean {
 // with a raw "failed to fetch" — the exact recurring "works and doesn't work".
 const CLI_NET_BACKOFFS_MS = [1500, 4000, 8000]; // fast — a blip clears in seconds
 function isTransientNetError(msg: string): boolean {
-  return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake/i.test(msg);
+  // Network blips AND transient SERVER-side errors that clear on a retry: an
+  // Anthropic 529 "Overloaded", 503/502 service-unavailable, and 429 rate limits
+  // are all "try again in a moment" — not a real failure of the agent's work.
+  return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
 }
 
 /// Sleep that rejects immediately if the run is cancelled mid-wait.
@@ -7207,12 +7286,25 @@ export default function AgentsPage() {
   // light up at once and the canvas pulses every member). Started as
   // a single string; the change is essential for the parallel flow.
   const [activeAgents, setActiveAgents] = useState<Set<string>>(new Set());
+  // Run stopwatch (team-wide) + per-agent working-time clocks. The header timer
+  // reads runStartedAt/runEndedAt; each agent card reads agentTiming[name].
+  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [runEndedAt, setRunEndedAt] = useState<number | null>(null);
+  const [agentTiming, setAgentTiming] = useState<Map<string, AgentTiming>>(new Map());
   const addActive = (name: string) => {
     worldEmit({ kind: "agent-start", agent: name }); // 2.5D HQ tap (P0-1)
     setActiveAgents(prev => {
       if (prev.has(name)) return prev;
       const next = new Set(prev);
       next.add(name);
+      return next;
+    });
+    // Start this agent's clock (cumulative — only if not already counting).
+    setAgentTiming(prev => {
+      const cur = prev.get(name) ?? { activeSince: null, accumMs: 0 };
+      if (cur.activeSince != null) return prev;
+      const next = new Map(prev);
+      next.set(name, { ...cur, activeSince: Date.now() });
       return next;
     });
   };
@@ -7222,6 +7314,14 @@ export default function AgentsPage() {
       if (!prev.has(name)) return prev;
       const next = new Set(prev);
       next.delete(name);
+      return next;
+    });
+    // Bank this agent's elapsed working time.
+    setAgentTiming(prev => {
+      const cur = prev.get(name);
+      if (!cur || cur.activeSince == null) return prev;
+      const next = new Map(prev);
+      next.set(name, { activeSince: null, accumMs: cur.accumMs + (Date.now() - cur.activeSince) });
       return next;
     });
   };
@@ -8954,6 +9054,10 @@ export default function AgentsPage() {
     setRunError(null);
     setBusy(true);
     setRunning(true); // store-backed: survives a page change so the run isn't orphaned
+    // Start the team stopwatch + reset per-agent clocks for this run.
+    setRunStartedAt(Date.now());
+    setRunEndedAt(null);
+    setAgentTiming(new Map());
     setPhase("planning");
     // Snapshot + clear the chip strip now. The orchestrator owns these
     // bytes for the rest of the run; the UI strip should feel "spent".
@@ -10048,6 +10152,7 @@ export default function AgentsPage() {
     } finally {
       setBusy(false);
       setRunning(false); // clear the store-backed in-flight flag (mirrors setBusy)
+      setRunEndedAt(Date.now()); // freeze the team stopwatch on the final duration
       clearActive();
       abortRef.current = null;
       agentRunAborts.delete(agentSessId);
@@ -10510,6 +10615,8 @@ export default function AgentsPage() {
             onResetLayout={resetGraphLayout}
             teamLabel={activeTeamTemplate?.display ?? null}
             onOpenWorkbench={() => setWorkbenchOpen(true)}
+            runStartedAt={runStartedAt}
+            runEndedAt={runEndedAt}
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>
             {viewMode === "diagram" ? (
@@ -10548,6 +10655,7 @@ export default function AgentsPage() {
                 agentIconOverrides={agentIconOverrides}
                 selectedAgent={selectedNode}
                 onSelectAgent={(name) => setSelectedNode(name)}
+                agentTiming={agentTiming}
               />
             )}
             {/* (The bottom-left canvas voice overlay was removed — the

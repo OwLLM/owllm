@@ -70,6 +70,7 @@ import {
   fetchNetRetry,
   TEAM_OPERATING_CONTRACT,
   TEAM_MEMORY_HINT,
+  projectWorkspaceBlock,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -5644,6 +5645,8 @@ function buildOrchestratorPrompt(
   /// blind to both tools AND skills, which is why it couldn't reason about who
   /// should do what. Combined with the role/template skills already on each spec.
   perAgentSkills?: Map<string, string[]>,
+  /// Absolute project root — so the orchestrator references the real folder.
+  projectCwd?: string | null,
 ): string {
   // Edge-seeded roster (P0-2, §0.4 lockstep with dispatch.ts): with a
   // graph present the orchestrator only sees its edge-wired specialists.
@@ -5785,6 +5788,9 @@ function buildOrchestratorPrompt(
     "4. Dispatch only the agents you actually need. Skip dispatches if the goal is trivial enough to answer yourself.",
     "5. After dispatches run, you'll be invoked again with the specialists' replies — produce the final answer for the user then.",
     "",
+    projectWorkspaceBlock(projectCwd),
+    "  - When a task touches files, put the project root in the specialist's instruction so it doesn't go looking elsewhere.",
+    "",
     TEAM_OPERATING_CONTRACT,
     "",
     TEAM_MEMORY_HINT,
@@ -5800,6 +5806,9 @@ function buildSpecialistPrompt(
   /// Pre-built SKILL block (from skillRuntime.buildSkillBlock) for the agent's
   /// equipped skills — resolved async by the caller so this stays pure/sync.
   skillBlock?: string,
+  /// Absolute project root the agent runs against — so it knows WHERE the project
+  /// is instead of climbing into OwLLM's internal folders.
+  projectCwd?: string | null,
 ): string {
   const role = roleByName.get(spec.base);
   // Layer: role base prompt (from yaml) + team-specific spec
@@ -5833,6 +5842,7 @@ function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
+  layers.push(projectWorkspaceBlock(projectCwd));
   layers.push(TEAM_OPERATING_CONTRACT);
   layers.push(TEAM_MEMORY_HINT);
   layers.push(routingHint(team, spec));
@@ -9036,7 +9046,7 @@ export default function AgentsPage() {
         ...(perAgentSkills.get(orch.name) ?? []),
       ];
       const orchSkillBlock = await buildAgentSkillBlock(orchSkillIds);
-      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills);
+      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = modelFor(orch.name);
       let orchReply: string;
@@ -9558,7 +9568,7 @@ export default function AgentsPage() {
           try {
             specText = (await streamChatCompletion(
               port, specModel, providerFor(specModel),
-              buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock), instruction,
+              buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd), instruction,
               tempFor(spec, 0.5), ctrl.signal,
               (delta) => streamLog(spec.name, delta),
               chainCwd,
@@ -9588,7 +9598,7 @@ export default function AgentsPage() {
           const members = wiredDispatchTargets(runTeam, leader.name) ?? new Set<string>();
           const leaderModel = modelFor(leader.name);
           const leaderPrompt = buildOrchestratorPrompt(
-            runTeam, roleByName, leader, directives, false, undefined, false, undefined, undefined, perAgentSkills,
+            runTeam, roleByName, leader, directives, false, undefined, false, undefined, undefined, perAgentSkills, projectCwd,
           );
           // 1. Leader plans + emits @member dispatches.
           addActive(leader.name);
@@ -9758,7 +9768,7 @@ export default function AgentsPage() {
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills), integrationInput,
+          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
@@ -9835,7 +9845,7 @@ export default function AgentsPage() {
           try {
             const revised = await streamChatCompletion(
               port, finalModel, providerFor(finalModel),
-              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills),
+              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd),
               [
                 "Your final answer:",
                 finalReply,
@@ -9942,7 +9952,7 @@ export default function AgentsPage() {
         try {
           await streamChatCompletion(
             port, modelFor(docSpec.name), providerFor(modelFor(docSpec.name)),
-            buildSpecialistPrompt(activeTeam, docSpec, roleByName, directives, docSkillBlock),
+            buildSpecialistPrompt(activeTeam, docSpec, roleByName, directives, docSkillBlock, docCwd),
             docInstruction, tempFor(docSpec, 0.3), ctrl.signal,
             (delta) => streamLog(docSpec.name, delta),
             docCwd,

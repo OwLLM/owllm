@@ -859,6 +859,9 @@ export function buildOrchestratorPrompt(
   /// scope, feature priority, and GUI direction. Missing = legacy
   /// free-interpretation behaviour.
   briefText?: string,
+  /// Absolute project root — so the orchestrator (and the instructions it gives
+  /// specialists) reference the real folder, not OwLLM's internal dirs.
+  projectCwd?: string | null,
 ): string {
   // Edge-seeded roster (P0-2): when the team has a graph, the orchestrator
   // only SEES the specialists its outgoing edges reach — the drawn graph
@@ -961,6 +964,9 @@ export function buildOrchestratorPrompt(
     "  - Ask the user clarifying questions in this turn — dispatch your best-guess plan; you can refine in the integration turn.",
     "  - Reply without any @<agent>: lines unless the goal is a pure no-edit, no-shell, no-external-call question. If you do, the user sees zero specialist activity and that is almost always wrong.",
     "",
+    projectWorkspaceBlock(projectCwd),
+    "  - Put the project root in each specialist's instruction when the task touches files, so they don't go looking elsewhere.",
+    "",
     TEAM_OPERATING_CONTRACT,
     "",
     TEAM_MEMORY_HINT,
@@ -975,6 +981,9 @@ export function buildSpecialistPrompt(
   directives?: Directive[],
   /// Pre-built SKILL block (skillRuntime.buildSkillBlock) — see AgentsPage copy.
   skillBlock?: string,
+  /// Absolute project root the agent runs against — injected so it knows WHERE the
+  /// project is instead of hunting OwLLM's internal folders.
+  projectCwd?: string | null,
 ): string {
   const role = roleByName.get(spec.base);
   const layers: string[] = [
@@ -1002,10 +1011,38 @@ export function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
+  layers.push(projectWorkspaceBlock(projectCwd));
   layers.push(TEAM_OPERATING_CONTRACT);
   layers.push(TEAM_MEMORY_HINT);
   layers.push(routingHint(team, spec));
   return layers.join("\n");
+}
+
+/// Tell the agent WHERE the project lives. Agents kept climbing out of their cwd
+/// into OwLLM's own WSL/home folders (~/owllm, .owllm, _probe, chat-scratch) hunting
+/// for "the project" and finding nothing — because nothing ever told them their
+/// project root. State it explicitly; when none is set, say so and tell them to ASK
+/// rather than wander the filesystem or invent paths.
+export function projectWorkspaceBlock(cwd?: string | null): string {
+  const root = (cwd ?? "").trim();
+  if (!root) {
+    return [
+      "PROJECT WORKSPACE: NONE assigned for this run — you have no project folder.",
+      "  - Do NOT search the filesystem or OwLLM's own folders (~/owllm, .owllm, _probe,",
+      "    chat-scratch, test) for project code — there is none there; those are app internals.",
+      "  - If the task needs the project's files, STOP and tell the user no folder is assigned",
+      "    (ask them to set the project folder). Never guess or invent file names or paths.",
+    ].join("\n");
+  }
+  return [
+    `PROJECT WORKSPACE: ${root}`,
+    "  - This is your project ROOT. Your file tools (read_file, list_dir, glob, grep, edit)",
+    "    operate from here — use paths relative to it (e.g. \"src/main.py\") or absolute under it.",
+    "  - Do ALL work inside this folder. Do NOT climb up into OwLLM's own folders (~/owllm,",
+    "    .owllm, _probe, chat-scratch, test) — those are the app's internals, NOT the project.",
+    "  - If list_dir(\".\") here is empty or denied, say so to the user — do not go hunting",
+    "    elsewhere or invent the project's contents.",
+  ].join("\n");
 }
 
 /// One-paragraph nudge so agents actually USE the shared team memory + the
@@ -2916,7 +2953,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     } catch { /* no brief yet — proceed without */ }
   }
 
-  const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode, briefText);
+  const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode, briefText, projectCwd);
   const orchModel = modelFor(orch.name);
   const orchProvider = providerFor(orchModel, models);
   let orchReply: string;
@@ -3238,7 +3275,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     hooks.onAgentStart(spec.name);
     hooks.onThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
     hooks.onLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
-    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives);
+    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives, undefined, projectCwd);
     const specModel = modelFor(spec.name);
     const specProvider = providerFor(specModel, models);
     // Per-agent memory: fold this agent's own prior turns in so the bridge path

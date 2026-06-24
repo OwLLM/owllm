@@ -117,28 +117,39 @@ fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     Ok(())
 }
 
+/// Bump when DEFAULT_DIRECTIVES changes so already-seeded projects upgrade to the
+/// new native set. `directives_seeded` doubles as the seed VERSION (0 = never).
+/// On upgrade we replace only untouched builtins — a rule the user edited is
+/// promoted to source='user_typed' (see directives_update) and is kept.
+pub(crate) const CURRENT_SEED_VERSION: i64 = 2;
+
 /// Native best-practice rules every project starts with, so nobody writes a rule
 /// list from zero. They are NORMAL directives (the user can edit or delete any of
-/// them) — only the `source` is 'builtin' so the UI can mark them. They flow into
-/// every agent AND the Critic exactly like user-typed rules (buildCriticPrompt /
-/// buildSpecialistPrompt both inject the project directives). Worded as general,
-/// production-quality engineering guidance — distilled from the user's own
-/// standing principles (verify, reuse, root-cause, no fabrication, build for all).
+/// them) — `source` is 'builtin' until the user edits one (then 'user_typed').
+/// They flow into every agent AND the Critic exactly like user-typed rules. This
+/// is the canonical "Agent Team Rules" Must/Prefer/Avoid set (the Operating
+/// Priority, Definition of Done, and Handoff Format live in the prompt-level
+/// TEAM_OPERATING_CONTRACT, since they are structure, not tunable rules).
 pub(crate) const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
-    ("must", "Verify every change actually works — run it, test it, or probe it — before calling it done."),
-    ("must", "Make the smallest change that fully solves the task; don't rewrite working code you weren't asked to touch."),
-    ("must", "Match the existing code's style, naming, structure, and patterns."),
-    ("must", "Find the root cause before reaching for a workaround."),
-    ("must", "Ask before anything destructive or irreversible (deleting files or data, force-pushing, overwriting)."),
-    ("must", "Design for every target user and environment, not just the current machine."),
-    ("prefer", "Reuse existing functions, components, and tools instead of writing parallel new ones."),
-    ("prefer", "Clear, descriptive names and straightforward code over cleverness."),
-    ("prefer", "Handle errors explicitly and surface them — never fail silently."),
-    ("prefer", "Check the shared team memory before re-deriving or re-asking something already known."),
-    ("avoid", "Fabricating data, file paths, results, or citations — never invent what you didn't verify."),
-    ("avoid", "Hardcoding machine-specific paths, credentials, or environment assumptions."),
-    ("avoid", "Mixing unrelated refactors into a single focused change."),
-    ("avoid", "Leaving debug prints, dead code, or vague TODOs behind."),
+    ("must", "Verify every change before calling it done. Run, test, inspect, or otherwise validate the result. If verification is not possible, state exactly what could not be verified and why."),
+    ("must", "Never fabricate anything: data, paths, outputs, logs, test results, metrics, citations, screenshots, or completion status. Clearly label assumptions and estimates."),
+    ("must", "Fix the root cause. Use workarounds only when necessary, clearly mark them as temporary, and explain the remaining risk."),
+    ("must", "Make the smallest change that fully resolves the problem at its root."),
+    ("must", "Match the existing style, naming, structure, architecture, and conventions."),
+    ("must", "Stop and ask when blocked, when ambiguity would materially affect the solution (implementation, safety, data, API, or user-facing behavior), or before any destructive or irreversible action (deleting files, user data, production data, database records, force-pushes, history rewrites, overwriting user content, credential changes, schema migrations, API contract changes, or production-impacting actions)."),
+    ("must", "Design for the intended users, deployment environments, and edge cases, not only the current machine or dataset."),
+    ("prefer", "Reuse existing functions, components, tools, and patterns before introducing new ones."),
+    ("prefer", "Choose clear names and straightforward implementations over clever or complex solutions."),
+    ("prefer", "Surface errors with actionable diagnostics. Never fail silently."),
+    ("prefer", "Check shared memory, project documentation, previous decisions, and open issues before re-asking questions or re-deriving conclusions."),
+    ("prefer", "Coordinate with other agents: own one task at a time, communicate state clearly, and avoid overwriting another agent's work."),
+    ("prefer", "Improve nearby code only when directly related to the task or necessary to safely implement the change."),
+    ("avoid", "Expanding scope beyond the requested task."),
+    ("avoid", "Mixing unrelated refactors into focused bug fixes or features."),
+    ("avoid", "Hardcoding paths, secrets, credentials, ports, hostnames, or environment-specific assumptions."),
+    ("avoid", "Leaving debug prints, dead code, commented-out experiments, temporary hacks, or vague TODOs."),
+    ("avoid", "Changing public behavior, APIs, schemas, file formats, or user workflows unless required and explicitly disclosed."),
+    ("avoid", "Adding dependencies, services, frameworks, or infrastructure without clear justification."),
 ];
 
 /// Insert the built-in rules for a project. When `skip_existing_by_text` is set,
@@ -176,9 +187,14 @@ fn insert_defaults(
     Ok(added)
 }
 
-/// Seed the native rules ONCE per project (gated by the directives_seeded flag),
-/// so a brand-new project — or an existing one opened for the first time after
-/// this ships — starts with the best-practice set instead of an empty list.
+/// Seed (or version-upgrade) the native rules for a project. `directives_seeded`
+/// holds the seed VERSION: 0 = never seeded, N = seeded with version N.
+///   - Never seeded → insert the current set.
+///   - Seeded at an older version → REPLACE only the untouched builtins (delete
+///     source='builtin' rows, re-insert the new set) and keep every 'user_typed'
+///     rule — including builtins the user edited, which directives_update promotes
+///     to 'user_typed'. So upgrades refresh the defaults without losing user work.
+/// Idempotent once at CURRENT_SEED_VERSION.
 fn seed_defaults_if_needed(conn: &rusqlite::Connection, project_id: &str) -> Result<(), String> {
     let seeded: i64 = conn
         .query_row(
@@ -187,15 +203,22 @@ fn seed_defaults_if_needed(conn: &rusqlite::Connection, project_id: &str) -> Res
             |r| r.get(0),
         )
         .unwrap_or(0);
-    if seeded != 0 {
+    if seeded >= CURRENT_SEED_VERSION {
         return Ok(());
     }
+    if seeded > 0 {
+        // Upgrade: drop the previous version's untouched built-ins before re-seeding.
+        let _ = conn.execute(
+            "DELETE FROM agent_directives WHERE project_id = ?1 AND source = 'builtin'",
+            rusqlite::params![project_id],
+        );
+    }
     insert_defaults(conn, project_id, false)?;
-    // Mark seeded even if the project row is absent yet (no-op then) — the next
-    // call re-checks. We swallow the error so listing never fails on the flag.
+    // Stamp the current seed version. No-op if the project row isn't there yet —
+    // the next call re-checks. Swallow the error so listing never fails on it.
     let _ = conn.execute(
-        "UPDATE agent_projects SET directives_seeded = 1 WHERE id = ?1",
-        rusqlite::params![project_id],
+        "UPDATE agent_projects SET directives_seeded = ?2 WHERE id = ?1",
+        rusqlite::params![project_id, CURRENT_SEED_VERSION],
     );
     Ok(())
 }
@@ -302,6 +325,9 @@ pub async fn directives_update(input: UpdateDirectiveInput) -> Result<(), String
         if sets.is_empty() { return Ok(()); }
         sets.push("updated_at = ?");
         params.push(Box::new(now_iso()));
+        // Editing a rule makes it the user's own — promote it to 'user_typed' so a
+        // future native-set version bump won't delete it as an untouched builtin.
+        sets.push("source = 'user_typed'");
         params.push(Box::new(input.id));
         let sql = format!("UPDATE agent_directives SET {} WHERE id = ?", sets.join(", "));
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
@@ -319,8 +345,8 @@ pub async fn directives_restore_defaults(project_id: String) -> Result<usize, St
         let conn = open_conn()?;
         let added = insert_defaults(&conn, &project_id, true)?;
         let _ = conn.execute(
-            "UPDATE agent_projects SET directives_seeded = 1 WHERE id = ?1",
-            rusqlite::params![project_id],
+            "UPDATE agent_projects SET directives_seeded = ?2 WHERE id = ?1",
+            rusqlite::params![project_id, CURRENT_SEED_VERSION],
         );
         Ok(added)
     })

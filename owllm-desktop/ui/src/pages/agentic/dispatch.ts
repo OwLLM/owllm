@@ -961,6 +961,8 @@ export function buildOrchestratorPrompt(
     "  - Ask the user clarifying questions in this turn — dispatch your best-guess plan; you can refine in the integration turn.",
     "  - Reply without any @<agent>: lines unless the goal is a pure no-edit, no-shell, no-external-call question. If you do, the user sees zero specialist activity and that is almost always wrong.",
     "",
+    TEAM_OPERATING_CONTRACT,
+    "",
     TEAM_MEMORY_HINT,
     "  - As orchestrator, memory_search at the START of a run to recover what the team already established; memory_write key decisions so later runs and other agents inherit them.",
   ].join("\n");
@@ -1000,6 +1002,7 @@ export function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
+  layers.push(TEAM_OPERATING_CONTRACT);
   layers.push(TEAM_MEMORY_HINT);
   layers.push(routingHint(team, spec));
   return layers.join("\n");
@@ -1018,6 +1021,30 @@ export const TEAM_MEMORY_HINT =
   "  - Your own earlier turns are already in your context; use shared memory for things\n" +
   "    the WHOLE team should know.";
 
+/// The team's standing operating contract — the parts of the "Agent Team Rules"
+/// that are STRUCTURE, not tunable rules: the conflict-resolution priority stack,
+/// the Definition of Done reporting contract, and the Handoff format. (The
+/// Must/Prefer/Avoid rules are the editable project directives, seeded in
+/// directives.rs and rendered by formatDirectivesBlock.) Injected verbatim into
+/// every agent AND the Critic so the whole team works and reports to one standard.
+export const TEAM_OPERATING_CONTRACT = [
+  "--- TEAM OPERATING CONTRACT (always in force) ---",
+  "PRIORITY — when guidance conflicts, the earlier item wins (this ordering is the",
+  "only way a lower rule yields):",
+  "  1) Verified & Correct  2) Safe & Reversible  3) Solves the Real Problem",
+  "  4) Small & Focused  5) Consistent with the Codebase  6) Clean & Maintainable",
+  "DEFINITION OF DONE — call work done ONLY after reporting: what changed; why it",
+  "solves the root problem; how it was verified (the exact commands/tests/checks run);",
+  "what could NOT be verified; assumptions made; remaining risks or follow-up. If you",
+  "could not verify, report it as partially verified or incomplete — never \"done\".",
+  "HANDOFF — when passing ACTIVE (unfinished) work to another agent, give everything",
+  "in the Definition of Done for the work so far, PLUS: the current task and exactly",
+  "where it stands; the files/components/branches/commits/diffs involved; open blockers",
+  "or failures; the next recommended step; and any work-in-progress that must NOT be",
+  "overwritten.",
+  "--- END OPERATING CONTRACT ---",
+].join("\n");
+
 /// Build the Critic agent's system prompt. The Critic answers in the
 /// user's voice when the orchestrator emits [NEED_USER_INPUT]. It
 /// leans heavily on the directive list because that IS the user's
@@ -1033,6 +1060,8 @@ export function buildCriticPrompt(
     "",
     "The user has stepped away. The orchestrator hit a decision point that's normally the user's call and asked for input. Your job is to answer AS THE USER WOULD, grounded in the project rules below.",
     directivesBlock || "(The user hasn't set any project rules yet — fall back to your best judgment of standard production-quality engineering practice.)",
+    "",
+    "Weigh trade-offs in this priority order (earlier wins): 1) Verified & Correct, 2) Safe & Reversible, 3) Solves the Real Problem, 4) Small & Focused, 5) Consistent with the Codebase, 6) Clean & Maintainable.",
     "",
     "HOW TO RESPOND:",
     "  - Give a short, direct, decisive answer (1-3 sentences max).",

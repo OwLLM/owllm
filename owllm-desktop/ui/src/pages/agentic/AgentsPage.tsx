@@ -68,6 +68,8 @@ import {
   nextHandoffs,
   loopExhaustedNotice,
   fetchNetRetry,
+  TEAM_OPERATING_CONTRACT,
+  TEAM_MEMORY_HINT,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -5782,6 +5784,11 @@ function buildOrchestratorPrompt(
     `3a. CRITICAL — the ONLY valid dispatch targets are these EXACT names: ${specialists.map(a => a.name).join(", ") || "(none)"}. Do NOT invent or assume agents: there is no @coder, @critic, @assistant, @writer, @developer (unless that exact name appears in the list). Never dispatch a tool either (no @web_search, @read_file). If the perfect specialist isn't on the list, pick the CLOSEST one that IS and put the real work in its instruction — but NEVER emit an @name that is not listed above, or it will be dropped and nothing runs.`,
     "4. Dispatch only the agents you actually need. Skip dispatches if the goal is trivial enough to answer yourself.",
     "5. After dispatches run, you'll be invoked again with the specialists' replies — produce the final answer for the user then.",
+    "",
+    TEAM_OPERATING_CONTRACT,
+    "",
+    TEAM_MEMORY_HINT,
+    "  - As orchestrator, memory_search at the START of a run to recover what the team already established; memory_write key decisions so later runs and other agents inherit them.",
   ].join("\n");
 }
 
@@ -5826,6 +5833,8 @@ function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
+  layers.push(TEAM_OPERATING_CONTRACT);
+  layers.push(TEAM_MEMORY_HINT);
   layers.push(routingHint(team, spec));
   return layers.join("\n");
 }

@@ -1769,6 +1769,16 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
     } catch (e) { console.error("directives_delete failed", e); }
     finally { setRulesBusy(false); }
   };
+  // Re-add any built-in best-practice rules the user deleted (no duplicates).
+  const restoreDefaults = async () => {
+    if (!projectId) return;
+    setRulesBusy(true);
+    try {
+      await invoke<number>("directives_restore_defaults", { projectId });
+      await onDirectivesChanged();
+    } catch (e) { console.error("directives_restore_defaults failed", e); }
+    finally { setRulesBusy(false); }
+  };
   return (
     // Width: fills the 450 px overlay column; height: fills the
     // available canvas vertical space (parent passes flex:1) so the
@@ -1919,6 +1929,17 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
               }}
             >+</button>
           </div>
+          {/* Restore the native best-practice set (re-adds any you deleted; no
+              duplicates). The defaults seed automatically on a new project; this
+              is the "I deleted some and want them back" affordance. */}
+          <div style={{ display:"flex", justifyContent:"flex-end" }}>
+            <button
+              onClick={restoreDefaults}
+              disabled={rulesBusy || !projectId}
+              title="Re-add the built-in best-practice rules you've deleted (won't duplicate ones you kept)"
+              style={{ background:"none", border:"none", color:"var(--fg-muted)", fontSize:10.5, cursor: projectId ? "pointer" : "not-allowed", textDecoration:"underline", padding:"2px 0" }}
+            >↺ Restore best-practices</button>
+          </div>
           {/* Rule list — grouped by kind, each row has Edit + Delete
               inline. While editing, the row swaps to inline form. */}
           <div style={{ background:"rgba(20,16,4,0.6)", border:"1px solid rgba(255,200,80,0.20)", borderRadius:8, padding:"8px 10px", maxHeight:220, overflow:"auto", fontSize:12, color:"var(--fg)", display:"flex", flexDirection:"column", gap:6 }}>
@@ -1960,7 +1981,12 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
                     </div>
                   ) : (
                     <div key={d.id} style={{ display:"flex", alignItems:"flex-start", gap:6, paddingLeft:8, borderLeft:`2px solid ${kc}`, lineHeight:1.4 }}>
-                      <span style={{ flex:1 }}>{d.text}</span>
+                      <span style={{ flex:1 }}>
+                        {d.text}
+                        {d.source === "builtin" && (
+                          <span title="Built-in best practice — edit or delete it like any rule" style={{ marginLeft:6, fontSize:9, fontWeight:700, letterSpacing:0.4, color:"var(--fg-subtle)", border:"1px solid var(--border)", borderRadius:4, padding:"0 4px", verticalAlign:"middle", textTransform:"uppercase" }}>native</span>
+                        )}
+                      </span>
                       <button onClick={() => beginEdit(d)} disabled={rulesBusy} title="Edit" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"var(--fg-muted)", fontSize:12, cursor:"pointer" }}>✏️</button>
                       <button onClick={() => deleteRule(d.id)} disabled={rulesBusy} title="Delete" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"#ff8c8c", fontSize:12, cursor:"pointer" }}>🗑</button>
                     </div>
@@ -4544,7 +4570,12 @@ function OrchestratorPane({
                     </div>
                   ) : (
                     <div key={d.id} style={{ display:"flex", alignItems:"flex-start", gap:6, paddingLeft:8, borderLeft:`2px solid ${kc}`, lineHeight:1.4 }}>
-                      <span style={{ flex:1 }}>{d.text}</span>
+                      <span style={{ flex:1 }}>
+                        {d.text}
+                        {d.source === "builtin" && (
+                          <span title="Built-in best practice — edit or delete it like any rule" style={{ marginLeft:6, fontSize:9, fontWeight:700, letterSpacing:0.4, color:"var(--fg-subtle)", border:"1px solid var(--border)", borderRadius:4, padding:"0 4px", verticalAlign:"middle", textTransform:"uppercase" }}>native</span>
+                        )}
+                      </span>
                       <button onClick={() => beginEdit(d)} disabled={rulesBusy} title="Edit" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"var(--fg-muted)", fontSize:12, cursor:"pointer" }}>✏️</button>
                       <button onClick={() => deleteRule(d.id)} disabled={rulesBusy} title="Delete" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"#ff8c8c", fontSize:12, cursor:"pointer" }}>🗑</button>
                     </div>

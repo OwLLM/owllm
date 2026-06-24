@@ -221,6 +221,7 @@ pub fn run() {
             directives::directives_add,
             directives::directives_update,
             directives::directives_delete,
+            directives::directives_restore_defaults,
             directives::project_set_director_mode,
             directives::project_get_director_mode,
             fleet::path_is_dir,

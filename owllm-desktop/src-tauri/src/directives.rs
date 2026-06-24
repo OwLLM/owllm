@@ -107,6 +107,96 @@ fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "ALTER TABLE agent_projects ADD COLUMN director_mode INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    // One-time "have we seeded this project's native best-practice rules?" flag.
+    // Lives on agent_projects so that deleting every rule never RE-seeds — the
+    // user's deletions stick. (Same idempotent-ALTER pattern.)
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN directives_seeded INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    Ok(())
+}
+
+/// Native best-practice rules every project starts with, so nobody writes a rule
+/// list from zero. They are NORMAL directives (the user can edit or delete any of
+/// them) — only the `source` is 'builtin' so the UI can mark them. They flow into
+/// every agent AND the Critic exactly like user-typed rules (buildCriticPrompt /
+/// buildSpecialistPrompt both inject the project directives). Worded as general,
+/// production-quality engineering guidance — distilled from the user's own
+/// standing principles (verify, reuse, root-cause, no fabrication, build for all).
+pub(crate) const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
+    ("must", "Verify every change actually works — run it, test it, or probe it — before calling it done."),
+    ("must", "Make the smallest change that fully solves the task; don't rewrite working code you weren't asked to touch."),
+    ("must", "Match the existing code's style, naming, structure, and patterns."),
+    ("must", "Find the root cause before reaching for a workaround."),
+    ("must", "Ask before anything destructive or irreversible (deleting files or data, force-pushing, overwriting)."),
+    ("must", "Design for every target user and environment, not just the current machine."),
+    ("prefer", "Reuse existing functions, components, and tools instead of writing parallel new ones."),
+    ("prefer", "Clear, descriptive names and straightforward code over cleverness."),
+    ("prefer", "Handle errors explicitly and surface them — never fail silently."),
+    ("prefer", "Check the shared team memory before re-deriving or re-asking something already known."),
+    ("avoid", "Fabricating data, file paths, results, or citations — never invent what you didn't verify."),
+    ("avoid", "Hardcoding machine-specific paths, credentials, or environment assumptions."),
+    ("avoid", "Mixing unrelated refactors into a single focused change."),
+    ("avoid", "Leaving debug prints, dead code, or vague TODOs behind."),
+];
+
+/// Insert the built-in rules for a project. When `skip_existing_by_text` is set,
+/// a default already present (matched by text) is skipped — used by the explicit
+/// "restore best-practices" action so it never duplicates surviving rules.
+/// Returns how many rows were inserted.
+fn insert_defaults(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    skip_existing_by_text: bool,
+) -> Result<usize, String> {
+    let now = now_iso();
+    let mut added = 0usize;
+    for (kind, text) in DEFAULT_DIRECTIVES {
+        if skip_existing_by_text {
+            let dup: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM agent_directives WHERE project_id = ?1 AND text = ?2",
+                    rusqlite::params![project_id, text],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if dup > 0 {
+                continue;
+            }
+        }
+        conn.execute(
+            "INSERT INTO agent_directives (id, project_id, kind, text, source, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, 'builtin', ?5, ?5)",
+            rusqlite::params![new_id(), project_id, kind, text, now],
+        )
+        .map_err(|e| format!("seed insert: {e}"))?;
+        added += 1;
+    }
+    Ok(added)
+}
+
+/// Seed the native rules ONCE per project (gated by the directives_seeded flag),
+/// so a brand-new project — or an existing one opened for the first time after
+/// this ships — starts with the best-practice set instead of an empty list.
+fn seed_defaults_if_needed(conn: &rusqlite::Connection, project_id: &str) -> Result<(), String> {
+    let seeded: i64 = conn
+        .query_row(
+            "SELECT COALESCE(directives_seeded, 0) FROM agent_projects WHERE id = ?1",
+            rusqlite::params![project_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if seeded != 0 {
+        return Ok(());
+    }
+    insert_defaults(conn, project_id, false)?;
+    // Mark seeded even if the project row is absent yet (no-op then) — the next
+    // call re-checks. We swallow the error so listing never fails on the flag.
+    let _ = conn.execute(
+        "UPDATE agent_projects SET directives_seeded = 1 WHERE id = ?1",
+        rusqlite::params![project_id],
+    );
     Ok(())
 }
 
@@ -125,6 +215,9 @@ fn open_conn() -> Result<rusqlite::Connection, String> {
 pub async fn directives_list(project_id: String) -> Result<Vec<Directive>, String> {
     tokio::task::spawn_blocking(move || {
         let conn = open_conn()?;
+        // Auto-seed native best-practice rules the first time a project is listed,
+        // so the rules panel is never empty and the user never starts from zero.
+        seed_defaults_if_needed(&conn, &project_id)?;
         let mut stmt = conn.prepare(
             "SELECT id, project_id, kind, text, source, created_at, updated_at \
              FROM agent_directives WHERE project_id = ?1 \
@@ -215,6 +308,24 @@ pub async fn directives_update(input: UpdateDirectiveInput) -> Result<(), String
         conn.execute(&sql, refs.as_slice()).map_err(|e| format!("update: {e}"))?;
         Ok(())
     }).await.map_err(|e| format!("join error: {e}"))?
+}
+
+/// Re-add any built-in best-practice rules the user has deleted (matched by
+/// text), without duplicating ones still present. Backs the "Restore
+/// best-practices" button. Returns how many were restored.
+#[tauri::command]
+pub async fn directives_restore_defaults(project_id: String) -> Result<usize, String> {
+    tokio::task::spawn_blocking(move || {
+        let conn = open_conn()?;
+        let added = insert_defaults(&conn, &project_id, true)?;
+        let _ = conn.execute(
+            "UPDATE agent_projects SET directives_seeded = 1 WHERE id = ?1",
+            rusqlite::params![project_id],
+        );
+        Ok(added)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 #[tauri::command]

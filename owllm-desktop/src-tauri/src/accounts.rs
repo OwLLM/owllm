@@ -372,14 +372,21 @@ pub async fn accounts_refresh_sandbox_creds(cwd: Option<String>) -> Result<bool,
     if !crate::sandbox::is_isolated(cwd.as_deref()) {
         return Ok(false);
     }
-    tokio::task::spawn_blocking(|| {
+    let fut = tokio::task::spawn_blocking(|| {
         // Re-mirror Windows → distro (claude/codex/gemini/kimi creds + keys). The
         // distro is resolved inside (best_linux_distro). Best-effort.
         let _ = crate::sandbox::sandbox_sync_logins(None);
-        Ok(true)
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+        true
+    });
+    // BOUND IT: a cold / unresponsive WSL (classically right after a PC reboot) made
+    // this WSL round-trip hang with no timeout — which blocked the warm-up, which
+    // blocked the orchestrator's first call for MINUTES with no way to recover. On
+    // timeout we give up (best-effort): the run proceeds, and the next warm cycle
+    // re-syncs once WSL is healthy. Never let a stuck WSL stall a dispatch.
+    match tokio::time::timeout(std::time::Duration::from_secs(20), fut).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(_)) | Err(_) => Ok(false),
+    }
 }
 
 /// on user click, not on the 3-s status poll.

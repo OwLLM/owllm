@@ -1478,7 +1478,7 @@ pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<bool, String>
     let Some(cwd) = cwd.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
         return Ok(false);
     };
-    tokio::task::spawn_blocking(move || -> Result<bool, String> {
+    let fut = tokio::task::spawn_blocking(move || -> bool {
         #[cfg(windows)]
         {
             if let Some((distro, linux_cwd)) = crate::wsl::parse_wsl_unc(&cwd) {
@@ -1490,16 +1490,21 @@ pub async fn sandbox_warm_and_check(cwd: Option<String>) -> Result<bool, String>
                     crate::wsl::sh_quote(&linux_cwd)
                 );
                 return match crate::wsl::run_in_distro_script(&distro, &script) {
-                    Ok(o) => Ok(o.contains("OWLLM_REACH_OK")),
-                    Err(_) => Ok(false),
+                    Ok(o) => o.contains("OWLLM_REACH_OK"),
+                    Err(_) => false,
                 };
             }
         }
         // Plain host path (or non-Windows): stat it directly.
-        Ok(std::path::Path::new(&cwd).is_dir())
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+        std::path::Path::new(&cwd).is_dir()
+    });
+    // BOUND IT: starting a cold distro can take a bit, but a stuck WSL must never
+    // hang the pre-flight forever. 45 s is generous for a cold-start; past that we
+    // report not-reachable so the run surfaces a clear message instead of blocking.
+    match tokio::time::timeout(std::time::Duration::from_secs(45), fut).await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(_)) | Err(_) => Ok(false),
+    }
 }
 
 #[cfg(test)]

@@ -14,6 +14,7 @@ import MarkdownLink from "../../components/MarkdownLink";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
+import TeamMemoryModal from "./TeamMemoryModal";
 import IconPickerDialog, {
   getAgentIconOverride,
   setAgentIconOverride,
@@ -73,7 +74,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope } from "./localTools";
 import { normalizeTeam, roleCanWrite } from "./teamConfig";
 import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
 import { getServerCtx } from "../core/serverContext";
@@ -1014,6 +1015,13 @@ function FlowHeader({
           >⟲ Layout</button>
         </>
       )}
+      <button
+        data-ui="FlowMemoryBtn"
+        className="ghost-btn"
+        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-team-memory"))}
+        title="Team Memory — the shared knowledge base your agents read and write (build commands, decisions, file maps). Syncs across your PCs via the vault."
+        style={{ height:28, padding:"0 8px", fontSize:11 }}
+      >🧠 Memory</button>
       <button data-ui="FlowRefreshBtn" className="ghost-btn" title="Refresh model lists in every picker" style={{ height:28, width:30, padding:0, fontSize:11 }}>⟳</button>
       {/* 3-way segmented view switch. Diagram = live orbital,
           Graph = editable top-down hierarchy, Chat = per-agent grid
@@ -8784,6 +8792,9 @@ export default function AgentsPage() {
     // when it's wired directly as the onRun handler.
     const text = (typeof overrideText === "string" ? overrideText : goal).trim();
     if (!text) return;
+    // Key the shared team memory by this project's stable ID so it matches across
+    // machines (and syncs via the vault) rather than by the per-PC folder path.
+    setTeamMemoryScope(selectedProjectId);
     // A goal dispatch is heavy (worktrees, commits, fan-out). Refuse to start
     // a second on top of one already running for THIS project — including one
     // still running in the background after the user changed pages. We read
@@ -10381,6 +10392,7 @@ export default function AgentsPage() {
           onSaved={async () => { setWorkbenchOpen(false); await reloadTeamLibrary(); }}
         />
       )}
+      <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} />
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{
           margin: "0 23px 6px",

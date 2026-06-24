@@ -12,6 +12,7 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   executeToolCall,
+  setTeamMemoryScope,
   formatToolsForOpenAI,
   unmangleMcpName,
   renderToolResultsForModel,
@@ -2844,6 +2845,8 @@ export async function runCriticDispatch(opts: {
 
 export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks): Promise<string> {
   const { team, roleByName, goal, modelFor, models, port, projectCwd, projectId, history, autoApprove, signal, directives, directorMode, attachments } = opts;
+  // Key the shared team memory by stable project ID (cross-PC / vault-syncable).
+  setTeamMemoryScope(projectId);
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]

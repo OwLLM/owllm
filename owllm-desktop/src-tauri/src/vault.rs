@@ -402,6 +402,100 @@ struct VaultProject {
     /// Carried so a BRAND-NEW device has a starting path; never overwrites an
     /// existing local project's location (see import_project).
     location: String,
+    /// Shared team-memory entries for this project (the RAG-like brain), keyed by
+    /// project ID so they match across machines. Merged per-entry on import
+    /// (last-writer-wins by each entry's own ts), independent of the project's
+    /// updated_at — agents write memory without bumping the project row.
+    /// `#[serde(default)]` so vault files written before this field still load.
+    #[serde(default)]
+    team_memory_json: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct VaultMemEntry {
+    key: String,
+    content: String,
+    tags: String,
+    author: String,
+    ts: i64,
+}
+
+/// Read a project's shared team-memory rows (scope == project id) for export.
+fn export_team_memory(conn: &rusqlite::Connection, project_id: &str) -> Vec<VaultMemEntry> {
+    let mut stmt = match conn.prepare(
+        "SELECT mkey, content, tags, author, ts FROM team_memory WHERE scope = ?1 ORDER BY id ASC",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(rusqlite::params![project_id], |r| {
+        Ok(VaultMemEntry {
+            key: r.get::<_, String>(0).unwrap_or_default(),
+            content: r.get::<_, String>(1).unwrap_or_default(),
+            tags: r.get::<_, String>(2).unwrap_or_default(),
+            author: r.get::<_, String>(3).unwrap_or_default(),
+            ts: r.get::<_, i64>(4).unwrap_or(0),
+        })
+    });
+    match rows {
+        Ok(it) => it.filter_map(|r| r.ok()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Merge remote team-memory entries into the local store for one project scope.
+/// Keyed entries upsert by (scope, key) keeping the newer ts; keyless entries
+/// insert if an identical (scope, content) isn't already present. Additive — a
+/// shared brain must never lose another device's contributions.
+fn merge_team_memory(conn: &rusqlite::Connection, project_id: &str, entries: &[VaultMemEntry]) {
+    for e in entries {
+        if e.content.trim().is_empty() {
+            continue;
+        }
+        if !e.key.trim().is_empty() {
+            let local_ts: Option<i64> = conn
+                .query_row(
+                    "SELECT ts FROM team_memory WHERE scope = ?1 AND mkey = ?2",
+                    rusqlite::params![project_id, e.key],
+                    |r| r.get(0),
+                )
+                .ok();
+            match local_ts {
+                Some(ts) if ts >= e.ts => { /* local is same/newer — keep it */ }
+                Some(_) => {
+                    let _ = conn.execute(
+                        "UPDATE team_memory SET content = ?1, tags = ?2, author = ?3, ts = ?4 \
+                         WHERE scope = ?5 AND mkey = ?6",
+                        rusqlite::params![e.content, e.tags, e.author, e.ts, project_id, e.key],
+                    );
+                }
+                None => {
+                    let _ = conn.execute(
+                        "INSERT INTO team_memory (scope, mkey, content, tags, author, ts) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        rusqlite::params![project_id, e.key, e.content, e.tags, e.author, e.ts],
+                    );
+                }
+            }
+        } else {
+            // Keyless: dedup on identical content within the scope.
+            let dup: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM team_memory WHERE scope = ?1 AND mkey = '' AND content = ?2",
+                    rusqlite::params![project_id, e.content],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if dup == 0 {
+                let _ = conn.execute(
+                    "INSERT INTO team_memory (scope, mkey, content, tags, author, ts) \
+                     VALUES (?1, '', ?2, ?3, ?4, ?5)",
+                    rusqlite::params![project_id, e.content, e.tags, e.author, e.ts],
+                );
+            }
+        }
+    }
 }
 
 /// Keep a project id safe as a filename (ids are `{hex}_{hex}` already, but be
@@ -426,6 +520,7 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
         return Ok(Vec::new());
     }
     crate::projects::ensure_schema(&conn)?;
+    let _ = crate::memory::ensure_schema(&conn);
     let mut stmt = conn
         .prepare(
             "SELECT id, name, description, team_json, model_overrides_json, graph_json, \
@@ -448,11 +543,20 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
                 created_at: r.get::<_, String>(9).unwrap_or_default(),
                 updated_at: r.get::<_, String>(10).unwrap_or_default(),
                 location: r.get::<_, String>(11).unwrap_or_default(),
+                team_memory_json: String::new(),
             })
         })
         .map_err(|e| format!("query export: {e}"))?;
-    let out: Result<Vec<_>, _> = rows.collect();
-    out.map_err(|e| format!("decode export: {e}"))
+    let mut projects: Vec<VaultProject> =
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("decode export: {e}"))?;
+    // Attach each project's shared team-memory (scope == project id).
+    for p in projects.iter_mut() {
+        let mem = export_team_memory(&conn, &p.id);
+        if !mem.is_empty() {
+            p.team_memory_json = serde_json::to_string(&mem).unwrap_or_else(|_| "[]".into());
+        }
+    }
+    Ok(projects)
 }
 
 /// Upsert one remote project into the local DB. Returns true when the local DB
@@ -468,6 +572,15 @@ fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool,
         Err(rusqlite::Error::QueryReturnedNoRows) => None,
         Err(e) => return Err(format!("probe project: {e}")),
     };
+    // Merge the shared team-memory regardless of the project's updated_at — memory
+    // writes don't bump the project row, so gating on it would drop another
+    // device's notes. Per-entry last-writer-wins inside merge_team_memory.
+    if !p.team_memory_json.trim().is_empty() {
+        if let Ok(entries) = serde_json::from_str::<Vec<VaultMemEntry>>(&p.team_memory_json) {
+            let _ = crate::memory::ensure_schema(conn);
+            merge_team_memory(conn, &p.id, &entries);
+        }
+    }
     match local_updated {
         None => {
             conn.execute(

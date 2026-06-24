@@ -246,6 +246,7 @@ pub fn run() {
             memory::team_memory_write,
             memory::team_memory_search,
             memory::team_memory_read,
+            memory::team_memory_delete,
             server::server_status,
             server::server_start,
             server::server_stop,

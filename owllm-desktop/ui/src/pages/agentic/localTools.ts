@@ -40,6 +40,16 @@ export const SKILL_TOOL_NAMES = new Set(["load_skill", "list_skills"]);
 /// advertised. Backed by SQLite (memory.rs) and scoped by the project cwd.
 export const MEMORY_TOOL_NAMES = new Set(["memory_search", "memory_write", "memory_read"]);
 
+/// Scope key for the shared team memory. We key it by the stable PROJECT ID
+/// (not the project cwd, which differs per machine: C:\foo vs /home/you/foo) so
+/// the store matches across PCs and can sync through the GitHub vault. The
+/// dispatch entry points set this at run start; the memory_* tools read it.
+/// Falls back to the cwd passed to executeToolCall when unset (e.g. ad-hoc use).
+let _teamMemoryScope = "";
+export function setTeamMemoryScope(projectId: string | null | undefined): void {
+  _teamMemoryScope = (projectId ?? "").trim();
+}
+
 export type ToolCall = {
   name: string;
   args: Record<string, string>;
@@ -1022,10 +1032,11 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         };
       }
       case "memory_search": {
-        // Shared team memory, scoped to the project cwd (Rust maps "" → "global").
+        // Shared team memory, scoped to the stable project ID (Rust maps "" → "global").
+        const memScope = _teamMemoryScope || projectCwd || "";
         const entries = await invoke<Array<{ id: number; key: string; content: string; tags: string; author: string; ts: number }>>(
           "team_memory_search",
-          { scope: projectCwd ?? "", query: call.args.query ?? "", limit: clampInt(call.args.limit, 8, 1, 50) },
+          { scope: memScope, query: call.args.query ?? "", limit: clampInt(call.args.limit, 8, 1, 50) },
         );
         if (!entries.length) {
           return { ok: true, output: "Team memory: no matching entries. (Save useful facts with memory_write.)" };
@@ -1041,7 +1052,7 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         const content = call.args.content ?? "";
         if (!content.trim()) return { ok: false, output: "memory_write: 'content' is required." };
         const id = await invoke<number>("team_memory_write", {
-          scope: projectCwd ?? "",
+          scope: _teamMemoryScope || projectCwd || "",
           content,
           key: call.args.key ?? "",
           tags: call.args.tags ?? "",
@@ -1055,7 +1066,7 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         if (!key.trim()) return { ok: false, output: "memory_read: 'key' is required." };
         const entry = await invoke<{ id: number; key: string; content: string; tags: string; author: string; ts: number } | null>(
           "team_memory_read",
-          { scope: projectCwd ?? "", key },
+          { scope: _teamMemoryScope || projectCwd || "", key },
         );
         if (!entry) return { ok: true, output: `Team memory: nothing stored under key "${key}".` };
         return { ok: true, output: entry.content };

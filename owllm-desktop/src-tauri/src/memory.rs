@@ -40,7 +40,7 @@ fn open_db() -> Result<rusqlite::Connection, String> {
     Ok(conn)
 }
 
-fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
+pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS agent_memory (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\
@@ -302,6 +302,23 @@ pub async fn team_memory_search(
         // Highest score first, then most-recent.
         scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
         Ok(scored.into_iter().take(lim).map(|(_, _, e)| e).collect())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Delete one shared entry by row id (the viewer's per-row delete). Returns the
+/// number of rows removed (0 if the id wasn't in this scope).
+#[tauri::command]
+pub async fn team_memory_delete(scope: String, id: i64) -> Result<usize, String> {
+    let sc = scope_of(&scope);
+    tokio::task::spawn_blocking(move || {
+        let conn = open_db()?;
+        conn.execute(
+            "DELETE FROM team_memory WHERE scope = ?1 AND id = ?2",
+            rusqlite::params![sc, id],
+        )
+        .map_err(|e| format!("delete: {e}"))
     })
     .await
     .map_err(|e| format!("join error: {e}"))?

@@ -50,6 +50,8 @@ import {
   getClaudeSession,
   resetClaudeSession,
   clearAllClaudeSessions,
+  loadAgentMemory,
+  appendAgentMemory,
   streamLocalChat,
   runCodexCliStream,
   ensureCliWarm,
@@ -9490,6 +9492,10 @@ export default function AgentsPage() {
             ...(perAgentSkills.get(spec.name) ?? []),              // per-project grant
           ];
           const skillBlock = await buildAgentSkillBlock(skillIds);
+          // Per-agent memory: fold THIS agent's own prior turns (across dispatches
+          // and across runs of this project) into its history so it's no longer a
+          // stateless one-shot. Model-agnostic — feeds the universal history param.
+          const specMemory = await loadAgentMemory(selectedProjectId, spec.name);
           let specText = "";
           try {
             specText = (await streamChatCompletion(
@@ -9498,7 +9504,7 @@ export default function AgentsPage() {
               tempFor(spec, 0.5), ctrl.signal,
               (delta) => streamLog(spec.name, delta),
               chainCwd,
-              undefined, undefined,
+              specMemory.length > 0 ? specMemory : undefined, undefined,
               (channel, role, delta) => streamThought(spec.name, channel, role, delta),
               allowed,
               undefined,
@@ -9509,6 +9515,8 @@ export default function AgentsPage() {
             streamLog(spec.name, "\n\n" + specText);
           }
           removeActive(spec.name);
+          // Persist this exchange so the next dispatch remembers it.
+          await appendAgentMemory(selectedProjectId, spec.name, instruction, specText);
           speakAgentReply(spec.name, specText);
           return { name: spec.name, text: specText };
         }

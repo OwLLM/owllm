@@ -33,6 +33,7 @@ mod git;
 mod hardware;
 mod huggingface;
 mod mcp;
+mod memory;
 mod models;
 mod modules;
 mod overlay_frame;
@@ -239,6 +240,12 @@ pub fn run() {
             projects::create_project,
             projects::update_project,
             projects::delete_project,
+            memory::agent_memory_get,
+            memory::agent_memory_append,
+            memory::agent_memory_clear,
+            memory::team_memory_write,
+            memory::team_memory_search,
+            memory::team_memory_read,
             server::server_status,
             server::server_start,
             server::server_stop,

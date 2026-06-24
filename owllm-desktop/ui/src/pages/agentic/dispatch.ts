@@ -331,6 +331,65 @@ export type GoalMsg = {
 };
 export type HistoryItem = { role: "user" | "assistant"; content: string };
 
+// ---------- Per-agent memory (the "teams have no memory" fix) ----------
+//
+// Specialists used to dispatch with history=undefined — each ran as a stateless
+// one-shot that saw only the single instruction. We now persist each agent's
+// (instruction → reply) turns in SQLite (memory.rs) and fold the recent,
+// char-budgeted tail back into its `history` on the next dispatch. Model-
+// agnostic: it feeds the universal `history` param, so it works for local,
+// Claude, Codex, Gemini, Kimi, and raw-API agents alike — independent of any
+// CLI --session-id (which only Claude honoured, and which carries no memory now).
+
+type AgentMemTurn = { role: "user" | "assistant"; content: string };
+
+/// Load an agent's recent conversational memory as a `history` array
+/// (oldest-first), budgeted to ~maxChars from the newest end so a long-lived
+/// agent's prompt can't grow without bound. Returns [] on any error / no id —
+/// memory is best-effort and must never block a dispatch.
+export async function loadAgentMemory(
+  projectId: string | null | undefined,
+  agentName: string | null | undefined,
+  maxChars = 6000,
+  maxTurns = 24,
+): Promise<HistoryItem[]> {
+  if (!projectId || !agentName) return [];
+  try {
+    const turns = await invoke<AgentMemTurn[]>("agent_memory_get", {
+      projectId, agentName, limit: maxTurns,
+    });
+    const out: HistoryItem[] = [];
+    let chars = 0;
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const t = turns[i];
+      chars += t.content?.length ?? 0;
+      if (chars > maxChars && out.length > 0) break;
+      out.unshift({ role: t.role, content: t.content });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/// Record one (instruction → reply) exchange for an agent. Best-effort; a
+/// blank/error reply is skipped Rust-side so it can't pollute memory.
+export async function appendAgentMemory(
+  projectId: string | null | undefined,
+  agentName: string | null | undefined,
+  instruction: string,
+  reply: string,
+): Promise<void> {
+  if (!projectId || !agentName) return;
+  // Don't persist obvious error replies as if they were real answers.
+  if (/^\(error:/.test(reply.trim())) return;
+  try {
+    await invoke("agent_memory_append", { projectId, agentName, instruction, reply });
+  } catch {
+    /* memory is best-effort */
+  }
+}
+
 // Multimodal attachment carrier. Raw bytes ride as base64 strings so
 // the same payload survives the JSON serialization on every provider
 // hop (OpenAI image_url data: URIs, Anthropic image.source.base64,
@@ -900,6 +959,9 @@ export function buildOrchestratorPrompt(
     "  - Try to do the work yourself. Your tools are read-only on purpose.",
     "  - Ask the user clarifying questions in this turn — dispatch your best-guess plan; you can refine in the integration turn.",
     "  - Reply without any @<agent>: lines unless the goal is a pure no-edit, no-shell, no-external-call question. If you do, the user sees zero specialist activity and that is almost always wrong.",
+    "",
+    TEAM_MEMORY_HINT,
+    "  - As orchestrator, memory_search at the START of a run to recover what the team already established; memory_write key decisions so later runs and other agents inherit them.",
   ].join("\n");
 }
 
@@ -937,9 +999,23 @@ export function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
+  layers.push(TEAM_MEMORY_HINT);
   layers.push(routingHint(team, spec));
   return layers.join("\n");
 }
+
+/// One-paragraph nudge so agents actually USE the shared team memory + the
+/// memory tools (memory_search / memory_write / memory_read). Specialists each
+/// also carry their OWN per-agent history now, but the shared store is how the
+/// team pools knowledge across agents and across runs.
+export const TEAM_MEMORY_HINT =
+  "TEAM MEMORY: you share a durable, project-wide memory with the rest of the team.\n" +
+  "  - Call memory_search FIRST when you need a known fact (build/run commands, file\n" +
+  "    locations, conventions, prior decisions) before re-deriving it or asking.\n" +
+  "  - Call memory_write to record stable, reusable facts you discover (use a short\n" +
+  "    `key` like 'build_command' to update one in place). Don't store transient chatter.\n" +
+  "  - Your own earlier turns are already in your context; use shared memory for things\n" +
+  "    the WHOLE team should know.";
 
 /// Build the Critic agent's system prompt. The Critic answers in the
 /// user's voice when the orchestrator emits [NEED_USER_INPUT]. It
@@ -3118,18 +3194,22 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives);
     const specModel = modelFor(spec.name);
     const specProvider = providerFor(specModel, models);
+    // Per-agent memory: fold this agent's own prior turns in so the bridge path
+    // (Telegram/WhatsApp/etc.) gets the same continuity as the UI team path.
+    const specMemory = await loadAgentMemory(projectId, spec.name);
     try {
       const specText = await streamChatCompletion(
         port, specModel, specProvider,
         specPrompt, instruction, tempFor(spec, 0.5), signal,
         (delta) => hooks.onLogDelta(spec.name, delta),
-        projectCwd, [], autoApprove,
+        projectCwd, specMemory.length > 0 ? specMemory : [], autoApprove,
         (channel, role, delta) => hooks.onThoughtDelta(spec.name, channel, role, delta),
         roleByName.get(spec.base)?.toolAllowlist,
         undefined,
         getClaudeSession(projectId, spec.name),
       );
       const cleaned = specText.trim();
+      await appendAgentMemory(projectId, spec.name, instruction, cleaned);
       hooks.onAgentReply(spec.name, cleaned);
       return { name: spec.name, text: cleaned };
     } catch (e: any) {

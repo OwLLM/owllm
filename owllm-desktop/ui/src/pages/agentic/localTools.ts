@@ -33,6 +33,13 @@ import { loadSkillByRef, skillCatalogBrief, anySkillInstalled } from "./skillRun
 /// them; force-added in formatToolsForOpenAI so an allowlist can't hide them.
 export const SKILL_TOOL_NAMES = new Set(["load_skill", "list_skills"]);
 
+/// Shared team-memory tools — a RAG-like store every agent can read/write so the
+/// team builds a common, durable knowledge base (decisions, build commands,
+/// gotchas, file maps) scoped to the project. Like skills, memory is a
+/// cross-cutting capability: NEVER gated by a role's tool_allowlist, always
+/// advertised. Backed by SQLite (memory.rs) and scoped by the project cwd.
+export const MEMORY_TOOL_NAMES = new Set(["memory_search", "memory_write", "memory_read"]);
+
 export type ToolCall = {
   name: string;
   args: Record<string, string>;
@@ -112,13 +119,23 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
   const localTools = (searchMcpTools.length > 0
     ? LOCAL_TOOL_SPECS.filter((t) => t.name !== "web_search")
     : LOCAL_TOOL_SPECS
-  ).filter((t) => !SKILL_TOOL_NAMES.has(t.name) && (!allowSet || allowSet.has(t.name)));
+  ).filter((t) =>
+    !SKILL_TOOL_NAMES.has(t.name) &&
+    !MEMORY_TOOL_NAMES.has(t.name) &&
+    (!allowSet || allowSet.has(t.name)),
+  );
   // Advertise the skill tools (load_skill / list_skills) regardless of the
   // allowlist, but only when at least one skill pack is installed.
   if (await anySkillInstalled()) {
     for (const t of LOCAL_TOOL_SPECS.filter((t) => SKILL_TOOL_NAMES.has(t.name))) {
       localTools.push(t);
     }
+  }
+  // Shared team-memory tools — always advertised (cross-cutting, never
+  // allowlist-gated) so any agent can consult / contribute to the team's
+  // common knowledge base.
+  for (const t of LOCAL_TOOL_SPECS.filter((t) => MEMORY_TOOL_NAMES.has(t.name))) {
+    localTools.push(t);
   }
   for (const t of localTools) {
     const properties: Record<string, unknown> = {};
@@ -627,6 +644,44 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       { name: "name", required: true, description: "The skill's name or id (e.g. 'pdf-processing').", aliases: ["skill", "skill_name", "id", "skill_id", "pack", "ref", "query"] },
     ],
   },
+  {
+    name: "memory_search",
+    aliases: ["recall", "remember", "search_memory", "memory_recall", "query_memory", "lookup_memory", "memory_lookup"],
+    description:
+      "Search the SHARED TEAM MEMORY — a durable knowledge base the whole team " +
+      "writes to (decisions, conventions, build/run commands, file locations, " +
+      "gotchas, prior findings). Call this BEFORE asking the user or re-deriving " +
+      "something that may already be known. Returns the most relevant entries. " +
+      "Pass an empty query to see the most recent entries.",
+    args: [
+      { name: "query", required: false, description: "Keywords to look up (e.g. 'build command', 'auth flow'). Empty = most recent.", aliases: ["q", "search", "text", "terms", "keywords", "topic"] },
+      { name: "limit", required: false, description: "Max entries to return (1-50, default 8).", aliases: ["max", "count", "n", "top_k", "max_results"] },
+    ],
+  },
+  {
+    name: "memory_write",
+    aliases: ["remember_this", "save_memory", "store_memory", "note", "memorize", "memory_save", "memory_store"],
+    description:
+      "Save a durable fact to the SHARED TEAM MEMORY so you and other agents can " +
+      "recall it later (across dispatches AND future runs). Use for stable, reusable " +
+      "knowledge — NOT transient chatter. Provide a short 'key' to UPDATE a known " +
+      "fact in place (e.g. key='build_command') instead of duplicating it.",
+    args: [
+      { name: "content", required: true, description: "The fact/decision to remember, stated plainly and self-contained.", aliases: ["text", "value", "fact", "note", "body", "memory", "data"] },
+      { name: "key", required: false, description: "Optional stable id to upsert in place (e.g. 'build_command', 'api_base_url').", aliases: ["name", "id", "slug", "label", "topic"] },
+      { name: "tags", required: false, description: "Optional comma-separated tags to aid later search.", aliases: ["tag", "labels", "categories", "keywords"] },
+    ],
+  },
+  {
+    name: "memory_read",
+    aliases: ["get_memory", "memory_get", "read_memory", "fetch_memory"],
+    description:
+      "Read ONE shared-memory entry by its exact key (the precise complement to " +
+      "memory_search). Returns the stored content, or nothing if that key is unset.",
+    args: [
+      { name: "key", required: true, description: "The exact key the fact was saved under (e.g. 'build_command').", aliases: ["name", "id", "slug", "label", "query"] },
+    ],
+  },
 ];
 
 // ---- Canonical-name + arg-alias resolution (the "normalize" half of
@@ -966,12 +1021,59 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
           output: `Loaded skill "${skill.name}". Follow these instructions for the current task:\n\n${truncate(skill.body.trim(), 12000)}`,
         };
       }
+      case "memory_search": {
+        // Shared team memory, scoped to the project cwd (Rust maps "" → "global").
+        const entries = await invoke<Array<{ id: number; key: string; content: string; tags: string; author: string; ts: number }>>(
+          "team_memory_search",
+          { scope: projectCwd ?? "", query: call.args.query ?? "", limit: clampInt(call.args.limit, 8, 1, 50) },
+        );
+        if (!entries.length) {
+          return { ok: true, output: "Team memory: no matching entries. (Save useful facts with memory_write.)" };
+        }
+        const rendered = entries.map((e) => {
+          const k = e.key ? `[${e.key}] ` : "";
+          const tg = e.tags ? `  (tags: ${e.tags})` : "";
+          return `• ${k}${e.content}${tg}`;
+        }).join("\n");
+        return { ok: true, output: `Team memory (${entries.length}):\n${rendered}` };
+      }
+      case "memory_write": {
+        const content = call.args.content ?? "";
+        if (!content.trim()) return { ok: false, output: "memory_write: 'content' is required." };
+        const id = await invoke<number>("team_memory_write", {
+          scope: projectCwd ?? "",
+          content,
+          key: call.args.key ?? "",
+          tags: call.args.tags ?? "",
+          author: "",
+        });
+        const k = call.args.key ? ` under key "${call.args.key}"` : "";
+        return { ok: true, output: `Saved to team memory${k} (#${id}).` };
+      }
+      case "memory_read": {
+        const key = call.args.key ?? "";
+        if (!key.trim()) return { ok: false, output: "memory_read: 'key' is required." };
+        const entry = await invoke<{ id: number; key: string; content: string; tags: string; author: string; ts: number } | null>(
+          "team_memory_read",
+          { scope: projectCwd ?? "", key },
+        );
+        if (!entry) return { ok: true, output: `Team memory: nothing stored under key "${key}".` };
+        return { ok: true, output: entry.content };
+      }
       default:
         return { ok: false, output: `unknown tool: ${call.name}` };
     }
   } catch (e) {
     return { ok: false, output: String(e) };
   }
+}
+
+/// Parse a model-supplied integer arg (they often send strings), clamping to
+/// [min,max] with a default when absent/garbage. Used by memory_search.limit.
+function clampInt(v: string | undefined, def: number, min: number, max: number): number {
+  const n = parseInt(String(v ?? "").trim(), 10);
+  if (!Number.isFinite(n)) return def;
+  return Math.max(min, Math.min(max, n));
 }
 
 function truncate(s: string, max: number): string {

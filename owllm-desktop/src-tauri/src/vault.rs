@@ -409,6 +409,101 @@ struct VaultProject {
     /// `#[serde(default)]` so vault files written before this field still load.
     #[serde(default)]
     team_memory_json: String,
+    /// Project RULES (directives) as a JSON array, synced as a UNIT with
+    /// last-writer-wins by `directives_updated_at` (a real edit beats the seed-only
+    /// sentinel ''). Unit-replace — not per-entry merge — so a DELETED rule stays
+    /// deleted across PCs instead of resurrecting. `directives_seeded` carries the
+    /// native-set version so the importer won't re-seed over a synced set.
+    #[serde(default)]
+    directives_json: String,
+    #[serde(default)]
+    directives_updated_at: String,
+    #[serde(default)]
+    directives_seeded: i64,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
+#[serde(rename_all = "camelCase")]
+struct VaultDirective {
+    id: String,
+    kind: String,
+    text: String,
+    source: String,
+    created_at: String,
+    updated_at: String,
+}
+
+/// Read a project's rule set for export.
+fn export_directives(conn: &rusqlite::Connection, project_id: &str) -> Vec<VaultDirective> {
+    let mut stmt = match conn.prepare(
+        "SELECT id, kind, text, source, created_at, updated_at FROM agent_directives \
+         WHERE project_id = ?1 ORDER BY kind, created_at",
+    ) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let rows = stmt.query_map(rusqlite::params![project_id], |r| {
+        Ok(VaultDirective {
+            id: r.get::<_, String>(0).unwrap_or_default(),
+            kind: r.get::<_, String>(1).unwrap_or_else(|_| "must".into()),
+            text: r.get::<_, String>(2).unwrap_or_default(),
+            source: r.get::<_, String>(3).unwrap_or_else(|_| "user_typed".into()),
+            created_at: r.get::<_, String>(4).unwrap_or_default(),
+            updated_at: r.get::<_, String>(5).unwrap_or_default(),
+        })
+    });
+    match rows {
+        Ok(it) => it.filter_map(|r| r.ok()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Replace a project's local rule set with the remote one ONLY when the remote is
+/// the newer writer (remote `directives_updated_at` > local). Unit-replace makes
+/// deletes propagate; the seed version is adopted so the importer won't re-seed.
+fn merge_directives(
+    conn: &rusqlite::Connection,
+    project_id: &str,
+    remote_dua: &str,
+    remote_seeded: i64,
+    entries: &[VaultDirective],
+) {
+    let remote_dua = remote_dua.trim();
+    if remote_dua.is_empty() {
+        return; // remote is seed-only — nothing curated to propagate.
+    }
+    let local_dua: String = conn
+        .query_row(
+            "SELECT COALESCE(directives_updated_at, '') FROM agent_projects WHERE id = ?1",
+            rusqlite::params![project_id],
+            |r| r.get(0),
+        )
+        .unwrap_or_default();
+    if remote_dua <= local_dua.as_str() {
+        return; // local is same/newer — keep it.
+    }
+    // Remote wins → swap the whole set in.
+    let _ = conn.execute(
+        "DELETE FROM agent_directives WHERE project_id = ?1",
+        rusqlite::params![project_id],
+    );
+    for e in entries {
+        if e.text.trim().is_empty() {
+            continue;
+        }
+        let _ = conn.execute(
+            "INSERT INTO agent_directives (id, project_id, kind, text, source, created_at, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![e.id, project_id, e.kind, e.text, e.source, e.created_at, e.updated_at],
+        );
+    }
+    // Adopt the remote stamp + seed version so we neither re-seed over this set nor
+    // re-import it next round.
+    let seeded = remote_seeded.max(0);
+    let _ = conn.execute(
+        "UPDATE agent_projects SET directives_updated_at = ?2, directives_seeded = ?3 WHERE id = ?1",
+        rusqlite::params![project_id, remote_dua, seeded],
+    );
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
@@ -544,16 +639,36 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
                 updated_at: r.get::<_, String>(10).unwrap_or_default(),
                 location: r.get::<_, String>(11).unwrap_or_default(),
                 team_memory_json: String::new(),
+                directives_json: String::new(),
+                directives_updated_at: String::new(),
+                directives_seeded: 0,
             })
         })
         .map_err(|e| format!("query export: {e}"))?;
     let mut projects: Vec<VaultProject> =
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("decode export: {e}"))?;
-    // Attach each project's shared team-memory (scope == project id).
+    let _ = crate::directives::ensure_schema(&conn);
     for p in projects.iter_mut() {
+        // Shared team-memory (scope == project id).
         let mem = export_team_memory(&conn, &p.id);
         if !mem.is_empty() {
             p.team_memory_json = serde_json::to_string(&mem).unwrap_or_else(|_| "[]".into());
+        }
+        // Rule set + its sync stamps (only meaningful once the user has edited rules,
+        // i.e. directives_updated_at != '').
+        let (dua, seeded): (String, i64) = conn
+            .query_row(
+                "SELECT COALESCE(directives_updated_at,''), COALESCE(directives_seeded,0) \
+                 FROM agent_projects WHERE id = ?1",
+                rusqlite::params![p.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or_default();
+        p.directives_updated_at = dua;
+        p.directives_seeded = seeded;
+        let dirs = export_directives(&conn, &p.id);
+        if !dirs.is_empty() {
+            p.directives_json = serde_json::to_string(&dirs).unwrap_or_else(|_| "[]".into());
         }
     }
     Ok(projects)
@@ -572,16 +687,9 @@ fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool,
         Err(rusqlite::Error::QueryReturnedNoRows) => None,
         Err(e) => return Err(format!("probe project: {e}")),
     };
-    // Merge the shared team-memory regardless of the project's updated_at — memory
-    // writes don't bump the project row, so gating on it would drop another
-    // device's notes. Per-entry last-writer-wins inside merge_team_memory.
-    if !p.team_memory_json.trim().is_empty() {
-        if let Ok(entries) = serde_json::from_str::<Vec<VaultMemEntry>>(&p.team_memory_json) {
-            let _ = crate::memory::ensure_schema(conn);
-            merge_team_memory(conn, &p.id, &entries);
-        }
-    }
-    match local_updated {
+    // 1) Upsert the project row FIRST so it's guaranteed to exist before the
+    //    sub-table merges below (which UPDATE flags on agent_projects).
+    let changed = match &local_updated {
         None => {
             conn.execute(
                 "INSERT INTO agent_projects (id, name, description, location, trust_writes, \
@@ -596,10 +704,10 @@ fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool,
                 ],
             )
             .map_err(|e| format!("insert project: {e}"))?;
-            Ok(true)
+            true
         }
         Some(local) => {
-            if p.updated_at > local {
+            if p.updated_at > *local {
                 // Remote is newer → adopt CONTENT, keep local path + trust flags.
                 conn.execute(
                     "UPDATE agent_projects SET name = ?2, description = ?3, team_json = ?4, \
@@ -613,12 +721,32 @@ fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool,
                     ],
                 )
                 .map_err(|e| format!("update project: {e}"))?;
-                Ok(true)
+                true
             } else {
-                Ok(false)
+                false
             }
         }
+    };
+    // 2) Merge the shared team-memory — INDEPENDENT of the project's updated_at
+    //    (memory writes don't bump it). Per-entry last-writer-wins.
+    if !p.team_memory_json.trim().is_empty() {
+        if let Ok(entries) = serde_json::from_str::<Vec<VaultMemEntry>>(&p.team_memory_json) {
+            let _ = crate::memory::ensure_schema(conn);
+            merge_team_memory(conn, &p.id, &entries);
+        }
     }
+    // 3) Merge the rule set — unit last-writer-wins by directives_updated_at
+    //    (delete-aware), also independent of the project's updated_at.
+    if !p.directives_updated_at.trim().is_empty() {
+        let _ = crate::directives::ensure_schema(conn);
+        let dirs = if p.directives_json.trim().is_empty() {
+            Vec::new()
+        } else {
+            serde_json::from_str::<Vec<VaultDirective>>(&p.directives_json).unwrap_or_default()
+        };
+        merge_directives(conn, &p.id, &p.directives_updated_at, p.directives_seeded, &dirs);
+    }
+    Ok(changed)
 }
 
 /// Sync the project/chat rows through the vault: pull every other device's

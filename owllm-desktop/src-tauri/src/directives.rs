@@ -83,7 +83,7 @@ fn new_id() -> String {
     format!("{:x}{:x}", ms, rand & 0xffff_ffff_ffff)
 }
 
-fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
+pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     conn.execute(
         "CREATE TABLE IF NOT EXISTS agent_directives (\
             id TEXT PRIMARY KEY,\
@@ -114,7 +114,25 @@ fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "ALTER TABLE agent_projects ADD COLUMN directives_seeded INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    // Last time the user CHANGED this project's rule set (add/edit/delete/restore).
+    // Drives cross-PC sync: the rule set is synced as a unit, last-writer-wins by
+    // this stamp. Empty '' = seed-only / never user-touched, so a freshly-seeded
+    // machine never overwrites a curated one (any real edit's ISO stamp beats '').
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN directives_updated_at TEXT NOT NULL DEFAULT ''",
+        [],
+    );
     Ok(())
+}
+
+/// Stamp "the user just changed this project's rules" so the cross-PC sync knows
+/// this machine holds the newer set. Called by add/update/delete/restore — NOT by
+/// seeding (seed leaves the stamp '' so defaults never beat a curated remote).
+fn touch_directives(conn: &rusqlite::Connection, project_id: &str) {
+    let _ = conn.execute(
+        "UPDATE agent_projects SET directives_updated_at = ?2 WHERE id = ?1",
+        rusqlite::params![project_id, now_iso()],
+    );
 }
 
 /// Bump when DEFAULT_DIRECTIVES changes so already-seeded projects upgrade to the
@@ -289,6 +307,7 @@ pub async fn directives_add(input: AddDirectiveInput) -> Result<Directive, Strin
              VALUES (?1, ?2, ?3, ?4, 'user_typed', ?5, ?5)",
             rusqlite::params![id, input.project_id, kind, text, now],
         ).map_err(|e| format!("insert: {e}"))?;
+        touch_directives(&conn, &input.project_id);
         Ok(Directive {
             id, project_id: input.project_id, kind, text,
             source: "user_typed".into(),
@@ -328,10 +347,18 @@ pub async fn directives_update(input: UpdateDirectiveInput) -> Result<(), String
         // Editing a rule makes it the user's own — promote it to 'user_typed' so a
         // future native-set version bump won't delete it as an untouched builtin.
         sets.push("source = 'user_typed'");
-        params.push(Box::new(input.id));
+        params.push(Box::new(input.id.clone()));
         let sql = format!("UPDATE agent_directives SET {} WHERE id = ?", sets.join(", "));
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         conn.execute(&sql, refs.as_slice()).map_err(|e| format!("update: {e}"))?;
+        // Stamp the owning project so the edit syncs as the newer rule set.
+        if let Ok(pid) = conn.query_row(
+            "SELECT project_id FROM agent_directives WHERE id = ?1",
+            rusqlite::params![input.id],
+            |r| r.get::<_, String>(0),
+        ) {
+            touch_directives(&conn, &pid);
+        }
         Ok(())
     }).await.map_err(|e| format!("join error: {e}"))?
 }
@@ -348,6 +375,8 @@ pub async fn directives_restore_defaults(project_id: String) -> Result<usize, St
             "UPDATE agent_projects SET directives_seeded = ?2 WHERE id = ?1",
             rusqlite::params![project_id, CURRENT_SEED_VERSION],
         );
+        // Restoring is a deliberate user action — stamp it so it syncs.
+        touch_directives(&conn, &project_id);
         Ok(added)
     })
     .await
@@ -358,8 +387,20 @@ pub async fn directives_restore_defaults(project_id: String) -> Result<usize, St
 pub async fn directives_delete(id: String) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let conn = open_conn()?;
+        // Look up the owning project BEFORE deleting so we can stamp it (a delete
+        // must sync, or the rule resurrects from another PC).
+        let pid: Option<String> = conn
+            .query_row(
+                "SELECT project_id FROM agent_directives WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
         conn.execute("DELETE FROM agent_directives WHERE id = ?1", rusqlite::params![id])
             .map_err(|e| format!("delete: {e}"))?;
+        if let Some(pid) = pid {
+            touch_directives(&conn, &pid);
+        }
         Ok(())
     }).await.map_err(|e| format!("join error: {e}"))?
 }

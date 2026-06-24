@@ -425,39 +425,54 @@ pub async fn server_start(
     // specialist's reply + history and overflows ("Context size has been
     // exceeded"). The KV cache grows linearly with context, so a bigger card
     // affords a bigger window; a small card stays conservative so models load.
+    // Largest context whose KV cache fits on the GPU ALONGSIDE the model weights.
+    // The old code keyed -c off TOTAL VRAM (≥20 GB → 32768) and ignored the weights
+    // already in VRAM, so a big model (e.g. a 17–19 GB model on a 24 GB 4090) got a
+    // 32k window whose ~5–8 GB KV cache no longer fit — and with `-fit off -ngl 99`
+    // that overflow ran on the CPU, dropping to a few tok/s while VRAM LOOKED full.
+    // We compute the fitting size from headroom = VRAM − weights − reserve, and then
+    // CAP the requested/stored value to it: a stale 32768 default must not be allowed
+    // to silently spill to CPU. A SMALLER explicit value is still honoured.
+    let vram = crate::recommendations::detect_vram_gb().await.unwrap_or(8.0) as f64;
+    let model_gb = std::fs::metadata(&base_model)
+        .map(|m| m.len() as f64 / 1_000_000_000.0)
+        .unwrap_or(0.0);
+    // ~2 GB reserved for the CUDA context + compute buffers (also covers a small mmproj).
+    let headroom = (vram - model_gb - 2.0).max(0.0);
+    let max_fit: u32 = if headroom >= 8.0 { 32768 }
+        else if headroom >= 5.0 { 16384 }
+        else if headroom >= 3.0 { 12288 }
+        else if headroom >= 1.8 { 8192 }
+        else if headroom >= 1.0 { 4096 }
+        else { 2048 };
     let ctx_size = match ctx {
-        Some(c) if c >= 512 => c,
+        // Honour an explicit choice — but cap it to what physically fits so it can't
+        // spill the KV cache onto the CPU. (model_gb==0 → couldn't stat; trust the ask.)
+        Some(c) if c >= 512 => {
+            if model_gb > 0.0 && c > max_fit {
+                let _ = app.emit("server-log", ServerLogEvent {
+                    stream: "stdout".into(),
+                    line: format!(
+                        "[supervisor] context {c} would spill to CPU — capped to {max_fit} so the {:.1} GB model + KV fit your {:.1} GB VRAM (a stale 32k default was the cause of the slow tok/s). For a bigger window at full GPU speed, use a smaller model/quant.",
+                        model_gb, vram,
+                    ),
+                });
+                max_fit
+            } else {
+                c
+            }
+        }
         _ => {
-            // Size the context from the VRAM LEFT AFTER THE MODEL WEIGHTS, not total
-            // VRAM. The old code keyed off total VRAM (≥20 GB → 32768), so a big
-            // model that already eats most of the card (e.g. a 19.5 GB 35B on a
-            // 24 GB 4090) got a 32k window whose KV cache (~5–8 GB) no longer fit —
-            // and with `-fit off -ngl 99` that overflow silently ran on the CPU,
-            // tanking speed to a few tok/s while VRAM still LOOKED full. Subtract the
-            // GGUF size + a CUDA/compute reserve, then size the window to the leftover
-            // headroom so the whole thing (weights + KV) actually fits on the GPU.
-            let vram = crate::recommendations::detect_vram_gb().await.unwrap_or(8.0) as f64;
-            let model_gb = std::fs::metadata(&base_model)
-                .map(|m| m.len() as f64 / 1_000_000_000.0)
-                .unwrap_or(0.0);
-            // ~2 GB reserved for the CUDA context + compute buffers.
-            let headroom = (vram - model_gb - 2.0).max(0.0);
-            let sized = if headroom >= 8.0 { 32768 }
-                else if headroom >= 5.0 { 16384 }
-                else if headroom >= 3.0 { 12288 }
-                else if headroom >= 1.8 { 8192 }
-                else if headroom >= 1.0 { 4096 }
-                else { 2048 };
             if model_gb > 0.0 {
                 let _ = app.emit("server-log", ServerLogEvent {
                     stream: "stdout".into(),
                     line: format!(
                         "[supervisor] auto context {} — model {:.1} GB + KV must fit your {:.1} GB VRAM (headroom {:.1} GB). For a bigger context with full GPU speed, use a smaller model/quant.",
-                        sized, model_gb, vram, headroom,
+                        max_fit, model_gb, vram, headroom,
                     ),
                 });
             }
-            sized
+            max_fit
         }
     };
     cmd.arg("-c").arg(ctx_size.to_string());

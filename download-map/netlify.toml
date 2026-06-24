@@ -1,0 +1,27 @@
+# OwLLM download-location map — a tiny Netlify site that:
+#   1. /dl/<platform>  — an Edge Function that records the visitor's COUNTRY
+#      (read at the edge, no IP stored, no cookie) then 302-redirects to the
+#      real GitHub installer. This is the link you share everywhere.
+#   2. /stats          — a token-gated Function returning the aggregate counts.
+#   3. /                — a private map dashboard (enter the token) that renders
+#      a world map shaded by downloads.
+#
+# Privacy: only an aggregate per-country counter is stored. No IP address, no
+# cookie, no per-user identifier — so it processes no personal data, which is
+# why it needs no consent banner. See README.md.
+
+[build]
+  publish = "public"
+  # Functions/edge-functions are auto-discovered from the default dirs below.
+
+[functions]
+  directory = "netlify/functions"
+
+[[edge_functions]]
+  path = "/dl"
+  function = "dl"
+
+[[edge_functions]]
+  # /dl/win, /dl/mac, /dl/linux, …
+  path = "/dl/*"
+  function = "dl"

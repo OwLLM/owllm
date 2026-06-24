@@ -1,0 +1,9 @@
+{
+  "name": "owllm-download-map",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Privacy-clean download-location map for OwLLM Desktop (Netlify Edge Function + Blobs).",
+  "dependencies": {
+    "@netlify/blobs": "^8.1.0"
+  }
+}

@@ -7,8 +7,12 @@
 // setTeamMemoryScope), so what you see here is exactly what the agents see — and
 // what syncs across your PCs through the GitHub vault.
 
-import { useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+
+// The 3D graph pulls in three.js — lazy-load it so the WebGL bundle only loads
+// when the user opens the Graph view (still bundled, so it works offline).
+const TeamMemoryGraph = lazy(() => import("./TeamMemoryGraph"));
 
 type Entry = {
   id: number;
@@ -27,6 +31,7 @@ export default function TeamMemoryModal({
   projectName?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const [view, setView] = useState<"list" | "graph">("list");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
@@ -44,7 +49,7 @@ export default function TeamMemoryModal({
     setErr(null);
     try {
       const rows = await invoke<Entry[]>("team_memory_search", {
-        scope, query: query.trim(), limit: 50,
+        scope, query: query.trim(), limit: 300,
       });
       setEntries(rows);
     } catch (e: any) {
@@ -105,7 +110,9 @@ export default function TeamMemoryModal({
       <div
         onClick={(e) => e.stopPropagation()}
         style={{
-          width: "min(720px, 94vw)", maxHeight: "86vh", display: "flex", flexDirection: "column",
+          width: view === "graph" ? "min(1100px, 96vw)" : "min(720px, 94vw)",
+          height: view === "graph" ? "90vh" : undefined,
+          maxHeight: "92vh", display: "flex", flexDirection: "column",
           background: "var(--bg-panel)", border: "1px solid var(--border-strong)",
           borderRadius: 12, boxShadow: "0 20px 60px rgba(0,0,0,0.5)", overflow: "hidden",
         }}
@@ -120,6 +127,21 @@ export default function TeamMemoryModal({
             </div>
           </div>
           <div style={{ flex: 1 }} />
+          {/* List / Graph view toggle */}
+          <div style={{ display: "flex", border: "1px solid var(--border-strong)", borderRadius: 7, overflow: "hidden", marginRight: 4 }}>
+            {(["list", "graph"] as const).map((v) => (
+              <button
+                key={v}
+                onClick={() => setView(v)}
+                title={v === "graph" ? "3D knowledge graph of the team memory" : "List view"}
+                style={{
+                  height: 28, padding: "0 11px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600,
+                  background: view === v ? "rgba(var(--accent-rgb),0.18)" : "transparent",
+                  color: view === v ? "var(--accent)" : "var(--fg-muted)",
+                }}
+              >{v === "graph" ? "🌐 Graph" : "☰ List"}</button>
+            ))}
+          </div>
           <button onClick={() => setOpen(false)} title="Close" style={{ width: 26, height: 26, padding: 0, border: "none", borderRadius: 6, background: "rgba(255,255,255,0.06)", color: "var(--fg)", fontSize: 13, cursor: "pointer" }}>✕</button>
         </div>
 
@@ -135,7 +157,17 @@ export default function TeamMemoryModal({
           <button onClick={() => void reload()} disabled={busy} className="ghost-btn" style={{ height: 32, padding: "0 12px", fontSize: 12 }}>Search</button>
         </div>
 
+        {/* Graph view — 3D knowledge graph of the brain (lazy-loaded). */}
+        {view === "graph" && (
+          <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+            <Suspense fallback={<div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--fg-muted)", fontSize: 13 }}>Loading 3D graph…</div>}>
+              <TeamMemoryGraph entries={entries} />
+            </Suspense>
+          </div>
+        )}
+
         {/* List */}
+        {view === "list" && (
         <div style={{ flex: 1, overflowY: "auto", padding: "8px 14px" }}>
           {err && <div style={{ color: "#ff8c8c", fontSize: 12, padding: "6px 0" }}>{err}</div>}
           {!scope && <div style={{ color: "var(--fg-muted)", fontSize: 12, padding: "10px 0" }}>Open a project to see its team memory.</div>}
@@ -159,8 +191,10 @@ export default function TeamMemoryModal({
             </div>
           ))}
         </div>
+        )}
 
         {/* Add note */}
+        {view === "list" && (
         <div style={{ padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-surface)" }}>
           <textarea
             value={newContent}
@@ -175,6 +209,7 @@ export default function TeamMemoryModal({
             <button onClick={() => void add()} disabled={busy || !newContent.trim() || !scope} className="ghost-btn" style={{ height: 30, padding: "0 14px", fontSize: 12, opacity: (busy || !newContent.trim() || !scope) ? 0.5 : 1 }}>+ Add</button>
           </div>
         </div>
+        )}
       </div>
     </div>
   );

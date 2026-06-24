@@ -173,6 +173,7 @@ pub fn run() {
             accounts::cli_install,
             accounts::cli_install_stream,
             accounts::accounts_test_probe_live,
+            accounts::accounts_refresh_sandbox_creds,
             audio::audio_transcribe_local,
             audio::whisper_runtime_status,
             audio::whisper_runtime_install,

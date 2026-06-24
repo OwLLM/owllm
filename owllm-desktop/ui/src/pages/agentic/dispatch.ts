@@ -1013,13 +1013,21 @@ export function buildSpecialistPrompt(
 /// also carry their OWN per-agent history now, but the shared store is how the
 /// team pools knowledge across agents and across runs.
 export const TEAM_MEMORY_HINT =
-  "TEAM MEMORY: you share a durable, project-wide memory with the rest of the team.\n" +
-  "  - Call memory_search FIRST when you need a known fact (build/run commands, file\n" +
-  "    locations, conventions, prior decisions) before re-deriving it or asking.\n" +
-  "  - Call memory_write to record stable, reusable facts you discover (use a short\n" +
-  "    `key` like 'build_command' to update one in place). Don't store transient chatter.\n" +
-  "  - Your own earlier turns are already in your context; use shared memory for things\n" +
-  "    the WHOLE team should know.";
+  "TEAM MEMORY — a durable, project-wide memory you share with the rest of the team.\n" +
+  "  WHERE IT LIVES: it is NOT a file or a folder. Do NOT look for it on disk — there is\n" +
+  "  no `owllm/` folder, no `.owllm`, no memory file to open. It exists ONLY through these\n" +
+  "  tools, and that is the ONLY way to read or write it:\n" +
+  "    - memory_search(query): call this FIRST when you need a known fact (build/run\n" +
+  "      commands, file locations, conventions, prior decisions) — before re-deriving it,\n" +
+  "      asking the user, or searching the filesystem. Empty query lists recent entries.\n" +
+  "    - memory_read(key): fetch one entry by its exact key.\n" +
+  "    - memory_write(content, key?, tags?): record a stable, reusable fact you discover\n" +
+  "      (use a short `key` like 'build_command' to update it in place). Not transient chatter.\n" +
+  "  PROJECT DOCUMENTATION is different: it lives in the PROJECT's OWN files (README, docs/,\n" +
+  "  comments) — find those with read_file / glob / grep in the project directory, NOT in any\n" +
+  "  OwLLM application folder.\n" +
+  "  Your own earlier turns are already in your context; use shared memory for what the WHOLE\n" +
+  "  team should know across agents and runs.";
 
 /// The team's standing operating contract — the parts of the "Agent Team Rules"
 /// that are STRUCTURE, not tunable rules: the conflict-resolution priority stack,
@@ -1289,7 +1297,7 @@ const _warmCli = new Map<string, WarmEntry>();
 // ~1h expiry. The reactive 401 retry (clearCliWarm + retry) is the backstop.
 const WARM_TTL_MS = 25 * 60 * 1000; // 25 min — comfortably under the ~1h token TTL
 export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli";
-export async function ensureCliWarm(backend: CliBackend): Promise<void> {
+export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): Promise<void> {
   // Only Claude/Codex expose the `accounts_test_probe_live` warm round-trip that
   // refreshes an OAuth token as a side effect. Gemini/Kimi have no such probe, so
   // warming them would just fire a guaranteed-failing invoke on every retry —
@@ -1306,6 +1314,13 @@ export async function ensureCliWarm(backend: CliBackend): Promise<void> {
     const p = (async () => {
       try { await invoke("accounts_test_probe_live", { backend }); }
       catch { /* ignore — warm-up is best-effort */ }
+      // THE AGENTIC-TEAM 401 FIX: a sandboxed project runs the CLI inside WSL
+      // against a COPY of the Windows credentials; warming only refreshes the
+      // Windows token, so the in-sandbox copy goes stale → persistent 401. After
+      // the warm refreshes the Windows token, re-mirror it into the sandbox so the
+      // in-distro CLI reads a valid token. No-op (Rust-side) when not isolated.
+      try { await invoke("accounts_refresh_sandbox_creds", { cwd: cwd ?? null }); }
+      catch { /* best-effort — never block the dispatch */ }
     })();
     entry = { at: now, p };
     _warmCli.set(backend, entry);

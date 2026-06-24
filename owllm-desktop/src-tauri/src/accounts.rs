@@ -350,6 +350,38 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
 /// and would happily return "key present (sk-…)" for a logged-in but
 /// free-tier kimi account, even though dispatch later fails. This
 /// command exists so the Test button can fail honestly. Fires only
+/// Refresh the credentials that a SANDBOXED project's subscription CLI actually
+/// reads — the fix for the recurring agentic-team 401 on subscription agents.
+///
+/// THE BUG: when a project is isolated, the team runs `claude`/`codex` INSIDE the
+/// WSL sandbox (claude_cli_stream → sandbox::program_argv with cwd). That CLI reads
+/// a one-time COPY of the Windows credentials (sandbox.rs `sync_logins` does
+/// `cp -f`, then bwrap binds the distro's ~/.claude). Every warm/refresh/retry we
+/// run only touches the WINDOWS token; the WSL copy goes stale (its access token
+/// expires and its refresh token gets ROTATED/revoked by a Windows-side refresh),
+/// so the in-sandbox CLI 401s forever — no host-side fix can reach it. Chat/Code
+/// run the CLI on the Windows host directly, against the live token, so they never
+/// show this — which is why it was agentic-team-ONLY.
+///
+/// THE FIX: re-copy the current Windows creds into the distro so the in-sandbox CLI
+/// gets a valid token + valid refresh token. No-op when the project isn't isolated
+/// (the host CLI already reads the live Windows creds). Called from the warm path
+/// (proactive) and the auth-retry (reactive) in the frontend.
+#[tauri::command]
+pub async fn accounts_refresh_sandbox_creds(cwd: Option<String>) -> Result<bool, String> {
+    if !crate::sandbox::is_isolated(cwd.as_deref()) {
+        return Ok(false);
+    }
+    tokio::task::spawn_blocking(|| {
+        // Re-mirror Windows → distro (claude/codex/gemini/kimi creds + keys). The
+        // distro is resolved inside (best_linux_distro). Best-effort.
+        let _ = crate::sandbox::sandbox_sync_logins(None);
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// on user click, not on the 3-s status poll.
 #[tauri::command]
 pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {

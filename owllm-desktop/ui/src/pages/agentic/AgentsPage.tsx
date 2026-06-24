@@ -6236,6 +6236,10 @@ async function withCliAuthRetry<T>(
   backend: "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli",
   signal: AbortSignal,
   fn: () => Promise<T>,
+  /// The cwd the CLI runs in. When the project is isolated, the re-warm also
+  /// re-mirrors the refreshed Windows creds INTO the sandbox (the agentic-team
+  /// 401 fix) — otherwise the host re-warm never reaches the in-distro copy.
+  cwd?: string | null,
 ): Promise<T> {
   for (let attempt = 0; ; attempt++) {
     try {
@@ -6256,7 +6260,7 @@ async function withCliAuthRetry<T>(
       // Auth → the one-time warm went stale; drop it + re-warm so the CLI
       // refreshes its OAuth token before we retry. Network → just wait + retry;
       // the CLI's own API call hit a transient blip that clears on its own.
-      if (isAuth) { try { clearCliWarm(backend); await ensureCliWarm(backend); } catch { /* retry regardless */ } }
+      if (isAuth) { try { clearCliWarm(backend); await ensureCliWarm(backend, cwd); } catch { /* retry regardless */ } }
       _authWaitHandler?.({ kind: "wait", attempt: attempt + 1, total: schedule.length, waitMs, backend, reason: isAuth ? "auth" : "network" });
       try { await sleepAbortable(waitMs, signal); }
       catch { throw e; } // run cancelled during the wait → surface original error
@@ -6310,8 +6314,10 @@ async function streamAnthropic(
     if (!status?.claude_cli) {
       throw new Error("Claude Code CLI not detected — run `claude /login` first.");
     }
-    // Refresh the CLI token once per session (cold-start 401 fix).
-    await ensureCliWarm("claude_cli");
+    // Refresh the CLI token once per session (cold-start 401 fix). Pass the cwd so
+    // a sandboxed project ALSO re-mirrors the refreshed creds into its WSL sandbox
+    // (the agentic-team 401 fix) — the in-distro CLI reads a copy, not the host token.
+    await ensureCliWarm("claude_cli", claudeCwd);
     // Stream via claude_cli_stream when the consumer wants live
     // thought traffic (AgentsPage Thought tab); fall back to one-shot
     // --print blob otherwise. Session-id conflicts get swallowed +
@@ -6345,14 +6351,14 @@ async function streamAnthropic(
           autoApprove: autoApprove ?? false, allowedTools,
           model: cliModel, effort: claudeEffort, sessionId: sid,
           onDelta, onThought,
-        })));
+        })), claudeCwd);
     }
     const reply = await withCliAuthRetry("claude_cli", signal, () =>
       runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false,
         model: cliModel, effort: claudeEffort, sessionId: sid,
-      })));
+      })), claudeCwd);
     if (reply) onDelta(reply);
     return reply;
   }
@@ -6363,14 +6369,14 @@ async function streamAnthropic(
     try {
       const status = await invoke<{ claude_cli: boolean }>("accounts_status");
       if (status?.claude_cli) {
-        await ensureCliWarm("claude_cli");
+        await ensureCliWarm("claude_cli", claudeCwd);
         if (onThought) {
           return await withCliAuthRetry("claude_cli", signal, () => runClaudeCliStream({
             systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
             autoApprove: autoApprove ?? false, allowedTools,
             model: cliModel, effort: claudeEffort, sessionId,
             onDelta, onThought,
-          }));
+          }), claudeCwd);
         }
         const reply = await withCliAuthRetry("claude_cli", signal, () => invoke<string>("claude_cli_complete", {
           systemPrompt,
@@ -6378,7 +6384,7 @@ async function streamAnthropic(
           cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
           model: cliModel, effort: claudeEffort, sessionId,
-        }));
+        }), claudeCwd);
         if (reply) onDelta(reply);
         return reply;
       }
@@ -6531,8 +6537,9 @@ async function streamOpenAI(
   // failed with "No OPENAI_API_KEY saved" even when a Codex subscription was
   // logged in — codex was the one provider left stubbed to the API path.
   if (route.forceSub === true) {
-    // Refresh the Codex CLI token once per session (cold-start 401 fix).
-    await ensureCliWarm("codex_cli");
+    // Refresh the Codex CLI token once per session (cold-start 401 fix). Pass cwd
+    // so an isolated project also re-mirrors creds into its WSL sandbox.
+    await ensureCliWarm("codex_cli", projectCwd);
     const convo = (history ?? [])
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
       .join("\n\n");
@@ -6548,11 +6555,11 @@ async function streamOpenAI(
     if (onThought) {
       return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
         systemPrompt, userMessage: prompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, onDelta, onThought,
-      }));
+      }), codexCwd);
     }
     const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
       systemPrompt, userMessage: prompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths,
-    }));
+    }), codexCwd);
     if (reply) onDelta(reply);
     return reply;
   }

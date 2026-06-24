@@ -254,7 +254,9 @@ pub async fn team_memory_search(
     limit: Option<u32>,
 ) -> Result<Vec<TeamMemoryEntry>, String> {
     let sc = scope_of(&scope);
-    let lim = limit.unwrap_or(8).clamp(1, 50) as usize;
+    // Up to 500 so the graph view can show the whole brain; the agent-facing
+    // memory_search tool still passes small limits (8).
+    let lim = limit.unwrap_or(8).clamp(1, 500) as usize;
     tokio::task::spawn_blocking(move || {
         let conn = open_db()?;
         let mut stmt = conn

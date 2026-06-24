@@ -3,6 +3,9 @@ description: Plans the goal, decomposes into subtasks, dispatches to specialists
 icon: "owl:owl_orchestrator1"
 can_dispatch: true
 default_temperature: 0.3
+# Native skill packs auto-equipped for this role (resources/agents/skills/).
+skills:
+  - planning-decomposition
 tool_allowlist:
   # READ-ONLY by design. The orchestrator plans and dispatches; it never
   # writes, edits, or runs shell itself. Handing it write tools let it do a

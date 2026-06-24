@@ -3,6 +3,9 @@ description: Researches prior art (competitors, open-source, real user pain poin
 icon: "owl:owl_brainstormer"
 can_dispatch: false
 default_temperature: 0.4
+# Native skill packs auto-equipped for this role (resources/agents/skills/).
+skills:
+  - research-method
 tool_allowlist:
   - web_search
   - web_fetch

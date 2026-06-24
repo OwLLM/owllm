@@ -607,8 +607,15 @@ pub fn skills_dir() -> Option<PathBuf> {
 
 pub fn skills_dirs_read() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(p) = skills_dir() {
+    // Bundled, OwLLM-authored skill packs that ship with the app (read-only).
+    // Listing them here makes list_skill_packs discover them like installed packs,
+    // so roles can auto-equip them by id out of the box.
+    if let Some(root) = resources_root() {
+        let p = root.join("agents").join("skills");
         if p.is_dir() { out.push(p); }
+    }
+    if let Some(p) = skills_dir() {
+        if p.is_dir() && !out.contains(&p) { out.push(p); }
     }
     if let Some(legacy) = legacy_user_data_root() {
         let p = legacy.join("skills");

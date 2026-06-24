@@ -2,6 +2,10 @@ name: critic
 description: Reviews other agents' work for correctness, safety, and completeness.
 icon: "owl:owl_critic"
 default_temperature: 0.2
+# Native skill packs auto-equipped for this role (resources/agents/skills/).
+skills:
+  - code-review
+  - debugging-method
 tool_allowlist:
   - read_file
   - list_dir

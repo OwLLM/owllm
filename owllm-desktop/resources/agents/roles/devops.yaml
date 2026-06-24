@@ -2,6 +2,9 @@ name: devops
 description: SSH into remote hosts — run commands, deploy files, inspect production.
 icon: "owl:owl_SSH"
 default_temperature: 0.2
+# Native skill packs auto-equipped for this role (resources/agents/skills/).
+skills:
+  - engineering-craft
 tool_allowlist:
   - read_file
   - list_dir

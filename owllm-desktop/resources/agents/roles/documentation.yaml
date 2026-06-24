@@ -2,6 +2,9 @@ name: documentation
 description: Writes and maintains docs — READMEs, API references, changelogs, runbooks.
 icon: "owl:owl_documentation"
 default_temperature: 0.3
+# Native skill packs auto-equipped for this role (resources/agents/skills/).
+skills:
+  - technical-writing
 tool_allowlist:
   - read_file
   - edit_file

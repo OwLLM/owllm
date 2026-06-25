@@ -183,7 +183,7 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.51** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.52** releases.
 
 ### 🧠 Agentic memory that actually persists
 - **Per-agent memory** — every specialist now remembers its own prior turns across dispatches *and* across runs. Model-agnostic (local, Claude, Codex, Gemini, Kimi).
@@ -206,16 +206,19 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.51** releases.
 - **Run timers** — a team stopwatch in the canvas header, plus per-agent working-time on every card.
 - Hardened the subscription path (transient **401 / 529** auto-retry), the WSL sandbox credentials + folder handling, and post-reboot cold-start hangs.
 
-### 💬 Chat polish
+### 💬 Chat & UI polish
+- **Server page tells you what's live** — *Select Model* pre-selects the running model, and the context window in effect shows as a live **● Live: N tokens** badge (read from llama-server) so you never guess what's loaded.
+- **Cleaner team diagram** — ring distances are fixed per layer instead of stretched to fill the canvas; a single-layer team no longer flings its ring out to the outer-layer distance.
 - **Ctrl+A behaves** — select-all inside a chat now grabs *only* that conversation, not the whole app window. Clean copies again.
 - **Live tok/s in the header** — your local generation speed sits next to the API key and updates even through thinking- and tool-heavy turns.
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.51)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.6.52)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.6.52** | Server page shows the running model + live context · fixed diagram ring distances |
 | **0.6.51** | Scoped Ctrl+A in chats · live tok/s in the header · no doubled orchestrator |
 | **0.6.50** | Effect-based abliteration — causal selection + refusal benchmark |
 | **0.6.49** | Context capped to fit VRAM (stops CPU spill) |

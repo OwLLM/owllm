@@ -1210,7 +1210,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           </div>
           {chatMsgs.length > 0 && <button onClick={() => chatId && updateThread(chatId, () => [])} title="Clear this conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
         </div>
-        <div ref={chatSticky.ref} onScroll={chatSticky.onScroll} style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
+        <div ref={chatSticky.ref} onScroll={chatSticky.onScroll} data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
           {chatMsgs.length === 0 && (
             <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", maxWidth: 440 }}>
               <div style={{ fontSize: 34, marginBottom: 8 }}>💬</div>
@@ -1617,6 +1617,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         ref={transcriptSticky.ref}
         onScroll={transcriptSticky.onScroll}
         className="selectable-chat"
+        data-selectall-scope
         style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
       >
         {messages.length === 0 ? (

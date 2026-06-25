@@ -54,6 +54,7 @@ import { samplingFor } from "../agentic/modelProfiles";
 import { streamChatCompletion, providerFor, fileToImageAttachment, type Attachment, type HistoryItem } from "../agentic/dispatch";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
+import { makeGenMeter } from "../../utils/genStats";
 
 // Session id for a column's chat stream in the ChatRuntime store. The
 // store lives above the router, so an in-flight stream survives this
@@ -912,6 +913,11 @@ export default function ChatPage() {
         // reader from the outside breaks the stream synchronously.
         controls.onReader(reader);
         const dec = new TextDecoder();
+        // Live tok/s meter — ticks on every generated delta (reply, thinking,
+        // tool args) so the header badge reflects this chat's local speed too.
+        // (This chat has its OWN SSE loop, separate from the agentic
+        // streamLocalChat, so it has to drive the meter itself.)
+        const genTick = makeGenMeter();
         let turnReply = "";
         let turnThinking = "";
         let buffer = "";
@@ -1015,12 +1021,14 @@ export default function ChatPage() {
                   const fn = tc?.function ?? {};
                   if (typeof fn.name === "string" && fn.name) nativeToolNames.set(idx, fn.name);
                   if (typeof fn.arguments === "string" && fn.arguments) {
+                    genTick();
                     nativeToolArgs.set(idx, (nativeToolArgs.get(idx) ?? "") + fn.arguments);
                   }
                 }
               }
               const reasoning: string | undefined = deltaObj?.reasoning_content ?? deltaObj?.reasoning;
               if (typeof reasoning === "string" && reasoning) {
+                genTick();
                 // Route reasoning to the SEPARATE thinking buffer
                 // (collapsed by default in the UI). Do NOT mix into
                 // turnReply — keeps the visible chat clean AND
@@ -1038,6 +1046,7 @@ export default function ChatPage() {
               }
               const delta = deltaObj?.content;
               if (typeof delta === "string" && delta) {
+                genTick();
                 // Split <think>…</think>: inside-tag goes to the
                 // collapsed thinking buffer, outside-tag is the
                 // visible answer. State machine survives chunk
@@ -1528,6 +1537,7 @@ export default function ChatPage() {
                 {/* Transcript */}
                 <div
                   className="selectable-chat"
+                  data-selectall-scope
                   ref={(el) => { transcriptRefs.current[col.id] = el; }}
                   onScroll={() => onTranscriptScroll(col.id)}
                   style={{

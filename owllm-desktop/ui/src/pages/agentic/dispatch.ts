@@ -27,6 +27,7 @@ import { samplingFor } from "./modelProfiles";
 import { resolveInferenceBase } from "./inferenceEndpoint";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
+import { makeGenMeter } from "../../utils/genStats";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -1985,24 +1986,19 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // model is resident.
   const LOAD_RETRY_MS = 120_000;
   const LOAD_RETRY_DELAY = 1500;
-  // Live generation-speed meter: count visible reply tokens (~1 per SSE delta in
-  // llama-server token streaming) over wall-clock and broadcast tok/s so a global
-  // badge can show "⚡ N tok/s". Throttled to ~5/s; the badge auto-hides when the
-  // stream stops emitting. Local generation only (where tok/s reflects the user's
-  // own hardware and is the meaningful number).
-  let _genTok = 0, _genT0 = 0, _genLast = 0;
-  const countingDelta: StreamHandler = (d) => {
-    if (_genT0 === 0) _genT0 = Date.now();
-    _genTok += 1;
-    const now = Date.now();
-    if (now - _genLast > 200) {
-      _genLast = now;
-      const secs = (now - _genT0) / 1000;
-      if (secs > 0.1) {
-        try { window.dispatchEvent(new CustomEvent("owllm:gen-stats", { detail: { toksPerSec: _genTok / secs, tokens: _genTok } })); } catch { /* never break the turn */ }
-      }
-    }
-    p.onDelta(d);
+  // Live generation-speed meter: count EVERY generated SSE delta (visible
+  // reply, thinking, AND tool-call args — all are tokens the GPU produced)
+  // over wall-clock and broadcast tok/s so the header badge can show
+  // "⚡ N tok/s". A plan/tool-heavy orchestrator turn emits little visible
+  // text, so counting only the reply made the badge look dead — count the
+  // thinking + tool channels too. Throttled to ~5/s; the badge auto-hides
+  // when the stream stops. Local generation only (where tok/s reflects the
+  // user's own hardware and is the meaningful number).
+  const genTick = makeGenMeter();
+  const countingDelta: StreamHandler = (d) => { genTick(); p.onDelta(d); };
+  const countingThought: ThoughtHandler = (channel, role, delta) => {
+    if (delta) genTick();
+    p.onThought?.(channel, role, delta);
   };
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
@@ -2075,7 +2071,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     // reasoning/thinking to onThought, and harvests native
     // delta.tool_calls into nativeCalls.
     const nativeCalls: RawNativeCall[] = [];
-    lastReply = await consumeOpenAISse(resp, countingDelta, p.onThought, nativeCalls);
+    lastReply = await consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls);
     // No tools available at all → single-shot, done.
     if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
     // Canonicalise native calls to registry tool + arg names.
@@ -2135,7 +2131,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         signal: p.signal,
       });
       if (fresp.ok) {
-        const finalText = await consumeOpenAISse(fresp, countingDelta, p.onThought, []);
+        const finalText = await consumeOpenAISse(fresp, countingDelta, countingThought, []);
         if (finalText.trim()) lastReply = finalText;
       }
     } catch (e) {

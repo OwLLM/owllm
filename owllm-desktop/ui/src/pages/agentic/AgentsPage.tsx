@@ -4672,7 +4672,7 @@ function OrchestratorPane({
             read-only log of what the user has sent; new sends happen
             via the bottom dock (UserInputDock) which is always
             visible. */}
-        <div data-ui="OrchestratorUserInputView" style={{ flex:1, display: effTab ==="userinput" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
+        <div data-ui="OrchestratorUserInputView" data-selectall-scope style={{ flex:1, display: effTab ==="userinput" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
           <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase" }}>User Input history</div>
           {(() => {
             const sentByMe = supChat.filter(m => m.role === "you");
@@ -4713,7 +4713,7 @@ function OrchestratorPane({
             (expandable cards), and replies (avatar bubbles), interleaved in
             arrival order via the shared ChatBubble / ToolEventCard /
             ThinkingBlock components. */}
-        <div ref={replyRef} data-ui="OrchestratorReplyView" style={{ flex:1, display: effTab ==="reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
+        <div ref={replyRef} data-ui="OrchestratorReplyView" data-selectall-scope style={{ flex:1, display: effTab ==="reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
           {fullChat.length === 0 && !runError ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:12 }}>
@@ -4727,7 +4727,7 @@ function OrchestratorPane({
           )}
         </div>
         {/* Thought — reasoning + dispatch directives. Tool entries excluded. */}
-        <div ref={thoughtRef} data-ui="OrchestratorThoughtView" style={{ flex:1, display: effTab ==="thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
+        <div ref={thoughtRef} data-ui="OrchestratorThoughtView" data-selectall-scope style={{ flex:1, display: effTab ==="thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {thoughts.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               No reasoning yet — the model's thinking blocks land here
@@ -4736,7 +4736,7 @@ function OrchestratorPane({
           ) : thoughts.map((t, i) => renderUnifiedEntry(t, i, orchName))}
         </div>
         {/* Tool Calls — every command the agent ran + its result. */}
-        <div ref={toolsRef} data-ui="OrchestratorToolsView" style={{ flex:1, display: effTab ==="tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
+        <div ref={toolsRef} data-ui="OrchestratorToolsView" data-selectall-scope style={{ flex:1, display: effTab ==="tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {toolCalls.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               No tool calls yet — every command the agent runs (Bash,
@@ -4746,7 +4746,7 @@ function OrchestratorPane({
           ) : toolCalls.map((t, i) => renderUnifiedEntry(t, i, orchName))}
         </div>
         {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
-        <div ref={fullRef} data-ui="OrchestratorFullView" style={{ flex:1, display: effTab ==="full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
+        <div ref={fullRef} data-ui="OrchestratorFullView" data-selectall-scope style={{ flex:1, display: effTab ==="full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {fullChat.length === 0 ? (
             <div style={{ color:"var(--fg-subtle)", fontSize:11 }}>
               Empty — replies, reasoning, and tool calls will all appear
@@ -7365,6 +7365,12 @@ export default function AgentsPage() {
   // mid-run. Users can still chat alongside a running plan.
   const [supSendBusy, setSupSendBusy] = useState(false);
   const supSendBusyRef = useRef(false);
+  // Synchronous reentrancy guard for dispatchGoal. The busy/running flags it
+  // already checks are React/store state set only AFTER an async preflight, so
+  // two rapid dispatches both passed the guard and ran concurrently — two
+  // orchestrator streams interleaving identical tokens into the same buffers
+  // (the garbled output bug). This ref flips synchronously, before any await.
+  const dispatchInFlightRef = useRef(false);
   // Shared abort controller for the active onSupSend run. The Stop
   // button on the ChatInputDock fires owllm:dispatch-abort; we listen
   // below and call .abort() on this controller, which propagates to
@@ -8338,16 +8344,31 @@ export default function AgentsPage() {
       const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
       if (hasSpecialists) {
         console.log("[onSupSend] team chat → dispatchGoal", { agents: activeTeam.agents.length });
-        // Capture the prior conversation BEFORE echoing this turn, so the
-        // orchestrator gets continuity across messages. Without this every
-        // team chat started from scratch — the "memory resets each message"
-        // bug (the solo path below already did this; the team path didn't).
-        const priorHistory = chatToHistory(supChat);
-        // Echo the user's message into the chat thread (dispatchGoal logs
-        // it to the agent buffers, not supChat), then run the team.
-        const echo: GoalMsg = { role: "you", color: "#9ad9ff", text, ts: Date.now(), seq: nextSeq() };
-        setSupChat(prev => [...prev, echo]);
-        await dispatchGoal(text, priorHistory);
+        // Hold the dock-busy flag for the WHOLE team dispatch. Previously the
+        // team branch left supSendBusy untouched, so (a) the Stop button never
+        // showed and (b) the dock's own busy guards were inert — a second Enter
+        // launched a SECOND concurrent orchestrator run that streamed identical
+        // tokens into the same per-agent buffers, producing the garbled,
+        // doubled-thinking output the user saw. Setting the ref synchronously
+        // makes the top-of-function guard reject any re-entry. dispatchGoal has
+        // its own reentrancy guard too (belt + suspenders).
+        supSendBusyRef.current = true;
+        setSupSendBusy(true);
+        try {
+          // Capture the prior conversation BEFORE echoing this turn, so the
+          // orchestrator gets continuity across messages. Without this every
+          // team chat started from scratch — the "memory resets each message"
+          // bug (the solo path below already did this; the team path didn't).
+          const priorHistory = chatToHistory(supChat);
+          // Echo the user's message into the chat thread (dispatchGoal logs
+          // it to the agent buffers, not supChat), then run the team.
+          const echo: GoalMsg = { role: "you", color: "#9ad9ff", text, ts: Date.now(), seq: nextSeq() };
+          setSupChat(prev => [...prev, echo]);
+          await dispatchGoal(text, priorHistory);
+        } finally {
+          supSendBusyRef.current = false;
+          setSupSendBusy(false);
+        }
         return;
       }
     }
@@ -8958,10 +8979,14 @@ export default function AgentsPage() {
     // the live store snapshot (not the captured render value) so the guard
     // holds even on a freshly-remounted page whose local `busy` reset to false.
     const liveRun = chatRuntime.getSnapshot(agentSessId).payload as AgentRunPayload | null;
-    if (busy || liveRun?.running) {
+    if (dispatchInFlightRef.current || busy || liveRun?.running) {
       setRunError("A run is already in progress for this project.");
       return;
     }
+    // Claim the slot synchronously — closes the check-then-await race that let
+    // two concurrent dispatches slip through before setBusy/setRunning fired.
+    // Cleared in the finally below AND on every pre-flight early return.
+    dispatchInFlightRef.current = true;
     // PRE-FLIGHT: warm WSL + verify the project folder is actually reachable before
     // we dispatch. After a PC reboot WSL comes back COLD (distro not started, /mnt
     // not mounted), so an isolated project's folder — reached through WSL — is
@@ -8983,6 +9008,7 @@ export default function AgentsPage() {
           `If you just rebooted, WSL is still starting up — wait a few seconds and run again. ` +
           `Your files on disk are safe.`,
         );
+        dispatchInFlightRef.current = false;
         return;
       }
     }
@@ -9022,6 +9048,7 @@ export default function AgentsPage() {
       }
       if (!wantedLocal) {
         setRunError("This team uses local model(s) but none are installed. Open the Models tab and add a local or tuned model first.");
+        dispatchInFlightRef.current = false;
         return;
       }
       if (!serverState.running || !serverState.port || serverState.model_id !== wantedLocal) {
@@ -9030,6 +9057,7 @@ export default function AgentsPage() {
         const ok = await ensureLocalServer(wantedLocal);
         if (!ok) {
           setRunError(`Local server failed to start for "${wantedLocal}" within 90s — try the Server tab manually.`);
+          dispatchInFlightRef.current = false;
           return;
         }
         setRunError(null);
@@ -9037,6 +9065,7 @@ export default function AgentsPage() {
     }
     if (!activeTeam || activeTeam.agents.length === 0) {
       setRunError("No team is loaded. Pick a team via 'Team…' or select a project with a roster.");
+      dispatchInFlightRef.current = false;
       return;
     }
 
@@ -10150,6 +10179,7 @@ export default function AgentsPage() {
       }
       setPhase("idle");
     } finally {
+      dispatchInFlightRef.current = false; // release the reentrancy slot
       setBusy(false);
       setRunning(false); // clear the store-backed in-flight flag (mirrors setBusy)
       setRunEndedAt(Date.now()); // freeze the team stopwatch on the final duration

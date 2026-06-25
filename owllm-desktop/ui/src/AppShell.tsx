@@ -40,6 +40,7 @@ import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWiza
 import AccountSyncModal from "./pages/core/AccountSyncModal";
 import WatcherDrawer from "./support/WatcherDrawer";
 import GenSpeedBadge from "./components/GenSpeedBadge";
+import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 
 // tauri.conf.json now sets decorations:false again — the OS title
@@ -703,6 +704,7 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
       <div data-ui="HeaderApiKeyLabel">
         <span style={{ marginRight: 4 }}>🔑</span>
         API key: owllm-local
+        <GenSpeedBadge variant="header" />
       </div>
       <div data-ui="HeaderVramLabel" title={server.message || undefined}>
         <span style={{ marginRight: 4 }}>💾</span>{vramLine}
@@ -954,6 +956,11 @@ export default function AppShell() {
     return () => window.removeEventListener("owllm:open-watcher", h as EventListener);
   }, []);
 
+  // Scope Ctrl/Cmd+A to the chat/log region the user is reading instead of
+  // grabbing the whole app window (which made a copy pull every panel's text).
+  // Regions opt in via `data-selectall-scope` on their scroll container.
+  useEffect(() => installScopedSelectAll(), []);
+
   useEffect(() => {
     if (!isTauri()) return;
     invoke<boolean>("overlay_frame_enabled")
@@ -1193,9 +1200,6 @@ export default function AppShell() {
           `owllm:open-sync` event. Invites GitHub sign-in so chats/settings
           follow the user across devices (their own private owllm-vault). */}
       <AccountSyncModal />
-      {/* Global live "⚡ N tok/s" badge — shows local generation speed on every
-          page while a model streams, then fades. */}
-      <GenSpeedBadge />
     </>
   );
 }

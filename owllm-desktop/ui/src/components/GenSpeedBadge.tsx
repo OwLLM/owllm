@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 
-/// Floating live generation-speed badge. Shows "⚡ N tok/s" while a LOCAL model
-/// streams — driven by the `owllm:gen-stats` events that streamLocalChat()
-/// broadcasts — and fades out ~1.5s after generation stops. Global: a single
-/// instance mounted in AppShell covers every page (Chat, Code, Agents, Dataset
-/// Builder, …). tok/s reflects the user's own hardware, which is the meaningful
-/// number; cloud generation (network-bound) isn't metered here.
-export default function GenSpeedBadge() {
+/// Live generation-speed readout. Shows "⚡ N tok/s" while a LOCAL model
+/// streams — driven by the `owllm:gen-stats` events every local SSE loop
+/// broadcasts (agentic streamLocalChat AND the fine-tuning chat) — and clears
+/// ~1.5s after generation stops. tok/s reflects the user's own hardware, which
+/// is the meaningful number; cloud generation (network-bound) isn't metered.
+///   • variant "header"   — compact inline span, parked in the header status
+///     block next to the API-key line (the user's chosen home for it).
+///   • variant "floating" — fixed pill bottom-right (legacy global badge).
+export default function GenSpeedBadge({ variant = "floating" }: { variant?: "header" | "floating" }) {
   const [tps, setTps] = useState<number | null>(null);
   const hideTimer = useRef<number | null>(null);
   useEffect(() => {
@@ -24,6 +26,21 @@ export default function GenSpeedBadge() {
     };
   }, []);
   if (tps == null) return null;
+  const label = `⚡ ${tps >= 100 ? Math.round(tps) : tps.toFixed(1)} tok/s`;
+  if (variant === "header") {
+    return (
+      <span
+        data-ui="HeaderGenSpeed"
+        title="Local generation speed (tokens per second)"
+        style={{
+          marginLeft: 8, color: "#7ff0c5", fontWeight: 800,
+          fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap",
+        }}
+      >
+        {label}
+      </span>
+    );
+  }
   return (
     <div
       title="Local generation speed (tokens per second)"
@@ -38,7 +55,7 @@ export default function GenSpeedBadge() {
         backdropFilter: "blur(4px)",
       }}
     >
-      ⚡ {tps >= 100 ? Math.round(tps) : tps.toFixed(1)} tok/s
+      {label}
     </div>
   );
 }

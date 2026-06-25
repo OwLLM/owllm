@@ -125,7 +125,7 @@ OwLLM ships starter teams in nine categories. **All of them are forkable and rem
 LoRA pipeline with Unsloth, TRL, PEFT, bitsandbytes. Llama / Qwen / Mistral / Gemma — anything on HuggingFace. Live loss curves, graceful Stop preserves checkpoints, resume-from-checkpoint and resume-adapter both supported. Runs on a 12 GB GPU.
 
 ### Abliterate (refusal removal for safety research)
-Orthogonalise weight matrices against refusal directions (the Labonne / Arditi technique, packaged). Use cases:
+Orthogonalise weight matrices against refusal directions — now with **effect-based (causal) selection**: it *measures* refusal on a held-out set, tests candidate directions by actually ablating and re-scoring, keeps the one that drops refusal most, and stops before over-ablating. You get a real before/after compliance number, and it works on strong RLHF models that defeat the classic single-direction recipe. Use cases:
 - AI safety labs training refusal classifiers need cleanly-uncensored teacher models
 - Red teams need models that don't sandbag jailbreak tests
 - Academic research on alignment failure modes
@@ -180,6 +180,55 @@ Three independent update streams — small, fast, no full reinstalls:
 - **Data layer** (team templates, role prompts, model profiles, MCP recommendations) hot-pulls from `data/` in this repo on launch. **A new team you contribute today reaches every installed app within minutes — no rebuild.**
 
 That's why the data/ tree is open and community-driven even though the app binaries are closed-source.
+
+## ✨ Recent highlights
+
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.50** releases.
+
+### 🧠 Agentic memory that actually persists
+- **Per-agent memory** — every specialist now remembers its own prior turns across dispatches *and* across runs. Model-agnostic (local, Claude, Codex, Gemini, Kimi).
+- **Shared team memory (RAG)** — a durable, project-wide knowledge base your agents search and write to via tools, so the whole team pools what it learns. **Syncs across your PCs.**
+- **3D knowledge graph** — explore that memory as a rotatable force-directed graph: 🧠 *Memory → 🌐 Graph*.
+
+### 📋 A team operating standard
+- Projects ship with a **native best-practice rule set** (fully editable) — enforced for every agent **and** the Critical Thinker.
+- A standing **operating contract**: a conflict-resolution priority order, a Definition of Done, and an agent handoff format.
+- Your rules **sync across machines**.
+
+### 🎓 Skills, by role, out of the box
+- A curated set of **skill packs auto-equipped by role** — coder, critic, researcher, writer, orchestrator… Add, remove, or install more (Anthropic / community) per agent.
+
+### ⚡ Local-model performance
+- **VRAM-aware context** — the context window is sized to fit your GPU *after* the model weights, so a big model stops silently spilling onto the CPU. Real, measurable speed-ups.
+- **Direct-drive file tools** — agents read your project folder straight off the disk instead of a slow WSL round-trip.
+
+### ⏱️ Visibility & reliability
+- **Run timers** — a team stopwatch in the canvas header, plus per-agent working-time on every card.
+- Hardened the subscription path (transient **401 / 529** auto-retry), the WSL sandbox credentials + folder handling, and post-reboot cold-start hangs.
+
+<details>
+<summary><b>Full changelog (0.6.37 → 0.6.50)</b></summary>
+
+| Version | Highlight |
+|---|---|
+| **0.6.50** | Effect-based abliteration — causal selection + refusal benchmark |
+| **0.6.49** | Context capped to fit VRAM (stops CPU spill) |
+| **0.6.48** | Auto-context sized from free VRAM after the model weights |
+| **0.6.47** | Time-bounded WSL warm-up — no post-reboot hang |
+| **0.6.46** | Direct-drive file tools + run timers + 529 retry |
+| **0.6.45** | WSL pre-flight folder-reachability check |
+| **0.6.44** | Agents told their project root explicitly |
+| **0.6.43** | 3D memory graph + sandbox-credential 401 fix |
+| **0.6.42** | Curated skill packs, auto-equipped by role |
+| **0.6.41** | Project rules sync across PCs |
+| **0.6.40** | Full Agent Team Rules + operating contract |
+| **0.6.39** | Native best-practice rule set |
+| **0.6.38** | Team-memory viewer + cross-PC sync |
+| **0.6.37** | Per-agent memory + shared RAG team memory |
+
+</details>
+
+---
 
 ## Roadmap
 

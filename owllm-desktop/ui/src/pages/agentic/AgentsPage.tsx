@@ -2486,10 +2486,6 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   const avail_w = (w - card_reserve) - HALF_LABEL_W * 2;
   const avail_h = h - HALO_R - LABEL_DROP - 40;
   const max_radius = Math.max(120, Math.min(avail_w / 2, avail_h / 2));
-  const inner_offset = 130;
-  let step = (max_radius - inner_offset) / Math.max(1, max_depth);
-  if (step < 90) step = 90;
-  const ring_radii = sortedDepths.map(d => inner_offset + step * d);
   const arc_span = (Math.PI * 2) * (340 / 360);
   // Orchestrator hub size — hoisted up here (was below) so the Critic
   // node can position itself OUTSIDE the hub artwork. The owl image is
@@ -2502,12 +2498,32 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   // so a smaller hub just opens up breathing room — no overlap.
   const orchestrator_r = Math.max(38, Math.min(w, h) * 0.07);
 
+  // Ring distances are FIXED per layer — NOT stretched to fill the canvas.
+  // The old formula sized the gap as (max_radius − inner_offset) / max_depth,
+  // so a single-layer team (max_depth = 1) had its one ring flung all the way
+  // out to max_radius — i.e. parked at the OUTER (2nd-layer) distance. Now:
+  //   • layer 1 always sits at FIRST_RING — just clear of the hub's 3× halo
+  //     plus the node's own inward halo, so it reads close to the orchestrator;
+  //   • each deeper layer adds a fixed RING_GAP.
+  // A team with only one layer therefore uses the layer-1 distance, never the
+  // layer-2 one. On a small window we shrink ONLY the gap between deeper layers
+  // (never layer 1, so it can't be squeezed into the hub) so the outer ring
+  // still fits. d starts at 1.
+  const FIRST_RING = Math.min(max_radius, Math.max(190, orchestrator_r * 3.0 + HALO_R * 0.6));
+  let RING_GAP = 150;
+  if (max_depth > 1) {
+    const gapRoom = (max_radius - FIRST_RING) / (max_depth - 1);
+    RING_GAP = Math.max(70, Math.min(RING_GAP, gapRoom));
+  }
+  const ringR = (d: number) => FIRST_RING + (d - 1) * RING_GAP;
+  const ring_radii = sortedDepths.map(ringR);
+
   type Node = { name: string; x: number; y: number; label: string; iconRef: string; active: boolean; depth: number; group: TeamGroup };
   const nodes: Node[] = [];
   for (const depth of sortedDepths) {
     const ringAgents = depthMap.get(depth)!;
     const count = ringAgents.length;
-    const r = inner_offset + step * depth;
+    const r = ringR(depth);
     for (let i = 0; i < count; i++) {
       const a = ringAgents[i];
       const theta = count === 1 ? -Math.PI / 2 : (arc_span * (i + 1)) / count - Math.PI / 2;

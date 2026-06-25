@@ -598,6 +598,29 @@ function LLMServerColumn({
   const isRunning = statusKind === "running" || statusKind === "loading";
   const apiUrl = selectedModel?.port ? `http://127.0.0.1:${selectedModel.port}/v1` : "-";
 
+  // The context window the running server ACTUALLY loaded with — read live from
+  // llama-server's /props (n_ctx). The preset buttons below are only the PENDING
+  // choice (applied on next restart); without this the user had no way to see
+  // what context is really in effect right now. null = not running / unknown.
+  const [loadedCtx, setLoadedCtx] = useState<number | null>(null);
+  useEffect(() => {
+    const port = selectedModel?.port;
+    if (statusKind !== "running" || !port) { setLoadedCtx(null); return; }
+    let cancelled = false;
+    const probe = async () => {
+      try {
+        const r = await fetch(`http://127.0.0.1:${port}/props`, { signal: AbortSignal.timeout(1000) });
+        if (!r.ok) return;
+        const d = await r.json().catch(() => ({} as any));
+        const n = d?.n_ctx ?? d?.default_generation_settings?.n_ctx;
+        if (!cancelled && Number.isFinite(n) && n > 0) setLoadedCtx(Number(n));
+      } catch { /* server busy/unreachable — keep last known value */ }
+    };
+    probe();
+    const id = window.setInterval(probe, 5000);
+    return () => { cancelled = true; window.clearInterval(id); };
+  }, [statusKind, selectedModel?.port]);
+
   // Active inference servers list — Qt server_page.py:919-951 + 1500-1600
   // Real probe runs in ActiveServersProbeThread; here we hit /v1/server/status
   // for the selected model as a stand-in until /v1/servers/active is wired.
@@ -704,9 +727,23 @@ function LLMServerColumn({
       {/* Context window (-c). Bigger = remembers more, but the KV cache grows
           linearly and lives in VRAM ON TOP of the weights — too big OOMs the GPU
           even when the weights fit. Change takes effect on the next (re)start. */}
-      <div style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)", marginTop: 6 }}
-           title="How many tokens the model keeps in context. Larger needs more VRAM for the KV cache.">
-        Context window:
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 6, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)" }}
+             title="How many tokens the model keeps in context. Larger needs more VRAM for the KV cache.">
+          Context window:
+        </div>
+        {loadedCtx != null && (
+          <span
+            title="The context window the running server actually loaded with (live from llama-server). The presets below are the size for the NEXT start."
+            style={{
+              fontSize: 11, fontWeight: 800, color: "#7ff0c5",
+              background: "rgba(127,240,197,0.12)", border: "1px solid rgba(127,240,197,0.40)",
+              borderRadius: 999, padding: "1px 9px", fontVariantNumeric: "tabular-nums", whiteSpace: "nowrap",
+            }}
+          >
+            ● Live: {loadedCtx.toLocaleString()} tokens
+          </span>
+        )}
       </div>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
         <button onClick={() => setCtx(null)}
@@ -1234,9 +1271,16 @@ export default function ServerPage() {
     try {
       const next = await listModels();
       setModels(next);
-      if (!modelId && next.length > 0) setModelId(next[0].model_id);
       const st = await serverStatus();
       setServerState(JSON.stringify(st, null, 2));
+      // Default the picker to the model that's ACTUALLY running (the header
+      // already shows it) so the user doesn't have to wait for a status probe
+      // to find out what's loaded. Fall back to the first registry entry only
+      // when nothing is serving. Only seeds when the user hasn't picked yet.
+      if (!modelId) {
+        if (st.running && st.model_id) setModelId(st.model_id);
+        else if (next.length > 0) setModelId(next[0].model_id);
+      }
     } catch (e) {
       setError(String(e));
     } finally {

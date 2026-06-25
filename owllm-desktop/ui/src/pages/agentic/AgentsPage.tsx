@@ -36,6 +36,7 @@ import {
   type Directive,
   formatDirectivesBlock,
   buildCriticPrompt,
+  buildAskUserBubble,
   extractUserInputRequest,
   transcribeAudioAttachments,
   imageAttachments,
@@ -77,7 +78,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites } from "./localTools";
 import { normalizeTeam, roleCanWrite } from "./teamConfig";
 import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
 import { getServerCtx } from "../core/serverContext";
@@ -5886,7 +5887,8 @@ function buildOrchestratorPrompt(
     TEAM_OPERATING_CONTRACT,
     "",
     TEAM_MEMORY_HINT,
-    "  - As orchestrator, memory_search at the START of a run to recover what the team already established; memory_write key decisions so later runs and other agents inherit them.",
+    "  - As orchestrator, recover what the team already established from the snapshot below at the START of a run, and record key decisions (with `[REMEMBER ...]` or memory_write) so later runs and other agents inherit them.",
+    getTeamMemorySnapshot(),
   ].join("\n");
 }
 
@@ -5937,6 +5939,8 @@ function buildSpecialistPrompt(
   layers.push(projectWorkspaceBlock(projectCwd));
   layers.push(TEAM_OPERATING_CONTRACT);
   layers.push(TEAM_MEMORY_HINT);
+  const memSnapshot = getTeamMemorySnapshot();
+  if (memSnapshot) layers.push(memSnapshot);
   layers.push(routingHint(team, spec));
   return layers.join("\n");
 }
@@ -8307,6 +8311,16 @@ export default function AgentsPage() {
   // and OpenAI tool_calls land as growing blocks instead of one log
   // line per delta.
   const streamThought = (agent: string, channel: string, role: string, delta: string) => {
+    // A mid-run agent question (SendUserMessage → "ask-user" channel) arrives
+    // as one complete call carrying the full question. It belongs in the
+    // Thought tab (handled below) AND — so the run doesn't look frozen — in the
+    // VISIBLE chat where the user can actually see it and reply. Surface it into
+    // supChat as a question bubble from the asking agent. Mirrors the
+    // specialist-reply colour lookup so the bubble matches that agent's card.
+    const askBubble = buildAskUserBubble(channel, agent, delta, activeTeam?.agents.find(a => a.name === agent));
+    if (askBubble) {
+      setSupChat(prev => [...prev, { ...askBubble, ts: Date.now(), seq: nextSeq() } as GoalMsg]);
+    }
     // Tool-use AND tool-result entries both belong to the Tools tab —
     // the result is the response to the call, conceptually part of the
     // same "command" stream. The 🛠 / ↩ prefixes are how the streamers
@@ -8989,6 +9003,9 @@ export default function AgentsPage() {
     // Key the shared team memory by this project's stable ID so it matches across
     // machines (and syncs via the vault) rather than by the per-PC folder path.
     setTeamMemoryScope(selectedProjectId);
+    // Warm the shared-memory snapshot so it's injected into the orchestrator's and
+    // every specialist's prompt this run (readable on every model path).
+    await refreshTeamMemorySnapshot();
     // A goal dispatch is heavy (worktrees, commits, fan-out). Refuse to start
     // a second on top of one already running for THIS project — including one
     // still running in the background after the user changed pages. We read
@@ -9262,6 +9279,8 @@ export default function AgentsPage() {
         removeActive(orch.name);
       }
       speakAgentReply(orch.name, orchReply);
+      // Persist any `[REMEMBER ...]` facts the orchestrator wrote while planning.
+      await harvestMemoryWrites(orchReply);
 
       // Critical-thinker interception: if the orchestrator asks for
       // @critical_thinker or [NEED_USER_INPUT], route it to the real
@@ -9955,6 +9974,8 @@ export default function AgentsPage() {
         removeActive(orch.name);
       }
       speakAgentReply(orch.name, finalReply);
+      // Persist any `[REMEMBER ...]` facts the orchestrator wrote in its final answer.
+      await harvestMemoryWrites(finalReply);
       // ----- Phase 3b: Critical Thinker post-review of the FINAL answer -----
       // The critic reviews the assembled answer and the orchestrator may revise.
       // Modes mirror the pre-dispatch loop:

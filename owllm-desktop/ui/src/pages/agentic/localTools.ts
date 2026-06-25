@@ -46,8 +46,113 @@ export const MEMORY_TOOL_NAMES = new Set(["memory_search", "memory_write", "memo
 /// dispatch entry points set this at run start; the memory_* tools read it.
 /// Falls back to the cwd passed to executeToolCall when unset (e.g. ad-hoc use).
 let _teamMemoryScope = "";
+/// Cached, prompt-ready snapshot of the most recent shared-memory entries for the
+/// current scope. The dispatch loops inject this into EVERY agent's system prompt
+/// (buildOrchestratorPrompt / buildSpecialistPrompt) so team memory is READABLE on
+/// every model path — including the cloud CLI / API agents that can't host the
+/// memory_* native tools. Refreshed at run start and after each write; "" if empty.
+let _teamMemorySnapshot = "";
+
 export function setTeamMemoryScope(projectId: string | null | undefined): void {
-  _teamMemoryScope = (projectId ?? "").trim();
+  const next = (projectId ?? "").trim();
+  // Scope changed (different project) → the cached snapshot is stale; drop it so a
+  // builder can't splice another project's memory in before the next refresh.
+  if (next !== _teamMemoryScope) _teamMemorySnapshot = "";
+  _teamMemoryScope = next;
+}
+
+/// The current rendered team-memory snapshot block (or "" when empty/unloaded).
+/// SYNC by design so the (sync) prompt builders can splice it in directly. The
+/// dispatch loops keep it warm via refreshTeamMemorySnapshot().
+export function getTeamMemorySnapshot(): string {
+  return _teamMemorySnapshot;
+}
+
+type RawTeamMemEntry = { id: number; key: string; content: string; tags: string; author: string; ts: number };
+
+/// Render shared-memory entries into a prompt block the model reads directly — the
+/// READ half of "memory usable on every model path". Pure; empty list → "".
+export function renderTeamMemorySnapshot(entries: RawTeamMemEntry[]): string {
+  if (!entries.length) return "";
+  const lines = entries.map((e) => {
+    const k = e.key ? `[${e.key}] ` : "";
+    const tg = e.tags ? `  (tags: ${e.tags})` : "";
+    return `  • ${k}${truncate(e.content, 400).replace(/\s*\n+\s*/g, " ")}${tg}`;
+  });
+  return [
+    "TEAM MEMORY — current shared knowledge (most recent first), injected so you can",
+    "read it WITHOUT any tool call. Consult it before re-deriving or asking:",
+    ...lines,
+  ].join("\n");
+}
+
+/// Refresh the cached snapshot for the current scope. Best-effort: any failure
+/// leaves the previous snapshot intact and never throws — memory must not break a
+/// run. The dispatch loops call this at run start and after writes.
+export async function refreshTeamMemorySnapshot(limit = 12): Promise<void> {
+  const scope = _teamMemoryScope || "";
+  try {
+    const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit });
+    _teamMemorySnapshot = renderTeamMemorySnapshot(entries);
+  } catch { /* keep the last good snapshot */ }
+}
+
+export type MemoryDirective = { content: string; key: string; tags: string };
+
+/// A fresh `[REMEMBER ...]` matcher each call — a global regex carries lastIndex
+/// state, so we never share one instance between exec-loops and .replace().
+function rememberRe(): RegExp {
+  // Inter-token gaps are [ \t] only (NOT \s) so a content-less `[REMEMBER]` line
+  // can't swallow the next line's text across the newline. Content is same-line.
+  return /^[ \t>*\-]*\[REMEMBER\b([^\]]*)\][ \t]*(.+?)[ \t]*$/gim;
+}
+
+/// Parse universal `[REMEMBER ...]` write directives out of an agent's reply. This
+/// is the MODEL-AGNOSTIC write path: a cloud CLI / API agent that can't call the
+/// memory_write tool instead emits a plain line such as
+///   [REMEMBER key=build_command tags=ci] Build with `npm run build` at repo root.
+/// Pure + exported for tests. One entry per matched line (blank content skipped).
+export function parseMemoryDirectives(text: string): MemoryDirective[] {
+  if (!text) return [];
+  const out: MemoryDirective[] = [];
+  const re = rememberRe();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text)) !== null) {
+    const attrs = m[1] ?? "";
+    const content = (m[2] ?? "").trim();
+    if (!content) continue;
+    const key = (/\bkey=([^\s\]]+)/i.exec(attrs)?.[1] ?? "").trim();
+    const tags = (/\btags=([^\s\]]+)/i.exec(attrs)?.[1] ?? "").trim();
+    out.push({ content, key, tags });
+  }
+  return out;
+}
+
+/// Remove `[REMEMBER ...]` directive lines from a reply (e.g. before storing it in
+/// per-agent history) so the control syntax doesn't accumulate. Pure.
+export function stripMemoryDirectives(text: string): string {
+  return text.replace(rememberRe(), "").replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/// Parse + persist any `[REMEMBER ...]` directives in an agent's reply to the shared
+/// team memory for the current scope, then refresh the snapshot so later agents in
+/// the SAME run see them. Best-effort, never throws. Returns how many were written.
+/// Works on every model path — the directive is just text in the reply.
+export async function harvestMemoryWrites(reply: string): Promise<number> {
+  const dirs = parseMemoryDirectives(reply);
+  if (!dirs.length) return 0;
+  const scope = _teamMemoryScope || "";
+  let written = 0;
+  for (const d of dirs) {
+    try {
+      await invoke<number>("team_memory_write", {
+        scope, content: d.content, key: d.key, tags: d.tags, author: "",
+      });
+      written++;
+    } catch { /* best-effort per directive */ }
+  }
+  if (written > 0) await refreshTeamMemorySnapshot();
+  return written;
 }
 
 export type ToolCall = {
@@ -1058,6 +1163,8 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
           tags: call.args.tags ?? "",
           author: "",
         });
+        // Keep the injected snapshot warm so later agents in this run see it.
+        await refreshTeamMemorySnapshot();
         const k = call.args.key ? ` under key "${call.args.key}"` : "";
         return { ok: true, output: `Saved to team memory${k} (#${id}).` };
       }

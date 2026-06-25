@@ -13,6 +13,10 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   executeToolCall,
   setTeamMemoryScope,
+  getTeamMemorySnapshot,
+  refreshTeamMemorySnapshot,
+  harvestMemoryWrites,
+  stripMemoryDirectives,
   formatToolsForOpenAI,
   unmangleMcpName,
   renderToolResultsForModel,
@@ -190,7 +194,7 @@ export async function runCodexCliStream(args: {
 /// tool call's input. The CLI stringifies the JSON input; the schema
 /// is `{ message: string }` for this tool. Falls back to the raw
 /// input when parsing fails so we never lose the question entirely.
-function parseUserMessageInput(input: string): string {
+export function parseUserMessageInput(input: string): string {
   if (!input) return "(empty)";
   try {
     const parsed = JSON.parse(input);
@@ -382,11 +386,19 @@ export async function appendAgentMemory(
   instruction: string,
   reply: string,
 ): Promise<void> {
+  // Harvest any universal `[REMEMBER ...]` write directives the agent emitted into
+  // the SHARED team memory — this is the model-agnostic write path that works on
+  // every model (cloud CLIs/APIs that can't call the memory_write tool included).
+  // Done first + unconditionally so it runs even for the no-projectId bridge case.
+  try { await harvestMemoryWrites(reply); } catch { /* memory is best-effort */ }
   if (!projectId || !agentName) return;
   // Don't persist obvious error replies as if they were real answers.
   if (/^\(error:/.test(reply.trim())) return;
+  // The [REMEMBER ...] facts are now in shared team memory; drop those control
+  // lines from the reply stored in THIS agent's own conversational history.
+  const cleaned = stripMemoryDirectives(reply);
   try {
-    await invoke("agent_memory_append", { projectId, agentName, instruction, reply });
+    await invoke("agent_memory_append", { projectId, agentName, instruction, reply: cleaned });
   } catch {
     /* memory is best-effort */
   }
@@ -736,6 +748,28 @@ export function colorForAgent(spec: AgentSpec): string {
   return ROLE_COLORS[spec.base] ?? ROLE_COLORS[spec.name] ?? "#9ad9ff";
 }
 
+/// Build the VISIBLE-chat bubble for a mid-run "agent asks the user"
+/// question. The Claude CLI path emits these as a SendUserMessage tool
+/// call which the stream tap forwards as onThought(channel="ask-user",…).
+/// streamThought writes the Thought-tab copy; THIS surfaces the same
+/// question into supChat so the run doesn't look frozen while it waits
+/// on the user. Returns null for any other channel / empty question so
+/// callers can `if (bubble)` guard. Pure (no React) → unit-drivable.
+/// Caller stamps ts/seq (Date.now()/nextSeq live at the React layer).
+export function buildAskUserBubble(
+  channel: string,
+  agentName: string,
+  question: string,
+  spec: AgentSpec | undefined,
+): Pick<GoalMsg, "role" | "color" | "text"> | null {
+  if (channel !== "ask-user" || !question.trim()) return null;
+  return {
+    role: agentName,
+    color: spec ? colorForAgent(spec) : "#ffd97a",
+    text: `❓ **${displayLabel(agentName)} asks:**\n\n${question.trim()}`,
+  };
+}
+
 export function findOrchestratorSpec(team: Team): AgentSpec | undefined {
   // Must match AgentsPage's orchestratorOf EXACTLY — this copy is what the
   // bridge (bridgeCore) and runDispatchLoop use. A renamed lead like "Orchi the
@@ -971,7 +1005,8 @@ export function buildOrchestratorPrompt(
     TEAM_OPERATING_CONTRACT,
     "",
     TEAM_MEMORY_HINT,
-    "  - As orchestrator, memory_search at the START of a run to recover what the team already established; memory_write key decisions so later runs and other agents inherit them.",
+    "  - As orchestrator, recover what the team already established from the snapshot below at the START of a run, and record key decisions (with `[REMEMBER ...]` or memory_write) so later runs and other agents inherit them.",
+    getTeamMemorySnapshot(),
   ].join("\n");
 }
 
@@ -1015,6 +1050,8 @@ export function buildSpecialistPrompt(
   layers.push(projectWorkspaceBlock(projectCwd));
   layers.push(TEAM_OPERATING_CONTRACT);
   layers.push(TEAM_MEMORY_HINT);
+  const memSnapshot = getTeamMemorySnapshot();
+  if (memSnapshot) layers.push(memSnapshot);
   layers.push(routingHint(team, spec));
   return layers.join("\n");
 }
@@ -1051,21 +1088,28 @@ export function projectWorkspaceBlock(cwd?: string | null): string {
 /// also carry their OWN per-agent history now, but the shared store is how the
 /// team pools knowledge across agents and across runs.
 export const TEAM_MEMORY_HINT =
-  "TEAM MEMORY — a durable, project-wide memory you share with the rest of the team.\n" +
-  "  WHERE IT LIVES: it is NOT a file or a folder. Do NOT look for it on disk — there is\n" +
-  "  no `owllm/` folder, no `.owllm`, no memory file to open. It exists ONLY through these\n" +
-  "  tools, and that is the ONLY way to read or write it:\n" +
-  "    - memory_search(query): call this FIRST when you need a known fact (build/run\n" +
-  "      commands, file locations, conventions, prior decisions) — before re-deriving it,\n" +
-  "      asking the user, or searching the filesystem. Empty query lists recent entries.\n" +
-  "    - memory_read(key): fetch one entry by its exact key.\n" +
-  "    - memory_write(content, key?, tags?): record a stable, reusable fact you discover\n" +
-  "      (use a short `key` like 'build_command' to update it in place). Not transient chatter.\n" +
-  "  PROJECT DOCUMENTATION is different: it lives in the PROJECT's OWN files (README, docs/,\n" +
-  "  comments) — find those with read_file / glob / grep in the project directory, NOT in any\n" +
-  "  OwLLM application folder.\n" +
-  "  Your own earlier turns are already in your context; use shared memory for what the WHOLE\n" +
-  "  team should know across agents and runs.";
+  "TEAM MEMORY — a durable, project-wide knowledge base you SHARE with the rest of the\n" +
+  "team (decisions, conventions, build/run commands, file locations, gotchas, prior\n" +
+  "findings). It persists across agents AND across future runs of this project.\n" +
+  "  HOW TO READ IT — the most recent entries are injected into your prompt below as a\n" +
+  "  'TEAM MEMORY — current shared knowledge' block (it may be empty on a new project).\n" +
+  "  Consult that FIRST before re-deriving a fact, asking the user, or searching the\n" +
+  "  filesystem. If your model also offers the memory_search / memory_read tools, use\n" +
+  "  them for older or more specific entries (memory_search with an empty query lists\n" +
+  "  the most recent).\n" +
+  "  HOW TO WRITE IT (works on EVERY model) — to record a stable, reusable fact (NOT\n" +
+  "  transient chatter), put a line ANYWHERE in your reply in this exact form:\n" +
+  "      [REMEMBER key=<optional-stable-id> tags=<optional,comma,tags>] <the fact>\n" +
+  "  Examples:\n" +
+  "      [REMEMBER key=build_command tags=ci] Build with `npm run build` at the repo root.\n" +
+  "      [REMEMBER] The auth flow lives in src/auth/session.ts and issues JWTs.\n" +
+  "  Give a `key` to UPDATE a fact in place (e.g. key=build_command) instead of\n" +
+  "  duplicating it. The runtime detects these lines and saves them automatically; if\n" +
+  "  your model has the memory_write tool, calling it does the same thing.\n" +
+  "  NOTE: team memory is a database, not a file — do NOT look for it on disk (there is\n" +
+  "  no `owllm/` or `.owllm` memory file). PROJECT DOCUMENTATION is different: it lives in\n" +
+  "  the project's OWN files (README, docs/, comments) — find those with read_file /\n" +
+  "  glob / grep, NOT in any OwLLM application folder.";
 
 /// The team's standing operating contract — the parts of the "Agent Team Rules"
 /// that are STRUCTURE, not tunable rules: the conflict-resolution priority stack,
@@ -2922,8 +2966,10 @@ export async function runCriticDispatch(opts: {
 
 export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks): Promise<string> {
   const { team, roleByName, goal, modelFor, models, port, projectCwd, projectId, history, autoApprove, signal, directives, directorMode, attachments } = opts;
-  // Key the shared team memory by stable project ID (cross-PC / vault-syncable).
+  // Key the shared team memory by stable project ID (cross-PC / vault-syncable),
+  // then warm the snapshot so the orchestrator + specialists get it injected.
   setTeamMemoryScope(projectId);
+  await refreshTeamMemorySnapshot();
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]
@@ -2982,6 +3028,8 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   } finally {
     hooks.onAgentEnd(orch.name);
   }
+  // Persist any `[REMEMBER ...]` facts the orchestrator wrote while planning.
+  await harvestMemoryWrites(orchReply);
 
   // Director-mode interception: if the orchestrator emitted a
   // [NEED_USER_INPUT] marker, route the question to the Critic, fold
@@ -3379,6 +3427,8 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   }
   const final = finalReply.trim();
   hooks.onAgentReply(orch.name, final);
+  // Persist any `[REMEMBER ...]` facts the orchestrator wrote in its final answer.
+  await harvestMemoryWrites(final);
   hooks.onPhase("done");
   return final;
 }

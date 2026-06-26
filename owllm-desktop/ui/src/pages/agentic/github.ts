@@ -8,6 +8,19 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
+/// Fired whenever the GitHub/vault connection changes (connect, disconnect, or a
+/// device-flow authorization completes) — from ANY surface. Passive consumers of
+/// `githubStatus()`/`vaultStatus()` listen for this so an in-window change is
+/// reflected immediately, instead of only on the next `window` focus.
+export const GITHUB_CHANGED_EVENT = "owllm:github-changed";
+
+/// Broadcast a connection change. Dispatched centrally from the mutation helpers
+/// below so every connect/disconnect/authorize path notifies, with no call site
+/// to forget. Read-only `githubStatus()`/`vaultStatus()` never dispatch (no loop).
+function notifyGithubChanged(): void {
+  try { window.dispatchEvent(new CustomEvent(GITHUB_CHANGED_EVENT)); } catch { /* no DOM */ }
+}
+
 export type GithubStatus = {
   connected: boolean;
   login: string | null;
@@ -31,11 +44,14 @@ export async function githubStatus(): Promise<GithubStatus> {
 
 /// Validate + store the token and wire git/gh credentials into the sandbox.
 export async function githubConnect(token: string, distro?: string | null): Promise<GithubConnect> {
-  return invoke<GithubConnect>("github_connect", { token, distro: distro ?? null });
+  const r = await invoke<GithubConnect>("github_connect", { token, distro: distro ?? null });
+  notifyGithubChanged();
+  return r;
 }
 
 export async function githubDisconnect(distro?: string | null): Promise<void> {
   await invoke("github_disconnect", { distro: distro ?? null });
+  notifyGithubChanged();
 }
 
 // ---- OAuth Device Flow ("Sign in with GitHub" — no token paste) ----------
@@ -61,7 +77,9 @@ export async function githubDeviceStart(): Promise<DeviceCodeStart> {
   return invoke<DeviceCodeStart>("github_device_start", { clientId: GITHUB_CLIENT_ID });
 }
 export async function githubDevicePoll(deviceCode: string): Promise<DevicePollResult> {
-  return invoke<DevicePollResult>("github_device_poll", { clientId: GITHUB_CLIENT_ID, deviceCode });
+  const r = await invoke<DevicePollResult>("github_device_poll", { clientId: GITHUB_CLIENT_ID, deviceCode });
+  if (r.status === "authorized") notifyGithubChanged();
+  return r;
 }
 
 // ---- Sync vault (the user's private owllm-vault repo) --------------------
@@ -85,7 +103,9 @@ export async function vaultStatus(): Promise<VaultStatus> {
 
 /// Create (if missing) + clone the private owllm-vault repo. Idempotent.
 export async function vaultEnsure(): Promise<VaultStatus> {
-  return invoke<VaultStatus>("vault_ensure");
+  const v = await invoke<VaultStatus>("vault_ensure");
+  notifyGithubChanged();
+  return v;
 }
 
 /// Deep link to create a token with the right scope pre-selected. Classic PAT

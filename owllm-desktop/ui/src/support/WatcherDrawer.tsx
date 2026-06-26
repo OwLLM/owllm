@@ -27,7 +27,7 @@ import {
 // walks them through a one-time GitHub sign-in (Device Flow — no token to paste;
 // the sign-in page also lets them CREATE a free account). Reuses the shared
 // github bindings so there's no parallel auth path.
-import { githubStatus, githubDeviceStart, githubDevicePoll, GITHUB_TOKEN_URL } from "../pages/agentic/github";
+import { githubStatus, githubDeviceStart, githubDevicePoll, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT } from "../pages/agentic/github";
 
 /// Open a URL in the user's real browser (native shell; window.open fallback).
 function openExternal(url: string) {
@@ -295,8 +295,12 @@ export default function WatcherDrawer({
   const ghPollAlive = React.useRef(false);
   React.useEffect(() => {
     if (!open) { ghPollAlive.current = false; return; }
-    githubStatus().then((s) => { setGhConnected(s.connected); setGhLogin(s.login); }).catch(() => setGhConnected(false));
-    return () => { ghPollAlive.current = false; };
+    const load = () => { githubStatus().then((s) => { setGhConnected(s.connected); setGhLogin(s.login); }).catch(() => setGhConnected(false)); };
+    load();
+    // Reflect an immediate connect/disconnect from another surface while the
+    // drawer is open, instead of waiting for window focus.
+    window.addEventListener(GITHUB_CHANGED_EVENT, load);
+    return () => { ghPollAlive.current = false; window.removeEventListener(GITHUB_CHANGED_EVENT, load); };
   }, [open]);
   // Device Flow: get a code, open github.com/login/device (where the user signs
   // in OR creates a free account), poll until authorized. No token to paste.

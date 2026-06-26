@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
+import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
@@ -1427,21 +1428,9 @@ function AgentChatGrid({
 }) {
   // Same pulse generator used by the canvas so the ring beat matches
   // the diagram + graph active-state visuals (30 fps, ~1.5 Hz pulse).
-  const [pulsePhase, setPulsePhase] = useState(0);
-  useEffect(() => {
-    let raf = 0;
-    let lastEmit = 0;
-    const start = performance.now();
-    const tick = (now: number) => {
-      if (now - lastEmit >= 33) {
-        setPulsePhase(((now - start) / 1000) * 36);
-        lastEmit = now;
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+  // Gated on real activity + visibility so an idle/backgrounded page does
+  // ZERO work (was an unconditional 30fps rAF that pegged a core + leaked).
+  const pulsePhase = useAnimatedPhase(activeAgents.size > 0);
   const pulse = 0.5 + 0.5 * Math.sin((pulsePhase * Math.PI) / 180 * 3);
 
   // 4-column spatial layout. Build fills cols 1-2, design fills cols
@@ -2379,26 +2368,10 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   const card_reserve = Math.min(410, w * 0.35);
   const cx = (w - card_reserve) / 2;
   const cy = h / 2;
-  const [arcPhase, setArcPhase] = useState(0);
-  useEffect(() => {
-    let raf = 0;
-    let lastEmit = 0;
-    const start = performance.now();
-    // Throttle re-renders to ~30 fps. The previous loop fired setState
-    // every frame (60 fps), which re-rendered the whole canvas — at
-    // 8-12 agents the orbital math + SVG layout took >16 ms and the
-    // animation visibly stuttered. 30 fps is plenty for a halo pulse
-    // and halves the React reconciliation cost.
-    const tick = (now: number) => {
-      if (now - lastEmit >= 33) {
-        setArcPhase(((now - start) / 1000) * 36);
-        lastEmit = now;
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+  // Orbital halo/arc pulse — ~30fps, but ONLY while agents are active and the
+  // window is visible. An idle or backgrounded diagram now animates nothing
+  // (the unconditional loop here was the runaway-renderer / freeze cause).
+  const arcPhase = useAnimatedPhase(activeAgents.size > 0);
 
   const LAYER_COLORS = [
     "#f1c44a", "#48d486", "#3aa0ff", "#ee5b5b",
@@ -3046,22 +3019,9 @@ function GraphCanvas({
 
   // Active-state pulse so the green ring on a streaming node breathes
   // (static 40 %-opacity ring used to be easy to miss against the dark
-  // gradient). 30 fps, same throttle as TeamCanvas.
-  const [pulsePhase, setPulsePhase] = useState(0);
-  useEffect(() => {
-    let raf = 0;
-    let lastEmit = 0;
-    const start = performance.now();
-    const tick = (now: number) => {
-      if (now - lastEmit >= 33) {
-        setPulsePhase(((now - start) / 1000) * 36);
-        lastEmit = now;
-      }
-      raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, []);
+  // gradient). ~30 fps, gated on activity + visibility — an idle/hidden
+  // graph runs no rAF at all (was a permanent 30fps re-render loop).
+  const pulsePhase = useAnimatedPhase(activeAgents.size > 0);
   const activePulse = 0.5 + 0.5 * Math.sin((pulsePhase * Math.PI) / 180 * 3);
 
   const LAYER_COLORS = [

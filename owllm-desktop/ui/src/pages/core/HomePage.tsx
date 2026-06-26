@@ -20,7 +20,7 @@ import React, { useCallback, useEffect, useReducer, useRef, useState } from "rea
 import { invoke } from "@tauri-apps/api/core";
 import WslSetupModal from "./WslSetupModal";
 import { openSyncOnboarding } from "./AccountSyncModal";
-import { githubStatus } from "../agentic/github";
+import { githubStatus, GITHUB_CHANGED_EVENT } from "../agentic/github";
 import {
   fetchReadiness,
   getCachedReadiness,
@@ -494,15 +494,21 @@ export default function HomePage() {
     }
   }, [ready]);
 
-  // GitHub / sync account state for the top sign-in bar. Reloads on mount
-  // (HomePage remounts on tab switch, so returning after sign-in refreshes).
+  // GitHub / sync account state for the top sign-in bar. Reloads on mount, on
+  // the in-window `github-changed` broadcast (immediate after a connect from
+  // any surface), and on window focus (out-of-window browser device-flow).
   const [account, setAccount] = useState<{ connected: boolean; login: string | null }>({ connected: false, login: null });
   useEffect(() => {
     let dead = false;
     const load = () => { githubStatus().then((s) => { if (!dead) setAccount(s); }).catch(() => {}); };
     load();
     window.addEventListener("focus", load);
-    return () => { dead = true; window.removeEventListener("focus", load); };
+    window.addEventListener(GITHUB_CHANGED_EVENT, load);
+    return () => {
+      dead = true;
+      window.removeEventListener("focus", load);
+      window.removeEventListener(GITHUB_CHANGED_EVENT, load);
+    };
   }, []);
   // Guided WSL setup modal — opened from the WSL row when it's not ready,
   // and from other pages (e.g. the Environment popup) via the

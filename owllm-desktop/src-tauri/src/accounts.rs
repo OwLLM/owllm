@@ -1049,9 +1049,17 @@ pub async fn claude_cli_complete(
         // large system prompt into the stdin prompt (stdin is an unbounded pipe),
         // so the command line can never overflow no matter how big memory / roster
         // / skills get. The model reads the same content either way.
-        const MAX_SYSTEM_ARG: usize = 4000;
+        // Deliver the agent's system prompt as a PROPER system prompt
+        // (--append-system-prompt) whenever it fits — that is what keeps the model
+        // behaving as its role. FOLDING it into stdin strips the role out of the
+        // system position and makes a smart model (Opus 4.8) behave dumbly, so only
+        // fold when the prompt would actually overflow the command line. The host
+        // path takes a ~32 KB command line; the WSL path wraps args in a bash -lc
+        // script (escaping expands length), so fold earlier there.
+        let on_wsl = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc).is_some();
+        let max_system_arg: usize = if on_wsl { 10_000 } else { 24_000 };
         let fold_system_into_stdin =
-            !system_prompt.trim().is_empty() && system_prompt.len() > MAX_SYSTEM_ARG;
+            !system_prompt.trim().is_empty() && system_prompt.len() > max_system_arg;
         if !system_prompt.trim().is_empty() && !fold_system_into_stdin {
             args.push("--append-system-prompt".into());
             args.push(system_prompt.clone());
@@ -1499,9 +1507,17 @@ pub async fn claude_cli_stream(
         // ("os error 206" → the orchestrator "crash after a few seconds"). Fold a
         // large prompt into stdin (unbounded pipe) instead; keep the proven flag
         // for small prompts.
-        const MAX_SYSTEM_ARG: usize = 4000;
+        // Deliver the agent's system prompt as a PROPER system prompt
+        // (--append-system-prompt) whenever it fits — that is what keeps the model
+        // behaving as its role. FOLDING it into stdin strips the role out of the
+        // system position and makes a smart model (Opus 4.8) behave dumbly, so only
+        // fold when the prompt would actually overflow the command line. The host
+        // path takes a ~32 KB command line; the WSL path wraps args in a bash -lc
+        // script (escaping expands length), so fold earlier there.
+        let on_wsl = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc).is_some();
+        let max_system_arg: usize = if on_wsl { 10_000 } else { 24_000 };
         let fold_system_into_stdin =
-            !system_prompt.trim().is_empty() && system_prompt.len() > MAX_SYSTEM_ARG;
+            !system_prompt.trim().is_empty() && system_prompt.len() > max_system_arg;
         if !system_prompt.trim().is_empty() && !fold_system_into_stdin {
             args.push("--append-system-prompt".into());
             args.push(system_prompt.clone());

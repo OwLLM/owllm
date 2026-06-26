@@ -7,6 +7,7 @@
 //
 // Extracted verbatim from the ChatPage template (don't fork it — reuse).
 
+import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownLink from "./MarkdownLink";
@@ -109,7 +110,7 @@ export function toolStatusLabel(status?: ToolStatus) {
 
 /// Expandable tool / terminal / notice card — the exact ChatPage event row.
 /// `kind` drives the framing: "terminal" gets the dark console look.
-export function ToolEventCard({
+export const ToolEventCard = memo(function ToolEventCard({
   title, content, status, kind = "tool",
 }: {
   title: string;
@@ -145,7 +146,7 @@ export function ToolEventCard({
       }}>{content}</pre>
     </details>
   );
-}
+});
 
 export type ChatBubbleProps = {
   /// One-or-two char chip in the avatar box ("U", "A", an emoji…).
@@ -166,7 +167,12 @@ export type ChatBubbleProps = {
   ts?: number;
 };
 
-export function ChatBubble({ avatar, sender, accent, isUser, isStreaming, content, thinking, ts }: ChatBubbleProps) {
+// memo: a chat surface re-renders on EVERY keystroke in its composer (the draft
+// state lives in the parent). Without memo, all 300+ bubbles re-render AND
+// re-parse their markdown each keystroke → multi-second input lag, brutal over
+// remote desktop. All props are primitives, so memo's shallow compare lets an
+// unchanged bubble skip entirely; only the streaming/edited one re-renders.
+export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isUser, isStreaming, content, thinking, ts }: ChatBubbleProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -208,4 +214,4 @@ export function ChatBubble({ avatar, sender, accent, isUser, isStreaming, conten
       </div>
     </div>
   );
-}
+});

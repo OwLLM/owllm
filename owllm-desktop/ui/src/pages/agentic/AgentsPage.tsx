@@ -5852,6 +5852,8 @@ function buildOrchestratorPrompt(
     `YOUR SPECIALISTS (use their EXACT names when dispatching):`,
     [roster, criticRosterLine].filter(Boolean).join("\n") || "  (none — solo)",
     "",
+    "EFFORT — match the round to the task. Triage FIRST, dispatch the MINIMUM that fits: a trivial question/lookup → answer directly or ONE agent (no fan-out, no critic); a small fix/change → ONE specialist in the right domain (critic only if risky, no design phase); a feature → just the agents it needs; a new/greenfield product → the full design-then-build flow. Never dispatch an agent the task doesn't need — slim when easy, escalate only when it truly demands it.",
+    "ROUTE BY DOMAIN — send each task to the specialist whose role matches it, and NEVER ask an agent to work outside its layer: backend/server/data work → a backend specialist; UI/frontend work → a frontend specialist. A task spanning layers → dispatch EACH for ITS part (in parallel), coordinating through the shared API/contract, not one reaching across into the other's files.",
     "HOW TO RESPOND:",
     "1. Start with a short paragraph that restates the user's goal in your own words.",
     "2. Sketch a brief plan (2-5 bullet points).",

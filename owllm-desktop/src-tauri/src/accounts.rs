@@ -1884,8 +1884,14 @@ pub async fn codex_cli_stream(
             args.push(p.clone());
         }
         // Positional prompt (older codex reads it here); stdin carries it
-        // too (newer codex reads it there).
-        args.push(prompt.clone());
+        // too (newer codex reads it there). A large agentic prompt as the
+        // positional arg overflows the Windows ~32 KB command line ("os error
+        // 206") — same crash the claude path hit — so for a large prompt we drop
+        // the positional and rely on stdin (written below).
+        const MAX_PROMPT_ARG: usize = 4000;
+        if prompt.len() <= MAX_PROMPT_ARG {
+            args.push(prompt.clone());
+        }
 
         // WSL-isolated project → run `codex` inside the distro; else Windows CLI.
         let mut cmd = if let Some((exe, sargs)) =

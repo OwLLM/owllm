@@ -412,7 +412,10 @@ pub struct InboxImage {
     pub mime: Option<String>,
 }
 
-#[cfg(windows)]
+// Cross-platform: this is plain base64-decode + std::fs file writes, so it works
+// identically on Windows, Linux and macOS. (It used to be `#[cfg(windows)]` with a
+// non-Windows stub that errored "image inbox is a WSL feature" — pure laziness;
+// nothing here is WSL-specific, so image paste now works on every OS.)
 fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, String> {
     use base64::Engine as _;
     if cwd.trim().is_empty() {
@@ -460,11 +463,6 @@ fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, 
         paths.push(format!(".owllm-inbox/{name}"));
     }
     Ok(paths)
-}
-
-#[cfg(not(windows))]
-fn save_inbox_impl(_cwd: String, _images: Vec<InboxImage>) -> Result<Vec<String>, String> {
-    Err("image inbox is a WSL (Windows) feature today".into())
 }
 
 /// Save pasted images into the agent's working directory (.owllm-inbox/) so a

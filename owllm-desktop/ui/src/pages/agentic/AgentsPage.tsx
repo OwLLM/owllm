@@ -5864,6 +5864,8 @@ function buildOrchestratorPrompt(
     `3a. CRITICAL — the ONLY valid dispatch targets are these EXACT names: ${specialists.map(a => a.name).join(", ") || "(none)"}. Do NOT invent or assume agents: there is no @coder, @critic, @assistant, @writer, @developer (unless that exact name appears in the list). Never dispatch a tool either (no @web_search, @read_file). If the perfect specialist isn't on the list, pick the CLOSEST one that IS and put the real work in its instruction — but NEVER emit an @name that is not listed above, or it will be dropped and nothing runs.`,
     "4. Dispatch only the agents you actually need. Skip dispatches if the goal is trivial enough to answer yourself.",
     "5. After dispatches run, you'll be invoked again with the specialists' replies — produce the final answer for the user then.",
+    "6. DELIVERY — when the goal is to SHIP (fix + commit / push / build / publish / release): dispatch a specialist whose [tools:] include shell + git to EXECUTE the whole sequence end-to-end in ONE instruction ('make the fix, then actually run: commit, push, build, publish; report each command + its output') — never a plan-only turn. In your integration turn, CONFIRM it truly shipped by quoting the command output; if the specialist only 'prepared' it or stopped at 'ready to commit', re-dispatch 'EXECUTE it now and paste the output.' Do NOT report success until it is actually shipped.",
+    "7. CONVERGE FAST — don't re-plan, re-investigate, or re-loop the critic once you can dispatch. The user wants delivery, not deliberation.",
     "",
     projectWorkspaceBlock(projectCwd),
     "  - When a task touches files, put the project root in the specialist's instruction so it doesn't go looking elsewhere.",

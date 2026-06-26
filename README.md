@@ -183,11 +183,11 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.52** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.53** releases.
 
 ### 🧠 Agentic memory that actually persists
 - **Per-agent memory** — every specialist now remembers its own prior turns across dispatches *and* across runs. Model-agnostic (local, Claude, Codex, Gemini, Kimi).
-- **Shared team memory (RAG)** — a durable, project-wide knowledge base your agents search and write to via tools, so the whole team pools what it learns. **Syncs across your PCs.**
+- **Shared team memory (RAG)** — a durable, project-wide knowledge base the whole team pools what it learns into. **Works on every model path now** — a recent-memory snapshot is injected into every agent's prompt, and any agent (cloud CLI or API, not just local) can write a fact with a `[REMEMBER …]` line. **Syncs across your PCs.**
 - **3D knowledge graph** — explore that memory as a rotatable force-directed graph: 🧠 *Memory → 🌐 Graph*.
 
 ### 📋 A team operating standard
@@ -204,6 +204,7 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.52** releases.
 
 ### ⏱️ Visibility & reliability
 - **Run timers** — a team stopwatch in the canvas header, plus per-agent working-time on every card.
+- **No more idle CPU burn / freeze** — the Agents views' animations now run only while agents are working *and* the window is visible, instead of re-rendering forever (which used to peg a core and leak memory until the app locked up).
 - Hardened the subscription path (transient **401 / 529** auto-retry), the WSL sandbox credentials + folder handling, and post-reboot cold-start hangs.
 
 ### 💬 Chat & UI polish
@@ -214,10 +215,11 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.52** releases.
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.52)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.6.53)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.6.53** | Team memory on every model path ([REMEMBER] writes + injected snapshot) · fixed runaway-CPU freeze |
 | **0.6.52** | Server page shows the running model + live context · fixed diagram ring distances |
 | **0.6.51** | Scoped Ctrl+A in chats · live tok/s in the header · no doubled orchestrator |
 | **0.6.50** | Effect-based abliteration — causal selection + refusal benchmark |

@@ -328,6 +328,14 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [chatBusy, setChatBusy] = useState(false);
   const [chatImages, setChatImages] = useState<Attachment[]>([]);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
+  // Project-coding composer image attachments (paste / drag-drop / picker) — the
+  // same capability the just-chat box and the agentic/fine-tuning chats have, so
+  // every chat behaves the same. Sent with the next message, then cleared.
+  const [codeImages, setCodeImages] = useState<Attachment[]>([]);
+  const codeFileRef = useRef<HTMLInputElement | null>(null);
+  // Clicking a file in the tree OPENS it in a read-only viewer (was: silently
+  // inserted an @ref, which is why the tree felt "fake" — you couldn't see files).
+  const [viewer, setViewer] = useState<{ abs: string; rel: string; content: string; loading: boolean } | null>(null);
   // Fallback working dir for chats with NO workspace folder selected. A pasted
   // image needs somewhere to be saved so a CLI/subscription model can READ it
   // (codex -i / claude file-ref) — without a cwd the image was silently dropped
@@ -1012,40 +1020,46 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     user: string,
     history: HistoryItem[],
     signal: AbortSignal,
-    opts?: { silent?: boolean; withEvents?: boolean },
+    opts?: { silent?: boolean; withEvents?: boolean; images?: ReturnType<typeof imageAttachments> },
   ): Promise<string> => {
     const provider = providerFor(modelId, availableModels);
     const isLocal = provider === "local" || provider === "tuned";
     const dDelta = opts?.silent ? () => {} : onDelta;
     const dThought = opts?.silent ? () => {} : onThought;
+    const imgs = opts?.images ?? [];
     if (isLocal) {
       const port = await ensureServer(modelId);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
-        port, modelId, systemPrompt: system, userContent: user, temperature: 0.3,
+        port, modelId, systemPrompt: system,
+        userContent: imgs.length ? openaiUserContent(user, imgs) : user, temperature: 0.3,
         signal, onDelta: dDelta, onThought: dThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall, onToolResult } : undefined,
       });
     }
-    return streamChatCompletion(0, modelId, provider, system, user, 0.3, signal, dDelta, workspace, history, true, dThought);
+    return streamChatCompletion(0, modelId, provider, system, user, 0.3, signal, dDelta, workspace, history, true, dThought, undefined, imgs.length ? imgs : undefined);
   };
 
   const send = async () => {
     const text = draft.trim();
-    if (!text || busy) return;
+    const images = imageAttachments(codeImages);
+    if ((!text && images.length === 0) || busy) return;
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setStatus("No model selected — pick one above."); return; }
     setDraft("");
+    setCodeImages([]);
     setBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const history: HistoryItem[] = messages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-    setMessages((msgs) => [...msgs, { role: "user", content: text, ts: Date.now() }]);
+    // The bubble shows a 🖼 marker; the actual images ride to the model via runTurn.
+    const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
+    setMessages((msgs) => [...msgs, { role: "user", content: label, ts: Date.now() }]);
     try {
       setStatus(`Coding in ${workspace}`);
-      await runTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
+      await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
     } catch (e) {
       const err = e as { name?: string; message?: string };
       if (err.name !== "AbortError") {
@@ -1180,9 +1194,32 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
 
   // Clicking a file in the tree drops an @-reference into the composer so the
   // user can point the agent at it ("fix the bug in @src/foo.ts").
-  const openFile = (abs: string) => {
-    const rel = workspace && abs.startsWith(workspace) ? abs.slice(workspace.length).replace(/^[\\/]+/, "") : abs;
+  const relOf = (abs: string) =>
+    workspace && abs.startsWith(workspace) ? abs.slice(workspace.length).replace(/^[\\/]+/, "") : abs;
+  // Click a file → OPEN it in a viewer (read its real contents). This is what
+  // makes the tree useful instead of decorative.
+  const openFile = async (abs: string) => {
+    const rel = relOf(abs);
+    setViewer({ abs, rel, content: "", loading: true });
+    try {
+      const content = await invoke<string>("tool_read_file", { path: abs, cwd: undefined });
+      setViewer({ abs, rel, content, loading: false });
+    } catch (e: any) {
+      setViewer({ abs, rel, content: `⚠ Couldn't open this file: ${String(e?.message ?? e)}\n\n(It may be binary, too large, or outside the workspace.)`, loading: false });
+    }
+  };
+  // Drop an @reference to the open file into the composer (so the model edits it).
+  const referenceInChat = (rel: string) => {
     setDraft((d) => (d.trim() ? `${d.replace(/\s*$/, "")} @${rel} ` : `@${rel} `));
+    setViewer(null);
+  };
+  // Project-composer image attachments — mirror addChatFiles (just-chat box).
+  const addCodeFiles = async (files: FileList | File[]) => {
+    for (const f of Array.from(files)) {
+      if (!f.type.startsWith("image/")) continue;
+      try { const a = await fileToImageAttachment(f); setCodeImages((x) => [...x, a]); }
+      catch (e: any) { setStatus(String(e?.message ?? e)); }
+    }
   };
 
   const wsShort = (projectRoot || workspace) ? (projectRoot || workspace)!.replace(/^.*[\\/]/, "") : "No folder";
@@ -1678,25 +1715,66 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
         : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
 
-      {/* Composer */}
-      <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-        <textarea
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-          placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? "Describe the change, bug, or feature…  (Enter to send, Shift+Enter for newline)" : "Pick a workspace folder first…"}
-          rows={2}
-          style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 160, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
-        />
-        {busy ? (
-          <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
-        ) : (
-          <>
-            <button onClick={planAndExecute} disabled={!draft.trim() || preparing} title="Break the goal into ordered steps, then build them one by one (Kanban)" style={{ ...btn, height: 44, padding: "0 14px", opacity: (draft.trim() && !preparing) ? 1 : 0.5 }}>📋 Plan</button>
-            <button onClick={send} disabled={!draft.trim() || preparing} title={preparing ? "Preparing the workspace — unlocks in a moment" : undefined} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: (draft.trim() && !preparing) ? 1 : 0.5 }}>{preparing ? "⏳ Preparing…" : "Send"}</button>
-          </>
+      {/* Composer — supports image paste / drag-drop / 📎 picker, like every
+          other chat in the app. Drop target wraps the whole row. */}
+      <div
+        onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) { e.preventDefault(); } }}
+        onDrop={(e) => { const f = Array.from(e.dataTransfer?.files ?? []).filter((x) => x.type.startsWith("image/")); if (f.length) { e.preventDefault(); void addCodeFiles(f); } }}
+        style={{ display: "flex", flexDirection: "column", gap: 6 }}
+      >
+        {codeImages.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {codeImages.map((img, i) => (
+              <div key={i} style={{ position: "relative", width: 48, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)" }}>
+                <img src={`data:${img.mime};base64,${img.data_b64}`} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                <button onClick={() => setCodeImages((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+              </div>
+            ))}
+          </div>
         )}
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+          <input ref={codeFileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+                 onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
+          <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+            placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? "Describe the change, bug, or feature… (paste/drop images too)" : "Pick a workspace folder first…"}
+            rows={2}
+            style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 160, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
+          />
+          {busy ? (
+            <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
+          ) : (
+            <>
+              <button onClick={planAndExecute} disabled={!draft.trim() || preparing} title="Break the goal into ordered steps, then build them one by one (Kanban)" style={{ ...btn, height: 44, padding: "0 14px", opacity: (draft.trim() && !preparing) ? 1 : 0.5 }}>📋 Plan</button>
+              <button onClick={send} disabled={(!draft.trim() && codeImages.length === 0) || preparing} title={preparing ? "Preparing the workspace — unlocks in a moment" : undefined} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || codeImages.length) && !preparing) ? 1 : 0.5 }}>{preparing ? "⏳ Preparing…" : "Send"}</button>
+            </>
+          )}
+        </div>
       </div>
+
+      {/* File viewer — opening a file in the tree shows its real contents here. */}
+      {viewer && (
+        <div onClick={() => setViewer(null)} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "min(980px, 94vw)", maxHeight: "88vh", display: "flex", flexDirection: "column", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 12, overflow: "hidden", boxShadow: "var(--shadow-lg)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderBottom: "1px solid var(--border)" }}>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={viewer.abs}>📄 {viewer.rel}</span>
+              <button onClick={() => referenceInChat(viewer.rel)} title="Insert @reference into the composer so the model edits this file" style={{ ...btn, height: 30, padding: "0 10px" }}>↳ Reference in chat</button>
+              <button onClick={() => setViewer(null)} style={{ ...btn, height: 30, padding: "0 12px" }}>✕ Close</button>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflow: "auto", background: "var(--bg-input)" }}>
+              {viewer.loading ? (
+                <div style={{ padding: 20, color: "var(--fg-muted)", fontSize: 13 }}>Loading…</div>
+              ) : (
+                <pre style={{ margin: 0, padding: 14, fontSize: 12.5, lineHeight: 1.5, fontFamily: "Consolas, 'JetBrains Mono', monospace", color: "var(--fg)", whiteSpace: "pre", overflowX: "auto" }}>{viewer.content}</pre>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

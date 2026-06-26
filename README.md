@@ -183,7 +183,7 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.53** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.56** releases.
 
 ### 🧠 Agentic memory that actually persists
 - **Per-agent memory** — every specialist now remembers its own prior turns across dispatches *and* across runs. Model-agnostic (local, Claude, Codex, Gemini, Kimi).
@@ -205,6 +205,8 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.53** releases.
 ### ⏱️ Visibility & reliability
 - **Run timers** — a team stopwatch in the canvas header, plus per-agent working-time on every card.
 - **No more idle CPU burn / freeze** — the Agents views' animations now run only while agents are working *and* the window is visible, instead of re-rendering forever (which used to peg a core and leak memory until the app locked up).
+- **No more orchestrator "crash after a few seconds"** — a large agent system prompt (role + team + memory) was passed as one giant command-line argument and overflowed Windows' ~32 KB limit; large prompts now go through stdin instead, across every CLI provider.
+- **Team agents honor auto-approve** — with auto-approve on, dispatched specialists actually get write/exec permission (was gated regardless of the toggle); image paste/drop no longer fails with "Access is denied."
 - Hardened the subscription path (transient **401 / 529** auto-retry), the WSL sandbox credentials + folder handling, and post-reboot cold-start hangs.
 
 ### 💬 Chat & UI polish
@@ -215,10 +217,13 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.53** releases.
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.53)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.6.56)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.6.56** | Finish the orchestrator-crash fix for the Codex agent path (all CLI paths overflow-safe) |
+| **0.6.55** | Fix orchestrator "crash after a few seconds" — system prompt overflowed the command line (os 206) |
+| **0.6.54** | Team agents honor the auto-approve toggle (can write) · fix image-paste "Access is denied" |
 | **0.6.53** | Team memory on every model path ([REMEMBER] writes + injected snapshot) · fixed runaway-CPU freeze |
 | **0.6.52** | Server page shows the running model + live context · fixed diagram ring distances |
 | **0.6.51** | Scoped Ctrl+A in chats · live tok/s in the header · no doubled orchestrator |

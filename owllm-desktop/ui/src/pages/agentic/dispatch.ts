@@ -1486,6 +1486,13 @@ export async function resolveImageCwd(cwd: string | undefined, hasImages: boolea
 export async function saveCliImages(
   images: Attachment[],
   cwd?: string,
+  /// Surface a backend save FAILURE to the caller instead of swallowing it.
+  /// Without this, a failed `agent_save_inbox_images` returned undefined and the
+  /// image silently vanished — the agent then replied "I couldn't see your
+  /// image" with no diagnostic. The caller folds this note (which carries the
+  /// backend error string) into the agent-visible prompt — same actionable
+  /// pattern as appendCliImageFiles' catch below.
+  onError?: (note: string) => void,
 ): Promise<string[] | undefined> {
   if (images.length === 0 || !cwd || !cwd.trim()) return undefined;
   try {
@@ -1493,8 +1500,11 @@ export async function saveCliImages(
       cwd,
       images: images.map((a) => ({ data_b64: a.data_b64, mime: a.mime })),
     });
-    return paths && paths.length > 0 ? paths : undefined;
-  } catch {
+    if (paths && paths.length > 0) return paths;
+    onError?.(`[${images.length} image attachment(s) couldn't be saved for the agent: the image-save backend returned no file paths]`);
+    return undefined;
+  } catch (e) {
+    onError?.(`[${images.length} image attachment(s) couldn't be saved for the agent: ${String((e as { message?: string })?.message ?? e)}]`);
     return undefined;
   }
 }
@@ -2473,14 +2483,19 @@ async function streamOpenAI(
     // native -i flag. resolveImageCwd falls back to a scratch dir when there's
     // no project folder, and we run codex in that SAME dir so -i resolves.
     const codexCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
-    const codexImagePaths = await saveCliImages(images ?? [], codexCwd);
+    // A backend image-save failure must reach the agent, not vanish — fold the
+    // diagnostic (carrying the backend error string) into the prompt so codex
+    // can tell the user WHAT failed instead of "I couldn't see your image".
+    let imageSaveNote = "";
+    const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
+    const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
     // Stream live activity (reasoning, commands, tools, web searches) when
     // the caller wants thought traffic — AgentsPage / ChatPage / CodePage.
     // Bridge callers (no Thought pane) fall back to the one-shot blob.
     if (onThought) {
       return await runCodexCliStream({
         systemPrompt,
-        userMessage: prompt,
+        userMessage: codexPrompt,
         cwd: codexCwd ?? null,
         imagePaths: codexImagePaths,
         onDelta,
@@ -2489,7 +2504,7 @@ async function streamOpenAI(
     }
     const reply = await invoke<string>("codex_cli_complete", {
       systemPrompt,
-      userMessage: prompt,
+      userMessage: codexPrompt,
       cwd: codexCwd ?? undefined,
       imagePaths: codexImagePaths,
     });

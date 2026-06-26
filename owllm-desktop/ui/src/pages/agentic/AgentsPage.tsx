@@ -490,9 +490,28 @@ function displayLabel(fullName: string): string {
   return words.join(" ") || fullName;
 }
 
+// Enforce the unique-agent-name invariant at the data boundary. Agent names
+// are identities: @dispatch resolves by exact name and every render surface
+// (chat grid, diagram, graph) keys nodes by name. A roster that carries the
+// same name twice — from an older/edited project record or a hand-touched
+// custom team — otherwise renders as duplicate cards with colliding React
+// keys ("agent cards repeated over and over"). Keep the FIRST occurrence
+// (the authored one) and drop later collisions. Order is preserved.
+function dedupeAgentsByName(agents: AgentSpec[]): AgentSpec[] {
+  const seen = new Set<string>();
+  const out: AgentSpec[] = [];
+  for (const a of agents) {
+    if (!a || typeof a.name !== "string") continue;
+    if (seen.has(a.name)) continue;
+    seen.add(a.name);
+    out.push(a);
+  }
+  return out;
+}
+
 function toTeam(t: TeamTemplateBackend): Team {
   const d = t.data ?? {};
-  const agents: AgentSpec[] = Array.isArray(d.agents)
+  const agents: AgentSpec[] = dedupeAgentsByName(Array.isArray(d.agents)
     ? d.agents.map((a: any) => ({
         name: a.name,
         base: a.base,
@@ -504,7 +523,7 @@ function toTeam(t: TeamTemplateBackend): Team {
         extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
         role: a.role === "leader" ? "leader" : a.role === "agent" ? "agent" : undefined,
       }))
-    : [];
+    : []);
   const edges: Edge[] = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
   const name = d.name ?? t.id;
   return {
@@ -553,7 +572,9 @@ function projectToTeam(p: ProjectRow): Team {
       // Stale graph_json — silently fall back to empty.
     }
   }
-  const agents: AgentSpec[] = p.team.map(n => ({ name: n, base: baseByName.get(n) ?? n }));
+  const agents: AgentSpec[] = dedupeAgentsByName(
+    p.team.map(n => ({ name: n, base: baseByName.get(n) ?? n })),
+  );
   return {
     id: `project:${p.id}`,
     name: p.name,
@@ -5629,10 +5650,13 @@ function criticConcluded(t: string): boolean {
 /// the team unchanged (the team author already accounted for it).
 function withSyntheticCritic(team: Team | null): Team | null {
   if (!team) return null;
-  if (team.agents.some(a => a.name === CRITIC_AGENT_NAME)) return team;
-  const orch = findOrchestratorSpec(team);
-  if (!orch) return team; // no orchestrator → no critic; nothing to peer with
-  return { ...team, agents: [...team.agents, CRITIC_SYNTHETIC_SPEC] };
+  // Defensive: collapse any repeated names before reasoning about the critic
+  // so no canvas/grid downstream ever receives a duplicate-keyed roster.
+  const base = dedupeAgentsByName(team.agents);
+  if (base.some(a => a.name === CRITIC_AGENT_NAME)) return { ...team, agents: base };
+  const orch = findOrchestratorSpec({ ...team, agents: base });
+  if (!orch) return { ...team, agents: base }; // no orchestrator → no critic; nothing to peer with
+  return { ...team, agents: [...base, CRITIC_SYNTHETIC_SPEC] };
 }
 
 // The DISPATCH-side orchestrator finder (used by onSupSend, the orchestrator
@@ -6618,16 +6642,18 @@ async function streamOpenAI(
     // A no-folder team chat has no projectCwd; fall back to the shared
     // chat-scratch dir so codex has a real place to save+read the image (#24).
     const codexCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
-    const codexImagePaths = await saveCliImages(images ?? [], codexCwd);
+    let imageSaveNote = "";
+    const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
+    const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
     // Stream live activity (reasoning/commands/tools/web-search) into the
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: prompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, onDelta, onThought,
+        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, onDelta, onThought,
       }), codexCwd);
     }
     const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
-      systemPrompt, userMessage: prompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths,
+      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths,
     }), codexCwd);
     if (reply) onDelta(reply);
     return reply;

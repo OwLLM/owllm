@@ -412,6 +412,47 @@ pub struct InboxImage {
     pub mime: Option<String>,
 }
 
+// True when `dir` is a Windows UNC path through the WSL 9P redirector
+// (`\\wsl.localhost\...`, `\\wsl$\...`, `\\?\UNC\...` — case-insensitive). The
+// agent cwd is frequently such a path, and the 9P redirector intermittently
+// returns PermissionDenied on directory create even though no real ACL is
+// involved. We only relax create_dir_all for these paths.
+#[cfg(windows)]
+fn is_wsl_redirector_path(dir: &std::path::Path) -> bool {
+    let s = dir.to_string_lossy().to_ascii_lowercase();
+    s.starts_with(r"\\wsl.localhost\") || s.starts_with(r"\\wsl$\") || s.starts_with(r"\\?\unc\")
+}
+
+// create_dir_all for the inbox dir, with a SMALL bounded retry that is scoped
+// (Windows-only) to WSL 9P redirector paths. On those paths create_dir_all can
+// transiently fail with PermissionDenied as a redirector race, not a genuine
+// permission denial, which randomly broke image paste. Retry at most a handful
+// of times with a short backoff, then return the original error so real
+// failures still surface clearly. On normal paths (and on non-Windows) this is
+// a single create_dir_all call — real permission errors stay immediate.
+fn create_inbox_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(windows)]
+    {
+        if is_wsl_redirector_path(dir) {
+            // up to 5 attempts total (1 + 4 retries) with a short backoff
+            for attempt in 0..5 {
+                match std::fs::create_dir_all(dir) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => {
+                        // Only the redirector race manifests as PermissionDenied;
+                        // anything else (or the last attempt) surfaces the real error.
+                        if attempt == 4 || e.kind() != std::io::ErrorKind::PermissionDenied {
+                            return Err(e);
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                }
+            }
+        }
+    }
+    std::fs::create_dir_all(dir)
+}
+
 // Cross-platform: this is plain base64-decode + std::fs file writes, so it works
 // identically on Windows, Linux and macOS. (It used to be `#[cfg(windows)]` with a
 // non-Windows stub that errored "image inbox is a WSL feature" — pure laziness;
@@ -428,7 +469,7 @@ fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, 
     // so recreating it on the next line raced and returned "Access is denied" —
     // which broke every paste AFTER the first into the same folder. Creating the
     // dir idempotently and deleting individual old files avoids the race.
-    std::fs::create_dir_all(&dir)
+    create_inbox_dir(&dir)
         .map_err(|e| format!("create inbox dir {}: {e}", dir.display()))?;
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for ent in rd.flatten() {

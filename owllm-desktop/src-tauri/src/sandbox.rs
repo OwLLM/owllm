@@ -419,8 +419,27 @@ fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, 
         return Err("no working directory to save images into".into());
     }
     let dir = std::path::Path::new(&cwd).join(".owllm-inbox");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create inbox: {e}"))?;
+    // Ensure the dir exists FIRST, then clear only stale image_* files inside.
+    // The previous `remove_dir_all` + immediate `create_dir_all` deadlocked on
+    // Windows: NTFS posts the directory delete asynchronously (delete-pending),
+    // so recreating it on the next line raced and returned "Access is denied" —
+    // which broke every paste AFTER the first into the same folder. Creating the
+    // dir idempotently and deleting individual old files avoids the race.
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("create inbox dir {}: {e}", dir.display()))?;
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for ent in rd.flatten() {
+            let p = ent.path();
+            let is_stale_image = p
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with("image_"))
+                .unwrap_or(false);
+            if is_stale_image {
+                let _ = std::fs::remove_file(&p);
+            }
+        }
+    }
     let mut paths = Vec::new();
     for (i, img) in images.iter().enumerate() {
         let bytes = base64::engine::general_purpose::STANDARD
@@ -433,7 +452,9 @@ fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, 
             _ => "png",
         };
         let name = format!("image_{}.{ext}", i + 1);
-        std::fs::write(dir.join(&name), &bytes).map_err(|e| format!("write image {}: {e}", i + 1))?;
+        let target = dir.join(&name);
+        std::fs::write(&target, &bytes)
+            .map_err(|e| format!("write image {} to {}: {e}", i + 1, target.display()))?;
         // RELATIVE to the agent's cwd — works for codex `-i` AND claude's Read
         // tool, whether the agent runs sandboxed (cwd bound) or on the host.
         paths.push(format!(".owllm-inbox/{name}"));

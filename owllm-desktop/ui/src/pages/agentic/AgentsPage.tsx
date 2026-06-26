@@ -9724,7 +9724,12 @@ export default function AgentsPage() {
               tempFor(spec, 0.5), ctrl.signal,
               (delta) => streamLog(spec.name, delta),
               chainCwd,
-              specMemory.length > 0 ? specMemory : undefined, undefined,
+              specMemory.length > 0 ? specMemory : undefined,
+              // autoApprove: thread the user's GUI toggle through so a Claude/Codex
+              // CLI specialist actually gets --permission-mode bypassPermissions and
+              // can WRITE. Was hardcoded undefined → every team-dispatched agent ran
+              // gated regardless of the toggle (the "blocked on write permissions" bug).
+              autoApprove,
               (channel, role, delta) => streamThought(spec.name, channel, role, delta),
               allowed,
               undefined,
@@ -10110,7 +10115,7 @@ export default function AgentsPage() {
             docInstruction, tempFor(docSpec, 0.3), ctrl.signal,
             (delta) => streamLog(docSpec.name, delta),
             docCwd,
-            undefined, undefined,
+            undefined, autoApprove, // autoApprove: let the doc writer's CLI write (was undefined)
             (channel, role, delta) => streamThought(docSpec.name, channel, role, delta),
             docAllowed,
             undefined,

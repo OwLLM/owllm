@@ -1040,10 +1040,29 @@ pub async fn claude_cli_complete(
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
-        if !system_prompt.trim().is_empty() {
+        // The agentic system prompt (role + team + injected memory snapshot +
+        // directives + skills) can be tens of KB. Windows caps a process command
+        // line at ~32 KB, so passing it via `--append-system-prompt <arg>` blew up
+        // once the team-memory snapshot grew → "spawn claude: The filename or
+        // extension is too long. (os error 206)" — the orchestrator "crash after a
+        // few seconds". Fix: keep the small case on the proven flag, but FOLD a
+        // large system prompt into the stdin prompt (stdin is an unbounded pipe),
+        // so the command line can never overflow no matter how big memory / roster
+        // / skills get. The model reads the same content either way.
+        const MAX_SYSTEM_ARG: usize = 4000;
+        let fold_system_into_stdin =
+            !system_prompt.trim().is_empty() && system_prompt.len() > MAX_SYSTEM_ARG;
+        if !system_prompt.trim().is_empty() && !fold_system_into_stdin {
             args.push("--append-system-prompt".into());
             args.push(system_prompt.clone());
         }
+        // What actually gets piped to the CLI's stdin: just the user turn normally,
+        // or system-prompt + user turn when we folded above.
+        let stdin_payload = if fold_system_into_stdin {
+            format!("{system_prompt}\n\n----- YOUR TASK -----\n\n{user_message}")
+        } else {
+            user_message.clone()
+        };
 
         // Build + run wrapped in a closure so a "Session ID … is already in use"
         // failure RETRIES once WITHOUT --session-id. Cause: `--session-id X`
@@ -1093,7 +1112,7 @@ pub async fn claude_cli_complete(
             let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
             if let Some(mut stdin) = child.stdin.take() {
                 stdin
-                    .write_all(user_message.as_bytes())
+                    .write_all(stdin_payload.as_bytes())
                     .map_err(|e| format!("write stdin: {e}"))?;
             }
             // Wait as long as the CLI needs (agentic runs can be 15-30 min).
@@ -1220,6 +1239,14 @@ pub async fn codex_cli_complete(
         } else {
             format!("{}\n\n{}", system_prompt.trim(), user_message)
         };
+        // Windows caps a command line at ~32 KB. codex passes the prompt BOTH as a
+        // positional arg AND on stdin (cross-version); a large agentic prompt as
+        // the positional arg overflows ("filename or extension is too long, os
+        // 206") — the same crash the claude path hit. Newer codex reads the prompt
+        // from stdin (always piped below), so for a large prompt we DROP the
+        // positional arg and rely on stdin. Small prompts keep both (older codex).
+        const MAX_PROMPT_ARG: usize = 4000;
+        let pass_prompt_positionally = prompt.len() <= MAX_PROMPT_ARG;
         // Base args shared by both paths (no -o — see per-branch handling).
         let mut base_args: Vec<String> = vec![
             "exec".into(),
@@ -1243,7 +1270,7 @@ pub async fn codex_cli_complete(
         // the sandbox, so we omit -o on this path).
         if let Some((exe, sargs)) = {
             let mut args = base_args.clone();
-            args.push(prompt.clone());
+            if pass_prompt_positionally { args.push(prompt.clone()); }
             crate::sandbox::program_argv(cwd.as_deref(), "codex", &args)
         } {
             let mut cmd = Command::new(exe);
@@ -1292,7 +1319,11 @@ pub async fn codex_cli_complete(
         push_arg(&mut cmd, batch, "-o");
         push_arg(&mut cmd, batch, &out_file.to_string_lossy());
         // Positional prompt (older codex reads it here); stdin carries it too.
-        push_arg(&mut cmd, batch, &prompt);
+        // Skipped for a large prompt to stay under the ~32 KB command-line cap —
+        // stdin below still delivers it (see MAX_PROMPT_ARG note above).
+        if pass_prompt_positionally {
+            push_arg(&mut cmd, batch, &prompt);
+        }
         if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let p = std::path::Path::new(dir);
             if p.is_dir() {
@@ -1463,10 +1494,23 @@ pub async fn claude_cli_stream(
                 }
             }
         }
-        if !system_prompt.trim().is_empty() {
+        // See claude_cli_complete: a large agentic system prompt passed via
+        // `--append-system-prompt <arg>` overflows the Windows ~32 KB command line
+        // ("os error 206" → the orchestrator "crash after a few seconds"). Fold a
+        // large prompt into stdin (unbounded pipe) instead; keep the proven flag
+        // for small prompts.
+        const MAX_SYSTEM_ARG: usize = 4000;
+        let fold_system_into_stdin =
+            !system_prompt.trim().is_empty() && system_prompt.len() > MAX_SYSTEM_ARG;
+        if !system_prompt.trim().is_empty() && !fold_system_into_stdin {
             args.push("--append-system-prompt".into());
             args.push(system_prompt.clone());
         }
+        let stdin_payload = if fold_system_into_stdin {
+            format!("{system_prompt}\n\n----- YOUR TASK -----\n\n{user_message}")
+        } else {
+            user_message.clone()
+        };
 
         // Build + stream wrapped in a closure so a "Session ID … is already in
         // use" startup failure retries once WITHOUT --session-id (see
@@ -1512,7 +1556,7 @@ pub async fn claude_cli_stream(
         let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
             stdin
-                .write_all(user_message.as_bytes())
+                .write_all(stdin_payload.as_bytes())
                 .map_err(|e| format!("write stdin: {e}"))?;
             // Closing stdin signals EOF — without this the CLI sits
             // waiting for more input and never emits anything.

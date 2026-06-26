@@ -24,7 +24,7 @@ import {
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
 import { isolationBadge } from "./isolationBadge";
-import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, type GithubStatus } from "./github";
+import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubStatus } from "./github";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
   sandboxProvision, sandboxLoginStatus, sandboxConvertProject,
@@ -784,10 +784,22 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [ghBusy, setGhBusy] = useState(false);
   const [ghMsg, setGhMsg] = useState("");
   const [ghOpen, setGhOpen] = useState(false);
+  // Reloads on mount, on the in-window `github-changed` broadcast (an
+  // immediate connect/disconnect/authorize from ANY surface — the Account Sync
+  // modal, the support drawer, the device-flow), and on window focus (covers
+  // an out-of-window browser device-flow). The in-page connect/disconnect
+  // handlers below also update `gh` directly.
   useEffect(() => {
     let dead = false;
-    githubStatus().then((s) => { if (!dead) setGh(s); });
-    return () => { dead = true; };
+    const load = () => { githubStatus().then((s) => { if (!dead) setGh(s); }).catch(() => {}); };
+    load();
+    window.addEventListener("focus", load);
+    window.addEventListener(GITHUB_CHANGED_EVENT, load);
+    return () => {
+      dead = true;
+      window.removeEventListener("focus", load);
+      window.removeEventListener(GITHUB_CHANGED_EVENT, load);
+    };
   }, []);
   const connectGithub = async () => {
     if (ghBusy || !ghToken.trim()) return;

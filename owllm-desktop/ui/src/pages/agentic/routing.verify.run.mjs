@@ -36,6 +36,7 @@ const {
   toolRoleIsWrite, goalRequiresWrite, runIsDone, runDelivered, normalizeRunOutput, isNoProgress,
 } = await load("teamConfig.ts");
 const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await load("dispatchParse.ts");
+const { formatWorkLogEntry, renderRelevantWork, enrichInstructionWithMemory, oneLine } = await load("teamMemoryFormat.ts");
 
 // --- role tool_allowlists (so roleCanWrite matches the app) ---------------
 function parseToolAllowlist(yamlText) {
@@ -196,6 +197,21 @@ const p4 = parseDispatchesDetailed("@nobody: do a thing", TEAM, "orchestrator");
 check("unknown agent → unresolved, not silently dropped", p4.unresolved.length === 1 && p4.dispatches.length === 0);
 // stripDispatchDirectives hides the whole instruction block from the clean reply
 check("stripDispatchDirectives keeps preamble, drops the block", stripDispatchDirectives(multiLine).trim() === "Proceeding to dispatch.");
+
+// 7) shared work-state (RAG) — auto-captured work is keyword-rich + synchronized
+//    into the next agent's task by RELEVANCE, not recency.
+section("7) Team work-state (RAG sync)");
+const wl = formatWorkLogEntry("backend_coder", "add the /login endpoint with JWT", "Implemented POST /login in auth.py, returns a JWT; added tests.");
+check("worklog carries the agent + task + outcome keywords", /@backend_coder/.test(wl) && /login/.test(wl) && /JWT/i.test(wl) && /auth\.py/.test(wl));
+check("oneLine collapses whitespace/newlines", oneLine("a\n  b   c") === "a b c");
+const relBlock = renderRelevantWork([
+  { content: "@backend_coder — TASK: add /login endpoint. DID: POST /login in auth.py returns JWT.", author: "backend_coder", tags: "worklog" },
+]);
+check("relevant-work block has a sync header", /RELEVANT TEAM WORK/.test(relBlock) && /auth\.py/.test(relBlock));
+check("empty entries → empty block", renderRelevantWork([]) === "");
+const enriched = enrichInstructionWithMemory(relBlock, "wire the frontend login form to the API");
+check("enriched instruction fences the task after the memory", enriched.includes("--- YOUR TASK ---") && enriched.endsWith("wire the frontend login form to the API") && enriched.startsWith("RELEVANT TEAM WORK"));
+check("no memory → instruction unchanged", enrichInstructionWithMemory("", "just do X") === "just do X");
 
 console.log(`\n${fail === 0 ? "✅ PASS" : "❌ FAIL"} — ${pass} passed, ${fail} failed`);
 if (fails.length) { console.log("Failed:"); fails.forEach((f) => console.log("  - " + f)); }

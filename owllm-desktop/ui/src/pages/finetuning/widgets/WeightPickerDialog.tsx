@@ -22,7 +22,10 @@ export type HfFile = {
 
 export type WeightPickerDialogProps = {
   modelId: string;
-  vramGb: number;
+  /** GPU VRAM in GB, used to colour each quant green (fits) / red (won't
+   *  load). Optional: undefined when no GPU probe is available, in which
+   *  case nothing is constrained and the fit hint is dropped. */
+  vramGb?: number;
   onCancel: () => void;
   /** Receives the list of selected file paths (subset of the repo's
    *  .gguf or .safetensors files). Pass through to hf_download as the
@@ -108,7 +111,8 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
     return () => { dead = true; };
   }, [p.modelId]);
 
-  const vramBytes = p.vramGb * 1024 ** 3;
+  // No VRAM probe → don't constrain anything (every quant "fits").
+  const vramBytes = p.vramGb ? p.vramGb * 1024 ** 3 : Infinity;
 
   const fits = (f: HfFile): boolean => {
     if (f.size && f.size > 0) return f.size <= vramBytes;
@@ -159,7 +163,9 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
         <div style={{ padding: "14px 18px", borderBottom: "1px solid rgba(var(--accent-rgb),0.3)" }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Choose weights to download</div>
           <div style={{ fontSize: 12, color: "#9aa0aa", marginTop: 4 }}>
-            <b>{p.modelId}</b> · Green = fits your {p.vramGb.toFixed(1)} GB VRAM · Red = won't load
+            {p.vramGb != null
+              ? <><b>{p.modelId}</b> · Green = fits your {p.vramGb.toFixed(1)} GB VRAM · Red = won't load</>
+              : <><b>{p.modelId}</b> · Pick the quant that fits your GPU</>}
           </div>
         </div>
 

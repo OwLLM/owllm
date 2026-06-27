@@ -453,6 +453,54 @@ fn create_inbox_dir(dir: &std::path::Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)
 }
 
+// Convert a WSL 9P redirector UNC path that points at a Windows drive mount
+// (`\\wsl.localhost\<distro>\mnt\<drive>\...`, also `\\wsl$\...` and the verbatim
+// `\\?\UNC\wsl.localhost\...` form, case-insensitive prefixes) into the native
+// Windows drive path it actually refers to, e.g.
+//   \\wsl.localhost\Ubuntu\mnt\c\1_Git\LocaLLM  ->  C:\1_Git\LocaLLM
+// Writing through the drive path sidesteps the flaky 9P redirector create.
+// Returns None for any UNC path that is NOT a `/mnt/<drive>/` drvfs mount (e.g.
+// `\\wsl.localhost\Ubuntu\home\user` has no Windows drive) and for non-UNC paths
+// — it never fabricates a drive. Pure string/path logic: no `#[cfg(windows)]`, so
+// it compiles and is unit-tested on every platform.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn wsl_unc_to_win_drive(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    let norm = dir.to_string_lossy().replace('\\', "/");
+    // ASCII-lowercase preserves byte length, so offsets into `lower` are valid
+    // offsets into `norm` — we match on `lower` but slice the case-preserving
+    // `norm` for the distro/tail components.
+    let lower = norm.to_ascii_lowercase();
+    let mut s = lower.as_str();
+    s = s.strip_prefix("//?/unc/").unwrap_or(s); // optional verbatim UNC prefix
+    s = s.trim_start_matches('/'); // tolerate the leading `//` of a plain UNC path
+    let rest = s
+        .strip_prefix("wsl.localhost/")
+        .or_else(|| s.strip_prefix("wsl$/"))?;
+    let off = lower.len() - rest.len(); // bytes consumed from the front of `norm`
+    let orig = &norm[off..]; // `<distro>/mnt/<drive>/<tail...>` with original case
+    // Match `mnt` + a single drive letter on the lowercased view.
+    let mut lparts = rest.splitn(4, '/');
+    let _distro = lparts.next()?;
+    if lparts.next()? != "mnt" {
+        return None; // not a /mnt/<drive>/ drvfs mount → no Windows drive
+    }
+    let drive = lparts.next()?;
+    if drive.len() != 1 || !drive.as_bytes()[0].is_ascii_alphabetic() {
+        return None; // e.g. /mnt/wsl/... is a real mount but not a drive letter
+    }
+    // Take the tail from the original-case string so path casing is preserved.
+    let tail = orig.splitn(4, '/').nth(3).unwrap_or("");
+    let win_tail = tail.replace('/', "\\");
+    let win_tail = win_tail.trim_end_matches('\\');
+    let drive_up = drive.to_ascii_uppercase();
+    let win = if win_tail.is_empty() {
+        format!("{drive_up}:\\")
+    } else {
+        format!("{drive_up}:\\{win_tail}")
+    };
+    Some(std::path::PathBuf::from(win))
+}
+
 // Cross-platform: this is plain base64-decode + std::fs file writes, so it works
 // identically on Windows, Linux and macOS. (It used to be `#[cfg(windows)]` with a
 // non-Windows stub that errored "image inbox is a WSL feature" — pure laziness;
@@ -462,7 +510,41 @@ fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, 
     if cwd.trim().is_empty() {
         return Err("no working directory to save images into".into());
     }
-    let dir = std::path::Path::new(&cwd).join(".owllm-inbox");
+    let raw = std::path::Path::new(&cwd);
+    // On Windows, when the cwd is a WSL 9P redirector path that maps to a real
+    // Windows drive, write through the native drive path (C:\…) instead of the
+    // flaky redirector. Only substitute when the conversion yields a sane,
+    // absolute, drive-rooted base AND the joined inbox stays under that base
+    // (starts_with guards against a path-escape regression). Anything else falls
+    // back to the raw cwd, where create_inbox_dir's bounded retry still applies.
+    #[cfg(windows)]
+    let dir = {
+        let fallback = || raw.join(".owllm-inbox");
+        if is_wsl_redirector_path(raw) {
+            match wsl_unc_to_win_drive(raw) {
+                Some(base)
+                    if base.is_absolute()
+                        && base.to_string_lossy().contains(":\\")
+                        && !base.as_os_str().is_empty() =>
+                {
+                    let candidate = base.join(".owllm-inbox");
+                    if !candidate.starts_with(&base) {
+                        return Err(format!(
+                            "refusing inbox path outside its base: {} is not under {}",
+                            candidate.display(),
+                            base.display()
+                        ));
+                    }
+                    candidate
+                }
+                _ => fallback(),
+            }
+        } else {
+            fallback()
+        }
+    };
+    #[cfg(not(windows))]
+    let dir = raw.join(".owllm-inbox");
     // Ensure the dir exists FIRST, then clear only stale image_* files inside.
     // The previous `remove_dir_all` + immediate `create_dir_all` deadlocked on
     // Windows: NTFS posts the directory delete asynchronously (delete-pending),
@@ -1608,6 +1690,37 @@ mod tests {
             assert_eq!(m.on_host, r.found_on_host.contains(&m.provider), "{} host flag", m.provider);
             assert_eq!(m.in_sandbox, r.synced.contains(&m.provider), "{} sandbox flag", m.provider);
         }
+    }
+
+    // Pure path logic — runs on every platform (NOT gated to Windows) so CI on
+    // Linux exercises the redirector→drive conversion.
+    #[test]
+    fn wsl_unc_to_drive_maps_mnt_paths() {
+        use std::path::PathBuf;
+        let f = wsl_unc_to_win_drive;
+        assert_eq!(
+            f(std::path::Path::new(r"\\wsl.localhost\Ubuntu\mnt\c\1_Git\LocaLLM")),
+            Some(PathBuf::from(r"C:\1_Git\LocaLLM"))
+        );
+        assert_eq!(
+            f(std::path::Path::new(r"\\wsl$\Ubuntu\mnt\d\x")),
+            Some(PathBuf::from(r"D:\x"))
+        );
+        assert_eq!(
+            f(std::path::Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\mnt\c\1_Git\LocaLLM")),
+            Some(PathBuf::from(r"C:\1_Git\LocaLLM"))
+        );
+        // Prefixes are case-insensitive.
+        assert_eq!(
+            f(std::path::Path::new(r"\\WSL.LOCALHOST\Ubuntu\mnt\e\Proj")),
+            Some(PathBuf::from(r"E:\Proj"))
+        );
+        // A WSL path that is NOT a /mnt/<drive>/ mount has no Windows drive.
+        assert_eq!(f(std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user")), None);
+        // /mnt/<non-drive> (a real mount, but not a drive letter) → None.
+        assert_eq!(f(std::path::Path::new(r"\\wsl.localhost\Ubuntu\mnt\wsl\x")), None);
+        // An ordinary Windows path is not a redirector path → None.
+        assert_eq!(f(std::path::Path::new(r"C:\Users\mc\proj")), None);
     }
 
     #[cfg(windows)]

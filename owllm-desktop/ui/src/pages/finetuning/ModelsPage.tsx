@@ -1304,7 +1304,7 @@ export default function ModelsPage() {
                   envKey={d.envKey}
                   isIncomplete={d.isIncomplete}
                   onboardingStatus={d.onboarding}
-                  compatibilityBadge={d.compat}
+                  compatibilityBadge={d.compat ?? undefined}
                   selected={selectedPath === d.path}
                   onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
                   onAddWeights={() => {

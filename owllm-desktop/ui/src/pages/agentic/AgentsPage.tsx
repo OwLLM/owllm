@@ -79,7 +79,8 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork } from "./localTools";
+import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
   goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress } from "./teamConfig";
@@ -587,6 +588,11 @@ function projectToTeam(p: ProjectRow): Team {
     category: "Project",
     description: p.description || "Project — agents from the saved roster.",
     icon: "owl:owl_agentic",
+    // Projects are user-created teams: not part of the curated roster, no
+    // workflow ranking, no MCP requirement of their own.
+    visibility: "custom",
+    workflowRank: 999,
+    requiredMcp: [],
     agents,
     edges,
   };
@@ -3925,7 +3931,7 @@ function ChatInputDock({
 }: {
   draft: string;
   setDraft: (v: string) => void;
-  inputRef: React.RefObject<HTMLTextAreaElement | null>;
+  inputRef: React.RefObject<HTMLTextAreaElement>;
   onSend: (images: Attachment[]) => void;
   busy: boolean;
   autoApprove: boolean;
@@ -4400,7 +4406,6 @@ function OrchestratorPane({
   //   3. focus change (jumping to a different agent's pane)
   // useLayoutEffect runs before paint so the user never sees the
   // scroll jump.
-  const replyRef = useRef<HTMLDivElement>(null);
   const thoughtRef = useRef<HTMLDivElement>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
   const fullRef = useRef<HTMLDivElement>(null);
@@ -4723,19 +4728,6 @@ function OrchestratorPane({
             (expandable cards), and replies (avatar bubbles), interleaved in
             arrival order via the shared ChatBubble / ToolEventCard /
             ThinkingBlock components. */}
-        <div ref={replyRef} data-ui="OrchestratorReplyView" data-selectall-scope style={{ flex:1, display: effTab ==="reply" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
-          {runError ? (<div style={{ border:"1px solid #ff9f9f", background:"rgba(255,80,80,0.10)", color:"#ffb0b0", borderRadius:6, padding:8, fontSize:12 }}>{runError}</div>) : null}
-          {fullChat.length === 0 && !runError ? (
-            <div style={{ color:"var(--fg-subtle)", fontSize:12 }}>
-              {serverState.running && serverState.model_id
-                ? `Ready. Type a goal above and press Run — the orchestrator will plan, dispatch, and integrate.`
-                : "Start a model on the Server tab first, then type a goal above and click Run."}
-            </div>
-          ) : null}
-          {fullChat.map((m, i) =>
-            renderUnifiedEntry(m, i, orchName, supSendBusy && i === fullChat.length - 1)
-          )}
-        </div>
         {/* Thought — reasoning + dispatch directives. Tool entries excluded. */}
         <div ref={thoughtRef} data-ui="OrchestratorThoughtView" data-selectall-scope style={{ flex:1, display: effTab ==="thought" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
           {thoughts.length === 0 ? (
@@ -6115,6 +6107,11 @@ async function streamChatCompletion(
   /// user sees a yellow system note in the chat instead of the silent
   /// thought-tab annotation we used to ship.
   onSystemWarning?: (text: string) => void,
+  /// Fires once per successfully transcribed audio attachment so the
+  /// caller can surface the transcribed text in the chat as soon as it
+  /// lands (green "🎤 <text>" bubble) instead of waiting for the model
+  /// to echo it back. Mirrors dispatch.ts streamChatCompletion.
+  onTranscript?: (filename: string, text: string) => void,
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -6145,7 +6142,7 @@ async function streamChatCompletion(
     );
   }
   const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning),
+    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning, onTranscript),
     images,
   );
 
@@ -9820,11 +9817,17 @@ export default function AgentsPage() {
           // and across runs of this project) into its history so it's no longer a
           // stateless one-shot. Model-agnostic — feeds the universal history param.
           const specMemory = await loadAgentMemory(selectedProjectId, spec.name);
+          // Shared work-state (RAG): pull what teammates already did RELEVANT to
+          // this task (term-hit ranked) and prepend it to the instruction, so the
+          // specialist is synchronized on the team's actual work instead of acting
+          // on a context-free sticky note. Model-agnostic (rides the instruction).
+          const taskMem = await retrieveTeamMemory(instruction);
+          const enrichedInstruction = enrichInstructionWithMemory(taskMem, instruction);
           let specText = "";
           try {
             specText = (await streamChatCompletion(
               port, specModel, providerFor(specModel),
-              buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd), instruction,
+              buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd), enrichedInstruction,
               tempFor(spec, 0.5), ctrl.signal,
               (delta) => streamLog(spec.name, delta),
               chainCwd,
@@ -9844,8 +9847,11 @@ export default function AgentsPage() {
             streamLog(spec.name, "\n\n" + specText);
           }
           removeActive(spec.name);
-          // Persist this exchange so the next dispatch remembers it.
+          // Persist this exchange so the next dispatch remembers it (per-agent).
           await appendAgentMemory(selectedProjectId, spec.name, instruction, specText);
+          // Auto-capture into SHARED work-state so the NEXT agent is synchronized
+          // on what this one just did (logs the original task, not the enriched one).
+          await logTeamWork(spec.name, instruction, specText);
           speakAgentReply(spec.name, specText);
           return { name: spec.name, text: specText };
         }

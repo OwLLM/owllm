@@ -246,6 +246,7 @@ pub fn run() {
             memory::agent_memory_append,
             memory::agent_memory_clear,
             memory::team_memory_write,
+            memory::team_memory_log,
             memory::team_memory_search,
             memory::team_memory_read,
             memory::team_memory_delete,

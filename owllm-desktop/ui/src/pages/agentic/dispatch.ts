@@ -23,9 +23,12 @@ import {
   renderValidationErrorsForModel,
   validateCall,
   firstRequiredArg,
+  retrieveTeamMemory,
+  logTeamWork,
   type ToolCall,
   type ToolExecResult,
 } from "./localTools";
+import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { canonicalizeNativeCalls, type RawNativeCall } from "./toolNormalizer";
 import { samplingFor } from "./modelProfiles";
 import { resolveInferenceBase } from "./inferenceEndpoint";
@@ -3262,10 +3265,14 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     // Per-agent memory: fold this agent's own prior turns in so the bridge path
     // (Telegram/WhatsApp/etc.) gets the same continuity as the UI team path.
     const specMemory = await loadAgentMemory(projectId, spec.name);
+    // Shared work-state (RAG): prepend the work teammates already did that's
+    // relevant to THIS task, so the bridge path is synchronized too (parity with
+    // the desktop runAgent). Rides the instruction → works on every model path.
+    const enriched = enrichInstructionWithMemory(await retrieveTeamMemory(instruction), instruction);
     try {
       const specText = await streamChatCompletion(
         port, specModel, specProvider,
-        specPrompt, instruction, tempFor(spec, 0.5), signal,
+        specPrompt, enriched, tempFor(spec, 0.5), signal,
         (delta) => hooks.onLogDelta(spec.name, delta),
         projectCwd, specMemory.length > 0 ? specMemory : [], autoApprove,
         (channel, role, delta) => hooks.onThoughtDelta(spec.name, channel, role, delta),
@@ -3275,6 +3282,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       );
       const cleaned = specText.trim();
       await appendAgentMemory(projectId, spec.name, instruction, cleaned);
+      await logTeamWork(spec.name, instruction, cleaned); // shared work-state for the next agent
       hooks.onAgentReply(spec.name, cleaned);
       return { name: spec.name, text: cleaned };
     } catch (e: any) {

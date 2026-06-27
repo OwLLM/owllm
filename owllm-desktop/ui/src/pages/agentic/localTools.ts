@@ -25,6 +25,7 @@ import {
 } from "./mcpSettings";
 import { bumpActivity } from "../../support/activityStats";
 import { loadSkillByRef, skillCatalogBrief, anySkillInstalled } from "./skillRuntime";
+import { formatWorkLogEntry, renderRelevantWork } from "./teamMemoryFormat";
 
 /// Built-in tools that let an agent manage its OWN skills at runtime. These
 /// bypass the role tool_allowlist (skills are a separate capability axis from
@@ -95,6 +96,32 @@ export async function refreshTeamMemorySnapshot(limit = 12): Promise<void> {
     const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit });
     _teamMemorySnapshot = renderTeamMemorySnapshot(entries);
   } catch { /* keep the last good snapshot */ }
+}
+
+/// Retrieve the shared work-state RELEVANT to a task (term-hit ranked by
+/// team_memory_search) and render it as a prompt block. This is the RAG READ path
+/// done right: query BY THE TASK, not by recency — so a specialist sees what
+/// teammates already did on this exact thing. Empty/failed → "". The dispatch
+/// loops prepend this to each specialist's instruction (enrichInstructionWithMemory).
+export async function retrieveTeamMemory(task: string, limit = 8): Promise<string> {
+  const scope = _teamMemoryScope || "";
+  try {
+    const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit });
+    return renderRelevantWork(entries);
+  } catch { return ""; /* memory must never break a run */ }
+}
+
+/// Auto-capture what an agent just did as shared work-state (the WRITE path done
+/// right: the harness records the WORK, not opt-in trivia), so the next agent is
+/// synchronized on it. Bounded server-side (team_memory_log prunes old worklog
+/// rows). Best-effort, never throws.
+export async function logTeamWork(agent: string, instruction: string, result: string): Promise<void> {
+  if (!result || !result.trim()) return;
+  const scope = _teamMemoryScope || "";
+  try {
+    await invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) });
+    await refreshTeamMemorySnapshot();
+  } catch { /* memory must never break a run */ }
 }
 
 export type MemoryDirective = { content: string; key: string; tags: string };

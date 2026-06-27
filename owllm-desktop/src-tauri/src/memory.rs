@@ -243,6 +243,49 @@ pub async fn team_memory_write(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Append one AUTO-CAPTURED work-state record (what an agent just did) and prune
+/// old work records so the store stays a LIVE picture of the work, not an
+/// ever-growing log. Distinct from team_memory_write (opt-in durable facts): this
+/// is the HARNESS recording the work itself, tagged 'worklog' + authored by the
+/// agent, so every later agent can retrieve what teammates did — relevance-ranked
+/// by team_memory_search. Returns the new row id.
+#[tauri::command]
+pub async fn team_memory_log(
+    scope: String,
+    agent: String,
+    content: String,
+    keep: Option<u32>,
+) -> Result<i64, String> {
+    if content.trim().is_empty() {
+        return Err("content is empty".to_string());
+    }
+    let sc = scope_of(&scope);
+    let keep = keep.unwrap_or(300).clamp(20, 2000) as i64;
+    tokio::task::spawn_blocking(move || {
+        let conn = open_db()?;
+        let ts = now_ms();
+        conn.execute(
+            "INSERT INTO team_memory (scope, mkey, content, tags, author, ts) \
+             VALUES (?1, '', ?2, 'worklog', ?3, ?4)",
+            rusqlite::params![sc, content, agent, ts],
+        )
+        .map_err(|e| format!("insert worklog: {e}"))?;
+        let id = conn.last_insert_rowid();
+        // Keep only the newest `keep` worklog rows for this scope; opt-in
+        // memory_write facts (other tags) are never pruned here.
+        conn.execute(
+            "DELETE FROM team_memory WHERE scope = ?1 AND tags = 'worklog' AND id NOT IN (\
+               SELECT id FROM team_memory WHERE scope = ?1 AND tags = 'worklog' \
+               ORDER BY id DESC LIMIT ?2)",
+            rusqlite::params![sc, keep],
+        )
+        .map_err(|e| format!("prune worklog: {e}"))?;
+        Ok(id)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// Keyword-scored retrieval over a project's shared memory. Splits the query
 /// into terms; scores each row by the number of distinct terms it contains
 /// (content + tags + key), tie-broken by recency. An empty query returns the

@@ -74,7 +74,10 @@ export type GoalKind = "design" | "code" | "docs" | "ops" | "general";
 export function classifyGoal(text: string): GoalKind {
   const t = (text || "").toLowerCase();
   if (/\b(design|wireframe|mock-?up|greenfield|brand-?new|from scratch|new (app|product|feature|screen|page|ui|ux)|whitepaper)\b/.test(t)) return "design";
-  if (/\b(fix|bug|crash|error|broken|stack ?trace|edit|change|implement|refactor|rewrite|patch|commit|push|publish|release|tag|build|test|regress)\b/.test(t)) return "code";
+  // Stems (leading \b, no trailing \b) so inflections match: crash→crashes/crashed,
+  // chang→change/changed/changing, fix→fixes/fixed, fail→fails/failed/failure,
+  // releas→release/released. (The trailing \b previously made "crashes" miss.)
+  if (/\b(fix|bug|crash|error|broke|broken|stack ?trace|edit|chang(?!elog)|implement|refactor|rewrite|patch|commit|push|publish|releas|\btag\b|build|test|regress|fail)/i.test(t)) return "code";
   if (/\b(readme|changelog|api ref|document(ation)?|write-?up)\b/.test(t)) return "docs";
   if (/\b(deploy|provision|install|configure|pipeline|ci\b|set ?up the (server|env|sandbox))\b/.test(t)) return "ops";
   return "general";

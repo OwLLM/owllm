@@ -1012,21 +1012,9 @@ export function buildOrchestratorPrompt(
     "Example for this team (mirror this pattern with as many @-lines as you need):",
     `    @${exampleAgent}: <a concrete, scoped task for ${exampleAgent} — what to read, what to change, what success looks like>`,
     "",
-    "DO NOT:",
-    "  - Try to do the work yourself. Your tools are read-only on purpose.",
-    "  - Ask the user clarifying questions in this turn — dispatch your best-guess plan; you can refine in the integration turn.",
-    "  - Reply without any @<agent>: lines unless the goal is a pure no-edit, no-shell, no-external-call question. If you do, the user sees zero specialist activity and that is almost always wrong.",
-    "  - Re-plan, re-investigate, or loop the critic when you already have enough to dispatch. Converge fast; the user wants delivery, not discussion.",
+    "DO NOT: do the work yourself (your tools are read-only); ask the user clarifying questions this turn (dispatch your best-guess plan, refine in the integration turn); reply with zero @<agent>: lines unless the goal is a pure no-edit question; or re-plan / loop the critic once you can dispatch.",
     "",
-    "DELIVERY — when the goal is to SHIP (fix + commit / push / build / publish / release):",
-    "  - Dispatch a specialist that HAS shell + git tools (a coder / operator) to EXECUTE the whole",
-    "    sequence end-to-end in ONE instruction — e.g. 'make the fix, then actually run: commit, push,",
-    "    build, and publish the release; report each command and its output.' Don't split it into a",
-    "    plan-only turn.",
-    "  - In your integration turn, CONFIRM it truly shipped by quoting the specialist's command output.",
-    "    If the specialist only 'prepared' it, described steps, or stopped at 'ready to commit', re-dispatch:",
-    "    'EXECUTE it now — actually run the commit/push/release and paste the output.' Do NOT tell the",
-    "    user it's done until it is.",
+    "To SHIP (fix + commit/push/build/publish/release): dispatch a coder/operator to EXECUTE the whole sequence in one instruction and confirm it from the command output — not a plan-only turn.",
     "",
     projectWorkspaceBlock(projectCwd),
     "  - Put the project root in each specialist's instruction when the task touches files, so they don't go looking elsewhere.",
@@ -1146,42 +1134,21 @@ export const TEAM_MEMORY_HINT =
 /// Must/Prefer/Avoid rules are the editable project directives, seeded in
 /// directives.rs and rendered by formatDirectivesBlock.) Injected verbatim into
 /// every agent AND the Critic so the whole team works and reports to one standard.
+// Kept deliberately SHORT. This block is injected into the orchestrator AND every
+// specialist prompt, so every extra line is paid on every call and crowds out the
+// agent's own role. The long "DELIVER, don't deliberate / carry it through / no
+// hedging" sermon this used to be was compensation for a dispatch-parser bug that
+// truncated instructions (fixed in v0.6.68, dispatchParse.ts) — the team looked
+// like it "wouldn't deliver" when really it never received the full task. The
+// done-gate + Run Report now ENFORCE delivery objectively, so the prompt only
+// needs to state the contract once, plainly, and trust the agent.
 export const TEAM_OPERATING_CONTRACT = [
   "--- TEAM OPERATING CONTRACT (always in force) ---",
-  "DELIVER — DON'T DELIBERATE. You are an AGENT with real tools, not an advisor.",
-  "Default to ACTION: read only what you need, make the change, run the command, and",
-  "report what you ACTUALLY DID. Do NOT reply with what the user 'should' do, a plan",
-  "you didn't execute, or a diff you didn't apply — analysis that doesn't end in an",
-  "action is a FAILURE. Don't re-investigate facts already established or loop over the",
-  "same options; pick the first workable approach and do it NOW.",
-  "CARRY IT THROUGH — INCLUDING IRREVERSIBLE STEPS. When the task says fix, edit,",
-  "commit, push, build, publish, or release, you must EXECUTE those steps with your",
-  "tools and confirm they succeeded. Stopping at 'ready to commit', 'you can now",
-  "publish', 'not committed yet', or 'I prepared it' when you were told to ship is NOT",
-  "acceptable — that is the #1 way this team has failed the user. If told to ship, the",
-  "job is done only when it is actually committed / built / released.",
-  "PRIORITY — when guidance conflicts, the earlier item wins:",
-  "  1) Verified & Correct  2) Safe & Reversible  3) Solves the Real Problem",
-  "  4) Small & Focused  5) Consistent with the Codebase  6) Clean & Maintainable",
-  "DEFINITION OF DONE — 'done' means the deliverable EXISTS and you verified it by",
-  "running the actual command/test/build and quoting its result. The ONLY acceptable",
-  "'not done' is a tool that genuinely FAILED when you ran it — then report the EXACT",
-  "error and what you tried. 'Partially done' is never an excuse to stop short: if you",
-  "can take the next step, take it now instead of reporting that it remains.",
-  "NO HEDGING THEATER — skip the disclaimers, 'on the record' narration, and walls of",
-  "caveats. One line of real status (what you did + the command output) beats a page",
-  "of qualifications.",
-  "STAY IN YOUR LANE. Do the work that is YOURS and respect every other agent's",
-  "ownership — do not edit files or take actions that belong to another agent's",
-  "domain/layer. A frontend/UI agent does NOT touch backend/server/data code, and a",
-  "backend agent does NOT touch UI code; they meet only at the shared contract/API.",
-  "If something outside your lane needs doing, hand it to the agent who owns it",
-  "(or flag it for the orchestrator) — never reach across. This keeps parallel work",
-  "collision-free.",
-  "HANDOFF — when passing UNFINISHED work to another agent: the current task and",
-  "exactly where it stands; the files/branches/commits/diffs involved; the exact",
-  "blocker WITH its error text; the next concrete step; and any WIP that must NOT be",
-  "overwritten.",
+  "ACT, don't just advise — you have real tools. Read what you need, make the change, run the command, and report what you ACTUALLY DID with its output. A plan or diff you didn't apply is not a result.",
+  "DONE = verified: the deliverable exists and you confirmed it by running the actual command/test/build and quoting the result. The only valid 'not done' is a tool that genuinely failed — then give the exact error. When told to commit/push/build/publish/release, execute those steps; don't stop at 'ready to commit'.",
+  "STAY IN YOUR LANE: do your own layer's work and respect others' — a frontend agent doesn't touch backend/server/data code and a backend agent doesn't touch UI; they meet only at the shared API/contract. Hand anything outside your lane to its owner instead of reaching across (keeps parallel work collision-free).",
+  "PRIORITY when guidance conflicts (earlier wins): 1) Verified & Correct  2) Safe & Reversible  3) Solves the Real Problem  4) Small & Focused  5) Consistent with the Codebase  6) Clean & Maintainable.",
+  "HANDOFF unfinished work with: the task + where it stands, the files/branches/commits involved, the exact blocker + its error text, and the next concrete step.",
   "--- END OPERATING CONTRACT ---",
 ].join("\n");
 

@@ -51,12 +51,15 @@ step "1/5 build  (version $VERSION)"
 # relink can't ship an old version string.
 rm -f "$INSTALLER" "$INSTALLER.sig"
 case "$(uname -s)" in
-  # cwd is already $APP (git-bash translates it to the Windows cwd for cmd.exe),
-  # so call the .bat by relative name — a POSIX "/c/…" path confuses cmd.exe.
-  MINGW*|MSYS*|CYGWIN*) cmd.exe //c build-release.bat ;;
-  *) npm run tauri -- build ;;   # macOS/Linux: native bundle (best-effort, cross-platform)
+  # cmd.exe needs the FULL Windows path to the .bat (a relative name or a POSIX
+  # "/c/…" path gets mangled by MSYS and silently no-ops). cygpath -w resolves it.
+  MINGW*|MSYS*|CYGWIN*)
+    WINBAT="$(cygpath -w "$APP/build-release.bat")"
+    cmd.exe //c "$WINBAT" || fail "build-release.bat failed"
+    ;;
+  *) npm run tauri -- build || fail "tauri build failed" ;;  # macOS/Linux native bundle
 esac
-[ -f "$INSTALLER" ] || fail "build produced no installer at $INSTALLER"
+[ -f "$INSTALLER" ] || fail "build produced no installer at $INSTALLER (build step did not run or failed)"
 
 step "2/5 sign   (minisign — empty password, closed stdin)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""

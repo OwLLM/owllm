@@ -2526,26 +2526,57 @@ export default function StudioPage() {
                 // Mirrors the Skills tab's sectioned layout; split on
                 // AgentDef.builtIn (backend `built_in`).
                 (() => {
-                  const agentSections = [
-                    { key: "curated", label: "Curated agents", accent: "var(--accent)", items: filteredAgents.filter(a => a.builtIn) },
-                    { key: "mine", label: "Your agents", accent: "#7a8a9c", items: filteredAgents.filter(a => !a.builtIn) },
-                  ].filter(s => s.items.length > 0);
+                  // Dedupe by name (case-insensitive, first occurrence wins),
+                  // applied SEPARATELY to each group so a built-in and a custom
+                  // agent sharing a name both survive. Mirrors the skills-dedup
+                  // `seen` Set pattern above.
+                  const dedupeByName = (list: AgentDef[]) => {
+                    const seen = new Set<string>();
+                    return list.filter(a => {
+                      const k = a.name.toLowerCase();
+                      if (seen.has(k)) return false;
+                      seen.add(k);
+                      return true;
+                    });
+                  };
+                  const builtIn = dedupeByName(filteredAgents.filter(a => a.builtIn));
+                  const custom = dedupeByName(filteredAgents.filter(a => !a.builtIn));
+                  const BLUE = "#4ea1ff";
+                  const NEUTRAL = "#7a8a9c";
                   return (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
-                      {agentSections.map(sec => (
-                        <div key={sec.key} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ fontSize: 11.5, fontWeight: 800, color: sec.accent, letterSpacing: 0.4 }}>{sec.label}</span>
-                            <span style={{ fontSize: 10, color: "var(--bg-panel)", fontWeight: 800, background: sec.accent, borderRadius: 999, padding: "1px 7px" }}>{sec.items.length}</span>
-                            <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, ${sec.accent}55, transparent)` }} />
+                    <div style={{ display: "flex", gap: 16 }}>
+                      {/* Left column — Built-in, in a blue container. Always visible. */}
+                      <div style={{ background: "rgba(78,161,255,0.08)", border: "1px solid rgba(78,161,255,0.45)", borderRadius: 12, padding: 14, flex: "0 0 320px", minWidth: 300, display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, color: BLUE, letterSpacing: 0.4 }}>Built-in</span>
+                          <span style={{ fontSize: 10, color: "var(--bg-panel)", fontWeight: 800, background: BLUE, borderRadius: 999, padding: "1px 7px" }}>{builtIn.length}</span>
+                          <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, ${BLUE}55, transparent)` }} />
+                        </div>
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
+                          {builtIn.map(a => (
+                            <AgentCard key={a.name} agent={a} selected={selectedAgent === a.name} onClick={() => setSelectedAgent(a.name)} />
+                          ))}
+                        </div>
+                      </div>
+                      {/* Right area — Your agents (custom). Stays visible even when empty. */}
+                      <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 11.5, fontWeight: 800, color: NEUTRAL, letterSpacing: 0.4 }}>Your agents</span>
+                          <span style={{ fontSize: 10, color: "var(--bg-panel)", fontWeight: 800, background: NEUTRAL, borderRadius: 999, padding: "1px 7px" }}>{custom.length}</span>
+                          <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, ${NEUTRAL}55, transparent)` }} />
+                        </div>
+                        {custom.length === 0 ? (
+                          <div style={{ color: "var(--fg-subtle)", fontSize: 12.5, lineHeight: 1.6, padding: "8px 2px" }}>
+                            No custom agents yet — Duplicate any built-in to make your own.
                           </div>
-                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
-                            {sec.items.map(a => (
+                        ) : (
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
+                            {custom.map(a => (
                               <AgentCard key={a.name} agent={a} selected={selectedAgent === a.name} onClick={() => setSelectedAgent(a.name)} />
                             ))}
                           </div>
-                        </div>
-                      ))}
+                        )}
+                      </div>
                     </div>
                   );
                 })()

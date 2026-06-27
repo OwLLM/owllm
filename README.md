@@ -183,7 +183,7 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.72** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.73** releases.
 
 ### 🎯 Teams that deliver — and a way to prove it
 - **Teams actually ship now** — the orchestrator right-sizes each round, routes code work to a **coder** (never the read-only design leader), enforces strict front-end/back-end layer ownership, and a **Definition-of-Done gate** flags a "code task" that produced zero file changes instead of trusting the model's prose. Universal across **every** team, on every model path.
@@ -225,10 +225,11 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.72** releases.
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.72)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.6.73)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.6.73** | The team ships its own releases — a Publisher role + host-side build/sign/publish/verify pipeline |
 | **0.6.72** | Team-memory graph renders — visible connection lines + always-on node labels |
 | **0.6.71** | Team memory becomes work-state sync — agents auto-record what they did and read teammates' relevant work; image-save (9P) fix |
 | **0.6.70** | Studio agents — built-in roles in their own column, custom agents deduped by name |

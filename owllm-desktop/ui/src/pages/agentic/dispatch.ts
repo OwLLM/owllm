@@ -32,6 +32,10 @@ import { resolveInferenceBase } from "./inferenceEndpoint";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
 import { makeGenMeter } from "../../utils/genStats";
+// Deterministic routing — shared with the desktop path so BOTH dispatch loops
+// route identically (no desktop-vs-Telegram drift). teamConfig type-imports from
+// this module, so this is a type-only cycle at runtime — safe.
+import { classifyGoal, bestAgentForGoal, agentDomain, roleCanWrite } from "./teamConfig";
 
 // Mirror of accounts.rs ClaudeStreamEvent. Discriminated union keyed
 // off `kind`; the field name comes from #[serde(tag = "kind")] on the
@@ -3341,6 +3345,33 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       }
     }
   }
+  // HARNESS route-correction (identical to the desktop path): a code/docs/ops goal
+  // MUST reach a write-capable, non-design specialist even if the orchestrator only
+  // dispatched design/read-only agents. Keeps Telegram + desktop routing the same.
+  {
+    const gk = classifyGoal(goal);
+    if (gk === "code" || gk === "docs" || gk === "ops") {
+      const dispatched = new Set(dispatches.map(d => d.agentName));
+      const hasCapable = dispatches.some(d => {
+        const spec = team.agents.find(a => a.name === d.agentName);
+        return !!spec && roleCanWrite(roleByName.get(spec.base)) && agentDomain(spec) !== "design";
+      });
+      if (!hasCapable) {
+        const pool = team.agents.filter(a =>
+          a.name !== orch.name && a.name !== "critical_thinker" &&
+          !dispatched.has(a.name) &&
+          (wired === null || wired.has(a.name)));
+        const writer = bestAgentForGoal(pool, goal, roleByName);
+        if (writer && roleCanWrite(roleByName.get(writer.base)) && agentDomain(writer) !== "design") {
+          hooks.onThought(orch.name, { role: "system", color: "#ffb74d",
+            text: `⚙ Routed the actual ${gk} work to @${writer.name} — orchestrator dispatched only design/read-only agents.` });
+          dispatches.push({ agentName: writer.name, instruction:
+            `Carry out the user's goal directly and concretely — make the change, run/verify it, and report exactly what you did:\n\n${goal}` });
+        }
+      }
+    }
+  }
+
   for (const d of dispatches) {
     hooks.onThought(orch.name, {
       role: "dispatch",

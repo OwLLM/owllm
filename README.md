@@ -183,7 +183,12 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.56** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.67** releases.
+
+### 🎯 Teams that deliver — and a way to prove it
+- **Teams actually ship now** — the orchestrator right-sizes each round, routes code work to a **coder** (never the read-only design leader), enforces strict front-end/back-end layer ownership, and a **Definition-of-Done gate** flags a "code task" that produced zero file changes instead of trusting the model's prose. Universal across **every** team, on every model path.
+- **An objective eval harness** — two layers you can run with `node`, no test framework: a **deterministic control-flow judge** that checks routing, task-classification, the critic verdict and the done-gate for **every bundled team** (it already caught and fixed 2 real bugs), and a **live-run scorecard** that records what each run did and grades it against per-team expectations — so you see *which* agent misbehaved, not just *that* something went wrong. Every run ends with a one-line **Run Report** (who ran · wrote files? · critic verdict · done?) with a PASS/FAIL.
+- **Smarter & snappier** — fixed a regression that demoted the agent system prompt to plain user text (models "acting dumb"), 20–30 s typing lag over remote, and tool results that falsely showed **"Failed."**
 
 ### 🧠 Agentic memory that actually persists
 - **Per-agent memory** — every specialist now remembers its own prior turns across dispatches *and* across runs. Model-agnostic (local, Claude, Codex, Gemini, Kimi).
@@ -217,10 +222,21 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.56** releases.
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.56)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.6.67)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.6.67** | Objective eval harness for teams — control-flow tests (all teams) + live-run scorecard + in-app Run Report |
+| **0.6.66** | A routing test that judges every team — found & fixed 2 task-classification bugs |
+| **0.6.65** | Harness-level run control — structured critic verdict · done-gate · oscillation break · routing parity |
+| **0.6.64** | Deterministic routing in the harness — code tasks reach a coder, never the design leader |
+| **0.6.63** | Tool results stop falsely showing "Failed" (use the real error flag, not word-matching) |
+| **0.6.62** | Fix "smart model acting dumb" (system prompt was demoted to user text) + 20–30 s typing lag |
+| **0.6.61** | "Stay in your lane" — layer ownership made universal across every team |
+| **0.6.60** | Orchestrator right-sizes the round + strict front-end/back-end ownership |
+| **0.6.59** | Product Studio fast-path — fix/ship an existing app without the design phase |
+| **0.6.58** | Teams DELIVER — action-forcing orchestrator + operating contract |
+| **0.6.57** | Land the team's in-repo work (dedupe agents, image-save diagnostics, WSL inbox retry) |
 | **0.6.56** | Finish the orchestrator-crash fix for the Codex agent path (all CLI paths overflow-safe) |
 | **0.6.55** | Fix orchestrator "crash after a few seconds" — system prompt overflowed the command line (os 206) |
 | **0.6.54** | Team agents honor the auto-approve toggle (can write) · fix image-paste "Access is denied" |

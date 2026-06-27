@@ -59,6 +59,69 @@ export function roleKind(spec: AgentSpec, roles: Map<string, RoleData>): RoleKin
   return "specialist";
 }
 
+// ---------------------------------------------------------------------------
+// Deterministic routing — control flow in the HARNESS, not the prompt.
+// The orchestrator (an LLM) still PLANS, but the code decides who is actually
+// CAPABLE of a kind of work, so a code task can never be force-routed to a
+// read-only design leader (the recurring "Product Owner did my bug fix" bug).
+// ---------------------------------------------------------------------------
+
+export type GoalKind = "design" | "code" | "docs" | "ops" | "general";
+
+/// Classify the user's goal from its text. Pure heuristic — deliberately blunt:
+/// it only needs to separate "make something NEW (design)" from "change existing
+/// code / fix / ship (code)" reliably enough to keep routing honest.
+export function classifyGoal(text: string): GoalKind {
+  const t = (text || "").toLowerCase();
+  if (/\b(design|wireframe|mock-?up|greenfield|brand-?new|from scratch|new (app|product|feature|screen|page|ui|ux)|whitepaper)\b/.test(t)) return "design";
+  if (/\b(fix|bug|crash|error|broken|stack ?trace|edit|change|implement|refactor|rewrite|patch|commit|push|publish|release|tag|build|test|regress)\b/.test(t)) return "code";
+  if (/\b(readme|changelog|api ref|document(ation)?|write-?up)\b/.test(t)) return "docs";
+  if (/\b(deploy|provision|install|configure|pipeline|ci\b|set ?up the (server|env|sandbox))\b/.test(t)) return "ops";
+  return "general";
+}
+
+/// Classify a CANDIDATE agent's domain from its name/base — coder vs design vs
+/// docs vs ops — so routing can match a goal to the right kind of specialist.
+export type AgentDomain = "coder" | "design" | "docs" | "ops" | "other";
+export function agentDomain(spec: AgentSpec): AgentDomain {
+  const hay = `${spec.name} ${spec.base}`.toLowerCase();
+  if (/coder|engineer|developer|programmer|backend|frontend|fullstack|refactor/.test(hay)) return "coder";
+  if (/design|\bux\b|\bui\b|architect|researcher|product[_\s-]?owner|whitepaper|wireframe/.test(hay)) return "design";
+  if (/\bdoc|writer|scribe|changelog/.test(hay)) return "docs";
+  if (/operator|devops|\bops\b|release|deploy|schedul/.test(hay)) return "ops";
+  return "other";
+}
+
+/// Pick the best specialist for a goal, deterministically. For a code/fix/ship
+/// goal it returns a CODER (or any write-capable NON-design agent) and NEVER a
+/// read-only design leader; design goals prefer a designer. Used by the
+/// solo-fallback and the route-correction guard so the harness — not the
+/// orchestrator's prose — decides capability fit. Returns undefined only when
+/// there are no candidates at all.
+export function bestAgentForGoal(
+  candidates: AgentSpec[],
+  goal: string,
+  roles: Map<string, RoleData>,
+): AgentSpec | undefined {
+  const kind = classifyGoal(goal);
+  const writable = candidates.filter((a) => roleCanWrite(roles.get(a.base)));
+  const inDomain = (list: AgentSpec[], d: AgentDomain) => list.filter((a) => agentDomain(a) === d);
+  const nonDesign = (list: AgentSpec[]) => list.filter((a) => agentDomain(a) !== "design");
+  const first = (...lists: AgentSpec[][]) => { for (const l of lists) if (l.length) return l[0]; return undefined; };
+  switch (kind) {
+    case "code":
+      return first(inDomain(writable, "coder"), nonDesign(writable), writable, inDomain(candidates, "coder"), candidates);
+    case "docs":
+      return first(inDomain(writable, "docs"), inDomain(writable, "coder"), nonDesign(writable), writable, candidates);
+    case "ops":
+      return first(inDomain(writable, "ops"), inDomain(writable, "coder"), nonDesign(writable), writable, candidates);
+    case "design":
+      return first(inDomain(candidates, "design"), writable, candidates);
+    default:
+      return first(nonDesign(writable), writable, candidates);
+  }
+}
+
 /// Find the one orchestrator. Exact name → exact base → any can_dispatch role →
 /// any name/base containing "orchestrator". Mirrors AgentsPage.orchestratorOf so
 /// the canvas, dispatch, and normalizer all agree on the same agent.

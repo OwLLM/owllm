@@ -80,7 +80,7 @@ import {
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites } from "./localTools";
-import { normalizeTeam, roleCanWrite } from "./teamConfig";
+import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain } from "./teamConfig";
 import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
 import { getServerCtx } from "../core/serverContext";
 import { isolationBadge } from "./isolationBadge";
@@ -9598,7 +9598,11 @@ export default function AgentsPage() {
           a.name !== orch.name &&
           a.name !== CRITIC_AGENT_NAME &&
           (wired === null || wired.has(a.name)));
-        const best = candidates.find(a => roleCanWrite(roleByName.get(a.base))) ?? candidates[0];
+        // Deterministic capability match (HARNESS, not prose): for a code/fix/ship
+        // goal this returns a coder / write-capable non-design agent and NEVER the
+        // read-only design leader. Was a positional "first writable" pick, which in
+        // a design-led team grabbed the Product Owner for a bug fix.
+        const best = bestAgentForGoal(candidates, text, roleByName) ?? candidates[0];
         if (best) {
           appendThought(orch.name, { role: "system", color: "#ffb74d",
             text: `⚠ Orchestrator didn't route to anyone — auto-dispatching the goal to @${best.name} so the team acts (it answered solo / named no real agent).` });
@@ -9622,6 +9626,38 @@ export default function AgentsPage() {
           ]);
           setPhase("done");
           return;
+        }
+      }
+
+      // HARNESS ROUTE-CORRECTION (control flow in code, not prose): a code / docs /
+      // ops goal MUST reach a write-capable, non-design specialist. If the
+      // orchestrator only dispatched design/read-only agents (the recurring
+      // "Product Owner got my bug fix and nothing shipped" failure), deterministically
+      // add the right specialist so the actual work gets done. Design/general goals
+      // are left exactly as the orchestrator planned.
+      {
+        const goalKind = classifyGoal(text);
+        if (goalKind === "code" || goalKind === "docs" || goalKind === "ops") {
+          const dispatchedNames = new Set(dispatches.map(d => d.agentName));
+          const hasCapable = dispatches.some(d => {
+            const spec = runTeam.agents.find(a => a.name === d.agentName);
+            return spec && roleCanWrite(roleByName.get(spec.base)) && agentDomain(spec) !== "design";
+          });
+          if (!hasCapable) {
+            const wiredC = wiredDispatchTargets(runTeam, orch.name);
+            const pool = runTeam.agents.filter(a =>
+              a.name !== orch.name && a.name !== CRITIC_AGENT_NAME &&
+              !dispatchedNames.has(a.name) &&
+              (wiredC === null || wiredC.has(a.name)));
+            const writer = bestAgentForGoal(pool, text, roleByName);
+            if (writer && roleCanWrite(roleByName.get(writer.base)) && agentDomain(writer) !== "design") {
+              const note = `⚙ Routed the actual ${goalKind} work to @${writer.name} — the orchestrator dispatched only design/read-only agents, which can't change code.`;
+              appendThought(orch.name, { role: "system", color: "#ffb74d", text: note });
+              setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: note, ts: Date.now() }]);
+              dispatches.push({ agentName: writer.name, instruction:
+                `Carry out the user's goal directly and concretely — make the change, run it/verify it, and report exactly what you did (commands + result):\n\n${text}` });
+            }
+          }
         }
       }
 

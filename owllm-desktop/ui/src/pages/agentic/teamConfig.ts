@@ -185,6 +185,25 @@ export function runIsDone(goal: string, ranWriteTool: boolean): boolean {
   return goalRequiresWrite(goal) ? ranWriteTool : true;
 }
 
+/// Domains whose presence in a run means the task was meant to MUTATE the world
+/// (produce/ship an artifact). If one of these specialists ran, a zero-write run
+/// did not deliver — even when the GOAL TEXT had no code verb.
+const DOER_DOMAINS = new Set<AgentDomain>(["coder", "ops"]);
+
+/// The done-gate that also accounts for WHO ran — the robust version. A run did
+/// NOT deliver if it was supposed to mutate the world (a code/ops goal, OR a
+/// coder/operator specialist was actually dispatched) but fired zero write
+/// tools. This catches UI/code tasks phrased without code verbs — e.g. "put the
+/// agents in order, add a purple container" — which classifyGoal alone labels
+/// "general", so runIsDone wrongly passed them. `ranDomains` = the domains of
+/// the specialists that ran this turn.
+export function runDelivered(goal: string, ranWriteTool: boolean, ranDomains: Iterable<AgentDomain>): boolean {
+  if (ranWriteTool) return true;            // something was written/executed → delivered
+  if (goalRequiresWrite(goal)) return false; // code/ops goal but nothing written
+  for (const d of ranDomains) if (DOER_DOMAINS.has(d)) return false; // a doer ran but wrote nothing
+  return true;                              // analysis/Q&A/design with no doer → fine as-is
+}
+
 /// Normalize an agent's output for no-progress comparison: collapse whitespace,
 /// lowercase, cap length so trivial reformatting doesn't read as "new work".
 export function normalizeRunOutput(s: string): string {

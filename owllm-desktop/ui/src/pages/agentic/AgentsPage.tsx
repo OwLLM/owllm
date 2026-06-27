@@ -82,7 +82,7 @@ import {
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites } from "./localTools";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
-  goalRequiresWrite, runIsDone, normalizeRunOutput, isNoProgress } from "./teamConfig";
+  goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress } from "./teamConfig";
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
@@ -7071,8 +7071,19 @@ function splitThinkTags(chunk: string, inThink: boolean): { reply: string; thoug
 // Strip any `@agent: …` directive lines from the orchestrator's reply
 // so the final user-facing rendering doesn't double-show them.
 function stripDispatchDirectives(text: string): string {
-  const re = /^[\s\-\d.*•]*@[A-Za-z0-9._\-]+\s*[:：]/;
-  return text.split(/\r?\n/).filter(l => !re.test(l.trim())).join("\n");
+  // Drop each `@name:` directive AND its multi-line instruction block (every
+  // line after it, up to end of reply) so the displayed "clean" orchestrator
+  // message shows only its preamble, not the raw instruction list it dispatched.
+  // Mirrors the multi-line capture in parseDispatchesDetailed.
+  const startRe = /^[\s\-\d.*•>]*@\s*[A-Za-z0-9._\-]+\s*\**\s*[:：]/;
+  const out: string[] = [];
+  let inBlock = false;
+  for (const l of text.split(/\r?\n/)) {
+    if (startRe.test(l.trim())) { inBlock = true; continue; }
+    if (inBlock) continue;
+    out.push(l);
+  }
+  return out.join("\n");
 }
 
 // Phase the dispatch loop is currently in. Used by the chrome to
@@ -10303,33 +10314,31 @@ export default function AgentsPage() {
         } catch { /* best-effort — worktree is recoverable on disk */ }
       }
 
-      // DETERMINISTIC DONE-GATE: a code / docs / ops goal that produced ZERO
-      // write/edit/shell/git actions did NOT actually do the work — say so loudly
-      // instead of letting the orchestrator's prose claim success.
-      {
-        const goalKind = classifyGoal(text);
-        if (goalRequiresWrite(text) && !runIsDone(text, ranWriteToolRef.current)) {
-          const m = `⚠ NOT done: this was a ${goalKind} task but no file was edited and no command was run — the team only analyzed/planned. Nothing was changed or shipped.`;
-          appendLog("system", { role: "system", color: "#ff8c8c", text: m });
-          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now() }]);
-        }
-      }
-
-      // ── RUN REPORT (Layer 2 eval): finalize the objective trace of this run,
-      // show it as a one-line report (with a PASS/FAIL when a fixture for this
-      // team + scenario type exists), and persist it for team.eval.run.mjs to
-      // grade later. Pure observation — wrapped so it can NEVER break a run.
+      // ── RUN REPORT + DONE-GATE (Layer 2 eval): finalize the objective trace of
+      // this run, decide if it actually DELIVERED (robust: a code/ops goal OR a
+      // coder/operator that was dispatched, but zero writes → NOT done — catches
+      // UI tasks classifyGoal labels "general"), warn loudly if not, show a
+      // one-line report (PASS/FAIL vs the matching fixture), and persist it for
+      // team.eval.run.mjs. Pure observation — wrapped so it can NEVER break a run.
       try {
         const rt = runTraceRef.current;
         if (rt) {
           const gk = classifyGoal(text);
           const agents = [...rt.agents.entries()].map(([name, v]) => ({ name, domain: v.domain, runs: v.runs }));
+          const delivered = runDelivered(text, ranWriteToolRef.current, agents.map(a => a.domain));
+          if (!delivered) {
+            const doer = agents.find(a => a.domain === "coder" || a.domain === "ops");
+            const why = goalRequiresWrite(text) ? `this was a ${gk} task` : `@${doer?.name ?? "a specialist"} (a coder/operator) was dispatched`;
+            const m = `⚠ NOT done: ${why} but no file was edited and no command was run — the team only analyzed/planned. Nothing was changed or shipped.`;
+            appendLog("system", { role: "system", color: "#ff8c8c", text: m });
+            setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now() }]);
+          }
           const trace: RunTrace = {
             team: activeTeam?.name ?? "team", goal: text, goalKind: gk, agents,
             hops: agents.reduce((a, b) => a + b.runs, 0),
             routeCorrections: rt.routeCorrections, wroteFiles: ranWriteToolRef.current,
             criticVerdict: rt.criticVerdict, capHit: rt.capHit, oscillationStops: rt.oscillationStops,
-            done: runIsDone(text, ranWriteToolRef.current),
+            done: delivered,
             durationMs: Date.now() - rt.t0, finalAnswer: (finalReply || "").slice(0, 2000), ts: Date.now(),
           };
           const fx = TEAM_FIXTURES.find(f => f.team === trace.team && f.expectKind === gk);

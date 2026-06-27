@@ -20,18 +20,22 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));        // …/ui/src/
 const REPO = path.resolve(HERE, "../../../..");                    // owllm-desktop
 const ts = (await import(pathToFileURL(path.join(REPO, "node_modules/typescript/lib/typescript.js")).href)).default;
 
-// --- transpile + load the REAL teamConfig.ts ------------------------------
+// --- transpile + load the REAL pure modules -------------------------------
 const tmp = fs.mkdtempSync(path.join(process.env.TMPDIR || process.env.TEMP || "/tmp", "harness-verify-"));
-const js = ts.transpileModule(fs.readFileSync(path.join(HERE, "teamConfig.ts"), "utf8"), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
-}).outputText;
-const file = path.join(tmp, "teamConfig.cjs");
-fs.writeFileSync(file, js);
+function load(rel) {
+  const out = path.join(tmp, rel.replace(/\.ts$/, ".cjs"));
+  const js = ts.transpileModule(fs.readFileSync(path.join(HERE, rel), "utf8"), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
+  }).outputText;
+  fs.writeFileSync(out, js);
+  return import(pathToFileURL(out).href);
+}
 const {
   classifyGoal, agentDomain, bestAgentForGoal, roleCanWrite,
   parseCriticVerdict, criticConcluded, criticIsSatisfied, criticRefused,
-  toolRoleIsWrite, goalRequiresWrite, runIsDone, normalizeRunOutput, isNoProgress,
-} = await import(pathToFileURL(file).href);
+  toolRoleIsWrite, goalRequiresWrite, runIsDone, runDelivered, normalizeRunOutput, isNoProgress,
+} = await load("teamConfig.ts");
+const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await load("dispatchParse.ts");
 
 // --- role tool_allowlists (so roleCanWrite matches the app) ---------------
 function parseToolAllowlist(yamlText) {
@@ -132,6 +136,16 @@ check("code goal + no write → NOT done", runIsDone("fix the crash and commit",
 check("code goal + wrote → done", runIsDone("fix the crash and commit", true) === true);
 check("design goal + no write → done", runIsDone("design a new screen from scratch", false) === true);
 check("general goal + no write → done", runIsDone("who is on this team?", false) === true);
+// runDelivered also accounts for WHO ran — the real bug: a UI task phrased with
+// no code verb classifies as "general", but if a coder ran and wrote nothing it
+// did NOT deliver. (This is the run that wrongly reported "✓ done".)
+const UI_GOAL = "in the studio page put the built-in agents in order, purple container";
+check("UI goal classifies general (no code verb)", classifyGoal(UI_GOAL) === "general");
+check("…general + coder ran + no write → NOT delivered", runDelivered(UI_GOAL, false, ["coder"]) === false);
+check("…general + coder ran + wrote → delivered", runDelivered(UI_GOAL, true, ["coder"]) === true);
+check("general + only design ran + no write → delivered", runDelivered(UI_GOAL, false, ["design"]) === true);
+check("general + nobody ran + no write → delivered", runDelivered("who is on this team?", false, []) === true);
+check("code goal + no write → NOT delivered (regardless of who)", runDelivered("fix the crash and commit", false, []) === false);
 
 // 5) no-progress / oscillation guard
 section("5) No-progress guard");
@@ -142,6 +156,46 @@ check("repeat (>40 chars) → no progress", isNoProgress(a1.padEnd(50, "x"), a1.
 check("first run (prev undefined) → progress", isNoProgress(undefined, a1.padEnd(50, "x")) === false);
 check("different output → progress", isNoProgress("aaaa".padEnd(50, "a"), "bbbb".padEnd(50, "b")) === false);
 check("short repeat (<40 chars) ignored", isNoProgress("ok", "ok") === false);
+
+// 6) dispatch parser — the bug that broke the "easy task": a MULTI-LINE @agent
+//    instruction (header + numbered change list) must reach the specialist
+//    WHOLE. The old single-line `(.+)$` capture delivered only the header.
+section("6) Dispatch parser (multi-line instruction must survive)");
+const TEAM = { agents: [{ name: "frontend_coder" }, { name: "backend_coder" }, { name: "orchestrator" }] };
+const multiLine = [
+  "Proceeding to dispatch.",
+  "",
+  "@frontend_coder: In StudioPage.tsx, make these changes to the Curated section only:",
+  "",
+  "1. Sort built-in agents by level (orchestrator, then leaders, then others).",
+  "2. Wrap the curated grid in a purple container.",
+  "",
+  "Report the diff and the tsc result.",
+].join("\n");
+const p1 = parseDispatchesDetailed(multiLine, TEAM, "orchestrator");
+check("one dispatch parsed", p1.dispatches.length === 1);
+check("instruction includes the numbered change list (was DROPPED before)", /1\. Sort built-in agents/.test(p1.dispatches[0]?.instruction || "") && /2\. Wrap the curated grid/.test(p1.dispatches[0]?.instruction || ""));
+check("instruction is multi-line, not a truncated header", (p1.dispatches[0]?.instruction || "").split("\n").length >= 3);
+
+// two dispatches: each owns its own block, no bleed
+const twoBlocks = [
+  "@frontend_coder: do the UI part:",
+  "- add the container",
+  "@backend_coder: do the API part:",
+  "- add the endpoint",
+].join("\n");
+const p2 = parseDispatchesDetailed(twoBlocks, TEAM, "orchestrator");
+check("two dispatches parsed", p2.dispatches.length === 2);
+check("first block stops at next directive", /add the container/.test(p2.dispatches[0].instruction) && !/endpoint/.test(p2.dispatches[0].instruction));
+check("second block owns its lines", /add the endpoint/.test(p2.dispatches[1].instruction));
+
+// single-line still works; fuzzy name resolves; unknown reported
+const p3 = parseDispatchesDetailed("@frontend_codr: quick fix", TEAM, "orchestrator");
+check("single-line + fuzzy name still resolves", p3.dispatches[0]?.agentName === "frontend_coder");
+const p4 = parseDispatchesDetailed("@nobody: do a thing", TEAM, "orchestrator");
+check("unknown agent → unresolved, not silently dropped", p4.unresolved.length === 1 && p4.dispatches.length === 0);
+// stripDispatchDirectives hides the whole instruction block from the clean reply
+check("stripDispatchDirectives keeps preamble, drops the block", stripDispatchDirectives(multiLine).trim() === "Proceeding to dispatch.");
 
 console.log(`\n${fail === 0 ? "✅ PASS" : "❌ FAIL"} — ${pass} passed, ${fail} failed`);
 if (fails.length) { console.log("Failed:"); fails.forEach((f) => console.log("  - " + f)); }

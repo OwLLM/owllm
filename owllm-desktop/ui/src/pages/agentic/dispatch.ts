@@ -1214,139 +1214,17 @@ export function buildCriticPrompt(
   ].join("\n");
 }
 
-// ---------- Dispatch parser ----------
-export type Dispatch = { agentName: string; instruction: string };
-
-/// A dispatch line whose @name resolved to NO team member, with the nearest
-/// real name as a suggestion. Surfaced to the user AND fed back to the
-/// orchestrator (P1-3: fail loud, never silently drop a specialist).
-export type UnresolvedDispatch = { name: string; instruction: string; suggestion: string | null };
-
-export type DispatchParse = { dispatches: Dispatch[]; unresolved: UnresolvedDispatch[] };
-
-/// Structural team shape the parser needs — keeps it shareable with
-/// AgentsPage's own Team type (§0.4: ONE parser, not two drifting copies).
-type TeamLike = { agents: Array<{ name: string }> };
-
-/// Levenshtein distance — small inputs (agent names), no need for anything fancier.
-function editDistance(a: string, b: string): number {
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  let prev = Array.from({ length: n + 1 }, (_, j) => j);
-  for (let i = 1; i <= m; i++) {
-    const cur = [i];
-    for (let j = 1; j <= n; j++) {
-      cur[j] = Math.min(
-        prev[j] + 1,
-        cur[j - 1] + 1,
-        prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
-      );
-    }
-    prev = cur;
-  }
-  return prev[n];
-}
-
-/// Normalize an agent name for tolerant matching: lowercase, strip
-/// separators/punctuation. "Data-Analyst." → "dataanalyst".
-function normName(s: string): string {
-  return s.toLowerCase().replace(/[\s._\-]+/g, "");
-}
-
-/// Resolve a model-emitted @name to a real team member. Steps: exact →
-/// case-insensitive → normalized (case + punctuation + separators) →
-/// fuzzy (edit distance ≤ 2 on the normalized form, but never more than
-/// half the name — "codr" finds "coder"; "designer" must NOT find "coder").
-/// Returns the canonical team name, or null.
-function resolveAgentName(raw: string, teamNames: string[]): string | null {
-  if (teamNames.includes(raw)) return raw;
-  const lower = raw.toLowerCase();
-  const ci = teamNames.find(n => n.toLowerCase() === lower);
-  if (ci) return ci;
-  const norm = normName(raw);
-  if (!norm) return null;
-  const nn = teamNames.find(n => normName(n) === norm);
-  if (nn) return nn;
-  let best: { name: string; d: number } | null = null;
-  for (const n of teamNames) {
-    const d = editDistance(norm, normName(n));
-    if (best === null || d < best.d) best = { name: n, d };
-  }
-  if (best && best.d <= 2 && best.d <= Math.floor(normName(best.name).length / 2)) {
-    return best.name;
-  }
-  return null;
-}
-
-/// Nearest team name for a "did you mean …?" hint (looser than resolution).
-function nearestAgentName(raw: string, teamNames: string[]): string | null {
-  const norm = normName(raw);
-  let best: { name: string; d: number } | null = null;
-  for (const n of teamNames) {
-    const d = editDistance(norm, normName(n));
-    if (best === null || d < best.d) best = { name: n, d };
-  }
-  return best && best.d <= 3 ? best.name : null;
-}
-
-/// Tolerant dispatch parse. Accepts `@coder: task`, `- @Coder: task`,
-/// `1. @ coder : task`, `**@coder:** task`, fuzzy names (`@codr:`), and
-/// reports every line that named NO resolvable agent in `unresolved` so the
-/// caller can fail loud instead of dropping it (P1-3).
-export function parseDispatchesDetailed(text: string, team: TeamLike, exclude: string): DispatchParse {
-  const teamNames = team.agents.map(a => a.name);
-  const lines = text.split(/\r?\n/);
-  const dispatches: Dispatch[] = [];
-  const unresolved: UnresolvedDispatch[] = [];
-  // `@ name` (optional space), list/bold/quote prefixes, fullwidth colon,
-  // and leading markdown bold asterisks stripped off the instruction.
-  const re = /^[\s\-\d.*•>]*@\s*([A-Za-z0-9._\-]+)\s*\**\s*[:：]\s*(.+)$/;
-  for (const raw of lines) {
-    const m = raw.trim().match(re);
-    if (!m) continue;
-    const name = m[1];
-    const instruction = m[2].replace(/^[\s*]+/, "").trim();
-    if (!instruction) continue;
-    // critical_thinker is a synthetic agent (not in team.agents); it's
-    // routed via extractUserInputRequest's CRITIC_DISPATCH_RE branch
-    // instead. Skip here so we don't fall through to the unknown-agent
-    // path.
-    if (/^critical[_\s-]?thinker$/i.test(name)) continue;
-    const resolved = resolveAgentName(name, teamNames);
-    if (resolved === null) {
-      unresolved.push({ name, instruction, suggestion: nearestAgentName(name, teamNames) });
-      continue;
-    }
-    if (resolved === exclude) continue; // orchestrator never self-dispatches
-    dispatches.push({ agentName: resolved, instruction });
-  }
-  return { dispatches, unresolved };
-}
-
-export function parseDispatches(text: string, team: TeamLike, exclude: string): Dispatch[] {
-  return parseDispatchesDetailed(text, team, exclude).dispatches;
-}
-
-/// One model-visible correction message for unresolved dispatch lines —
-/// fed back to the orchestrator so it can re-emit with real names.
-export function unresolvedCorrectionMessage(unresolved: UnresolvedDispatch[], team: TeamLike, exclude: string): string {
-  const roster = team.agents.map(a => a.name).filter(n => n !== exclude).join(", ");
-  const lines = unresolved.map(u =>
-    `- "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""}`);
-  return [
-    "[dispatch error — fix and re-emit]",
-    "These dispatch lines named agents that do not exist, so NOTHING was dispatched for them:",
-    ...lines,
-    `Your team is exactly: ${roster}.`,
-    "Re-emit the dispatch lines now, one per line, as `@<exact-agent-name>: <instruction>`. Do not apologize or explain.",
-  ].join("\n");
-}
-
-export function stripDispatchDirectives(text: string): string {
-  const re = /^[\s\-\d.*•]*@[A-Za-z0-9._\-]+\s*[:：]/;
-  return text.split(/\r?\n/).filter(l => !re.test(l.trim())).join("\n");
-}
+// ---------- Dispatch parser (extracted to dispatchParse.ts — PURE + unit-
+// tested by harness.verify). Re-exported here so every existing importer of
+// ./dispatch keeps working unchanged. ONE parser, shared by both loops.
+import {
+  parseDispatchesDetailed, parseDispatches, unresolvedCorrectionMessage, stripDispatchDirectives,
+  type Dispatch,
+} from "./dispatchParse";
+export {
+  parseDispatchesDetailed, parseDispatches, unresolvedCorrectionMessage, stripDispatchDirectives,
+} from "./dispatchParse";
+export type { Dispatch, UnresolvedDispatch, DispatchParse } from "./dispatchParse";
 
 // ---------- History helpers ----------
 export function chatToHistory(chat: GoalMsg[]): HistoryItem[] {

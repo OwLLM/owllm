@@ -91,7 +91,7 @@ export function agentDomain(spec: AgentSpec): AgentDomain {
   if (/coder|engineer|developer|programmer|backend|frontend|fullstack|refactor/.test(hay)) return "coder";
   if (/design|\bux\b|\bui\b|architect|researcher|product[_\s-]?owner|whitepaper|wireframe/.test(hay)) return "design";
   if (/\bdoc|writer|scribe|changelog/.test(hay)) return "docs";
-  if (/operator|devops|\bops\b|release|deploy|schedul/.test(hay)) return "ops";
+  if (/operator|devops|\bops\b|release|deploy|schedul|publish/.test(hay)) return "ops";
   return "other";
 }
 

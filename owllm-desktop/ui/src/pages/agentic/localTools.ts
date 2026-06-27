@@ -647,6 +647,21 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     args: [{ name: "path", required: true, description: "Absolute or project-relative directory path.", aliases: ["dir", "directory", "folder", "dir_path"] }],
   },
   {
+    name: "publish_release",
+    aliases: ["release", "ship_release", "publish", "cut_release"],
+    description:
+      "Build, sign, and publish a signed OwLLM release on the HOST (runs the vetted " +
+      "publish-release.sh: build → minisign → latest.json → gh release → verify). " +
+      "Bump the version in tauri.conf.json, commit, push and tag FIRST, then call this. " +
+      "Returns the script log; success ends with PUBLISH_OK. Use dry_run='true' first " +
+      "for a safe rehearsal (build+sign, no publish). Publisher role only.",
+    args: [
+      { name: "notes", required: false, description: "Release notes shown on GitHub + in the updater.", aliases: ["release_notes", "changelog", "message"] },
+      { name: "dry_run", required: false, description: "'true' = build+sign+latest.json but DO NOT publish (rehearsal).", aliases: ["dryrun", "dry"] },
+      { name: "draft", required: false, description: "'true' = publish as a DRAFT for a human to flip public.", aliases: [] },
+    ],
+  },
+  {
     name: "create_dir",
     aliases: ["mkdir", "makedir", "make_directory", "create_directory", "new_dir"],
     description: "Create a directory (and any missing parent dirs).",
@@ -1035,6 +1050,16 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         if (r.stderr.trim()) parts.push(`stderr:\n${truncate(r.stderr, 2000)}`);
         parts.push(`exit_code: ${r.exitCode}`);
         return { ok: r.exitCode === 0, output: parts.join("\n\n") };
+      }
+      case "publish_release": {
+        // Host-side build+sign+publish. cwd is the project root (the repo to ship).
+        const log = await invoke<string>("publish_release", {
+          repoDir: cwd ?? ".",
+          notes: call.args.notes ?? null,
+          dryRun: /^(true|1|yes)$/i.test(String(call.args.dry_run ?? "")),
+          draft: /^(true|1|yes)$/i.test(String(call.args.draft ?? "")),
+        });
+        return { ok: true, output: truncate(log, 6000) };
       }
       case "ssh_exec":
       case "ssh": {

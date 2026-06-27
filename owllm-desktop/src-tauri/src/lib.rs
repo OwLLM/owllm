@@ -42,6 +42,7 @@ mod projects;
 mod pty;
 mod readiness;
 mod recommendations;
+mod release;
 mod server;
 mod skill_library;
 mod support;
@@ -248,6 +249,7 @@ pub fn run() {
             memory::team_memory_write,
             memory::team_memory_log,
             memory::team_memory_search,
+            release::publish_release,
             memory::team_memory_read,
             memory::team_memory_delete,
             server::server_status,

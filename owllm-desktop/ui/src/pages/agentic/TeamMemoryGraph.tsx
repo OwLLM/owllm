@@ -11,6 +11,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import ForceGraph3D from "react-force-graph-3d";
+// three.js ships transitively with react-force-graph-3d (its own docs import it
+// the same way); we use it for the always-visible label sprites below. The
+// transitive install carries no bundled type declarations and @types/three is
+// not a dep, so import it untyped — same loose-third-party stance as the FG cast.
+// @ts-ignore: no type declarations for the transitive `three` install
+import * as THREE from "three";
 
 // react-force-graph-3d's prop types are loose; cast to keep our tsc strict-clean.
 const FG = ForceGraph3D as unknown as (props: any) => JSX.Element;
@@ -40,11 +46,69 @@ function splitTags(s: string): string[] {
   return (s || "").split(/[,\n]/).map((t) => t.trim()).filter(Boolean);
 }
 
+const NODE_REL_SIZE = 4;
+const LABEL_WORLD_H = 7; // world-space height of a label sprite
+
+// Build (and cache) a SpriteMaterial carrying the rendered label as a canvas
+// texture. Cached by the exact label string so duplicate labels share one
+// texture/material — but callers must still wrap each use in a FRESH Sprite
+// (an Object3D can only have one parent).
+type LabelMat = { mat: THREE.SpriteMaterial; aspect: number };
+function makeLabelMaterial(cache: Map<string, LabelMat>, text: string): LabelMat {
+  const hit = cache.get(text);
+  if (hit) return hit;
+  const fontPx = 64;
+  const padX = 16;
+  const padY = 10;
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d")!;
+  const font = `600 ${fontPx}px -apple-system, system-ui, "Segoe UI", sans-serif`;
+  ctx.font = font;
+  const w = Math.ceil(ctx.measureText(text).width) + padX * 2;
+  const h = fontPx + padY * 2;
+  canvas.width = w;
+  canvas.height = h;
+  ctx.font = font; // resizing the canvas resets the context, so re-apply
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  // subtle dark backing so text stays legible over bright nodes
+  ctx.fillStyle = "rgba(6,8,13,0.55)";
+  ctx.fillRect(0, 0, w, h);
+  ctx.fillStyle = "#e8eef8";
+  ctx.fillText(text, w / 2, h / 2);
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true; // ensure the GPU uploads the drawn canvas (blank-sprite guard)
+  const mat = new THREE.SpriteMaterial({
+    map: tex,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const entry: LabelMat = { mat, aspect: w / h };
+  cache.set(text, entry);
+  return entry;
+}
+
 export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
   const fgRef = useRef<any>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const labelCache = useRef<Map<string, LabelMat>>(new Map());
   const [dim, setDim] = useState({ w: 800, h: 520 });
   const [selected, setSelected] = useState<GNode | null>(null);
+
+  // Always-visible label sprite per node (kept ALONGSIDE the default sphere via
+  // nodeThreeObjectExtend). Fresh Sprite per call; material/texture is cached.
+  const nodeThreeObject = (n: GNode) => {
+    const text = n.kind === "tag" ? `🏷 ${n.label}` : n.label;
+    const { mat, aspect } = makeLabelMaterial(labelCache.current, text);
+    const sprite = new THREE.Sprite(mat);
+    sprite.scale.set(LABEL_WORLD_H * aspect, LABEL_WORLD_H, 1);
+    const radius = Math.cbrt(Math.max(1, n.val)) * NODE_REL_SIZE;
+    sprite.position.set(0, radius + LABEL_WORLD_H * 0.7, 0); // float above the sphere
+    sprite.renderOrder = 999; // draw on top of node geometry
+    return sprite;
+  };
 
   // Track the container size so the canvas fills it (and reflows on resize).
   useEffect(() => {
@@ -115,13 +179,16 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
           height={dim.h}
           backgroundColor="rgba(0,0,0,0)"
           showNavInfo={false}
-          nodeRelSize={4}
+          nodeRelSize={NODE_REL_SIZE}
           nodeVal={(n: GNode) => n.val}
           nodeColor={(n: GNode) => (n.kind === "tag" ? "#ffcf5a" : "#4da3ff")}
           nodeOpacity={0.9}
           nodeLabel={(n: GNode) => (n.kind === "tag" ? `🏷 ${n.label}` : (n.content || n.label))}
-          linkColor={(l: any) => (l.kind === "key" ? "rgba(255,154,217,0.5)" : "rgba(120,150,200,0.32)")}
-          linkWidth={(l: any) => (l.kind === "key" ? 1.2 : 0.5)}
+          nodeThreeObjectExtend={true}
+          nodeThreeObject={nodeThreeObject}
+          linkColor={(l: any) => (l.kind === "key" ? "#ff9ad9" : "#9db4dc")}
+          linkWidth={(l: any) => (l.kind === "key" ? 2.2 : 1.2)}
+          linkOpacity={0.9}
           linkDirectionalParticles={0}
           warmupTicks={40}
           cooldownTime={4000}

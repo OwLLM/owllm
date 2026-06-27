@@ -551,6 +551,12 @@ pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
                      chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
                      echo \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" > /etc/apt/sources.list.d/github-cli.list && \
                      apt-get update -y && apt-get install -y gh )) || true; \
+                  echo '--- TOOLCHAIN REPORT (what is actually installed) ---'; \
+                  for t in node npm git curl uv gh claude codex gemini bwrap; do \
+                    if command -v \"$t\" >/dev/null 2>&1; then echo \"  OK       $t  ($(command -v \"$t\"))\"; \
+                    else echo \"  MISSING  $t  — install above did not land\"; fi; \
+                  done; \
+                  echo '----------------------------------------------------'; \
                   echo PROVISION_DONE";
     let out = tokio::task::spawn_blocking(move || {
         run_in_distro_script_user(&distro, Some("root"), script)

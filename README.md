@@ -183,12 +183,13 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.68** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.69** releases.
 
 ### 🎯 Teams that deliver — and a way to prove it
 - **Teams actually ship now** — the orchestrator right-sizes each round, routes code work to a **coder** (never the read-only design leader), enforces strict front-end/back-end layer ownership, and a **Definition-of-Done gate** flags a "code task" that produced zero file changes instead of trusting the model's prose. Universal across **every** team, on every model path.
 - **An objective eval harness** — two layers you can run with `node`, no test framework: a **deterministic control-flow judge** that checks routing, task-classification, the critic verdict and the done-gate for **every bundled team** (it already caught and fixed 2 real bugs), and a **live-run scorecard** that records what each run did and grades it against per-team expectations — so you see *which* agent misbehaved, not just *that* something went wrong. Every run ends with a one-line **Run Report** (who ran · wrote files? · critic verdict · done?) with a PASS/FAIL.
 - **The big delivery fix (0.6.68)** — multi-line dispatch instructions (a numbered change list, steps, a code block) used to reach the specialist truncated to just the first line, so the team received a header with no actual task and shipped nothing. Now the whole instruction arrives intact, and the end-of-run report no longer claims a task is "done" when a coder was dispatched but wrote nothing.
+- **Leaner, more flexible teams (0.6.69)** — with that bug fixed, the prompt scaffolding piled on to *force* delivery was removed: the always-on operating contract is half the size and the orchestrator guide is much shorter, so the model spends its attention on your task, not on reciting rules. Delivery is now enforced by the run diagnostics instead of by browbeating the prompt.
 - **Smarter & snappier** — fixed a regression that demoted the agent system prompt to plain user text (models "acting dumb"), 20–30 s typing lag over remote, and tool results that falsely showed **"Failed."**
 
 ### 🧠 Agentic memory that actually persists
@@ -223,10 +224,11 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.68** releases.
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.68)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.6.69)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.6.69** | Restore the lean, flexible orchestrator — slim the prompt scaffolding that was compensating for the (now-fixed) dispatch bug |
 | **0.6.68** | Fix teams unable to deliver — multi-line dispatch instructions were truncated to a header; honest "not done" report |
 | **0.6.67** | Objective eval harness for teams — control-flow tests (all teams) + live-run scorecard + in-app Run Report |
 | **0.6.66** | A routing test that judges every team — found & fixed 2 task-classification bugs |

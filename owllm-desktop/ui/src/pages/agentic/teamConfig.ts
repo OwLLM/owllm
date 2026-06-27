@@ -125,6 +125,79 @@ export function bestAgentForGoal(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Run-control predicates — the other half of "control flow in the HARNESS, not
+// the prompt". These are the deterministic signals the dispatch loop terminates
+// and judges itself on (critic verdict, done-gate, no-progress), pulled out of
+// AgentsPage so they are (a) the SAME on every model path and (b) testable as
+// pure functions with no React/Tauri in the way (harness.verify covers them).
+// ---------------------------------------------------------------------------
+
+/// The critic is ADVISORY and can NEVER gate the team; these detect the two ways
+/// a critic ROUND should end the consult loop so the team proceeds regardless.
+/// `criticIsSatisfied` — nothing left to add ("no concerns", "lgtm").
+export function criticIsSatisfied(t: string): boolean {
+  return /\bno (further |major |remaining |other |real |significant |additional )?(concerns?|issues?|objections?|changes?|problems?|blockers?)\b|\blooks? (good|solid|fine|reasonable|right)\b|\bready to (dispatch|proceed|go|build|start|ship)\b|\blgtm\b|\bapproved?\b|\bno changes? (needed|required)\b|\bproceed as planned\b|\bgo ahead\b|\bnothing (else |further |more )?to add\b/i.test(t);
+}
+/// `criticRefused` — it declined the task (a non-abliterated critic objecting to
+/// a sanctioned Red-Team / abliterate job). A refusal is NOT a veto: we note it
+/// and proceed; the code caps the rounds and never gates dispatch on approval.
+export function criticRefused(t: string): boolean {
+  return /\bI (can'?t|cannot|can not|won'?t|will not|am unable to|must decline|refuse|am not (going|willing|able) to)\b|\b(against|violates?) (my|the|our|its) (guidelines?|policy|policies|principles?|values?|terms)\b|\bnot (comfortable|able|willing) to\b|\bas an ai\b[^.]*\b(can'?t|cannot|won'?t|unable)\b|\bI('| a)?m not able to (help|assist|comply|continue|support)\b|\bI do not (feel )?(comfortable|able) (with|to)\b/i.test(t);
+}
+/// Parse the critic's STRUCTURED verdict line (the deterministic signal the loop
+/// terminates on, instead of regex-guessing free-text prose — which let
+/// "no concerns about X, but Y is broken" read as approval).
+export function parseCriticVerdict(t: string): "ship" | "concern" | null {
+  const m = /^\s*VERDICT:\s*(SHIP|CONCERN)\b/im.exec(t || "");
+  if (!m) return null;
+  return m[1].toUpperCase() === "SHIP" ? "ship" : "concern";
+}
+/// True when the critic round should END the consult loop (explicit SHIP, or no
+/// structured verdict but the prose is satisfied / a refusal we defer past).
+export function criticConcluded(t: string): boolean {
+  const v = parseCriticVerdict(t);
+  if (v === "ship") return true;      // explicit go → stop consulting the critic
+  if (v === "concern") return false;  // explicit concern → let the orchestrator address it
+  // No structured verdict (older / misaligned critic) → fall back to prose heuristics.
+  return criticIsSatisfied(t) || criticRefused(t);
+}
+
+/// True if a streamed TOOL-CALL role represents real world-mutation (write/edit/
+/// shell/git), i.e. "the team actually did something". `role` looks like
+/// "🛠 Edit" / "🛠 Bash" / "🛠 write_file". This is the signal the done-gate reads.
+export function toolRoleIsWrite(role: string): boolean {
+  return /🛠/.test(role) && /\b(edit|write|multiedit|notebookedit|bash|shell|str_replace|apply_patch|create_file|patch|commit|git)\b/i.test(role);
+}
+
+/// True if a goal of this kind is expected to MUTATE the world (produce/ship an
+/// artifact), so a run that fired zero write tools did NOT actually do the work.
+/// Matches the done-gate: code & ops require artifacts; design/docs/general don't.
+export function goalRequiresWrite(goal: string): boolean {
+  const k = classifyGoal(goal);
+  return k === "code" || k === "ops";
+}
+
+/// The done-gate, as a pure predicate: did the run produce the work its goal
+/// requires? A code/ops goal that fired no write tool is NOT done (the team only
+/// analyzed/planned). Everything else is considered done by this gate.
+export function runIsDone(goal: string, ranWriteTool: boolean): boolean {
+  return goalRequiresWrite(goal) ? ranWriteTool : true;
+}
+
+/// Normalize an agent's output for no-progress comparison: collapse whitespace,
+/// lowercase, cap length so trivial reformatting doesn't read as "new work".
+export function normalizeRunOutput(s: string): string {
+  return (s || "").replace(/\s+/g, " ").trim().toLowerCase().slice(0, 2000);
+}
+
+/// No-progress / oscillation guard (deterministic): an agent that just repeated
+/// its previous (normalized) output is in a stuck loop, not making progress, so
+/// its chain should stop. `prev`/`cur` are already normalizeRunOutput()'d.
+export function isNoProgress(prev: string | undefined, cur: string): boolean {
+  return prev !== undefined && cur.length > 40 && cur === prev;
+}
+
 /// Find the one orchestrator. Exact name → exact base → any can_dispatch role →
 /// any name/base containing "orchestrator". Mirrors AgentsPage.orchestratorOf so
 /// the canvas, dispatch, and normalizer all agree on the same agent.

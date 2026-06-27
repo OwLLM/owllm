@@ -13,6 +13,10 @@ python_engine/
 # Tauri generated stubs that bloat the build cache.
 src-tauri/.tauri/
 
+# Per-run eval traces written by the in-app Run Report (Layer 2). Dev artifact;
+# the node scorecard (team.eval.run.mjs) reads them, they are never committed.
+.owllm/
+
 # TwinForge working copies + per-run backups (the Coder edits a
 # timestamped sibling and the run driver may leave a *_PREPATCH_*.tsx
 # on disk so the user can revert by-hand after a regression).

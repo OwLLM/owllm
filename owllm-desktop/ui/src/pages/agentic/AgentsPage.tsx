@@ -80,7 +80,12 @@ import {
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites } from "./localTools";
-import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain } from "./teamConfig";
+import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
+  criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
+  goalRequiresWrite, runIsDone, normalizeRunOutput, isNoProgress } from "./teamConfig";
+import type { AgentDomain } from "./teamConfig";
+import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
+import { TEAM_FIXTURES } from "./teamEvalFixtures";
 import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
 import { getServerCtx } from "../core/serverContext";
 import { isolationBadge } from "./isolationBadge";
@@ -5640,36 +5645,11 @@ function buildCriticalThinkerReviewPrompt(team: Team | null, directives?: Direct
 }
 
 // ── Critic loop guards ─────────────────────────────────────────────────────
-// The Critical Thinker is ADVISORY and can NEVER block, veto, or stall the team
-// (see its system prompt + #29). When the critic runs in a LOOP, these detect
-// the two ways a round should END the loop so the team dispatches regardless:
-//   • criticIsSatisfied — it has nothing left to add ("no concerns", "lgtm").
-//   • criticRefused      — it declined the task (a non-abliterated critic
-//                          objecting to a sanctioned Red-Team / abliterate job).
-// A refusal is NOT a veto: we note it and proceed. This is the hard guarantee —
-// the prompt asks the critic to defer, but a misaligned critic can ignore that,
-// so the CODE caps the rounds and never gates dispatch on the critic's approval.
-function criticIsSatisfied(t: string): boolean {
-  return /\bno (further |major |remaining |other |real |significant |additional )?(concerns?|issues?|objections?|changes?|problems?|blockers?)\b|\blooks? (good|solid|fine|reasonable|right)\b|\bready to (dispatch|proceed|go|build|start|ship)\b|\blgtm\b|\bapproved?\b|\bno changes? (needed|required)\b|\bproceed as planned\b|\bgo ahead\b|\bnothing (else |further |more )?to add\b/i.test(t);
-}
-function criticRefused(t: string): boolean {
-  return /\bI (can'?t|cannot|can not|won'?t|will not|am unable to|must decline|refuse|am not (going|willing|able) to)\b|\b(against|violates?) (my|the|our|its) (guidelines?|policy|policies|principles?|values?|terms)\b|\bnot (comfortable|able|willing) to\b|\bas an ai\b[^.]*\b(can'?t|cannot|won'?t|unable)\b|\bI('| a)?m not able to (help|assist|comply|continue|support)\b|\bI do not (feel )?(comfortable|able) (with|to)\b/i.test(t);
-}
-/// Parse the critic's STRUCTURED verdict line (the deterministic signal the loop
-/// terminates on, instead of regex-guessing free-text prose — which let
-/// "no concerns about X, but Y is broken" read as approval).
-function parseCriticVerdict(t: string): "ship" | "concern" | null {
-  const m = /^\s*VERDICT:\s*(SHIP|CONCERN)\b/im.exec(t || "");
-  if (!m) return null;
-  return m[1].toUpperCase() === "SHIP" ? "ship" : "concern";
-}
-function criticConcluded(t: string): boolean {
-  const v = parseCriticVerdict(t);
-  if (v === "ship") return true;      // explicit go → stop consulting the critic
-  if (v === "concern") return false;  // explicit concern → let the orchestrator address it
-  // No structured verdict (older / misaligned critic) → fall back to prose heuristics.
-  return criticIsSatisfied(t) || criticRefused(t);
-}
+// criticIsSatisfied / criticRefused / parseCriticVerdict / criticConcluded now
+// live in teamConfig.ts (imported above) so the desktop and bridge paths share
+// ONE definition and harness.verify can test them as pure functions. The critic
+// stays ADVISORY and can NEVER block: the CODE caps the rounds and never gates
+// dispatch on its approval — these only detect when a round should END the loop.
 
 /// Return a team augmented with the synthetic critic node. Idempotent:
 /// if the team already has an agent literally named "critic" we return
@@ -7412,6 +7392,16 @@ export default function AgentsPage() {
   // code/ship goal that produced ZERO real actions is flagged NOT done instead of
   // trusting the model's prose self-assessment.
   const ranWriteToolRef = useRef(false);
+  // Run-trace draft (Layer 2 eval): the objective signals of THIS run, collected
+  // as it executes and finalized into a RunTrace at run end (rendered as the Run
+  // Report + persisted for team.eval.run.mjs). Pure bookkeeping — never affects
+  // control flow. Reset at run start.
+  const runTraceRef = useRef<{
+    goal: string; t0: number;
+    agents: Map<string, { domain: AgentDomain; runs: number }>;
+    routeCorrections: number; oscillationStops: number; capHit: boolean;
+    criticVerdict: "ship" | "concern" | null;
+  } | null>(null);
   // Shared abort controller for the active onSupSend run. The Stop
   // button on the ChatInputDock fires owllm:dispatch-abort; we listen
   // below and call .abort() on this controller, which propagates to
@@ -8335,7 +8325,7 @@ export default function AgentsPage() {
     // Deterministic "real work happened" signal: a write/edit/shell/git tool call.
     // role looks like "🛠 Edit" / "🛠 Bash" / "🛠 write_file". If one fires this run,
     // a code/ship goal can legitimately claim it did something (checked at run end).
-    if (/🛠/.test(role) && /\b(edit|write|multiedit|notebookedit|bash|shell|str_replace|apply_patch|create_file|patch|commit|git)\b/i.test(role)) {
+    if (toolRoleIsWrite(role)) {
       ranWriteToolRef.current = true;
     }
     // A mid-run agent question (SendUserMessage → "ask-user" channel) arrives
@@ -9143,6 +9133,8 @@ export default function AgentsPage() {
     setRunError(null);
     setBusy(true);
     ranWriteToolRef.current = false; // reset the "real work happened" signal for this run
+    runTraceRef.current = { goal: text, t0: Date.now(), agents: new Map(),
+      routeCorrections: 0, oscillationStops: 0, capHit: false, criticVerdict: null };
     setRunning(true); // store-backed: survives a page change so the run isn't orphaned
     // Start the team stopwatch + reset per-agent clocks for this run.
     setRunStartedAt(Date.now());
@@ -9639,6 +9631,7 @@ export default function AgentsPage() {
             text: `⚠ Orchestrator answered solo — auto-routed the goal to @${best.name}.`, ts: Date.now() }]);
           dispatches = [{ agentName: best.name, instruction:
             `The orchestrator did not route this to a specialist. Carry out the user's goal yourself, directly and concretely:\n\n${text}` }];
+          if (runTraceRef.current) runTraceRef.current.routeCorrections++;
           // fall through to Phase 2 with this single dispatch.
         } else {
           // Genuinely no specialist to route to → keep the loud solo notice.
@@ -9685,6 +9678,7 @@ export default function AgentsPage() {
               setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: note, ts: Date.now() }]);
               dispatches.push({ agentName: writer.name, instruction:
                 `Carry out the user's goal directly and concretely — make the change, run it/verify it, and report exactly what you did (commands + result):\n\n${text}` });
+              if (runTraceRef.current) runTraceRef.current.routeCorrections++;
             }
           }
         }
@@ -9924,6 +9918,7 @@ export default function AgentsPage() {
           if (!activeTeam) return [];
           const total = Array.from(runCount.values()).reduce((a, b) => a + b, 0);
           if (total >= MAX_CHAIN_HOPS) {                                // global backstop — LOUD
+            if (runTraceRef.current) runTraceRef.current.capHit = true;
             if (!capNoticed.global) {
               capNoticed.global = true;
               const m = `⚠ Stopped: hit the dispatch-chain limit (${MAX_CHAIN_HOPS} hops). The result may be INCOMPLETE — not every step ran.`;
@@ -9933,6 +9928,7 @@ export default function AgentsPage() {
             return [];
           }
           if ((runCount.get(name) ?? 0) >= MAX_AGENT_RERUNS) {          // per-agent cap — LOUD
+            if (runTraceRef.current) runTraceRef.current.capHit = true;
             appendThought(name, { role: "system", color: "#ffb74d", text: `⚠ @${name} hit its re-run limit (${MAX_AGENT_RERUNS}); not running again — its part may be incomplete.` });
             return [];
           }
@@ -9940,15 +9936,26 @@ export default function AgentsPage() {
           const spec = activeTeam.agents.find(a => a.name === name);
           if (!spec) return [];
           const out = await runAgent(spec, input);
+          // Run-trace bookkeeping (Layer 2): record who ran (+ domain + count) and,
+          // if this was the critic, its parsed verdict. Pure observation.
+          if (runTraceRef.current) {
+            const rt = runTraceRef.current;
+            const prev = rt.agents.get(name);
+            rt.agents.set(name, { domain: agentDomain(spec), runs: (prev?.runs ?? 0) + 1 });
+            if (name === CRITIC_AGENT_NAME) {
+              const v = parseCriticVerdict(out.text);
+              if (v) rt.criticVerdict = v;
+            }
+          }
           // No-progress / oscillation guard (harness, deterministic): if this agent
           // just repeated its previous output, stop its chain — that's a stuck loop
           // (e.g. critic<->coder ping-pong), not progress.
           {
-            const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim().toLowerCase().slice(0, 2000);
-            const cur = norm(out.text);
+            const cur = normalizeRunOutput(out.text);
             const prevOut = lastOutput.get(name);
             lastOutput.set(name, cur);
-            if (prevOut !== undefined && cur.length > 40 && cur === prevOut) {
+            if (isNoProgress(prevOut, cur)) {
+              if (runTraceRef.current) runTraceRef.current.oscillationStops++;
               appendThought(name, { role: "system", color: "#ffb74d", text: `⚠ @${name} repeated its previous output — no progress; stopping this chain to avoid a loop.` });
               return [out];
             }
@@ -10124,6 +10131,7 @@ export default function AgentsPage() {
           if (reviewFailed) break;
           speakAgentReply(CRITIC_NAME, postReview);
           const pr = postReview.trim();
+          if (runTraceRef.current) { const v = parseCriticVerdict(pr); if (v) runTraceRef.current.criticVerdict = v; }
           // Satisfied or refused → ship what we have. The critic never blocks.
           if (!pr || criticConcluded(pr)) break;
           // Substantive feedback → orchestrator revises ONCE this round. Still
@@ -10300,12 +10308,47 @@ export default function AgentsPage() {
       // instead of letting the orchestrator's prose claim success.
       {
         const goalKind = classifyGoal(text);
-        if ((goalKind === "code" || goalKind === "ops") && !ranWriteToolRef.current) {
+        if (goalRequiresWrite(text) && !runIsDone(text, ranWriteToolRef.current)) {
           const m = `⚠ NOT done: this was a ${goalKind} task but no file was edited and no command was run — the team only analyzed/planned. Nothing was changed or shipped.`;
           appendLog("system", { role: "system", color: "#ff8c8c", text: m });
           setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now() }]);
         }
       }
+
+      // ── RUN REPORT (Layer 2 eval): finalize the objective trace of this run,
+      // show it as a one-line report (with a PASS/FAIL when a fixture for this
+      // team + scenario type exists), and persist it for team.eval.run.mjs to
+      // grade later. Pure observation — wrapped so it can NEVER break a run.
+      try {
+        const rt = runTraceRef.current;
+        if (rt) {
+          const gk = classifyGoal(text);
+          const agents = [...rt.agents.entries()].map(([name, v]) => ({ name, domain: v.domain, runs: v.runs }));
+          const trace: RunTrace = {
+            team: activeTeam?.name ?? "team", goal: text, goalKind: gk, agents,
+            hops: agents.reduce((a, b) => a + b.runs, 0),
+            routeCorrections: rt.routeCorrections, wroteFiles: ranWriteToolRef.current,
+            criticVerdict: rt.criticVerdict, capHit: rt.capHit, oscillationStops: rt.oscillationStops,
+            done: runIsDone(text, ranWriteToolRef.current),
+            durationMs: Date.now() - rt.t0, finalAnswer: (finalReply || "").slice(0, 2000), ts: Date.now(),
+          };
+          const fx = TEAM_FIXTURES.find(f => f.team === trace.team && f.expectKind === gk);
+          let report = `🧪 Run report — ${summarizeTrace(trace)}`;
+          if (fx) {
+            const card = scoreRun(trace, fx);
+            const misses = card.checks.filter(c => !c.pass).map(c => c.name);
+            report += `\n   eval vs "${fx.note ?? fx.goal}": ${card.ok ? "✓ PASS" : "✗ FAIL"} (${card.passed}/${card.checks.length})${misses.length ? " — failed: " + misses.join(", ") : ""}`;
+          }
+          setSupChat(prev => [...prev, { role: "system", color: trace.done ? "#7ff0c5" : "#ffb74d", text: report, ts: Date.now() }]);
+          // Persist (append, keep last 200) for the node scorecard. Best-effort.
+          try {
+            let prior = "";
+            try { prior = await invoke<string>("tool_read_file", { path: ".owllm/eval-traces.jsonl", cwd: projectCwd }); } catch { prior = ""; }
+            const kept = (prior ? prior.split(/\r?\n/).filter(Boolean) : []).slice(-199);
+            await invoke("tool_write_file", { path: ".owllm/eval-traces.jsonl", content: [...kept, JSON.stringify(trace)].join("\n") + "\n", cwd: projectCwd });
+          } catch { /* disk persistence is optional — the in-app report still shows */ }
+        }
+      } catch { /* tracing must never break a run */ }
 
       setPhase("done");
     } catch (e: any) {

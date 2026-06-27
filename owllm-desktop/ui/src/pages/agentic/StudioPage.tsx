@@ -101,6 +101,25 @@ export function resolveAgentIcon(icon: string | null | undefined, base: string |
 // Data — baked from LLM/core/agents/teams/*.json (17 templates).
 // ---------------------------------------------------------------------
 type AgentSpec = { name: string; base: string; icon?: string | null };
+
+// Cards (chat grid, mini cards, agent cards) key nodes by name. A roster that
+// carries the same name twice — from an older/edited template or a hand-touched
+// custom team — otherwise renders as duplicate cards with colliding React keys.
+// Keep the FIRST occurrence (the authored one) and drop later collisions; order
+// is preserved. (Mirror of dedupeAgentsByName in AgentsPage.tsx — kept local;
+// page modules don't import across each other.)
+function dedupeAgentsByName(agents: AgentSpec[]): AgentSpec[] {
+  const seen = new Set<string>();
+  const out: AgentSpec[] = [];
+  for (const a of agents) {
+    if (!a || typeof a.name !== "string") continue;
+    if (seen.has(a.name)) continue;
+    seen.add(a.name);
+    out.push(a);
+  }
+  return out;
+}
+
 type TeamVisibility = "recommended" | "more" | "examples" | "legacy" | "custom";
 type McpPackServer = {
   name: string;
@@ -1757,9 +1776,9 @@ type SkillPackBackend     = { id: string; path: string; dir: string; frontmatter
 
 function toTeam(t: TeamTemplateBackend): Team {
   const d = t.data ?? {};
-  const agents: AgentSpec[] = Array.isArray(d.agents)
+  const agents: AgentSpec[] = dedupeAgentsByName(Array.isArray(d.agents)
     ? d.agents.map((a: any) => ({ name: a.name, base: a.base, icon: a.icon ?? null }))
-    : [];
+    : []);
   const edges = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
   const name = d.name ?? t.id;
   const mcpPack = normalizeMcpPack(d.mcp_pack);
@@ -2502,11 +2521,34 @@ export default function StudioPage() {
                   })
                 )
               ) : (
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
-                  {filteredAgents.map(a => (
-                    <AgentCard key={a.name} agent={a} selected={selectedAgent === a.name} onClick={() => setSelectedAgent(a.name)} />
-                  ))}
-                </div>
+                // Two rows instead of one flat wall: curated (built-in)
+                // templates first, then the user's own agents (if any).
+                // Mirrors the Skills tab's sectioned layout; split on
+                // AgentDef.builtIn (backend `built_in`).
+                (() => {
+                  const agentSections = [
+                    { key: "curated", label: "Curated agents", accent: "var(--accent)", items: filteredAgents.filter(a => a.builtIn) },
+                    { key: "mine", label: "Your agents", accent: "#7a8a9c", items: filteredAgents.filter(a => !a.builtIn) },
+                  ].filter(s => s.items.length > 0);
+                  return (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+                      {agentSections.map(sec => (
+                        <div key={sec.key} style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                            <span style={{ fontSize: 11.5, fontWeight: 800, color: sec.accent, letterSpacing: 0.4 }}>{sec.label}</span>
+                            <span style={{ fontSize: 10, color: "var(--bg-panel)", fontWeight: 800, background: sec.accent, borderRadius: 999, padding: "1px 7px" }}>{sec.items.length}</span>
+                            <div style={{ flex: 1, height: 1, background: `linear-gradient(90deg, ${sec.accent}55, transparent)` }} />
+                          </div>
+                          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(310px, 1fr))", gridAutoRows: "min-content", gap: 12, alignContent: "flex-start" }}>
+                            {sec.items.map(a => (
+                              <AgentCard key={a.name} agent={a} selected={selectedAgent === a.name} onClick={() => setSelectedAgent(a.name)} />
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()
               )}
             </div>
             <div style={{ flex: 4, display: "flex", minWidth: 0 }}>

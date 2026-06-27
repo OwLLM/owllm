@@ -40,7 +40,7 @@ type ClaudeStreamEvent =
   | { kind: "text"; delta: string }
   | { kind: "thinking"; delta: string }
   | { kind: "toolUse"; toolUseId: string; name: string; input: string }
-  | { kind: "toolResult"; toolUseId: string; content: string }
+  | { kind: "toolResult"; toolUseId: string; content: string; isError: boolean }
   | { kind: "error"; message: string };
 
 // Run claude --print --output-format stream-json and route events to
@@ -113,7 +113,11 @@ async function runClaudeCliStream(args: {
         const snippet = msg.content.length > 800
           ? msg.content.slice(0, 800) + "\n…(truncated)"
           : msg.content;
-        args.onThought(channel, "↩ result", snippet);
+        // Carry the REAL success flag (is_error) in the role marker so the
+        // renderer shows the true status instead of guessing from the result
+        // text — a grep for "error"/"denied" returns those words and was being
+        // mislabeled "Failed".
+        args.onThought(channel, msg.isError ? "↩ error" : "↩ result", snippet);
         break;
       }
       case "error":

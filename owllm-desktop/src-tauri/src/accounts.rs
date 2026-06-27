@@ -1402,7 +1402,11 @@ pub enum ClaudeStreamEvent {
     /// The result of a tool call (file contents, command output, etc.).
     /// Surfaced under the same Thought block as the matching tool_use
     /// so the user sees both the request and its outcome.
-    ToolResult { tool_use_id: String, content: String },
+    /// `is_error` is the tool's REAL success flag from the CLI — the only
+    /// reliable signal. (The UI must NOT guess from the result text: a grep
+    /// that searches for "error"/"denied" returns matching lines containing
+    /// those words and was being mislabeled "Failed".)
+    ToolResult { tool_use_id: String, content: String, is_error: bool },
     /// Non-fatal error during stream parsing — surfaced so the user
     /// knows the dispatch had partial trouble, but the CLI keeps
     /// running.
@@ -1712,9 +1716,14 @@ pub async fn claude_cli_stream(
                                         .join("\n"),
                                     _ => String::new(),
                                 };
+                                let is_error = block
+                                    .get("is_error")
+                                    .and_then(|b| b.as_bool())
+                                    .unwrap_or(false);
                                 let _ = on_event.send(ClaudeStreamEvent::ToolResult {
                                     tool_use_id: id,
                                     content: content_str,
+                                    is_error,
                                 });
                             }
                         }

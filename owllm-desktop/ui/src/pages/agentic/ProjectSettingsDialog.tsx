@@ -14,6 +14,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { isolationBadge } from "./isolationBadge";
 import { isWslPath } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
+import { parseVerifyConfig } from "./gate";
 
 type Team = {
   id: string; name: string; display: string; category: string;
@@ -93,6 +94,9 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [actBusy, setActBusy] = useState<string | null>(null);
   const [actMsg, setActMsg] = useState<string | null>(null);
+  // The team's "done" check (.owllm/verify.json `command`). Blank = auto-detect.
+  const [verifyCmd, setVerifyCmd] = useState("");
+  const [verifyMsg, setVerifyMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -112,6 +116,25 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   // runs on the open transition, when they already hold their current value.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, project?.id]);
+
+  // Pre-fill the Verify command from the project's existing .owllm/verify.json
+  // (top-level `command`). Blank when there's none — the gate auto-detects then.
+  useEffect(() => {
+    if (!open || mode === "new") return;
+    const cwd = effectiveCwd || location;
+    setVerifyCmd(""); setVerifyMsg(null);
+    if (!cwd) return;
+    let live = true;
+    (async () => {
+      try {
+        const txt = await invoke<string>("tool_read_file", { path: ".owllm/verify.json", cwd });
+        const cmd = parseVerifyConfig(txt)?.command ?? "";
+        if (live) setVerifyCmd(cmd);
+      } catch { /* no file yet → leave blank (auto-detect) */ }
+    })();
+    return () => { live = false; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, mode, project?.id, effectiveCwd]);
 
   if (!open) return null;
 
@@ -165,6 +188,24 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
       await invoke("delete_project", { id: project.id });
       onAfterDelete(); onClose();
     } catch (e: any) { setActMsg(`Delete failed: ${e?.message ?? e}`); }
+    finally { setActBusy(null); }
+  };
+
+  // Persist the team's "done" check to <project>/.owllm/verify.json. A blank
+  // command writes `{}` so the gate falls back to auto-detecting one from the
+  // project's markers (rather than leaving a stale command behind).
+  const saveVerify = async () => {
+    const cwd = effectiveCwd || location;
+    if (!cwd) { setVerifyMsg("Pick a project folder first."); return; }
+    setActBusy("verify-cmd"); setVerifyMsg(null);
+    try {
+      const cmd = verifyCmd.trim();
+      const content = cmd ? JSON.stringify({ command: cmd }, null, 2) + "\n" : "{}\n";
+      await invoke("tool_write_file", { path: ".owllm/verify.json", content, cwd });
+      setVerifyMsg(cmd
+        ? `✓ Saved — the team verifies "done" by running \`${cmd}\`.`
+        : "✓ Cleared — the team will auto-detect a check from the project.");
+    } catch (e: any) { setVerifyMsg(`Save failed: ${e?.message ?? e}`); }
     finally { setActBusy(null); }
   };
 
@@ -318,6 +359,21 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                 {!isWslPath(effectiveCwd) && aBtn("🛡 Isolate", isolate, "isolate")}
                 {!fullAccess && <button type="button" onClick={onToggleFullAccess} title="Let this project's agents run OUTSIDE the sandbox. Use only for projects you trust." style={{ height: 24, padding: "2px 8px", background: "var(--bg-elevated)", color: "var(--fg-muted)", border: "1px solid var(--border-strong)", borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>🔓 Full access…</button>}
               </div>
+            </div>
+            {/* Verify command — how the team proves "done" (.owllm/verify.json) */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <label style={LBL}>Verify command <span style={{ opacity: 0.6, fontWeight: 400 }}>— how the team proves a change is “done”</span></label>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input value={verifyCmd} onChange={e => setVerifyCmd(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") saveVerify(); }}
+                  placeholder="auto-detected — e.g. npm run build · cargo check · pytest -q"
+                  style={{ ...INPUT, flex: 1 }} />
+                <button onClick={saveVerify} className="ghost-btn" disabled={actBusy === "verify-cmd"} style={{ height: 38, padding: "0 14px" }}>{actBusy === "verify-cmd" ? "Saving…" : "Save"}</button>
+              </div>
+              <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                The coder runs this after editing; it’s “done” only when the command exits 0. Stored as <code>.owllm/verify.json</code>. Leave blank to auto-detect from the project (package.json / Cargo.toml / pyproject / go.mod).
+              </div>
+              {verifyMsg && <div style={{ fontSize: 12, color: verifyMsg.startsWith("✓") ? "#7fd17f" : "#ff8c8c" }}>{verifyMsg}</div>}
             </div>
             {/* Team template (canvas) + Bridge */}
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

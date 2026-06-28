@@ -37,7 +37,7 @@ const {
 } = await load("teamConfig.ts");
 const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await load("dispatchParse.ts");
 const { formatWorkLogEntry, renderRelevantWork, enrichInstructionWithMemory, oneLine } = await load("teamMemoryFormat.ts");
-const { parseVerifyConfig, pickGateCommand, classifyGateStatus, renderGateLine } = await load("gate.ts");
+const { parseVerifyConfig, pickGateCommand, classifyGateStatus, renderGateLine, detectVerifyCommand } = await load("gate.ts");
 
 // --- role tool_allowlists (so roleCanWrite matches the app) ---------------
 function parseToolAllowlist(yamlText) {
@@ -231,6 +231,23 @@ check("classifyGateStatus: exit 0 → passed", classifyGateStatus(true, 0) === "
 check("classifyGateStatus: exit 1 → FAILED (explicit, not 'not passed')", classifyGateStatus(true, 1) === "failed");
 check("renderGateLine unverified is honest (not 'passed')", /UNVERIFIED/.test(renderGateLine({ status: "unverified", cwd: ".", scope: "full", startedAt: "", finishedAt: "", captured: true })) );
 check("renderGateLine failed shows the command + exit", /FAILED/.test(renderGateLine({ status: "failed", command: "npm run build", exitCode: 2, cwd: ".", scope: "full", startedAt: "", finishedAt: "", captured: true })));
+check("renderGateLine notes auto-detected", /auto-detected/.test(renderGateLine({ status: "passed", command: "cargo check", detected: true, cwd: ".", scope: "full", startedAt: "", finishedAt: "", captured: true })));
+
+// 9) Auto-detect — the gate works out-of-the-box when there's no verify.json.
+section("9) detectVerifyCommand (zero-config fallback)");
+check("npm build script → npm run build", detectVerifyCommand({ packageJson: '{"scripts":{"build":"vite build"}}' }) === "npm run build");
+check("build preferred over test", detectVerifyCommand({ packageJson: '{"scripts":{"build":"x","test":"y"}}' }) === "npm run build");
+check("no build but typescript dep → tsc --noEmit", detectVerifyCommand({ packageJson: '{"devDependencies":{"typescript":"^5"}}' }) === "npx tsc --noEmit");
+check("no build, no ts, has test → npm test", detectVerifyCommand({ packageJson: '{"scripts":{"test":"vitest run"}}' }) === "npm test");
+check("Cargo.toml → cargo check", detectVerifyCommand({ hasCargo: true }) === "cargo check");
+check("pyproject → pytest -q", detectVerifyCommand({ hasPyproject: true }) === "pytest -q");
+check("pytest.ini → pytest -q", detectVerifyCommand({ hasPytestIni: true }) === "pytest -q");
+check("go.mod → go build ./...", detectVerifyCommand({ hasGoMod: true }) === "go build ./...");
+check("JS wins over Rust when both present", detectVerifyCommand({ packageJson: '{"scripts":{"build":"x"}}', hasCargo: true }) === "npm run build");
+check("nothing detectable → '' (stays unverified)", detectVerifyCommand({}) === "");
+check("malformed package.json + no other markers → ''", detectVerifyCommand({ packageJson: "{not json" }) === "");
+check("null probe → ''", detectVerifyCommand(null) === "");
+check("does NOT guess make/arbitrary runner", detectVerifyCommand({ packageJson: '{"name":"x"}' }) === "");
 
 console.log(`\n${fail === 0 ? "✅ PASS" : "❌ FAIL"} — ${pass} passed, ${fail} failed`);
 if (fails.length) { console.log("Failed:"); fails.forEach((f) => console.log("  - " + f)); }

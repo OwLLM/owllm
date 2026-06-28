@@ -20,6 +20,10 @@ export type GateResult = {
   startedAt: string;
   finishedAt: string;
   captured: true;
+  /// true when `command` was inferred from the project's marker files
+  /// (no .owllm/verify.json) — so the UI can say "auto-detected" and the
+  /// user knows why a command ran without them configuring one.
+  detected?: boolean;
 };
 
 /// `.owllm/verify.json` shape: a top-level `command` (the "full" check) and an
@@ -53,11 +57,54 @@ export function classifyGateStatus(hadCommand: boolean, exitCode: number | undef
   return exitCode === 0 ? "passed" : "failed";
 }
 
+/// Marker files we sniff to infer a check when there's NO .owllm/verify.json,
+/// so the gate works out-of-the-box instead of sitting "unverified" forever.
+/// `packageJson` is the raw text (we read its scripts); the rest are presence
+/// flags. All optional — absence just means we couldn't read it.
+export type ProjectProbe = {
+  packageJson?: string | null;
+  hasCargo?: boolean;
+  hasPyproject?: boolean;
+  hasPytestIni?: boolean;
+  hasGoMod?: boolean;
+};
+
+/// Infer a CHEAP, side-effect-light verify command from a project's markers
+/// when the user hasn't configured one. Bias: a real "does it compile/pass"
+/// check that EXITS (never a watcher), preferring fast checks over full builds.
+/// Returns "" when nothing confident can be inferred → the run stays honestly
+/// "unverified" rather than running a guessed (possibly destructive) command.
+/// NOTE: deliberately does NOT detect `make`/arbitrary task runners — a default
+/// target can do anything (deploy, clean), so guessing it is unsafe.
+export function detectVerifyCommand(probe: ProjectProbe | null | undefined): string {
+  if (!probe) return "";
+  // JS/TS first — the most common case and the one with a declared script.
+  if (probe.packageJson) {
+    try {
+      const pkg = JSON.parse(probe.packageJson);
+      const scripts = (pkg && typeof pkg === "object" && pkg.scripts) || {};
+      // A "build" script is the most reliable "did it compile" signal and
+      // virtually always exits (unlike many test watchers).
+      if (typeof scripts.build === "string" && scripts.build.trim()) return "npm run build";
+      // No build script but TypeScript is present → typecheck without emitting.
+      const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+      if (deps.typescript) return "npx tsc --noEmit";
+      // Last JS resort: a test script (some watch, but better than nothing).
+      if (typeof scripts.test === "string" && scripts.test.trim()) return "npm test";
+    } catch { /* malformed package.json → fall through to other ecosystems */ }
+  }
+  if (probe.hasCargo) return "cargo check";                 // cheaper than build/test, still catches breakage
+  if (probe.hasPyproject || probe.hasPytestIni) return "pytest -q";
+  if (probe.hasGoMod) return "go build ./...";
+  return "";
+}
+
 /// One-line human summary for the Run Report / logs.
 export function renderGateLine(g: GateResult): string {
   if (g.status === "unverified") {
-    return "🔍 verify: UNVERIFIED — no .owllm/verify.json check configured. Add one (e.g. {\"command\":\"npm run build\"}) to ground \"done\".";
+    return "🔍 verify: UNVERIFIED — no .owllm/verify.json and no build/test command could be auto-detected. Set a Verify command in project settings (or add .owllm/verify.json, e.g. {\"command\":\"npm run build\"}) to ground \"done\".";
   }
-  if (g.status === "passed") return `✓ verify passed — \`${g.command}\``;
-  return `✗ verify FAILED — \`${g.command}\` (exit ${g.exitCode})\n${(g.stderr || g.stdout || "").trim().slice(-700)}`;
+  const how = g.detected ? " (auto-detected)" : "";
+  if (g.status === "passed") return `✓ verify passed${how} — \`${g.command}\``;
+  return `✗ verify FAILED${how} — \`${g.command}\` (exit ${g.exitCode})\n${(g.stderr || g.stdout || "").trim().slice(-700)}`;
 }

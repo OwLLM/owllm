@@ -26,7 +26,7 @@ import {
 import { bumpActivity } from "../../support/activityStats";
 import { loadSkillByRef, skillCatalogBrief, anySkillInstalled } from "./skillRuntime";
 import { formatWorkLogEntry, renderRelevantWork } from "./teamMemoryFormat";
-import { parseVerifyConfig, pickGateCommand, classifyGateStatus, type GateResult, type GateScope } from "./gate";
+import { parseVerifyConfig, pickGateCommand, classifyGateStatus, detectVerifyCommand, type GateResult, type GateScope } from "./gate";
 
 /// Built-in tools that let an agent manage its OWN skills at runtime. These
 /// bypass the role tool_allowlist (skills are a separate capability axis from
@@ -136,11 +136,38 @@ export async function logTeamWork(agent: string, instruction: string, result: st
 /// (tool_shell_exec), captures stdout/stderr/exit, and returns a GateResult whose
 /// status is decided from the EXIT CODE — never from any agent's claim. No command
 /// configured → status "unverified" (honest). Best-effort; never throws.
+/// Best-effort read of a project marker file (relative to cwd). Returns its
+/// text, or null when it's absent/unreadable — never throws.
+async function probeRead(path: string, cwd: string): Promise<string | null> {
+  try { return await invoke<string>("tool_read_file", { path, cwd }); } catch { return null; }
+}
+
 export async function runGate(cwd: string, scope: GateScope = "full"): Promise<GateResult> {
   const startedAt = new Date().toISOString();
   let cfgText = "";
   try { cfgText = await invoke<string>("tool_read_file", { path: ".owllm/verify.json", cwd }); } catch { /* none */ }
-  const command = pickGateCommand(parseVerifyConfig(cfgText), scope);
+  let command = pickGateCommand(parseVerifyConfig(cfgText), scope);
+  let detected = false;
+  // No explicit config → sniff the project's marker files and infer a cheap
+  // check, so the gate works out-of-the-box instead of sitting "unverified"
+  // forever (which is what made the loop never engage by default).
+  if (!command) {
+    const [packageJson, cargo, pyproject, pytestIni, goMod] = await Promise.all([
+      probeRead("package.json", cwd),
+      probeRead("Cargo.toml", cwd),
+      probeRead("pyproject.toml", cwd),
+      probeRead("pytest.ini", cwd),
+      probeRead("go.mod", cwd),
+    ]);
+    command = detectVerifyCommand({
+      packageJson,
+      hasCargo: cargo != null,
+      hasPyproject: pyproject != null,
+      hasPytestIni: pytestIni != null,
+      hasGoMod: goMod != null,
+    });
+    detected = !!command;
+  }
   if (!command) {
     return { status: "unverified", cwd, scope, startedAt, finishedAt: new Date().toISOString(), captured: true };
   }
@@ -155,7 +182,7 @@ export async function runGate(cwd: string, scope: GateScope = "full"): Promise<G
   }
   return {
     status: classifyGateStatus(true, exitCode),
-    command, cwd, scope, exitCode, stdout, stderr,
+    command, cwd, scope, exitCode, stdout, stderr, detected,
     startedAt, finishedAt: new Date().toISOString(), captured: true,
   };
 }

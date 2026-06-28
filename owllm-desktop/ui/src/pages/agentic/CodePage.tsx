@@ -518,7 +518,9 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const t0 = Date.now();
     let outcome: WtCreate;
     try {
-      outcome = await invoke<WtCreate>("fleet_worktree_create", { projectCwd: dir, agentName: "code", runId: pageId });
+      // "owllm-page" namespace (NOT owllm-fleet) so the team-run sweep never
+      // touches a Code page's worktree — it holds the user's unmerged edits.
+      outcome = await invoke<WtCreate>("fleet_worktree_create", { projectCwd: dir, agentName: "code", runId: pageId, branchPrefix: "owllm-page" });
     } catch (e: any) {
       outcome = { status: "error", message: String(e?.message ?? e) };
     }

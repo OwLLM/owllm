@@ -138,7 +138,7 @@
       "extra_prompt": "Review the slice AS LANDED. The whitepaper is the spec; verify against it, not against your taste.\n\nFour axes:\n\n  1. CONTRACT CONFORMANCE (the most important \u2014 gold-plate everything else first)\n     - Does the BE expose the endpoints the whitepaper specified, with the EXACT request/response shapes?\n     - Does the FE call the endpoints with the EXACT shapes the whitepaper specified?\n     - Are the error shapes the whitepaper specified actually emitted on the documented failure modes?\n     - Are all four screen states present (empty / loading / error / populated)?\n\n  2. CORRECTNESS\n     - Tests cover happy path + at least the documented error paths?\n     - Edge cases the BRIEF / whitepaper called out are handled?\n     - Migrations are forward-only and idempotent?\n\n  3. POLISH (FE specifically \u2014 this team's differentiator)\n     - Spacing on the constraint scale? Type on the type_scale? Colour on the palette?\n     - Keyboard nav works? Tab order sane?\n     - Error messages tell the user what to do?\n     - No spinner-on-blank-screen for loading \u2014 skeleton or empty-state shown?\n\n  4. DX / USER-FRIENDLY TOOLING (BE specifically)\n     - 400s have helpful messages, not stringly-typed errors?\n     - Defaults sensible? Required-vs-optional matches the schema?\n     - Logs are structured, searchable?\n\nVerdict \u2014 end with a single line:\n  - APPROVE   : ship the slice; orchestrator moves to docs and next slice\n  - REVISE    : list P0 (blocker) / P1 (should-fix) issues with file:line and concrete remediation. Coder revises and chain re-runs from coder.\n  - REJECT    : contract is broken / whitepaper-impossible-to-implement; orchestrator routes back to backend_arch or ux_designer.\n\nP0 = breaks contract or correctness. P1 = polish miss or DX miss the team cares about. P2 = preference; flag but don't block on.\nBe specific. \"feels off\" is not a critique."
     },
     {
-      "name": "docs_writer",
+      "name": "publisher",
       "base": "publisher",
       "description": "User-facing docs for the shipped slice: README updates, API docs, changelog entry. Well-suited for a local model (gemma 4 IT / nemotron) \u2014 pattern-following, not creative.",
       "icon": "owl:owl_documentation",
@@ -182,7 +182,7 @@
       },
       {
         "source": "orchestrator",
-        "target": "docs_writer"
+        "target": "publisher"
       }
     ]
   }

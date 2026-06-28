@@ -57,6 +57,11 @@ export type ProjectSettingsDialogProps = {
   isolationRequested: boolean;
   onAfterRename: () => void;
   onAfterDelete: () => void;
+  /// Re-derive this project's roster + wiring from its built-in team template
+  /// (picks up template fixes like renamed/repurposed agents). Shown only when
+  /// the project maps to a template (resolvedTeamLabel set). Parent persists +
+  /// reloads. Returns a status string to show inline.
+  onResetTeam?: () => Promise<string>;
 };
 
 const LBL: React.CSSProperties = { fontSize: 11, color: "var(--fg-muted)", letterSpacing: 0.5, textTransform: "uppercase" };
@@ -64,7 +69,7 @@ const INPUT: React.CSSProperties = { height: 38, padding: "0 12px", borderRadius
 
 export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
   const {
-    open, mode, onClose, teams, pickedTeamId, onPickTeam,
+    open, mode, onClose, teams, pickedTeamId, onPickTeam, onResetTeam,
     resolvedTeamLabel, defaultTeamName, onCreated,
     project, location, effectiveCwd, onChangeLocation,
     trustWrites, onToggleTrustWrites, fullAccess, onToggleFullAccess,
@@ -327,6 +332,18 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                 <button type="button"
                   onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-workbench"))}
                   className="ghost-btn" style={{ height: 28, padding: "0 10px", fontSize: 12 }}>⚙ Edit team</button>
+                {onResetTeam && resolvedTeamLabel && (
+                  <button type="button"
+                    title={`Re-derive this team's agents + wiring from the built-in ${resolvedTeamLabel} template (picks up renamed/repurposed agents). Keeps your per-agent model picks.`}
+                    onClick={async () => {
+                      setActBusy("reset"); setActMsg(null);
+                      try { setActMsg(await onResetTeam()); }
+                      catch (e: any) { setActMsg(`Reset failed: ${e?.message ?? e}`); }
+                      finally { setActBusy(null); }
+                    }}
+                    disabled={!!actBusy}
+                    className="ghost-btn" style={{ height: 28, padding: "0 10px", fontSize: 12 }}>{actBusy === "reset" ? "Resetting…" : "↺ Reset to template"}</button>
+                )}
               </div>
               <label style={{ ...LBL, marginTop: 4 }}>Override the canvas team</label>
               <div style={{ display: "flex", gap: 8 }}>

@@ -8039,6 +8039,34 @@ export default function AgentsPage() {
     [activeTeam, teams],
   );
 
+  // Reset the project's stored roster + wiring to its built-in template — picks
+  // up template fixes (e.g. an agent renamed/repurposed: docs_writer → publisher)
+  // that a project frozen at creation wouldn't otherwise get. Persists the
+  // template's exact names/roles into team_json+graph_json so the match is exact
+  // going forward, keeps per-agent model/voice/skill picks (keyed by name), and
+  // clears any local edge/override so the canvas redraws from the template.
+  const resetTeamToTemplate = async (): Promise<string> => {
+    if (!selectedProject) return "No project selected.";
+    const tmpl = activeTeamTemplate;
+    if (!tmpl || tmpl.agents.length === 0) return "This project doesn't map to a built-in team template.";
+    await invoke("update_project", {
+      input: {
+        id: selectedProject.id,
+        team: tmpl.agents.map(a => a.name),
+        graph_json: buildGraphJson({
+          edges: tmpl.edges,
+          agents: tmpl.agents,
+          agentModels: perAgentModel, agentVoices: perAgentVoice,
+          agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
+        }),
+      },
+    });
+    setEditedEdges(null);
+    setPickedTeamId(null);
+    await reloadProjects();
+    return `Reset to “${tmpl.display || tmpl.name}” — ${tmpl.agents.length} agents, ${tmpl.edges.length} links.`;
+  };
+
   // Reset edge edits + node positions whenever the active team flips.
   // Without this, edges/positions from a previous team would leak onto
   // the next one and reference agents that don't exist.
@@ -10687,6 +10715,7 @@ export default function AgentsPage() {
         pickedTeamId={pickedTeamId}
         onPickTeam={setPickedTeamId}
         resolvedTeamLabel={activeTeamTemplate?.display ?? null}
+        onResetTeam={resetTeamToTemplate}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
         onCreated={onProjectCreated}
         project={selectedProject}

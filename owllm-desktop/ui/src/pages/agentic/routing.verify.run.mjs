@@ -37,6 +37,7 @@ const {
 } = await load("teamConfig.ts");
 const { parseDispatchesDetailed, parseDispatches, stripDispatchDirectives } = await load("dispatchParse.ts");
 const { formatWorkLogEntry, renderRelevantWork, enrichInstructionWithMemory, oneLine } = await load("teamMemoryFormat.ts");
+const { parseVerifyConfig, pickGateCommand, classifyGateStatus, renderGateLine } = await load("gate.ts");
 
 // --- role tool_allowlists (so roleCanWrite matches the app) ---------------
 function parseToolAllowlist(yamlText) {
@@ -212,6 +213,24 @@ check("empty entries → empty block", renderRelevantWork([]) === "");
 const enriched = enrichInstructionWithMemory(relBlock, "wire the frontend login form to the API");
 check("enriched instruction fences the task after the memory", enriched.includes("--- YOUR TASK ---") && enriched.endsWith("wire the frontend login form to the API") && enriched.startsWith("RELEVANT TEAM WORK"));
 check("no memory → instruction unchanged", enrichInstructionWithMemory("", "just do X") === "just do X");
+
+// 8) Verification Gate (slice 1) — the source-of-truth check. PASS/FAIL/UNVERIFIED
+//    must be decided from the exit code + whether a command exists, never guessed.
+section("8) Verification Gate");
+check("parseVerifyConfig: valid", parseVerifyConfig('{"command":"npm run build"}')?.command === "npm run build");
+check("parseVerifyConfig: empty → null", parseVerifyConfig("") === null);
+check("parseVerifyConfig: malformed → null", parseVerifyConfig("{not json") === null);
+const cfg = { command: "npm run build", lanes: { frontend: "npm run build:ui", backend: "pytest -q" } };
+check("pickGateCommand full → top-level command", pickGateCommand(cfg, "full") === "npm run build");
+check("pickGateCommand frontend → lane command", pickGateCommand(cfg, "frontend") === "npm run build:ui");
+check("pickGateCommand backend → lane command", pickGateCommand(cfg, "backend") === "pytest -q");
+check("pickGateCommand undefined lane → falls back to command", pickGateCommand({ command: "make test" }, "frontend") === "make test");
+check("pickGateCommand no config → '' (→ unverified)", pickGateCommand(null, "full") === "");
+check("classifyGateStatus: no command → unverified", classifyGateStatus(false, undefined) === "unverified");
+check("classifyGateStatus: exit 0 → passed", classifyGateStatus(true, 0) === "passed");
+check("classifyGateStatus: exit 1 → FAILED (explicit, not 'not passed')", classifyGateStatus(true, 1) === "failed");
+check("renderGateLine unverified is honest (not 'passed')", /UNVERIFIED/.test(renderGateLine({ status: "unverified", cwd: ".", scope: "full", startedAt: "", finishedAt: "", captured: true })) );
+check("renderGateLine failed shows the command + exit", /FAILED/.test(renderGateLine({ status: "failed", command: "npm run build", exitCode: 2, cwd: ".", scope: "full", startedAt: "", finishedAt: "", captured: true })));
 
 console.log(`\n${fail === 0 ? "✅ PASS" : "❌ FAIL"} — ${pass} passed, ${fail} failed`);
 if (fails.length) { console.log("Failed:"); fails.forEach((f) => console.log("  - " + f)); }

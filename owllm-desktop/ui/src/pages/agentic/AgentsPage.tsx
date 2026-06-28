@@ -79,8 +79,9 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
+import { renderGateLine, type GateResult } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
   goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress } from "./teamConfig";
@@ -10370,42 +10371,33 @@ export default function AgentsPage() {
           const agents = [...rt.agents.entries()].map(([name, v]) => ({ name, domain: v.domain, runs: v.runs }));
           const wrote = ranWriteToolRef.current;
           const delivered = runDelivered(text, wrote, agents.map(a => a.domain));
-          // GROUNDED VERIFY GATE (the load-bearing finding from the loop research):
-          // when files changed on a code/ops goal, the run is "done" only if the
-          // project's OWN check passes — not by the agents' say-so (self-reported
-          // "done" is wrong most of the time). Opt-in via .owllm/verify.json
-          // {"command":"npm run build"}; reuses the sandbox-aware shell; only runs
-          // when something was written, so it never slows a no-op run.
-          let verifyMsg = "";
-          let verifyPassed: boolean | null = null;
+          // VERIFICATION GATE (slice 1 — first-class, gate.ts/runGate): when files
+          // changed on a code/ops goal, "done" is decided by the project's OWN check
+          // (exit code), never the agents' say-so. runGate returns passed | failed |
+          // unverified with the captured output. unverified (no .owllm/verify.json)
+          // falls back to the write proxy and says so — never a false "passed".
+          // Only runs when something was written, so a no-op run is never slowed.
+          let gate: GateResult | null = null;
           if (wrote && goalRequiresWrite(text)) {
-            try {
-              const cfg = JSON.parse(await invoke<string>("tool_read_file", { path: ".owllm/verify.json", cwd: projectCwd }));
-              const cmd = typeof cfg?.command === "string" ? cfg.command.trim() : "";
-              if (cmd) {
-                appendLog("system", { role: "system", color: "#7ff0c5", text: `🔍 verify — running \`${cmd}\`` });
-                const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>("tool_shell_exec", { command: cmd, cwd: projectCwd });
-                verifyPassed = r.exitCode === 0;
-                verifyMsg = verifyPassed
-                  ? `✓ verify passed — \`${cmd}\``
-                  : `✗ verify FAILED — \`${cmd}\` (exit ${r.exitCode})\n${(r.stderr || r.stdout || "").trim().slice(-700)}`;
-              }
-            } catch { /* no .owllm/verify.json (or it failed to run) → ungrounded; fall back to the write proxy */ }
+            appendLog("system", { role: "system", color: "#7ff0c5", text: "🔍 verification gate…" });
+            gate = await runGate(projectCwd, "full");
+            const line = renderGateLine(gate);
+            const col = gate.status === "passed" ? "#7ff0c5" : gate.status === "failed" ? "#ff8c8c" : "#ffb74d";
+            appendLog("system", { role: "system", color: col, text: line });
+            if (gate.status !== "unverified") setSupChat(prev => [...prev, { role: "system", color: col, text: line, ts: Date.now() }]);
           }
-          const done = verifyPassed !== null ? verifyPassed : delivered;
-          if (!done) {
+          // passed → done; failed → not done; unverified/none → fall back to the write proxy.
+          const done = gate ? (gate.status === "passed" ? true : gate.status === "failed" ? false : delivered) : delivered;
+          if (!done && (!gate || gate.status !== "failed")) {
+            // Gate FAILED already printed its own loud line above; only add the
+            // "nothing was written / analyzed-only" message for the non-gate case.
             const doer = agents.find(a => a.domain === "coder" || a.domain === "ops");
-            const why = verifyPassed === false
-              ? verifyMsg
-              : goalRequiresWrite(text)
-                ? `this was a ${gk} task but no file was edited and no command was run — the team only analyzed/planned.`
-                : `@${doer?.name ?? "a specialist"} (a coder/operator) was dispatched but nothing was written.`;
+            const why = goalRequiresWrite(text)
+              ? `this was a ${gk} task but no file was edited and no command was run — the team only analyzed/planned.`
+              : `@${doer?.name ?? "a specialist"} (a coder/operator) was dispatched but nothing was written.`;
             const m = `⚠ NOT done: ${why}`;
             appendLog("system", { role: "system", color: "#ff8c8c", text: m });
             setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now() }]);
-          } else if (verifyMsg) {
-            appendLog("system", { role: "system", color: "#7ff0c5", text: verifyMsg });
-            setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: verifyMsg, ts: Date.now() }]);
           }
           const trace: RunTrace = {
             team: activeTeam?.name ?? "team", goal: text, goalKind: gk, agents,

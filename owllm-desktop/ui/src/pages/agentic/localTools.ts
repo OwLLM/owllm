@@ -26,6 +26,7 @@ import {
 import { bumpActivity } from "../../support/activityStats";
 import { loadSkillByRef, skillCatalogBrief, anySkillInstalled } from "./skillRuntime";
 import { formatWorkLogEntry, renderRelevantWork } from "./teamMemoryFormat";
+import { parseVerifyConfig, pickGateCommand, classifyGateStatus, type GateResult, type GateScope } from "./gate";
 
 /// Built-in tools that let an agent manage its OWN skills at runtime. These
 /// bypass the role tool_allowlist (skills are a separate capability axis from
@@ -128,6 +129,35 @@ export async function logTeamWork(agent: string, instruction: string, result: st
     await invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) });
     await refreshTeamMemorySnapshot();
   } catch { /* memory must never break a run */ }
+}
+
+/// Run the Verification Gate at `cwd` for a scope (the wired half of gate.ts).
+/// Reads .owllm/verify.json, runs the scoped command via the SANDBOX-AWARE shell
+/// (tool_shell_exec), captures stdout/stderr/exit, and returns a GateResult whose
+/// status is decided from the EXIT CODE — never from any agent's claim. No command
+/// configured → status "unverified" (honest). Best-effort; never throws.
+export async function runGate(cwd: string, scope: GateScope = "full"): Promise<GateResult> {
+  const startedAt = new Date().toISOString();
+  let cfgText = "";
+  try { cfgText = await invoke<string>("tool_read_file", { path: ".owllm/verify.json", cwd }); } catch { /* none */ }
+  const command = pickGateCommand(parseVerifyConfig(cfgText), scope);
+  if (!command) {
+    return { status: "unverified", cwd, scope, startedAt, finishedAt: new Date().toISOString(), captured: true };
+  }
+  let exitCode: number | undefined;
+  let stdout = "";
+  let stderr = "";
+  try {
+    const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>("tool_shell_exec", { command, cwd });
+    exitCode = r.exitCode; stdout = r.stdout; stderr = r.stderr;
+  } catch (e: any) {
+    exitCode = -1; stderr = String(e?.message ?? e);
+  }
+  return {
+    status: classifyGateStatus(true, exitCode),
+    command, cwd, scope, exitCode, stdout, stderr,
+    startedAt, finishedAt: new Date().toISOString(), captured: true,
+  };
 }
 
 export type MemoryDirective = { content: string; key: string; tags: string };

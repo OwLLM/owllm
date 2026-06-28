@@ -81,6 +81,14 @@ function kLabel(chars: number): string {
   return `~${Math.max(1, Math.round(chars / 1000))}k`;
 }
 
+/// Slugify a team display name into a file-stem id: lowercase, every run
+/// of non-alphanumerics → a single "-", trimmed. Returns "team" when the
+/// name has no usable characters so we never emit an empty stem.
+function slugifyTeamName(name: string): string {
+  const s = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return s || "team";
+}
+
 function skillName(p: SkillPackBackend): string {
   const fm = p.frontmatter ?? {};
   return (typeof fm.name === "string" && fm.name) || p.id;
@@ -168,6 +176,10 @@ export default function TeamWorkbench({
   const [promptOpen, setPromptOpen] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  // "Save as new…" — inline rename row that forks a brand-new team file
+  // instead of overwriting the current stem (the in-place Save above).
+  const [saveAsOpen, setSaveAsOpen] = useState(false);
+  const [saveAsName, setSaveAsName] = useState("");
 
   const builtIn = backend.built_in;
 
@@ -368,33 +380,40 @@ export default function TeamWorkbench({
   };
 
   // ---- save ----
+  /// Serialize the current working team into a save_team_template `data`
+  /// payload under the given display name. Shared by the in-place Save and
+  /// "Save as new…" so the two paths can never drift in what they persist.
+  const buildSaveData = (displayName: string): any => {
+    // Normalize once at save for idempotency (wires orphans, drops dead edges).
+    const normalized = normalizeTeam(dispatchTeam, roleByName).team;
+    const data: any = JSON.parse(JSON.stringify(backend.data ?? {}));
+    data.display_name = displayName;
+    data.category = category.trim() || "Custom";
+    data.description = description.trim();
+    data.agents = agents.map(a => {
+      const out: any = { ...(a.orig ?? {}) };
+      out.name = a.name.trim();
+      out.base = a.base;
+      if (a.icon) out.icon = a.icon; else delete out.icon;
+      if (a.description?.trim()) out.description = a.description.trim(); else delete out.description;
+      if (a.extraPrompt?.trim()) out.extra_prompt = a.extraPrompt; else delete out.extra_prompt;
+      if (a.extraSkills.length) out.extra_skills = a.extraSkills; else delete out.extra_skills;
+      if (a.modelId?.trim()) out.default_model_id = a.modelId.trim(); else delete out.default_model_id;
+      if (a.temperature != null) out.default_temperature = a.temperature; else delete out.default_temperature;
+      if (a.canDispatch) out.can_dispatch = true; else delete out.can_dispatch;
+      if (a.role === "leader" || a.role === "agent") out.role = a.role; else delete out.role;
+      return out;
+    });
+    data.graph = { ...(data.graph ?? {}), edges: normalized.edges };
+    if (!data.icon) data.icon = "owl:owl_asssitant";
+    return data;
+  };
+
   const doSave = async () => {
     setSaving(true);
     setSaveErr(null);
     try {
-      // Normalize once at save for idempotency (wires orphans, drops dead edges).
-      const normalized = normalizeTeam(dispatchTeam, roleByName).team;
-      const data: any = JSON.parse(JSON.stringify(backend.data ?? {}));
-      data.display_name = display.trim() || backend.id;
-      data.category = category.trim() || "Custom";
-      data.description = description.trim();
-      data.agents = agents.map(a => {
-        const out: any = { ...(a.orig ?? {}) };
-        out.name = a.name.trim();
-        out.base = a.base;
-        if (a.icon) out.icon = a.icon; else delete out.icon;
-        if (a.description?.trim()) out.description = a.description.trim(); else delete out.description;
-        if (a.extraPrompt?.trim()) out.extra_prompt = a.extraPrompt; else delete out.extra_prompt;
-        if (a.extraSkills.length) out.extra_skills = a.extraSkills; else delete out.extra_skills;
-        if (a.modelId?.trim()) out.default_model_id = a.modelId.trim(); else delete out.default_model_id;
-        if (a.temperature != null) out.default_temperature = a.temperature; else delete out.default_temperature;
-        if (a.canDispatch) out.can_dispatch = true; else delete out.can_dispatch;
-        if (a.role === "leader" || a.role === "agent") out.role = a.role; else delete out.role;
-        return out;
-      });
-      data.graph = { ...(data.graph ?? {}), edges: normalized.edges };
-      if (!data.icon) data.icon = "owl:owl_asssitant";
-
+      const data = buildSaveData(display.trim() || backend.id);
       // Save under the SAME id — for a built-in this writes a custom OVERRIDE
       // with the built-in's own stem (the bundled file is read-only; the
       // override goes to the writable custom dir and the loader prefers it).
@@ -404,6 +423,38 @@ export default function TeamWorkbench({
       const saved = await invoke<TeamTemplateBackend>("save_team_template", { fileStem, data });
       invoke("vault_sync_teams").catch(() => {});
       setDirty(false);
+      onSaved((saved.data?.name ?? saved.id) as string);
+    } catch (e: any) {
+      setSaveErr(String(e?.message ?? e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  /// "Save as new…" — fork the working team into a BRAND-NEW template file
+  /// under the entered name, deriving a fresh, collision-free stem. Unlike
+  /// the in-place Save (which reuses backend.id, overwriting/overriding the
+  /// same template), this always creates a distinct team the user can keep
+  /// alongside the original.
+  const doSaveAs = async () => {
+    const newName = saveAsName.trim();
+    if (!newName) return;
+    setSaving(true);
+    setSaveErr(null);
+    try {
+      const data = buildSaveData(newName);
+      // Derive a unique stem: slug of the name, then -2/-3/… if it collides
+      // with any existing template id (built-in or custom) so we never clobber
+      // another team's file.
+      const base = slugifyTeamName(newName);
+      const existing = await invoke<TeamTemplateBackend[]>("list_team_templates").catch(() => [] as TeamTemplateBackend[]);
+      const taken = new Set(existing.map(t => t.id));
+      let stem = base;
+      for (let i = 2; taken.has(stem); i++) stem = `${base}-${i}`;
+      const saved = await invoke<TeamTemplateBackend>("save_team_template", { fileStem: stem, data });
+      invoke("vault_sync_teams").catch(() => {});
+      setDirty(false);
+      setSaveAsOpen(false);
       onSaved((saved.data?.name ?? saved.id) as string);
     } catch (e: any) {
       setSaveErr(String(e?.message ?? e));
@@ -449,12 +500,36 @@ export default function TeamWorkbench({
           </button>
         )}
         {dirty && <span style={{ fontSize: 11, color: "#ffcaa8", fontWeight: 700 }}>• unsaved</span>}
+        <button onClick={() => { setSaveAsName(`${display || backend.id} copy`); setSaveAsOpen(v => !v); setSaveErr(null); }} disabled={saving}
+          title="Fork this team into a new, separately-named template (keeps the original untouched)"
+          style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", color: "var(--fg)", borderRadius: 8, height: 30, padding: "0 12px", fontSize: 12, fontWeight: 700, cursor: saving ? "wait" : "pointer" }}>
+          Save as new…
+        </button>
         <button onClick={doSave} disabled={saving}
+          title={builtIn ? "Save your edits in place — writes an editable override the app loads instead of the bundled file" : "Save changes to this team"}
           style={{ background: "linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent))", color: "var(--accent-fg)", border: "none", borderRadius: 8, height: 30, padding: "0 18px", fontSize: 12.5, fontWeight: 800, cursor: saving ? "wait" : "pointer" }}>
-          {saving ? "Saving…" : builtIn ? "Save as copy" : "Save"}
+          {saving ? "Saving…" : builtIn ? "Save in place" : "Save"}
         </button>
       </div>
-      {saveErr && <div style={{ color: "#ff8c8c", fontSize: 12, padding: "0 4px" }}>Save failed: {saveErr}</div>}
+      {saveAsOpen && (
+        <div style={{ ...card, display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", flexWrap: "wrap" }}>
+          <span style={lbl}>New team name</span>
+          <input autoFocus value={saveAsName} onChange={e => setSaveAsName(e.target.value)}
+            onKeyDown={e => { if (e.key === "Enter" && saveAsName.trim()) doSaveAs(); if (e.key === "Escape") setSaveAsOpen(false); }}
+            placeholder="Name for the new team"
+            style={{ ...input, flex: 1, minWidth: 200, maxWidth: 360 }} />
+          <button onClick={doSaveAs} disabled={saving || !saveAsName.trim()}
+            style={{ background: "linear-gradient(180deg, color-mix(in srgb, var(--accent) 88%, #fff), var(--accent))", color: "var(--accent-fg)", border: "none", borderRadius: 8, height: 30, padding: "0 16px", fontSize: 12.5, fontWeight: 800,
+              cursor: saving || !saveAsName.trim() ? "not-allowed" : "pointer", opacity: !saveAsName.trim() ? 0.5 : 1 }}>
+            {saving ? "Saving…" : "Create new team"}
+          </button>
+          <button onClick={() => setSaveAsOpen(false)} disabled={saving}
+            style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", color: "var(--fg)", borderRadius: 8, height: 30, padding: "0 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
+            Cancel
+          </button>
+        </div>
+      )}
+      {saveErr && <div style={{ color: "#ff8c8c", fontSize: 12, padding: "0 4px" }}>Save failed: {saveErr} — check the team name and try again.</div>}
 
       {/* ---- notices drawer ---- */}
       {showNotices && noticeCount > 0 && (

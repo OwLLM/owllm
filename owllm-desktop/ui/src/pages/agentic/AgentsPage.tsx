@@ -291,6 +291,11 @@ type AgentSpec = {
   // distinct from `tool_allowlist` function calls. Kept in sync with the
   // dispatch.ts AgentSpec copy.
   extraSkills?: string[];
+  /// Per-agent card colour override (hex, e.g. "#7ad3ff"). Set via the agent
+  /// editor popup and persisted into the team template's per-agent `color`.
+  /// When present it wins over the role/group default in colorForAgent +
+  /// tileAccentFor, so it drives the tile, canvas node and graph node colour.
+  color?: string;
 };
 type Edge = { source: string; target: string };
 type TeamVisibility = "recommended" | "more" | "examples" | "legacy" | "custom";
@@ -529,6 +534,7 @@ function toTeam(t: TeamTemplateBackend): Team {
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
         extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
         role: a.role === "leader" ? "leader" : a.role === "agent" ? "agent" : undefined,
+        color: typeof a.color === "string" && a.color.trim() ? a.color : undefined,
       }))
     : []);
   const edges: Edge[] = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
@@ -1366,6 +1372,7 @@ function AgentInfoCard({
 // and critic get distinct dedicated colours since they sit OUTSIDE
 // the design/build split.
 function tileAccentFor(spec: AgentSpec): string {
+  if (spec.color && spec.color.trim()) return spec.color;
   const shortName = spec.name.includes(".") ? spec.name.split(".").pop()! : spec.name;
   const shortBase = spec.base.includes(".") ? spec.base.split(".").pop()! : spec.base;
   if (shortBase === "orchestrator" || shortName === "orchestrator") return "#ffd97a";
@@ -1374,6 +1381,31 @@ function tileAccentFor(spec: AgentSpec): string {
   if (group === "design") return "#7ae0a8";
   if (group === "critic") return "#ffb84c";
   return "#78b4ff";   // build
+}
+
+// Brand tint per model provider — mirrors ModelPicker's SECTION_META so a
+// model's logo-chip on the agent card reads in the provider's colour. Keyed by
+// the provider string providerFor() returns. The app ships no per-provider
+// brand IMAGE assets, so the chip shows the model's short name in the brand
+// colour (the explicit fallback the feature spec allows) rather than inventing
+// an asset pipeline.
+const PROVIDER_TINT: Record<string, string> = {
+  local: "#7fdfff", tuned: "#ffd166",
+  anthropic: "#ff9a3a", openai: "#10a37f", moonshot: "#d36bff", kimi: "#d36bff",
+  gemini: "#4285f4", deepseek: "#2563eb", xai: "#9aa0a6", groq: "#ff5d11",
+  perplexity: "#20b2aa", mistral: "#ff7a00", together: "#7fc8ff", auto: "#c08aff",
+};
+// Short, human label for a resolved model id — strips the sub/api/auto route
+// prefix the ModelPicker encodes plus any :effort suffix and owner/ path, so
+// the card chip stays compact.
+function shortModelLabel(modelId: string): string {
+  if (!modelId) return "";
+  let s = modelId;
+  for (const p of ["sub/", "api/", "auto/"]) if (s.startsWith(p)) { s = s.slice(p.length); break; }
+  const colon = s.indexOf(":");
+  if (colon > 0) s = s.slice(0, colon);
+  if (s.includes("/")) s = s.split("/").pop()!;
+  return s;
 }
 
 // Tile arrangement for a 4-column grid. Spatial layout the user spec'd:
@@ -1447,7 +1479,7 @@ function hexToRgbStr(hex: string): string {
 // clicking the canvas node), so the OrchestratorPane updates too.
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
-  selectedAgent, onSelectAgent, agentTiming,
+  selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, agentTiming,
 }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
@@ -1456,6 +1488,14 @@ function AgentChatGrid({
   agentIconOverrides: Record<string, string>;
   selectedAgent: string | null;
   onSelectAgent: (name: string) => void;
+  /// Open the per-agent editor popup (model / colour / prompt) for this agent.
+  /// Fired in addition to onSelectAgent when a tile is clicked.
+  onOpenEditor: (name: string) => void;
+  /// Resolve the model id shown on a tile's header chip (per-agent override >
+  /// team default > server model). Same resolver the dispatch path uses.
+  modelFor: (agentName: string) => string;
+  /// Map a resolved model id → provider string, for the header chip tint.
+  providerFor: (modelId: string) => string;
   /// Per-agent working-time map (name → cumulative timing), for the card clocks.
   agentTiming?: Map<string, AgentTiming>;
 }) {
@@ -1544,6 +1584,11 @@ function AgentChatGrid({
         const outerPx = isActive ? 14 + 12 * pulse : 0;
         const alphaA = 0.65 + 0.30 * pulse;
         const alphaB = 0.40 + 0.30 * pulse;
+        // Resolved model for the header logo-chip (right side). The synthetic
+        // Critic isn't a dispatch target, so leave its chip blank.
+        const resolvedModel = a.name === CRITIC_AGENT_NAME ? "" : modelFor(a.name);
+        const modelLabel = shortModelLabel(resolvedModel);
+        const modelTint = PROVIDER_TINT[providerFor(resolvedModel)] ?? "#9db4dc";
         return (
           <AgentChatTile
             key={a.name}
@@ -1554,6 +1599,9 @@ function AgentChatGrid({
             isSelected={selectedAgent === a.name}
             accent={accent}
             onClick={() => onSelectAgent(a.name)}
+            onOpenEditor={() => onOpenEditor(a.name)}
+            modelLabel={modelLabel}
+            modelTint={modelTint}
             ringPx={ringPx}
             outerPx={outerPx}
             alphaA={alphaA}
@@ -1571,7 +1619,8 @@ function AgentChatGrid({
 // for every other tile otherwise.
 function AgentChatTile({
   name, icon, messages,
-  isActive, isSelected, accent, onClick,
+  isActive, isSelected, accent, onClick, onOpenEditor,
+  modelLabel, modelTint,
   ringPx, outerPx, alphaA, alphaB,
   timing,
 }: {
@@ -1592,6 +1641,13 @@ function AgentChatTile({
   /// Click anywhere on the tile selects this agent in the left
   /// workspace — same effect as clicking the canvas node.
   onClick: () => void;
+  /// Click the tile also opens the per-agent editor popup (model / colour /
+  /// prompt). Suppressed while the user is mid text-selection in the tile.
+  onOpenEditor: () => void;
+  /// Short model name shown as a logo-chip on the right of the header.
+  modelLabel: string;
+  /// Provider brand colour for the model chip.
+  modelTint: string;
   ringPx: number;
   outerPx: number;
   alphaA: number;
@@ -1621,8 +1677,15 @@ function AgentChatTile({
   ), [messages]);
   return (
     <div
-      title={`Click to view ${displayLabel(name)}'s chat in the workspace pane`}
-      onClick={onClick}
+      title={`Click to open ${displayLabel(name)}'s editor (model · colour · prompt) and view its chat`}
+      onClick={() => {
+        onClick(); // preserve: select this agent for the workspace chat pane
+        // Don't pop the editor while the user is dragging to select transcript
+        // text inside the tile — same guard the auto-scroll effect uses.
+        const sel = window.getSelection?.();
+        if (sel && !sel.isCollapsed) return;
+        onOpenEditor();
+      }}
       style={{
         minWidth: 0, minHeight: 0,
         // Body fill: was rgba(rgb, 0.06); +10% to 0.16, then +20% to
@@ -1667,6 +1730,23 @@ function AgentChatTile({
           color: "var(--fg-strong)", fontSize: 12, fontWeight: 700,
           overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
         }}>{displayLabel(name)}</div>
+        {/* Model logo-chip — right side of the header. The app has no per-
+            provider brand image, so show the resolved model's short name in the
+            provider's brand colour (spec-allowed fallback). */}
+        {modelLabel && (
+          <span
+            title={`Model: ${modelLabel}`}
+            style={{
+              fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+              color: modelTint,
+              background: "rgba(0,0,0,0.30)",
+              border: `1px solid ${modelTint}66`,
+              borderRadius: 4, padding: "1px 6px",
+              maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              flexShrink: 0,
+            }}
+          >{modelLabel}</span>
+        )}
         {/* Per-agent working time — to the RIGHT of the name. Green while this
             agent is active, muted once it's done; shows cumulative work time. */}
         {elapsedMs > 0 && (
@@ -1732,6 +1812,223 @@ function AgentChatTile({
             );
           })
         )}
+      </div>
+    </div>
+  );
+}
+
+// AgentEditorModal — the per-agent editor popup opened by clicking a chat
+// tile. Edits Model, Card colour and the agent's extra (system) prompt, then
+// "Save all" persists the three into the team TEMPLATE via save_team_template
+// (the same path TeamWorkbench uses) so the change sticks across reloads.
+// Mirrors DirectivesPanel's overlay/card chrome (z-index, backdrop click-to-
+// close, ✕ button) and adds Esc-to-close.
+function AgentEditorModal({
+  agentName, displayName, icon,
+  initialModel, initialColor, initialPrompt,
+  models, accountsStatus, serverState, effectiveTeamModel,
+  templateId, onPickModel, onPreviewColor, onClose, onSaved,
+}: {
+  agentName: string;
+  displayName: string;
+  icon: string;
+  initialModel: string;
+  initialColor: string;
+  initialPrompt: string;
+  models: ModelInfo[];
+  accountsStatus: AccountsStatusLite | null;
+  serverState: ServerStatus;
+  effectiveTeamModel: string;
+  /// Template id (= save_team_template fileStem) backing the active team, or
+  /// null when the roster is a custom project with no saved template.
+  templateId: string | null;
+  /// Live model pick — updates the running session immediately (same handler
+  /// the AgentSettings panel uses: per-agent override).
+  onPickModel: (modelId: string) => void;
+  /// Live colour preview — repaints the tile / canvas / graph before Save.
+  /// null reverts to the role/group default.
+  onPreviewColor: (hex: string | null) => void;
+  onClose: () => void;
+  /// Called after a successful template save (reload team library + close).
+  onSaved: () => Promise<void> | void;
+}) {
+  const [model, setModel] = useState(initialModel);
+  const [color, setColor] = useState(initialColor);
+  const [prompt, setPrompt] = useState(initialPrompt);
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Esc closes the popup (backdrop click + ✕ also close).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const saveAll = async () => {
+    if (!templateId) {
+      setErr("No saved team template backs this roster. Open the Team Workbench and save it as a template first, then edit agents here.");
+      return;
+    }
+    setSaving(true); setErr(null);
+    try {
+      // Re-fetch the editable backend record so we save against the latest
+      // on-disk JSON and preserve every unknown per-agent field.
+      const all = await invoke<TeamTemplateBackend[]>("list_team_templates").catch(() => [] as TeamTemplateBackend[]);
+      const rec = all.find(t => t.id === templateId);
+      if (!rec) throw new Error(`Team template '${templateId}' not found — reopen the team and try again.`);
+      const data = JSON.parse(JSON.stringify(rec.data ?? {}));
+      const arr: any[] = Array.isArray(data.agents) ? data.agents : [];
+      const idx = arr.findIndex((a: any) => a?.name === agentName);
+      if (idx < 0) throw new Error(`Agent '${agentName}' is not in template '${templateId}'.`);
+      const out: any = { ...arr[idx] };
+      if (model.trim()) out.default_model_id = model.trim(); else delete out.default_model_id;
+      if (color.trim()) out.color = color.trim(); else delete out.color;
+      if (prompt.trim()) out.extra_prompt = prompt; else delete out.extra_prompt;
+      arr[idx] = out;
+      data.agents = arr;
+      await invoke<TeamTemplateBackend>("save_team_template", { fileStem: templateId, data });
+      invoke("vault_sync_teams").catch(() => {});
+      await onSaved();
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const lbl: React.CSSProperties = {
+    fontSize: 10, color: "var(--fg-muted)", letterSpacing: 0.6,
+    textTransform: "uppercase", fontWeight: 700,
+  };
+  const swatch = (color && color.trim()) ? color : "#9ad9ff";
+
+  return (
+    <div
+      data-ui="AgentEditorOverlay"
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(8,12,20,0.55)",
+        display: "flex", alignItems: "center", justifyContent: "center",
+        zIndex: 1000,
+      }}
+    >
+      <div
+        data-ui="AgentEditorModal"
+        onClick={e => e.stopPropagation()}
+        style={{
+          width: 620, maxWidth: "92vw", maxHeight: "86vh", overflow: "auto",
+          background: "var(--bg-elevated)", border: "1px solid var(--border)",
+          borderRadius: 12, padding: "16px 18px",
+          display: "flex", flexDirection: "column", gap: 14,
+          boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+        }}
+      >
+        {/* Header */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <span style={{ width: 10, height: 10, borderRadius: 3, background: swatch, flexShrink: 0 }} />
+          <img src={owlSrc(icon)} style={{ width: 26, height: 26, objectFit: "contain" }} />
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, color: "var(--fg)" }}>{displayName}</div>
+            <div style={{ fontSize: 11, color: "var(--fg-subtle)", marginTop: 2 }}>
+              Edit this agent's model, card colour and prompt. Save writes them into the team template.
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            title="Close (Esc)"
+            style={{ width: 28, height: 28, padding: 0, borderRadius: 6, border: "1px solid var(--border-strong)", background: "#1a2030", color: "var(--fg)", cursor: "pointer", fontSize: 14, flexShrink: 0 }}
+          >✕</button>
+        </div>
+
+        {/* Model */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={lbl}>Model</span>
+          <ModelPicker
+            value={model}
+            onChange={(id) => { setModel(id); onPickModel(id); }}
+            models={models}
+            status={accountsStatus}
+            fallbackLabel={
+              effectiveTeamModel
+                ? `(use team model · ${effectiveTeamModel})`
+                : serverState.model_id
+                  ? `(use team / server model · ${serverState.model_id})`
+                  : "(use team / server model — none running)"
+            }
+          />
+        </div>
+
+        {/* Card colour */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={lbl}>Card colour</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="color"
+              value={swatch}
+              onChange={e => { setColor(e.target.value); onPreviewColor(e.target.value); }}
+              title="Pick the card / node colour"
+              style={{ width: 40, height: 28, padding: 0, border: "1px solid var(--border-strong)", borderRadius: 6, background: "transparent", cursor: "pointer" }}
+            />
+            <input
+              type="text"
+              value={color}
+              onChange={e => { const v = e.target.value; setColor(v); onPreviewColor(v.trim() ? v : null); }}
+              placeholder="#7ad3ff — blank = role default"
+              style={{ flex: 1, padding: "5px 8px", borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-input)", color: "var(--fg)", fontSize: 13, fontFamily: "monospace" }}
+            />
+            <button
+              onClick={() => { setColor(""); onPreviewColor(null); }}
+              title="Reset to the role / group default colour"
+              style={{ padding: "5px 12px", borderRadius: 6, border: "1px solid var(--border-strong)", background: "#1a2030", color: "var(--fg)", cursor: "pointer", fontSize: 12 }}
+            >Reset</button>
+          </div>
+        </div>
+
+        {/* Prompt */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={lbl}>Prompt (augments this agent's role)</span>
+          <textarea
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
+            placeholder="Extra instructions layered on top of this agent's base role prompt at dispatch…"
+            rows={8}
+            style={{
+              width: "100%", boxSizing: "border-box", resize: "vertical",
+              padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border-strong)",
+              background: "var(--bg-input)", color: "var(--fg)", fontSize: 13,
+              fontFamily: "Segoe UI, sans-serif", lineHeight: 1.5,
+            }}
+          />
+        </div>
+
+        {err && (
+          <div style={{ fontSize: 12, color: "#ff8c8c", background: "rgba(255,80,80,0.08)", border: "1px solid rgba(255,120,120,0.4)", borderRadius: 6, padding: "6px 10px" }}>
+            {err}
+          </div>
+        )}
+
+        {/* Footer */}
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+          <button
+            onClick={onClose}
+            disabled={saving}
+            style={{ padding: "6px 16px", borderRadius: 6, border: "1px solid var(--border-strong)", background: "#1a2030", color: "var(--fg)", cursor: saving ? "default" : "pointer", fontSize: 13 }}
+          >Cancel</button>
+          <button
+            onClick={saveAll}
+            disabled={saving || !templateId}
+            title={templateId ? "Persist model + colour + prompt into the team template" : "No saved team template backs this roster"}
+            style={{
+              padding: "6px 18px", borderRadius: 6,
+              border: "1px solid var(--accent)",
+              background: (saving || !templateId) ? "rgba(var(--accent-rgb),0.25)" : "var(--accent)",
+              color: (saving || !templateId) ? "#7d8595" : "var(--bg-elevated)",
+              cursor: (saving || !templateId) ? "default" : "pointer",
+              fontSize: 13, fontWeight: 700,
+            }}
+          >{saving ? "Saving…" : "Save all"}</button>
+        </div>
       </div>
     </div>
   );
@@ -5459,6 +5756,7 @@ const ROLE_COLORS: Record<string, string> = {
   assistant:    "#dadcdf",
 };
 function colorForAgent(spec: AgentSpec): string {
+  if (spec.color && spec.color.trim()) return spec.color;
   return ROLE_COLORS[spec.base] ?? ROLE_COLORS[spec.name] ?? "#9ad9ff";
 }
 
@@ -7546,6 +7844,13 @@ export default function AgentsPage() {
   // the IconPickerDialog targeting that agent; null = closed.
   const [agentIconOverrides, setAgentIconOverrides] = useState<Record<string, string>>({});
   const [iconPickerAgent, setIconPickerAgent] = useState<string | null>(null);
+  /// Which agent's editor popup (model / colour / prompt) is open, by name.
+  const [editingAgent, setEditingAgent] = useState<string | null>(null);
+  /// Live card-colour preview per agent (name → hex), applied to renderTeam so
+  /// the tile / canvas / graph repaint before the user hits Save. Ephemeral —
+  /// the persisted colour rides on the team template (spec.color via toTeam);
+  /// an entry is cleared once it's been saved into the template.
+  const [perAgentColor, setPerAgentColor] = useState<Map<string, string>>(new Map());
   // Reload directives + director_mode whenever the active project
   // changes. Both fetches run in parallel; errors fall back to empty /
   // false so a fresh DB before the table exists doesn't break the UI.
@@ -8274,8 +8579,18 @@ export default function AgentsPage() {
   // without having to know about Director Mode plumbing.
   const renderTeam: Team | null = useMemo(() => {
     if (!activeTeam) return null;
-    return withSyntheticCritic({ ...activeTeam, edges: currentEdges });
-  }, [activeTeam, currentEdges]);
+    // Apply any live colour previews (set in the agent editor popup) onto the
+    // agent specs so the tile / canvas / graph repaint immediately — spec.color
+    // wins in colorForAgent + tileAccentFor.
+    const base = perAgentColor.size === 0
+      ? activeTeam
+      : {
+          ...activeTeam,
+          agents: activeTeam.agents.map(a =>
+            perAgentColor.has(a.name) ? { ...a, color: perAgentColor.get(a.name) } : a),
+        };
+    return withSyntheticCritic({ ...base, edges: currentEdges });
+  }, [activeTeam, currentEdges, perAgentColor]);
 
   const deleteSelectedEdge = () => {
     if (selectedEdgeIdx == null) return;
@@ -10922,6 +11237,48 @@ export default function AgentsPage() {
           onSaved={async () => { setWorkbenchOpen(false); await reloadTeamLibrary(); }}
         />
       )}
+      {editingAgent && (() => {
+        // The tile may be the synthetic Critic, which isn't in activeTeam.agents
+        // — look up against renderTeam (it injects the critic) so any visible
+        // tile resolves. Persisting an agent that isn't in the template surfaces
+        // a clear error from the modal's Save rather than failing silently.
+        const spec = renderTeam?.agents.find(a => a.name === editingAgent) ?? null;
+        if (!spec) return null;
+        const name = editingAgent;
+        const closeEditor = () => {
+          // Drop any unsaved colour preview for this agent on close (Cancel
+          // reverts to the saved / default colour).
+          setPerAgentColor(prev => {
+            if (!prev.has(name)) return prev;
+            const next = new Map(prev); next.delete(name); return next;
+          });
+          setEditingAgent(null);
+        };
+        return (
+          <AgentEditorModal
+            agentName={name}
+            displayName={displayLabel(name)}
+            icon={agentIconRef(spec, roleByName, agentIconOverrides)}
+            initialModel={modelFor(name)}
+            initialColor={spec.color ?? ""}
+            initialPrompt={spec.extraPrompt ?? ""}
+            models={models}
+            accountsStatus={accountsStatus}
+            serverState={serverState}
+            effectiveTeamModel={effectiveTeamModel}
+            templateId={activeTeamTemplate?.id ?? null}
+            onPickModel={(id) => onPickAgentModel(name, id)}
+            onPreviewColor={(hex) => setPerAgentColor(prev => {
+              const next = new Map(prev);
+              if (hex && hex.trim()) next.set(name, hex);
+              else next.delete(name);
+              return next;
+            })}
+            onClose={closeEditor}
+            onSaved={async () => { await reloadTeamLibrary(); closeEditor(); }}
+          />
+        );
+      })()}
       <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} />
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{
@@ -10999,6 +11356,9 @@ export default function AgentsPage() {
                 agentIconOverrides={agentIconOverrides}
                 selectedAgent={selectedNode}
                 onSelectAgent={(name) => setSelectedNode(name)}
+                onOpenEditor={(name) => setEditingAgent(name)}
+                modelFor={modelFor}
+                providerFor={providerFor}
                 agentTiming={agentTiming}
               />
             )}

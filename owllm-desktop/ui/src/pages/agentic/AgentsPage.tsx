@@ -8316,7 +8316,12 @@ export default function AgentsPage() {
   // Active team: pickedTeamId wins; else project roster; else first
   // built-in template so the canvas is never empty.
   const activeTeam: Team | null = useMemo(() => {
-    if (pickedTeamId) return teams.find(t => t.id === pickedTeamId) ?? null;
+    if (pickedTeamId) {
+      const picked = teams.find(t => t.id === pickedTeamId);
+      if (picked) return picked;
+      // Stale/unknown override id (e.g. a deleted team) — don't blank the canvas;
+      // fall through to the project's own roster below.
+    }
     if (selectedProject && selectedProject.team.length > 0) {
       const proj = projectToTeam(selectedProject);
       // ONE source of truth for the team WIRING. A project stores its own edges
@@ -8375,6 +8380,37 @@ export default function AgentsPage() {
     setPickedTeamId(null);
     await reloadProjects();
     return `Reset to “${tmpl.display || tmpl.name}” — ${tmpl.agents.length} agents, ${tmpl.edges.length} links.`;
+  };
+
+  // Change the project's TEAM and PERSIST it. Picking a team in settings used to
+  // only set the transient pickedTeamId override, so after an app restart the
+  // project fell back to its frozen roster (bug: "I switched to OWLLM Team, but
+  // Product Studio came back on restart"). This rewrites the project's roster +
+  // edges from the chosen template — the same persist resetTeamToTemplate does —
+  // so the existing roster→template resolution restores it next launch. Picking
+  // "(use project roster)" (null) just clears the live override.
+  const changeProjectTeam = async (teamId: string | null) => {
+    setPickedTeamId(teamId);                 // instant canvas feedback
+    if (!teamId || !selectedProject) return; // null = "(use project roster)" — leave the DB roster as-is
+    const t = teams.find(x => x.id === teamId);
+    if (!t || t.agents.length === 0) return;
+    try {
+      await invoke("update_project", {
+        input: {
+          id: selectedProject.id,
+          team: t.agents.map(a => a.name),
+          // Fresh team → no carried-over per-agent picks (the new agents have
+          // different names); they start at defaults.
+          graph_json: buildGraphJson({
+            edges: t.edges, agents: t.agents,
+            agentModels: new Map(), agentVoices: new Map(),
+            agentSkills: new Map(), agentToolExtras: new Map(),
+          }),
+        },
+      });
+      setEditedEdges(null);
+      await reloadProjects();
+    } catch { /* keep the live override even if the DB write fails */ }
   };
 
   // Reset edge edits + node positions whenever the active team flips.
@@ -11116,7 +11152,7 @@ export default function AgentsPage() {
         onClose={() => setNewProjOpen(false)}
         teams={teams}
         pickedTeamId={pickedTeamId}
-        onPickTeam={setPickedTeamId}
+        onPickTeam={changeProjectTeam}
         resolvedTeamLabel={activeTeamTemplate?.display ?? null}
         onResetTeam={resetTeamToTemplate}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}

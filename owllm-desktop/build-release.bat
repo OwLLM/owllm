@@ -46,6 +46,18 @@ echo [owllm-desktop] Building web UI...
 call npm run build
 if errorlevel 1 exit /b 1
 
+rem Force a FRESH UI embed. Tauri bakes the built frontend INTO the binary at
+rem COMPILE time (generate_context!). A TS-only change leaves all Rust untouched,
+rem so cargo reuses the cached crate object code -- with the STALE embedded UI --
+rem and ships an old interface even though npm run build just produced new assets.
+rem (This bit us: a verify-command field shipped in source but never appeared in
+rem the installed app.) Cleaning ONLY our crate forces main.rs to recompile and
+rem re-embed; all dependencies stay cached, so it costs a relink + our crate, not
+rem a full rebuild.
+echo [owllm-desktop] Forcing fresh UI embed (cargo clean -p owllm-desktop)...
+call cargo clean -p owllm-desktop --release --target x86_64-pc-windows-gnu --manifest-path src-tauri\Cargo.toml
+if errorlevel 1 echo [owllm-desktop] warn: cargo clean -p failed (continuing; UI may be stale)
+
 echo [owllm-desktop] Building Tauri release with GNU toolchain...
 call npm run tauri -- build --target x86_64-pc-windows-gnu
 if errorlevel 1 exit /b 1

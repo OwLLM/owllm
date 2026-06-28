@@ -117,6 +117,12 @@ export async function retrieveTeamMemory(task: string, limit = 8): Promise<strin
 /// rows). Best-effort, never throws.
 export async function logTeamWork(agent: string, instruction: string, result: string): Promise<void> {
   if (!result || !result.trim()) return;
+  // Don't record FAILED turns into the shared work-state. The loop research is
+  // clear that an agent re-conditions on its own errors when they accumulate in
+  // context (it repeats the failed approach), so a `(error: …)` reply must not be
+  // re-injected into the next agent's instruction. Errors surface in the live log,
+  // not the durable memory.
+  if (/^\(error:/i.test(result.trim())) return;
   const scope = _teamMemoryScope || "";
   try {
     await invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) });

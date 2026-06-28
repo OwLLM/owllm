@@ -10368,20 +10368,51 @@ export default function AgentsPage() {
         if (rt) {
           const gk = classifyGoal(text);
           const agents = [...rt.agents.entries()].map(([name, v]) => ({ name, domain: v.domain, runs: v.runs }));
-          const delivered = runDelivered(text, ranWriteToolRef.current, agents.map(a => a.domain));
-          if (!delivered) {
+          const wrote = ranWriteToolRef.current;
+          const delivered = runDelivered(text, wrote, agents.map(a => a.domain));
+          // GROUNDED VERIFY GATE (the load-bearing finding from the loop research):
+          // when files changed on a code/ops goal, the run is "done" only if the
+          // project's OWN check passes — not by the agents' say-so (self-reported
+          // "done" is wrong most of the time). Opt-in via .owllm/verify.json
+          // {"command":"npm run build"}; reuses the sandbox-aware shell; only runs
+          // when something was written, so it never slows a no-op run.
+          let verifyMsg = "";
+          let verifyPassed: boolean | null = null;
+          if (wrote && goalRequiresWrite(text)) {
+            try {
+              const cfg = JSON.parse(await invoke<string>("tool_read_file", { path: ".owllm/verify.json", cwd: projectCwd }));
+              const cmd = typeof cfg?.command === "string" ? cfg.command.trim() : "";
+              if (cmd) {
+                appendLog("system", { role: "system", color: "#7ff0c5", text: `🔍 verify — running \`${cmd}\`` });
+                const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>("tool_shell_exec", { command: cmd, cwd: projectCwd });
+                verifyPassed = r.exitCode === 0;
+                verifyMsg = verifyPassed
+                  ? `✓ verify passed — \`${cmd}\``
+                  : `✗ verify FAILED — \`${cmd}\` (exit ${r.exitCode})\n${(r.stderr || r.stdout || "").trim().slice(-700)}`;
+              }
+            } catch { /* no .owllm/verify.json (or it failed to run) → ungrounded; fall back to the write proxy */ }
+          }
+          const done = verifyPassed !== null ? verifyPassed : delivered;
+          if (!done) {
             const doer = agents.find(a => a.domain === "coder" || a.domain === "ops");
-            const why = goalRequiresWrite(text) ? `this was a ${gk} task` : `@${doer?.name ?? "a specialist"} (a coder/operator) was dispatched`;
-            const m = `⚠ NOT done: ${why} but no file was edited and no command was run — the team only analyzed/planned. Nothing was changed or shipped.`;
+            const why = verifyPassed === false
+              ? verifyMsg
+              : goalRequiresWrite(text)
+                ? `this was a ${gk} task but no file was edited and no command was run — the team only analyzed/planned.`
+                : `@${doer?.name ?? "a specialist"} (a coder/operator) was dispatched but nothing was written.`;
+            const m = `⚠ NOT done: ${why}`;
             appendLog("system", { role: "system", color: "#ff8c8c", text: m });
             setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now() }]);
+          } else if (verifyMsg) {
+            appendLog("system", { role: "system", color: "#7ff0c5", text: verifyMsg });
+            setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: verifyMsg, ts: Date.now() }]);
           }
           const trace: RunTrace = {
             team: activeTeam?.name ?? "team", goal: text, goalKind: gk, agents,
             hops: agents.reduce((a, b) => a + b.runs, 0),
-            routeCorrections: rt.routeCorrections, wroteFiles: ranWriteToolRef.current,
+            routeCorrections: rt.routeCorrections, wroteFiles: wrote,
             criticVerdict: rt.criticVerdict, capHit: rt.capHit, oscillationStops: rt.oscillationStops,
-            done: delivered,
+            done,
             durationMs: Date.now() - rt.t0, finalAnswer: (finalReply || "").slice(0, 2000), ts: Date.now(),
           };
           const fx = TEAM_FIXTURES.find(f => f.team === trace.team && f.expectKind === gk);

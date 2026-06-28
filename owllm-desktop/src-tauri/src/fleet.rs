@@ -444,7 +444,64 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
     );
     let _ = git(&cwd, &["branch", "-D", &args.branch]);
     let _ = std::fs::remove_dir_all(&args.worktree_path);
+    // Remove the now-empty parent RUN dir (…/<repo>/<run_id>/) so finished runs
+    // don't leave a litter of empty folders (remove_dir only succeeds if empty,
+    // so a kept sibling worktree is never clobbered).
+    if let Some(run_dir) = PathBuf::from(&args.worktree_path).parent() {
+        let _ = std::fs::remove_dir(run_dir);
+    }
     Ok(())
+}
+
+/// Sweep leftover fleet worktrees for this repo. Per-run cleanup
+/// (fleet_worktree_remove) handles the normal path, but a run that CRASHES
+/// before its cleanup leaves a full worktree behind forever, and nothing ever
+/// reclaimed it — exactly the pile of folders under ~/…/owllm/fleet the user
+/// found. Called at run START (before new worktrees are created), so every
+/// `owllm-fleet/*` worktree present is from a PAST run and safe to drop. Returns
+/// how many were reclaimed. Best-effort; never fails a run.
+#[tauri::command]
+pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
+    let cwd = PathBuf::from(&project_cwd);
+    if !is_git_repo(&cwd) {
+        return Ok(0);
+    }
+    let _ = git(&cwd, &["worktree", "prune"]); // drop registry entries for already-deleted dirs
+    let mut removed = 0u32;
+    // Remove every registered worktree on an owllm-fleet/* branch.
+    if let (true, out, _) = git(&cwd, &["worktree", "list", "--porcelain"])? {
+        let mut path: Option<String> = None;
+        for line in out.lines() {
+            if let Some(p) = line.strip_prefix("worktree ") {
+                path = Some(p.trim().to_string());
+            } else if line.starts_with("branch ") && line.contains("owllm-fleet/") {
+                if let Some(p) = path.take() {
+                    let _ = git(&cwd, &["worktree", "remove", "--force", &p]);
+                    removed += 1;
+                }
+            }
+        }
+    }
+    let _ = git(&cwd, &["worktree", "prune"]);
+    // Delete the auto-generated fleet branches.
+    if let (true, out, _) = git(&cwd, &["branch", "--list", "owllm-fleet/*"])? {
+        for b in out
+            .lines()
+            .map(|l| l.trim().trim_start_matches('*').trim())
+            .filter(|s| !s.is_empty())
+        {
+            let _ = git(&cwd, &["branch", "-D", b]);
+        }
+    }
+    // Nuke this repo's fleet scratch dir outright — at run start nothing inside is
+    // live, so any remaining (empty run dirs, contents of a crashed worktree git
+    // couldn't track) is pure litter.
+    if let Some(root) = fleet_root() {
+        if let Some(name) = cwd.file_name().and_then(|n| n.to_str()) {
+            let _ = std::fs::remove_dir_all(root.join(safe_seg(name)));
+        }
+    }
+    Ok(removed)
 }
 
 // ------------------------------------------------------------------

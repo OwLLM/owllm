@@ -9742,10 +9742,24 @@ export default function AgentsPage() {
         appendThought(orch.name, { role: "fleet", color: "#7ff0c5",
           text: `🗂 WSL-isolated project — agents run sealed inside the distro (shared worktree).` });
       }
+      // Per-agent worktrees exist ONLY to stop CONCURRENT agents from colliding on
+      // the same files. A sequential run (the default) has no concurrency, so it
+      // needs none — running in the project dir directly avoids cutting a full
+      // working-tree copy per agent on every run (the leftover-folders the user
+      // hit). Only a parallel run with >1 agent actually needs isolation.
+      const needWorktrees = !wslShared && parallelMode && dispatches.length > 1;
+      // Reclaim any worktrees a PAST/crashed run left behind before making new
+      // ones — per-run cleanup misses a run that crashed before its finally{}.
+      if (!wslShared) {
+        try {
+          const n = await invoke<number>("fleet_cleanup_orphans", { projectCwd });
+          if (n > 0) appendThought(orch.name, { role: "fleet", color: "#7ff0c5", text: `🧹 reclaimed ${n} leftover worktree(s) from a previous run.` });
+        } catch { /* best-effort */ }
+      }
       // Surface a "🗂 isolated" or "🗂 shared" line in the orchestrator's
       // Thought tab per dispatch so the user can see what happened.
       for (const d of dispatches) {
-        if (wslShared) { worktreeBySpec.set(d.agentName, null); continue; }
+        if (!needWorktrees) { worktreeBySpec.set(d.agentName, null); continue; }
         const spec = activeTeam.agents.find(a => a.name === d.agentName);
         if (!spec) continue;
         let res: FleetCreateResult;

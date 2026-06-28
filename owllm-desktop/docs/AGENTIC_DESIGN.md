@@ -1,173 +1,134 @@
-# OwLLM — Agentic Design & the Evidence Behind It
+# OwLLM — Agentic Architecture (4 Adaptive Shapes)
 
-Why OwLLM's agents are built the way they are. Every choice here is anchored to
-published research and real benchmarks, not vibes. Diagrams are
-[Mermaid](https://mermaid.js.org/) — they render on GitHub and GitHub Pages.
+**One engine → 4 adaptive shapes → many presets → smallest safe activation per task.**
+Not 18 bespoke teams; not one generic swarm forced onto every task. Every choice
+here is anchored to published research (see §9). Diagrams are
+[Mermaid](https://mermaid.js.org/) (render on GitHub / Pages).
 
-> **The one principle:** *match the architecture to the task.* There is no single
-> "best" agent shape — the **structure of the task** decides it. The whole system
-> is three primitives, **composed differently per task type**.
+## 1. The principle
+> **Isolate implementation. Share contracts. Run scoped, grounded agent loops. Verify integration.**
+>
+> *Loops make each agent reliable. Contracts make a team coherent. Tests — not debate — decide truth. The Lead decides how much team to wake up.*
 
----
-
-## 1. The three primitives
-
-Everything OwLLM does is a composition of just three things:
-
+## 2. Three primitives
 ```mermaid
 flowchart LR
-    P["🧭 PLAN<br/>(Lead)<br/>hold context · decompose · route"]:::plan
-    A["🔧 ACT<br/>(Executor)<br/>solo, or parallel readers"]:::act
-    G["✅ GATE<br/>(Verify)<br/>tests · approval · fact-check"]:::gate
-    P --> A --> G
-    G -- "not satisfied → iterate" --> A
-    classDef plan fill:#1e2b4d,stroke:#6b8cff,color:#cfe0ff
-    classDef act fill:#13351f,stroke:#54d98c,color:#c9f5da
-    classDef gate fill:#3a2a12,stroke:#ffb74d,color:#ffe6c2
+  P["PLAN (Lead)<br/>hold context · decompose · route"] --> A["ACT (Executor)<br/>solo, or parallel readers"]
+  A --> G["GATE (Verify)<br/>source of truth"]
+  G -- "not satisfied → iterate (bounded)" --> A
 ```
+- **PLAN / Lead** — the single context owner; brainstorm-or-route; sizes the ceremony to the task.
+- **ACT / Executor** — solo for coupled work, parallel for independent reads.
+- **GATE** — the *grounded* check that decides "done." The executor never grades itself (self-reported "done" is wrong up to ~76% on coding tasks).
 
-- **PLAN / Lead** — the single entity that holds the user conversation. It either
-  *thinks with you* (brainstorm + plan a new idea) or *routes* a concrete job. One
-  context owner, always.
-- **ACT / Executor** — does the work. **Solo** for coupled work (coding), **parallel**
-  for independent read-heavy work (research).
-- **GATE / Verify** — the **grounded** check that decides "done." Critically, this is
-  *not the model's own say-so* — it's an external signal whose form depends on the
-  task (see §3). Self-reported "done" is wrong **up to ~76%** of the time on coding
-  tasks ([False Success, 2026](https://arxiv.org/abs/2606.09863)).
+**Every shape has a source-of-truth gate:**
 
----
+| Shape | Gate |
+|---|---|
+| Build | tests / build pass |
+| Research | citations / evidence supported |
+| Assistant | user approval |
+| Workflow | validation node |
 
-## 2. Match the architecture to the task
+*(Internally it's one Gate abstraction with these four implementations.)*
 
-The same primitives, composed for the task in front of you:
+## 3. Memory tiers
+| Tier | Holds | Scope |
+|---|---|---|
+| 1. Private role memory | lane knowledge (UI patterns / API changes…) | per agent |
+| 2. Shared contract memory | cross-boundary truths (endpoints, schemas, types, env, auth, error codes, acceptance criteria) | shared |
+| 3. Live blackboard | current structured state (phase, worktrees, statuses, blockers, required tests) | shared, live |
+| 4. Decision log | locked decisions + supersedes (stops reviving wrong ideas) | shared |
+| 5. Verified artifact store | real diffs, test/build logs, reports | shared, append-only |
 
-| Task type | Best shape | Primitive composition | Why (evidence) |
-|---|---|---|---|
-| **Coding / shipping** | **Solo agent + tight verify-loop** | `Act(solo) → Gate(tests/build)` | Multi-agent *degrades* SWE-bench (−2…−15%) at ~4× tokens; a ~100-line solo loop scores **>74%** ([mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent)); a fixed pipeline beats agent frameworks ([Agentless](https://arxiv.org/abs/2407.01489)); "no architecture systematically wins, the model dominates" ([survey](https://arxiv.org/abs/2506.17208)). |
-| **Research / discovery** | **Lead + parallel read sub-agents → synthesize** | `Plan → Act(parallel reads) → Gate(synthesis + citations)` | Multi-agent beat solo by **+90%** on breadth-first research ([Anthropic](https://www.anthropic.com/engineering/multi-agent-research-system)); each sub-agent compresses an independent slice in its own context. **Parallelize reads.** |
-| **Personal assistant** | **Solo conversational + tools + approval gate** | `Act(tools) → Gate(human approval for side-effects)` | Tool-use loop ([ReAct](https://arxiv.org/abs/2210.03629)); gate by **risk × reversibility**, not by the agent's uncertainty (OpenAI/Anthropic agent guides). Can fan out *reads* (check 3 calendars) but **side-effects pass a gate**. |
-| **Repeatable workflow (n8n-style)** | **Deterministic graph; LLM only at decision/validation nodes** | `fixed Act steps + CriticalThinker(decide) + Gatekeeper(validate)` | For a **known, repeatable** path, a workflow (predefined steps) is more reliable & cheaper than a free agent ([Anthropic: Building Effective Agents](https://www.anthropic.com/research/building-effective-agents)). Add intelligence only at branch/validation points. |
-| **Open-ended / unknown** | **Agent — the Lead routes** | LLM-directed `Plan → Act → Gate` | Use an agent only when the path *isn't* knowable up front; otherwise prefer a workflow. |
+*Rule: share the **contract**, isolate the **implementation**, and never store an agent's claim of success — store the captured command output.*
 
-**The unification (your insight, generalized):** a **workflow is just a fixed
-composition of the primitives** — the control flow is decided in advance. An
-**agent is an LLM-decided composition** — the control flow is chosen at runtime.
-Same parts; "workflow vs agent" is only *who picks the path.*
+## 4. Shape vs roles — two different decisions
+- **Shape is *selected*, not guessed** — it comes from the preset the user opens (code repo → Build; "finance assistant" → Assistant). Deterministic, low-risk.
+- **Roles are *activated*** by the Lead within a shape — a forgiving guess, because the **Gate auto-escalates** when you under-activate (verify fails → wake the missing role).
 
-And the **Gate is one primitive with different concrete checks:** tests/build for
-code · human approval for world-actions · citation/fact-check for research · a
-validation node for a workflow. Whatever the form, it's an **external** signal —
-never the executor grading itself ([self-correction degrades without an oracle](https://arxiv.org/abs/2310.01798)).
+## 5. The four shapes
 
----
-
-## 3. The Lead — one front door that brainstorms *or* routes
-
+### A. Build — coding, apps, bugs, releases
 ```mermaid
 flowchart TD
-    U([👤 User]) --> L["🧭 Lead<br/>holds the conversation · investigates context"]:::plan
-    L -->|"new / fuzzy idea"| B["💡 Brainstorm + Plan<br/>parallel research sub-agents → BRIEF"]:::act
-    L -->|"concrete code job"| C["⌨️ Solo Coder<br/>tight verify-loop"]:::act
-    L -->|"find things out"| R["🔎 Research fan-out<br/>parallel readers → synthesize"]:::act
-    L -->|"act on the world"| AS["🗓️ Assistant<br/>tools + approval gate"]:::act
-    L -->|"known repeatable"| W["⚙️ Workflow<br/>deterministic steps"]:::act
-    B --> C
-    C --> V{"✅ Verify gate<br/>tests / build pass?"}:::gate
-    V -->|fail| C
-    V -->|pass| D([✓ Done]):::done
-    AS --> HA{"🔐 Approval gate"}:::gate
-    HA -->|approved| D
-    classDef plan fill:#1e2b4d,stroke:#6b8cff,color:#cfe0ff
-    classDef act fill:#13351f,stroke:#54d98c,color:#c9f5da
-    classDef gate fill:#3a2a12,stroke:#ffb74d,color:#ffe6c2
-    classDef done fill:#11302a,stroke:#36c,color:#bfe
+  U([User]) --> L["Lead"]
+  L -->|tiny, single-lane| F1["Coder (one lane)"]
+  L -->|cross-lane feature| CT["Critical Thinker reviews plan"] --> K["lock contract"]
+  K --> F["Frontend Coder loop"]
+  K --> B["Backend Coder loop"]
+  F --> IW["Integration worktree"]
+  B --> IW
+  F1 --> IW
+  IW --> VG{"Verification Gate<br/>(always on)"}
+  VG -->|fail| L
+  VG -->|pass| CR["Critic (grounded) + Red Team (adversarial)"] --> PUB["Publisher (release gate)"] --> D([Done])
 ```
+- Always present: **Lead + Verification Gate**. Activated when needed: Frontend, Backend, Tester, Critic, Red Team, Publisher; Critical Thinker at the plan stage.
+- Scales **down** (tiny edit = Lead → one Coder → Gate) and **up** (feature = contract → parallel lanes → integration → review → publish).
+- Presets: `dev_squad`, `code_artisan`, `bug_hunter`, `code_reviewer`, `product_studio`.
 
-- The Lead **decides the mode in context** (smarter than a keyword classifier), and
-  you can always override (*"just do it"* / *"let's plan first"*).
-- It **routes**; it does **not** do the work itself — the executor explores the code
-  (a read-only planner handing blind tickets to a blind executor is *the* documented
-  failure mode — [Cognition](https://cognition.ai/blog/dont-build-multi-agents)).
-- **Verification is independent of the Lead.** The Lead owns the plan, so it can't be
-  the judge of it — the **Gate** (tests) is the judge.
-
----
-
-## 4. The coding loop (where solo wins)
-
+### B. Research — discovery, analysis (the clearest place multi-agent parallelism can win)
 ```mermaid
 flowchart TD
-    S["Task + FULL context"] --> E["Coder: read code → edit → run the check"]:::act
-    E --> Q{"verify passes?"}:::gate
-    Q -->|yes| OK([✓ Done]):::done
-    Q -->|"no · < 3 tries"| F["read the failure → fix"]:::act
-    F --> E
-    Q -->|"no · stuck / repeating"| RS["change approach / fresh restart<br/>(don't retry the same context)"]:::act
-    RS --> E
-    E -->|"budget / cap hit"| STOP["stop + report honestly"]:::stop
-    classDef act fill:#13351f,stroke:#54d98c,color:#c9f5da
-    classDef gate fill:#3a2a12,stroke:#ffb74d,color:#ffe6c2
-    classDef done fill:#11302a,stroke:#36c,color:#bfe
-    classDef stop fill:#3a1416,stroke:#ff5a5a,color:#ffd0d0
+  Q([Question]) --> LR["Lead Researcher"] --> SP["split into independent branches"]
+  SP --> R1["Reader 1"] & R2["Reader 2"] & R3["Reader 3"]
+  R1 & R2 & R3 --> SY["Synthesizer"]
+  SY --> EG{"Evidence / citation gate"} --> A([Answer])
 ```
+- Parallel independent readers (own context each) → synthesize → citation gate. The gate here is the *softest*: output is **"evidence-backed," not "verified-correct"** — you can't *execute* a research answer.
+- Presets: `research_lab`, `data_analyst`.
 
-Loop rules, all evidence-backed:
-- **Close on tests, not self-report.** Set `.owllm/verify.json` `{"command":"npm run build"}`; OwLLM runs it and the Run Report shows **✓ / ✗** (shipped v0.6.78).
-- **Cap at ~2–3 fix rounds** — they capture 76–95% of achievable gains; more plateaus or decays.
-- **Break a stuck loop by *changing context* / restarting**, not retrying — the loop is the model pattern-continuing what's already there. Step-repetition is the **#1** multi-agent failure ([MAST](https://arxiv.org/abs/2503.13657)).
-- **Don't feed failed attempts back** — agents re-condition on their own errors ([Context Rot](https://www.trychroma.com/research/context-rot) / self-conditioning).
+### C. Assistant — calendars, messages, APIs, domains
+```mermaid
+flowchart TD
+  U([User]) --> OP["Operator agent + memory"] --> T["tools / connectors"]
+  T --> AG{"Approval gate<br/>(risk × reversibility)"}
+  AG -->|read-only| DO["do it"]
+  AG -->|side-effect| OK["user approves"] --> DO
+  DO --> LOG["action log"] --> D([Done])
+```
+- Solo conversational + tools + **approval gate** (human approval for side-effects; reads just happen) + action log. Fans out *reads*, never *writes*.
+- Presets: `concierge`, `secretary`, `customer_support`, `sales_outreach`, `smart_home`, `health_coach`, `finance`, `learning_tutor`, `social_desk`, `writers_room`.
 
----
-
-## 5. A workflow IS the primitives (deterministic composition)
-
+### D. Workflow — known, repeatable jobs
 ```mermaid
 flowchart LR
-    T["⚡ Trigger"] --> A1["Act: step 1"]:::act
-    A1 --> CT{"🧠 Critical Thinker<br/>decision node"}:::plan
-    CT -->|branch A| A2["Act: step 2a"]:::act
-    CT -->|branch B| A3["Act: step 2b"]:::act
-    A2 --> GK{"🔐 Gatekeeper<br/>validate / approve"}:::gate
-    A3 --> GK
-    GK -->|ok| OUT([Output]):::done
-    GK -->|reject| A1
-    classDef plan fill:#1e2b4d,stroke:#6b8cff,color:#cfe0ff
-    classDef act fill:#13351f,stroke:#54d98c,color:#c9f5da
-    classDef gate fill:#3a2a12,stroke:#ffb74d,color:#ffe6c2
-    classDef done fill:#11302a,stroke:#36c,color:#bfe
+  TR["Trigger"] --> S1["step 1"] --> CT{"decision node (LLM only if ambiguous)"}
+  CT --> S2["step 2a"] & S3["step 2b"]
+  S2 & S3 --> GK{"validation node"} --> OUT([Output])
 ```
+- Deterministic first; LLM only where ambiguity requires. For known paths this beats a free agent (cheaper, reliable).
+- Presets: `n8n_workflow_builder`, document/email/report pipelines.
 
-An n8n-style workflow is **fixed-path** (cheap, reliable, for known processes), with
-LLM intelligence inserted only where it's needed: a **Critical Thinker** at a branch
-and a **Gatekeeper** at a validation/approval point. The Lead *runs* a workflow for a
-known repeatable job, and falls back to a *free agent* only when the path is unknown.
+## 6. Nested loops + budgets
+`Lead loop → per-agent scoped loops → tool/verify loops.` Each loop has a budget; **no debate loops** (opinion→opinion drifts via sycophancy). The danger is multiple *rounds within a stage*; distinct stages are fine. Primary exit is **no-progress** ("same error twice"), not the iteration cap.
 
----
+## 7. Reviewers (three stages, one pass each)
+- **Critical Thinker** — upstream, talks only to the Lead: pressure-tests the *plan/contract* before code; stands in for the user as **super-user** when you're away (decisive, grounded in project rules).
+- **Critic** — downstream, with the agents: reviews *work/diffs*, **grounded on the verify output**, one pass, never a coder↔critic loop.
+- **Red Team** — adversarial *verifier*: tries to break it (security/abliteration), reports what actually broke.
 
-## 6. Scientific background (load-bearing sources)
+## 8. The 18 → 4 mapping
+Coding teams → **Build** presets. `research_lab`/`data_analyst` → **Research**. The domain assistants → **Assistant** presets. `n8n_workflow_builder` → **Workflow**. Shapes are *code* (4); presets are *thin data* (tools/prompt/permissions/memory) — never copies of shape logic.
 
-**Architecture.** Single-agent baselines are strong: [Agentless](https://arxiv.org/abs/2407.01489), [mini-swe-agent](https://github.com/SWE-agent/mini-swe-agent), [SWE-bench leaderboard survey](https://arxiv.org/abs/2506.17208). Multi-agent helps for breadth-first/parallel work: [Anthropic multi-agent research system](https://www.anthropic.com/engineering/multi-agent-research-system); and its limits/failures: [Cognition — Don't Build Multi-Agents](https://cognition.ai/blog/dont-build-multi-agents), [MAST](https://arxiv.org/abs/2503.13657). Workflow-vs-agent: [Anthropic — Building Effective Agents](https://www.anthropic.com/research/building-effective-agents).
+## 9. Evidence
+Single-agent strength: Agentless, mini-swe-agent (>74% SWE-bench), SWE-bench survey. Multi-agent for research: Anthropic multi-agent system (+90%, ~15× tokens). Limits/failures: Cognition "Don't Build Multi-Agents", MAST (inter-agent misalignment 36.9%). Verification: Self-Debug, Reflexion; and its limits: "LLMs Cannot Self-Correct Reasoning Yet", "False Success" (~76%). Context: Lost in the Middle, Context Rot. Workflow-vs-agent: Anthropic "Building Effective Agents".
 
-**The loop.** [ReAct](https://arxiv.org/abs/2210.03629), [CodeAct](https://arxiv.org/abs/2402.01030), [SWE-agent](https://arxiv.org/abs/2405.15793). Verification is the spine: [Self-Debug](https://arxiv.org/abs/2304.05128), [Reflexion](https://arxiv.org/abs/2303.11366); and its limits: [LLMs Cannot Self-Correct Reasoning Yet](https://arxiv.org/abs/2310.01798), [When Can LLMs Actually Correct Their Own Mistakes? (TACL 2024)](https://arxiv.org/abs/2406.01297), [False Success](https://arxiv.org/abs/2606.09863).
+## 10. Build order (the Gate is the foundation)
+Build the **Verification Gate first** — once it exists, every later agent has a source of truth. Then: verify.json discovery → honest "unverified" state → captured output → coder loop uses the Gate → structured handoff → Lead activation table → contract lock → integration worktree → grounded Critic. **Do not collapse the old coding teams until the Gate + coder loop work.**
 
-**Context.** [Lost in the Middle](https://arxiv.org/abs/2307.03172), [Context Rot](https://www.trychroma.com/research/context-rot), [Anthropic — Effective context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents).
+## 11. Positioning
+> OwLLM runs **adaptive agent shapes, not fixed swarms.** A small edit behaves like a fast solo coder; a complex feature expands into a coordinated build team with shared contracts, scoped loops, verification, review, and publishing. The same engine powers research (parallel investigators), assistants (tools + approval), and workflows (deterministic steps).
+>
+> **One engine. Four adaptive shapes. Only the agents you need.**
+> *Private memory for the lane. Shared memory for the contract. Verified memory for the truth.*
 
-**Sampling.** Low temp / greedy for code: [The Good, the Bad, and the Greedy](https://arxiv.org/abs/2407.10457). (Note: newer Claude models manage their own sampling — temperature is a local-model knob.)
-
----
-
-## 7. Status
-
+## 12. Status
 | Piece | State |
 |---|---|
-| Grounded verify gate (`.owllm/verify.json`) | ✅ shipped (v0.6.78) |
-| Bias-to-action contract (decide reversible forks; ask only on goal ambiguity) | ✅ shipped (v0.6.78) |
-| No self-conditioning (failed turns excluded from shared memory) | ✅ shipped (v0.6.78) |
-| Lead front-door (brainstorm-or-route, single interface) | 🚧 proposed |
-| Solo-coder verify-loop as the default coding path | 🚧 proposed |
-| Executor explores code (no blind-ticket handoff) + full-trace handoff | 🚧 proposed |
-| Verify auto-run *inside* the coder loop (fix red itself) | 🚧 proposed |
-
-*This document is the rationale; the implementation lands incrementally, each piece
-proposed before it's built.*
+| Grounded verify gate (`.owllm/verify.json`) | ✅ first cut shipped (v0.6.78); formalizing into a first-class Gate (slice 1) |
+| Bias-to-action contract · no self-conditioning | ✅ shipped (v0.6.78) |
+| 4-shape model + presets | 📐 adopted (this doc) |
+| Build Shape: Lead + Gate + activation + per-agent loop | 🚧 slice 1 (in progress) |
+| Research / Assistant / Workflow shapes | 🚧 next |

@@ -181,6 +181,8 @@ Three independent update streams — small, fast, no full reinstalls:
 
 That's why the data/ tree is open and community-driven even though the app binaries are closed-source.
 
+> 📐 **[How OwLLM's agents are built — design & the science behind it](docs/AGENTIC_DESIGN.md)** — evidence-based architecture (single-agent verify-loops for code, parallel teams for research), with diagrams and cited research.
+
 ## ✨ Recent highlights
 
 OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.74** releases.

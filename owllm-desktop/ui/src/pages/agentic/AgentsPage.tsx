@@ -81,7 +81,7 @@ import {
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
-import { renderGateLine, type GateResult } from "./gate";
+import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
   goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress } from "./teamConfig";
@@ -7396,6 +7396,10 @@ export default function AgentsPage() {
   // code/ship goal that produced ZERO real actions is flagged NOT done instead of
   // trusting the model's prose self-assessment.
   const ranWriteToolRef = useRef(false);
+  // Last gate result from a coder's per-agent verify-fix loop, with the cwd it ran
+  // in. The run-end integration gate reuses it when it already verified projectCwd
+  // (a solo coder) instead of re-running the full build. Reset at run start.
+  const lastGateRef = useRef<GateResult | null>(null);
   // Run-trace draft (Layer 2 eval): the objective signals of THIS run, collected
   // as it executes and finalized into a RunTrace at run end (rendered as the Run
   // Report + persisted for team.eval.run.mjs). Pure bookkeeping — never affects
@@ -9165,6 +9169,7 @@ export default function AgentsPage() {
     setRunError(null);
     setBusy(true);
     ranWriteToolRef.current = false; // reset the "real work happened" signal for this run
+    lastGateRef.current = null;      // reset the per-agent gate result for this run
     runTraceRef.current = { goal: text, t0: Date.now(), agents: new Map(),
       routeCorrections: 0, oscillationStops: 0, capHit: false, criticVerdict: null };
     setRunning(true); // store-backed: survives a page change so the run isn't orphaned
@@ -9866,35 +9871,72 @@ export default function AgentsPage() {
           // on a context-free sticky note. Model-agnostic (rides the instruction).
           const taskMem = await retrieveTeamMemory(instruction);
           const enrichedInstruction = enrichInstructionWithMemory(taskMem, instruction);
+          const sysPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd);
+          // PER-AGENT VERIFY-FIX LOOP (Build Shape slice 1, step 5+6): a coder does
+          // not return one-shot. After it edits, the GATE runs the project's check
+          // in the coder's own cwd; on a real FAILURE it gets the captured error and
+          // one more bounded attempt; it stops on pass (done), unverified (no check
+          // to loop on), the budget, or no-progress (same failure twice → escalate,
+          // never thrash). "Done" for this agent is grounded in the gate, not its
+          // say-so. Non-coders + no-verify.json run exactly once (today's behavior).
+          const isCoder = agentDomain(spec) === "coder";
+          const scope: GateScope = /front|\bui\b|web/i.test(spec.name) ? "frontend"
+            : /back|api|server|\bdb\b|data/i.test(spec.name) ? "backend" : "full";
+          const MAX_FIX = 3;
           let specText = "";
-          try {
-            specText = (await streamChatCompletion(
-              port, specModel, providerFor(specModel),
-              buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd), enrichedInstruction,
-              tempFor(spec, 0.5), ctrl.signal,
-              (delta) => streamLog(spec.name, delta),
-              chainCwd,
-              specMemory.length > 0 ? specMemory : undefined,
-              // autoApprove: thread the user's GUI toggle through so a Claude/Codex
-              // CLI specialist actually gets --permission-mode bypassPermissions and
-              // can WRITE. Was hardcoded undefined → every team-dispatched agent ran
-              // gated regardless of the toggle (the "blocked on write permissions" bug).
-              autoApprove,
-              (channel, role, delta) => streamThought(spec.name, channel, role, delta),
-              allowed,
-              undefined,
-              getClaudeSession(selectedProjectId, spec.name),
-            )).trim();
-          } catch (e: any) {
-            specText = `(error: ${cleanAgentError(e)})`;
-            streamLog(spec.name, "\n\n" + specText);
+          let finalGate: GateResult | null = null;
+          let prevFailNorm = "";
+          for (let attempt = 1; attempt <= MAX_FIX; attempt++) {
+            const turn = attempt === 1
+              ? enrichedInstruction
+              : `Your previous change did NOT pass the project's verification:\n${renderGateLine(finalGate!)}\n\nFix it so the check passes — change the approach if needed. Original task:\n${instruction}`;
+            try {
+              specText = (await streamChatCompletion(
+                port, specModel, providerFor(specModel),
+                sysPrompt, turn,
+                tempFor(spec, 0.5), ctrl.signal,
+                (delta) => streamLog(spec.name, delta),
+                chainCwd,
+                specMemory.length > 0 ? specMemory : undefined,
+                // autoApprove: thread the user's GUI toggle through so a Claude/Codex
+                // CLI specialist actually gets --permission-mode bypassPermissions and
+                // can WRITE. Was hardcoded undefined → every team-dispatched agent ran
+                // gated regardless of the toggle (the "blocked on write permissions" bug).
+                autoApprove,
+                (channel, role, delta) => streamThought(spec.name, channel, role, delta),
+                allowed,
+                undefined,
+                getClaudeSession(selectedProjectId, spec.name),
+              )).trim();
+            } catch (e: any) {
+              specText = `(error: ${cleanAgentError(e)})`;
+              streamLog(spec.name, "\n\n" + specText);
+              break; // a thrown error isn't a verify failure — stop the loop
+            }
+            if (!isCoder) break;                         // only coders loop on the gate
+            finalGate = await runGate(chainCwd, scope);
+            lastGateRef.current = finalGate;             // let run-end reuse it (solo coder)
+            if (finalGate.status !== "failed") break;    // passed (done) or unverified (nothing to loop on)
+            if (attempt >= MAX_FIX) {                    // out of budget — leave it failed, loudly
+              appendThought(spec.name, { role: "system", color: "#ff8c8c", text: `⚠ verify still failing after ${MAX_FIX} attempts — escalating to the orchestrator.` });
+              break;
+            }
+            const failNorm = normalizeRunOutput((finalGate.stderr || finalGate.stdout || "") + finalGate.exitCode);
+            if (failNorm === prevFailNorm) {             // no progress — don't thrash
+              appendThought(spec.name, { role: "system", color: "#ff8c8c", text: `⚠ same verify failure twice — no progress; escalating instead of retrying.` });
+              break;
+            }
+            prevFailNorm = failNorm;
+            appendThought(spec.name, { role: "system", color: "#ffb74d", text: `🔁 verify failed — re-attempting fix (${attempt + 1}/${MAX_FIX})` });
           }
           removeActive(spec.name);
           // Persist this exchange so the next dispatch remembers it (per-agent).
           await appendAgentMemory(selectedProjectId, spec.name, instruction, specText);
-          // Auto-capture into SHARED work-state so the NEXT agent is synchronized
-          // on what this one just did (logs the original task, not the enriched one).
-          await logTeamWork(spec.name, instruction, specText);
+          // STRUCTURED HANDOFF (step 6): record what the agent did AND its grounded
+          // lane-verify result (not the agent's claim) into the shared work-state, so
+          // the next agent / the run report inherit the real outcome.
+          const laneTag = finalGate && finalGate.status !== "unverified" ? `\n[lane verify: ${finalGate.status}]` : "";
+          await logTeamWork(spec.name, instruction, specText + laneTag);
           speakAgentReply(spec.name, specText);
           return { name: spec.name, text: specText };
         }
@@ -10379,8 +10421,17 @@ export default function AgentsPage() {
           // Only runs when something was written, so a no-op run is never slowed.
           let gate: GateResult | null = null;
           if (wrote && goalRequiresWrite(text)) {
-            appendLog("system", { role: "system", color: "#7ff0c5", text: "🔍 verification gate…" });
-            gate = await runGate(projectCwd, "full");
+            // Reuse a solo coder's own full-scope gate (it already verified
+            // projectCwd in its loop) instead of re-running the build; otherwise
+            // run the integration gate on the merged tree.
+            const reuse = lastGateRef.current && lastGateRef.current.cwd === projectCwd && lastGateRef.current.scope === "full"
+              ? lastGateRef.current : null;
+            if (reuse) {
+              gate = reuse;
+            } else {
+              appendLog("system", { role: "system", color: "#7ff0c5", text: "🔍 verification gate…" });
+              gate = await runGate(projectCwd, "full");
+            }
             const line = renderGateLine(gate);
             const col = gate.status === "passed" ? "#7ff0c5" : gate.status === "failed" ? "#ff8c8c" : "#ffb74d";
             appendLog("system", { role: "system", color: col, text: line });

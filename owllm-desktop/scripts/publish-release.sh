@@ -95,9 +95,16 @@ if [ "$DRAFT" = 1 ]; then
   echo "PUBLISH_DRAFT_OK: $TAG drafted — flip it public on GitHub when ready."
   exit 0
 fi
-SERVED="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).version)}catch{process.stdout.write("?")}})')"
+# Poll: GitHub's /latest CDN can lag a few seconds behind `gh release create`,
+# so checking once right after publishing false-fails. Retry up to ~60s.
+SERVED=""
+for i in $(seq 1 20); do
+  SERVED="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).version)}catch{process.stdout.write("?")}})')"
+  [ "$SERVED" = "$VERSION" ] && break
+  sleep 3
+done
 HTTP="$(curl -s -o /dev/null -w "%{http_code}" -L "$URL")"
 echo "  updater serves: $SERVED | installer HTTP: $HTTP"
-[ "$SERVED" = "$VERSION" ] || fail "updater serves '$SERVED', expected '$VERSION'"
+[ "$SERVED" = "$VERSION" ] || fail "updater serves '$SERVED', expected '$VERSION' (after ~60s of polling)"
 [ "$HTTP" = "200" ] || fail "installer HTTP $HTTP (expected 200)"
 echo "PUBLISH_OK: $TAG live — updater serves $VERSION, installer 200."

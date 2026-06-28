@@ -185,7 +185,13 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.74** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.81** releases.
+
+### 🧪 Agentic teams, rebuilt on evidence (0.6.78 → 0.6.81)
+After a deep, citation-backed review of how agentic systems actually succeed and fail (Agentless, mini-swe-agent, Anthropic's multi-agent research, MAST's failure taxonomy, the "self-correction needs an oracle" results), we rebuilt the team engine around one principle: **an agent never grades its own work.**
+- **The Verification Gate** — a first-class, unit-tested check that decides "done" from a **real command's exit code**, never from the model's say-so. Point it at your project's check with a one-line `.owllm/verify.json` (`{"command":"npm run build"}`, or per-lane `frontend`/`backend` commands). No check configured? It honestly reports **"unverified"** — never a false "passed".
+- **Per-agent verify-fix loops** — each coder now *edits → runs the gate in its own workspace → on a real failure, takes the captured error and tries again* (bounded; stops early once it stops making progress). The agent is "done" only when the check passes, and the shared team memory records the **real** verify outcome, not the agent's claim.
+- **The OWLLM Team** — one adaptive build team that **right-sizes itself**: a one-file fix uses a single coder; a cross-lane feature **locks a shared API contract first**, then builds front-end and back-end together in isolated git worktrees (worktrees stop the lanes clobbering files; the locked contract stops them disagreeing on the shape). Critic reviews what a build can't catch, Red Team tries to break it, Publisher ships the release. One team that scales up or down, replacing five fixed coding teams. *(The full design — diagrams and citations — lives in [`docs/AGENTIC_DESIGN.md`](owllm-desktop/docs/AGENTIC_DESIGN.md).)*
 
 ### 🎯 Teams that deliver — and a way to prove it
 - **Teams actually ship now** — the orchestrator right-sizes each round, routes code work to a **coder** (never the read-only design leader), enforces strict front-end/back-end layer ownership, and a **Definition-of-Done gate** flags a "code task" that produced zero file changes instead of trusting the model's prose. Universal across **every** team, on every model path.
@@ -227,10 +233,17 @@ OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.74** releases.
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.74)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.6.81)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.6.81** | OWLLM Team — one adaptive build team (right-size activation + contract-lock before cross-lane fan-out) replacing five fixed coding teams · "Save as new…" team fork |
+| **0.6.80** | Per-agent verify-fix loop — each coder edits→verifies→fixes against the real check; "done" is a passing build, not a self-report |
+| **0.6.79** | The Verification Gate — a first-class, unit-tested check that decides "done" from a real exit code (`.owllm/verify.json`); honest "unverified" when none configured |
+| **0.6.78** | Ground the loop in execution — real verify gate + bias-to-action + no self-conditioning (evidence-driven redesign) |
+| **0.6.77** | Protect Code-page worktrees from the team sweep (no unmerged-work loss) + separate branch namespaces |
+| **0.6.76** | Stop fleet worktrees piling up — no worktree for sequential runs + sweep crashed-run orphans |
+| **0.6.75** | "Reset team to template" — pull template fixes (e.g. the publisher rename) onto an existing project's frozen roster |
 | **0.6.74** | Publisher agent named as such; Info page cards flow at natural heights |
 | **0.6.73** | The team ships its own releases — a Publisher role + host-side build/sign/publish/verify pipeline |
 | **0.6.72** | Team-memory graph renders — visible connection lines + always-on node labels |

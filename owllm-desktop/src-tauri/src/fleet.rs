@@ -135,10 +135,10 @@ pub async fn fleet_worktree_create(
     project_cwd: String,
     agent_name: String,
     run_id: String,
-    /// Branch namespace. Team-run worktrees use the default "owllm-fleet" (the
-    /// team-run sweep reclaims those). The Code page passes "owllm-page" so its
-    /// per-page worktrees — which hold the user's UNMERGED edits — live in their
-    /// own namespace and are NEVER touched by the team sweep.
+    // Branch namespace. Team-run worktrees use the default "owllm-fleet" (the
+    // team-run sweep reclaims those). The Code page passes "owllm-page" so its
+    // per-page worktrees — which hold the user's UNMERGED edits — live in their
+    // own namespace and are NEVER touched by the team sweep.
     branch_prefix: Option<String>,
 ) -> Result<CreateOutcome, String> {
     let cwd = PathBuf::from(&project_cwd);

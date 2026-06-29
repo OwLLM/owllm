@@ -1408,6 +1408,74 @@ function shortModelLabel(modelId: string): string {
   return s;
 }
 
+// Research-lab brand colour per lab name — tints the model chip in the maker's
+// colour. Falls back through PROVIDER_TINT then a neutral.
+const LAB_TINT: Record<string, string> = {
+  Anthropic: "#ff9a3a", OpenAI: "#10a37f", Google: "#4285f4",
+  Moonshot: "#d36bff", DeepSeek: "#2563eb", xAI: "#c7ccd1", Mistral: "#ff7a00",
+  Meta: "#4267b2", Qwen: "#7a5cff", Microsoft: "#00a4ef", Nous: "#b07cff",
+  "01.AI": "#22c55e", Cohere: "#39c5bb", Unsloth: "#ffb020", IBM: "#0f62fe",
+  NVIDIA: "#76b900", TII: "#1f9d8f", Stability: "#ff5d7a", AllenAI: "#f59e0b",
+  BigCode: "#ffd166",
+};
+// Providers that ARE the model's maker → lab name straight through. Host-style
+// providers (groq/together/perplexity/local/tuned) are intentionally omitted so
+// the chip falls through to id parsing and shows the ACTUAL maker, not the host.
+const PROVIDER_LAB: Record<string, string> = {
+  anthropic: "Anthropic", openai: "OpenAI", gemini: "Google",
+  moonshot: "Moonshot", kimi: "Moonshot", deepseek: "DeepSeek",
+  xai: "xAI", mistral: "Mistral",
+};
+// Maker detected from a local/tuned model id's owner path prefix
+// ("unsloth/…", "google/gemma-…", "Qwen/…", "deepseek-ai/…").
+const OWNER_LAB: Record<string, string> = {
+  unsloth: "Unsloth", google: "Google", "meta-llama": "Meta", meta: "Meta",
+  qwen: "Qwen", "deepseek-ai": "DeepSeek", deepseek: "DeepSeek",
+  mistralai: "Mistral", microsoft: "Microsoft", nousresearch: "Nous",
+  "01-ai": "01.AI", "01.ai": "01.AI", cohereforai: "Cohere", cohere: "Cohere",
+  bigcode: "BigCode", stabilityai: "Stability", allenai: "AllenAI",
+  "ibm-granite": "IBM", ibm: "IBM", nvidia: "NVIDIA", tiiuae: "TII",
+};
+
+// Friendly research-lab label for a resolved model id. A maker-provider maps
+// straight from `provider`; otherwise the lab is parsed from the id's owner path
+// or name keywords. Keeps the card chip compact for long local GGUF names
+// ("unsloth/gemma-3-…-GGUF" → "Google"/"Unsloth") and works for cloud + local +
+// tuned alike. Returns "" only for an empty id. `provider` is an optional hint;
+// the id-only path is used on surfaces (graph canvas) that carry no provider.
+function modelLabFor(modelId: string, provider?: string): string {
+  if (!modelId) return "";
+  if (provider && PROVIDER_LAB[provider]) return PROVIDER_LAB[provider];
+  let bare = modelId;
+  for (const p of ["sub/", "api/", "auto/"]) if (bare.startsWith(p)) { bare = bare.slice(p.length); break; }
+  if (bare.includes("/")) {
+    const owner = bare.split("/")[0].toLowerCase();
+    if (OWNER_LAB[owner]) return OWNER_LAB[owner];
+  }
+  const n = bare.toLowerCase();
+  if (n.includes("gemma") || n.includes("gemini")) return "Google";
+  if (n.includes("qwen")) return "Qwen";
+  if (n.includes("llama")) return "Meta";
+  if (n.includes("mixtral") || n.includes("mistral")) return "Mistral";
+  if (n.includes("deepseek")) return "DeepSeek";
+  if (n.startsWith("phi") || n.includes("phi-")) return "Microsoft";
+  if (n.includes("command-r") || n.includes("command")) return "Cohere";
+  if (n.includes("grok")) return "xAI";
+  if (n.includes("kimi") || n.includes("moonshot")) return "Moonshot";
+  if (n.includes("gpt") || n === "o3" || n.startsWith("o3") || n.includes("codex")) return "OpenAI";
+  if (n.includes("claude")) return "Anthropic";
+  if (n.includes("falcon")) return "TII";
+  if (n.includes("granite")) return "IBM";
+  if (n.startsWith("yi-") || n.includes("/yi-")) return "01.AI";
+  return shortModelLabel(modelId);
+}
+// Lab name + brand tint for the model chip on an agent card.
+function modelChipFor(modelId: string, provider?: string): { lab: string; tint: string } {
+  const lab = modelLabFor(modelId, provider);
+  const tint = LAB_TINT[lab] ?? (provider ? PROVIDER_TINT[provider] : undefined) ?? "#9db4dc";
+  return { lab, tint };
+}
+
 // Tile arrangement for a 4-column grid. Spatial layout the user spec'd:
 //
 //   Row 0:  Orchestrator | Critic | Design Lead | Design[1]
@@ -1636,11 +1704,13 @@ function AgentChatGrid({
         const outerPx = isActive ? 14 + 12 * pulse : 0;
         const alphaA = 0.65 + 0.30 * pulse;
         const alphaB = 0.40 + 0.30 * pulse;
-        // Resolved model for the header logo-chip (right side). The synthetic
-        // Critic isn't a dispatch target, so leave its chip blank.
-        const resolvedModel = a.name === CRITIC_AGENT_NAME ? "" : modelFor(a.name);
-        const modelLabel = shortModelLabel(resolvedModel);
-        const modelTint = PROVIDER_TINT[providerFor(resolvedModel)] ?? "#9db4dc";
+        // Show the model's research-lab (e.g. "OpenAI", "Google", "Unsloth") on
+        // EVERY agent INCLUDING the critical_thinker — it runs on a real model
+        // (often Codex) and was previously blanked, so its chip was the only one
+        // missing. The lab label also keeps long local GGUF names from overflowing.
+        const resolvedModel = modelFor(a.name);
+        const { lab: modelLabel, tint: modelTint } = modelChipFor(resolvedModel, providerFor(resolvedModel));
+        const modelTitle = shortModelLabel(resolvedModel);
         return (
           <AgentChatTile
             key={a.name}
@@ -1654,6 +1724,7 @@ function AgentChatGrid({
             onOpenEditor={() => onOpenEditor(a.name)}
             modelLabel={modelLabel}
             modelTint={modelTint}
+            modelTitle={modelTitle}
             ringPx={ringPx}
             outerPx={outerPx}
             alphaA={alphaA}
@@ -1673,7 +1744,7 @@ function AgentChatGrid({
 function AgentChatTile({
   name, icon, messages,
   isActive, isSelected, accent, onClick, onOpenEditor,
-  modelLabel, modelTint,
+  modelLabel, modelTint, modelTitle,
   ringPx, outerPx, alphaA, alphaB,
   timing, skills,
 }: {
@@ -1704,6 +1775,8 @@ function AgentChatTile({
   modelLabel: string;
   /// Provider brand colour for the model chip.
   modelTint: string;
+  /// Full model short-name for the chip tooltip (chip shows the lab label).
+  modelTitle: string;
   ringPx: number;
   outerPx: number;
   alphaA: number;
@@ -1807,7 +1880,7 @@ function AgentChatTile({
             provider's brand colour (spec-allowed fallback). */}
         {modelLabel && (
           <span
-            title={`Model: ${modelLabel}`}
+            title={`Model: ${modelTitle || modelLabel}`}
             style={{
               fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
               color: modelTint,
@@ -4064,7 +4137,7 @@ function GraphCanvas({
                 const desc = (n.spec.description?.trim() || role?.description?.trim() || "").trim();
                 const shortDesc = desc.length > 70 ? desc.slice(0, 67) + "…" : desc;
                 const modelId = modelFor(n.name);
-                const modelShort = modelId.length > 28 ? modelId.slice(0, 25) + "…" : modelId;
+                const modelLab = modelLabFor(modelId);
                 return (
                   <div style={{ display:"flex", flexDirection:"column", gap:3, marginTop:2, paddingTop:6, borderTop:"1px solid rgba(255,255,255,0.06)" }}>
                     <div style={{ display:"flex", justifyContent:"space-between", gap:6, fontSize:10, color:"var(--fg-muted)", letterSpacing:0.3 }}>
@@ -4072,7 +4145,7 @@ function GraphCanvas({
                       <span style={{ flexShrink:0 }}>· {temp} temp</span>
                     </div>
                     <div style={{ fontSize:10, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={modelId || "(no model)"}>
-                      🧠 {modelShort || "(no model)"}
+                      🧠 {modelLab || "(no model)"}
                     </div>
                     {shortDesc && (
                       <div style={{ fontSize:10, color:"var(--fg-subtle)", lineHeight:1.3, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" }} title={desc}>

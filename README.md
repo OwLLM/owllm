@@ -185,7 +185,7 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.81** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.85** releases.
 
 ### 🧪 Agentic teams, rebuilt on evidence (0.6.78 → 0.6.81)
 After a deep, citation-backed review of how agentic systems actually succeed and fail (Agentless, mini-swe-agent, Anthropic's multi-agent research, MAST's failure taxonomy, the "self-correction needs an oracle" results), we rebuilt the team engine around one principle: **an agent never grades its own work.**
@@ -213,6 +213,7 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 
 ### 🎓 Skills, by role, out of the box
 - A curated set of **skill packs auto-equipped by role** — coder, critic, researcher, writer, orchestrator… Add, remove, or install more (Anthropic / community) per agent.
+- **Skills you can *see*** — each agent now wears a ribbon of **skill badges** on its card (📊 pptx, 📕 pdf, 🔍 code-review, 🐞 debugging…), hover for the named list. Most agent apps bury capability in a config file; OwLLM puts each agent’s toolkit right on the card.
 
 ### ⚡ Local-model performance
 - **VRAM-aware context** — the context window is sized to fit your GPU *after* the model weights, so a big model stops silently spilling onto the CPU. Real, measurable speed-ups.
@@ -233,10 +234,14 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.81)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.6.85)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.6.85** | Skill badges — every agent card shows a ribbon of its equipped-skill icons (hover for names); capability is finally visible, not hidden in config |
+| **0.6.84** | Fixed: TS-only builds shipped stale UI (now forced fresh embed) · team choice persists across restart · “shipped” ≠ committed honesty rule |
+| **0.6.83** | Inline agent-card editor — click a card to edit that agent’s model, colour, and prompt (shipped in 0.6.84) |
+| **0.6.82** | Verification gate works out-of-the-box — auto-detects a check (npm/cargo/pytest/go) + a Verify-command field in project settings |
 | **0.6.81** | OWLLM Team — one adaptive build team (right-size activation + contract-lock before cross-lane fan-out) replacing five fixed coding teams · "Save as new…" team fork |
 | **0.6.80** | Per-agent verify-fix loop — each coder edits→verifies→fixes against the real check; "done" is a passing build, not a self-report |
 | **0.6.79** | The Verification Gate — a first-class, unit-tested check that decides "done" from a real exit code (`.owllm/verify.json`); honest "unverified" when none configured |

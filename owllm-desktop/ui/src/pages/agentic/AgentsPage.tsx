@@ -9651,6 +9651,11 @@ export default function AgentsPage() {
     setBusy(true);
     ranWriteToolRef.current = false; // reset the "real work happened" signal for this run
     lastGateRef.current = null;      // reset the per-agent gate result for this run
+    // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
+    // provider can self-load a skill by reading it with their native file tool
+    // (the load_skill tool only reaches local models). Fire-and-forget — it's
+    // fast and the orchestrator's planning turn runs before any specialist reads it.
+    if (runCwd) invoke("sync_project_skills", { cwd: runCwd }).catch(() => {});
     runTraceRef.current = { goal: text, t0: Date.now(), agents: new Map(),
       routeCorrections: 0, oscillationStops: 0, capHit: false, criticVerdict: null };
     setRunning(true); // store-backed: survives a page change so the run isn't orphaned

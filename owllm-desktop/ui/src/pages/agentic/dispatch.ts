@@ -2884,6 +2884,11 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // then warm the snapshot so the orchestrator + specialists get it injected.
   setTeamMemoryScope(projectId);
   await refreshTeamMemorySnapshot();
+  // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
+  // provider can self-load a skill by reading it with their native file tool
+  // (load_skill only reaches local models). Fire-and-forget — fast, and the
+  // orchestrator plans before any specialist reads it.
+  if (projectCwd) invoke("sync_project_skills", { cwd: projectCwd }).catch(() => {});
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]

@@ -149,15 +149,17 @@ export function buildSkillBlock(skills: ResolvedSkill[]): string {
     if (inlined.has(s.id) && s.body) {
       lines.push(`\n### Skill: ${s.name}\n${s.body.trim()}`);
     } else {
-      lines.push(`- ${s.name}: ${s.description || "(no description)"} — call load_skill("${s.name}") to load its full instructions.`);
+      lines.push(`- ${s.name}: ${s.description || "(no description)"} — read \`.owllm/skills/${s.id}/SKILL.md\` for its full instructions.`);
     }
   }
   lines.push(
     "",
-    "You choose your own skills: call load_skill(\"<name>\") to pull a skill's full " +
-    "instructions into context when the task calls for it, and call it again with a " +
-    "different skill to switch — as many times as you need. Use list_skills to see " +
-    "every skill available (not just the ones above).",
+    "SELF-LOAD ANY SKILL (works on every model): the full skill library is mirrored " +
+    "into `.owllm/skills/` in your working directory. Read `.owllm/skills/INDEX.md` " +
+    "to see every available skill (not just the ones above), then read " +
+    "`.owllm/skills/<id>/SKILL.md` with your file-read tool to pull a skill's full " +
+    "instructions into context — load as many as the task needs, and read another to " +
+    "switch. (Local models may also use the load_skill / list_skills tools.)",
   );
   lines.push("--- END SKILLS ---");
   return lines.join("\n");
@@ -178,11 +180,13 @@ export async function buildAgentSkillBlock(ids: string[]): Promise<string> {
   const brief = await skillCatalogBrief(ids);
   return [
     "--- SKILLS (available to you on demand) ---",
-    "You can equip a capability pack yourself when a task calls for it:",
+    "You can load a capability pack yourself when a task calls for it:",
     brief,
     "",
-    "Call load_skill(\"<name>\") to load one's full instructions, and call it again " +
-    "with a different skill to switch. Use list_skills to re-list them anytime.",
+    "SELF-LOAD (works on every model): the full library is mirrored into " +
+    "`.owllm/skills/` in your working directory. Read `.owllm/skills/INDEX.md` for " +
+    "the catalog, then read `.owllm/skills/<id>/SKILL.md` with your file-read tool to " +
+    "load a skill's full instructions. (Local models may also use load_skill / list_skills.)",
     "--- END SKILLS ---",
   ].join("\n");
 }

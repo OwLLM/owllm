@@ -131,6 +131,51 @@ pub async fn list_skill_packs() -> Result<Vec<SkillPack>, String> {
     Ok(out)
 }
 
+#[derive(Serialize)]
+pub struct SkillSyncResult {
+    pub count: usize,
+    pub index_rel: String,
+}
+
+/// Mirror every available skill pack's SKILL.md into
+/// `<cwd>/.owllm/skills/<id>/SKILL.md` plus an `INDEX.md` catalog, so a
+/// SANDBOXED agent on ANY provider can self-load a skill with its native
+/// file-read tool. (The `load_skill` tool only reaches local-model agents; a
+/// Claude/Codex/Gemini CLI agent is jailed to the project folder and can't see
+/// %APPDATA%\skills — so we bring the skills into the project.) The mirror is
+/// git-ignored so it never lands in the user's repo, and is refreshed each run.
+#[tauri::command]
+pub async fn sync_project_skills(cwd: String) -> Result<SkillSyncResult, String> {
+    if cwd.trim().is_empty() {
+        return Err("sync_project_skills: empty cwd".into());
+    }
+    let packs = list_skill_packs().await?;
+    let base = Path::new(&cwd).join(".owllm").join("skills");
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
+    // Never commit the mirror — it's a per-run cache, not project content.
+    let _ = std::fs::write(base.join(".gitignore"), "*\n");
+    let mut index = String::from(
+        "# Skill library — your self-load catalog\n\nRead `<id>/SKILL.md` (relative to this folder) to load a skill's full instructions on demand.\n\n",
+    );
+    let mut count = 0usize;
+    for p in &packs {
+        let dest = base.join(&p.id);
+        if std::fs::create_dir_all(&dest).is_err() {
+            continue;
+        }
+        // Copy the ORIGINAL SKILL.md verbatim (frontmatter + body).
+        if std::fs::copy(&p.path, dest.join("SKILL.md")).is_ok() {
+            count += 1;
+        }
+        let name = p.frontmatter.get("name").and_then(|v| v.as_str()).unwrap_or(p.id.as_str());
+        let desc = p.frontmatter.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let desc1 = desc.lines().next().unwrap_or("").trim();
+        index.push_str(&format!("- **{}** — `{}/SKILL.md`\n  {}\n", name, p.id, desc1));
+    }
+    std::fs::write(base.join("INDEX.md"), index).map_err(|e| format!("write INDEX.md: {e}"))?;
+    Ok(SkillSyncResult { count, index_rel: ".owllm/skills/INDEX.md".into() })
+}
+
 /// Split a SKILL.md document into its YAML frontmatter (as JSON) and
 /// the markdown body. Frontmatter is enclosed in `---` lines at the
 /// top of the file. Returns an empty object + the whole file as body

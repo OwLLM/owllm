@@ -190,6 +190,7 @@ pub fn run() {
             agents::create_agent_definition,
             agents::delete_agent_definition,
             agents::list_skill_packs,
+            agents::sync_project_skills,
             bridges::load_bridge_configs,
             bridges::bridge_route_get,
             bridges::bridge_route_set,

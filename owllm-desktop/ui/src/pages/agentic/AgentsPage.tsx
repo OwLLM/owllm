@@ -1904,7 +1904,7 @@ function AgentChatTile({
                 maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
                 flexShrink: 0,
               }}
-            >{Logo ? <Logo size={14} color={modelTint} /> : modelLabel}</span>
+            >{Logo ? <Logo size={21} color={modelTint} /> : modelLabel}</span>
           );
         })()}
         {/* Per-agent working time — to the RIGHT of the name. Green while this

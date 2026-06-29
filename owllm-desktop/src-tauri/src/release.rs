@@ -99,3 +99,47 @@ pub async fn publish_release(
         Err(format!("publish did not complete:\n{tail}"))
     }
 }
+
+/// Rule-based "finish & publish" — the deterministic host release the SOLO path
+/// fires when the goal says publish. Bumps the version, commits ONLY the app dir,
+/// pushes, tags, then runs the canonical publish-release.sh — none of it dependent
+/// on the model committing/tagging/not-lying. Same host-only requirements +
+/// success markers as publish_release.
+#[tauri::command]
+pub async fn finish_and_publish(repo_dir: String, notes: Option<String>) -> Result<String, String> {
+    let posix = to_gitbash_path(&repo_dir);
+    let script = format!("{posix}/owllm-desktop/scripts/finish-and-publish.sh");
+    let args: Vec<String> = vec![script, "--notes".into(), notes.unwrap_or_default()];
+
+    let out = tokio::task::spawn_blocking(move || {
+        let bash = which_bash();
+        let mut cmd = Command::new(&bash);
+        cmd.args(&args);
+        // Run in the repo so git operations target the right tree.
+        cmd.current_dir(&repo_dir);
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        cmd.output().map_err(|e| format!("spawn bash ({bash}): {e}"))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))??;
+
+    let combined = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let ok = out.status.success()
+        && (combined.contains("PUBLISH_OK")
+            || combined.contains("PUBLISH_DRYRUN_OK")
+            || combined.contains("PUBLISH_DRAFT_OK"));
+    if ok {
+        Ok(combined)
+    } else {
+        let tail: String = combined.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
+        Err(format!("finish_and_publish did not complete:\n{tail}"))
+    }
+}

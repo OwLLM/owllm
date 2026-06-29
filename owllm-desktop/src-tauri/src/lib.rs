@@ -252,6 +252,7 @@ pub fn run() {
             memory::team_memory_log,
             memory::team_memory_search,
             release::publish_release,
+            release::finish_and_publish,
             memory::team_memory_read,
             memory::team_memory_delete,
             server::server_status,

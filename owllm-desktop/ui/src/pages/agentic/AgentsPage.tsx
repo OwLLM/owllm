@@ -89,7 +89,7 @@ import { parseAgentPrompt, serializeAgentPrompt } from "./agentPrompt";
 import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
-  goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress } from "./teamConfig";
+  goalRequiresWrite, runDelivered, normalizeRunOutput, isNoProgress, goalRequiresPublish } from "./teamConfig";
 import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
@@ -5371,6 +5371,8 @@ function RightColumnTabs(props: {
   onToggleDirectorMode: () => void;
   parallelMode: boolean;
   onToggleParallel: () => void;
+  soloMode: boolean;
+  onToggleSolo: () => void;
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -5478,6 +5480,8 @@ function RightColumnTabs(props: {
             onToggleDirectorMode={props.onToggleDirectorMode}
             parallelMode={props.parallelMode}
             onToggleParallel={props.onToggleParallel}
+            soloMode={props.soloMode}
+            onToggleSolo={props.onToggleSolo}
             team={props.team}
             roleByName={props.roleByName}
           />
@@ -5555,6 +5559,7 @@ function SuperUserSettings({
   autoApprove, onToggleAutoApprove,
   directorMode, onToggleDirectorMode,
   parallelMode, onToggleParallel,
+  soloMode, onToggleSolo,
   team, roleByName,
 }: {
   autoApprove: boolean;
@@ -5563,6 +5568,8 @@ function SuperUserSettings({
   onToggleDirectorMode: () => void;
   parallelMode: boolean;
   onToggleParallel: () => void;
+  soloMode: boolean;
+  onToggleSolo: () => void;
   team: Team | null;
   roleByName: Map<string, RoleData>;
 }) {
@@ -5613,6 +5620,16 @@ function SuperUserSettings({
         <span>parallel dispatch (run independent agents at once)
           <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
             {parallelMode ? "orchestrator batches independent tasks into one wave" : "off: one task at a time (sequential)"}
+          </span>
+        </span>
+      </label>
+      {/* Solo-loop — skip orchestration entirely: ONE coder, edit→verify→fix,
+          and rule-based host publish if the goal says so. For simple tasks. */}
+      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: soloMode ? "#7fd4ff" : "#7888a8", cursor:"pointer" }}>
+        <input type="checkbox" checked={soloMode} onChange={onToggleSolo} style={{ width:12, height:12, marginTop:2, accentColor:"#3aa0ff" }} />
+        <span>solo-loop (one agent, no orchestration)
+          <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
+            {soloMode ? "one coder: edit → verify → fix, + rule-based publish — no critic/red-team" : "off: full team orchestration"}
           </span>
         </span>
       </label>
@@ -8075,6 +8092,12 @@ export default function AgentsPage() {
   // Per-project UI preference in localStorage (no DB/Rust needed). Default OFF
   // so existing sequential-pipeline teams aren't surprised.
   const [parallelMode, setParallelModeState] = useState<boolean>(false);
+  // Solo-loop mode (per-project, header toggle): when ON, the run SKIPS the
+  // orchestrator/critic/red_team entirely and goes to ONE coder in an
+  // edit→verify→fix loop, and — rule-based, host-side — publishes deterministically
+  // if the goal asks for it. The honest implementation of the "solo agent + loop"
+  // the docs promised; it takes finishing/publishing OUT of the model's hands.
+  const [soloMode, setSoloModeState] = useState<boolean>(false);
   const [directivesPanelOpen, setDirectivesPanelOpen] = useState(false);
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
   // top-level so it can be reused later (e.g. from NewProjectDialog).
@@ -8149,6 +8172,18 @@ export default function AgentsPage() {
     setParallelModeState(v);
     if (!selectedProjectId) return;
     try { localStorage.setItem(parallelKey(selectedProjectId), v ? "1" : "0"); } catch { /* ignore */ }
+  };
+  // Solo-loop is a per-project preference too, same storage pattern.
+  const soloKey = (pid: string) => `owllm:solo:${pid}`;
+  useEffect(() => {
+    if (!selectedProjectId) { setSoloModeState(false); return; }
+    try { setSoloModeState(localStorage.getItem(soloKey(selectedProjectId)) === "1"); }
+    catch { setSoloModeState(false); }
+  }, [selectedProjectId]);
+  const setSoloMode = (v: boolean) => {
+    setSoloModeState(v);
+    if (!selectedProjectId) return;
+    try { localStorage.setItem(soloKey(selectedProjectId), v ? "1" : "0"); } catch { /* ignore */ }
   };
 
   async function onBrowseProjectFolder() {
@@ -9875,6 +9910,81 @@ export default function AgentsPage() {
     }
 
     try {
+      // ===== SOLO-LOOP fast path (canvas header toggle) =====
+      // The honest implementation of the documented "solo agent + loop": ONE coder
+      // runs the task in an edit→verify→fix loop with NO orchestrator/critic/red_team,
+      // and — RULE-BASED, host-side — publishes deterministically if the goal asks.
+      // Isolated early-return so the team path below is byte-for-byte untouched.
+      if (soloMode) {
+        const coder = bestAgentForGoal(runTeam.agents, text, roleByName)
+          ?? runTeam.agents.find(a => agentDomain(a) === "coder")
+          ?? runTeam.agents.find(a => a.name !== orch.name)
+          ?? orch;
+        appendLog("you", { role: "you", color: "#9ad9ff", text });
+        addActive(coder.name);
+        appendThought(coder.name, { role: "system", color: "#7fd4ff", text: "⚡ Solo-loop — one agent, no orchestration" });
+        appendLog(coder.name, { role: coder.name, color: colorForAgent(coder), text: "" });
+        runTraceRef.current?.agents.set(coder.name, { domain: agentDomain(coder), runs: 1 });
+        const sIds = [
+          ...(roleByName.get(coder.base)?.skillAllowlist ?? []),
+          ...(coder.extraSkills ?? []),
+          ...(perAgentSkills.get(coder.name) ?? []),
+        ];
+        const sBlock = await buildAgentSkillBlock(sIds);
+        const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd);
+        const sAllowed = roleByName.get(coder.base)?.toolAllowlist;
+        const sMem = await loadAgentMemory(selectedProjectId, coder.name);
+        let sText = ""; let sGate: GateResult | null = null; let sPrev = "";
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          const turn = attempt === 1 ? text
+            : `Your previous change did NOT pass the project's verification:\n${renderGateLine(sGate!)}\n\nFix it so the check passes. Original task:\n${text}`;
+          try {
+            sText = (await streamChatCompletion(
+              port, modelFor(coder.name), providerFor(modelFor(coder.name)),
+              sPrompt, turn, tempFor(coder, 0.3), ctrl.signal,
+              (d) => streamLog(coder.name, d), projectCwd,
+              sMem.length > 0 ? sMem : undefined, autoApprove,
+              (c, r, d) => streamThought(coder.name, c, r, d), sAllowed, undefined,
+              getClaudeSession(selectedProjectId, coder.name),
+            )).trim();
+          } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }
+          sGate = await runGate(projectCwd, "full");
+          lastGateRef.current = sGate;
+          if (sGate.status !== "failed") break;
+          if (attempt >= 3) { appendThought(coder.name, { role: "system", color: "#ff8c8c", text: "⚠ verify still failing after 3 attempts — stopping." }); break; }
+          const fn = normalizeRunOutput((sGate.stderr || sGate.stdout || "") + sGate.exitCode);
+          if (fn === sPrev) { appendThought(coder.name, { role: "system", color: "#ff8c8c", text: "⚠ same failure twice — no progress; stopping." }); break; }
+          sPrev = fn;
+          appendThought(coder.name, { role: "system", color: "#ffb74d", text: `🔁 verify failed — retry ${attempt + 1}/3` });
+        }
+        ranWriteToolRef.current = true; // a solo coder run IS the write attempt; the gate decides "done"
+        removeActive(coder.name);
+        // RULE-BASED PUBLISH: host commits+bumps+releases deterministically when asked.
+        let sPub = "";
+        const wantsPublish = goalRequiresPublish(text);
+        if (wantsPublish) {
+          appendThought(coder.name, { role: "system", color: "#7ff0c5", text: "📦 rule-based publish — host building / signing / releasing…" });
+          try { sPub = await invoke<string>("finish_and_publish", { repoDir: projectCwd, notes: text.slice(0, 160) }); }
+          catch (e: any) { sPub = `PUBLISH_FAILED: ${String(e?.message ?? e)}`; }
+          const okPub = /PUBLISH_OK/.test(sPub);
+          appendLog("system", { role: "system", color: okPub ? "#7fd17f" : "#ff8c8c", text: `📦 ${sPub.slice(-1400)}` });
+        }
+        const sFinal = sText + (sPub ? `\n\n[host publish]\n${sPub.slice(-600)}` : "");
+        await appendAgentMemory(selectedProjectId, coder.name, text, sFinal);
+        await logTeamWork(coder.name, text, sFinal + (sGate && sGate.status !== "unverified" ? `\n[verify: ${sGate.status}]` : ""));
+        speakAgentReply(coder.name, sText);
+        setSupChat(prev => [...prev, { role: coder.name, color: colorForAgent(coder), text: sText, ts: Date.now() }]);
+        // Minimal solo run report.
+        const vtxt = sGate ? (sGate.status === "passed" ? "✓ verify passed" : sGate.status === "failed" ? "✗ verify FAILED" : "verify: unverified") : "ran";
+        const ptxt = wantsPublish ? (/PUBLISH_OK/.test(sPub) ? " · ✓ published" : " · ✗ publish failed") : "";
+        const okRun = (!sGate || sGate.status !== "failed") && (!wantsPublish || /PUBLISH_OK/.test(sPub));
+        const secs = Math.round((Date.now() - (runTraceRef.current?.t0 ?? Date.now())) / 1000);
+        setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now() }]);
+        setPhase("done");
+        setRunEndedAt(Date.now());
+        return;
+      }
+
       // ----- Phase 1: orchestrator plan + dispatches -----
       addActive(orch.name);
       // Parallel mode: load the (seeded, user-editable) parallel-dispatch skill so
@@ -11731,6 +11841,8 @@ export default function AgentsPage() {
             onToggleDirectorMode={() => setDirectorMode(!directorMode)}
             parallelMode={parallelMode}
             onToggleParallel={() => setParallelMode(!parallelMode)}
+            soloMode={soloMode}
+            onToggleSolo={() => setSoloMode(!soloMode)}
             agentLogs={agentLogs}
             agentThoughts={agentThoughts}
             runError={runError}

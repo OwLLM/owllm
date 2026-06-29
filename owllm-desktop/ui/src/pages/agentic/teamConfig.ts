@@ -83,6 +83,13 @@ export function classifyGoal(text: string): GoalKind {
   return "general";
 }
 
+/// True when the goal explicitly asks to PUBLISH/RELEASE/SHIP — the gate for the
+/// SOLO path's rule-based host publish, so the host only auto-releases when the
+/// user actually asked for it (never an unrequested public release).
+export function goalRequiresPublish(text: string): boolean {
+  return /\b(publish|releas\w*|ship\s+it|deploy)\b/i.test(text || "");
+}
+
 /// Classify a CANDIDATE agent's domain from its name/base — coder vs design vs
 /// docs vs ops — so routing can match a goal to the right kind of specialist.
 export type AgentDomain = "coder" | "design" | "docs" | "ops" | "other";

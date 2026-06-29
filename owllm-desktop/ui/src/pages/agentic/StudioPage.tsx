@@ -17,6 +17,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import SkillLibraryDialog from "./SkillLibraryDialog";
+import { skillIcon } from "./AgentsPage";
 import TeamWorkbench from "./TeamWorkbench";
 import { type ModelInfo, type AccountsStatusLite } from "./ModelPicker";
 import IconPickerDialog, {
@@ -1044,7 +1045,7 @@ function SkillCard({ skill, selected, onClick, accent }: {
           width: 40, height: 40, flexShrink: 0, fontSize: 21,
           display: "flex", alignItems: "center", justifyContent: "center",
           borderRadius: 10, background: `rgba(${rgb},0.16)`, border: `1px solid rgba(${rgb},0.45)`,
-        }}>📚</div>
+        }}>{skillIcon(skill.name)}</div>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div style={{ fontSize: 14, fontWeight: 700, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{skill.name}</div>
           <div style={{ fontSize: 10, color: accent, letterSpacing: 0.6, fontWeight: 700 }}>SKILL PACK · ~{ctxK}k ctx</div>

@@ -1474,7 +1474,7 @@ function hexToRgbStr(hex: string): string {
 // Emoji icon per skill, matched on id/name keywords (pptx→📊, pdf→📕…). Emoji
 // keeps it asset-free + cross-platform; the hover tooltip carries the real
 // names. Unknown skills fall back to a generic pack icon.
-function skillIcon(id: string): string {
+export function skillIcon(id: string): string {
   const s = id.toLowerCase();
   if (/pptx|powerpoint|slide|deck|present/.test(s)) return "📊";
   if (/\bpdf\b/.test(s)) return "📕";
@@ -1783,22 +1783,25 @@ function AgentChatTile({
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
         {/* The NAME is the editor handle: clicking it opens the per-agent
-            model/colour/prompt popup. Clicking anywhere else on the tile just
-            selects the agent so its chat shows. stopPropagation keeps the
-            tile's select-only click from also firing. */}
-        <div
-          role="button"
-          tabIndex={0}
-          title={`Edit ${displayLabel(name)} — model · colour · prompt`}
-          onClick={(e) => { e.stopPropagation(); onOpenEditor(); }}
-          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenEditor(); } }}
-          style={{
-            flex: 1, minWidth: 0,
-            color: "var(--fg-strong)", fontSize: 12, fontWeight: 700,
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-            cursor: "pointer", textDecoration: "underline", textDecorationColor: "rgba(255,255,255,0.25)", textUnderlineOffset: 2,
-          }}
-        >{displayLabel(name)}</div>
+            model/colour/prompt popup. The clickable element is an inline-block
+            sized to the name GLYPHS (not the full-width header row), so the
+            empty space beside the name falls through to the tile's select-only
+            click. stopPropagation keeps the tile click from also firing. */}
+        <div style={{ flex: 1, minWidth: 0, overflow: "hidden" }}>
+          <span
+            role="button"
+            tabIndex={0}
+            title={`Edit ${displayLabel(name)} — model · colour · prompt`}
+            onClick={(e) => { e.stopPropagation(); onOpenEditor(); }}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenEditor(); } }}
+            style={{
+              display: "inline-block", maxWidth: "100%", verticalAlign: "bottom",
+              color: "var(--fg-strong)", fontSize: 12, fontWeight: 700,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+              cursor: "pointer", textDecoration: "underline", textDecorationColor: "rgba(255,255,255,0.25)", textUnderlineOffset: 2,
+            }}
+          >{displayLabel(name)}</span>
+        </div>
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
             provider's brand colour (spec-allowed fallback). */}

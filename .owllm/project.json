@@ -1,6 +1,14 @@
 {
   "name": "OwLLM Desktop",
   "goal": "Local-LLM agentic-team desktop app (Tauri + React). Source stays PRIVATE (ruigro/LLM-Studio); releases publish to OwLLM/owllm.",
+  "verify": {
+    "command": "cd owllm-desktop && npm run build",
+    "lanes": {
+      "frontend": "cd owllm-desktop && npm run build",
+      "backend": "cd owllm-desktop/src-tauri && cargo check",
+      "full": "cd owllm-desktop && npm run build"
+    }
+  },
   "release": {
     "versionFile": "owllm-desktop/src-tauri/tauri.conf.json",
     "versionScheme": "odometer-100",

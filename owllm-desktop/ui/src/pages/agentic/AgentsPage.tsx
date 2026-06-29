@@ -467,6 +467,25 @@ function isNetworkAgentError(raw: unknown): boolean {
     low.includes("stream disconnected") || low.includes("failed to connect to websocket") ||
     low.includes("error sending request") || low.includes("dns");
 }
+/// True when text (a thrown error OR an agent's REPLY) is an auth/401 failure.
+/// Critical: a subscription-CLI 401 often comes back as exit-0 REPLY TEXT (not a
+/// thrown error), so it slips past the catch path and reads as a normal "done".
+/// Detect it in the reply so we can tell the user to re-login instead.
+function isAuthError(raw: unknown): boolean {
+  const low = String((raw as { message?: string })?.message ?? raw ?? "").toLowerCase();
+  return low.includes("401") || low.includes("invalid authentication")
+    || low.includes("failed to authenticate") || low.includes("authentication credentials")
+    || low.includes("unauthorized") || low.includes("not logged in")
+    || low.includes("please run /login") || low.includes("oauth token has expired")
+    || low.includes("session expired") || low.includes("invalid api key");
+}
+/// Plain, actionable re-login message — names the provider AND tells the user the
+/// exact step (a console opens, type /login). For non-experts who don't know the
+/// CLI's slash-command.
+function authReloginMessage(provider: string): string {
+  const p = provider && provider !== "local" ? provider : "the model";
+  return `⚠ ${p} is signed out — its login expired (401). Re-authenticate: Accounts page → Reconnect ${p} → a console opens, type  /login  and press Enter, finish in the browser, then run again.`;
+}
 function cleanAgentError(raw: unknown): string {
   const s = String((raw as { message?: string })?.message ?? raw ?? "").trim();
   const low = s.toLowerCase();
@@ -9969,6 +9988,7 @@ export default function AgentsPage() {
               getClaudeSession(selectedProjectId, coder.name),
             )).trim();
           } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }
+          if (isAuthError(sText)) break;  // 401 came back as reply text — don't gate/retry; handled below
           sGate = await runGate(projectCwd, "full");
           lastGateRef.current = sGate;
           if (sGate.status !== "failed") break;
@@ -9977,6 +9997,17 @@ export default function AgentsPage() {
           if (fn === sPrev) { appendThought(coder.name, { role: "system", color: "#ff8c8c", text: "⚠ same failure twice — no progress; stopping." }); break; }
           sPrev = fn;
           appendThought(coder.name, { role: "system", color: "#ffb74d", text: `🔁 verify failed — retry ${attempt + 1}/3` });
+        }
+        // AUTH FAILURE: a 401 means the agent did nothing — never report "done".
+        // Tell the user plainly to re-login (with the exact step), and stop.
+        if (isAuthError(sText)) {
+          removeActive(coder.name);
+          const m = authReloginMessage(providerFor(modelFor(coder.name)));
+          appendLog("system", { role: "system", color: "#ff8c8c", text: m });
+          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now() }]);
+          setRunError("Signed out (401) — re-login required.");
+          setPhase("done"); setRunEndedAt(Date.now());
+          return;
         }
         ranWriteToolRef.current = true; // a solo coder run IS the write attempt; the gate decides "done"
         removeActive(coder.name);
@@ -11162,6 +11193,15 @@ export default function AgentsPage() {
       // one-line report (PASS/FAIL vs the matching fixture), and persist it for
       // team.eval.run.mjs. Pure observation — wrapped so it can NEVER break a run.
       try {
+        // AUTH: a subscription-CLI 401 often comes back as the FINAL reply text
+        // (exit 0), so it reads as "done". Catch it and tell the user to re-login
+        // (with the exact step) instead of leaving a raw 401 in the transcript.
+        if (isAuthError(finalReply)) {
+          const am = authReloginMessage(providerFor(modelFor(orch.name)));
+          appendLog("system", { role: "system", color: "#ff8c8c", text: am });
+          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: am, ts: Date.now() }]);
+          setRunError("Signed out (401) — re-login required.");
+        }
         const rt = runTraceRef.current;
         if (rt) {
           const gk = classifyGoal(text);

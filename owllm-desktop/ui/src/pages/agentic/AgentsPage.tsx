@@ -1007,7 +1007,12 @@ function FlowHeader({
   canEdit, onDeleteEdge, onReverseEdge, onResetLayout,
   teamLabel, onOpenWorkbench,
   runStartedAt, runEndedAt,
+  soloMode, onToggleSolo,
 }: {
+  /// Solo-loop vs full-team toggle, shown right in the canvas header. Solo = one
+  /// agent edit→verify→fix + rule-based publish, no orchestration.
+  soloMode?: boolean;
+  onToggleSolo?: () => void;
   viewMode: "diagram" | "graph" | "chat";
   /// Three-state segmented switch — caller passes the target mode the
   /// user clicked. Replaces the binary toggle the page had before the
@@ -1118,6 +1123,22 @@ function FlowHeader({
             style={{ height:28, padding:"0 8px", fontSize:11 }}
           >⟲ Layout</button>
         </>
+      )}
+      {onToggleSolo && (
+        <button
+          data-ui="FlowSoloBtn"
+          className="ghost-btn"
+          onClick={onToggleSolo}
+          title={soloMode
+            ? "SOLO-LOOP is ON: one agent runs the task (edit → verify → fix) + rule-based host publish — no orchestrator/critic/red-team. Click to switch to the full Team."
+            : "TEAM (full orchestration). Click for SOLO-LOOP: one agent, fast, for simple tasks — and the host publishes by rule when you ask."}
+          style={{
+            height:28, padding:"0 10px", fontSize:11, fontWeight:700,
+            background: soloMode ? "rgba(127,212,255,0.20)" : undefined,
+            color: soloMode ? "#7fd4ff" : undefined,
+            border: soloMode ? "1px solid rgba(127,212,255,0.5)" : undefined,
+          }}
+        >{soloMode ? "⚡ Solo" : "👥 Team"}</button>
       )}
       <button
         data-ui="FlowMemoryBtn"
@@ -11742,6 +11763,8 @@ export default function AgentsPage() {
             onOpenWorkbench={() => setWorkbenchOpen(true)}
             runStartedAt={runStartedAt}
             runEndedAt={runEndedAt}
+            soloMode={soloMode}
+            onToggleSolo={() => setSoloMode(!soloMode)}
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>
             {viewMode === "diagram" ? (

@@ -277,6 +277,48 @@ export async function harvestMemoryWrites(reply: string): Promise<number> {
   return written;
 }
 
+/// A publish request the Publisher emits in its reply text, e.g.
+///   [PUBLISH notes="v0.6.89: fix X"]        — build → sign → gh release (real)
+///   [PUBLISH dry notes="..."]               — rehearse (build+sign, no release)
+/// We HARVEST it from the text (not as a tool call) because that is the ONE path
+/// that works for sandboxed CLI agents (Claude/Codex/Gemini) — their native
+/// tools never reach executeToolCall, so the publish_release tool is unreachable
+/// to them; the host reads the sentinel and runs the release ITSELF.
+export type PublishRequest = { notes: string; dryRun: boolean; draft: boolean };
+export function parsePublishRequest(reply: string): PublishRequest | null {
+  const m = /\[PUBLISH\b([^\]]*)\]/i.exec(reply || "");
+  if (!m) return null;
+  const attrs = m[1] || "";
+  const notesM = /notes\s*=\s*"([^"]*)"/i.exec(attrs) || /notes\s*=\s*'([^']*)'/i.exec(attrs);
+  return {
+    notes: notesM ? notesM[1].trim() : "",
+    dryRun: /\bdry(?:[-_]?run)?\b/i.test(attrs),
+    draft: /\bdraft\b/i.test(attrs),
+  };
+}
+
+/// Run a harvested publish request on the HOST via the publish_release command
+/// (which shells the vetted scripts/publish-release.sh: build → minisign →
+/// latest.json → gh release → verify). Returns the publish log (contains
+/// PUBLISH_OK / PUBLISH_DRYRUN_OK / PUBLISH_FAILED) or null when there was no
+/// request. Never throws — a failure comes back as PUBLISH_FAILED text so the
+/// agent/orchestrator can read it and react.
+export async function harvestPublishRequest(reply: string, cwd: string | null | undefined): Promise<string | null> {
+  const req = parsePublishRequest(reply);
+  if (!req) return null;
+  if (!cwd) return "PUBLISH_FAILED: no project folder set — cannot run the host release.";
+  try {
+    return await invoke<string>("publish_release", {
+      repoDir: cwd,
+      notes: req.notes || null,
+      dryRun: req.dryRun,
+      draft: req.draft,
+    });
+  } catch (e: any) {
+    return `PUBLISH_FAILED: ${String(e?.message ?? e)}`;
+  }
+}
+
 export type ToolCall = {
   name: string;
   args: Record<string, string>;

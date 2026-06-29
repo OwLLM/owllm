@@ -16,6 +16,7 @@ import {
   getTeamMemorySnapshot,
   refreshTeamMemorySnapshot,
   harvestMemoryWrites,
+  harvestPublishRequest,
   stripMemoryDirectives,
   formatToolsForOpenAI,
   unmangleMcpName,
@@ -3286,7 +3287,16 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         undefined,
         getClaudeSession(projectId, spec.name),
       );
-      const cleaned = specText.trim();
+      let cleaned = specText.trim();
+      // PUBLISH BRIDGE — see AgentsPage runAgent: a sandboxed CLI publisher can't
+      // reach the publish_release tool, so it emits `[PUBLISH …]` and the HOST
+      // runs the real signed release here. Gated to the publisher role.
+      const canPublish = spec.base === "publisher"
+        || (roleByName.get(spec.base)?.toolAllowlist ?? []).includes("publish_release");
+      if (canPublish) {
+        const pub = await harvestPublishRequest(cleaned, projectCwd);
+        if (pub) cleaned = `${cleaned}\n\n[host publish result]\n${pub.slice(-1600)}`;
+      }
       await appendAgentMemory(projectId, spec.name, instruction, cleaned);
       await logTeamWork(spec.name, instruction, cleaned); // shared work-state for the next agent
       hooks.onAgentReply(spec.name, cleaned);

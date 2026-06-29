@@ -79,7 +79,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, ensureAllSkillsInstalled } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
@@ -10419,15 +10419,34 @@ export default function AgentsPage() {
             appendThought(spec.name, { role: "system", color: "#ffb74d", text: `🔁 verify failed — re-attempting fix (${attempt + 1}/${MAX_FIX})` });
           }
           removeActive(spec.name);
+          // PUBLISH BRIDGE: a sandboxed CLI publisher CANNOT reach the
+          // publish_release tool (its native tools never hit executeToolCall), so
+          // it emits a `[PUBLISH …]` sentinel and the HOST runs the real signed
+          // release here — the same text-harvest path that makes [REMEMBER] work
+          // for CLI agents. Gated to the publisher role so a stray sentinel from
+          // another agent can't trigger a release.
+          let specOut = specText;
+          const canPublish = spec.base === "publisher"
+            || (roleByName.get(spec.base)?.toolAllowlist ?? []).includes("publish_release");
+          if (canPublish) {
+            // Publish from the MAIN repo, never a per-agent worktree.
+            const pub = await harvestPublishRequest(specText, projectCwd);
+            if (pub) {
+              const ok = /PUBLISH_OK|PUBLISH_DRYRUN_OK/.test(pub);
+              appendThought(spec.name, { role: "system", color: ok ? "#7fd17f" : "#ff8c8c", text: `📦 host publish:\n${pub.slice(-1400)}` });
+              specOut = `${specText}\n\n[host publish result]\n${pub.slice(-1600)}`;
+              if (/PUBLISH_OK/.test(pub)) ranWriteToolRef.current = true; // a real release counts as delivery
+            }
+          }
           // Persist this exchange so the next dispatch remembers it (per-agent).
-          await appendAgentMemory(selectedProjectId, spec.name, instruction, specText);
+          await appendAgentMemory(selectedProjectId, spec.name, instruction, specOut);
           // STRUCTURED HANDOFF (step 6): record what the agent did AND its grounded
           // lane-verify result (not the agent's claim) into the shared work-state, so
           // the next agent / the run report inherit the real outcome.
           const laneTag = finalGate && finalGate.status !== "unverified" ? `\n[lane verify: ${finalGate.status}]` : "";
-          await logTeamWork(spec.name, instruction, specText + laneTag);
+          await logTeamWork(spec.name, instruction, specOut + laneTag);
           speakAgentReply(spec.name, specText);
-          return { name: spec.name, text: specText };
+          return { name: spec.name, text: specOut };
         }
         // SUB-ORCHESTRATOR for a team leader: it plans over its OWN members (its
         // wired targets), dispatches them through the SAME runFrom handoff (so the

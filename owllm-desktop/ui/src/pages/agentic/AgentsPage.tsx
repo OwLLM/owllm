@@ -79,7 +79,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, ensureAllSkillsInstalled } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
@@ -8221,6 +8221,10 @@ export default function AgentsPage() {
   // Initial load — projects, teams, roles, bridges in parallel.
   useEffect(() => {
     let dead = false;
+    // Fresh-install convenience: pull the full curated skill library in the
+    // background — once per install, idempotent, retries on git/network failure.
+    // Non-blocking so it never delays the page coming up.
+    void ensureAllSkillsInstalled();
     (async () => {
       const [rawProjects, rawTeams, rawRoles, rawBridges, rawModels] = await Promise.all([
         invoke<ProjectRow[]>("list_projects").catch(() => [] as ProjectRow[]),

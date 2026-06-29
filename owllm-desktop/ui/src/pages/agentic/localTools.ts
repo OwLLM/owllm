@@ -187,6 +187,38 @@ export async function runGate(cwd: string, scope: GateScope = "full"): Promise<G
   };
 }
 
+/// One-time-per-install auto-install of the FULL curated skill library, so a
+/// fresh setup ships with every pack present — no need to open the Skill Library
+/// dialog. Idempotent: discover_skills reports `installed`, so we only install
+/// the missing ones. Fail-safe: if git is absent or the network is down, a fetch
+/// throws and we DON'T set the done-flag, so it simply retries next launch (the
+/// git-missing check returns instantly, so the retry is cheap). The bundled
+/// OwLLM packs are always available regardless (read from resources) — this only
+/// fills in the external curated sources (Anthropic, superpowers).
+export async function ensureAllSkillsInstalled(): Promise<{ installed: number; ok: boolean }> {
+  const FLAG = "owllm:skills-autoinstall-v1";
+  try { if (localStorage.getItem(FLAG) === "done") return { installed: 0, ok: true }; } catch { return { installed: 0, ok: true }; }
+  let installed = 0;
+  let hadError = false;
+  try {
+    const sources = await invoke<{ key: string; git_url: string }[]>("list_skill_sources");
+    for (const src of sources) {
+      try {
+        await invoke("fetch_skill_source", { key: src.key, gitUrl: src.git_url, force: false });
+        const found = await invoke<{ relative_dir: string; installed: boolean }[]>("discover_skills", { key: src.key });
+        for (const sk of found) {
+          if (sk.installed) continue;
+          try { await invoke("install_skill", { sourceKey: src.key, relativeDir: sk.relative_dir }); installed++; }
+          catch { hadError = true; } // one bad pack shouldn't abort the rest
+        }
+      } catch { hadError = true; } // git missing / offline → retry next launch
+    }
+  } catch { hadError = true; }
+  // Mark done only on a clean pass, so transient git/network failures retry.
+  if (!hadError) { try { localStorage.setItem(FLAG, "done"); } catch { /* private mode */ } }
+  return { installed, ok: !hadError };
+}
+
 export type MemoryDirective = { content: string; key: string; tags: string };
 
 /// A fresh `[REMEMBER ...]` matcher each call — a global regex carries lastIndex

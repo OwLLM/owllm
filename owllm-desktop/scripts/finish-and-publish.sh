@@ -27,8 +27,22 @@ cd "$REPO"
 
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
 
-CONF="$APP/src-tauri/tauri.conf.json"
-[ -f "$CONF" ] || fail "tauri.conf.json not found at $CONF"
+# --- Project Card (.owllm/project.json): per-project release config so this works
+#     for ANY project on ANY OS, not just this repo. Defaults preserve the OwLLM
+#     behaviour, so a card-less repo still publishes exactly as before. ---
+CARD="$REPO/.owllm/project.json"
+VERSION_FILE="owllm-desktop/src-tauri/tauri.conf.json"
+STAGE_PATH="owllm-desktop"
+PUBLISH_CMD='bash "owllm-desktop/scripts/publish-release.sh" --notes "$OWLLM_RELEASE_NOTES"'
+if [ -f "$CARD" ]; then
+  _rd() { CARD="$CARD" K="$1" node -e 'try{const r=(require(process.env.CARD).release)||{};process.stdout.write(String(r[process.env.K]||""))}catch{}'; }
+  vf="$(_rd versionFile)"; sp="$(_rd stagePath)"; pc="$(_rd command)"
+  [ -n "$vf" ] && VERSION_FILE="$vf"
+  [ -n "$sp" ] && STAGE_PATH="$sp"
+  [ -n "$pc" ] && PUBLISH_CMD="$pc"
+fi
+CONF="$REPO/$VERSION_FILE"
+[ -f "$CONF" ] || fail "version file '$VERSION_FILE' not found — set release.versionFile in .owllm/project.json"
 
 # 1. Bump the patch version (string-replace to preserve formatting; rule-based rollover).
 CUR="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$CONF")"
@@ -50,7 +64,7 @@ MSG="v$NEW: $NOTES"
 
 # 2. Stage ONLY the app dir (keeps root junk — .claude/, scratch icons — out of the
 #    release commit, per the audit rule), commit if there's anything, push the branch.
-git add -- "$APP" || fail "git add failed"
+git add -- "$REPO/$STAGE_PATH" || fail "git add failed"
 if ! git diff --cached --quiet; then
   git commit -q -m "$MSG" || fail "git commit failed"
   echo "committed $(git rev-parse --short HEAD)"
@@ -65,5 +79,8 @@ git tag -a "v$NEW" -m "$MSG" || fail "git tag v$NEW failed (already exists?)"
 git push -q origin "v$NEW" || fail "git push tag v$NEW failed"
 echo "tagged v$NEW"
 
-# 4. Canonical build → sign → gh release → verify.
-bash "$APP/scripts/publish-release.sh" --notes "$NOTES"
+# 4. Run the project's publish command (default = the canonical OwLLM
+#    publish-release.sh: build → sign → gh release → verify). The notes are passed
+#    via $OWLLM_RELEASE_NOTES so any project's command can use them.
+export OWLLM_RELEASE_NOTES="$NOTES"
+( cd "$REPO" && bash -c "$PUBLISH_CMD" ) || fail "publish command failed: $PUBLISH_CMD"

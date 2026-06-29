@@ -41,6 +41,21 @@ export function parseVerifyConfig(text: string | null | undefined): VerifyConfig
   return null;
 }
 
+/// Extract the verify config from a Project Card (.owllm/project.json). The card's
+/// `verify` section uses the SAME {command, lanes} shape as verify.json, so the gate
+/// treats it identically — the card is just the single committed place a project can
+/// declare its rules (goal/release/verify) instead of a separate file. null when the
+/// card is absent/malformed or has no `verify` section.
+export function parseCardVerify(text: string | null | undefined): VerifyConfig | null {
+  if (!text || !text.trim()) return null;
+  try {
+    const j = JSON.parse(text);
+    const v = j && typeof j === "object" ? (j as any).verify : null;
+    if (v && typeof v === "object") return v as VerifyConfig;
+  } catch { /* malformed card → unconfigured (honest 'unverified', not a guess) */ }
+  return null;
+}
+
 /// Pick the command for a scope: the lane command if defined, else the top-level
 /// `command` as the fallback. "" when nothing is configured → the run is unverified.
 export function pickGateCommand(cfg: VerifyConfig | null | undefined, scope: GateScope): string {
@@ -102,7 +117,7 @@ export function detectVerifyCommand(probe: ProjectProbe | null | undefined): str
 /// One-line human summary for the Run Report / logs.
 export function renderGateLine(g: GateResult): string {
   if (g.status === "unverified") {
-    return "🔍 verify: UNVERIFIED — no .owllm/verify.json and no build/test command could be auto-detected. Set a Verify command in project settings (or add .owllm/verify.json, e.g. {\"command\":\"npm run build\"}) to ground \"done\".";
+    return "🔍 verify: UNVERIFIED — no verify command configured (.owllm/project.json `verify`, .owllm/verify.json) and none could be auto-detected. Add a verify command to the Project Card (e.g. \"verify\": {\"command\":\"npm run build\"}) to ground \"done\".";
   }
   const how = g.detected ? " (auto-detected)" : "";
   if (g.status === "passed") return `✓ verify passed${how} — \`${g.command}\``;

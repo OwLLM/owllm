@@ -26,7 +26,7 @@ import {
 import { bumpActivity } from "../../support/activityStats";
 import { loadSkillByRef, skillCatalogBrief, anySkillInstalled } from "./skillRuntime";
 import { formatWorkLogEntry, renderRelevantWork } from "./teamMemoryFormat";
-import { parseVerifyConfig, pickGateCommand, classifyGateStatus, detectVerifyCommand, type GateResult, type GateScope } from "./gate";
+import { parseVerifyConfig, parseCardVerify, pickGateCommand, classifyGateStatus, detectVerifyCommand, type GateResult, type GateScope } from "./gate";
 
 /// Built-in tools that let an agent manage its OWN skills at runtime. These
 /// bypass the role tool_allowlist (skills are a separate capability axis from
@@ -148,6 +148,13 @@ export async function runGate(cwd: string, scope: GateScope = "full"): Promise<G
   try { cfgText = await invoke<string>("tool_read_file", { path: ".owllm/verify.json", cwd }); } catch { /* none */ }
   let command = pickGateCommand(parseVerifyConfig(cfgText), scope);
   let detected = false;
+  // Next: the Project Card (.owllm/project.json) `verify` section — the single
+  // committed place a project declares its rules. Same {command,lanes} shape; the
+  // dedicated verify.json still wins if both exist (more specific, purpose-built).
+  if (!command) {
+    const cardText = await probeRead(".owllm/project.json", cwd);
+    command = pickGateCommand(parseCardVerify(cardText), scope);
+  }
   // No explicit config → sniff the project's marker files and infer a cheap
   // check, so the gate works out-of-the-box instead of sitting "unverified"
   // forever (which is what made the loop never engage by default).

@@ -9979,6 +9979,11 @@ export default function AgentsPage() {
         const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd);
         const sAllowed = roleByName.get(coder.base)?.toolAllowlist;
         const sMem = await loadAgentMemory(selectedProjectId, coder.name);
+        // Scope the gate to the coder's domain (mirrors the team path) so the card's
+        // frontend/backend lanes apply — a UI edit runs the fast frontend check, a
+        // backend edit runs the heavier backend one, not always "full".
+        const sScope: GateScope = /front|\bui\b|web/i.test(coder.name) ? "frontend"
+          : /back|api|server|\bdb\b|data|rust/i.test(coder.name) ? "backend" : "full";
         let sText = ""; let sGate: GateResult | null = null; let sPrev = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
           const turn = attempt === 1 ? text
@@ -9994,7 +9999,7 @@ export default function AgentsPage() {
             )).trim();
           } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }
           if (isAuthError(sText)) break;  // 401 came back as reply text — don't gate/retry; handled below
-          sGate = await runGate(projectCwd, "full");
+          sGate = await runGate(projectCwd, sScope);
           lastGateRef.current = sGate;
           if (sGate.status !== "failed") break;
           if (attempt >= 3) { appendThought(coder.name, { role: "system", color: "#ff8c8c", text: "⚠ verify still failing after 3 attempts — stopping." }); break; }

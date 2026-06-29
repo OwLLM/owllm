@@ -185,7 +185,14 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.6.87** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.7.3** releases.
+
+### 📇 The Project Card — your project's rules in one committed file (0.7.0 → 0.7.3)
+One file, `.owllm/project.json`, holds **how this project is built**: its goal, the **verify** command(s) that ground "done", and the **release** config. It's committed, so the rules **travel with the repo** — every machine, every teammate, every OS uses the same ones — with sensible defaults so existing projects keep working untouched.
+- **⚡ Solo or 👥 Team — your call, in the canvas header.** **Solo** runs *one* coder in a tight **edit → verify → fix** loop with no orchestration — right for a one-line change or a quick fix. **Team** is the full adaptive orchestration. Per-project, remembered.
+- **Releases that actually finish — by rule, not by vibes.** When a goal says "publish", the release runs **deterministically** on the host: bump the version (rolls at 100), commit, tag, build, sign, create the GitHub release, verify the updater. No more an agent *claiming* it shipped and then deferring the real push. The whole pipeline is driven by the card, so it works for **any** project.
+- **The Steward — a teammate that keeps the card honest.** Add it to a team and it **reviews the Project Card against the real repo** and flags incongruences *before* a run wastes a token: a publish goal with no release config, a verify command that can't run here, a version file that doesn't exist — and, hardest, a card that says the **source is private while the remote is public**. Detection is **rule-based** (27 unit tests), not the model guessing; it proposes the smallest fix for **you to approve**.
+- **Grounded "done", from the card.** The Verification Gate now reads its command straight from the card's `verify` section (with the same auto-detect + honest "unverified" fallback), so a fresh clone is grounded with zero setup.
 
 ### 🧪 Agentic teams, rebuilt on evidence (0.6.78 → 0.6.81)
 After a deep, citation-backed review of how agentic systems actually succeed and fail (Agentless, mini-swe-agent, Anthropic's multi-agent research, MAST's failure taxonomy, the "self-correction needs an oracle" results), we rebuilt the team engine around one principle: **an agent never grades its own work.**

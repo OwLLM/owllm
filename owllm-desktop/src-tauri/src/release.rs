@@ -115,8 +115,9 @@ pub async fn finish_and_publish(repo_dir: String, notes: Option<String>) -> Resu
         let bash = which_bash();
         let mut cmd = Command::new(&bash);
         cmd.args(&args);
-        // Run in the repo so git operations target the right tree.
-        cmd.current_dir(&repo_dir);
+        // NO current_dir: repo_dir can be a WSL/posix path Windows can't cd into
+        // (os error 267). finish-and-publish.sh cd's to the repo itself (from its
+        // own BASH_SOURCE path), exactly like publish_release does.
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;

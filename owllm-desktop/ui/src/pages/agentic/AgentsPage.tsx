@@ -9956,8 +9956,13 @@ export default function AgentsPage() {
       // and — RULE-BASED, host-side — publishes deterministically if the goal asks.
       // Isolated early-return so the team path below is byte-for-byte untouched.
       if (soloMode) {
-        const coder = bestAgentForGoal(runTeam.agents, text, roleByName)
-          ?? runTeam.agents.find(a => agentDomain(a) === "coder")
+        // Pick a coder that can ACTUALLY WRITE — never the orchestrator (read-only:
+        // it would just emit a @dispatch the solo path doesn't execute) or the
+        // read-only critic. bestAgentForGoal over the writers only.
+        const writers = runTeam.agents.filter(a => a.name !== orch.name && roleCanWrite(roleByName.get(a.base)));
+        const coder = bestAgentForGoal(writers, text, roleByName)
+          ?? writers.find(a => agentDomain(a) === "coder")
+          ?? writers[0]
           ?? runTeam.agents.find(a => a.name !== orch.name)
           ?? orch;
         appendLog("you", { role: "you", color: "#9ad9ff", text });

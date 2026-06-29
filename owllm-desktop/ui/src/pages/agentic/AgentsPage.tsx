@@ -85,6 +85,7 @@ import {
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
+import { parseAgentPrompt, serializeAgentPrompt } from "./agentPrompt";
 import { renderGateLine, type GateResult, type GateScope } from "./gate";
 import { normalizeTeam, roleCanWrite, classifyGoal, bestAgentForGoal, agentDomain,
   criticIsSatisfied, criticRefused, criticConcluded, parseCriticVerdict, toolRoleIsWrite,
@@ -2071,7 +2072,13 @@ function AgentEditorModal({
 }) {
   const [model, setModel] = useState(initialModel);
   const [color, setColor] = useState(initialColor);
-  const [prompt, setPrompt] = useState(initialPrompt);
+  // Prompt is stored as ONE `extra_prompt` markdown string but edited as four
+  // labelled sections — seed them once from the saved value, serialize on save.
+  const seeded = useMemo(() => parseAgentPrompt(initialPrompt), [initialPrompt]);
+  const [general, setGeneral] = useState(seeded.general);
+  const [mission, setMission] = useState(seeded.mission);
+  const [rules, setRules] = useState(seeded.rules);
+  const [dod, setDod] = useState(seeded.dod);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -2101,6 +2108,7 @@ function AgentEditorModal({
       const out: any = { ...arr[idx] };
       if (model.trim()) out.default_model_id = model.trim(); else delete out.default_model_id;
       if (color.trim()) out.color = color.trim(); else delete out.color;
+      const prompt = serializeAgentPrompt({ general, mission, rules, dod });
       if (prompt.trim()) out.extra_prompt = prompt; else delete out.extra_prompt;
       arr[idx] = out;
       data.agents = arr;
@@ -2202,21 +2210,37 @@ function AgentEditorModal({
           </div>
         </div>
 
-        {/* Prompt */}
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {/* Prompt — four structured sections, persisted as one `extra_prompt`
+            markdown string (## General / ## Mission / ## Rules / ## Definition
+            of Done). Empty sections are dropped on save. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           <span style={lbl}>Prompt (augments this agent's role)</span>
-          <textarea
-            value={prompt}
-            onChange={e => setPrompt(e.target.value)}
-            placeholder="Extra instructions layered on top of this agent's base role prompt at dispatch…"
-            rows={8}
-            style={{
-              width: "100%", boxSizing: "border-box", resize: "vertical",
-              padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border-strong)",
-              background: "var(--bg-input)", color: "var(--fg)", fontSize: 13,
-              fontFamily: "Segoe UI, sans-serif", lineHeight: 1.5,
-            }}
-          />
+          {[
+            { label: "General (freeform)", value: general, set: setGeneral, rows: 3,
+              placeholder: "Extra instructions layered on top of this agent's base role prompt at dispatch…" },
+            { label: "Mission", value: mission, set: setMission, rows: 4,
+              placeholder: "What this agent is here to achieve — its objective on the team." },
+            { label: "Rules", value: rules, set: setRules, rows: 4,
+              placeholder: "Hard constraints — what it must always / never do." },
+            { label: "Definition of Done", value: dod, set: setDod, rows: 3,
+              placeholder: "How to know the work is complete — the bar to clear before handing back." },
+          ].map(({ label, value, set, rows, placeholder }) => (
+            <div key={label} style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+              <span style={{ ...lbl, fontSize: 9.5 }}>{label}</span>
+              <textarea
+                value={value}
+                onChange={e => set(e.target.value)}
+                placeholder={placeholder}
+                rows={rows}
+                style={{
+                  width: "100%", boxSizing: "border-box", resize: "vertical",
+                  padding: "8px 10px", borderRadius: 8, border: "1px solid var(--border-strong)",
+                  background: "var(--bg-input)", color: "var(--fg)", fontSize: 13,
+                  fontFamily: "Segoe UI, sans-serif", lineHeight: 1.5,
+                }}
+              />
+            </div>
+          ))}
         </div>
 
         {err && (

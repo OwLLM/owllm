@@ -1470,6 +1470,54 @@ function hexToRgbStr(hex: string): string {
   return `${r},${g},${b}`;
 }
 
+// --- Skill badges -------------------------------------------------------
+// Emoji icon per skill, matched on id/name keywords (pptx→📊, pdf→📕…). Emoji
+// keeps it asset-free + cross-platform; the hover tooltip carries the real
+// names. Unknown skills fall back to a generic pack icon.
+function skillIcon(id: string): string {
+  const s = id.toLowerCase();
+  if (/pptx|powerpoint|slide|deck|present/.test(s)) return "📊";
+  if (/\bpdf\b/.test(s)) return "📕";
+  if (/docx|\bword\b|coauthor|document/.test(s)) return "📝";
+  if (/xlsx|excel|spreadsheet|sheet/.test(s)) return "📈";
+  if (/code.?review|(^|_|-)review/.test(s)) return "🔍";
+  if (/debug/.test(s)) return "🐞";
+  if (/research/.test(s)) return "🔬";
+  if (/plan|decompos/.test(s)) return "🗺️";
+  if (/release|publish|ship|changelog/.test(s)) return "🚀";
+  if (/tech.?writ|writing/.test(s)) return "✍️";
+  if (/engineer|craft/.test(s)) return "🛠️";
+  if (/brainstorm|idea/.test(s)) return "💡";
+  if (/\btest|qa|webapp.?test/.test(s)) return "🧪";
+  if (/\bapi\b|mcp|builder/.test(s)) return "🔌";
+  if (/brand|canvas|design|art|theme/.test(s)) return "🎨";
+  if (/web|frontend|html|artifact/.test(s)) return "🌐";
+  if (/slack|comm|message|gif/.test(s)) return "💬";
+  if (/parallel|dispatch|orchestr/.test(s)) return "🔀";
+  if (/skill.?creat|template|tutor|learn/.test(s)) return "🧰";
+  if (/docs|documentation/.test(s)) return "📚";
+  return "📦";
+}
+// "anthropics__pdf" → "Pdf"; "code-review" → "Code Review". Tooltip label.
+function skillShortName(id: string): string {
+  const base = id.includes("__") ? id.split("__").pop()! : id;
+  return base.replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+// An agent's equipped skill ids — role allowlist + team extras + per-project
+// grant, deduped. The SAME sources buildSpecialistPrompt injects, so the badge
+// reflects exactly what the agent actually has equipped.
+function resolveAgentSkillIds(
+  a: AgentSpec,
+  roleByName: Map<string, RoleData>,
+  perAgentSkills?: Map<string, string[]>,
+): string[] {
+  return [...new Set([
+    ...(roleByName.get(a.base)?.skillAllowlist ?? []),
+    ...(a.extraSkills ?? []),
+    ...(perAgentSkills?.get(a.name) ?? []),
+  ])].filter(Boolean);
+}
+
 // AgentChatGrid — per-agent chat windows tiled into a square grid in
 // the right half of the page. Opened from the ▦ button on the left
 // of the SuperUserCard header. Each tile is a mini live log for one
@@ -1480,9 +1528,13 @@ function hexToRgbStr(hex: string): string {
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
   selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, agentTiming,
+  perAgentSkills,
 }: {
   team: Team | null;
   roleByName: Map<string, RoleData>;
+  /// Per-agent skill grants (project overrides) — combined with each agent's
+  /// role + team skills to render the skill badges on every tile.
+  perAgentSkills?: Map<string, string[]>;
   agentLogs: Map<string, GoalMsg[]>;
   activeAgents: Set<string>;
   agentIconOverrides: Record<string, string>;
@@ -1607,6 +1659,7 @@ function AgentChatGrid({
             alphaA={alphaA}
             alphaB={alphaB}
             timing={agentTiming?.get(a.name)}
+            skills={resolveAgentSkillIds(a, roleByName, perAgentSkills)}
           />
         );
       })}
@@ -1622,10 +1675,13 @@ function AgentChatTile({
   isActive, isSelected, accent, onClick, onOpenEditor,
   modelLabel, modelTint,
   ringPx, outerPx, alphaA, alphaB,
-  timing,
+  timing, skills,
 }: {
   name: string;
   icon: string;
+  /// This agent's equipped skill ids — rendered as a corner "ribbon" of icon
+  /// badges (hover for the named list). Empty/undefined = no badge.
+  skills?: string[];
   messages: GoalMsg[];
   isActive: boolean;
   /// This agent's cumulative working time this run (ticks while active).
@@ -1654,6 +1710,7 @@ function AgentChatTile({
   alphaB: number;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [showSkills, setShowSkills] = useState(false); // skill-badge hover → named list
   useTick(timing?.activeSince != null); // tick this card's clock while it's working
   const elapsedMs = agentElapsedMs(timing);
   const tailSig = `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}`;
@@ -1677,14 +1734,13 @@ function AgentChatTile({
   ), [messages]);
   return (
     <div
-      title={`Click to open ${displayLabel(name)}'s editor (model · colour · prompt) and view its chat`}
+      title={`Click to view ${displayLabel(name)}'s chat — click the name to edit model · colour · prompt`}
       onClick={() => {
-        onClick(); // preserve: select this agent for the workspace chat pane
-        // Don't pop the editor while the user is dragging to select transcript
-        // text inside the tile — same guard the auto-scroll effect uses.
-        const sel = window.getSelection?.();
-        if (sel && !sel.isCollapsed) return;
-        onOpenEditor();
+        // Clicking the tile body ONLY selects this agent for the workspace
+        // chat pane — it no longer pops the editor. The editor used to open
+        // on any tile click and covered the chat, so the chat "never
+        // appeared"; it now opens only from the name (see header below).
+        onClick();
       }}
       style={{
         minWidth: 0, minHeight: 0,
@@ -1707,6 +1763,7 @@ function AgentChatTile({
         display: "flex", flexDirection: "column",
         overflow: "hidden",
         cursor: "pointer",
+        position: "relative",
         transition: "border-color 120ms, box-shadow 120ms",
       }}
     >
@@ -1725,11 +1782,23 @@ function AgentChatTile({
         flexShrink: 0,
       }}>
         <img src={owlSrc(icon)} style={{ width: 22, height: 22, objectFit: "contain" }} />
-        <div style={{
-          flex: 1, minWidth: 0,
-          color: "var(--fg-strong)", fontSize: 12, fontWeight: 700,
-          overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-        }}>{displayLabel(name)}</div>
+        {/* The NAME is the editor handle: clicking it opens the per-agent
+            model/colour/prompt popup. Clicking anywhere else on the tile just
+            selects the agent so its chat shows. stopPropagation keeps the
+            tile's select-only click from also firing. */}
+        <div
+          role="button"
+          tabIndex={0}
+          title={`Edit ${displayLabel(name)} — model · colour · prompt`}
+          onClick={(e) => { e.stopPropagation(); onOpenEditor(); }}
+          onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenEditor(); } }}
+          style={{
+            flex: 1, minWidth: 0,
+            color: "var(--fg-strong)", fontSize: 12, fontWeight: 700,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+            cursor: "pointer", textDecoration: "underline", textDecorationColor: "rgba(255,255,255,0.25)", textUnderlineOffset: 2,
+          }}
+        >{displayLabel(name)}</div>
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
             provider's brand colour (spec-allowed fallback). */}
@@ -1813,6 +1882,63 @@ function AgentChatTile({
           })
         )}
       </div>
+      {/* Skill ribbon — a corner stack of skill icons (like a soldier's
+          badges). Hover the corner → the full named list. Shows what this
+          agent has equipped; lit whether it's mid-run or idle. */}
+      {skills && skills.length > 0 && (
+        <div
+          onMouseEnter={() => setShowSkills(true)}
+          onMouseLeave={() => setShowSkills(false)}
+          onClick={(e) => e.stopPropagation()}
+          title={`Skills: ${skills.map(skillShortName).join(", ")}`}
+          style={{
+            position: "absolute", bottom: 6, right: 6, zIndex: 4,
+            display: "flex", flexDirection: "row-reverse", alignItems: "flex-end", gap: 1,
+          }}
+        >
+          {skills.slice(0, 5).map((id, i) => (
+            <span
+              key={id}
+              style={{
+                fontSize: 11, width: 18, height: 18,
+                display: "inline-flex", alignItems: "center", justifyContent: "center",
+                background: "rgba(8,11,17,0.78)", border: `1px solid rgba(${rgb},0.6)`,
+                borderRadius: 4,
+                transform: `rotate(-12deg) translateY(${i * -1}px)`, // diagonal medal-row
+                boxShadow: "0 1px 3px rgba(0,0,0,0.5)",
+              }}
+            >{skillIcon(id)}</span>
+          ))}
+          {skills.length > 5 && (
+            <span style={{
+              fontSize: 9, fontWeight: 800, color: "var(--fg-muted)",
+              alignSelf: "center", padding: "0 2px",
+            }}>+{skills.length - 5}</span>
+          )}
+          {showSkills && (
+            <div style={{
+              position: "absolute", bottom: 24, right: 0, zIndex: 6,
+              minWidth: 150, maxWidth: 210,
+              background: "rgba(10,13,20,0.98)", border: `1px solid rgba(${rgb},0.6)`,
+              borderRadius: 8, padding: "7px 9px", boxShadow: "0 6px 20px rgba(0,0,0,0.6)",
+            }}>
+              <div style={{
+                fontSize: 9, fontWeight: 800, letterSpacing: 0.4, textTransform: "uppercase",
+                color: "var(--fg-muted)", marginBottom: 5,
+              }}>Skills ({skills.length})</div>
+              {skills.map((id) => (
+                <div key={id} style={{
+                  display: "flex", alignItems: "center", gap: 7,
+                  fontSize: 11.5, color: "var(--fg-strong)", padding: "2px 0",
+                }}>
+                  <span style={{ width: 15, textAlign: "center", flexShrink: 0 }}>{skillIcon(id)}</span>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{skillShortName(id)}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -10857,6 +10983,11 @@ export default function AgentsPage() {
 
   function onCancel() {
     abortRef.current?.abort();
+    // Also abort the SOLO-CHAT controller. A solo orchestrator chat runs on
+    // supSendAbortRef (NOT abortRef), so aborting only abortRef left that run
+    // going and Cancel looked dead/slow. Mirror the owllm:dispatch-abort
+    // handler: abort whichever controller is live.
+    try { supSendAbortRef.current?.abort(); } catch { /* already aborted */ }
     // Also abort via the module-scoped registry: if this run was started
     // before a page change, the remounted page's `abortRef` is null but the
     // original controller is still in the registry, so Cancel can reach it.
@@ -11396,6 +11527,7 @@ export default function AgentsPage() {
                 modelFor={modelFor}
                 providerFor={providerFor}
                 agentTiming={agentTiming}
+                perAgentSkills={perAgentSkills}
               />
             )}
             {/* (The bottom-left canvas voice overlay was removed — the

@@ -15,6 +15,8 @@ import { isolationBadge } from "./isolationBadge";
 import { isWslPath } from "./wslIsolation";
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
 import { parseVerifyConfig } from "./gate";
+import { parseProjectCard, renderCardFindings, type CardFinding, type ProjectCard } from "./cardLint";
+import { runCardLint } from "./localTools";
 
 type Team = {
   id: string; name: string; display: string; category: string;
@@ -94,9 +96,21 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [actBusy, setActBusy] = useState<string | null>(null);
   const [actMsg, setActMsg] = useState<string | null>(null);
-  // The team's "done" check (.owllm/verify.json `command`). Blank = auto-detect.
-  const [verifyCmd, setVerifyCmd] = useState("");
-  const [verifyMsg, setVerifyMsg] = useState<string | null>(null);
+  // --- Project Card (.owllm/project.json) — the one committed file holding this
+  // project's goal / verify / release / mode, edited right here so it's visible.
+  const [cardRaw, setCardRaw] = useState<ProjectCard | null>(null);   // parsed card (preserves unknown fields on save)
+  const [cardExists, setCardExists] = useState(false);
+  const [cardGoal, setCardGoal] = useState("");
+  const [cardVerify, setCardVerify] = useState("");                  // verify.command
+  const [cardMode, setCardMode] = useState("");                      // "", "solo", "team"
+  const [relVersionFile, setRelVersionFile] = useState("");
+  const [relStagePath, setRelStagePath] = useState("");
+  const [relCommand, setRelCommand] = useState("");
+  const [showRelease, setShowRelease] = useState(false);
+  const [legacyVerifyJson, setLegacyVerifyJson] = useState(false);   // a separate .owllm/verify.json exists (takes precedence)
+  const [cardBusy, setCardBusy] = useState<string | null>(null);
+  const [cardMsg, setCardMsg] = useState<string | null>(null);
+  const [findings, setFindings] = useState<CardFinding[] | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -117,20 +131,42 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, project?.id]);
 
-  // Pre-fill the Verify command from the project's existing .owllm/verify.json
-  // (top-level `command`). Blank when there's none — the gate auto-detects then.
+  // Load the Project Card (.owllm/project.json) into the editor fields. Falls back
+  // to a legacy .owllm/verify.json for the verify command (and flags it, since that
+  // file takes precedence over the card in the gate). Blank everywhere → no card yet.
   useEffect(() => {
     if (!open || mode === "new") return;
     const cwd = effectiveCwd || location;
-    setVerifyCmd(""); setVerifyMsg(null);
+    setCardRaw(null); setCardExists(false); setCardGoal(""); setCardVerify("");
+    setCardMode(""); setRelVersionFile(""); setRelStagePath(""); setRelCommand("");
+    setShowRelease(false); setLegacyVerifyJson(false); setCardMsg(null); setFindings(null);
     if (!cwd) return;
     let live = true;
     (async () => {
+      let card: ProjectCard | null = null;
       try {
-        const txt = await invoke<string>("tool_read_file", { path: ".owllm/verify.json", cwd });
-        const cmd = parseVerifyConfig(txt)?.command ?? "";
-        if (live) setVerifyCmd(cmd);
-      } catch { /* no file yet → leave blank (auto-detect) */ }
+        const txt = await invoke<string>("tool_read_file", { path: ".owllm/project.json", cwd });
+        card = parseProjectCard(txt);
+      } catch { /* no card yet */ }
+      let legacyCmd = "";
+      try {
+        const vtxt = await invoke<string>("tool_read_file", { path: ".owllm/verify.json", cwd });
+        legacyCmd = parseVerifyConfig(vtxt)?.command ?? "";
+      } catch { /* no legacy verify.json */ }
+      if (!live) return;
+      if (card) {
+        setCardRaw(card); setCardExists(true);
+        setCardGoal(card.goal ?? "");
+        setCardVerify(card.verify?.command ?? legacyCmd);
+        setCardMode(card.mode ? String(card.mode) : "");
+        setRelVersionFile(card.release?.versionFile ?? "");
+        setRelStagePath(card.release?.stagePath ?? "");
+        setRelCommand(card.release?.command ?? "");
+        if (card.release && (card.release.versionFile || card.release.command)) setShowRelease(true);
+      } else {
+        setCardVerify(legacyCmd);
+      }
+      setLegacyVerifyJson(!!legacyCmd);
     })();
     return () => { live = false; };
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -191,22 +227,53 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     finally { setActBusy(null); }
   };
 
-  // Persist the team's "done" check to <project>/.owllm/verify.json. A blank
-  // command writes `{}` so the gate falls back to auto-detecting one from the
-  // project's markers (rather than leaving a stale command behind).
-  const saveVerify = async () => {
+  // Persist the Project Card to <project>/.owllm/project.json. Merges the edited
+  // fields into the existing card object so unknown keys (name, _note, verify.lanes…)
+  // survive. Empty sections are omitted so the card stays clean.
+  const saveCard = async () => {
     const cwd = effectiveCwd || location;
-    if (!cwd) { setVerifyMsg("Pick a project folder first."); return; }
-    setActBusy("verify-cmd"); setVerifyMsg(null);
+    if (!cwd) { setCardMsg("Pick a project folder first."); return; }
+    setCardBusy("save"); setCardMsg(null);
     try {
-      const cmd = verifyCmd.trim();
-      const content = cmd ? JSON.stringify({ command: cmd }, null, 2) + "\n" : "{}\n";
-      await invoke("tool_write_file", { path: ".owllm/verify.json", content, cwd });
-      setVerifyMsg(cmd
-        ? `✓ Saved — the team verifies "done" by running \`${cmd}\`.`
-        : "✓ Cleared — the team will auto-detect a check from the project.");
-    } catch (e: any) { setVerifyMsg(`Save failed: ${e?.message ?? e}`); }
-    finally { setActBusy(null); }
+      const card: ProjectCard = { ...(cardRaw ?? {}) };
+      const goal = cardGoal.trim();
+      if (goal) card.goal = goal; else delete card.goal;
+      if (cardMode) card.mode = cardMode; else delete card.mode;
+
+      const vc = cardVerify.trim();
+      if (vc) card.verify = { ...(card.verify ?? {}), command: vc };
+      else if (card.verify) { delete card.verify.command; if (!card.verify.lanes || !Object.keys(card.verify.lanes).length) delete card.verify; }
+
+      const vf = relVersionFile.trim(), sp = relStagePath.trim(), rc = relCommand.trim();
+      if (vf || sp || rc) {
+        card.release = { ...(card.release ?? {}) };
+        if (vf) card.release.versionFile = vf; else delete card.release.versionFile;
+        if (sp) card.release.stagePath = sp; else delete card.release.stagePath;
+        if (rc) card.release.command = rc; else delete card.release.command;
+        if (!Object.keys(card.release).length) delete card.release;
+      } else { delete card.release; }
+
+      const content = JSON.stringify(card, null, 2) + "\n";
+      await invoke("tool_write_file", { path: ".owllm/project.json", content, cwd });
+      setCardRaw(card); setCardExists(true);
+      setCardMsg(legacyVerifyJson && vc
+        ? "✓ Card saved. NOTE: a legacy .owllm/verify.json also exists and TAKES PRECEDENCE for verify — delete it to let the card's verify apply."
+        : "✓ Project Card saved to .owllm/project.json — it's committed with the repo and used on every machine.");
+    } catch (e: any) { setCardMsg(`Save failed: ${e?.message ?? e}`); }
+    finally { setCardBusy(null); }
+  };
+
+  // Run the Steward's deterministic lint against the saved card + repo and show the
+  // findings inline (the same check that runs at the start of a team run).
+  const reviewCard = async () => {
+    const cwd = effectiveCwd || location;
+    if (!cwd) { setCardMsg("Pick a project folder first."); return; }
+    setCardBusy("review"); setCardMsg(null); setFindings(null);
+    try {
+      const { findings } = await runCardLint(cwd);
+      setFindings(findings);
+    } catch (e: any) { setCardMsg(`Review failed: ${e?.message ?? e}`); }
+    finally { setCardBusy(null); }
   };
 
   // ---- isolation actions (moved here off the toolbar) ----
@@ -360,20 +427,84 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                 {!fullAccess && <button type="button" onClick={onToggleFullAccess} title="Let this project's agents run OUTSIDE the sandbox. Use only for projects you trust." style={{ height: 24, padding: "2px 8px", background: "var(--bg-elevated)", color: "var(--fg-muted)", border: "1px solid var(--border-strong)", borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: "pointer" }}>🔓 Full access…</button>}
               </div>
             </div>
-            {/* Verify command — how the team proves "done" (.owllm/verify.json) */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <label style={LBL}>Verify command <span style={{ opacity: 0.6, fontWeight: 400 }}>— how the team proves a change is “done”</span></label>
-              <div style={{ display: "flex", gap: 8 }}>
-                <input value={verifyCmd} onChange={e => setVerifyCmd(e.target.value)}
-                  onKeyDown={e => { if (e.key === "Enter") saveVerify(); }}
-                  placeholder="auto-detected — e.g. npm run build · cargo check · pytest -q"
-                  style={{ ...INPUT, flex: 1 }} />
-                <button onClick={saveVerify} className="ghost-btn" disabled={actBusy === "verify-cmd"} style={{ height: 38, padding: "0 14px" }}>{actBusy === "verify-cmd" ? "Saving…" : "Save"}</button>
+            {/* 📇 Project Card — .owllm/project.json: the one committed file holding
+                this project's goal / verify / release / mode. Edited here so it's
+                visible, and reviewed by the Steward's deterministic lint. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, borderRadius: 10, background: "var(--bg-elevated)", border: "1px solid var(--border)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <label style={{ ...LBL, flex: 1 }}>📇 Project Card <span style={{ opacity: 0.6, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— the rules that travel with this repo (<code>.owllm/project.json</code>)</span></label>
+                {cardExists
+                  ? <span style={{ fontSize: 10.5, color: "#7fd17f", fontWeight: 700 }}>● committed</span>
+                  : <span style={{ fontSize: 10.5, color: "var(--fg-muted)", fontWeight: 700 }}>○ not created yet</span>}
               </div>
+
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={LBL}>Goal</label>
+                <textarea value={cardGoal} onChange={e => setCardGoal(e.target.value)} rows={2}
+                  placeholder="What this project is, in one or two lines — the team reads this."
+                  style={{ ...INPUT, height: "auto", padding: "8px 12px", resize: "vertical", minHeight: 40 }} />
+              </div>
+
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: "2 1 240px" }}>
+                  <label style={LBL}>Verify command <span style={{ opacity: 0.6, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— proves a change is “done”</span></label>
+                  <input value={cardVerify} onChange={e => setCardVerify(e.target.value)}
+                    onKeyDown={e => { if (e.key === "Enter") saveCard(); }}
+                    placeholder="auto-detected — e.g. npm run build · cargo check · pytest -q"
+                    style={{ ...INPUT, flex: 1 }} />
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: "1 1 120px" }}>
+                  <label style={LBL}>Default mode</label>
+                  <select value={cardMode} onChange={e => setCardMode(e.target.value)} style={INPUT}>
+                    <option value="">(unset)</option>
+                    <option value="team">👥 Team</option>
+                    <option value="solo">⚡ Solo</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Release (publishing) — power-user, collapsed by default */}
+              <button type="button" onClick={() => setShowRelease(v => !v)}
+                style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--fg-muted)", fontSize: 12, cursor: "pointer", padding: 0 }}>
+                {showRelease ? "▾" : "▸"} Release (rule-based publish)
+              </button>
+              {showRelease && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingLeft: 12, borderLeft: "2px solid var(--border)" }}>
+                  <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+                    When a goal says “publish”, the release runs by rule on the host: bump → commit → tag → build → release → verify.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={LBL}>Version file</label>
+                    <input value={relVersionFile} onChange={e => setRelVersionFile(e.target.value)} placeholder="e.g. package.json · src-tauri/tauri.conf.json" style={INPUT} />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={LBL}>Stage path <span style={{ opacity: 0.6, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— dir to commit for the release</span></label>
+                    <input value={relStagePath} onChange={e => setRelStagePath(e.target.value)} placeholder="e.g. . · owllm-desktop" style={INPUT} />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={LBL}>Publish command</label>
+                    <input value={relCommand} onChange={e => setRelCommand(e.target.value)} placeholder='e.g. bash scripts/publish.sh --notes "$OWLLM_RELEASE_NOTES"' style={INPUT} />
+                  </div>
+                </div>
+              )}
+
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={saveCard} disabled={!!cardBusy} className="ghost-btn" style={{ height: 36, padding: "0 16px", fontWeight: 700 }}>{cardBusy === "save" ? "Saving…" : (cardExists ? "Save card" : "Create card")}</button>
+                <button onClick={reviewCard} disabled={!!cardBusy} className="ghost-btn" style={{ height: 36, padding: "0 14px" }} title="Run the Steward's deterministic lint against the card + repo">{cardBusy === "review" ? "Reviewing…" : "🔍 Review"}</button>
+              </div>
+
               <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-                The coder runs this after editing; it’s “done” only when the command exits 0. Stored as <code>.owllm/verify.json</code>. Leave blank to auto-detect from the project (package.json / Cargo.toml / pyproject / go.mod).
+                Stored as <code>.owllm/project.json</code> and committed with the repo, so every machine and teammate uses the same rules. Leave verify blank to auto-detect from the project.
               </div>
-              {verifyMsg && <div style={{ fontSize: 12, color: verifyMsg.startsWith("✓") ? "#7fd17f" : "#ff8c8c" }}>{verifyMsg}</div>}
+              {cardMsg && <div style={{ fontSize: 12, color: cardMsg.startsWith("✓") ? "#7fd17f" : "#ff8c8c", whiteSpace: "pre-wrap" }}>{cardMsg}</div>}
+
+              {findings && (
+                <div style={{ fontSize: 12, color: "var(--fg)", whiteSpace: "pre-wrap", lineHeight: 1.5, background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px" }}>
+                  {findings.filter(f => f.severity !== "info").length === 0
+                    ? "✓ Project Card looks congruent with the repo."
+                    : renderCardFindings(findings.filter(f => f.severity !== "info"))}
+                </div>
+              )}
             </div>
             {/* Team template (canvas) + Bridge */}
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>

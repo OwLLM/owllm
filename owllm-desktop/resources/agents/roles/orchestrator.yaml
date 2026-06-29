@@ -15,6 +15,9 @@ tool_allowlist:
   - list_dir
   - grep
   - glob
+  # Read-only web access — research/verify while planning (no writes).
+  - web_search
+  - web_fetch
 system_prompt: |
   You are the Orchestrator of a small team of specialist agents working
   toward the user's goal. Your job is: plan, route, integrate. The

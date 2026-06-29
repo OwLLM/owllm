@@ -9,6 +9,9 @@ skills:
 tool_allowlist:
   - read_file
   - list_dir
+  - grep
+  - web_search
+  - web_fetch
 system_prompt: |
   You are the Critic / Critical Thinker. You brainstorm with the
   Orchestrator and push back on its plan to make it sharper. You are

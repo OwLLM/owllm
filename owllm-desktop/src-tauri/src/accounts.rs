@@ -1425,18 +1425,31 @@ pub enum ClaudeStreamEvent {
 /// verify, ssh_*) — they're silently dropped so the role still works
 /// when the dispatch resolves to the CLI subscription.
 fn map_owllm_tool_to_cli(name: &str) -> Option<&'static str> {
+    // The KEYS here must match the real tool names emitted by localTools.ts
+    // (executeToolCall cases) — not aliases. A mismatch silently drops the tool
+    // from the CLI agent's --allowedTools, so the capability vanishes with no
+    // error (this bit `glob` and `web_fetch`, which the coder/orchestrator/
+    // brainstormer roles rely on). Claude's native tool names are the values.
     match name {
         "read_file" => Some("Read"),
         "edit_file" => Some("Edit"),
-        "write_file_with_diff" => Some("Write"),
-        "list_dir" | "glob_files" => Some("Glob"),
+        "write_file_with_diff" | "write_file" => Some("Write"),
+        "list_dir" | "glob_files" | "glob" => Some("Glob"),
         "grep" => Some("Grep"),
-        "shell" => Some("Bash"),
+        "shell" | "shell_exec" => Some("Bash"),
+        "create_dir" => Some("Bash"), // no dedicated CLI mkdir tool — Bash covers it
         "todo_write" => Some("TodoWrite"),
-        "http_get" => Some("WebFetch"),
+        "http_get" | "web_fetch" => Some("WebFetch"),
         "web_search" | "search_web" => Some("WebSearch"),
-        // OWLLM-internal control tools — no CLI counterpart.
-        "dispatch" | "verify" | "ssh_exec" | "ssh_upload" | "ssh_download" => None,
+        // OWLLM-only tools with NO Claude-CLI counterpart — silently dropped so
+        // the role still works on the CLI path. NOTE: load_skill/list_skills are
+        // covered by disk self-load (.owllm/skills), publish_release by the
+        // [PUBLISH] host-harvest, and memory by snapshot-inject + [REMEMBER].
+        // STILL UNBRIDGED for CLI: screenshot_url, memory_search/read (on-demand),
+        // ssh_* — these genuinely don't work for a CLI agent yet.
+        "dispatch" | "verify" | "ssh" | "ssh_exec" | "ssh_upload" | "ssh_download"
+        | "screenshot_url" | "memory_read" | "memory_search" | "memory_write"
+        | "load_skill" | "list_skills" | "publish_release" => None,
         _ => None,
     }
 }

@@ -23,6 +23,10 @@ import IconPickerDialog, {
 } from "./IconPickerDialog";
 import ModelPicker, { AccountsStatusLite } from "./ModelPicker";
 import {
+  OpenAILogo, AnthropicLogo, GeminiLogo, DeepSeekLogo,
+  XaiLogo, MoonshotLogo, MistralLogo,
+} from "../advanced/brandLogos";
+import {
   type VoiceConfig,
   DEFAULT_VOICE,
   listVoices as listTtsVoices,
@@ -1475,6 +1479,13 @@ function modelChipFor(modelId: string, provider?: string): { lab: string; tint: 
   const tint = LAB_TINT[lab] ?? (provider ? PROVIDER_TINT[provider] : undefined) ?? "#9db4dc";
   return { lab, tint };
 }
+// Research-lab brand mark per lab NAME, for the model chip. Labs without a
+// dedicated mark are absent here and fall back to the compact lab-name text —
+// the chip never renders blank.
+const LAB_LOGO: Record<string, React.FC<{ size?: number; color?: string }>> = {
+  OpenAI: OpenAILogo, Anthropic: AnthropicLogo, Google: GeminiLogo,
+  DeepSeek: DeepSeekLogo, xAI: XaiLogo, Moonshot: MoonshotLogo, Mistral: MistralLogo,
+};
 
 // Tile arrangement for a 4-column grid. Spatial layout the user spec'd:
 //
@@ -1878,20 +1889,24 @@ function AgentChatTile({
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
             provider's brand colour (spec-allowed fallback). */}
-        {modelLabel && (
-          <span
-            title={`Model: ${modelTitle || modelLabel}`}
-            style={{
-              fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
-              color: modelTint,
-              background: "rgba(0,0,0,0.30)",
-              border: `1px solid ${modelTint}66`,
-              borderRadius: 4, padding: "1px 6px",
-              maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-              flexShrink: 0,
-            }}
-          >{modelLabel}</span>
-        )}
+        {modelLabel && (() => {
+          const Logo = LAB_LOGO[modelLabel];
+          return (
+            <span
+              title={`Model: ${modelTitle || modelLabel}`}
+              style={{
+                display: "inline-flex", alignItems: "center",
+                fontSize: 9, fontWeight: 700, letterSpacing: 0.3,
+                color: modelTint,
+                background: "rgba(0,0,0,0.30)",
+                border: `1px solid ${modelTint}66`,
+                borderRadius: 4, padding: "1px 6px",
+                maxWidth: 110, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                flexShrink: 0,
+              }}
+            >{Logo ? <Logo size={14} color={modelTint} /> : modelLabel}</span>
+          );
+        })()}
         {/* Per-agent working time — to the RIGHT of the name. Green while this
             agent is active, muted once it's done; shows cumulative work time. */}
         {elapsedMs > 0 && (
@@ -4138,14 +4153,18 @@ function GraphCanvas({
                 const shortDesc = desc.length > 70 ? desc.slice(0, 67) + "…" : desc;
                 const modelId = modelFor(n.name);
                 const modelLab = modelLabFor(modelId);
+                const ModelLogo = LAB_LOGO[modelLab];
+                const modelLabTint = LAB_TINT[modelLab] ?? "var(--fg)";
                 return (
                   <div style={{ display:"flex", flexDirection:"column", gap:3, marginTop:2, paddingTop:6, borderTop:"1px solid rgba(255,255,255,0.06)" }}>
                     <div style={{ display:"flex", justifyContent:"space-between", gap:6, fontSize:10, color:"var(--fg-muted)", letterSpacing:0.3 }}>
                       <span style={{ overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap", textTransform:"capitalize" }} title={n.spec.base}>{n.spec.base}</span>
                       <span style={{ flexShrink:0 }}>· {temp} temp</span>
                     </div>
-                    <div style={{ fontSize:10, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={modelId || "(no model)"}>
-                      🧠 {modelLab || "(no model)"}
+                    <div style={{ display:"flex", alignItems:"center", gap:4, fontSize:10, color:"var(--fg)", overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }} title={modelId || "(no model)"}>
+                      {ModelLogo
+                        ? <ModelLogo size={12} color={modelLabTint} />
+                        : <span>🧠 {modelLab || "(no model)"}</span>}
                     </div>
                     {shortDesc && (
                       <div style={{ fontSize:10, color:"var(--fg-subtle)", lineHeight:1.3, display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical", overflow:"hidden" }} title={desc}>

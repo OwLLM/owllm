@@ -83,7 +83,8 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
+import { renderCardFindings } from "./cardLint";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { parseAgentPrompt, serializeAgentPrompt } from "./agentPrompt";
 import { renderGateLine, type GateResult, type GateScope } from "./gate";
@@ -9950,6 +9951,24 @@ export default function AgentsPage() {
     }
 
     try {
+      // ===== Project Card review (rule-based, runs on every provider) =====
+      // Lint the card against the repo up front so a broken card (publish goal but
+      // no release config, a missing versionFile, a PRIVATE source on a PUBLIC
+      // remote) is surfaced BEFORE the run spends tokens — not after a failed
+      // publish. Detection is deterministic (cardLint.ts); the Steward agent, if on
+      // the team, then reasons about + proposes fixes the user approves. Best-effort,
+      // never blocks a run.
+      if (projectCwd) {
+        try {
+          const { findings } = await runCardLint(projectCwd);
+          const actionable = findings.filter(f => f.severity !== "info");
+          if (actionable.length) {
+            appendLog("system", { role: "system", color: "#ffb74d",
+              text: "🗂️ Project Card review:\n" + renderCardFindings(actionable) });
+          }
+        } catch { /* card lint is best-effort — never block a run on it */ }
+      }
+
       // ===== SOLO-LOOP fast path (canvas header toggle) =====
       // The honest implementation of the documented "solo agent + loop": ONE coder
       // runs the task in an edit→verify→fix loop with NO orchestrator/critic/red_team,

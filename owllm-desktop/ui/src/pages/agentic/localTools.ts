@@ -27,6 +27,7 @@ import { bumpActivity } from "../../support/activityStats";
 import { loadSkillByRef, skillCatalogBrief, anySkillInstalled } from "./skillRuntime";
 import { formatWorkLogEntry, renderRelevantWork } from "./teamMemoryFormat";
 import { parseVerifyConfig, parseCardVerify, pickGateCommand, classifyGateStatus, detectVerifyCommand, type GateResult, type GateScope } from "./gate";
+import { parseProjectCard, lintProjectCard, type CardFinding, type CardFacts } from "./cardLint";
 
 /// Built-in tools that let an agent manage its OWN skills at runtime. These
 /// bypass the role tool_allowlist (skills are a separate capability axis from
@@ -192,6 +193,64 @@ export async function runGate(cwd: string, scope: GateScope = "full"): Promise<G
     command, cwd, scope, exitCode, stdout, stderr, detected,
     startedAt, finishedAt: new Date().toISOString(), captured: true,
   };
+}
+
+/// Run the Project Card linter at `cwd` (the wired half of cardLint.ts). Reads
+/// .owllm/project.json, gathers the repo facts the pure linter needs — but only the
+/// ones it can determine CONFIDENTLY (unknowns stay null so the linter skips them,
+/// never warning on a guess) — and returns the findings. Best-effort; never throws.
+/// This is the Steward's deterministic backbone: detection is rule-based here, the
+/// agent only proposes fixes the user approves.
+export async function runCardLint(cwd: string): Promise<{ findings: CardFinding[]; cardText: string | null }> {
+  const cardText = await probeRead(".owllm/project.json", cwd);
+  const card = parseProjectCard(cardText);
+  const facts: CardFacts = {};
+
+  if (card?.release?.versionFile) {
+    facts.versionFileExists = (await probeRead(card.release.versionFile, cwd)) != null;
+  }
+  if (card?.release?.stagePath) {
+    try { await invoke("tool_list_dir", { path: card.release.stagePath, cwd }); facts.stagePathExists = true; }
+    catch { facts.stagePathExists = false; }
+  }
+
+  // Toolchain markers: only assert them when NO verify command cd's into a subdir —
+  // otherwise the marker really lives elsewhere (e.g. OwLLM's verify cds into
+  // owllm-desktop/) and a root-level check would false-positive. cd present → leave
+  // the facts null so toolchainMismatch is skipped.
+  const cmds: string[] = [];
+  if (card?.verify?.command) cmds.push(card.verify.command);
+  if (card?.verify?.lanes) for (const k of Object.keys(card.verify.lanes)) cmds.push(card.verify.lanes[k]);
+  const anyCd = cmds.some(c => /(^|\s|&&|;)\s*cd\s+/.test(c || ""));
+  if (cmds.length && !anyCd) {
+    const [pkg, cargo, py, pyini, go] = await Promise.all([
+      probeRead("package.json", cwd), probeRead("Cargo.toml", cwd),
+      probeRead("pyproject.toml", cwd), probeRead("pytest.ini", cwd), probeRead("go.mod", cwd),
+    ]);
+    facts.hasPackageJson = pkg != null;
+    facts.hasCargo = cargo != null;
+    facts.hasPyproject = py != null || pyini != null;
+    facts.hasGoMod = go != null;
+  }
+
+  // Public/private of the origin remote — best-effort via gh (cross-platform). Only
+  // used by the #1 standing rule (private source must never sit on a public remote),
+  // so ONLY pay the network call when the card actually claims "private" — otherwise
+  // skip it (no gh latency on the common run). Unknown/unavailable → null → the rule
+  // is skipped (honest, never a guess).
+  const claimsPrivate = /\bprivate\b/i.test(
+    `${card?.goal ?? ""}\n${Array.isArray(card?.rules) ? card!.rules.join("\n") : (card?.rules ?? "")}`);
+  if (claimsPrivate) {
+    try {
+      const r = await invoke<{ stdout: string; stderr: string; exitCode: number }>(
+        "tool_shell_exec", { command: "gh repo view --json visibility -q .visibility", cwd });
+      const vis = (r?.stdout || "").trim().toUpperCase();
+      if (vis === "PUBLIC") facts.remoteIsPublic = true;
+      else if (vis === "PRIVATE" || vis === "INTERNAL") facts.remoteIsPublic = false;
+    } catch { /* gh missing/offline → leave null */ }
+  }
+
+  return { findings: lintProjectCard(card, facts), cardText };
 }
 
 /// One-time-per-install auto-install of the FULL curated skill library, so a

@@ -1024,7 +1024,6 @@ function agentElapsedMs(t: AgentTiming | undefined): number {
 // and the editable graph (mirrors agents_page.py:_on_view_toggle).
 function FlowHeader({
   viewMode, onSetView,
-  canEdit, onDeleteEdge, onReverseEdge, onResetLayout,
   teamLabel, onOpenWorkbench,
   runStartedAt, runEndedAt,
   soloMode, onToggleSolo,
@@ -1039,10 +1038,6 @@ function FlowHeader({
   /// 2026-05-28 restructure that added the per-agent chat grid as a
   /// canvas mode.
   onSetView: (m: "diagram" | "graph" | "chat") => void;
-  canEdit: boolean;
-  onDeleteEdge: () => void;
-  onReverseEdge: () => void;
-  onResetLayout: () => void;
   /// The team this project runs. Rendered as a clickable chip next to the
   /// title that opens the full Team Workbench (roles + arrows + skills).
   teamLabel?: string | null;
@@ -1072,9 +1067,6 @@ function FlowHeader({
       >{label}</button>
     );
   };
-  // Edge-edit buttons only make sense in graph mode; collapse them
-  // to invisible in the other modes so the toolbar reads cleaner.
-  const showEditBtns = viewMode === "graph";
   return (
     <div style={{ position:"relative", display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
       <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Orchestrated Workflow</div>
@@ -1117,33 +1109,6 @@ function FlowHeader({
         </button>
       )}
       <div style={{ flex:1 }} />
-      {showEditBtns && (
-        <>
-          <button
-            data-ui="FlowDeleteEdgeBtn"
-            className="ghost-btn"
-            onClick={onDeleteEdge}
-            disabled={!canEdit}
-            title="Delete the selected edge (or press Delete)"
-            style={{ height:28, padding:"0 8px", fontSize:11, opacity: canEdit ? 1 : 0.45, cursor: canEdit ? "pointer" : "not-allowed" }}
-          >✕ Edge</button>
-          <button
-            data-ui="FlowReverseEdgeBtn"
-            className="ghost-btn"
-            onClick={onReverseEdge}
-            disabled={!canEdit}
-            title="Reverse the direction of the selected edge"
-            style={{ height:28, padding:"0 8px", fontSize:11, opacity: canEdit ? 1 : 0.45, cursor: canEdit ? "pointer" : "not-allowed" }}
-          >⇄ Reverse</button>
-          <button
-            data-ui="FlowLayoutBtn"
-            className="ghost-btn"
-            onClick={onResetLayout}
-            title="Reset positions to the auto-layout (top-down hierarchical, orchestrator on top, then specialists in rows by dispatch distance)"
-            style={{ height:28, padding:"0 8px", fontSize:11 }}
-          >⟲ Layout</button>
-        </>
-      )}
       {onToggleSolo && (
         <button
           data-ui="FlowSoloBtn"
@@ -8953,22 +8918,6 @@ export default function AgentsPage() {
     return withSyntheticCritic({ ...base, edges: currentEdges });
   }, [activeTeam, currentEdges, perAgentColor]);
 
-  const deleteSelectedEdge = () => {
-    if (selectedEdgeIdx == null) return;
-    const next = currentEdges.slice();
-    next.splice(selectedEdgeIdx, 1);
-    setEditedEdges(next);
-    setSelectedEdgeIdx(null);
-  };
-  const reverseSelectedEdge = () => {
-    if (selectedEdgeIdx == null) return;
-    const next = currentEdges.slice();
-    const e = next[selectedEdgeIdx];
-    next[selectedEdgeIdx] = { source: e.target, target: e.source };
-    setEditedEdges(next);
-  };
-  const resetGraphLayout = () => setNodePositions(null);
-
   // ----- Per-agent log mutation helpers -----
   // Append a fresh entry to a given agent's buffer.
   const appendLog = (agent: string, msg: GoalMsg) => {
@@ -11824,10 +11773,6 @@ export default function AgentsPage() {
           <FlowHeader
             viewMode={viewMode}
             onSetView={setViewMode}
-            canEdit={viewMode === "graph" && selectedEdgeIdx != null}
-            onDeleteEdge={deleteSelectedEdge}
-            onReverseEdge={reverseSelectedEdge}
-            onResetLayout={resetGraphLayout}
             teamLabel={activeTeamTemplate?.display ?? null}
             onOpenWorkbench={() => setWorkbenchOpen(true)}
             runStartedAt={runStartedAt}

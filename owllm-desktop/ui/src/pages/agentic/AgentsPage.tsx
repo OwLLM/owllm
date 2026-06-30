@@ -9046,12 +9046,18 @@ export default function AgentsPage() {
     // the specialists run, and the Critical Thinker is consulted. Without
     // this, the chat hit a lone tool-using assistant that never dispatched
     // and never involved the critic — the "orchestrator does nothing" bug.
-    // Text-only for now; image chats keep the single-assistant path.
-    if (text.trim() && images.length === 0 && activeTeam) {
+    // TEAM fan-out doesn't carry images to specialists, so an image-bearing
+    // TEAM chat stays on the single-assistant path (images.length === 0 gate).
+    // SOLO mode is ONE coder that CAN take the image AND owns the rule-based
+    // publish — so it MUST route through dispatchGoal even with an image.
+    // Otherwise attaching a picture silently diverted the run to the read-only
+    // single-assistant orchestrator below, skipping the solo-loop's publish
+    // (the "I said publish but it switched to the orchestrator" bug).
+    if (text.trim() && activeTeam && (soloMode || images.length === 0)) {
       const orchSpec = findOrchestratorSpec(activeTeam);
       const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
-      if (hasSpecialists) {
-        console.log("[onSupSend] team chat → dispatchGoal", { agents: activeTeam.agents.length });
+      if (soloMode || hasSpecialists) {
+        console.log("[onSupSend] chat → dispatchGoal", { solo: soloMode, images: images.length, agents: activeTeam.agents.length });
         // Hold the dock-busy flag for the WHOLE team dispatch. Previously the
         // team branch left supSendBusy untouched, so (a) the Stop button never
         // showed and (b) the dock's own busy guards were inert — a second Enter
@@ -9069,10 +9075,13 @@ export default function AgentsPage() {
           // bug (the solo path below already did this; the team path didn't).
           const priorHistory = chatToHistory(supChat);
           // Echo the user's message into the chat thread (dispatchGoal logs
-          // it to the agent buffers, not supChat), then run the team.
-          const echo: GoalMsg = { role: "you", color: "#9ad9ff", text, ts: Date.now(), seq: nextSeq() };
+          // it to the agent buffers, not supChat), then run. Mark any attached
+          // images so the echoed turn matches what the single-assistant path shows.
+          const echo: GoalMsg = { role: "you", color: "#9ad9ff",
+            text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
+            ts: Date.now(), seq: nextSeq() };
           setSupChat(prev => [...prev, echo]);
-          await dispatchGoal(text, priorHistory);
+          await dispatchGoal(text, priorHistory, images);
         } finally {
           supSendBusyRef.current = false;
           setSupSendBusy(false);
@@ -9670,7 +9679,7 @@ export default function AgentsPage() {
   //   3. Integrate — orchestrator gets one more turn with all replies
   // Each phase streams into the matching per-agent log buffer; the
   // canvas's `activeAgent` highlights whichever agent is on stage.
-  async function dispatchGoal(overrideText?: string, priorHistory?: HistoryItem[]) {
+  async function dispatchGoal(overrideText?: string, priorHistory?: HistoryItem[], attachments: Attachment[] = []) {
     setRunError(null);
     // overrideText is passed when the SuperUser CHAT routes a message
     // through the team flow (so the orchestrator dispatches instead of
@@ -9962,7 +9971,8 @@ export default function AgentsPage() {
               sPrompt, turn, tempFor(coder, 0.3), ctrl.signal,
               (d) => streamLog(coder.name, d), projectCwd,
               sMem.length > 0 ? sMem : undefined, autoApprove,
-              (c, r, d) => streamThought(coder.name, c, r, d), sAllowed, undefined,
+              (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
+              attachments.length > 0 ? attachments : undefined,
               getClaudeSession(selectedProjectId, coder.name),
             )).trim();
           } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }

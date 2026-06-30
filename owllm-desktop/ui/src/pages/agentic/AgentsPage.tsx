@@ -797,59 +797,15 @@ function computeDepths(team: Team): Map<string, number> {
   return out;
 }
 
-// GoalRow — agents_page.py:1757-1910. 📎 attach, goal input, Run,
-// Cancel, 📊 telemetry, 🔊 voice with ▾ menu caret. Images + audio
-// can be attached via the 📎 button (file picker) or dropped onto the
-// input. Each attachment becomes a chip rendered just under the row.
+// GoalRow — a compact toolbar above the canvas. Hosts the project cluster
+// (leftSlot: dropdown + ⚙ settings + New), 🧠 Brainstorm, Cancel, and the
+// 🔊 voice control. The goal text box, 📎 attach, Run and 📊 telemetry
+// controls were removed (v0.7.10): the chat dock at the bottom of the pane
+// is now the single goal-entry surface (it carries history + slash commands
+// + its own image attach), and 📊 had no panel wired behind it.
 
-const MAX_ATTACH_BYTES = 20 * 1024 * 1024; // 20 MB per file, in-memory base64
-
-function mimeFromFilename(name: string): string | null {
-  const ext = name.toLowerCase().split(".").pop() ?? "";
-  if (ext === "jpg" || ext === "jpeg") return "image/jpeg";
-  if (ext === "png") return "image/png";
-  if (ext === "gif") return "image/gif";
-  if (ext === "webp") return "image/webp";
-  if (ext === "heic") return "image/heic";
-  if (ext === "mp3") return "audio/mpeg";
-  if (ext === "wav") return "audio/wav";
-  if (ext === "ogg" || ext === "oga" || ext === "opus") return "audio/ogg";
-  if (ext === "m4a" || ext === "aac") return "audio/aac";
-  if (ext === "webm") return "audio/webm";
-  if (ext === "flac") return "audio/flac";
-  return null;
-}
-
-/// Browser File -> Attachment. Reads as base64 via FileReader. Throws
-/// when the MIME isn't image/* or audio/*, or when the file exceeds
-/// MAX_ATTACH_BYTES (would balloon the request body unmanageably).
-async function fileToAttachment(file: File): Promise<Attachment> {
-  if (file.size > MAX_ATTACH_BYTES) {
-    throw new Error(`${file.name} is ${(file.size / 1024 / 1024).toFixed(1)} MB — limit is ${MAX_ATTACH_BYTES / 1024 / 1024} MB.`);
-  }
-  const mime = file.type || mimeFromFilename(file.name) || "application/octet-stream";
-  const kind: "image" | "audio" =
-    mime.startsWith("image/") ? "image"
-    : mime.startsWith("audio/") ? "audio"
-    : (() => { throw new Error(`Unsupported file type: ${mime || "(unknown)"} — pick an image or audio file.`); })();
-  // FileReader.readAsDataURL → "data:<mime>;base64,<payload>". We only
-  // want the base64 payload so the carrier stays uniform across
-  // browser-attached files and Telegram-downloaded bytes.
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result));
-    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
-    fr.readAsDataURL(file);
-  });
-  const comma = dataUrl.indexOf(",");
-  const data_b64 = comma >= 0 ? dataUrl.slice(comma + 1) : "";
-  return { kind, mime, data_b64, filename: file.name };
-}
-
-function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachments, onBrainstorm, hasBrief, brainstormReady, leftSlot }: {
-  goal: string; setGoal: (g: string) => void;
-  onRun: () => void; onCancel: () => void; busy: boolean;
-  attachments: Attachment[]; setAttachments: (a: Attachment[]) => void;
+function GoalRow({ onCancel, busy, onBrainstorm, hasBrief, brainstormReady, leftSlot }: {
+  onCancel: () => void; busy: boolean;
   /// Compact project cluster (project dropdown + ⚙ settings + New) rendered at
   /// the START of the run row, so the whole top is a SINGLE line.
   leftSlot?: React.ReactNode;
@@ -863,72 +819,10 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
   /// away). False → the 🧠 button opens Project settings instead.
   brainstormReady?: boolean;
 }) {
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [dragOver, setDragOver] = useState(false);
-  const [attachError, setAttachError] = useState<string | null>(null);
-
-  const addFiles = async (files: FileList | File[] | null | undefined) => {
-    if (!files || (Array.isArray(files) ? files.length : files.length) === 0) return;
-    setAttachError(null);
-    const arr = Array.isArray(files) ? files : Array.from(files);
-    const next: Attachment[] = [];
-    for (const f of arr) {
-      try {
-        next.push(await fileToAttachment(f));
-      } catch (e: any) {
-        setAttachError(String(e?.message ?? e));
-      }
-    }
-    if (next.length > 0) setAttachments([...attachments, ...next]);
-  };
-
-  const onPickClick = () => fileInputRef.current?.click();
-  const onPickChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    addFiles(e.target.files);
-    // Reset value so picking the same file twice still fires onChange.
-    e.target.value = "";
-  };
-  const onDragOver = (e: React.DragEvent) => { e.preventDefault(); setDragOver(true); };
-  const onDragLeave = () => setDragOver(false);
-  const onDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(false);
-    addFiles(e.dataTransfer?.files);
-  };
-  const removeAttachment = (i: number) => {
-    const next = attachments.slice();
-    next.splice(i, 1);
-    setAttachments(next);
-  };
-
   return (
     <div style={{ padding:"0 23px", margin:"12px 0", background:"transparent" }}>
       <div style={{ height:38, display:"flex", alignItems:"center", gap:10 }}>
         {leftSlot}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept="image/*,audio/*"
-          multiple
-          style={{ display:"none" }}
-          onChange={onPickChange}
-        />
-        <button
-          data-ui="GoalAttachBtn"
-          onClick={onPickClick}
-          title="Attach images or audio (also: drop files onto the input)"
-          style={{ height:38, minWidth:44, padding:"0 10px", border:"none", borderRadius:10, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16, cursor:"pointer" }}
-        >📎</button>
-        <input data-ui="GoalInput"
-          value={goal}
-          onChange={e => setGoal(e.target.value)}
-          onKeyDown={e => { if (e.key === "Enter" && !busy) onRun(); }}
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-          onPaste={e => { const imgs = Array.from(e.clipboardData?.files ?? []).filter(f => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); addFiles(imgs); } }}
-          placeholder="Goal — e.g. 'summarise the last commit and propose a follow-up' (paste or drop an image / audio)"
-          style={{ flex:1, height:38, borderRadius:10, padding:"0 14px", fontSize:13, background:"var(--bg-input)", color:"var(--fg-strong)", border: dragOver ? "1px dashed rgba(124,196,255,0.85)" : "1px solid transparent" }} />
         <button
           data-ui="GoalBrainstormBtn"
           onClick={() => onBrainstorm?.()}
@@ -950,43 +844,14 @@ function GoalRow({ goal, setGoal, onRun, onCancel, busy, attachments, setAttachm
             opacity: busy ? 0.5 : (brainstormReady ? 1 : 0.8),
           }}
         >🧠</button>
-        <button data-ui="GoalRunBtn" disabled={busy || !goal.trim()} onClick={onRun}
-          style={{ height:38, padding:"0 24px", borderRadius:10, border:"none",
-                   background: busy || !goal.trim() ? "rgba(var(--accent-rgb),0.25)" : "var(--accent)",
-                   color: busy || !goal.trim() ? "#9aa0a6" : "#fff", fontWeight:600, fontSize:14,
-                   cursor: busy || !goal.trim() ? "not-allowed" : "pointer" }}>
-          {busy ? "Running…" : "Run"}
-        </button>
+        <div style={{ flex:1 }} />
         <button data-ui="GoalCancelBtn" disabled={!busy} onClick={onCancel}
           style={{ height:38, padding:"0 18px", borderRadius:10, border:"none",
                    background: busy ? "rgba(255,140,140,0.20)" : "rgba(255,140,140,0.10)",
                    color: busy ? "#ff8c8c" : "#555", fontWeight:600, fontSize:14,
                    cursor: busy ? "pointer" : "not-allowed" }}>Cancel</button>
-        <button data-ui="GoalTelemetryBtn" title="Open the tool-call telemetry panel" style={{ height:38, width:44, padding:0, border:"none", borderRadius:8, background:"var(--bg-surface)", color:"var(--fg)", fontSize:16 }}>📊</button>
         <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(var(--accent-rgb),0.18)", color:"var(--accent)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
       </div>
-      {(attachments.length > 0 || attachError) && (
-        <div data-ui="GoalAttachStrip" style={{ marginTop:6, display:"flex", flexWrap:"wrap", gap:6 }}>
-          {attachments.map((a, i) => (
-            <span
-              key={i}
-              title={`${a.mime} · ${Math.round(a.data_b64.length * 3 / 4 / 1024)} KB`}
-              style={{ display:"inline-flex", alignItems:"center", gap:6, padding:"2px 6px 2px 8px", borderRadius:14, fontSize:11, background:"rgba(124,196,255,0.12)", color:"var(--fg-strong)", border:"1px solid rgba(124,196,255,0.30)" }}
-            >
-              <span style={{ opacity:0.7 }}>{a.kind === "image" ? "🖼" : "🎵"}</span>
-              <span style={{ maxWidth:200, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>{a.filename ?? a.mime}</span>
-              <button
-                onClick={() => removeAttachment(i)}
-                title="Remove"
-                style={{ border:"none", background:"transparent", color:"var(--fg-muted)", cursor:"pointer", padding:0, lineHeight:1, fontSize:14 }}
-              >×</button>
-            </span>
-          ))}
-          {attachError && (
-            <span style={{ fontSize:11, color:"#ff8c8c" }}>{attachError}</span>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -7809,11 +7674,6 @@ export default function AgentsPage() {
   // the per-agent grid is now a CANVAS view mode rather than a side-
   // by-side split; see the FlowHeader 3-way segmented switch + the
   // "▦ Chat grid" canvas button.)
-  // Multimodal attachments queued against the next Run. Cleared the
-  // moment dispatchGoal kicks off — once the orchestrator has them in
-  // its context, the user's chip strip should empty so the next prompt
-  // is unencumbered. In-memory only (base64); not persisted.
-  const [attachments, setAttachments] = useState<Attachment[]>([]);
 
   // Per-agent log buffers (keyed by agent.name, plus "you"/"system") AND the
   // Super User conversation now live in the shared chatRuntime store, keyed
@@ -7851,10 +7711,19 @@ export default function AgentsPage() {
   );
   const setSupChat = useCallback(
     (upd: GoalMsg[] | ((p: GoalMsg[]) => GoalMsg[])) =>
-      writeAgentPayload((p) => ({
-        ...p,
-        supChat: typeof upd === "function" ? (upd as (m: GoalMsg[]) => GoalMsg[])(p.supChat ?? []) : upd,
-      })),
+      writeAgentPayload((p) => {
+        const base = p.supChat ?? [];
+        const next = typeof upd === "function" ? (upd as (m: GoalMsg[]) => GoalMsg[])(base) : upd;
+        // Stamp a monotonic seq (+ ts) on any freshly-appended bubble that lacks
+        // one. The Full Chat tab sorts by `(seq ?? 0)`, so an unstamped entry
+        // collapsed to 0 and floated ABOVE seq'd tool/system entries — which is
+        // why an agent reply rendered before the system message holding the
+        // tools it ran. Stamping at this single choke point fixes ordering for
+        // every supChat call site at once; entries that already carry a seq keep
+        // it (streaming deltas don't re-stamp, so a growing reply stays put).
+        const stamped = next.map(m => m.seq == null ? { ...m, seq: nextSeq(), ts: m.ts ?? Date.now() } : m);
+        return { ...p, supChat: stamped };
+      }),
     [writeAgentPayload],
   );
   const setRunning = useCallback(
@@ -9817,10 +9686,9 @@ export default function AgentsPage() {
     setRunEndedAt(null);
     setAgentTiming(new Map());
     setPhase("planning");
-    // Snapshot + clear the chip strip now. The orchestrator owns these
-    // bytes for the rest of the run; the UI strip should feel "spent".
+    // These attachment bytes (passed in by the chat dock's image attach)
+    // belong to the orchestrator for the rest of the run.
     const runAttachments = attachments;
-    if (attachments.length > 0) setAttachments([]);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     agentRunAborts.set(agentSessId, ctrl); // reachable by Cancel after a page change
@@ -11293,8 +11161,6 @@ export default function AgentsPage() {
     }
   }
 
-  const onRun = dispatchGoal;
-
   function onCancel() {
     abortRef.current?.abort();
     // Also abort the SOLO-CHAT controller. A solo orchestrator chat runs on
@@ -11616,8 +11482,7 @@ export default function AgentsPage() {
         onAfterDelete={() => { reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
       />
       <GoalRow
-        goal={goal} setGoal={setGoal} onRun={onRun} onCancel={onCancel} busy={busy || backgroundRunning}
-        attachments={attachments} setAttachments={setAttachments}
+        onCancel={onCancel} busy={busy || backgroundRunning}
         // Single-line top: the compact project cluster (dropdown + ⚙ settings +
         // New) renders at the start of the run row. Everything else that used to
         // crowd the old project strip now lives in the ⚙ ProjectSettingsDialog.

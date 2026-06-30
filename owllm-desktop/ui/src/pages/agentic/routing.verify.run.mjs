@@ -31,7 +31,7 @@ function load(rel) {
   return import(pathToFileURL(out).href);
 }
 const {
-  classifyGoal, agentDomain, bestAgentForGoal, roleCanWrite,
+  classifyGoal, agentDomain, bestAgentForGoal, roleCanWrite, coderLane, goalLane,
   parseCriticVerdict, criticConcluded, criticIsSatisfied, criticRefused,
   toolRoleIsWrite, goalRequiresWrite, runIsDone, runDelivered, normalizeRunOutput, isNoProgress,
 } = await load("teamConfig.ts");
@@ -111,6 +111,26 @@ for (const tf of fs.readdirSync(teamsDir).filter((f) => f.endsWith(".json"))) {
   check(`[${data.name}] code→writable-non-design`, codeOk);
   console.log(`  ${codeOk ? "✓" : "✗"} ${(data.name || tf).padEnd(16)} code→@${codePick?.name ?? "(none)"} (${codePick ? agentDomain(codePick) : "-"})   design→@${designPick?.name ?? "(none)"}`);
 }
+
+// 2b) lane-aware coder routing — a code goal must reach the coder whose lane
+//     (frontend/backend) matches the goal, not always the first coder in roster
+//     order. This is the "only the frontend coder ever runs" fix.
+section("2b) Lane-aware coder routing (frontend vs backend)");
+const LANE_TEAM = [
+  { name: "frontend_coder", base: "frontend_coder", role: "Edit" },
+  { name: "backend_coder", base: "backend_coder", role: "Edit" },
+];
+const laneRoles = new Map(LANE_TEAM.map((a) => [a.base, a.role]));
+const FE_GOAL = "fix the broken header button styling on the CodePage and commit it";
+const BE_GOAL = "fix the broken /publish API endpoint on the server and commit it";
+check("goalLane(frontend goal)==frontend", goalLane(FE_GOAL) === "frontend");
+check("goalLane(backend goal)==backend", goalLane(BE_GOAL) === "backend");
+check("coderLane(frontend_coder)==frontend", coderLane(LANE_TEAM[0]) === "frontend");
+check("coderLane(backend_coder)==backend", coderLane(LANE_TEAM[1]) === "backend");
+check("frontend goal → @frontend_coder", bestAgentForGoal(LANE_TEAM, FE_GOAL, laneRoles)?.name === "frontend_coder");
+check("backend goal → @backend_coder", bestAgentForGoal(LANE_TEAM, BE_GOAL, laneRoles)?.name === "backend_coder");
+// no clear lane → roster-first (backward-compatible)
+check("lane-less goal → first coder (roster order)", bestAgentForGoal(LANE_TEAM, "fix the dispatch bug and commit", laneRoles)?.name === "frontend_coder");
 
 // 3) critic verdict — the loop must terminate on the STRUCTURED line, and only
 //    fall back to prose when there is no verdict (the "concern about X but Y is

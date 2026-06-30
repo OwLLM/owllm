@@ -22,6 +22,13 @@ export const TEAM_FIXTURES: TeamExpectation[] = [
   },
   {
     team: "product_studio",
+    goal: "fix the broken /publish API endpoint on the server and commit it",
+    note: "backend code work on a team with both coders — must reach the BACKEND coder, not the frontend coder that is listed first in roster order",
+    expectKind: "code", expectDomain: "coder", expectAgent: "backend_coder",
+    expectWrote: true, expectDone: true, maxHops: 12,
+  },
+  {
+    team: "product_studio",
     goal: "who is on this team and what do you do?",
     note: "trivial question — a slim, fast round; no code, no design lane",
     expectKind: "general", expectWrote: false, expectDone: true, forbidDomain: "design", maxHops: 4,

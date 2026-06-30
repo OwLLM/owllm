@@ -102,6 +102,45 @@ export function agentDomain(spec: AgentSpec): AgentDomain {
   return "other";
 }
 
+/// Classify a CODER agent's lane — frontend vs backend vs full-stack — from its
+/// name/base, so a code goal can be routed to the matching lane instead of blindly
+/// taking the first coder in roster order. Mirrors the gate-scope signal used to
+/// pick the verify command in AgentsPage, kept here so agent SELECTION and command
+/// SCOPING agree on what "frontend"/"backend" means.
+export type CoderLane = "frontend" | "backend" | "full";
+export function coderLane(spec: AgentSpec): CoderLane {
+  const hay = `${spec.name} ${spec.base}`.toLowerCase();
+  if (/front|\bui\b|web|client|css|react|vue|svelte/.test(hay)) return "frontend";
+  if (/back|api|server|\bdb\b|database|data|rust|tauri|engine|infra/.test(hay)) return "backend";
+  return "full";
+}
+
+/// Infer which lane a GOAL wants from its text — same vocabulary as `coderLane`.
+/// Returns "full" when the goal gives no clear frontend/backend signal so the
+/// caller falls back to roster order rather than guessing.
+export function goalLane(goal: string): CoderLane {
+  const t = (goal || "").toLowerCase();
+  const fe = /\b(front-?end|\bui\b|css|style|layout|page|header|button|icon|component|react|vue|svelte|client|web ?view|screen|modal|render)\b/.test(t);
+  const be = /\b(back-?end|api|server|endpoint|route|database|\bdb\b|sql|schema|migration|rust|tauri|engine|daemon|service|queue|worker|infra|auth|token)\b/.test(t);
+  if (fe && !be) return "frontend";
+  if (be && !fe) return "backend";
+  return "full";
+}
+
+/// From a set of coders, pick the one whose lane matches the goal's lane. When
+/// the goal has no clear lane, or only one coder exists, returns the first in
+/// roster order (preserving prior behavior). This is what stops every code goal
+/// from always landing on the frontend coder simply because it is listed first.
+function pickCoderForGoal(coders: AgentSpec[], goal: string): AgentSpec | undefined {
+  if (coders.length <= 1) return coders[0];
+  const want = goalLane(goal);
+  if (want !== "full") {
+    const match = coders.find((c) => coderLane(c) === want);
+    if (match) return match;
+  }
+  return coders[0];
+}
+
 /// Pick the best specialist for a goal, deterministically. For a code/fix/ship
 /// goal it returns a CODER (or any write-capable NON-design agent) and NEVER a
 /// read-only design leader; design goals prefer a designer. Used by the
@@ -119,8 +158,13 @@ export function bestAgentForGoal(
   const nonDesign = (list: AgentSpec[]) => list.filter((a) => agentDomain(a) !== "design");
   const first = (...lists: AgentSpec[][]) => { for (const l of lists) if (l.length) return l[0]; return undefined; };
   switch (kind) {
-    case "code":
-      return first(inDomain(writable, "coder"), nonDesign(writable), writable, inDomain(candidates, "coder"), candidates);
+    case "code": {
+      // Lane-aware: when multiple coders exist, route to the one whose lane
+      // (frontend/backend) matches the goal instead of always the first coder.
+      const laneCoder = pickCoderForGoal(inDomain(writable, "coder"), goal);
+      if (laneCoder) return laneCoder;
+      return first(nonDesign(writable), writable, inDomain(candidates, "coder"), candidates);
+    }
     case "docs":
       return first(inDomain(writable, "docs"), inDomain(writable, "coder"), nonDesign(writable), writable, candidates);
     case "ops":

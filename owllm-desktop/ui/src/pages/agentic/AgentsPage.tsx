@@ -9988,17 +9988,25 @@ export default function AgentsPage() {
           return;
         }
         ranWriteToolRef.current = true; // a solo coder run IS the write attempt; the gate decides "done"
-        removeActive(coder.name);
         // RULE-BASED PUBLISH: host commits+bumps+releases deterministically when asked.
+        // The host build/sign/release can run for minutes with no model activity, so
+        // KEEP the coder card active (pulsing) and flip the phase to "integrating"
+        // across the whole publish — otherwise the run timer keeps ticking and the
+        // chat stays locked with NO active card, leaving the user with no idea why.
         let sPub = "";
         const wantsPublish = goalRequiresPublish(text);
         if (wantsPublish) {
+          setPhase("integrating");
           appendThought(coder.name, { role: "system", color: "#7ff0c5", text: "📦 rule-based publish — host building / signing / releasing…" });
+          // Surface it in the main chat too (the thought buffer alone is easy to miss),
+          // so the locked composer + running timer have a visible explanation.
+          setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: "📦 Publishing — host is building, signing & releasing the app. This can take a few minutes…", ts: Date.now() }]);
           try { sPub = await invoke<string>("finish_and_publish", { repoDir: projectCwd, notes: text.slice(0, 160) }); }
           catch (e: any) { sPub = `PUBLISH_FAILED: ${String(e?.message ?? e)}`; }
           const okPub = /PUBLISH_OK/.test(sPub);
           appendLog("system", { role: "system", color: okPub ? "#7fd17f" : "#ff8c8c", text: `📦 ${sPub.slice(-1400)}` });
         }
+        removeActive(coder.name);
         const sFinal = sText + (sPub ? `\n\n[host publish]\n${sPub.slice(-600)}` : "");
         await appendAgentMemory(selectedProjectId, coder.name, text, sFinal);
         await logTeamWork(coder.name, text, sFinal + (sGate && sGate.status !== "unverified" ? `\n[verify: ${sGate.status}]` : ""));

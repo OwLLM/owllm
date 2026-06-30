@@ -89,8 +89,9 @@ if [ -n "$PREV_TAG" ]; then RANGE="$PREV_TAG..HEAD"; else RANGE="HEAD~5..HEAD"; 
 SUBJECTS="$(git log --no-merges --pretty='- %s' "$RANGE" 2>/dev/null | grep -vE '^- v[0-9]+\.[0-9]+\.[0-9]+' | head -20 || true)"
 SHORT="$(git diff --shortstat "$RANGE" 2>/dev/null || true)"
 NAMES="$(git diff --name-status "$RANGE" 2>/dev/null | head -40 || true)"
+#     The release body describes what SHIPPED only — it never echoes the user's
+#     chat message ($HEADLINE), which is for the git commit/tag subject alone.
 NOTES_BODY="$(
-  if [ -n "$HEADLINE" ]; then printf '%s\n\n' "$HEADLINE"; fi
   if [ -n "$SUBJECTS" ]; then printf 'What changed:\n%s\n\n' "$SUBJECTS"; fi
   if [ -n "$NAMES" ]; then
     printf 'Files changed%s:\n' "${PREV_TAG:+ since $PREV_TAG}"

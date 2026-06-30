@@ -1319,10 +1319,6 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   if (!workspace && !preparing) {
     return (
       <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontSize: 16 }}>🦉</span>
-          <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
-        </div>
         <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
           <div style={{ width: "100%", maxWidth: 760, display: "flex", flexDirection: "column", gap: 30, padding: "48px 36px" }}>
             <div>
@@ -1552,8 +1548,6 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-panel)", color: "var(--fg)" }}>
       {/* Header: workspace · model · status */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span style={{ fontSize: 16 }}>🦉</span>
-        <span style={{ fontWeight: 700, fontSize: 14, color: "var(--fg-strong)" }}>Code</span>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
         <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
         {/* Honest isolation badge (P1-1, shared helper): turns LOUD red when

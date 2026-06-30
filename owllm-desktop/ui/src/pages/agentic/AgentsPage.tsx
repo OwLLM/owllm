@@ -10139,12 +10139,32 @@ export default function AgentsPage() {
         }
       }
 
-      // Mirror to the SuperUserCard so the user-facing thread shows
-      // the orchestrator's plan + (later) the integrated answer.
-      setSupChat(prev => [
-        ...prev,
-        { role: "you", color: "#9ad9ff", text },
-      ]);
+      // Mirror to the user-facing thread so the orchestrator pane shows the
+      // orchestrator's PLAN (and, via the Phase-3 append below, the integrated
+      // answer). BUG FIX: this used to push ONLY the user's message here and
+      // never the plan — so focusing the orchestrator showed "only the user's
+      // message" while specialists (which render their own rich buffer) looked
+      // full. Two fixes in one:
+      //   1) The user echo is already in supChat on the CHAT path (onSupSend
+      //      appended it); only the Run-button path (priorHistory === undefined)
+      //      still needs it here — gate it so the chat path stops double-echoing.
+      //   2) Mirror the orchestrator's plan prose (its @agent: routing lines
+      //      stripped — those render in the Thought tab) so its voice actually
+      //      appears in the pane. A pure solo answer (no directives) is left to
+      //      the no-dispatch branch below, which pushes it itself; mirroring it
+      //      here too would duplicate it.
+      setSupChat(prev => {
+        const out = [...prev];
+        if (priorHistory === undefined) {
+          out.push({ role: "you", color: "#9ad9ff", text, ts: Date.now() });
+        }
+        const plan = stripDispatchDirectives(orchReply).trim();
+        const hadDirectives = plan.length < orchReply.trim().length;
+        if (plan && hadDirectives) {
+          out.push({ role: "orchestrator", color: "#ffd97a", text: plan, ts: Date.now() });
+        }
+        return out;
+      });
 
       // ----- Phase 2: parse + dispatch -----
       // Parse @agent: lines, then drop any that name a known TOOL (weak models

@@ -59,8 +59,15 @@ CUR="$CUR" NEW="$NEW" CONF="$CONF" node -e '
   fs.writeFileSync(process.env.CONF, s.replace(a,b));'
 echo "version $CUR -> $NEW"
 
-[ -n "$NOTES" ] || NOTES="v$NEW"
-MSG="v$NEW: $NOTES"
+# Headline from the caller — but DROP a bare "publish it" / "ship" / "release"
+# command. The release body must describe what SHIPPED, not echo the chat message
+# the user typed to the agents (that was the old, useless behaviour).
+HEADLINE="$(printf '%s' "$NOTES" | head -1)"
+_squash="$(printf '%s' "$HEADLINE" | tr 'A-Z' 'a-z' | tr -d '[:space:][:punct:]')"
+case "$_squash" in
+  ""|publish|publishit|publishthis|publishthechanges|publishthechange|publishnow|shipit|ship|release|releaseit|releasenow|deploy|deployit|makearelease|publishrelease|pushit|publishplease) HEADLINE="" ;;
+esac
+MSG="v$NEW${HEADLINE:+: $HEADLINE}"
 
 # 2. Stage ONLY the app dir (keeps root junk — .claude/, scratch icons — out of the
 #    release commit, per the audit rule), commit if there's anything, push the branch.
@@ -74,13 +81,34 @@ fi
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 git push -q origin "$BRANCH" || fail "git push failed (branch $BRANCH)"
 
+# 2b. Build INFORMATIVE release notes from the actual changes (what really shipped),
+#     not the chat message. PREV_TAG = the previous release (HEAD isn't tagged yet).
+PREV_TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
+if [ -n "$PREV_TAG" ]; then RANGE="$PREV_TAG..HEAD"; else RANGE="HEAD~5..HEAD"; fi
+# Real commit subjects from THIS release window, minus the version-bump commits.
+SUBJECTS="$(git log --no-merges --pretty='- %s' "$RANGE" 2>/dev/null | grep -vE '^- v[0-9]+\.[0-9]+\.[0-9]+' | head -20 || true)"
+SHORT="$(git diff --shortstat "$RANGE" 2>/dev/null || true)"
+NAMES="$(git diff --name-status "$RANGE" 2>/dev/null | head -40 || true)"
+NOTES_BODY="$(
+  if [ -n "$HEADLINE" ]; then printf '%s\n\n' "$HEADLINE"; fi
+  if [ -n "$SUBJECTS" ]; then printf 'What changed:\n%s\n\n' "$SUBJECTS"; fi
+  if [ -n "$NAMES" ]; then
+    printf 'Files changed%s:\n' "${PREV_TAG:+ since $PREV_TAG}"
+    if [ -n "$SHORT" ]; then printf '%s\n' "$SHORT"; fi
+    printf '%s\n%s\n%s\n' '```' "$NAMES" '```'
+  fi
+  true
+)"
+[ -n "$NOTES_BODY" ] || NOTES_BODY="Maintenance release v$NEW."
+echo "release notes:"; printf '%s\n' "$NOTES_BODY" | sed 's/^/  | /'
+
 # 3. Tag + push the tag.
 git tag -a "v$NEW" -m "$MSG" || fail "git tag v$NEW failed (already exists?)"
 git push -q origin "v$NEW" || fail "git push tag v$NEW failed"
 echo "tagged v$NEW"
 
 # 4. Run the project's publish command (default = the canonical OwLLM
-#    publish-release.sh: build → sign → gh release → verify). The notes are passed
-#    via $OWLLM_RELEASE_NOTES so any project's command can use them.
-export OWLLM_RELEASE_NOTES="$NOTES"
+#    publish-release.sh: build → sign → gh release → verify). The generated notes
+#    are passed via $OWLLM_RELEASE_NOTES so any project's command can use them.
+export OWLLM_RELEASE_NOTES="$NOTES_BODY"
 ( cd "$REPO" && bash -c "$PUBLISH_CMD" ) || fail "publish command failed: $PUBLISH_CMD"

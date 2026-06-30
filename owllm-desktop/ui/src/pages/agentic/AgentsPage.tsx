@@ -1154,9 +1154,9 @@ function FlowHeader({
             : "TEAM (full orchestration). Click for SOLO-LOOP: one agent, fast, for simple tasks — and the host publishes by rule when you ask."}
           style={{
             height:28, padding:"0 10px", fontSize:11, fontWeight:700,
-            background: soloMode ? "rgba(127,212,255,0.20)" : undefined,
-            color: soloMode ? "#7fd4ff" : undefined,
-            border: soloMode ? "1px solid rgba(127,212,255,0.5)" : undefined,
+            background: soloMode ? "rgba(127,212,255,0.20)" : "rgba(255,217,122,0.20)",
+            color: soloMode ? "#7fd4ff" : "#ffd97a",
+            border: soloMode ? "1px solid rgba(127,212,255,0.5)" : "1px solid rgba(255,217,122,0.6)",
           }}
         >{soloMode ? "⚡ Solo" : "👥 Team"}</button>
       )}

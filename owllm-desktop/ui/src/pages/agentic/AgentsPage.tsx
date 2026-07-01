@@ -998,11 +998,14 @@ function FlowHeader({
         style={{ height:28, padding:"0 8px", fontSize:11 }}
       >🧠 Memory</button>
       <button data-ui="FlowRefreshBtn" className="ghost-btn" title="Refresh model lists in every picker" style={{ height:28, width:30, padding:0, fontSize:11 }}>⟳</button>
-      {/* 3-way segmented view switch. Diagram = live orbital,
-          Graph = editable top-down hierarchy, Chat = per-agent grid
-          replacing the canvas entirely. */}
+      {/* Segmented view switch. Graph = editable top-down hierarchy,
+          Chat = per-agent grid replacing the canvas entirely.
+          UNUSED FEATURE (hidden 2026-07-01, user request): the "◑ Diagram"
+          live-orbital view (TeamCanvas) button is commented out below to
+          declutter — the render branch is kept in CanvasStack so the feature
+          can be restored by un-commenting this seg. Clean up later if unused. */}
       <div data-ui="FlowViewSeg" style={{ display:"flex", border:"1px solid var(--border)", borderRadius:6, overflow:"hidden" }}>
-        {seg("diagram", "◑ Diagram", "Live orbital diagram (animated)")}
+        {/* {seg("diagram", "◑ Diagram", "Live orbital diagram (animated)")} */}
         {seg("graph",   "◐ Graph",   "Editable top-down hierarchical graph")}
         {seg("chat",    "▦ Chat",    "Per-agent chat grid (replaces the canvas with one live transcript per agent)")}
       </div>
@@ -7787,7 +7790,11 @@ export default function AgentsPage() {
   //   "chat"    → per-agent chat grid REPLACES the canvas (AgentChatGrid)
   // Selected node lives here so the canvas mode toggle preserves the
   // selection across views.
-  const [viewMode, setViewMode] = useState<"diagram" | "graph" | "chat">("diagram");
+  // Default is "graph" — the "diagram" orbital view button is hidden
+  // (see FlowHeader; unused feature, 2026-07-01), so landing on it would
+  // strand the canvas on a view with no lit toggle. The diagram render
+  // branch is kept for when/if the button is restored.
+  const [viewMode, setViewMode] = useState<"diagram" | "graph" | "chat">("graph");
   // Team Workbench popup — opened by the team chip in the FlowHeader. Lets the
   // user assign leaders, wire dispatch arrows, and equip skills on the team
   // template the dispatch engine reads (see TeamWorkbenchModal).

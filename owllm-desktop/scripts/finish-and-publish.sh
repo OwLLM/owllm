@@ -81,26 +81,28 @@ fi
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 git push -q origin "$BRANCH" || fail "git push failed (branch $BRANCH)"
 
-# 2b. Build INFORMATIVE release notes from the actual changes (what really shipped),
-#     not the chat message. PREV_TAG = the previous release (HEAD isn't tagged yet).
+# 2b. Build a HUMAN release changelog from the actual commit subjects (what really
+#     shipped), not the chat message and NOT git file-plumbing. PREV_TAG = the
+#     previous release (HEAD isn't tagged yet).
 PREV_TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
 if [ -n "$PREV_TAG" ]; then RANGE="$PREV_TAG..HEAD"; else RANGE="HEAD~5..HEAD"; fi
-# Real commit subjects from THIS release window, minus the version-bump commits.
-SUBJECTS="$(git log --no-merges --pretty='- %s' "$RANGE" 2>/dev/null | grep -vE '^- v[0-9]+\.[0-9]+\.[0-9]+' | head -20 || true)"
-SHORT="$(git diff --shortstat "$RANGE" 2>/dev/null || true)"
-NAMES="$(git diff --name-status "$RANGE" 2>/dev/null | head -40 || true)"
-#     The release body describes what SHIPPED only — it never echoes the user's
-#     chat message ($HEADLINE), which is for the git commit/tag subject alone.
-NOTES_BODY="$(
-  if [ -n "$SUBJECTS" ]; then printf 'What changed:\n%s\n\n' "$SUBJECTS"; fi
-  if [ -n "$NAMES" ]; then
-    printf 'Files changed%s:\n' "${PREV_TAG:+ since $PREV_TAG}"
-    if [ -n "$SHORT" ]; then printf '%s\n' "$SHORT"; fi
-    printf '%s\n%s\n%s\n' '```' "$NAMES" '```'
-  fi
-  true
-)"
-[ -n "$NOTES_BODY" ] || NOTES_BODY="Maintenance release v$NEW."
+# Every release commit this script makes is prefixed "vX.Y.Z: <headline>", so
+# recover the human <headline> by STRIPPING that prefix — don't drop the line
+# (dropping it discarded the only real info and left the notes as raw git
+# shortstat/name-status plumbing, which is what users complained about). Bare
+# version-bump commits with no headline collapse to empty and are dropped.
+SUBJECTS="$(git log --no-merges --pretty='- %s' "$RANGE" 2>/dev/null \
+  | sed -E 's/^- v[0-9]+\.[0-9]+\.[0-9]+:?[[:space:]]*/- /' \
+  | grep -vE '^-[[:space:]]*$' \
+  | head -20 || true)"
+#     The release body is a clean "what's new" list only — never the git
+#     file-plumbing (shortstat / name-status) and never the user's chat message
+#     ($HEADLINE, which is for the git commit/tag subject alone).
+if [ -n "$SUBJECTS" ]; then
+  NOTES_BODY="$SUBJECTS"
+else
+  NOTES_BODY="Maintenance release v$NEW."
+fi
 echo "release notes:"; printf '%s\n' "$NOTES_BODY" | sed 's/^/  | /'
 
 # 3. Tag + push the tag.

@@ -40,6 +40,11 @@ function toReleaseBullets(body: string): string[] {
   for (let line of body.replace(/\r/g, "").split("\n")) {
     line = line.trim();
     if (!line) continue;
+    // Drop git-plumbing noise that older auto-generated notes leaked in: code
+    // fences and shortstat summaries ("1 file changed, 1 insertion(+)…"). These
+    // are developer diagnostics, never user-facing "what's new".
+    if (/^(```|~~~)/.test(line)) continue;
+    if (/^\d+ files? changed(,|$)/.test(line)) continue;
     // A markdown heading becomes its own (bold-ish) lead line, kept whole.
     if (/^#{1,6}\s+/.test(line)) { out.push(line.replace(/^#{1,6}\s+/, "")); continue; }
     const stripped = line.replace(/^([-*•]|\d+[.)])\s+/, "").trim();

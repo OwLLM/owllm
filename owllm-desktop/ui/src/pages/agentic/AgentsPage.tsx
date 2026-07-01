@@ -9890,7 +9890,12 @@ export default function AgentsPage() {
           // Surface it in the main chat too (the thought buffer alone is easy to miss),
           // so the locked composer + running timer have a visible explanation.
           setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: "📦 Publishing — host is building, signing & releasing the app. This can take a few minutes…", ts: Date.now() }]);
-          try { sPub = await invoke<string>("finish_and_publish", { repoDir: projectCwd, notes: text.slice(0, 160) }); }
+          // Release notes must describe what SHIPPED — NOT echo the user's chat
+          // message. Passing `text` (the goal prompt) here is what leaked prompts
+          // like "WTF is that?" as the top "What's New" bullet. Send NO headline;
+          // the shell then produces a clean "Maintenance release vX.Y.Z". (A proper
+          // per-release changelog needs a curated source, not the chat prompt.)
+          try { sPub = await invoke<string>("finish_and_publish", { repoDir: projectCwd, notes: "" }); }
           catch (e: any) { sPub = `PUBLISH_FAILED: ${String(e?.message ?? e)}`; }
           const okPub = /PUBLISH_OK/.test(sPub);
           appendLog("system", { role: "system", color: okPub ? "#7fd17f" : "#ff8c8c", text: `📦 ${sPub.slice(-1400)}` });

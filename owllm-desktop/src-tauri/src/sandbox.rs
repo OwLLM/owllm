@@ -641,6 +641,61 @@ pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<Strin
     ))
 }
 
+// ---- extra read/write scope for subscription CLIs -------------------------
+//
+// The tool allowlist (--allowedTools) and the CLI's filesystem SCOPE are two
+// INDEPENDENT axes: granting every tool still leaves Claude Code's own
+// "allowed working directories" guard blocking a Read/`cat` of any file
+// OUTSIDE cwd (e.g. ~/Downloads/BRIEF.md → "may only concatenate files from
+// the allowed working directories"). `--add-dir` widens that scope. We grant
+// the user's home profile (Downloads/Desktop/Documents/…) so an agent can open
+// a file the user explicitly points it at.
+
+/// Extra directories a subscription CLI (Claude Code, …) may read/write beyond
+/// the project folder, returned already in the namespace the CLI runs in and
+/// meant to be passed as `--add-dir <dir>`. Grants the user's home profile so an
+/// agent can open a file the user points it at outside the project.
+///
+/// Returns EMPTY when the run is bwrap-jailed: the jail bind-mounts ONLY the
+/// project, so a broader --add-dir would both name a path that doesn't exist
+/// inside the jail AND defeat the confinement the jail exists to provide.
+#[cfg(windows)]
+pub fn extra_allowed_dirs(cwd: Option<&str>) -> Vec<String> {
+    let home = match std::env::var("USERPROFILE") {
+        Ok(h) if !h.trim().is_empty() => h,
+        _ => return Vec::new(),
+    };
+    match cwd.and_then(crate::wsl::parse_wsl_unc) {
+        // WSL project. Only widen when NOT confined by bwrap — full-access
+        // (trusted) or bwrap-absent runs use plain WSL routing, which mounts
+        // /mnt/c and so genuinely reaches the Windows profile. Express the
+        // profile as its /mnt path for the in-distro CLI.
+        Some((distro, _linux_cwd)) => {
+            if !is_full_access(cwd) && ensure_sandbox(&distro) {
+                return Vec::new();
+            }
+            // Reuse the login-sync translator (C:\Users\mc → /mnt/c/Users/mc).
+            win_to_mnt(&home).ok().into_iter().collect()
+        }
+        // Native Windows run — grant the profile path directly.
+        None => vec![home],
+    }
+}
+
+/// Non-Windows host: grant $HOME unless the project is sandbox-isolated (where
+/// the jail intentionally hides the rest of home).
+#[cfg(not(windows))]
+pub fn extra_allowed_dirs(cwd: Option<&str>) -> Vec<String> {
+    if is_isolated(cwd) {
+        return Vec::new();
+    }
+    std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.trim().is_empty())
+        .into_iter()
+        .collect()
+}
+
 // ---- auto-clean a deleted project's sandbox footprint ---------------------
 //
 // SAFETY: only ever removes a sandbox COPY that OwLLM itself created under the

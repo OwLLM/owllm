@@ -1040,6 +1040,13 @@ pub async fn claude_cli_complete(
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
+        // Widen the CLI's filesystem scope to the user's home profile so an agent
+        // can open a file the user points it at outside the project. Empty (no-op)
+        // for a bwrap-jailed run. See claude_cli_stream + sandbox::extra_allowed_dirs.
+        for dir in crate::sandbox::extra_allowed_dirs(cwd.as_deref()) {
+            args.push("--add-dir".into());
+            args.push(dir);
+        }
         // The agentic system prompt (role + team + injected memory snapshot +
         // directives + skills) can be tens of KB. Windows caps a process command
         // line at ~32 KB, so passing it via `--append-system-prompt <arg>` blew up
@@ -1518,6 +1525,16 @@ pub async fn claude_cli_stream(
                     args.push(cli_tools.join(" "));
                 }
             }
+        }
+        // Widen the CLI's filesystem SCOPE to the user's home profile so an agent
+        // can open a file the user points it at OUTSIDE the project (e.g.
+        // ~/Downloads/BRIEF.md). Without this, Claude Code's own allowed-working-
+        // dirs guard blocks the Read/`cat` even when every TOOL permission is
+        // granted — the allowlist and the filesystem jail are separate axes. This
+        // is empty (a no-op) for a bwrap-jailed run, preserving confinement there.
+        for dir in crate::sandbox::extra_allowed_dirs(cwd.as_deref()) {
+            args.push("--add-dir".into());
+            args.push(dir);
         }
         // See claude_cli_complete: a large agentic system prompt passed via
         // `--append-system-prompt <arg>` overflows the Windows ~32 KB command line

@@ -65,7 +65,7 @@ fn wsl_mnt_unc_to_windows(p: &str) -> Option<String> {
 
 /// The host-fs base for a cwd: a WSL-mount UNC of a Windows drive is unwrapped to
 /// the native drive path (direct + reliable); anything else is used as-is.
-fn host_cwd(cwd: &str) -> String {
+pub(crate) fn host_cwd(cwd: &str) -> String {
     wsl_mnt_unc_to_windows(cwd).unwrap_or_else(|| cwd.to_string())
 }
 

@@ -150,7 +150,14 @@ pub async fn sync_project_skills(cwd: String) -> Result<SkillSyncResult, String>
         return Err("sync_project_skills: empty cwd".into());
     }
     let packs = list_skill_packs().await?;
-    let base = Path::new(&cwd).join(".owllm").join("skills");
+    // A project opened through WSL isolation arrives as a
+    // `\\wsl.localhost\<distro>\mnt\<drive>\...` UNC. Creating dirs through that 9P
+    // redirector routinely fails with "access denied" (os error 5) — the same
+    // reason the host file tools unwrap it. Route the mirror to the native drive
+    // path so the write is direct; the agent still finds it (it's the same folder
+    // from the agent's `/mnt/<drive>/...` view).
+    let host = crate::agent_tools::host_cwd(&cwd);
+    let base = Path::new(&host).join(".owllm").join("skills");
     std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
     // Never commit the mirror — it's a per-run cache, not project content.
     let _ = std::fs::write(base.join(".gitignore"), "*\n");

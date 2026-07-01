@@ -5242,8 +5242,6 @@ function RightColumnTabs(props: {
   onToggleDirectorMode: () => void;
   parallelMode: boolean;
   onToggleParallel: () => void;
-  soloMode: boolean;
-  onToggleSolo: () => void;
   agentLogs: Map<string, GoalMsg[]>;
   agentThoughts: Map<string, GoalMsg[]>;
   runError: string | null;
@@ -5351,8 +5349,6 @@ function RightColumnTabs(props: {
             onToggleDirectorMode={props.onToggleDirectorMode}
             parallelMode={props.parallelMode}
             onToggleParallel={props.onToggleParallel}
-            soloMode={props.soloMode}
-            onToggleSolo={props.onToggleSolo}
             team={props.team}
             roleByName={props.roleByName}
           />
@@ -5430,7 +5426,6 @@ function SuperUserSettings({
   autoApprove, onToggleAutoApprove,
   directorMode, onToggleDirectorMode,
   parallelMode, onToggleParallel,
-  soloMode, onToggleSolo,
   team, roleByName,
 }: {
   autoApprove: boolean;
@@ -5439,8 +5434,6 @@ function SuperUserSettings({
   onToggleDirectorMode: () => void;
   parallelMode: boolean;
   onToggleParallel: () => void;
-  soloMode: boolean;
-  onToggleSolo: () => void;
   team: Team | null;
   roleByName: Map<string, RoleData>;
 }) {
@@ -5494,16 +5487,8 @@ function SuperUserSettings({
           </span>
         </span>
       </label>
-      {/* Solo-loop — skip orchestration entirely: ONE coder, edit→verify→fix,
-          and rule-based host publish if the goal says so. For simple tasks. */}
-      <label style={{ display:"flex", alignItems:"flex-start", gap:6, fontSize:12, color: soloMode ? "#7fd4ff" : "#7888a8", cursor:"pointer" }}>
-        <input type="checkbox" checked={soloMode} onChange={onToggleSolo} style={{ width:12, height:12, marginTop:2, accentColor:"#3aa0ff" }} />
-        <span>solo-loop (one agent, no orchestration)
-          <span style={{ display:"block", fontSize:10, color:"var(--fg-subtle)", lineHeight:"13px" }}>
-            {soloMode ? "one coder: edit → verify → fix, + rule-based publish — no critic/red-team" : "off: full team orchestration"}
-          </span>
-        </span>
-      </label>
+      {/* Solo-loop lives on the canvas header toggle (⚡ Solo / 👥 Team) — it was
+          duplicated here as a redundant checkbox and removed (v0.7.14). */}
     </div>
   );
 }
@@ -11800,8 +11785,6 @@ export default function AgentsPage() {
             onToggleDirectorMode={() => setDirectorMode(!directorMode)}
             parallelMode={parallelMode}
             onToggleParallel={() => setParallelMode(!parallelMode)}
-            soloMode={soloMode}
-            onToggleSolo={() => setSoloMode(!soloMode)}
             agentLogs={agentLogs}
             agentThoughts={agentThoughts}
             runError={runError}

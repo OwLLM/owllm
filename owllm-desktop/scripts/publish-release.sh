@@ -61,6 +61,41 @@ case "$(uname -s)" in
 esac
 [ -f "$INSTALLER" ] || fail "build produced no installer at $INSTALLER (build step did not run or failed)"
 
+step "1b/5 authenticode sign (SimplySign / Certum) — must run BEFORE minisign"
+# Windows code signing to clear SmartScreen "unknown publisher". Uses the cloud
+# cert exposed by SimplySign Desktop (log in first — the virtual card must be
+# mounted in the Windows cert store). Configure the cert via, in priority order:
+#   OWLLM_SIGN_THUMBPRINT env · OWLLM_SIGN_SUBJECT env · .tauri-keys/authenticode.thumbprint
+# Unconfigured → SKIP (installer stays unsigned, today's behaviour). Configured
+# but signing fails → FAIL (never ship a "signed" release that isn't). Authenticode
+# MUST precede minisign: it rewrites the .exe, which would void the updater sig.
+SIGN_THUMBPRINT="${OWLLM_SIGN_THUMBPRINT:-}"
+SIGN_SUBJECT="${OWLLM_SIGN_SUBJECT:-}"
+SIGN_TSA="${OWLLM_SIGN_TSA:-http://time.certum.pl}"          # Certum RFC3161 timestamp
+THUMB_FILE=".tauri-keys/authenticode.thumbprint"
+if [ -z "$SIGN_THUMBPRINT" ] && [ -z "$SIGN_SUBJECT" ] && [ -f "$THUMB_FILE" ]; then
+  SIGN_THUMBPRINT="$(tr -d ' \r\n\t' < "$THUMB_FILE")"
+fi
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; then
+      SIGNTOOL="$(command -v signtool.exe 2>/dev/null || true)"
+      [ -n "$SIGNTOOL" ] || SIGNTOOL="$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64/signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+      [ -n "$SIGNTOOL" ] || fail "signtool.exe not found — install the Windows 10/11 SDK (or put signtool on PATH) to Authenticode-sign"
+      WININ="$(cygpath -w "$INSTALLER")"
+      if [ -n "$SIGN_THUMBPRINT" ]; then SEL=(/sha1 "$SIGN_THUMBPRINT"); else SEL=(/n "$SIGN_SUBJECT"); fi
+      echo "  signing '$INSTALLER'  (${SIGN_THUMBPRINT:+thumbprint ${SIGN_THUMBPRINT}}${SIGN_SUBJECT:+subject \"${SIGN_SUBJECT}\"}, tsa $SIGN_TSA)"
+      "$SIGNTOOL" sign "${SEL[@]}" /fd sha256 /tr "$SIGN_TSA" /td sha256 /d "OwLLM Desktop" "$WININ" \
+        || fail "signtool sign failed — is SimplySign Desktop running + logged in (cloud key mounted)? Is the thumbprint/subject correct?"
+      "$SIGNTOOL" verify /pa "$WININ" || fail "signtool verify failed after signing"
+      echo "  ✓ Authenticode-signed + verified"
+    else
+      echo "  (skipped — no OWLLM_SIGN_THUMBPRINT / OWLLM_SIGN_SUBJECT / $THUMB_FILE; installer will be UNSIGNED)"
+    fi
+    ;;
+  *) echo "  (skipped — Authenticode signing is Windows-only)" ;;
+esac
+
 step "2/5 sign   (minisign — empty password, closed stdin)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 KEY_CONTENT="$(cat "$KEY_FILE")"

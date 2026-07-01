@@ -260,11 +260,17 @@ export default function BrainstormPanel(props: Props) {
   const convSystemPrompt = brainstormerRole?.systemPrompt
     ? [
         "You are the user's CO-FOUNDER and a friendly SKEPTIC, scoping their idea before any code is written.",
-        "Hold a short back-and-forth FIRST: ask 1-3 sharp questions per turn — pin down the ICP and the core job, AND challenge scope, assumptions, and whether this is even worth building. Be concise and direct, not a wall of text.",
-        "Do NOT start web research yet — wait until you've clarified enough, OR the user tells you to (e.g. 'go', 'run', 'proceed', 'looks good'). THEN run your full research workflow below and WRITE BRIEF.md.",
+        "Hold a short back-and-forth FIRST: ask 1-3 sharp questions per turn — clarify what they actually want and why, and challenge scope and assumptions. Be concise and direct, not a wall of text.",
+        // Mode-neutral framing: the role's STEP 0 decides NEW vs IMPROVEMENT.
+        // Do NOT presuppose competitor research or an ICP — an improvement to
+        // THIS app needs neither (inspect the code and plan the change), and
+        // forcing that framing here is what made the brainstormer web-search
+        // even for simple improvements.
+        "Before doing anything, decide the MODE per STEP 0 of your role below: is this a brand-NEW app, or an IMPROVEMENT to the app that already exists in this project? An improvement (add/fix/change a feature, 'the app', a named screen/button) needs NO competitor web research — inspect the codebase and plan the change. Only a brand-new product gets competitor research.",
+        "Do NOT start any tools yet — wait until you've clarified enough, OR the user tells you to (e.g. 'go', 'run', 'proceed', 'looks good'). THEN follow the matching track in your role below and WRITE the ordered PLAN to BRIEF.md.",
         "After BRIEF.md exists, the user may keep talking to refine it — re-write BRIEF.md to reflect their changes.",
         "",
-        "--- YOUR RESEARCH ROLE (run this once you're ready) ---",
+        "--- YOUR ROLE (follow it once you're ready) ---",
         brainstormerRole.systemPrompt,
       ].join("\n")
     : "";
@@ -290,6 +296,11 @@ export default function BrainstormPanel(props: Props) {
         convSystemPrompt, userText, brainstormerRole?.defaultTemperature ?? 0.4,
         ctrl.signal, onDelta, projectCwd,
         priorHistory, undefined, onThought,
+        // Pass the brainstormer's tool_allowlist so the Claude CLI sub path
+        // gets `--allowedTools "WebSearch WebFetch Write Read Grep Glob Bash"`
+        // and pre-approves the write — without this the CLI runs in default
+        // permission mode and silently blocks writing BRIEF.md.
+        brainstormerRole?.toolAllowlist,
       );
       const newHistory = [...priorHistory, { role: "user" as const, content: userText }, { role: "assistant" as const, content: reply }];
       setConvHistory(newHistory);
@@ -325,13 +336,13 @@ export default function BrainstormPanel(props: Props) {
     if (!modelId) { setError("No model picked. Set a team default model first."); return; }
     setDone(false);
     setConvHistory([]);
-    setLines([{ kind: "system", text: `🧠 Brainstorm in ${projectCwd} using ${modelId}. I'll ask a couple of questions first — answer below, then say "go" when you want me to research + write the brief.` }]);
+    setLines([{ kind: "system", text: `🧠 Brainstorm in ${projectCwd} using ${modelId}. I'll ask a couple of questions first — answer below, then say "go" when you want me to write the plan.` }]);
     await runTurn([
-      `Project location (where BRIEF.md and brainstorm/<png> go): ${projectCwd}`,
+      `Project location (BRIEF.md goes here; for a brand-new app, brainstorm/<png> screenshots too): ${projectCwd}`,
       "",
       `My idea: ${trimmed}`,
       "",
-      "Start as my co-founder: ask me your sharpest 1-3 questions (don't research yet).",
+      "Start as my co-founder: ask me your sharpest 1-3 questions (no tools yet).",
     ].join("\n"));
   };
 

@@ -2891,9 +2891,17 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   await refreshTeamMemorySnapshot();
   // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
   // provider can self-load a skill by reading it with their native file tool
-  // (load_skill only reaches local models). Fire-and-forget — fast, and the
-  // orchestrator plans before any specialist reads it.
-  if (projectCwd) invoke("sync_project_skills", { cwd: projectCwd }).catch(() => {});
+  // (load_skill only reaches local models). Awaited (a fast local copy) so the
+  // mirror is on disk before any specialist reads it; a failed or empty sync is
+  // surfaced via onSystemWarning instead of being silently swallowed.
+  if (projectCwd) {
+    try {
+      const sync = await invoke<{ count: number; index_rel: string }>("sync_project_skills", { cwd: projectCwd });
+      if (sync.count === 0) hooks.onSystemWarning?.("🧩 Skill sync staged 0 skills — none installed for agents to self-load.");
+    } catch (e: any) {
+      hooks.onSystemWarning?.(`⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}`);
+    }
+  }
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]

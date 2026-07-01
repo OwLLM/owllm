@@ -333,9 +333,14 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // every chat behaves the same. Sent with the next message, then cleared.
   const [codeImages, setCodeImages] = useState<Attachment[]>([]);
   const codeFileRef = useRef<HTMLInputElement | null>(null);
-  // Clicking a file in the tree OPENS it in a read-only viewer (was: silently
-  // inserted an @ref, which is why the tree felt "fake" — you couldn't see files).
-  const [viewer, setViewer] = useState<{ abs: string; rel: string; content: string; loading: boolean } | null>(null);
+  // Clicking a file in the tree OPENS it in a viewer (was: silently inserted an
+  // @ref, which is why the tree felt "fake" — you couldn't see files). The viewer
+  // is also editable: ✎ Edit turns the <pre> into a <textarea>, and once the text
+  // is modified the button becomes 💾 Save (writes back via tool_write_file).
+  // `content` is what's on disk; `draft` is the in-progress edit; dirty = draft≠content.
+  const [viewer, setViewer] = useState<
+    { abs: string; rel: string; content: string; loading: boolean; editing: boolean; draft: string; saving: boolean; saveError?: string } | null
+  >(null);
   // Fallback working dir for chats with NO workspace folder selected. A pasted
   // image needs somewhere to be saved so a CLI/subscription model can READ it
   // (codex -i / claude file-ref) — without a cwd the image was silently dropped
@@ -1202,13 +1207,35 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // makes the tree useful instead of decorative.
   const openFile = async (abs: string) => {
     const rel = relOf(abs);
-    setViewer({ abs, rel, content: "", loading: true });
+    setViewer({ abs, rel, content: "", loading: true, editing: false, draft: "", saving: false });
     try {
       const content = await invoke<string>("tool_read_file", { path: abs, cwd: undefined });
-      setViewer({ abs, rel, content, loading: false });
+      setViewer({ abs, rel, content, loading: false, editing: false, draft: content, saving: false });
     } catch (e: any) {
-      setViewer({ abs, rel, content: `⚠ Couldn't open this file: ${String(e?.message ?? e)}\n\n(It may be binary, too large, or outside the workspace.)`, loading: false });
+      setViewer({ abs, rel, content: `⚠ Couldn't open this file: ${String(e?.message ?? e)}\n\n(It may be binary, too large, or outside the workspace.)`, loading: false, editing: false, draft: "", saving: false });
     }
+  };
+  // ✎ Edit → make the open file editable (seed the draft from the on-disk text).
+  const startEdit = () => setViewer((v) => (v ? { ...v, editing: true, draft: v.content, saveError: undefined } : v));
+  // Leave edit mode, discarding any unsaved changes.
+  const cancelEdit = () => setViewer((v) => (v ? { ...v, editing: false, draft: v.content, saveError: undefined } : v));
+  // 💾 Save → write the draft back to disk (cwd = workspace so it clears the
+  // write-jail, which only allows writes inside the project/temp/~OwLLM).
+  const saveFile = async () => {
+    if (!viewer) return;
+    const { abs, draft } = viewer;
+    setViewer((v) => (v ? { ...v, saving: true, saveError: undefined } : v));
+    try {
+      await invoke("tool_write_file", { path: abs, content: draft, cwd: workspace || undefined });
+      setViewer((v) => (v ? { ...v, content: draft, editing: false, saving: false } : v));
+    } catch (e: any) {
+      setViewer((v) => (v ? { ...v, saving: false, saveError: String(e?.message ?? e) } : v));
+    }
+  };
+  // Close the viewer, but don't silently drop unsaved edits.
+  const closeViewer = () => {
+    if (viewer && viewer.editing && viewer.draft !== viewer.content && !window.confirm("Discard unsaved changes to this file?")) return;
+    setViewer(null);
   };
   // Drop an @reference to the open file into the composer (so the model edits it).
   const referenceInChat = (rel: string) => {
@@ -1752,25 +1779,52 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         </div>
       </div>
 
-      {/* File viewer — opening a file in the tree shows its real contents here. */}
-      {viewer && (
-        <div onClick={() => setViewer(null)} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+      {/* File viewer — opening a file in the tree shows its real contents, and
+          (via ✎ Edit → 💾 Save) lets you edit and write it back to disk. */}
+      {viewer && (() => {
+        const dirty = viewer.editing && viewer.draft !== viewer.content;
+        const canEdit = !viewer.loading && !viewer.content.startsWith("⚠ Couldn't open");
+        return (
+        <div onClick={closeViewer} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: "min(980px, 94vw)", maxHeight: "88vh", display: "flex", flexDirection: "column", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 12, overflow: "hidden", boxShadow: "var(--shadow-lg)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderBottom: "1px solid var(--border)" }}>
-              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={viewer.abs}>📄 {viewer.rel}</span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={viewer.abs}>📄 {viewer.rel}{dirty ? " •" : ""}</span>
+              {/* ✎ Edit turns the file editable; once modified it becomes 💾 Save. */}
+              {!viewer.editing ? (
+                canEdit && <button onClick={startEdit} title="Edit this file" style={{ ...btn, height: 30, padding: "0 10px" }}>✎ Edit</button>
+              ) : (
+                <>
+                  <button onClick={saveFile} disabled={!dirty || viewer.saving}
+                    title={dirty ? "Save changes to disk" : "Make a change to enable saving"}
+                    style={{ ...btn, height: 30, padding: "0 12px", fontWeight: 700,
+                      borderColor: dirty ? "#7ff0c5" : "var(--border)", color: dirty ? "#7ff0c5" : "var(--fg-muted)",
+                      opacity: dirty && !viewer.saving ? 1 : 0.6, cursor: dirty && !viewer.saving ? "pointer" : "default" }}>
+                    {viewer.saving ? "Saving…" : dirty ? "💾 Save" : "✎ Editing…"}
+                  </button>
+                  <button onClick={cancelEdit} title="Discard changes and stop editing" style={{ ...btn, height: 30, padding: "0 10px" }}>Cancel</button>
+                </>
+              )}
               <button onClick={() => referenceInChat(viewer.rel)} title="Insert @reference into the composer so the model edits this file" style={{ ...btn, height: 30, padding: "0 10px" }}>↳ Reference in chat</button>
-              <button onClick={() => setViewer(null)} style={{ ...btn, height: 30, padding: "0 12px" }}>✕ Close</button>
+              <button onClick={closeViewer} style={{ ...btn, height: 30, padding: "0 12px" }}>✕ Close</button>
             </div>
+            {viewer.saveError && (
+              <div style={{ padding: "8px 14px", fontSize: 12, color: "#ff8c8c", borderBottom: "1px solid var(--border)", background: "rgba(255,140,140,0.08)" }}>⚠ Couldn't save: {viewer.saveError}</div>
+            )}
             <div style={{ flex: 1, minHeight: 0, overflow: "auto", background: "var(--bg-input)" }}>
               {viewer.loading ? (
                 <div style={{ padding: 20, color: "var(--fg-muted)", fontSize: 13 }}>Loading…</div>
+              ) : viewer.editing ? (
+                <textarea value={viewer.draft} spellCheck={false}
+                  onChange={(e) => { const val = e.target.value; setViewer((v) => (v ? { ...v, draft: val } : v)); }}
+                  style={{ display: "block", width: "100%", minHeight: "60vh", boxSizing: "border-box", margin: 0, padding: 14, border: "none", outline: "none", resize: "none", background: "var(--bg-input)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "Consolas, 'JetBrains Mono', monospace", color: "var(--fg)", whiteSpace: "pre", overflowWrap: "normal" }} />
               ) : (
                 <pre style={{ margin: 0, padding: 14, fontSize: 12.5, lineHeight: 1.5, fontFamily: "Consolas, 'JetBrains Mono', monospace", color: "var(--fg)", whiteSpace: "pre", overflowX: "auto" }}>{viewer.content}</pre>
               )}
             </div>
           </div>
         </div>
-      )}
+        );
+      })()}
     </div>
   );
 }

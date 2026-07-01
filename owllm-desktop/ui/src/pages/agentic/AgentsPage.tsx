@@ -9675,9 +9675,28 @@ export default function AgentsPage() {
     lastGateRef.current = null;      // reset the per-agent gate result for this run
     // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
     // provider can self-load a skill by reading it with their native file tool
-    // (the load_skill tool only reaches local models). Fire-and-forget — it's
-    // fast and the orchestrator's planning turn runs before any specialist reads it.
-    if (runCwd) invoke("sync_project_skills", { cwd: runCwd }).catch(() => {});
+    // (the load_skill tool only reaches local models). We AWAIT it (a fast local
+    // file copy) so the mirror is guaranteed on disk before any specialist reads
+    // it, and we SURFACE the result — previously this was fire-and-forget with a
+    // swallowed .catch(), so a failed/empty sync was invisible and there was no
+    // way to tell whether skills were actually staged for this run.
+    if (runCwd) {
+      try {
+        const sync = await invoke<{ count: number; index_rel: string }>("sync_project_skills", { cwd: runCwd });
+        const syncMsg: GoalMsg = sync.count > 0
+          ? { role: "system", color: "#8aa0b4",
+              text: `🧩 ${sync.count} skill${sync.count === 1 ? "" : "s"} staged in .owllm/skills/ — agents self-load on demand.` }
+          : { role: "system", color: "#ffb74d",
+              text: "🧩 Skill sync ran but staged 0 skills — none are installed, so agents have none to self-load." };
+        setSupChat(prev => [...prev, syncMsg]);
+        appendLog("system", syncMsg);
+      } catch (e: any) {
+        const errMsg: GoalMsg = { role: "system", color: "#ff8c8c",
+          text: `⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}` };
+        setSupChat(prev => [...prev, errMsg]);
+        appendLog("system", errMsg);
+      }
+    }
     runTraceRef.current = { goal: text, t0: Date.now(), agents: new Map(),
       routeCorrections: 0, oscillationStops: 0, capHit: false, criticVerdict: null };
     setRunning(true); // store-backed: survives a page change so the run isn't orphaned

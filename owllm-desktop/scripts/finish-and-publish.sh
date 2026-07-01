@@ -86,13 +86,18 @@ git push -q origin "$BRANCH" || fail "git push failed (branch $BRANCH)"
 #     previous release (HEAD isn't tagged yet).
 PREV_TAG="$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || true)"
 if [ -n "$PREV_TAG" ]; then RANGE="$PREV_TAG..HEAD"; else RANGE="HEAD~5..HEAD"; fi
-# Every release commit this script makes is prefixed "vX.Y.Z: <headline>", so
-# recover the human <headline> by STRIPPING that prefix — don't drop the line
-# (dropping it discarded the only real info and left the notes as raw git
-# shortstat/name-status plumbing, which is what users complained about). Bare
-# version-bump commits with no headline collapse to empty and are dropped.
+# The changelog is built from REAL work-commit subjects (conventional commits
+# like "fix(release): …" / "feat: …"), NOT from the "vX.Y.Z: <headline>" release
+# commits this script makes. Those release headlines have repeatedly carried the
+# user's raw chat prompt — a STALE app build (built before the UI stopped doing
+# it) still passes the chat text as --notes, which becomes the release commit
+# subject. Recovering that headline leaked the prompt straight into "What's New".
+# So DROP every vX.Y.Z release commit outright. This is enforced host-side at
+# publish time, so it holds no matter which app build triggered the release and
+# also strips already-poisoned historical release commits out of the range. If no
+# real work commits remain, NOTES_BODY falls back to a clean "Maintenance release".
 SUBJECTS="$(git log --no-merges --pretty='- %s' "$RANGE" 2>/dev/null \
-  | sed -E 's/^- v[0-9]+\.[0-9]+\.[0-9]+:?[[:space:]]*/- /' \
+  | grep -vE '^- v[0-9]+\.[0-9]+\.[0-9]+([:[:space:]]|$)' \
   | grep -vE '^-[[:space:]]*$' \
   | head -20 || true)"
 #     The release body is a clean "what's new" list only — never the git

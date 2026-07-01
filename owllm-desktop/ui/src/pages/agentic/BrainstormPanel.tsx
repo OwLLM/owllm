@@ -60,6 +60,17 @@ type Props = {
 
 type LogLine = { kind: "text" | "tool" | "system"; text: string };
 type ProposedAgent = { name: string; base: string; why?: string };
+
+// Where a brainstorm's co-founder conversation is checkpointed on disk so a
+// session that stops for any reason (crash, close, refresh) can be resumed
+// instead of lost. Lives next to BRIEF.md, under the project's .owllm/ dir.
+const BRAINSTORM_STATE_PATH = ".owllm/brainstorm.json";
+type BrainstormState = {
+  v: 1;
+  idea: string;
+  convHistory: { role: "user" | "assistant"; content: string }[];
+  done: boolean;
+};
 type BriefFeature = { feature: string; priority: "v1" | "v2" | "opportunity" | "drop" };
 
 // Parse the "## Feature Priority" table out of BRIEF.md into structured rows so
@@ -149,23 +160,56 @@ export default function BrainstormPanel(props: Props) {
   // (contentKey = line count) — never yank a user who scrolled up to read.
   const logSticky = useStickyScroll(lines.length, open);
 
-  // Reset when reopened.
+  // Reset when reopened, then restore any checkpointed brainstorm from disk so
+  // a session that stopped mid-way (crash, close, refresh) resumes where it left
+  // off instead of losing the whole co-founder conversation.
   useEffect(() => {
-    if (open) {
-      setRunning(false);
-      setDone(false);
-      setError(null);
-      setLines([]);
-      setProposing(false);
-      setProposedTeam(null);
-      setApplying(false);
-      setTeamApplied(false);
-      setConvHistory([]);
-      setChatInput("");
-      setBriefText("");
-      setBoardView(false);
-    }
-  }, [open]);
+    if (!open) return;
+    setRunning(false);
+    setDone(false);
+    setError(null);
+    setLines([]);
+    setProposing(false);
+    setProposedTeam(null);
+    setApplying(false);
+    setTeamApplied(false);
+    setConvHistory([]);
+    setChatInput("");
+    setBriefText("");
+    setBoardView(false);
+    setIdea("");
+    if (!projectCwd) return;
+    let cancelled = false;
+    (async () => {
+      let st: BrainstormState | null = null;
+      try {
+        const raw = await invoke<string>("tool_read_file", { path: BRAINSTORM_STATE_PATH, cwd: projectCwd });
+        st = JSON.parse(raw) as BrainstormState;
+      } catch { /* no checkpoint yet — fresh start */ }
+      if (cancelled || !st || !Array.isArray(st.convHistory) || st.convHistory.length === 0) return;
+      setIdea(typeof st.idea === "string" ? st.idea : "");
+      setConvHistory(st.convHistory);
+      // Rebuild the visible log from the saved turns so the user sees the prior
+      // exchange, matching how runTurn renders it live.
+      const restored: LogLine[] = [{
+        kind: "system",
+        text: "↩ Resumed your saved brainstorm — pick up below, or 🆕 start fresh to begin a new idea.",
+      }];
+      for (const m of st.convHistory) {
+        if (m.role === "user") restored.push({ kind: "system", text: `\n🧑 ${m.content}\n` });
+        else restored.push({ kind: "text", text: m.content });
+      }
+      setLines(restored);
+      if (st.done) {
+        setDone(true);
+        try {
+          const brief = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd: projectCwd });
+          if (!cancelled && brief.trim()) setBriefText(brief);
+        } catch { /* brief gone — chat still resumable */ }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [open, projectCwd]);
 
   if (!open) return null;
 
@@ -180,6 +224,35 @@ export default function BrainstormPanel(props: Props) {
       }
       return out;
     });
+
+  // Checkpoint the co-founder conversation to disk so it survives a stop of any
+  // kind. Best-effort: a write failure must never block or break the chat.
+  const persistState = async (next: Omit<BrainstormState, "v">) => {
+    if (!projectCwd) return;
+    try {
+      await invoke("tool_write_file", {
+        path: BRAINSTORM_STATE_PATH,
+        content: JSON.stringify({ v: 1, ...next } satisfies BrainstormState, null, 2),
+        cwd: projectCwd,
+      });
+    } catch { /* best-effort checkpoint */ }
+  };
+
+  // Clear the current conversation AND its on-disk checkpoint so the next open
+  // starts blank instead of resuming. (BRIEF.md is left alone — it's the brief,
+  // not the transcript.)
+  const startFresh = async () => {
+    if (running) return;
+    setConvHistory([]);
+    setLines([]);
+    setDone(false);
+    setBriefText("");
+    setProposedTeam(null);
+    setTeamApplied(false);
+    setError(null);
+    setIdea("");
+    await persistState({ idea: "", convHistory: [], done: false });
+  };
 
   // Conversational co-founder (step 3): wrap the brainstormer role so it FIRST
   // talks (clarifies + challenges like a co-founder/skeptic), then runs the
@@ -218,7 +291,8 @@ export default function BrainstormPanel(props: Props) {
         ctrl.signal, onDelta, projectCwd,
         priorHistory, undefined, onThought,
       );
-      setConvHistory([...priorHistory, { role: "user", content: userText }, { role: "assistant", content: reply }]);
+      const newHistory = [...priorHistory, { role: "user" as const, content: userText }, { role: "assistant" as const, content: reply }];
+      setConvHistory(newHistory);
       // Did the brief land (or get refined) this turn?
       let briefOnDisk = false;
       try {
@@ -226,11 +300,14 @@ export default function BrainstormPanel(props: Props) {
         briefOnDisk = text.trim().length > 0;
         if (briefOnDisk) setBriefText(text);   // keep the live board in sync each turn
       } catch { /* not yet */ }
+      const nowDone = done || briefOnDisk;
       if (briefOnDisk && !done) {
         setDone(true);
         append("system", `\n✓ BRIEF.md saved. Keep chatting to refine it (the board updates live), or 🤝 Assemble a team below.`);
         onBriefSaved?.();
       }
+      // Checkpoint the conversation so it's never lost if the next turn stops.
+      await persistState({ idea, convHistory: newHistory, done: nowDone });
     } catch (e: any) {
       if (e?.name === "AbortError") append("system", "\n⏹ Cancelled.");
       else setError(String(e?.message ?? e));
@@ -472,6 +549,21 @@ export default function BrainstormPanel(props: Props) {
                 }}
               >
                 ⏹ Stop
+              </button>
+            )}
+            {!running && convHistory.length > 0 && (
+              <button
+                onClick={startFresh}
+                title="Clear this conversation and its saved checkpoint to start a new idea"
+                style={{
+                  padding: "8px 16px", fontSize: 13, fontWeight: 700,
+                  background: "transparent",
+                  color: "#cfd4e1",
+                  border: "1px solid rgba(255,255,255,0.15)", borderRadius: 6,
+                  cursor: "pointer",
+                }}
+              >
+                🆕 Start fresh
               </button>
             )}
             {done && !teamApplied && (

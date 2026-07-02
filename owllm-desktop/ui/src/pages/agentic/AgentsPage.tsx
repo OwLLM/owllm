@@ -1918,7 +1918,7 @@ function AgentChatTile({
 function AgentEditorModal({
   agentName, displayName, icon,
   initialModel, initialColor, initialPrompt,
-  models, accountsStatus, serverState, effectiveTeamModel,
+  models, accountsStatus, serverState, effectiveTeamModel, providerFor,
   templateId, onPickModel, onPreviewColor, onClose, onSaved,
 }: {
   agentName: string;
@@ -1931,6 +1931,9 @@ function AgentEditorModal({
   accountsStatus: AccountsStatusLite | null;
   serverState: ServerStatus;
   effectiveTeamModel: string;
+  /// Model → provider resolver (same one the run loop uses) so the ✨ Organize
+  /// button can call the agent's own model to split the freeform prompt.
+  providerFor: (modelId: string) => string;
   /// Template id (= save_team_template fileStem) backing the active team, or
   /// null when the roster is a custom project with no saved template.
   templateId: string | null;
@@ -1954,7 +1957,55 @@ function AgentEditorModal({
   const [rules, setRules] = useState(seeded.rules);
   const [dod, setDod] = useState(seeded.dod);
   const [saving, setSaving] = useState(false);
+  const [organizing, setOrganizing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  // ✨ Organize — split the current freeform prompt (everything, but chiefly the
+  // General blob) into Mission / Rules / Definition of Done using the agent's own
+  // model. It CATEGORISES, preserving wording — it does not rewrite. The user
+  // reviews the filled boxes and clicks Save; nothing is persisted here.
+  const organize = async () => {
+    const source = [general, mission, rules, dod].map(s => s.trim()).filter(Boolean).join("\n");
+    if (!source) { setErr("Nothing to organize — the prompt is empty."); return; }
+    const useModel = (model.trim() || effectiveTeamModel || serverState.model_id || "").trim();
+    if (!useModel) { setErr("No model available to organize — pick a model for this agent or start the server."); return; }
+    const prov = providerFor(useModel);
+    if (prov === "local" && !serverState.port) { setErr("Start the local server first (or pick a cloud model) so Organize can run."); return; }
+    setOrganizing(true); setErr(null);
+    const ctrl = new AbortController();
+    try {
+      const sys = [
+        "You reorganise an AI agent's prompt into four buckets. You CATEGORISE the",
+        "existing text — you do NOT reword, summarise, invent, or drop anything.",
+        "Move each sentence or line into exactly ONE bucket, keeping its original wording:",
+        "- mission: the agent's objective / purpose / what it's here to achieve.",
+        "- rules: hard constraints, do's and don'ts, 'never/always' statements.",
+        "- dod: how it knows the work is complete (definition of done, output/verify criteria).",
+        "- general: anything that fits none of the above (e.g. team roster, background).",
+        'Return ONLY minified JSON, no prose, no code fence: {"mission":"","rules":"","dod":"","general":""}',
+        "Use \\n for line breaks inside a value.",
+      ].join("\n");
+      let out = "";
+      await streamChatCompletion(
+        serverState.port ?? 0, useModel, prov,
+        sys, `Reorganise this agent prompt:\n\n${source}`,
+        0.1, ctrl.signal, (d) => { out += d; },
+      );
+      // Pull the JSON object out of the reply (models sometimes wrap it in prose
+      // or a ```json fence despite instructions).
+      const s = out.indexOf("{"), e = out.lastIndexOf("}");
+      if (s < 0 || e <= s) throw new Error("model did not return JSON");
+      const j = JSON.parse(out.slice(s, e + 1));
+      setMission(String(j.mission ?? "").trim());
+      setRules(String(j.rules ?? "").trim());
+      setDod(String(j.dod ?? "").trim());
+      setGeneral(String(j.general ?? "").trim());
+    } catch (e: any) {
+      setErr(`Organize failed: ${cleanAgentError(e)}. Your text is untouched — edit by hand or try again.`);
+    } finally {
+      setOrganizing(false);
+    }
+  };
 
   // Esc closes the popup (backdrop click + ✕ also close).
   useEffect(() => {
@@ -2088,7 +2139,15 @@ function AgentEditorModal({
             markdown string (## General / ## Mission / ## Rules / ## Definition
             of Done). Empty sections are dropped on save. */}
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          <span style={lbl}>Prompt (augments this agent's role)</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ ...lbl, flex: 1 }}>Prompt (augments this agent's role)</span>
+            <button
+              onClick={organize}
+              disabled={organizing}
+              title="Split the prompt text into Mission / Rules / Definition of Done using this agent's model. Categorises only — keeps your wording. Review, then Save."
+              style={{ padding: "4px 10px", borderRadius: 6, border: "1px solid var(--border-strong)", background: organizing ? "rgba(var(--accent-rgb),0.18)" : "#1a2030", color: organizing ? "#7d8595" : "var(--fg)", cursor: organizing ? "wait" : "pointer", fontSize: 11.5, fontWeight: 700, whiteSpace: "nowrap" }}
+            >{organizing ? "✨ Organizing…" : "✨ Organize"}</button>
+          </div>
           {[
             { label: "General (freeform)", value: general, set: setGeneral, rows: 3,
               placeholder: "Extra instructions layered on top of this agent's base role prompt at dispatch…" },
@@ -11648,6 +11707,7 @@ export default function AgentsPage() {
             accountsStatus={accountsStatus}
             serverState={serverState}
             effectiveTeamModel={effectiveTeamModel}
+            providerFor={providerFor}
             templateId={activeTeamTemplate?.id ?? null}
             onPickModel={(id) => onPickAgentModel(name, id)}
             onPreviewColor={(hex) => setPerAgentColor(prev => {

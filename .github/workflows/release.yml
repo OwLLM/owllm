@@ -1,7 +1,7 @@
 # Cross-platform release build for OwLLM Desktop.
 #
 # Trigger:
-#   * Tag push matching `v*.*.*`   → builds Windows + macOS (arm64 + x64) + Linux
+#   * Tag push matching `v*.*.*`   → builds Windows + macOS (arm64) + Linux
 #                                     and publishes a GitHub Release (DRAFT) with
 #                                     every installer attached.
 #   * Manual `workflow_dispatch`   → same matrix; the release step still runs
@@ -11,7 +11,7 @@
 # Output formats per platform (matches the bundle.targets = "all" in
 # src-tauri/tauri.conf.json):
 #   * Windows  — *.exe NSIS installer  +  portable owllm-desktop.exe
-#   * macOS    — *.dmg drag-installer  +  *.app bundle (one each for arm64 + x64)
+#   * macOS    — *.dmg drag-installer  +  *.app bundle (arm64 / Apple Silicon)
 #   * Linux    — *.deb (Debian/Ubuntu) + *.rpm (Fedora/RHEL) + *.AppImage (universal)
 #
 # Code signing: every signing env var is OPTIONAL. When the corresponding
@@ -99,15 +99,21 @@ jobs:
             rust_target: 'aarch64-apple-darwin'
             tauri_args: '--target aarch64-apple-darwin'
             artifact: 'owllm-desktop-macos-arm64'
-          - label: 'macOS Intel'
-            os: 'macos-13'
-            rust_target: 'x86_64-apple-darwin'
-            tauri_args: '--target x86_64-apple-darwin'
-            artifact: 'owllm-desktop-macos-x64'
+          # NOTE: the 'macOS Intel' (macos-13 / x86_64-apple-darwin) entry was
+          # removed 2026-07: GitHub retired the macos-13 runner image, so the
+          # job queued forever and blocked every release (the queued job also
+          # ate a concurrency slot for 24h until force-cancelled). Restoring
+          # Intel Mac support requires a paid larger runner (e.g.
+          # macos-15-large) or building a universal binary on macos-latest.
           - label: 'Linux x64'
             os: 'ubuntu-22.04'
             rust_target: 'x86_64-unknown-linux-gnu'
-            tauri_args: ''
+            # --target must match rust_target: the "Stage installers" and
+            # smoke-test steps derive the bundle dir from rust_target, and
+            # without an explicit --target Tauri writes to target/release/
+            # instead — the path mismatch made every Linux release fail at
+            # the staging step despite a successful build.
+            tauri_args: '--target x86_64-unknown-linux-gnu'
             artifact: 'owllm-desktop-linux-x64'
 
     steps:
@@ -290,7 +296,20 @@ jobs:
         # committed tauri.conf.json keeps it false so local key-less builds
         # (build-release.bat) still work without a signing key. Requires the
         # TAURI_SIGNING_PRIVATE_KEY secret to be set, or this build fails.
-        run: npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
+        run: |
+          # An UNSET repo secret still materialises here as a SET-but-EMPTY
+          # env var, and tauri-cli does NOT ignore empty values for the
+          # Apple vars: an empty APPLE_SIGNING_IDENTITY makes it attempt
+          # `codesign` with identity "" and the whole build fails with
+          # "The specified item could not be found in the keychain".
+          # Unset every empty signing var so missing secrets mean
+          # "build unsigned", as the header comment promises.
+          for v in TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD \
+                   APPLE_SIGNING_IDENTITY APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID \
+                   TAURI_WINDOWS_CERTIFICATE TAURI_WINDOWS_CERTIFICATE_PASSWORD; do
+            if [ -z "$(eval echo "\${$v:-}")" ]; then unset "$v"; fi
+          done
+          npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true}}'
 
       # ---------------------------------------------------------------
       # Smoke test — launch the built binary and verify it stays alive

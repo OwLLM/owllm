@@ -309,11 +309,12 @@ jobs:
                    TAURI_WINDOWS_CERTIFICATE TAURI_WINDOWS_CERTIFICATE_PASSWORD; do
             if [ -z "$(eval echo "\${$v:-}")" ]; then unset "$v"; fi
           done
-          # certificateThumbprint:"" overrides tauri.conf.json's EV thumbprint for CI:
-          # the SimplySign/Certum cert lives only on the host, so CI runners can't
-          # sign — blank it here so the CI build doesn't fail looking for it. (Signed
-          # releases come from the host publish path, which HAS the cert.)
-          npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true,"windows":{"certificateThumbprint":""}}}'
+          # certificateThumbprint:null REMOVES tauri.conf.json's EV thumbprint for CI
+          # (--config uses JSON merge-patch: null deletes the key, but "" keeps it
+          # set and makes Tauri run signtool with no cert — that broke v0.7.33).
+          # The SimplySign/Certum cert lives only on the host, so CI builds unsigned;
+          # signed releases come from the host publish path, which HAS the cert.
+          npm run tauri -- build ${{ matrix.tauri_args }} --config '{"bundle":{"createUpdaterArtifacts":true,"windows":{"certificateThumbprint":null}}}'
 
       # ---------------------------------------------------------------
       # Smoke test — launch the built binary and verify it stays alive

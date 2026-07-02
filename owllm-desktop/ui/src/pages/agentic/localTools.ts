@@ -1042,6 +1042,106 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       { name: "key", required: true, description: "The exact key the fact was saved under (e.g. 'build_command').", aliases: ["name", "id", "slug", "label", "query"] },
     ],
   },
+  {
+    name: "browser_open",
+    aliases: ["open_browser", "browser_launch", "start_browser", "browse_to"],
+    description:
+      "Open a URL in the REAL persistent browser — a full logged-in Chromium session " +
+      "that keeps the user's cookies/logins across calls (not a headless scrape). " +
+      "Starts the browser if needed, then navigates. After this, call browser_snapshot " +
+      "to get the indexed list of interactive elements before clicking or filling.",
+    args: [{ name: "url", required: true, description: "Absolute URL to open (e.g. https://example.com).", aliases: ["link", "address", "uri", "href", "u"] }],
+  },
+  {
+    name: "browser_navigate",
+    aliases: ["browser_goto", "navigate", "goto_url", "browser_go"],
+    description:
+      "Navigate the already-open persistent browser to a new URL (same logged-in " +
+      "session). Call browser_snapshot afterward to re-read the interactive elements.",
+    args: [{ name: "url", required: true, description: "Absolute URL to navigate to.", aliases: ["link", "address", "uri", "href", "u"] }],
+  },
+  {
+    name: "browser_snapshot",
+    aliases: ["snapshot", "browser_dom", "browser_elements", "page_snapshot"],
+    description:
+      "Snapshot the current page and return the INDEXED list of interactive elements " +
+      "(links, buttons, inputs) with their index numbers. You act on elements BY INDEX " +
+      "with browser_click / browser_fill / browser_select — ALWAYS call this first to " +
+      "get fresh indexes before interacting, and again after the page changes.",
+    args: [],
+  },
+  {
+    name: "browser_click",
+    aliases: ["click", "browser_press_element", "click_element"],
+    description:
+      "Click the interactive element at the given index from the latest browser_snapshot. " +
+      "Snapshot first to get the index; the page may change, so snapshot again after.",
+    args: [{ name: "index", required: true, description: "Element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] }],
+  },
+  {
+    name: "browser_fill",
+    aliases: ["fill", "type_text", "browser_type", "fill_input"],
+    description:
+      "Type text into the input/textarea element at the given index from the latest " +
+      "browser_snapshot. Snapshot first to get the index.",
+    args: [
+      { name: "index", required: true, description: "Input element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] },
+      { name: "text", required: true, description: "The text to type into the field.", aliases: ["value", "content", "input", "str"] },
+    ],
+  },
+  {
+    name: "browser_press",
+    aliases: ["press", "browser_key", "press_key", "keypress"],
+    description:
+      "Press a keyboard key in the persistent browser (e.g. 'Enter', 'Tab', 'Escape', " +
+      "'ArrowDown'). Use after browser_fill to submit a form or trigger a handler.",
+    args: [{ name: "key", required: true, description: "Key name to press, e.g. 'Enter' or 'Escape'.", aliases: ["k", "keyname", "button"] }],
+  },
+  {
+    name: "browser_select",
+    aliases: ["select", "select_option", "browser_choose", "choose_option"],
+    description:
+      "Select an option (by value) in the <select> dropdown at the given index from the " +
+      "latest browser_snapshot. Snapshot first to get the index.",
+    args: [
+      { name: "index", required: true, description: "Select element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] },
+      { name: "value", required: true, description: "The option value to select.", aliases: ["option", "val", "choice"] },
+    ],
+  },
+  {
+    name: "browser_screenshot",
+    aliases: ["browser_capture", "capture_page", "page_screenshot"],
+    description:
+      "Take a screenshot of the current page in the persistent browser. Use to visually " +
+      "confirm state when the snapshot's element list isn't enough.",
+    args: [],
+  },
+  {
+    name: "browser_get_text",
+    aliases: ["get_text", "browser_text", "page_text", "read_page"],
+    description:
+      "Return the visible text content of the current page in the persistent browser. " +
+      "Use to read article/body content rather than the interactive-element list.",
+    args: [],
+  },
+  {
+    name: "browser_back",
+    aliases: ["go_back", "browser_history_back", "navigate_back"],
+    description: "Go back one entry in the persistent browser's history. Snapshot afterward to re-read elements.",
+    args: [],
+  },
+  {
+    name: "browser_reload",
+    aliases: ["reload", "browser_refresh", "refresh_page"],
+    description: "Reload the current page in the persistent browser. Snapshot afterward to re-read elements.",
+    args: [],
+  },
+  {
+    name: "browser_close",
+    aliases: ["close_browser", "browser_stop", "stop_browser", "quit_browser"],
+    description: "Close/stop the persistent browser session. Reopen later with browser_open.",
+    args: [],
+  },
 ];
 
 // ---- Canonical-name + arg-alias resolution (the "normalize" half of
@@ -1432,6 +1532,57 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         );
         if (!entry) return { ok: true, output: `Team memory: nothing stored under key "${key}".` };
         return { ok: true, output: entry.content };
+      }
+      case "browser_open": {
+        // Real persistent logged-in browser: ensure the daemon, start it, then navigate.
+        await invoke("browser_ensure");
+        await invoke("browser_start");
+        const result = await invoke<string>("browser_cmd", { action: "navigate", params: { url: call.args.url } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_navigate": {
+        const result = await invoke<string>("browser_cmd", { action: "navigate", params: { url: call.args.url } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_snapshot": {
+        const result = await invoke<string>("browser_cmd", { action: "snapshot", params: {} });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_click": {
+        const result = await invoke<string>("browser_cmd", { action: "click", params: { index: Number(call.args.index) } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_fill": {
+        const result = await invoke<string>("browser_cmd", { action: "fill", params: { index: Number(call.args.index), text: call.args.text } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_press": {
+        const result = await invoke<string>("browser_cmd", { action: "press", params: { key: call.args.key } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_select": {
+        const result = await invoke<string>("browser_cmd", { action: "select", params: { index: Number(call.args.index), value: call.args.value } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_screenshot": {
+        const result = await invoke<string>("browser_cmd", { action: "screenshot", params: {} });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_get_text": {
+        const result = await invoke<string>("browser_cmd", { action: "get_text", params: {} });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_back": {
+        const result = await invoke<string>("browser_cmd", { action: "back", params: {} });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_reload": {
+        const result = await invoke<string>("browser_cmd", { action: "reload", params: {} });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_close": {
+        const result = await invoke<string>("browser_stop");
+        return { ok: true, output: truncate(result, 8000) };
       }
       default:
         return { ok: false, output: `unknown tool: ${call.name}` };

@@ -30,10 +30,10 @@ Actions (all also documented in the frozen contract the frontend calls):
 flow is: snapshot -> read indices -> click/fill by index.
 """
 
-import base64
 import json
 import os
 import sys
+import time
 
 
 # Interactive elements we index in a snapshot. Kept deliberately broad so the
@@ -311,12 +311,17 @@ def dispatch(context, page, elmap, action, params):
 
     if action == "screenshot":
         page = current_page(context)
-        png = page.screenshot(full_page=False)
-        b64 = base64.b64encode(png).decode("ascii")
+        # Save the PNG to a `screenshots/` dir beside the profile dir and
+        # return only a short note + the file path. Inlining base64 (>100 KB)
+        # would be truncated by the frontend into a non-decodable data URI and
+        # would flood the model's context on every call.
+        profile = os.environ.get("OWLLM_BROWSER_PROFILE") or default_profile_dir()
+        shots_dir = os.path.join(os.path.dirname(profile), "screenshots")
+        os.makedirs(shots_dir, exist_ok=True)
+        path = os.path.abspath(os.path.join(shots_dir, f"screenshot-{time.time_ns()}.png"))
+        png = page.screenshot(path=path, full_page=False)
         note = f"screenshot captured: {len(png)} bytes, {safe_url(page)}"
-        # Return a short note plus the base64 so a caller that wants the image
-        # has it; text-only callers still get a useful one-liner on line 1.
-        return page, elmap, f"{note}\ndata:image/png;base64,{b64}"
+        return page, elmap, f"{note}\nSaved screenshot: {path}"
 
     raise ValueError(f"unknown action {action!r}")
 

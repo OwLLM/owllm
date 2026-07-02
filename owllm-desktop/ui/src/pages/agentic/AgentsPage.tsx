@@ -4657,7 +4657,11 @@ function ChatInputDock({
               if (e.key === "Escape") { setPaletteOpen(false); return; }
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
-                handleSend();
+                // While a run is active, Enter QUEUES the message to steer the run
+                // (onSend → onSupSend enqueues). handleSend()-when-busy is Stop, so
+                // route around it here; the ■ button remains the way to stop.
+                if (busy && draft.trim()) onSend(images);
+                else handleSend();
               }
             }}
             placeholder="Queue another message…"
@@ -4960,9 +4964,11 @@ function OrchestratorPane({
     ta.style.height = `${Math.max(36, next)}px`;
   }, [draft]);
   const submitInput = (images: Attachment[] = []) => {
-    if (supSendBusy) return;
     const t = draft.trim();
     if (!t && images.length === 0) return;
+    // NOTE: no busy-guard — when a run is active, onSupSend queues this as a
+    // mid-run steer instead of starting a second run. That's what lets the user
+    // type + send while the team works (the ■ button still stops the run).
     onSupSend(t, images);
     setDraft("");
   };
@@ -7907,6 +7913,19 @@ export default function AgentsPage() {
   // mid-run. Users can still chat alongside a running plan.
   const [supSendBusy, setSupSendBusy] = useState(false);
   const supSendBusyRef = useRef(false);
+  // Mid-run steering (like Claude Code): a message the user sends WHILE a run is
+  // active is queued here instead of dropped, and dispatchGoal drains it at the next
+  // orchestrator boundary and feeds it in as a ⚡ USER (mid-run) turn. steerQueueRef
+  // is the source of truth; pendingSteers just mirrors the count for the UI.
+  const steerQueueRef = useRef<string[]>([]);
+  // Drain the queued steers into a single block (empty string when none). Called at
+  // safe boundaries in the run loop. The user's feedback that a message was captured
+  // is the "⚡ queued to steer the run →" echo pushed into the chat on enqueue.
+  const drainSteers = (): string => {
+    const q = steerQueueRef.current;
+    if (!q.length) return "";
+    return q.splice(0, q.length).join("\n");
+  };
   // Synchronous reentrancy guard for dispatchGoal. The busy/running flags it
   // already checks are React/store state set only AFTER an async preflight, so
   // two rapid dispatches both passed the guard and ran concurrently — two
@@ -9057,7 +9076,15 @@ export default function AgentsPage() {
   // flow; this lets the user sneak in a side note without re-running.
   const onSupSend = async (text: string, images: Attachment[] = []) => {
     if (supSendBusyRef.current) {
-      console.log("[onSupSend] ignored — already busy");
+      // A run is active → DON'T drop the message. Queue it as a mid-run steer;
+      // dispatchGoal drains it at the next orchestrator boundary and feeds it in.
+      // (Images aren't carried mid-run — text only.) Echo it so the user sees it
+      // was captured, not ignored.
+      const t = text.trim();
+      if (t) {
+        steerQueueRef.current.push(t);
+        setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `⚡ queued to steer the run → ${t}`, ts: Date.now(), seq: nextSeq() }]);
+      }
       return;
     }
     // A chat to a TEAM must orchestrate, not answer solo. When the active
@@ -10006,8 +10033,13 @@ export default function AgentsPage() {
           : /back|api|server|\bdb\b|data|rust/i.test(coder.name) ? "backend" : "full";
         let sText = ""; let sGate: GateResult | null = null; let sPrev = "";
         for (let attempt = 1; attempt <= 3; attempt++) {
-          const turn = attempt === 1 ? text
+          // Mid-run steering: fold any message the user queued while the coder
+          // worked into this attempt's turn (like Claude Code reading it mid-flight).
+          const sSteer = drainSteers();
+          if (sSteer) appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteer}` });
+          const sBase = attempt === 1 ? text
             : `Your previous change did NOT pass the project's verification:\n${renderGateLine(sGate!)}\n\nFix it so the check passes. Original task:\n${text}`;
+          const turn = sSteer ? `${sBase}\n\n⚡ The user sent this WHILE you were working — address it too:\n${sSteer}` : sBase;
           try {
             sText = (await streamChatCompletion(
               port, modelFor(coder.name), providerFor(modelFor(coder.name)),
@@ -10039,6 +10071,28 @@ export default function AgentsPage() {
           setRunError("Signed out (401) — re-login required.");
           setPhase("done"); setRunEndedAt(Date.now());
           return;
+        }
+        // Address any steer queued during a passing attempt (the loop above may
+        // have broken before draining it) so nothing the user typed is left stranded
+        // in the queue. Bounded; re-verifies after each.
+        for (let sg = 0; sg < 3 && !ctrl.signal.aborted; sg++) {
+          const sSteer = drainSteers();
+          if (!sSteer) break;
+          appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteer}` });
+          addActive(coder.name);
+          try {
+            sText = (await streamChatCompletion(
+              port, modelFor(coder.name), providerFor(modelFor(coder.name)),
+              sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteer}`,
+              tempFor(coder, 0.3), ctrl.signal,
+              (d) => streamLog(coder.name, d), projectCwd,
+              sMem.length > 0 ? sMem : undefined, autoApprove,
+              (c, r, d) => streamThought(coder.name, c, r, d), sAllowed, undefined,
+              getClaudeSession(selectedProjectId, coder.name),
+            )).trim();
+            sGate = await runGate(projectCwd, sScope); lastGateRef.current = sGate;
+          } catch (e: any) { if (ctrl.signal.aborted) throw e; }
+          finally { removeActive(coder.name); }
         }
         ranWriteToolRef.current = true; // a solo coder run IS the write attempt; the gate decides "done"
         // RULE-BASED PUBLISH: host commits+bumps+releases deterministically when asked.
@@ -11117,6 +11171,46 @@ export default function AgentsPage() {
           }
         }
       }
+      // ----- Mid-run steering: address anything the user queued WHILE the team
+      // worked, before delivering. Always runs (the critic loop above is
+      // conditional). Loops so a message queued DURING the addressing is caught
+      // too; guarded so a rapid typist can't spin it forever. Non-blocking: an
+      // error keeps the current answer. -----
+      for (let sg = 0; sg < 5 && !ctrl.signal.aborted; sg++) {
+        const steer = drainSteers();
+        if (!steer) break;
+        appendThought(orch.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${steer}` });
+        addActive(orch.name);
+        appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
+        try {
+          const steered = await streamChatCompletion(
+            port, finalModel, providerFor(finalModel),
+            buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd),
+            [
+              "Your answer so far:",
+              finalReply,
+              "",
+              "The user sent this WHILE you were working — address it now, then output the updated final answer only. Dispatch specialists again ONLY if the message genuinely needs it:",
+              steer,
+            ].join("\n"),
+            tempFor(orch, 0.4), ctrl.signal,
+            (delta) => streamLog(orch.name, delta),
+            projectCwd,
+            priorHistory, undefined,
+            (channel, role, delta) => streamThought(orch.name, channel, role, delta),
+            undefined,
+            undefined,
+            getClaudeSession(selectedProjectId, orch.name),
+          );
+          if (steered.trim()) { finalReply = steered; speakAgentReply(orch.name, finalReply); }
+        } catch (e: any) {
+          if (ctrl.signal.aborted) throw e;
+          // steer addressing failed → keep the prior finalReply (non-blocking)
+        } finally {
+          removeActive(orch.name);
+        }
+      }
+
       setSupChat(prev => [...prev, { role: "orchestrator", color: "#ffd97a", text: finalReply.trim(), ts: Date.now(), seq: nextSeq() }]);
 
       // ----- Phase 4: serial squash-merge each committed branch back -----

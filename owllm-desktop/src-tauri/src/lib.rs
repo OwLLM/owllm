@@ -19,6 +19,7 @@ mod agents;
 mod audio;
 mod bootstrap;
 mod bridges;
+mod browser;
 mod code;
 mod crypt;
 mod data_layer;
@@ -212,6 +213,11 @@ pub fn run() {
             slack::slack_open_connection,
             slack::slack_send_message,
             slack::slack_download_file,
+            browser::browser_ensure,
+            browser::browser_start,
+            browser::browser_cmd,
+            browser::browser_stop,
+            browser::browser_status,
             git::git_status,
             git::git_branches,
             git::git_checkout,

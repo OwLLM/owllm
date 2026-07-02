@@ -1536,8 +1536,11 @@ function resolveAgentSkillIds(
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
   selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, agentTiming,
-  perAgentSkills,
+  perAgentSkills, projectCwd,
 }: {
+  /// Project working directory — threaded to the publisher tile's
+  /// Commit / Merge / Publish host controls.
+  projectCwd?: string | null;
   team: Team | null;
   roleByName: Map<string, RoleData>;
   /// Per-agent skill grants (project overrides) — combined with each agent's
@@ -1671,9 +1674,235 @@ function AgentChatGrid({
             alphaB={alphaB}
             timing={agentTiming?.get(a.name)}
             skills={resolveAgentSkillIds(a, roleByName, perAgentSkills)}
+            isPublisher={a.base === "publisher"
+              || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release")}
+            projectCwd={projectCwd}
           />
         );
       })}
+    </div>
+  );
+}
+
+// ── Publisher card body ──────────────────────────────────────────────
+// The publisher's tile in the ▦ chat grid swaps its chat preview for the
+// deterministic release controls: Commit / Merge / Publish buttons that
+// call the HOST-side git executors directly (no LLM in the loop — the
+// same philosophy as release.rs), plus a repo-setup bar whose READY /
+// NOT READY tag is COMPUTED by real probes (incl. `git ls-remote`, the
+// credential check sandboxed agents fail with "could not read Username").
+type PublisherReadyCheck = { id: string; label: string; ok: boolean; detail: string };
+type PublisherCfg = { targetBranch: string; commitScope: string; commitMsg: string };
+
+function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
+  const [checks, setChecks] = useState<PublisherReadyCheck[] | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [log, setLog] = useState("");
+  const [setupOpen, setSetupOpen] = useState(false);
+  const storageKey = `publisherCard:${cwd ?? "none"}`;
+  const [cfg, setCfg] = useState<PublisherCfg>(() => {
+    const base: PublisherCfg = { targetBranch: "main", commitScope: "", commitMsg: "" };
+    try { return { ...base, ...JSON.parse(localStorage.getItem(storageKey) ?? "{}") }; }
+    catch { return base; }
+  });
+  const saveCfg = (next: PublisherCfg) => {
+    setCfg(next);
+    try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* quota — non-fatal */ }
+  };
+  const refresh = useCallback(async () => {
+    if (!cwd) {
+      setChecks([{ id: "repo", label: "Project folder", ok: false, detail: "no project open" }]);
+      return;
+    }
+    setBusy("check");
+    try { setChecks(await invoke<PublisherReadyCheck[]>("publish_readiness", { repoDir: cwd })); }
+    catch (e) { setChecks([{ id: "error", label: "Readiness check", ok: false, detail: String(e) }]); }
+    finally { setBusy(null); }
+  }, [cwd]);
+  useEffect(() => { void refresh(); }, [refresh]);
+
+  const okIds = new Set((checks ?? []).filter(c => c.ok).map(c => c.id));
+  const failing = (checks ?? []).filter(c => !c.ok);
+  const ready = checks != null && failing.length === 0;
+  const canCommit = okIds.has("repo");
+  const canMerge = okIds.has("repo") && okIds.has("remote") && okIds.has("auth");
+  const canPublish = canMerge && okIds.has("version") && okIds.has("script");
+  const reasonFor = (need: string[]) =>
+    (checks ?? []).filter(c => need.includes(c.id) && !c.ok).map(c => `${c.label}: ${c.detail}`).join("\n");
+
+  const run = async (kind: string, fn: () => Promise<string>) => {
+    setBusy(kind);
+    setLog(`▶ ${kind}…\n`);
+    try {
+      const out = await fn();
+      setLog(l => `${l}${out}\n✔ ${kind} done`);
+    } catch (e) {
+      setLog(l => `${l}✖ ${String(e)}`);
+    } finally {
+      setBusy(null);
+      void refresh();
+    }
+  };
+
+  const bigBtn = (label: string, glyph: string, enabled: boolean, title: string, onGo: () => void) => (
+    <button
+      disabled={!enabled || busy != null}
+      title={title}
+      onClick={(e) => { e.stopPropagation(); onGo(); }}
+      style={{
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+        gap: 4, padding: "10px 4px", minWidth: 0,
+        background: enabled ? `rgba(${rgb},0.18)` : "rgba(255,255,255,0.04)",
+        border: `1px solid rgba(${rgb},${enabled ? 0.65 : 0.2})`,
+        borderRadius: 8,
+        color: enabled ? "var(--fg-strong)" : "var(--fg-subtle)",
+        cursor: enabled && busy == null ? "pointer" : "not-allowed",
+        fontWeight: 700, fontSize: 11,
+        transition: "background 120ms, border-color 120ms",
+      }}
+    >
+      <span style={{ fontSize: 20, lineHeight: 1 }}>{glyph}</span>
+      <span>{label}</span>
+    </button>
+  );
+
+  return (
+    <div
+      onClick={(e) => e.stopPropagation()}
+      style={{
+        flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+        gap: 8, padding: 10, cursor: "default",
+      }}
+    >
+      {/* 3 big buttons, 3 columns */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, flexShrink: 0 }}>
+        {bigBtn("Commit", "✓", canCommit,
+          canCommit ? "Stage + commit the working tree (host git, deterministic)" : reasonFor(["repo"]),
+          () => { void run("commit", () => invoke<string>("repo_commit", { repoDir: cwd, message: cfg.commitMsg, scope: cfg.commitScope || null })); })}
+        {bigBtn("Merge", "⇥", canMerge,
+          canMerge
+            ? `Fast-forward '${cfg.targetBranch}' to HEAD and push (refuses non-fast-forward, never force)`
+            : reasonFor(["repo", "remote", "auth"]),
+          () => { void run("merge", () => invoke<string>("repo_merge", { repoDir: cwd, target: cfg.targetBranch })); })}
+        {bigBtn("Publish", "🚀", canPublish,
+          canPublish
+            ? "Bump version → commit → tag → push → CI drafts the release"
+            : reasonFor(["repo", "remote", "auth", "version", "script"]),
+          () => {
+            if (!window.confirm("Publish a new release?\n\nThis bumps the version, commits, tags, pushes, and triggers the CI release build (lands as a DRAFT on GitHub).")) return;
+            void run("publish", () => invoke<string>("finish_and_publish", { repoDir: cwd, notes: "" }));
+          })}
+      </div>
+      {/* Repo-setup bar with the computed READY / NOT READY tag */}
+      <button
+        onClick={(e) => { e.stopPropagation(); setSetupOpen(true); }}
+        title="Repository settings + readiness details"
+        style={{
+          display: "flex", alignItems: "center", gap: 8, width: "100%",
+          padding: "6px 10px", flexShrink: 0,
+          background: "rgba(0,0,0,0.30)",
+          border: `1px solid rgba(${rgb},0.4)`, borderRadius: 7,
+          color: "var(--fg)", fontSize: 11, fontWeight: 600, cursor: "pointer",
+        }}
+      >
+        <span>⚙ Set up repo</span>
+        <span style={{ flex: 1 }} />
+        <span style={{
+          fontSize: 9, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase",
+          padding: "1px 7px", borderRadius: 4,
+          color: ready ? "#3cf26b" : "#ffd97a",
+          background: ready ? "rgba(60,242,107,0.12)" : "rgba(255,217,122,0.12)",
+          border: `1px solid ${ready ? "rgba(60,242,107,0.5)" : "rgba(255,217,122,0.5)"}`,
+        }}>
+          {checks == null ? "…" : ready ? "READY" : `NOT READY (${failing.length})`}
+        </span>
+      </button>
+      {/* Live output of the last action — the script/git output itself,
+          not an agent's paraphrase of it. */}
+      <div style={{
+        flex: 1, minHeight: 0, overflowY: "auto",
+        background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: 7, padding: 8,
+        fontFamily: "Consolas, monospace", fontSize: 10.5, whiteSpace: "pre-wrap",
+        color: log.includes("✖") ? "#ff9d9d" : "var(--fg-muted)",
+        userSelect: "text", cursor: "text",
+      }}>
+        {busy != null && busy !== "check" ? `⏳ ${busy} running…\n${log}` : (log || "Ready. Actions run host-side git — output appears here.")}
+      </div>
+      {/* Settings popup — readiness detail per check + the config fields */}
+      {setupOpen && (
+        <div
+          onClick={(e) => { e.stopPropagation(); setSetupOpen(false); }}
+          style={{
+            position: "fixed", inset: 0, zIndex: 1000,
+            background: "rgba(8,12,20,0.55)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: 440, maxWidth: "92vw", maxHeight: "84vh", overflowY: "auto",
+              background: "rgba(14,17,25,0.98)", border: `1px solid rgba(${rgb},0.55)`,
+              borderRadius: 12, padding: 16, boxShadow: "0 12px 40px rgba(0,0,0,0.6)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", marginBottom: 10 }}>
+              <span style={{ fontSize: 13, fontWeight: 800, color: "var(--fg-strong)" }}>⚙ Repository setup</span>
+              <span style={{ flex: 1 }} />
+              <button
+                onClick={() => setSetupOpen(false)}
+                style={{ background: "none", border: "none", color: "var(--fg-muted)", fontSize: 15, cursor: "pointer" }}
+              >✕</button>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginBottom: 10, wordBreak: "break-all" }}>
+              Repo: {cwd ?? "(no project open)"}
+            </div>
+            {/* Readiness checks — each is a real probe result */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 14 }}>
+              {(checks ?? []).map(c => (
+                <div key={c.id} style={{
+                  display: "flex", gap: 8, alignItems: "baseline",
+                  fontSize: 11.5, color: c.ok ? "var(--fg)" : "#ffd97a",
+                }}>
+                  <span style={{ flexShrink: 0 }}>{c.ok ? "✅" : "⚠️"}</span>
+                  <span style={{ fontWeight: 700, flexShrink: 0 }}>{c.label}</span>
+                  <span style={{ color: "var(--fg-subtle)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={c.detail}>{c.detail}</span>
+                </div>
+              ))}
+            </div>
+            {([
+              ["Merge target branch", "targetBranch", "main", "The branch Merge fast-forwards and pushes"],
+              ["Commit scope (pathspec)", "commitScope", "empty = whole tree", "Limit Commit to a sub-path, e.g. owllm-desktop/ — keeps unrelated clutter out"],
+              ["Commit message", "commitMsg", "auto if empty", "Used by the Commit button"],
+            ] as const).map(([label, key, ph, hint]) => (
+              <label key={key} style={{ display: "block", marginBottom: 10 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, color: "var(--fg-muted)", marginBottom: 3 }}>{label}</div>
+                <input
+                  value={cfg[key]}
+                  placeholder={ph}
+                  title={hint}
+                  onChange={(e) => saveCfg({ ...cfg, [key]: e.target.value })}
+                  style={{
+                    width: "100%", boxSizing: "border-box", padding: "6px 8px",
+                    background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: 6, color: "var(--fg)", fontSize: 12,
+                  }}
+                />
+              </label>
+            ))}
+            <button
+              disabled={busy === "check"}
+              onClick={() => void refresh()}
+              style={{
+                width: "100%", padding: "7px 0", marginTop: 2,
+                background: `rgba(${rgb},0.18)`, border: `1px solid rgba(${rgb},0.6)`,
+                borderRadius: 7, color: "var(--fg-strong)", fontSize: 12, fontWeight: 700, cursor: "pointer",
+              }}
+            >{busy === "check" ? "Checking…" : "↻ Re-run readiness checks"}</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1686,10 +1915,15 @@ function AgentChatTile({
   isActive, isSelected, accent, onClick, onOpenEditor,
   modelLabel, modelTint, modelTitle,
   ringPx, outerPx, alphaA, alphaB,
-  timing, skills,
+  timing, skills, isPublisher, projectCwd,
 }: {
   name: string;
   icon: string;
+  /// Publisher tile: replaces the chat preview with the deterministic
+  /// Commit / Merge / Publish controls + repo-setup bar (user spec).
+  isPublisher?: boolean;
+  /// Project working directory the publisher controls operate on.
+  projectCwd?: string | null;
   /// This agent's equipped skill ids — rendered as a corner "ribbon" of icon
   /// badges (hover for the named list). Empty/undefined = no badge.
   skills?: string[];
@@ -1859,6 +2093,13 @@ function AgentChatTile({
           }}>LIVE</span>
         )}
       </div>
+      {/* Publisher tile: the body is the release control panel instead of
+          the chat preview (user spec 2026-07-02). Its buttons call the
+          host-side git executors directly — deterministic, no agent. */}
+      {isPublisher ? (
+        <PublisherTilePanel cwd={projectCwd ?? null} rgb={rgb} />
+      ) : (
+      <>
       {/* Log scroll pane — the agent's reply text only, plain pre-wrap
           so mouse-selection survives streaming token updates (the
           previous MarkdownBody renderer rebuilt the DOM per token and
@@ -1902,6 +2143,8 @@ function AgentChatTile({
           })
         )}
       </div>
+      </>
+      )}
       {/* Skill ribbon — a corner stack of skill icons (like a soldier's
           badges). Hover the corner → the full named list. Shows what this
           agent has equipped; lit whether it's mid-run or idle. */}
@@ -12215,6 +12458,7 @@ export default function AgentsPage() {
                 providerFor={providerFor}
                 agentTiming={agentTiming}
                 perAgentSkills={perAgentSkills}
+                projectCwd={runCwd || null}
               />
             )}
             {/* (The bottom-left canvas voice overlay was removed — the

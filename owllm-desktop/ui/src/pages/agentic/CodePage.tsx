@@ -434,6 +434,23 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     onTitle(label);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot, workspace]);
+  // Stale-worktree self-heal: a restored session can point at a worktree that
+  // was deleted or gutted underneath it (sweep, crash, manual cleanup). The
+  // old behaviour was a silently EMPTY file tree that looked broken. Verify
+  // the worktree is still a real checkout (its `.git` link exists); if not,
+  // rebuild it from the project root — openWorkspace already handles every
+  // failure with an explicit status message (dirty repo, missing folder, …).
+  const healedRef = useRef(false);
+  useEffect(() => {
+    if (healedRef.current || !isolated || !workspace || !projectRoot || preparing) return;
+    healedRef.current = true;
+    invoke<Array<{ name: string; kind: string }>>("tool_list_dir", { path: workspace, cwd: undefined })
+      .then((e) => {
+        if (!e.some((x) => x.name === ".git")) void openWorkspace(projectRoot);
+      })
+      .catch(() => { void openWorkspace(projectRoot); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isolated, workspace, projectRoot, preparing]);
   // "New page on the same project": auto-open the seeded project once on mount,
   // but only if this page doesn't already have a workspace (restored session).
   const seededRef = useRef(false);
@@ -1973,6 +1990,9 @@ function TreeDir({ path, name, depth, defaultOpen, onOpenFile }: {
 }) {
   const [open, setOpen] = useState(!!defaultOpen);
   const [entries, setEntries] = useState<TreeEntry[] | null>(null);
+  // A failed listing must SAY so — a silent empty tree is indistinguishable
+  // from an empty folder, which is exactly how a dead worktree went unnoticed.
+  const [err, setErr] = useState<string | null>(null);
   useEffect(() => {
     if (open && entries === null) {
       invoke<Array<{ name: string; kind: string; size?: number }>>("tool_list_dir", { path, cwd: undefined })
@@ -1983,7 +2003,7 @@ function TreeDir({ path, name, depth, defaultOpen, onOpenFile }: {
               .sort((a, b) => (a.kind === b.kind ? a.name.localeCompare(b.name) : a.kind === "dir" ? -1 : 1)),
           ),
         )
-        .catch(() => setEntries([]));
+        .catch((e) => { setErr(String(e)); setEntries([]); });
     }
   }, [open, entries, path]);
   const rowStyle: CSSProperties = {
@@ -1998,6 +2018,11 @@ function TreeDir({ path, name, depth, defaultOpen, onOpenFile }: {
         <span>📁 {name}</span>
       </div>
       {open && entries === null && <div style={{ ...rowStyle, color: "var(--fg-muted)" }}>…</div>}
+      {open && err && (
+        <div style={{ ...rowStyle, paddingLeft: 4 + (depth + 1) * 12, color: "var(--danger, #ff7a7a)", whiteSpace: "normal" }} title={err}>
+          ⚠ can’t read this folder — {err}
+        </div>
+      )}
       {open && entries?.map((e) => {
         const child = `${path}/${e.name}`;
         if (e.kind === "dir") {

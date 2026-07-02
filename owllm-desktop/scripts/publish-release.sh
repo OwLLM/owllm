@@ -85,9 +85,11 @@ case "$(uname -s)" in
       WININ="$(cygpath -w "$INSTALLER")"
       if [ -n "$SIGN_THUMBPRINT" ]; then SEL=(/sha1 "$SIGN_THUMBPRINT"); else SEL=(/n "$SIGN_SUBJECT"); fi
       echo "  signing '$INSTALLER'  (${SIGN_THUMBPRINT:+thumbprint ${SIGN_THUMBPRINT}}${SIGN_SUBJECT:+subject \"${SIGN_SUBJECT}\"}, tsa $SIGN_TSA)"
-      "$SIGNTOOL" sign "${SEL[@]}" /fd sha256 /tr "$SIGN_TSA" /td sha256 /d "OwLLM Desktop" "$WININ" \
+      # MSYS2_ARG_CONV_EXCL: Git Bash rewrites /fd, /tr, /sha1 into filesystem
+      # paths before signtool sees them ("No file digest algorithm specified").
+      MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" sign "${SEL[@]}" /fd sha256 /tr "$SIGN_TSA" /td sha256 /d "OwLLM Desktop" "$WININ" \
         || fail "signtool sign failed — is SimplySign Desktop running + logged in (cloud key mounted)? Is the thumbprint/subject correct?"
-      "$SIGNTOOL" verify /pa "$WININ" || fail "signtool verify failed after signing"
+      MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" verify /pa "$WININ" || fail "signtool verify failed after signing"
       echo "  ✓ Authenticode-signed + verified"
     else
       echo "  (skipped — no OWLLM_SIGN_THUMBPRINT / OWLLM_SIGN_SUBJECT / $THUMB_FILE; installer will be UNSIGNED)"

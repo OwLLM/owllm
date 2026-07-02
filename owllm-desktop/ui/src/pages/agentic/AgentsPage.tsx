@@ -85,6 +85,7 @@ import {
 // SuperUser orchestrator's streamed reply.
 import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
+import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { parseAgentPrompt, serializeAgentPrompt } from "./agentPrompt";
 import { renderGateLine, type GateResult, type GateScope } from "./gate";
@@ -9979,6 +9980,31 @@ export default function AgentsPage() {
     }
 
     try {
+      // ===== Preflight: a referenced file the sandbox can't read (deterministic) =====
+      // The #1 silent 20-minute time-sink: the goal points at a file OUTSIDE the
+      // project root (e.g. C:\Users\…\Downloads\BRIEF.md while the sandbox is sealed
+      // to /mnt/c/1_Git/LocaLLM), so every agent read is hard-blocked and the team
+      // churns before surfacing it. Catch it in SECONDS: for each absolute file path
+      // in the goal that's outside projectCwd, try to read it; if it's blocked, STOP
+      // here with the exact unblock steps — before dispatching anyone. (A host-access
+      // project CAN read out-of-root, so the read-probe — not the path alone —
+      // decides; a readable path never trips this.)
+      if (projectCwd) {
+        for (const p of extractAbsPaths(text)) {
+          if (isInsideRoot(p, projectCwd)) continue;
+          let readable = false;
+          try { await invoke<string>("tool_read_file", { path: p, cwd: projectCwd }); readable = true; } catch { readable = false; }
+          if (readable) continue;
+          const dest = suggestInRoot(p, projectCwd);
+          const msg = `⚠ I can't reach ${p} — it's OUTSIDE this project's folder, so the sandboxed agents are hard-blocked from reading it. Nothing was dispatched (so no time is wasted). To unblock, either:\n  • move it into the project — e.g. ${dest} — and re-run, or\n  • paste its contents here.\nThen I'll build it end-to-end.`;
+          appendLog("system", { role: "system", color: "#ff8c8c", text: msg });
+          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: msg, ts: Date.now(), seq: nextSeq() }]);
+          setRunError("Referenced file is outside the project folder — sandbox can't read it.");
+          setPhase("done"); setRunEndedAt(Date.now());
+          return;
+        }
+      }
+
       // ===== Project Card review (rule-based, runs on every provider) =====
       // Lint the card against the repo up front so a broken card (publish goal but
       // no release config, a missing versionFile, a PRIVATE source on a PUBLIC

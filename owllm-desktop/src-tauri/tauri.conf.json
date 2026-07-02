@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OwLLM Desktop",
-  "version": "0.7.32",
+  "version": "0.7.33",
   "identifier": "com.localllm.owllm-desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -124,9 +124,9 @@
       }
     },
     "windows": {
-      "certificateThumbprint": null,
+      "certificateThumbprint": "86D13D491414359FD09379181D4D1CC2B5E4E6AF",
       "digestAlgorithm": "sha256",
-      "timestampUrl": "http://timestamp.digicert.com",
+      "timestampUrl": "http://time.certum.pl",
       "tsp": false,
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

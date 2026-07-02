@@ -102,7 +102,7 @@ import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIs
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
 import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
-import { ChatBubble, ChatMarkdown, ToolEventCard, ThinkingBlock, fmtTime } from "../../components/ChatBubble";
+import { ChatBubble, ChatMarkdown, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 
@@ -364,7 +364,60 @@ type GoalMsg = {
   /// bubble. "wsl-restart" → "⟳ Restart WSL networking" (fires owllm:wsl-restart).
   /// Set on network-failure system messages so users never type a terminal cmd.
   action?: "wsl-restart";
+  /// For a paired tool entry (kind "tool", role "🛠 <name>"): the matching tool
+  /// RESULT text + its status. Set only by pairToolEntries at render time so a
+  /// call+result render as ONE collapsed input|output line. Never persisted.
+  result?: string;
+  resultStatus?: "ok" | "error";
 };
+
+// Extract the tool-use id shared by a call/result pair from its channelKey.
+// Call channel:  "tool:<name>:<id>"   Result channel: "tool-result:<id>".
+function toolIdOf(channelKey?: string): string | null {
+  if (!channelKey) return null;
+  if (channelKey.startsWith("tool-result:")) return channelKey.slice("tool-result:".length);
+  if (channelKey.startsWith("tool:")) {
+    const idx = channelKey.lastIndexOf(":");
+    return idx > "tool".length ? channelKey.slice(idx + 1) : null;
+  }
+  return null;
+}
+
+// Fold each "🛠 <tool>" CALL entry together with its matching "↩ result"/"↩ error"
+// entry into a single row carrying both input (text) and output (result), so the
+// Tool/​Full views render one collapsed input|output line per tool call instead of
+// two separate cards (user spec). Matches by tool-use id when present, else pairs
+// a call with the entry immediately following it. Non-tool entries and orphan
+// results pass through unchanged.
+function pairToolEntries(entries: GoalMsg[]): GoalMsg[] {
+  const out: GoalMsg[] = [];
+  const used = new Set<number>();
+  for (let i = 0; i < entries.length; i++) {
+    if (used.has(i)) continue;
+    const e = entries[i];
+    if (!(e.kind === "tool" && e.role.startsWith("🛠"))) { out.push(e); continue; }
+    const id = toolIdOf(e.channelKey);
+    let ri = -1;
+    if (id != null) {
+      for (let j = i + 1; j < entries.length; j++) {
+        if (used.has(j)) continue;
+        const r = entries[j];
+        if (r.kind === "tool" && r.role.startsWith("↩") && toolIdOf(r.channelKey) === id) { ri = j; break; }
+      }
+    } else {
+      const r = entries[i + 1];
+      if (r && r.kind === "tool" && r.role.startsWith("↩") && toolIdOf(r.channelKey) == null) ri = i + 1;
+    }
+    if (ri >= 0) {
+      const r = entries[ri];
+      used.add(ri);
+      out.push({ ...e, result: r.text, resultStatus: /error|✗/i.test(r.role) ? "error" : "ok" });
+    } else {
+      out.push(e);
+    }
+  }
+  return out;
+}
 
 // Module-scoped monotonic sequence — assigns a chronological id to
 // every entry so the Full Chat tab can interleave the reply + thought
@@ -4338,28 +4391,40 @@ function renderUnifiedEntry(m: GoalMsg, i: number, orchName: string | null, isSt
     return <div key={`u-${m.seq ?? i}`}><ThinkingBlock text={m.text} /></div>;
   }
   if (m.kind === "tool") {
-    // Agentic tool entries: role is "🛠 <tool>" (call) or "↩ <tool>"
-    // (result). Shell-ish calls get the terminal console look, matching
-    // ChatPage's terminalish detection. Status is inferred from the
-    // result text when present (exit_code / error markers).
+    // Agentic tool entries: role is "🛠 <tool>" (call) or "↩ <tool>" (result).
+    // pairToolEntries has already folded a call together with its result, so a
+    // 🛠 entry may carry `result`/`resultStatus`. Render as ONE compact
+    // input|output line, collapsed by default and expandable (user spec).
     const label = m.role || "Tool call";
     const isTerminal = /shell|bash|command|terminal|powershell|cmd|exec/i.test(label);
-    const txt = m.text || "";
-    // Prefer the EXPLICIT status the streamers set on a result entry: "↩ error"
-    // (the tool's real is_error flag) vs "↩ result" (success). Do NOT infer
-    // failure from the result TEXT for normal tools — a grep/read whose output
-    // contains "error"/"failed"/"denied" (often because that's what it searched
-    // for) was being false-flagged "Failed". The exit_code/traceback text
-    // heuristic stays ONLY for shell/terminal output, where it IS the real signal.
-    const status: "ok" | "error" | "running" | undefined =
-      m.role.startsWith("↩")
-        ? (/error|✗/i.test(m.role) ? "error" : "ok")
-        : isTerminal && /\b(error|failed|traceback|exit_code:\s*[1-9])/i.test(txt) ? "error"
-        : isTerminal && /exit_code:\s*0|completed/i.test(txt) ? "ok"
-        : "running";
+    const isCall = label.startsWith("🛠");
+    const isResult = label.startsWith("↩");
+    // Strip the 🛠/↩ marker for a clean tool name in the left column.
+    const title = label.replace(/^🛠\s*/, "").replace(/^↩\s*/, "").trim() || "tool";
+    if (isCall) {
+      const hasResult = m.result !== undefined;
+      // Status from the paired result when present; otherwise the call is still
+      // running (no result streamed back yet).
+      const status: ToolStatus = hasResult ? (m.resultStatus ?? "ok") : "running";
+      return (
+        <div key={`u-${m.seq ?? i}`}>
+          <ToolCallLine kind={isTerminal ? "terminal" : "tool"} title={title} input={m.text} output={m.result} status={status} />
+        </div>
+      );
+    }
+    if (isResult) {
+      // Orphan result (its call isn't in this view) — show output-only.
+      const status: ToolStatus = /error|✗/i.test(label) ? "error" : "ok";
+      return (
+        <div key={`u-${m.seq ?? i}`}>
+          <ToolCallLine kind={isTerminal ? "terminal" : "tool"} title={title} output={m.text} status={status} />
+        </div>
+      );
+    }
+    // Non-🛠/↩ tool-kind entry (rare) — fall back to the full card.
     return (
       <div key={`u-${m.seq ?? i}`}>
-        <ToolEventCard kind={isTerminal ? "terminal" : "tool"} title={label} status={status} content={txt || "…"} />
+        <ToolEventCard kind={isTerminal ? "terminal" : "tool"} title={label} status={undefined} content={m.text || "…"} />
       </div>
     );
   }
@@ -4834,7 +4899,12 @@ function OrchestratorPane({
   // or aren't allowed here — the removed "reply" tab, and "rules" when we're not
   // on the Super User page — both fall back to Full Chat. Keeps slash commands
   // and stale state from showing a blank/forbidden pane.
-  const effTab = (activeTab === "reply" || (activeTab === "rules" && !isSuperUser)) ? "full" : activeTab;
+  // Super User is the human operator — its card shows ONLY the operator's info +
+  // settings (Rules), never the agent chat log (user spec #4). So on the Super
+  // User page the pane is pinned to Rules and the chat tabs/dock are hidden.
+  const effTab = isSuperUser
+    ? "rules"
+    : (activeTab === "reply" || activeTab === "rules") ? "full" : activeTab;
   // Pick which buffer to show: explicit selection > currently-active
   // agent > orchestrator (so the user sees the plan even if nothing
   // is selected yet) > "you" (which holds the goal echo).
@@ -4874,10 +4944,14 @@ function OrchestratorPane({
   // tool_use + tool_result. Full = everything merged in chronological
   // arrival order via the per-entry `seq` stamp.
   const thoughts = allThoughts.filter(t => t.kind !== "tool");
-  const toolCalls = allThoughts.filter(t => t.kind === "tool");
-  const fullChat: GoalMsg[] = [...messages, ...allThoughts]
-    .slice()
-    .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  // Pair each 🛠 call with its ↩ result so a tool renders as ONE collapsed
+  // input|output line (user spec) in both the Tool Calls and Full Chat views.
+  const toolCalls = pairToolEntries(allThoughts.filter(t => t.kind === "tool"));
+  const fullChat: GoalMsg[] = pairToolEntries(
+    [...messages, ...allThoughts]
+      .slice()
+      .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
+  );
 
   // Autoscroll-to-bottom — one ref per tab. Triggered on:
   //   1. tab switch (scroll the freshly-shown tab to bottom)
@@ -4890,6 +4964,7 @@ function OrchestratorPane({
   const thoughtRef = useRef<HTMLDivElement>(null);
   const toolsRef = useRef<HTMLDivElement>(null);
   const fullRef = useRef<HTMLDivElement>(null);
+  const userInputRef = useRef<HTMLDivElement>(null);
   // Sticky-scroll gate (user spec): land on the latest message when the view
   // OPENS/switches, but NEVER yank the user back down once they've scrolled UP to
   // read. true = following the bottom (auto-scroll on); false = reading above.
@@ -4898,17 +4973,22 @@ function OrchestratorPane({
     `${messages.length}:${messages[messages.length - 1]?.text?.length ?? 0}|` +
     `${thoughts.length}:${thoughts[thoughts.length - 1]?.text?.length ?? 0}|` +
     `${toolCalls.length}:${toolCalls[toolCalls.length - 1]?.text?.length ?? 0}|` +
-    `${fullChat.length}:${fullChat[fullChat.length - 1]?.text?.length ?? 0}`
+    `${fullChat.length}:${fullChat[fullChat.length - 1]?.text?.length ?? 0}|` +
+    // User-Input tab reads supChat's "you" turns; key on supChat length so a new
+    // sent message re-fires the autoscroll effect (the tab was never following
+    // the latest message — user report #3).
+    `${supChat.length}`
   );
   // OPEN / switch tab or focus → re-pin so the freshly-shown pane jumps to the
   // latest message. Runs before the streaming effect below (declaration order).
   useLayoutEffect(() => { pinnedRef.current = true; }, [effTab, focus]);
   useLayoutEffect(() => {
-    if (effTab === "rules" || effTab === "userinput") return; // no log to scroll
+    if (effTab === "rules") return; // no log to scroll
     const ref =
-      effTab === "thought" ? thoughtRef :
-      effTab === "tools"   ? toolsRef   :
-                             fullRef;
+      effTab === "thought"   ? thoughtRef   :
+      effTab === "tools"     ? toolsRef     :
+      effTab === "userinput" ? userInputRef :
+                               fullRef;
     const el = ref.current;
     if (!el) return;
     const isSelecting = () => {
@@ -5027,17 +5107,17 @@ function OrchestratorPane({
             smaller than full-screen). flexShrink:0 + whiteSpace:nowrap
             on each button keeps the labels on one line. */}
         <div style={{ display:"flex", alignItems:"center", padding:"0 12px", gap:0, borderBottom:"1px solid var(--border)", flexShrink:0, overflowX:"auto", overflowY:"hidden" }}>
-          {([
-            // Rules shows ONLY on the Super User page. "Clear Chat" was removed;
-            // Full Chat is the single chat view (per user request).
-            ...(isSuperUser
-              ? [{ id:"rules" as const, label:"📋 Rules", accent:"#ff6b6b", count: directives.length }]
-              : []),
-            { id:"userinput" as const, label:"✏ User Input",  accent:"#ffd97a",       count: 0                  },
-            { id:"full"      as const, label:"📜 Full Chat",  accent:"var(--accent)", count: fullChat.length    },
-            { id:"thought"   as const, label:"🧠 Thought",    accent:"#dcb0ff",       count: thoughts.length    },
-            { id:"tools"     as const, label:"🛠 Tool Calls", accent:"#7ff0c5",       count: toolCalls.length   },
-          ]).map(tab => {
+          {(isSuperUser
+            // Super User page = operator info + settings only. Show JUST the
+            // Rules (settings) tab; no agent chat tabs (user spec #4).
+            ? [{ id:"rules" as const, label:"📋 Rules", accent:"#ff6b6b", count: directives.length }]
+            : [
+                { id:"userinput" as const, label:"✏ User Input",  accent:"#ffd97a",       count: 0                  },
+                { id:"full"      as const, label:"📜 Full Chat",  accent:"var(--accent)", count: fullChat.length    },
+                { id:"thought"   as const, label:"🧠 Thought",    accent:"#dcb0ff",       count: thoughts.length    },
+                { id:"tools"     as const, label:"🛠 Tool Calls", accent:"#7ff0c5",       count: toolCalls.length   },
+              ]
+          ).map(tab => {
             const active = effTab === tab.id;
             return (
               <button
@@ -5170,7 +5250,7 @@ function OrchestratorPane({
             read-only log of what the user has sent; new sends happen
             via the bottom dock (UserInputDock) which is always
             visible. */}
-        <div data-ui="OrchestratorUserInputView" data-selectall-scope style={{ flex:1, display: effTab ==="userinput" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
+        <div ref={userInputRef} data-ui="OrchestratorUserInputView" data-selectall-scope style={{ flex:1, display: effTab ==="userinput" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto" }}>
           <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ffd97a", textTransform:"uppercase" }}>User Input history</div>
           {(() => {
             const sentByMe = supChat.filter(m => m.role === "you");
@@ -5245,19 +5325,23 @@ function OrchestratorPane({
           )}
         </div>
       </div>
-      <ChatInputDock
-        draft={draft}
-        setDraft={setDraft}
-        inputRef={inputRef}
-        onSend={submitInput}
-        busy={supSendBusy}
-        autoApprove={autoApprove}
-        onToggleAutoApprove={onToggleAutoApprove}
-        onSwitchTab={setActiveTab}
-        needsLoad={needsLoad}
-        loadingModel={loadingModel}
-        onLoadModel={onLoadModel}
-      />
+      {/* Super User is settings-only — no chat composer there (user spec #4).
+          The dock stays on the Orchestrator/Team pages where chatting happens. */}
+      {!isSuperUser && (
+        <ChatInputDock
+          draft={draft}
+          setDraft={setDraft}
+          inputRef={inputRef}
+          onSend={submitInput}
+          busy={supSendBusy}
+          autoApprove={autoApprove}
+          onToggleAutoApprove={onToggleAutoApprove}
+          onSwitchTab={setActiveTab}
+          needsLoad={needsLoad}
+          loadingModel={loadingModel}
+          onLoadModel={onLoadModel}
+        />
+      )}
     </div>
   );
 }
@@ -7982,12 +8066,12 @@ export default function AgentsPage() {
     const onRestart = async () => {
       if (wslRestartingRef.current) return; // ignore double-clicks while in flight
       wslRestartingRef.current = true;
-      setSupChat(prev => [...prev, { role: "system", color: "#9ad9ff", text: "↻ Restarting WSL networking… (a few seconds — every WSL session is being cold-started)", ts: Date.now() }]);
+      setSupChat(prev => [...prev, { role: "system", color: "#9ad9ff", text: "↻ Restarting WSL networking… (a few seconds — every WSL session is being cold-started)", ts: Date.now(), seq: nextSeq() }]);
       try {
         await invoke("wsl_restart");
-        setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: "✓ WSL restarted with fresh networking. Send your message again.", ts: Date.now() }]);
+        setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: "✓ WSL restarted with fresh networking. Send your message again.", ts: Date.now(), seq: nextSeq() }]);
       } catch (e: any) {
-        setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: `Couldn't restart WSL automatically: ${String(e?.message ?? e)}`, ts: Date.now() }]);
+        setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: `Couldn't restart WSL automatically: ${String(e?.message ?? e)}`, ts: Date.now(), seq: nextSeq() }]);
       } finally {
         wslRestartingRef.current = false;
       }
@@ -8312,7 +8396,7 @@ export default function AgentsPage() {
         setSupChat(prev => [...prev, {
           role: "system", color: "#7ff0c5",
           text: `✓ ${cli} reconnected — resuming the team.`,
-          ts: Date.now(),
+          ts: Date.now(), seq: nextSeq(),
         }]);
         return;
       }
@@ -8325,7 +8409,7 @@ export default function AgentsPage() {
       setSupChat(prev => [...prev, {
         role: "system", color: "#ffb74d",
         text: `⏸ ${cli} ${why} — ${action} in ${human} (attempt ${info.attempt}/${info.total}). The team is paused, not stopped.`,
-        ts: Date.now(),
+        ts: Date.now(), seq: nextSeq(),
       }]);
     };
     return () => { _authWaitHandler = null; };
@@ -9160,7 +9244,7 @@ export default function AgentsPage() {
     const userMsg: GoalMsg = {
       role: "you", color: "#9ad9ff",
       text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
-      ts: Date.now(),
+      ts: Date.now(), seq: nextSeq(),
     };
     setSupChat(prev => [...prev, userMsg]);
     appendLog("you", userMsg);
@@ -9295,11 +9379,11 @@ export default function AgentsPage() {
     const traceMsg: GoalMsg = {
       role: "system", color: "#9ad9ff",
       text: `→ dispatching to ${orchKey} · model=${supModelId} · provider=${supProvider}${supProvider === "local" ? ` · port=${freshServerState.port ?? 0}` : ""}`,
-      ts: Date.now(),
+      ts: Date.now(), seq: nextSeq(),
     };
     setSupChat(prev => [...prev, traceMsg]);
     appendLog("system", traceMsg);
-    const replyMsg: GoalMsg = { role: orchKey, color: "#ffd97a", text: "", ts: Date.now() };
+    const replyMsg: GoalMsg = { role: orchKey, color: "#ffd97a", text: "", ts: Date.now(), seq: nextSeq() };
     setSupChat(prev => [...prev, replyMsg]);
     appendLog(orchKey, replyMsg);
     // Active state — drives the per-node pulse in the canvas.
@@ -9426,7 +9510,7 @@ export default function AgentsPage() {
         const emptyMsg = streamedReply.trim()
           ? "(the model produced only tool-call / formatting output with no readable answer — try rephrasing, or set a stronger model for this team's orchestrator on the card)"
           : "(the model returned an empty response — no answer was produced)";
-        setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg, ts: Date.now() }]);
+        setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg, ts: Date.now(), seq: nextSeq() }]);
         appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
       }
     } catch (e: any) {
@@ -9437,7 +9521,7 @@ export default function AgentsPage() {
       console.error("[onSupSend] streamChatCompletion threw", String(e?.message ?? e));
       const errMsg: GoalMsg = {
         role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}`,
-        ts: Date.now(),
+        ts: Date.now(), seq: nextSeq(),
         // Attach the one-click WSL-restart recovery when it's a network failure.
         action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
       };
@@ -9911,7 +9995,7 @@ export default function AgentsPage() {
     }
     for (const w of teamWarnings) {
       appendThought(orch.name, { role: "system", color: "#ffb74d", text: `⚠ team config: ${w}` });
-      setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `⚠ ${w}`, ts: Date.now() }]);
+      setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `⚠ ${w}`, ts: Date.now(), seq: nextSeq() }]);
     }
 
     // Cloud calls don't need a port; only the local fallback does. Pull a FRESH
@@ -10109,7 +10193,7 @@ export default function AgentsPage() {
           removeActive(coder.name);
           const m = authReloginMessage(providerFor(modelFor(coder.name)));
           appendLog("system", { role: "system", color: "#ff8c8c", text: m });
-          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now() }]);
+          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now(), seq: nextSeq() }]);
           setRunError("Signed out (401) — re-login required.");
           setPhase("done"); setRunEndedAt(Date.now());
           return;
@@ -10149,7 +10233,7 @@ export default function AgentsPage() {
           appendThought(coder.name, { role: "system", color: "#7ff0c5", text: "📦 rule-based publish — host building / signing / releasing…" });
           // Surface it in the main chat too (the thought buffer alone is easy to miss),
           // so the locked composer + running timer have a visible explanation.
-          setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: "📦 Publishing — host is building, signing & releasing the app. This can take a few minutes…", ts: Date.now() }]);
+          setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: "📦 Publishing — host is building, signing & releasing the app. This can take a few minutes…", ts: Date.now(), seq: nextSeq() }]);
           // Release notes must describe what SHIPPED — NOT echo the user's chat
           // message. Passing `text` (the goal prompt) here is what leaked prompts
           // like "WTF is that?" as the top "What's New" bullet. Send NO headline;
@@ -10165,13 +10249,13 @@ export default function AgentsPage() {
         await appendAgentMemory(selectedProjectId, coder.name, text, sFinal);
         await logTeamWork(coder.name, text, sFinal + (sGate && sGate.status !== "unverified" ? `\n[verify: ${sGate.status}]` : ""));
         speakAgentReply(coder.name, sText);
-        setSupChat(prev => [...prev, { role: coder.name, color: colorForAgent(coder), text: sText, ts: Date.now() }]);
+        setSupChat(prev => [...prev, { role: coder.name, color: colorForAgent(coder), text: sText, ts: Date.now(), seq: nextSeq() }]);
         // Minimal solo run report.
         const vtxt = sGate ? (sGate.status === "passed" ? "✓ verify passed" : sGate.status === "failed" ? "✗ verify FAILED" : "verify: unverified") : "ran";
         const ptxt = wantsPublish ? (/PUBLISH_OK/.test(sPub) ? " · ✓ published" : " · ✗ publish failed") : "";
         const okRun = (!sGate || sGate.status !== "failed") && (!wantsPublish || /PUBLISH_OK/.test(sPub));
         const secs = Math.round((Date.now() - (runTraceRef.current?.t0 ?? Date.now())) / 1000);
-        setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now() }]);
+        setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now(), seq: nextSeq() }]);
         setPhase("done");
         setRunEndedAt(Date.now());
         return;
@@ -10370,7 +10454,7 @@ export default function AgentsPage() {
             const msg = cleanAgentError(e);
             appendThought(orch.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker unavailable (${msg}) — proceeding without its review.` });
             appendLog(CRITIC_NAME, { role: "system", color: "#ff8c8c", text: `⚠ ${msg}` });
-            setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `⚠ Critical Thinker skipped: ${msg} (check the model on its card / re-auth the subscription).`, ts: Date.now() }]);
+            setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `⚠ Critical Thinker skipped: ${msg} (check the model on its card / re-auth the subscription).`, ts: Date.now(), seq: nextSeq() }]);
             criticReview = "";
             criticFailed = true;
           } finally {
@@ -10432,12 +10516,12 @@ export default function AgentsPage() {
       setSupChat(prev => {
         const out = [...prev];
         if (priorHistory === undefined) {
-          out.push({ role: "you", color: "#9ad9ff", text, ts: Date.now() });
+          out.push({ role: "you", color: "#9ad9ff", text, ts: Date.now(), seq: nextSeq() });
         }
         const plan = stripDispatchDirectives(orchReply).trim();
         const hadDirectives = plan.length < orchReply.trim().length;
         if (plan && hadDirectives) {
-          out.push({ role: "orchestrator", color: "#ffd97a", text: plan, ts: Date.now() });
+          out.push({ role: "orchestrator", color: "#ffd97a", text: plan, ts: Date.now(), seq: nextSeq() });
         }
         return out;
       });
@@ -10592,7 +10676,7 @@ export default function AgentsPage() {
           appendThought(orch.name, { role: "system", color: "#ffb74d",
             text: `⚠ Orchestrator didn't route to anyone — auto-dispatching the goal to @${best.name} so the team acts (it answered solo / named no real agent).` });
           setSupChat(prev => [...prev, { role: "system", color: "#ffb74d",
-            text: `⚠ Orchestrator answered solo — auto-routed the goal to @${best.name}.`, ts: Date.now() }]);
+            text: `⚠ Orchestrator answered solo — auto-routed the goal to @${best.name}.`, ts: Date.now(), seq: nextSeq() }]);
           dispatches = [{ agentName: best.name, instruction:
             `The orchestrator did not route this to a specialist. Carry out the user's goal yourself, directly and concretely:\n\n${text}` }];
           if (runTraceRef.current) runTraceRef.current.routeCorrections++;
@@ -10607,8 +10691,8 @@ export default function AgentsPage() {
           appendLog("system", { role: "system", color: "#ff8c8c", text: noteText });
           setSupChat(prev => [
             ...prev,
-            { role: "system", color: "#ff8c8c", text: "⚠ Specialists did not run — orchestrator answered solo. See system log.", ts: Date.now() },
-            { role: "orchestrator", color: "#ffd97a", text: clean || orchReply, ts: Date.now() },
+            { role: "system", color: "#ff8c8c", text: "⚠ Specialists did not run — orchestrator answered solo. See system log.", ts: Date.now(), seq: nextSeq() },
+            { role: "orchestrator", color: "#ffd97a", text: clean || orchReply, ts: Date.now(), seq: nextSeq() },
           ]);
           setPhase("done");
           return;
@@ -10639,7 +10723,7 @@ export default function AgentsPage() {
             if (writer && roleCanWrite(roleByName.get(writer.base)) && agentDomain(writer) !== "design") {
               const note = `⚙ Routed the actual ${goalKind} work to @${writer.name} — the orchestrator dispatched only design/read-only agents, which can't change code.`;
               appendThought(orch.name, { role: "system", color: "#ffb74d", text: note });
-              setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: note, ts: Date.now() }]);
+              setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: note, ts: Date.now(), seq: nextSeq() }]);
               dispatches.push({ agentName: writer.name, instruction:
                 `Carry out the user's goal directly and concretely — make the change, run it/verify it, and report exactly what you did (commands + result):\n\n${text}` });
               if (runTraceRef.current) runTraceRef.current.routeCorrections++;
@@ -10741,7 +10825,7 @@ export default function AgentsPage() {
         setSupChat(prev => [...prev, {
           role: "system", color: "#7fd4ff",
           text: `▶ Running ${dispatches.length} agents in parallel: ${dispatches.map(d => "@" + d.agentName).join(", ")}`,
-          ts: Date.now(),
+          ts: Date.now(), seq: nextSeq(),
         }]);
       }
       type SpecOutcome = {
@@ -10966,7 +11050,7 @@ export default function AgentsPage() {
               capNoticed.global = true;
               const m = `⚠ Stopped: hit the dispatch-chain limit (${MAX_CHAIN_HOPS} hops). The result may be INCOMPLETE — not every step ran.`;
               appendLog("system", { role: "system", color: "#ffb74d", text: m });
-              setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: m, ts: Date.now() }]);
+              setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: m, ts: Date.now(), seq: nextSeq() }]);
             }
             return [];
           }
@@ -11399,7 +11483,7 @@ export default function AgentsPage() {
         if (isAuthError(finalReply)) {
           const am = authReloginMessage(providerFor(modelFor(orch.name)));
           appendLog("system", { role: "system", color: "#ff8c8c", text: am });
-          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: am, ts: Date.now() }]);
+          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: am, ts: Date.now(), seq: nextSeq() }]);
           setRunError("Signed out (401) — re-login required.");
         }
         const rt = runTraceRef.current;
@@ -11430,7 +11514,7 @@ export default function AgentsPage() {
             const line = renderGateLine(gate);
             const col = gate.status === "passed" ? "#7ff0c5" : gate.status === "failed" ? "#ff8c8c" : "#ffb74d";
             appendLog("system", { role: "system", color: col, text: line });
-            if (gate.status !== "unverified") setSupChat(prev => [...prev, { role: "system", color: col, text: line, ts: Date.now() }]);
+            if (gate.status !== "unverified") setSupChat(prev => [...prev, { role: "system", color: col, text: line, ts: Date.now(), seq: nextSeq() }]);
           }
           // passed → done; failed → not done; unverified/none → fall back to the write proxy.
           const done = gate ? (gate.status === "passed" ? true : gate.status === "failed" ? false : delivered) : delivered;
@@ -11443,7 +11527,7 @@ export default function AgentsPage() {
               : `@${doer?.name ?? "a specialist"} (a coder/operator) was dispatched but nothing was written.`;
             const m = `⚠ NOT done: ${why}`;
             appendLog("system", { role: "system", color: "#ff8c8c", text: m });
-            setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now() }]);
+            setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now(), seq: nextSeq() }]);
           }
           const trace: RunTrace = {
             team: activeTeam?.name ?? "team", goal: text, goalKind: gk, agents,
@@ -11460,7 +11544,7 @@ export default function AgentsPage() {
             const misses = card.checks.filter(c => !c.pass).map(c => c.name);
             report += `\n   eval vs "${fx.note ?? fx.goal}": ${card.ok ? "✓ PASS" : "✗ FAIL"} (${card.passed}/${card.checks.length})${misses.length ? " — failed: " + misses.join(", ") : ""}`;
           }
-          setSupChat(prev => [...prev, { role: "system", color: trace.done ? "#7ff0c5" : "#ffb74d", text: report, ts: Date.now() }]);
+          setSupChat(prev => [...prev, { role: "system", color: trace.done ? "#7ff0c5" : "#ffb74d", text: report, ts: Date.now(), seq: nextSeq() }]);
           // Persist (append, keep last 200) for the node scorecard. Best-effort.
           try {
             let prior = "";

@@ -7,7 +7,7 @@
 //
 // Extracted verbatim from the ChatPage template (don't fork it — reuse).
 
-import { memo } from "react";
+import { memo, type CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownLink from "./MarkdownLink";
@@ -144,6 +144,83 @@ export const ToolEventCard = memo(function ToolEventCard({
         fontFamily: "Consolas, 'JetBrains Mono', monospace", fontSize: 11.5, lineHeight: 1.45,
         userSelect: "text", WebkitUserSelect: "text",
       }}>{content}</pre>
+    </details>
+  );
+});
+
+/// Compact ONE-LINE tool row: two columns (input | output), collapsed by
+/// default and expandable on click (user spec — "one line only divided in
+/// input/output … always shrinked but clickable"). The summary shows the tool
+/// name + a one-line input preview on the left and the status + a one-line
+/// output preview on the right; expanding reveals the full input and output.
+export const ToolCallLine = memo(function ToolCallLine({
+  title, input, output, status, kind = "tool",
+}: {
+  title: string;
+  input?: string;
+  output?: string;
+  status?: ToolStatus;
+  kind?: "tool" | "terminal";
+}) {
+  const c = toolStatusColor(status);
+  const isTerminal = kind === "terminal";
+  // Collapse whitespace so the preview is a single tidy line.
+  const oneLine = (s?: string) => (s || "").replace(/\s+/g, " ").trim();
+  const inPrev = oneLine(input);
+  const outPrev = oneLine(output);
+  const cell: CSSProperties = {
+    display: "flex", alignItems: "center", gap: 6, minWidth: 0,
+  };
+  const preview: CSSProperties = {
+    whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis",
+    fontFamily: "Consolas, 'JetBrains Mono', monospace", fontSize: 11,
+  };
+  const sectionLabel: CSSProperties = {
+    padding: "5px 10px 0", fontSize: 9.5, fontWeight: 800, letterSpacing: 0.8,
+    textTransform: "uppercase", color: "var(--fg-subtle)",
+  };
+  const body: CSSProperties = {
+    margin: 0, padding: "4px 10px 8px", maxHeight: 240, overflow: "auto",
+    whiteSpace: "pre-wrap", fontFamily: "Consolas, 'JetBrains Mono', monospace",
+    fontSize: 11, lineHeight: 1.45, userSelect: "text", WebkitUserSelect: "text",
+  };
+  return (
+    <details style={{
+      border: `1px solid ${c}55`,
+      background: "rgba(127,140,160,0.06)",
+      borderRadius: 6, overflow: "hidden", flexShrink: 0,
+    }}>
+      <summary style={{
+        display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10,
+        alignItems: "center", padding: "5px 10px",
+        cursor: "pointer", userSelect: "none", listStyle: "none", fontSize: 12,
+      }}>
+        {/* col 1 — tool + input */}
+        <span style={cell}>
+          <span style={{ width: 7, height: 7, borderRadius: 4, background: c, flexShrink: 0, boxShadow: `0 0 6px ${c}` }} />
+          <span style={{ fontWeight: 700, color: "var(--fg)", flexShrink: 0 }}>{title || "tool"}</span>
+          <span style={{ ...preview, color: "var(--fg-subtle)" }}>{inPrev}</span>
+        </span>
+        {/* col 2 — status + output */}
+        <span style={cell}>
+          <span style={{ color: c, fontSize: 10, textTransform: "uppercase", letterSpacing: 0.6, flexShrink: 0 }}>{toolStatusLabel(status)}</span>
+          <span style={{ ...preview, color: "var(--fg-muted)" }}>{outPrev || "…"}</span>
+        </span>
+      </summary>
+      <div style={{ borderTop: `1px solid ${c}33` }}>
+        {input != null && input !== "" && (
+          <div>
+            <div style={sectionLabel}>input</div>
+            <pre style={{ ...body, color: "var(--fg)" }}>{input}</pre>
+          </div>
+        )}
+        {output != null && output !== "" && (
+          <div style={{ borderTop: (input != null && input !== "") ? `1px solid ${c}22` : "none" }}>
+            <div style={sectionLabel}>output</div>
+            <pre style={{ ...body, color: isTerminal ? "#d7ffe8" : "var(--fg)", background: isTerminal ? "#05070a" : "transparent" }}>{output}</pre>
+          </div>
+        )}
+      </div>
     </details>
   );
 });

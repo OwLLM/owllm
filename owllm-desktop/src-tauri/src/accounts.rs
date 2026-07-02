@@ -1019,6 +1019,12 @@ pub async fn claude_cli_complete(
     // id is reused across dispatches, the CLI loads the prior turn so
     // the agent has memory without re-feeding history via prompt.
     session_id: Option<String>,
+    // Per-run, user-consented widening of the CLI filesystem scope to the
+    // user's home profile (--add-dir). Default None/false = NO widening: the
+    // agent stays jailed to the project. Set true ONLY after the user approves
+    // the "grant home for this run" prompt — never silently. See
+    // sandbox::extra_allowed_dirs.
+    grant_home: Option<bool>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         // Collect args once → run as the Windows CLI or inside WSL (isolated).
@@ -1040,12 +1046,17 @@ pub async fn claude_cli_complete(
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
-        // Widen the CLI's filesystem scope to the user's home profile so an agent
-        // can open a file the user points it at outside the project. Empty (no-op)
-        // for a bwrap-jailed run. See claude_cli_stream + sandbox::extra_allowed_dirs.
-        for dir in crate::sandbox::extra_allowed_dirs(cwd.as_deref()) {
-            args.push("--add-dir".into());
-            args.push(dir);
+        // Widen the CLI's filesystem scope to the user's home profile ONLY when
+        // the user has explicitly consented for this run (grant_home). Default is
+        // NO widening — the agent stays jailed to the project, and a block on an
+        // outside file surfaces a consent prompt in the UI instead of silently
+        // opening the whole home dir. Empty (no-op) for a bwrap-jailed run anyway.
+        // See sandbox::extra_allowed_dirs.
+        if grant_home.unwrap_or(false) {
+            for dir in crate::sandbox::extra_allowed_dirs(cwd.as_deref()) {
+                args.push("--add-dir".into());
+                args.push(dir);
+            }
         }
         // The agentic system prompt (role + team + injected memory snapshot +
         // directives + skills) can be tens of KB. Windows caps a process command
@@ -1483,6 +1494,11 @@ pub async fn claude_cli_stream(
     // enabled. The streaming consumer detects SendUserMessage tool
     // calls and surfaces the agent's question to the UI (Phase C).
     brief_mode: Option<bool>,
+    // Per-run, user-consented widening of the CLI filesystem scope to the
+    // user's home profile (--add-dir). Default None/false = NO widening. Set
+    // true ONLY after the user approves the consent prompt. See
+    // sandbox::extra_allowed_dirs.
+    grant_home: Option<bool>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {

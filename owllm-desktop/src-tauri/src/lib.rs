@@ -308,6 +308,7 @@ pub fn run() {
             agent_tools::fetch_remote_text,
             agent_tools::tool_read_file,
             agent_tools::tool_write_file,
+            agent_tools::copy_into_workspace,
             agent_tools::tool_list_dir,
             agent_tools::tool_create_dir,
             agent_tools::tool_shell_exec,

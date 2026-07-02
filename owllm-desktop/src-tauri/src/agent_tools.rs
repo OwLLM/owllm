@@ -233,6 +233,35 @@ pub async fn tool_read_file(path: String, cwd: Option<String>) -> Result<String,
     std::fs::read_to_string(&p).map_err(|e| format!("read {}: {e}", p.display()))
 }
 
+/// Copy a file that lives OUTSIDE the workspace into the project folder so an
+/// agent — whose CLI is jailed to cwd — can then read it with a plain relative
+/// path. This is the user-consented remedy for the "may only concatenate files
+/// from the allowed working directories" block: instead of silently widening
+/// the sandbox, we bring the one file the user pointed at into scope.
+///
+/// `src` is any host path (absolute, or a WSL-mount UNC — both are unwrapped to
+/// the native drive). The copy lands at `<cwd>/<filename>`; returns the
+/// workspace-relative path (`./<filename>`) to hand back to the agent — relative
+/// so it resolves correctly whatever namespace the agent's CLI runs in.
+#[tauri::command]
+pub async fn copy_into_workspace(src: String, cwd: Option<String>) -> Result<String, String> {
+    let cwd = cwd.filter(|s| !s.is_empty()).ok_or_else(|| {
+        "no workspace open — cannot copy a file into the project".to_string()
+    })?;
+    let source = resolve(&src, &Some(cwd.clone()));
+    if !source.is_file() {
+        return Err(format!("not a file: {}", source.display()));
+    }
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| format!("cannot derive a filename from {}", source.display()))?;
+    let dest = Path::new(&host_cwd(&cwd)).join(&name);
+    std::fs::copy(&source, &dest)
+        .map_err(|e| format!("copy {} -> {}: {e}", source.display(), dest.display()))?;
+    Ok(format!("./{name}"))
+}
+
 #[tauri::command]
 pub async fn tool_write_file(
     path: String,

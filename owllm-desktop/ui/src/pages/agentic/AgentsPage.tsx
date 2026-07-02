@@ -6451,6 +6451,37 @@ type ClaudeStreamEvent =
   | { kind: "toolResult"; toolUseId: string; content: string }
   | { kind: "error"; message: string };
 
+// Per-run consent to widen the CLI's filesystem scope to the user's home
+// profile (--add-dir). DEFAULT FALSE — the agent stays jailed to the project.
+// Flipped true only when the user approves the "grant home for this run"
+// consent prompt (see FileAccessConsentModal), and RESET to false at the start
+// of every dispatch (dispatchGoal) so a grant never silently leaks into a later
+// run. Module-scoped so runClaudeCliStream (also module-scoped) can read it
+// without threading a param through every stream* signature.
+let grantHomeThisRun = false;
+function setGrantHomeThisRun(v: boolean) { grantHomeThisRun = v; }
+
+// Detect the CLI/local sandbox "file is outside the working directory" block
+// from a streamed error string, and best-effort pull out the path the agent
+// tried to reach. Returns null when the text isn't that block. This is what
+// turns a silent 30-min "I can't read it" into an immediate consent prompt.
+function detectOutsideWorkspaceBlock(text: string): { path: string | null } | null {
+  const t = text || "";
+  const isBlock =
+    /may only concatenate files from the allowed working directories/i.test(t) ||
+    /haven'?t granted it yet/i.test(t) ||
+    /requested permissions to (?:read|access)/i.test(t) ||
+    /outside the (?:agent )?workspace/i.test(t) ||
+    /outside the allowed working director/i.test(t);
+  if (!isBlock) return null;
+  // Best-effort path extraction: a Windows drive path or a POSIX/WSL path,
+  // optionally quoted. First match wins; null is fine (modal still helps).
+  const win = t.match(/[A-Za-z]:\\[^\s"'`)]+/);
+  const posix = t.match(/\/(?:mnt\/)?[A-Za-z0-9][A-Za-z0-9._~\/-]*\.[A-Za-z0-9]+/);
+  const path = (win?.[0] || posix?.[0] || null);
+  return { path };
+}
+
 // Streaming variant of claude_cli_complete — uses claude --print
 // --output-format stream-json --verbose so the Thought tab gets live
 // thinking blocks + tool_use commands as the CLI emits them. Returns
@@ -6530,6 +6561,9 @@ async function runClaudeCliStream(args: {
     // always ask via SendUserMessage; question lands in the chat as a
     // prominent "❓ agent asks" entry.
     briefMode: args.briefMode ?? true,
+    // Per-run, user-consented home-profile access (--add-dir). False unless the
+    // user approved the consent prompt this run. See grantHomeThisRun.
+    grantHome: grantHomeThisRun,
     onEvent: ch,
   });
 }
@@ -6932,6 +6966,7 @@ async function streamAnthropic(
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false,
         model: cliModel, effort: claudeEffort, sessionId: sid,
+        grantHome: grantHomeThisRun,
       })), claudeCwd);
     if (reply) onDelta(reply);
     return reply;
@@ -6958,6 +6993,7 @@ async function streamAnthropic(
           cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
           model: cliModel, effort: claudeEffort, sessionId,
+          grantHome: grantHomeThisRun,
         }), claudeCwd);
         if (reply) onDelta(reply);
         return reply;
@@ -8038,6 +8074,16 @@ export default function AgentsPage() {
   // the IconPickerDialog targeting that agent; null = closed.
   const [agentIconOverrides, setAgentIconOverrides] = useState<Record<string, string>>({});
   const [iconPickerAgent, setIconPickerAgent] = useState<string | null>(null);
+  /// Filesystem-sandbox consent prompt. Set when an agent is blocked reading a
+  /// file OUTSIDE the project (the CLI/local jail). null = closed. Surfaces the
+  /// block IMMEDIATELY instead of letting the agent flail, and offers the safe
+  /// remedy (copy the file into the workspace) + an explicit per-run grant.
+  const [fileConsent, setFileConsent] = useState<
+    { agent: string; path: string | null; error: string; copying?: boolean; done?: string } | null
+  >(null);
+  /// Paths already prompted this run, so a repeated block on the same file
+  /// doesn't re-open the modal over and over.
+  const consentSeenRef = useRef<Set<string>>(new Set());
   /// Which agent's editor popup (model / colour / prompt) is open, by name.
   const [editingAgent, setEditingAgent] = useState<string | null>(null);
   /// Live card-colour preview per agent (name → hex), applied to renderTeam so
@@ -8903,6 +8949,20 @@ export default function AgentsPage() {
   // and OpenAI tool_calls land as growing blocks instead of one log
   // line per delta.
   const streamThought = (agent: string, channel: string, role: string, delta: string) => {
+    // Filesystem-sandbox block → surface an IMMEDIATE consent prompt instead of
+    // letting the agent burn 30 minutes rediscovering it can't read the file.
+    // The error rides the "cli-error" channel; local-tool jail denials can also
+    // arrive as a tool result, so we check both against the block signature.
+    if (channel === "cli-error" || channel.startsWith("tool-result:")) {
+      const hit = detectOutsideWorkspaceBlock(delta);
+      if (hit) {
+        const key = hit.path || `__nopath__:${agent}`;
+        if (!consentSeenRef.current.has(key)) {
+          consentSeenRef.current.add(key);
+          setFileConsent({ agent, path: hit.path, error: delta.slice(0, 600) });
+        }
+      }
+    }
     // Deterministic "real work happened" signal: a write/edit/shell/git tool call.
     // role looks like "🛠 Edit" / "🛠 Bash" / "🛠 write_file". If one fires this run,
     // a code/ship goal can legitimately claim it did something (checked at run end).
@@ -8950,6 +9010,46 @@ export default function AgentsPage() {
       }
       return next;
     });
+  };
+
+  // Consent remedy #1 (recommended): copy the blocked file INTO the project so
+  // the agent — jailed to cwd — can read it with a plain relative path. No
+  // sandbox widening. Posts a visible system line telling the user (and the
+  // next turn) the in-workspace path to read.
+  const consentCopyIntoWorkspace = async () => {
+    if (!fileConsent?.path) return;
+    const { path, agent } = fileConsent;
+    setFileConsent(c => (c ? { ...c, copying: true } : c));
+    try {
+      const rel = await invoke<string>("copy_into_workspace", { src: path, cwd: runCwd || null });
+      setFileConsent(c => (c ? { ...c, copying: false, done: rel } : c));
+      setSupChat(prev => [...prev, {
+        role: "system", color: "#7ff0c5",
+        text: `✅ Copied ${path} into the project as ${rel}. Re-run (or tell ${agent}) to read ${rel} — it's now inside the workspace.`,
+        ts: Date.now(), seq: nextSeq(),
+      } as GoalMsg]);
+    } catch (e: any) {
+      setFileConsent(c => (c ? { ...c, copying: false } : c));
+      setSupChat(prev => [...prev, {
+        role: "system", color: "#ff8c8c",
+        text: `Couldn't copy ${path} into the project: ${String(e?.message ?? e)}`,
+        ts: Date.now(), seq: nextSeq(),
+      } as GoalMsg]);
+    }
+  };
+
+  // Consent remedy #2 (explicit widening): grant the CLI read access to the
+  // user's home profile for THIS run only. Takes effect on the next dispatch
+  // (subprocess args are fixed at launch), so we tell the user to re-run.
+  const consentGrantHome = () => {
+    setGrantHomeThisRun(true);
+    const p = fileConsent?.path;
+    setSupChat(prev => [...prev, {
+      role: "system", color: "#ffd97a",
+      text: `🔓 Home-folder access granted for this run only. Re-run so ${fileConsent?.agent ?? "the agent"} can read ${p ? p : "files in your home profile"}. It resets automatically on the next run.`,
+      ts: Date.now(), seq: nextSeq(),
+    } as GoalMsg]);
+    setFileConsent(null);
   };
 
   // SuperUserCard Send — drops a one-off message into the Super User
@@ -9601,6 +9701,11 @@ export default function AgentsPage() {
   // canvas's `activeAgent` highlights whichever agent is on stage.
   async function dispatchGoal(overrideText?: string, priorHistory?: HistoryItem[], attachments: Attachment[] = []) {
     setRunError(null);
+    // Fresh run: revoke any prior per-run home grant (never let it leak across
+    // runs — that's the silent-widening bug we're fixing) and clear the
+    // already-prompted set so a genuine new block re-surfaces the consent modal.
+    setGrantHomeThisRun(false);
+    consentSeenRef.current = new Set();
     // overrideText is passed when the SuperUser CHAT routes a message
     // through the team flow (so the orchestrator dispatches instead of
     // answering solo). Guard against React handing this a click Event
@@ -11622,6 +11727,95 @@ export default function AgentsPage() {
         brainstormReady={!!(runCwd && runCwd.trim())}
         hasBrief={hasBriefForProject}
       />
+      {fileConsent && (
+        <div
+          data-ui="FileConsentOverlay"
+          onClick={() => setFileConsent(null)}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(8,12,20,0.6)",
+            zIndex: 1200, display: "flex", alignItems: "center", justifyContent: "center",
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: "min(560px, 92vw)", background: "#0e1420",
+              border: "1px solid #2a3a52", borderRadius: 12, padding: "20px 22px",
+              boxShadow: "0 18px 60px rgba(0,0,0,0.55)", color: "#dce6f5",
+            }}
+          >
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
+              🔒 File outside the workspace
+            </div>
+            <div style={{ fontSize: 13, lineHeight: 1.5, color: "#b6c4d8" }}>
+              <b>{fileConsent.agent}</b> tried to read a file{" "}
+              {fileConsent.path ? <>outside the project folder:</> : <>outside the project folder.</>}
+              {fileConsent.path && (
+                <div style={{
+                  margin: "8px 0", padding: "7px 10px", background: "#0a0f18",
+                  border: "1px solid #223145", borderRadius: 7, fontFamily: "monospace",
+                  fontSize: 12, wordBreak: "break-all", color: "#8fe0c0",
+                }}>{fileConsent.path}</div>
+              )}
+              For security, agents are confined to the working folder
+              {runCwd ? <> (<code>{runCwd}</code>)</> : null}. Granting every drive would
+              defeat that sandbox — so the safe fix is to bring just this one file into the project.
+            </div>
+
+            {fileConsent.done ? (
+              <div style={{
+                marginTop: 14, padding: "9px 11px", background: "#10241c",
+                border: "1px solid #1f5a44", borderRadius: 8, fontSize: 13, color: "#8fe0c0",
+              }}>
+                ✅ Copied into the project as <code>{fileConsent.done}</code>. Re-run and the agent
+                can read it with that path.
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 18 }}>
+                <button
+                  onClick={consentCopyIntoWorkspace}
+                  disabled={!fileConsent.path || fileConsent.copying}
+                  style={{
+                    flex: "1 1 auto", padding: "10px 14px", borderRadius: 8, border: "none",
+                    background: fileConsent.path ? "#2f7d5b" : "#2a3446",
+                    color: "#eafff5", fontWeight: 700, fontSize: 13,
+                    cursor: fileConsent.path && !fileConsent.copying ? "pointer" : "not-allowed",
+                  }}
+                  title={fileConsent.path ? "Copy the file into the project folder (recommended)" : "No file path was detected in the error"}
+                >
+                  {fileConsent.copying ? "Copying…" : "📋 Copy into workspace"}
+                </button>
+                <button
+                  onClick={consentGrantHome}
+                  style={{
+                    flex: "1 1 auto", padding: "10px 14px", borderRadius: 8,
+                    border: "1px solid #6b5a1f", background: "#231d0c", color: "#ffd97a",
+                    fontWeight: 600, fontSize: 13, cursor: "pointer",
+                  }}
+                  title="Grant read access to your home folder for this run only (takes effect on re-run)"
+                >
+                  🔓 Grant home (this run)
+                </button>
+                <button
+                  onClick={() => setFileConsent(null)}
+                  style={{
+                    flex: "0 0 auto", padding: "10px 14px", borderRadius: 8,
+                    border: "1px solid #2a3a52", background: "transparent", color: "#9fb0c6",
+                    fontSize: 13, cursor: "pointer",
+                  }}
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
+            <div style={{ marginTop: 12, fontSize: 11, color: "#6f7f96" }}>
+              Recommended: <b>Copy into workspace</b> — the file is duplicated inside the project and
+              the sandbox stays intact. “Grant home” widens access to your whole user profile for this
+              run only and resets automatically next run.
+            </div>
+          </div>
+        </div>
+      )}
       <IconPickerDialog
         open={iconPickerAgent != null}
         agentName={iconPickerAgent ?? ""}

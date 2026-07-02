@@ -9738,7 +9738,7 @@ export default function AgentsPage() {
     // through the team flow (so the orchestrator dispatches instead of
     // answering solo). Guard against React handing this a click Event
     // when it's wired directly as the onRun handler.
-    const text = (typeof overrideText === "string" ? overrideText : goal).trim();
+    let text = (typeof overrideText === "string" ? overrideText : goal).trim();
     if (!text) return;
     // Key the shared team memory by this project's stable ID so it matches across
     // machines (and syncs via the vault) rather than by the per-PC folder path.
@@ -9980,28 +9980,44 @@ export default function AgentsPage() {
     }
 
     try {
-      // ===== Preflight: a referenced file the sandbox can't read (deterministic) =====
+      // ===== Preflight: a referenced file the sandbox can't read → AUTO-INGEST it =====
       // The #1 silent 20-minute time-sink: the goal points at a file OUTSIDE the
       // project root (e.g. C:\Users\…\Downloads\BRIEF.md while the sandbox is sealed
       // to /mnt/c/1_Git/LocaLLM), so every agent read is hard-blocked and the team
-      // churns before surfacing it. Catch it in SECONDS: for each absolute file path
-      // in the goal that's outside projectCwd, try to read it; if it's blocked, STOP
-      // here with the exact unblock steps — before dispatching anyone. (A host-access
-      // project CAN read out-of-root, so the read-probe — not the path alone —
-      // decides; a readable path never trips this.)
+      // churns. The app itself has HOST access — so instead of making the user move
+      // the file, we bring it in: copy it into the project, repoint the goal at the
+      // in-project copy, and (for a brief) load its contents. Deterministic, before
+      // any dispatch. A readable path (host-access project) is left untouched; we
+      // fall back to asking only if even the host-side copy fails.
       if (projectCwd) {
         for (const p of extractAbsPaths(text)) {
           if (isInsideRoot(p, projectCwd)) continue;
           let readable = false;
           try { await invoke<string>("tool_read_file", { path: p, cwd: projectCwd }); readable = true; } catch { readable = false; }
           if (readable) continue;
-          const dest = suggestInRoot(p, projectCwd);
-          const msg = `⚠ I can't reach ${p} — it's OUTSIDE this project's folder, so the sandboxed agents are hard-blocked from reading it. Nothing was dispatched (so no time is wasted). To unblock, either:\n  • move it into the project — e.g. ${dest} — and re-run, or\n  • paste its contents here.\nThen I'll build it end-to-end.`;
-          appendLog("system", { role: "system", color: "#ff8c8c", text: msg });
-          setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: msg, ts: Date.now(), seq: nextSeq() }]);
-          setRunError("Referenced file is outside the project folder — sandbox can't read it.");
-          setPhase("done"); setRunEndedAt(Date.now());
-          return;
+          try {
+            // copy_into_workspace copies the host file → <cwd>/<name>, returns "./name".
+            const rel = await invoke<string>("copy_into_workspace", { src: p, cwd: projectCwd });
+            const base = rel.replace(/^\.\//, "");
+            text = text.split(p).join(rel);   // agents now read the in-project copy
+            appendLog("system", { role: "system", color: "#7ff0c5", text: `📎 ${p} was outside the sandbox — copied it into the project as ${rel}; building from it.` });
+            setSupChat(prev => [...prev, { role: "system", color: "#7ff0c5", text: `📎 ${base} was outside the sandbox — I brought it into the project and I'm building from it now.`, ts: Date.now(), seq: nextSeq() }]);
+            // If it's the brief, load its content so it rides every agent's prompt
+            // directly (briefText was read before this point, when it wasn't here yet).
+            if (/^brief\.md$/i.test(base)) {
+              try { briefText = await invoke<string>("tool_read_file", { path: base, cwd: projectCwd }); } catch { /* agents still read the ./ path */ }
+            }
+          } catch (e: any) {
+            // Even the host copy failed (unreadable source / no workspace) — now it's
+            // genuinely the user's call. Surface it in SECONDS, not after churn.
+            const dest = suggestInRoot(p, projectCwd);
+            const msg = `⚠ ${p} is outside the project and I couldn't copy it in (${cleanAgentError(e)}). Move it to ${dest} or paste its contents, and I'll build it. (Stopped before dispatching — no time wasted.)`;
+            appendLog("system", { role: "system", color: "#ff8c8c", text: msg });
+            setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: msg, ts: Date.now(), seq: nextSeq() }]);
+            setRunError("Referenced file is outside the project and couldn't be copied in.");
+            setPhase("done"); setRunEndedAt(Date.now());
+            return;
+          }
         }
       }
 

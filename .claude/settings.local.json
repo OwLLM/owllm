@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -f c:/1_Git/LocaLLM/LLM/core/_process_helpers.py)",
+      "Bash(cp ../icons/owl_launcher.ico ./owl_launcher.ico)",
+      "Bash(taskkill //F //IM launcher.exe)",
+      "Bash(taskkill //F //IM pythonw.exe)",
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(/c/mingw64/bin/windres -i launcher.rc -o launcher_res.o --input-format=rc --output-format=coff)",
+      "Bash(/c/mingw64/bin/g++ -O2 -s -mwindows -DLOCALLLM_LAUNCHER_GUI launcher.cpp launcher_res.o -o launcher.exe -static -static-libgcc -static-libstdc++ -lshlwapi -lurlmon -luser32)",
+      "Bash(rm -f launcher_res.o owl_launcher.ico)",
+      "Bash(git push origin main)",
+      "Bash(git push origin main:main)"
+    ]
+  }
+}

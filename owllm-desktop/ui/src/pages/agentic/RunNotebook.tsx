@@ -210,6 +210,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
 
   const pendingCount = useMemo(() => nb.steps.filter((s) => s.status === "pending").length, [nb.steps]);
+  // Human-readable digest model: the raw id with any file path stripped.
+  const digestModelLabel = useMemo(() => {
+    const raw = (modelId || "").trim();
+    return raw ? (raw.split(/[\\/]/).pop() || raw) : "server model";
+  }, [modelId]);
   if (!open) return null;
 
   const statusIcon = (s: NotebookStep) => (s.status === "done" ? "✓" : s.status === "sent" ? "⚡" : "○");
@@ -333,7 +338,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               >Add all</button>
             </div>
           )}
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span
+              title="The digest agent runs on the team's default model (pending override → project's team model → the loaded server model). Change it in Team settings."
+              style={{ flexShrink: 0, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", height: 22, lineHeight: "22px", padding: "0 9px", border: "1px solid var(--border)", borderRadius: 999, background: "var(--bg-surface)", color: "var(--fg-muted)", fontSize: 10.5 }}
+            >🪄 {digestModelLabel}</span>
             <input
               value={digestInput}
               onChange={(e) => setDigestInput(e.target.value)}

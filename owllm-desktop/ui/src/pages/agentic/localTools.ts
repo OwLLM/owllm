@@ -1196,6 +1196,60 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     description: "Close/stop the persistent browser session. Reopen later with browser_open.",
     args: [],
   },
+  // ---- kvm_node — drive a networked Sipeed NanoKVM as target eyes+hands ----
+  // SCOPE: host / local-agent ONLY. This routes through the Tauri `invoke`
+  // host command `kvm_node_exec`; subscription-CLI agents (Claude/Codex CLI)
+  // run outside the Tauri shell and CANNOT reach the host executor, so the
+  // tool is a no-op for them by construction. Gated by the SAME backend
+  // feature flag as `kvm_node_exec`; when the flag is off (or the host
+  // command isn't built yet) the executor just surfaces the backend's error.
+  //
+  // The spec framework advertises every arg as a JSON-schema `string`
+  // (formatToolsForOpenAI, ~line 543 — llama-server's --jinja grammar only
+  // renders scalar-string args), so the nested `target` object and per-action
+  // `params` object are passed as JSON *strings* and documented inline below;
+  // the executor JSON-parses them before handing to `kvm_node_exec`.
+  {
+    name: "kvm_node",
+    aliases: ["kvm", "nanokvm", "kvm_exec", "kvm_control"],
+    description:
+      "Control a networked KVM node (Sipeed NanoKVM) as the target machine's eyes + hands. " +
+      "Actions: 'screenshot' (capture the target's live video — returns an absolute saved PNG " +
+      "path you then view via the normal screenshot/vision path), 'type' (type a text string via " +
+      "emulated USB-HID keyboard), 'keys' (press a key chord/sequence, e.g. 'ctrl+alt+del' or " +
+      "'Enter'), 'mouse' (move/click the emulated USB-HID mouse), 'boot_key' (tap a boot/BIOS key " +
+      "such as F2/F12/Del during POST). Documented STUBS (backend may return not-implemented): " +
+      "'mount_iso' (attach a virtual USB ISO), 'power' (press the target's power/reset line). " +
+      "Take a 'screenshot' first to see the target before acting.",
+    args: [
+      {
+        name: "action",
+        required: true,
+        description:
+          "One of: screenshot | type | keys | mouse | boot_key | mount_iso | power.",
+        aliases: ["op", "command", "cmd", "verb"],
+      },
+      {
+        name: "target",
+        required: true,
+        description:
+          "JSON object identifying the KVM node: " +
+          '{ "host": string, "port"?: number, "auth": { "sshKeyPath"?: string, "token"?: string }, ' +
+          '"transport": "ssh" | "http" }. Provide EXACTLY one of auth.sshKeyPath or auth.token.',
+        aliases: ["node", "device", "kvm_target", "endpoint"],
+      },
+      {
+        name: "params",
+        required: false,
+        description:
+          "JSON object of action-specific params. screenshot: {} — type: {\"text\": string} — " +
+          "keys: {\"combo\": string} (e.g. \"ctrl+alt+del\") — mouse: {\"x\"?: number, \"y\"?: number, " +
+          "\"button\"?: \"left\"|\"right\"|\"middle\", \"op\"?: \"move\"|\"click\"|\"down\"|\"up\"} — " +
+          "boot_key: {\"key\": string} — mount_iso: {\"isoPath\": string} — power: {\"line\": \"power\"|\"reset\"}.",
+        aliases: ["arguments", "options", "opts", "payload"],
+      },
+    ],
+  },
 ];
 
 // ---- Canonical-name + arg-alias resolution (the "normalize" half of
@@ -1639,11 +1693,66 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         const result = await invoke<string>("browser_stop");
         return { ok: true, output: truncate(result, 8000) };
       }
+      case "kvm_node": {
+        // Host/local-agent ONLY — routes to the Tauri host command
+        // `kvm_node_exec` exactly like the browser tools route to `browser_cmd`.
+        // Subscription-CLI agents run outside the Tauri shell and can't reach it.
+        // The nested `target` / `params` objects arrive as JSON strings (the
+        // spec framework coerces every arg to a string); parse them here.
+        const action = (call.args.action ?? "").trim();
+        if (!action) return { ok: false, output: "kvm_node: 'action' is required (screenshot|type|keys|mouse|boot_key|mount_iso|power)." };
+        let target: unknown;
+        try {
+          target = call.args.target ? JSON.parse(call.args.target) : undefined;
+        } catch {
+          return { ok: false, output: "kvm_node: 'target' must be a JSON object {host, port?, auth{sshKeyPath?|token?}, transport}." };
+        }
+        if (!target || typeof target !== "object") {
+          return { ok: false, output: "kvm_node: 'target' is required — a JSON object {host, port?, auth{sshKeyPath?|token?}, transport}." };
+        }
+        let params: unknown = {};
+        if (call.args.params) {
+          try { params = JSON.parse(call.args.params); }
+          catch { return { ok: false, output: "kvm_node: 'params' must be a JSON object for the chosen action." }; }
+        }
+        // Frozen envelope shape from the backend contract: {ok, action, data?, error?}.
+        const env = await invokeKvmNode(target, action, params);
+        if (!env.ok) {
+          return { ok: false, output: env.error ?? `kvm_node ${action} failed.` };
+        }
+        if (action === "screenshot") {
+          // Path-based hand-off — mirror screenshot_url/browser_screenshot: surface
+          // the ABSOLUTE saved PNG path as text so the existing vision path picks it
+          // up. NO base64, NO second image pipeline.
+          const imagePath = (env.data as { imagePath?: string } | undefined)?.imagePath;
+          if (!imagePath) return { ok: false, output: "kvm_node screenshot: backend returned no imagePath." };
+          return { ok: true, output: `screenshot saved: ${imagePath}` };
+        }
+        return { ok: true, output: truncate(JSON.stringify(env.data ?? { ok: true }), 8000) };
+      }
       default:
         return { ok: false, output: `unknown tool: ${call.name}` };
     }
   } catch (e) {
     return { ok: false, output: String(e) };
+  }
+}
+
+/// Frozen `kvm_node_exec` return envelope (Rust: Result<serde_json::Value,String>
+/// whose Ok value is this object). data is action-specific (screenshot →
+/// { imagePath }); error is set when ok is false.
+type KvmNodeEnvelope = { ok: boolean; action: string; data?: unknown; error?: string };
+
+/// Invoke the `kvm_node_exec` host command, mirroring how the browser tools
+/// invoke `browser_cmd`. If the command isn't registered yet in this build
+/// (backend not shipped), `invoke` rejects — we fall back to the FROZEN
+/// envelope shape { ok, action, error } so the tool degrades to a clear
+/// "unavailable" error instead of an opaque crash. No fabricated success.
+async function invokeKvmNode(target: unknown, action: string, params: unknown): Promise<KvmNodeEnvelope> {
+  try {
+    return await invoke<KvmNodeEnvelope>("kvm_node_exec", { target, action, params });
+  } catch (e) {
+    return { ok: false, action, error: `kvm_node_exec host command unavailable: ${String(e)}` };
   }
 }
 

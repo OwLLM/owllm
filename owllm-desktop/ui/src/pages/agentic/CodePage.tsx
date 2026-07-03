@@ -1634,22 +1634,14 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         )}
         <GitBar workspace={workspace} busy={busy} />
         {isolated && (
-          <>
-            <span
-              title={`This page edits a PRIVATE git worktree on its own branch, cut from ${projectRoot}. Your real folder is untouched until you Merge. (This is unrelated to the WSL "isolation" badge, which is about whether the agent's tools run inside Linux vs. on the host.)`}
-              style={{ fontSize: 11, fontWeight: 700, padding: "3px 8px", borderRadius: 6, whiteSpace: "nowrap", background: "rgba(127,240,197,0.12)", color: "#7ff0c5", border: "1px solid rgba(127,240,197,0.35)" }}
-            >
-              ⎇ {branch ? branch.replace(/^owllm-fleet\//, "") : "branch"}
-            </span>
-            <button
-              onClick={mergeToMain}
-              disabled={mergeBusy || busy}
-              title={`Commit this page's work and squash-merge it into ${projectRoot}. Your real folder changes ONLY when you click this.`}
-              style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "#7ff0c5", fontWeight: 700, opacity: mergeBusy ? 0.6 : 1 }}
-            >
-              {mergeBusy ? "⏳ Merging…" : `⤴ Merge to ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`}
-            </button>
-          </>
+          <button
+            onClick={mergeToMain}
+            disabled={mergeBusy || busy}
+            title={`This page edits a PRIVATE git worktree on its own branch, cut from ${projectRoot}. Your real folder is untouched until you Merge — this commits the page's work and squash-merges it into ${projectRoot}. (Unrelated to the WSL "isolation" badge, which is about whether the agent's tools run inside Linux vs. on the host.)`}
+            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "#7ff0c5", fontWeight: 700, opacity: mergeBusy ? 0.6 : 1 }}
+          >
+            {mergeBusy ? "⏳ Merging…" : `⤴ Merge to ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`}
+          </button>
         )}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>

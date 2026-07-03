@@ -988,7 +988,37 @@ function FlowHeader({
   };
   return (
     <div style={{ position:"relative", display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
-      <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Orchestrated Workflow</div>
+      {/* The title IS the mode switch — Orchestrated Workflow ⟷ Solo-Loop. The
+          active mode is bright gold + glow; the other stays visible but shadowed.
+          This replaces the old 👥 Team / ⚡ Solo button. */}
+      <div data-ui="FlowModeSwitch" style={{ display:"flex", alignItems:"center", gap:2, height:30, fontFamily:"Segoe UI", paddingRight:6 }}>
+        {[
+          { label:"Orchestrated Workflow", active:!soloMode, target:false,
+            title:"Full agentic team — the orchestrator dispatches specialists" },
+          { label:"Solo-Loop", active:!!soloMode, target:true,
+            title:"Solo-Loop — one coder does the whole job, a single critic check, rule-based publish" },
+        ].map((m, i) => (
+          <React.Fragment key={m.label}>
+            {i === 1 && <span style={{ color:"#2f3850", fontSize:16, fontWeight:700, padding:"0 2px", userSelect:"none" }}>⟷</span>}
+            <button
+              data-ui={m.target ? "FlowModeSolo" : "FlowModeOrch"}
+              onClick={() => { if (!!soloMode !== m.target) onToggleSolo?.(); }}
+              aria-pressed={m.active}
+              title={m.title}
+              style={{
+                appearance:"none", border:0, cursor:"pointer", fontFamily:"inherit",
+                fontSize:14.5, fontWeight:800, letterSpacing:0.2, lineHeight:1, whiteSpace:"nowrap",
+                padding:"6px 11px", borderRadius:8,
+                transition:"color .25s, text-shadow .25s, background .25s, box-shadow .25s",
+                color: m.active ? "#ffd97a" : "#39435a",
+                textShadow: m.active ? "0 0 18px rgba(255,217,122,0.5)" : "0 1px 0 rgba(0,0,0,0.5)",
+                background: m.active ? "rgba(255,217,122,0.15)" : "transparent",
+                boxShadow: m.active ? "inset 0 0 0 1px rgba(255,217,122,0.42)" : "none",
+              }}
+            >{m.label}</button>
+          </React.Fragment>
+        ))}
+      </div>
       {/* Team stopwatch — absolute-centered so it sits in the middle of the header
           regardless of the buttons on either side. Shows how long the team has run
           autonomously; green + ⏱ while live, muted + ✓ once the run stops. */}
@@ -1028,22 +1058,7 @@ function FlowHeader({
         </button>
       )}
       <div style={{ flex:1 }} />
-      {onToggleSolo && (
-        <button
-          data-ui="FlowSoloBtn"
-          className="ghost-btn"
-          onClick={onToggleSolo}
-          title={soloMode
-            ? "SOLO-LOOP is ON: one agent runs the task (edit → verify → fix) + rule-based host publish — no orchestrator/critic/red-team. Click to switch to the full Team."
-            : "TEAM (full orchestration). Click for SOLO-LOOP: one agent, fast, for simple tasks — and the host publishes by rule when you ask."}
-          style={{
-            height:28, padding:"0 10px", fontSize:11, fontWeight:700,
-            background: soloMode ? "rgba(127,212,255,0.20)" : "rgba(255,217,122,0.20)",
-            color: soloMode ? "#7fd4ff" : "#ffd97a",
-            border: soloMode ? "1px solid rgba(127,212,255,0.5)" : "1px solid rgba(255,217,122,0.6)",
-          }}
-        >{soloMode ? "⚡ Solo" : "👥 Team"}</button>
-      )}
+      {/* (old FlowSoloBtn removed — the header title-switch above now controls the mode) */}
       <button
         data-ui="FlowMemoryBtn"
         className="ghost-btn"
@@ -3199,6 +3214,59 @@ function useCanvasGestures(opts?: { minZoom?: number; maxZoom?: number; factor?:
 // gesture set in agent_team_canvas.py::wheelEvent. Click an agent to
 // select it (drives the top-left info card); click empty space to
 // deselect.
+// SoloLoopCanvas — the Solo-Loop mode's minimal graph. One full-stack Coder does
+// the WHOLE job (lanes off), a Critical Thinker checks it once (and can act as Super
+// User for a confirmation), then the Publisher ships it. The Publisher node reuses the
+// EXACT PublisherTilePanel (Commit / Merge / Publish + ⚙ Set up repo) from the team
+// canvas — same component, same host-side logic, no rebuild.
+function SoloLoopCanvas({ projectCwd, activeNode }: {
+  projectCwd: string | null;
+  /// Which node is currently working, so it glows (set by the solo run in phase 3).
+  activeNode?: "coder" | "critic" | "publisher" | null;
+}) {
+  const card = (icon: string, name: string, sub: string, hex: string, active: boolean) => (
+    <div style={{
+      width: 152, borderRadius: 12, padding: "11px 10px 10px", textAlign: "center",
+      background: "linear-gradient(180deg, var(--bg-elevated), #0d1524)",
+      border: `1.5px solid ${active ? hex : "var(--border-strong)"}`,
+      boxShadow: active ? `0 0 22px -2px ${hex}` : "0 6px 22px rgba(0,0,0,0.4)",
+      transition: "box-shadow .25s, border-color .25s",
+    }}>
+      <div style={{ fontSize: 22, lineHeight: 1 }}>{icon}</div>
+      <div style={{ fontSize: 13, fontWeight: 700, marginTop: 5, color: "var(--fg)" }}>{name}</div>
+      <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 2 }}>{sub}</div>
+    </div>
+  );
+  return (
+    <div data-ui="SoloLoopCanvas" style={{ position: "absolute", inset: 0, overflow: "auto" }}>
+      <svg viewBox="0 0 900 600" preserveAspectRatio="xMidYMid meet"
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+        <defs>
+          <marker id="sl-ah" markerWidth={9} markerHeight={9} refX={7} refY={3} orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="rgba(255,217,122,0.7)" /></marker>
+          <marker id="sl-ahp" markerWidth={9} markerHeight={9} refX={7} refY={3} orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="rgba(255,154,217,0.6)" /></marker>
+        </defs>
+        <path d="M 320 150 C 400 120, 500 120, 578 150" stroke="rgba(255,217,122,0.5)" strokeWidth={2} fill="none" markerEnd="url(#sl-ah)" />
+        <path d="M 578 190 C 500 220, 400 220, 326 190" stroke="rgba(255,154,217,0.5)" strokeWidth={2} fill="none" strokeDasharray="5 5" markerEnd="url(#sl-ahp)" />
+        <path d="M 300 210 C 330 300, 400 330, 452 330" stroke="rgba(255,217,122,0.5)" strokeWidth={2} fill="none" markerEnd="url(#sl-ah)" />
+        <text x={450} y={116} fill="#8494ac" fontSize={12} textAnchor="middle" fontFamily="Segoe UI, sans-serif">writes everything</text>
+        <text x={452} y={240} fill="#ff9ad9" fontSize={11} textAnchor="middle" fontFamily="Segoe UI, sans-serif">checks once ↺</text>
+      </svg>
+      <div style={{ position: "absolute", left: "30%", top: "20%", transform: "translate(-50%,-50%)" }}>{card("🧰", "Coder", "full-stack · lanes off", "#7fb4ff", activeNode === "coder")}</div>
+      <div style={{ position: "absolute", left: "66%", top: "20%", transform: "translate(-50%,-50%)" }}>{card("🧠", "Critical Thinker", "one review · Super User", "#ff9ad9", activeNode === "critic")}</div>
+      <div style={{ position: "absolute", left: "50%", top: "52%", transform: "translate(-50%,0)", width: "min(300px, 82%)" }}>
+        <div style={{ textAlign: "center", fontSize: 10.5, color: "var(--fg-muted)", marginBottom: 6, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase" }}>🚀 Publisher · rule-based</div>
+        <div style={{
+          borderRadius: 12, transition: "box-shadow .25s, border-color .25s",
+          border: `1.5px solid ${activeNode === "publisher" ? "#6ff0c0" : "var(--border-strong)"}`,
+          boxShadow: activeNode === "publisher" ? "0 0 22px -2px #6ff0c0" : "0 6px 22px rgba(0,0,0,0.4)",
+        }}>
+          <PublisherTilePanel cwd={projectCwd} rgb="111,240,192" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNode, onSelectNode }: {
   width: number; height: number; team: Team | null; roleByName: Map<string, RoleData>;
   /// Set of currently-running agents (specialists run in parallel during
@@ -10446,7 +10514,24 @@ export default function AgentsPage() {
           ...(perAgentSkills.get(coder.name) ?? []),
         ];
         const sBlock = await buildAgentSkillBlock(sIds);
-        const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd);
+        // ⚡ THE solo fix: whoever we picked is a TEAM specialist whose role prompt
+        // may lane-lock it ("own ONLY the UI, NEVER edit Rust, flag the dependency").
+        // Alone, that lock is fatal — it does its slice and hands the rest to agents
+        // that don't exist. Suspend the lane and make it own the WHOLE task.
+        const SOLO_OVERRIDE = [
+          "",
+          "⚡ SOLO-LOOP MODE — YOU ARE THE ONLY AGENT.",
+          "There is NO team, NO orchestrator, NO backend/frontend split, NO handoff. Any",
+          "\"LAYER OWNERSHIP\" / lane rule above is SUSPENDED for this run: do the COMPLETE",
+          "task end-to-end across ALL layers yourself — UI AND backend/Rust, client AND",
+          "server, tests AND docs. NEVER flag a dependency \"for another agent\", NEVER emit",
+          "\"@<name>:\" dispatch lines (nothing executes them here), NEVER wait for a critic.",
+          "Finish the ENTIRE task; a Critical Thinker reviews your work ONCE afterward.",
+          "Only if you hit a choice ONLY the user can make (a missing asset, an irreversible",
+          "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
+          "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
+        ].join("\n");
+        const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd) + "\n" + SOLO_OVERRIDE;
         const sAllowed = roleByName.get(coder.base)?.toolAllowlist;
         const sMem = await loadAgentMemory(selectedProjectId, coder.name);
         // Scope the gate to the coder's domain (mirrors the team path) so the card's
@@ -10518,6 +10603,51 @@ export default function AgentsPage() {
           finally { removeActive(coder.name); }
         }
         ranWriteToolRef.current = true; // a solo coder run IS the write attempt; the gate decides "done"
+
+        // ----- Single Critical Thinker check (Solo-Loop): review the coder's work
+        // ONCE — advisory, non-blocking. Its ONE extra job is Super User: if the coder
+        // or the critic flags a decision only the user can make ("NEEDS USER:"), we do
+        // NOT auto-publish — we surface the ask and stop, so nothing ships past a real
+        // user gate. Otherwise the work ships as usual. -----
+        let needsUserDecision = false;
+        if (sText && !isAuthError(sText) && !ctrl.signal.aborted) {
+          const CRITIC_NAME = CRITIC_AGENT_NAME;
+          addActive(CRITIC_NAME);
+          appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
+          try {
+            const criticModel = modelFor(CRITIC_NAME);
+            const review = (await streamChatCompletion(
+              port, criticModel, providerFor(criticModel),
+              buildCriticalThinkerReviewPrompt(activeTeam, directives),
+              [
+                "The user's goal:", text, "",
+                "The solo coder's result (it did the whole task across ALL layers):", sText, "",
+                sGate && sGate.status !== "unverified" ? `Verification ran: ${sGate.status}.` : "No verify command ran.",
+                "Review it ONCE for correctness, gaps, and anything half-done or unverified.",
+                "You are ADVISORY — the work ships regardless. If it's solid, say 'no concerns'.",
+                "ONLY if it needs a decision the USER must make, say so on a line prefixed 'NEEDS USER:'.",
+              ].join("\n"),
+              0.3, ctrl.signal,
+              (d) => streamLog(CRITIC_NAME, d), projectCwd,
+              undefined, undefined,
+              (c, r, d) => streamThought(CRITIC_NAME, c, r, d),
+              READONLY_LOCAL_TOOLS, undefined,
+              getClaudeSession(selectedProjectId, CRITIC_NAME),
+            )).trim();
+            if (review) {
+              speakAgentReply(CRITIC_NAME, review);
+              setSupChat(prev => [...prev, { role: CRITIC_NAME, color: "#ff9ad9", text: `🧠 ${review}`, ts: Date.now(), seq: nextSeq() }]);
+            }
+            const ask = (review.match(/NEEDS USER:[^\n]*/i)?.[0] ?? sText.match(/NEEDS USER:[^\n]*/i)?.[0] ?? "").trim();
+            if (ask) {
+              needsUserDecision = true;
+              setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: `⚡ Needs your call before anything ships — ${ask.replace(/^NEEDS USER:\s*/i, "")} · reply and I'll continue.`, ts: Date.now(), seq: nextSeq() }]);
+            }
+          } catch (e: any) {
+            if (ctrl.signal.aborted) throw e;
+            appendThought(coder.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker check skipped (${cleanAgentError(e)}) — shipping as-is.` });
+          } finally { removeActive(CRITIC_NAME); }
+        }
         // RULE-BASED PUBLISH: host commits+bumps+releases deterministically when asked.
         // The host build/sign/release can run for minutes with no model activity, so
         // KEEP the coder card active (pulsing) and flip the phase to "integrating"
@@ -10525,7 +10655,12 @@ export default function AgentsPage() {
         // chat stays locked with NO active card, leaving the user with no idea why.
         let sPub = "";
         const wantsPublish = goalRequiresPublish(text);
-        if (wantsPublish) {
+        if (wantsPublish && needsUserDecision) {
+          // A user-only decision is pending — hold the release, don't ship blind.
+          appendThought(coder.name, { role: "system", color: "#ffd97a", text: "⏸ Publish held — waiting on your decision above." });
+          setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: "⏸ Publish is on hold until you answer the question above.", ts: Date.now(), seq: nextSeq() }]);
+        }
+        if (wantsPublish && !needsUserDecision) {
           setPhase("integrating");
           appendThought(coder.name, { role: "system", color: "#7ff0c5", text: "📦 rule-based publish — host building / signing / releasing…" });
           // Surface it in the main chat too (the thought buffer alone is easy to miss),
@@ -12471,7 +12606,14 @@ export default function AgentsPage() {
             onToggleSolo={() => setSoloMode(!soloMode)}
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>
-            {viewMode === "diagram" ? (
+            {soloMode && viewMode !== "chat" ? (
+              // Solo-Loop mode: the diagram/graph collapses to the lean
+              // Coder → Critic → Publisher loop (chat mode still uses the grid).
+              <SoloLoopCanvas
+                projectCwd={runCwd || null}
+                activeNode={busy ? "coder" : null}
+              />
+            ) : viewMode === "diagram" ? (
               <TeamCanvas
                 width={canvasSize.size.w || 800}
                 height={canvasSize.size.h || 600}

@@ -2043,7 +2043,7 @@ function AgentChatTile({
             onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenEditor(); } }}
             style={{
               display: "inline-block", maxWidth: "100%", verticalAlign: "bottom",
-              color: "var(--fg-strong)", fontSize: 12, fontWeight: 700,
+              color: "var(--fg-strong)", fontSize: 14, fontWeight: 700,
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
               cursor: "pointer", textDecoration: "underline", textDecorationColor: "rgba(255,255,255,0.25)", textUnderlineOffset: 2,
             }}

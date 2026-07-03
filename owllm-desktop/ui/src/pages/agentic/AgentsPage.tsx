@@ -10460,7 +10460,24 @@ export default function AgentsPage() {
           ...(perAgentSkills.get(coder.name) ?? []),
         ];
         const sBlock = await buildAgentSkillBlock(sIds);
-        const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd);
+        // ⚡ THE solo fix: whoever we picked is a TEAM specialist whose role prompt
+        // may lane-lock it ("own ONLY the UI, NEVER edit Rust, flag the dependency").
+        // Alone, that lock is fatal — it does its slice and hands the rest to agents
+        // that don't exist. Suspend the lane and make it own the WHOLE task.
+        const SOLO_OVERRIDE = [
+          "",
+          "⚡ SOLO-LOOP MODE — YOU ARE THE ONLY AGENT.",
+          "There is NO team, NO orchestrator, NO backend/frontend split, NO handoff. Any",
+          "\"LAYER OWNERSHIP\" / lane rule above is SUSPENDED for this run: do the COMPLETE",
+          "task end-to-end across ALL layers yourself — UI AND backend/Rust, client AND",
+          "server, tests AND docs. NEVER flag a dependency \"for another agent\", NEVER emit",
+          "\"@<name>:\" dispatch lines (nothing executes them here), NEVER wait for a critic.",
+          "Finish the ENTIRE task; a Critical Thinker reviews your work ONCE afterward.",
+          "Only if you hit a choice ONLY the user can make (a missing asset, an irreversible",
+          "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
+          "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
+        ].join("\n");
+        const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd) + "\n" + SOLO_OVERRIDE;
         const sAllowed = roleByName.get(coder.base)?.toolAllowlist;
         const sMem = await loadAgentMemory(selectedProjectId, coder.name);
         // Scope the gate to the coder's domain (mirrors the team path) so the card's
@@ -10532,6 +10549,51 @@ export default function AgentsPage() {
           finally { removeActive(coder.name); }
         }
         ranWriteToolRef.current = true; // a solo coder run IS the write attempt; the gate decides "done"
+
+        // ----- Single Critical Thinker check (Solo-Loop): review the coder's work
+        // ONCE — advisory, non-blocking. Its ONE extra job is Super User: if the coder
+        // or the critic flags a decision only the user can make ("NEEDS USER:"), we do
+        // NOT auto-publish — we surface the ask and stop, so nothing ships past a real
+        // user gate. Otherwise the work ships as usual. -----
+        let needsUserDecision = false;
+        if (sText && !isAuthError(sText) && !ctrl.signal.aborted) {
+          const CRITIC_NAME = CRITIC_AGENT_NAME;
+          addActive(CRITIC_NAME);
+          appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
+          try {
+            const criticModel = modelFor(CRITIC_NAME);
+            const review = (await streamChatCompletion(
+              port, criticModel, providerFor(criticModel),
+              buildCriticalThinkerReviewPrompt(activeTeam, directives),
+              [
+                "The user's goal:", text, "",
+                "The solo coder's result (it did the whole task across ALL layers):", sText, "",
+                sGate && sGate.status !== "unverified" ? `Verification ran: ${sGate.status}.` : "No verify command ran.",
+                "Review it ONCE for correctness, gaps, and anything half-done or unverified.",
+                "You are ADVISORY — the work ships regardless. If it's solid, say 'no concerns'.",
+                "ONLY if it needs a decision the USER must make, say so on a line prefixed 'NEEDS USER:'.",
+              ].join("\n"),
+              0.3, ctrl.signal,
+              (d) => streamLog(CRITIC_NAME, d), projectCwd,
+              undefined, undefined,
+              (c, r, d) => streamThought(CRITIC_NAME, c, r, d),
+              READONLY_LOCAL_TOOLS, undefined,
+              getClaudeSession(selectedProjectId, CRITIC_NAME),
+            )).trim();
+            if (review) {
+              speakAgentReply(CRITIC_NAME, review);
+              setSupChat(prev => [...prev, { role: CRITIC_NAME, color: "#ff9ad9", text: `🧠 ${review}`, ts: Date.now(), seq: nextSeq() }]);
+            }
+            const ask = (review.match(/NEEDS USER:[^\n]*/i)?.[0] ?? sText.match(/NEEDS USER:[^\n]*/i)?.[0] ?? "").trim();
+            if (ask) {
+              needsUserDecision = true;
+              setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: `⚡ Needs your call before anything ships — ${ask.replace(/^NEEDS USER:\s*/i, "")} · reply and I'll continue.`, ts: Date.now(), seq: nextSeq() }]);
+            }
+          } catch (e: any) {
+            if (ctrl.signal.aborted) throw e;
+            appendThought(coder.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker check skipped (${cleanAgentError(e)}) — shipping as-is.` });
+          } finally { removeActive(CRITIC_NAME); }
+        }
         // RULE-BASED PUBLISH: host commits+bumps+releases deterministically when asked.
         // The host build/sign/release can run for minutes with no model activity, so
         // KEEP the coder card active (pulsing) and flip the phase to "integrating"
@@ -10539,7 +10601,12 @@ export default function AgentsPage() {
         // chat stays locked with NO active card, leaving the user with no idea why.
         let sPub = "";
         const wantsPublish = goalRequiresPublish(text);
-        if (wantsPublish) {
+        if (wantsPublish && needsUserDecision) {
+          // A user-only decision is pending — hold the release, don't ship blind.
+          appendThought(coder.name, { role: "system", color: "#ffd97a", text: "⏸ Publish held — waiting on your decision above." });
+          setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: "⏸ Publish is on hold until you answer the question above.", ts: Date.now(), seq: nextSeq() }]);
+        }
+        if (wantsPublish && !needsUserDecision) {
           setPhase("integrating");
           appendThought(coder.name, { role: "system", color: "#7ff0c5", text: "📦 rule-based publish — host building / signing / releasing…" });
           // Surface it in the main chat too (the thought buffer alone is easy to miss),

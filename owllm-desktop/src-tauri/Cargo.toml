@@ -141,6 +141,14 @@ symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4", "ogg", "vorbi
 # arrive as opus-in-ogg. Wraps libopus C code (vendored by audiopus-sys
 # under the hood), which compiles fine on every Tauri target.
 symphonia-adapter-libopus = "0.1"
+# OWLLM Node (kvm.rs) — the NanoKVM web login scrambles the password exactly
+# like the device's own web client: AES-256-CBC in OpenSSL "Salted__" form with
+# the key/iv derived by EVP_BytesToKey(MD5) from a fixed passphrase. These three
+# pure-Rust RustCrypto crates reproduce that on every Tauri target (no OpenSSL /
+# system dep). The TLS for the realtime HID websocket reuses `native-tls` above.
+aes = "0.8"
+cbc = { version = "0.1", features = ["alloc"] }
+md-5 = "0.10"
 
 # Windows-only: needed by overlay_frame to make the cyan chrome window
 # an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).

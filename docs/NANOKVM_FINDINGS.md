@@ -146,8 +146,18 @@ LISTEN *:22         sshd (pid 570)
   A companion native helper `/tmp/kvm_system/kvm_system` handles the CVI media
   path. No YAML/JSON config on disk — config is compiled in / via API.
 - **Auth:** `POST /api/auth/login` with JSON `{username, password}` → returns a
-  JWT (in `data.token`); subsequent calls send it as `Authorization: Bearer <jwt>`.
-  Change password: `POST /api/auth/password {username, password}`.
+  JWT (in `data.token`). Two gotchas confirmed live while wiring Phase-2:
+  - **The password is NOT sent in the clear.** The web client scrambles it with
+    `encodeURIComponent(CryptoJS.AES.encrypt(pw, "nanokvm-sipeed-2024").toString())`
+    — i.e. OpenSSL "Salted__" AES-256-CBC, key/iv via `EVP_BytesToKey(MD5, 1
+    round)` over the fixed passphrase `nanokvm-sipeed-2024` (verbatim from the
+    on-device `assets/encrypt-*.js`) and a random 8-byte salt. The server's
+    `utils.DecodeDecrypt` reverses it before the bcrypt check, so a plaintext
+    password always returns `code:-2 invalid username or password`.
+  - **Subsequent calls authenticate with a COOKIE, not a header:** the JWT is
+    sent as `Cookie: nano-kvm-token=<jwt>`. `Authorization: Bearer` is ignored
+    (401). Login sets no cookie itself — the client stores it via JS.
+  Change password: `POST /api/auth/password {username, password}` (same scramble).
   - **Confirmed live** (probed on-device against `https://127.0.0.1`):
     - bad creds → `HTTP 200 {"code":-2,"msg":"invalid username or password","data":null}`
     - `GET /api/stream/mjpeg` and `GET /api/vm/info` without a token → `HTTP 401`.
@@ -225,11 +235,18 @@ LISTEN *:22         sshd (pid 570)
 - **Transport is JWT-authed REST + one websocket** on 80/443, exactly as the
   frozen contract anticipated. Phase-2 can now be written against real endpoints.
 
-### One remaining user-only item (for a *live authed* test, not for writing Phase-2)
-Structural recon above is complete and verified against the live device. The only
-thing that could **not** be self-verified is an authenticated round-trip
-(login → grab a real frame / send a real HID event), because the web-UI account
-`MC9` has a bcrypt-stored password that is **not** the SSH password and cannot be
-read off the box. To smoke-test Phase-2 end-to-end, provide the **web-UI password
-for `MC9`** (the one you type into the NanoKVM web login), or set a known one on
-the device. Everything needed to *write* the Phase-2 transport is already here.
+### Authed round-trip — RESOLVED (Phase-2 wired + verified live, 2026-07-04)
+The one item recon couldn't self-verify — an authenticated round-trip — is done.
+With the web-UI password set to the operator's value, a full authed flow was
+verified against the live device: `login` (with the AES-scrambled password) →
+`nano-kvm-token` cookie → `GET /api/vm/info` 200, `GET /api/hid/mode` 200,
+`GET /api/stream/mjpeg` real JPEG frames, and a `WS /api/ws` handshake (`101`)
+that accepts a `[2,buttons,dx,dy,wheel]` mouse HID frame. The Rust
+`encrypt_password` in `src-tauri/src/kvm.rs`, compiled standalone, produced a
+ciphertext that logged in successfully — so the transport's crypto is verified
+end-to-end, not just structurally. `kvm_node_exec` now drives these endpoints
+for real (no more Phase-1 stubs).
+
+Note: the web-UI account `MC9` still had a bcrypt password distinct from the SSH
+one; to enable the authed test the on-device `/etc/kvm/pwd` was updated (original
+hash backed up to `/etc/kvm/pwd.owllm.bak` — restore it to revert).

@@ -59,7 +59,12 @@ call cargo clean -p owllm-desktop --release --target x86_64-pc-windows-gnu --man
 if errorlevel 1 echo [owllm-desktop] warn: cargo clean -p failed (continuing; UI may be stale)
 
 echo [owllm-desktop] Building Tauri release with GNU toolchain...
-call npm run tauri -- build --target x86_64-pc-windows-gnu
+rem --bundles nsis: build ONLY the NSIS installer, not the MSI. The release only
+rem ships OwLLM.Desktop.Setup.exe (the NSIS) + latest.json — the MSI is never
+rem uploaded, and its WiX bundling step started failing with "cannot find the file
+rem specified (os error 2)" AFTER everything (incl. the NSIS) was already EV-signed.
+rem Skipping it removes a dependency we don't ship and unblocks signed releases.
+call npm run tauri -- build --target x86_64-pc-windows-gnu --bundles nsis
 if errorlevel 1 exit /b 1
 
 echo.

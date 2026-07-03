@@ -8049,8 +8049,29 @@ const agentSid = (pid: string | null | undefined): string => `agents:${pid || "n
 // null and couldn't otherwise stop it.
 const agentRunAborts = new Map<string, AbortController>();
 
-export default function AgentsPage() {
+// One agentic workspace. Multiple instances can be mounted at once (one per
+// tab in the AgentsPages shell below) — each remembers its own selected
+// project per pageId, so two tabs can run teams on the same or different
+// projects in parallel. `isActive` gates the window-level UI-command events
+// (open-workbench, memory modal, dock drafts) so only the visible tab reacts;
+// the bridge/stream events stay project-scoped and untouched.
+export function AgentsPage({
+  pageId = "main",
+  isActive = true,
+  onTitle,
+  onBusy,
+}: {
+  pageId?: string;
+  isActive?: boolean;
+  onTitle?: (title: string) => void;
+  onBusy?: (busy: boolean) => void;
+} = {}) {
   const SPLITTER_W = 8;
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
+  // Per-tab "which project was I on" — restored on mount so every tab
+  // comes back to its own project, not projects[0].
+  const pageProjKey = `owllm:agents:page:${pageId}:project`;
   /// Live size of the canvas container — fed into TeamCanvas /
   /// GraphCanvas so the SVG layouts scale with the window.
   const canvasSize = useElementSize<HTMLDivElement>();
@@ -8376,6 +8397,7 @@ export default function AgentsPage() {
   const wslRestartingRef = useRef(false);
   useEffect(() => {
     const onRestart = async () => {
+      if (!isActiveRef.current) return; // the button lives in the visible tab
       if (wslRestartingRef.current) return; // ignore double-clicks while in flight
       wslRestartingRef.current = true;
       setSupChat(prev => [...prev, { role: "system", color: "#9ad9ff", text: "↻ Restarting WSL networking… (a few seconds — every WSL session is being cold-started)", ts: Date.now(), seq: nextSeq() }]);
@@ -8689,7 +8711,10 @@ export default function AgentsPage() {
 
   // "⚙ Edit team" in the project settings card opens the Team Workbench.
   useEffect(() => {
-    const onOpen = () => { setNewProjOpen(false); setWorkbenchOpen(true); };
+    const onOpen = () => {
+      if (!isActiveRef.current) return; // only the visible tab opens it
+      setNewProjOpen(false); setWorkbenchOpen(true);
+    };
     window.addEventListener("owllm:open-workbench", onOpen as EventListener);
     return () => window.removeEventListener("owllm:open-workbench", onOpen as EventListener);
   }, []);
@@ -8784,8 +8809,12 @@ export default function AgentsPage() {
       setProjects(rawProjects);
       setModels(rawModels);
       if (rawProjects.length > 0) {
-        setSelectedProjectId(rawProjects[0].id);
-        setLocationOverride(rawProjects[0].location || "");
+        // Restore this tab's own project when it still exists; else first.
+        let stored: string | null = null;
+        try { stored = localStorage.getItem(pageProjKey); } catch { /* ignore */ }
+        const pick = rawProjects.find(p => p.id === stored) ?? rawProjects[0];
+        setSelectedProjectId(pick.id);
+        setLocationOverride(pick.location || "");
         setTrustWritesOverride(null);
       }
       setTeams(rawTeams.map(toTeam).sort((a, b) =>
@@ -8847,6 +8876,22 @@ export default function AgentsPage() {
   }, []);
 
   const selectedProject = projects.find(p => p.id === selectedProjectId) ?? null;
+
+  // Multi-tab bookkeeping: remember this tab's project + surface the tab
+  // title (project name) and busy dot up to the AgentsPages shell.
+  useEffect(() => {
+    if (!selectedProjectId) return;
+    try { localStorage.setItem(pageProjKey, selectedProjectId); } catch { /* ignore */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId]);
+  useEffect(() => {
+    onTitle?.(selectedProject?.name || "Agents");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProject?.name]);
+  useEffect(() => {
+    onBusy?.(busy || backgroundRunning);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [busy, backgroundRunning]);
 
   // The cwd agents actually run in — the single source of truth for the run
   // AND the isolation badge. "Isolate in place": a Windows-folder project runs
@@ -9998,6 +10043,7 @@ export default function AgentsPage() {
   const pendingSendRef = useRef<string>("");
   useEffect(() => {
     const onPark = (e: Event) => {
+      if (!isActiveRef.current) return; // draft belongs to the visible tab
       const detail = (e as CustomEvent<{ text: string }>).detail;
       if (detail && typeof detail.text === "string") {
         pendingSendRef.current = detail.text;
@@ -12541,7 +12587,7 @@ export default function AgentsPage() {
           />
         );
       })()}
-      <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} />
+      <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} active={isActive} />
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{
           margin: "0 23px 6px",
@@ -12703,6 +12749,129 @@ export default function AgentsPage() {
             ttsVoices={ttsVoices}
           />
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---- The Agents page = a tab strip of independent AgentsPage instances ------
+// Mirrors the Code page's multi-page shell, with ONE crucial difference: a
+// running team dispatch lives inside its AgentsPage instance (the dispatch
+// loop + AbortController are component-local), so tabs are KEPT MOUNTED and
+// toggled with `display` — exactly the keep-alive trick AppShell already uses
+// for the single instance — instead of unmounting on switch. Each tab picks
+// its own project (same or different), so several teams can run in parallel.
+type AgentsPageMeta = { id: string; title: string };
+const AGENTS_PAGES_KEY = "owllm:agents:pages";
+const AGENTS_ACTIVE_PAGE_KEY = "owllm:agents:activePage";
+function newAgentsPageId(): string { return `a${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
+function loadAgentsPages(): AgentsPageMeta[] {
+  try {
+    const a = JSON.parse(localStorage.getItem(AGENTS_PAGES_KEY) || "[]");
+    return Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
+  } catch { return []; }
+}
+
+export default function AgentsPages() {
+  const [pages, setPages] = useState<AgentsPageMeta[]>(() => {
+    const p = loadAgentsPages();
+    return p.length ? p : [{ id: "main", title: "Agents" }];
+  });
+  const [activeId, setActiveId] = useState<string>(() => {
+    try { return localStorage.getItem(AGENTS_ACTIVE_PAGE_KEY) || ""; } catch { return ""; }
+  });
+  const active = pages.find((p) => p.id === activeId) ?? pages[0];
+  // Lazy keep-alive: a tab mounts the first time it's visited this session and
+  // then stays mounted (hidden, not unmounted) so its in-flight run survives.
+  const [visited, setVisited] = useState<Set<string>>(() => new Set());
+  useEffect(() => {
+    if (active) setVisited((v) => (v.has(active.id) ? v : new Set(v).add(active.id)));
+  }, [active]);
+  // Busy dot per tab — reported up by each instance (dispatch running).
+  const [busyById, setBusyById] = useState<Map<string, boolean>>(new Map());
+  useEffect(() => {
+    try { localStorage.setItem(AGENTS_PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
+  }, [pages]);
+  useEffect(() => {
+    try { if (active) localStorage.setItem(AGENTS_ACTIVE_PAGE_KEY, active.id); } catch { /* best effort */ }
+  }, [active]);
+
+  const setTitle = (id: string, title: string) =>
+    setPages((ps) => ps.map((p) => (p.id === id ? (p.title === title ? p : { ...p, title }) : p)));
+  const setBusy = (id: string, b: boolean) =>
+    setBusyById((m) => (m.get(id) === b ? m : new Map(m).set(id, b)));
+
+  const newPage = () => {
+    const id = newAgentsPageId();
+    setPages((ps) => [...ps, { id, title: "Agents" }]);
+    setActiveId(id);
+  };
+
+  const closePage = (id: string) => {
+    if (busyById.get(id) && !window.confirm("This page has a team run in progress — closing it stops the run. Close anyway?")) return;
+    try { localStorage.removeItem(`owllm:agents:page:${id}:project`); } catch { /* ignore */ }
+    setVisited((v) => { const n = new Set(v); n.delete(id); return n; });
+    setBusyById((m) => { const n = new Map(m); n.delete(id); return n; });
+    setPages((ps) => {
+      const next = ps.filter((p) => p.id !== id);
+      if (next.length === 0) {
+        const nid = newAgentsPageId();
+        setActiveId(nid);
+        return [{ id: nid, title: "Agents" }];
+      }
+      if (id === activeId) setActiveId(next[next.length - 1].id);
+      return next;
+    });
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg-panel)" }}>
+      {/* Tab strip — same look as the Code page's. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "5px 6px 0", flexShrink: 0, overflowX: "auto" }}>
+        {pages.map((p) => {
+          const on = p.id === active?.id;
+          const busy = busyById.get(p.id) === true;
+          return (
+            <div
+              key={p.id}
+              onClick={() => setActiveId(p.id)}
+              title={busy ? `${p.title} — team run in progress` : p.title}
+              style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "5px 10px",
+                borderRadius: "7px 7px 0 0", cursor: "pointer", maxWidth: 200, flexShrink: 0,
+                background: on ? "var(--bg-input)" : "transparent",
+                border: "1px solid", borderColor: on ? "var(--border-strong)" : "transparent", borderBottom: "none",
+                color: on ? "var(--fg-strong)" : "var(--fg-muted)", fontSize: 12, fontWeight: on ? 700 : 500,
+              }}
+            >
+              {busy && <span style={{ color: "#7ff0c5", fontSize: 9, lineHeight: 1 }} title="Team run in progress">●</span>}
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title || "Agents"}</span>
+              <span
+                onClick={(e) => { e.stopPropagation(); closePage(p.id); }}
+                title="Close this page"
+                style={{ opacity: 0.55, fontSize: 14, lineHeight: 1, padding: "0 2px" }}
+              >×</span>
+            </div>
+          );
+        })}
+        <button
+          onClick={newPage}
+          title="Open another Agents page — run a team on the same or a different project in parallel"
+          style={{ height: 26, padding: "0 10px", marginLeft: 4, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12, cursor: "pointer" }}
+        >＋ New page</button>
+      </div>
+      {/* Every visited page stays mounted; only the active one is visible. */}
+      <div style={{ flex: 1, minHeight: 0, position: "relative" }}>
+        {pages.filter((p) => visited.has(p.id) || p.id === active?.id).map((p) => (
+          <div key={p.id} style={{ position: "absolute", inset: 0, display: p.id === active?.id ? "block" : "none" }}>
+            <AgentsPage
+              pageId={p.id}
+              isActive={p.id === active?.id}
+              onTitle={(t) => setTitle(p.id, t)}
+              onBusy={(b) => setBusy(p.id, b)}
+            />
+          </div>
+        ))}
       </div>
     </div>
   );

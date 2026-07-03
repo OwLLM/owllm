@@ -113,7 +113,8 @@ const PAGE_DOCS: Record<string, string> = {
     "Note: the Sandbox-disk maintenance panel moved to the Info page.",
   agents:
     "AGENTIC TEAM — an orchestrator + specialist agents that fan out on your goal.\n" +
-    "• The top is ONE line: a 📁 project dropdown + ⚙ (Project settings) + '+ New' + the goal/Run row.\n" +
+    "• MULTIPLE PAGES: a tab strip at the very top (like the Code page) lets you open several Agents pages at once — '＋ New page'. Each tab picks its OWN project (same or different) and runs its own team in parallel; a green ● on a tab = that page has a run in progress. Tabs stay alive when you switch, so runs keep going; closing a busy tab asks first (closing stops its run).\n" +
+    "• The top of each page is ONE line: a 📁 project dropdown + ⚙ (Project settings) + '+ New' + the goal/Run row.\n" +
     "• ⚙ Project settings popup holds everything project-level: Folder/Browse, a Security block (Trust writes; Isolated vs ⚠ Host-access; Verify; Isolate; Full access), Team template, Bridge, Rename, and Delete (requires a double-confirm). '+ New' opens the SAME popup to create a project.\n" +
     "• Goal/Run row: 📎 attach an image/audio, the goal box, 🧠 Brainstorm, Run, Cancel, 📊 telemetry, 🔊 voice.\n" +
     "• The orchestrator leads and dispatches to specialists; the arrows between cards ARE the dispatch graph. Each agent's model + voice are set on its card and PERSIST per project.\n" +

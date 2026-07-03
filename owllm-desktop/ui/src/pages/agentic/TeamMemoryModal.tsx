@@ -7,7 +7,7 @@
 // setTeamMemoryScope), so what you see here is exactly what the agents see — and
 // what syncs across your PCs through the GitHub vault.
 
-import { Suspense, lazy, useCallback, useEffect, useState } from "react";
+import { Suspense, lazy, useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 // The 3D graph pulls in three.js — lazy-load it so the WebGL bundle only loads
@@ -40,9 +40,13 @@ function splitTags(s: string): string[] {
 export default function TeamMemoryModal({
   projectId,
   projectName,
+  active = true,
 }: {
   projectId: string | null | undefined;
   projectName?: string;
+  /// With multiple agentic tabs mounted at once, every instance hears the
+  /// window-level open event — only the visible tab's modal should open.
+  active?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"list" | "graph">("list");
@@ -76,8 +80,10 @@ export default function TeamMemoryModal({
   }, [scope, query]);
 
   // Open on the toolbar event; load fresh each time it opens.
+  const activeRef = useRef(active);
+  activeRef.current = active;
   useEffect(() => {
-    const onOpen = () => { setOpen(true); };
+    const onOpen = () => { if (activeRef.current) setOpen(true); };
     window.addEventListener("owllm:open-team-memory", onOpen as EventListener);
     return () => window.removeEventListener("owllm:open-team-memory", onOpen as EventListener);
   }, []);

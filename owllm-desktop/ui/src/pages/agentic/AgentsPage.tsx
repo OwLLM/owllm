@@ -3214,59 +3214,6 @@ function useCanvasGestures(opts?: { minZoom?: number; maxZoom?: number; factor?:
 // gesture set in agent_team_canvas.py::wheelEvent. Click an agent to
 // select it (drives the top-left info card); click empty space to
 // deselect.
-// SoloLoopCanvas — the Solo-Loop mode's minimal graph. One full-stack Coder does
-// the WHOLE job (lanes off), a Critical Thinker checks it once (and can act as Super
-// User for a confirmation), then the Publisher ships it. The Publisher node reuses the
-// EXACT PublisherTilePanel (Commit / Merge / Publish + ⚙ Set up repo) from the team
-// canvas — same component, same host-side logic, no rebuild.
-function SoloLoopCanvas({ projectCwd, activeNode }: {
-  projectCwd: string | null;
-  /// Which node is currently working, so it glows (set by the solo run in phase 3).
-  activeNode?: "coder" | "critic" | "publisher" | null;
-}) {
-  const card = (icon: string, name: string, sub: string, hex: string, active: boolean) => (
-    <div style={{
-      width: 152, borderRadius: 12, padding: "11px 10px 10px", textAlign: "center",
-      background: "linear-gradient(180deg, var(--bg-elevated), #0d1524)",
-      border: `1.5px solid ${active ? hex : "var(--border-strong)"}`,
-      boxShadow: active ? `0 0 22px -2px ${hex}` : "0 6px 22px rgba(0,0,0,0.4)",
-      transition: "box-shadow .25s, border-color .25s",
-    }}>
-      <div style={{ fontSize: 22, lineHeight: 1 }}>{icon}</div>
-      <div style={{ fontSize: 13, fontWeight: 700, marginTop: 5, color: "var(--fg)" }}>{name}</div>
-      <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 2 }}>{sub}</div>
-    </div>
-  );
-  return (
-    <div data-ui="SoloLoopCanvas" style={{ position: "absolute", inset: 0, overflow: "auto" }}>
-      <svg viewBox="0 0 900 600" preserveAspectRatio="xMidYMid meet"
-        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
-        <defs>
-          <marker id="sl-ah" markerWidth={9} markerHeight={9} refX={7} refY={3} orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="rgba(255,217,122,0.7)" /></marker>
-          <marker id="sl-ahp" markerWidth={9} markerHeight={9} refX={7} refY={3} orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="rgba(255,154,217,0.6)" /></marker>
-        </defs>
-        <path d="M 320 150 C 400 120, 500 120, 578 150" stroke="rgba(255,217,122,0.5)" strokeWidth={2} fill="none" markerEnd="url(#sl-ah)" />
-        <path d="M 578 190 C 500 220, 400 220, 326 190" stroke="rgba(255,154,217,0.5)" strokeWidth={2} fill="none" strokeDasharray="5 5" markerEnd="url(#sl-ahp)" />
-        <path d="M 300 210 C 330 300, 400 330, 452 330" stroke="rgba(255,217,122,0.5)" strokeWidth={2} fill="none" markerEnd="url(#sl-ah)" />
-        <text x={450} y={116} fill="#8494ac" fontSize={12} textAnchor="middle" fontFamily="Segoe UI, sans-serif">writes everything</text>
-        <text x={452} y={240} fill="#ff9ad9" fontSize={11} textAnchor="middle" fontFamily="Segoe UI, sans-serif">checks once ↺</text>
-      </svg>
-      <div style={{ position: "absolute", left: "30%", top: "20%", transform: "translate(-50%,-50%)" }}>{card("🧰", "Coder", "full-stack · lanes off", "#7fb4ff", activeNode === "coder")}</div>
-      <div style={{ position: "absolute", left: "66%", top: "20%", transform: "translate(-50%,-50%)" }}>{card("🧠", "Critical Thinker", "one review · Super User", "#ff9ad9", activeNode === "critic")}</div>
-      <div style={{ position: "absolute", left: "50%", top: "52%", transform: "translate(-50%,0)", width: "min(300px, 82%)" }}>
-        <div style={{ textAlign: "center", fontSize: 10.5, color: "var(--fg-muted)", marginBottom: 6, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase" }}>🚀 Publisher · rule-based</div>
-        <div style={{
-          borderRadius: 12, transition: "box-shadow .25s, border-color .25s",
-          border: `1.5px solid ${activeNode === "publisher" ? "#6ff0c0" : "var(--border-strong)"}`,
-          boxShadow: activeNode === "publisher" ? "0 0 22px -2px #6ff0c0" : "0 6px 22px rgba(0,0,0,0.4)",
-        }}>
-          <PublisherTilePanel cwd={projectCwd} rgb="111,240,192" />
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNode, onSelectNode }: {
   width: number; height: number; team: Team | null; roleByName: Map<string, RoleData>;
   /// Set of currently-running agents (specialists run in parallel during
@@ -9353,6 +9300,31 @@ export default function AgentsPage() {
     return withSyntheticCritic({ ...base, edges: currentEdges });
   }, [activeTeam, currentEdges, perAgentColor]);
 
+  // Solo-Loop roster — the SAME Team shape as renderTeam, just the lean
+  // Coder → Critic → Publisher loop. Fed to the SAME TeamCanvas / GraphCanvas /
+  // AgentChatGrid so diagram, graph AND chat reuse the real cards/tiles (the
+  // Publisher node is the very same PublisherTilePanel). No bespoke canvas.
+  const soloRenderTeam: Team | null = useMemo(() => {
+    if (!renderTeam) return null;
+    const agents = renderTeam.agents;
+    const orch = findOrchestratorSpec(renderTeam);
+    const coder = agents.find(a => a.name !== orch?.name && agentDomain(a) === "coder")
+      ?? agents.find(a => a.name !== orch?.name && roleCanWrite(roleByName.get(a.base)))
+      ?? agents.find(a => a.name !== orch?.name)
+      ?? agents[0];
+    const critic = agents.find(a => a.name === CRITIC_AGENT_NAME)
+      ?? ({ name: CRITIC_AGENT_NAME, base: "critic", icon: null } as AgentSpec);
+    const publisher = agents.find(a => a.base === "publisher" || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release"))
+      ?? ({ name: "Publisher", base: "publisher", icon: null } as AgentSpec);
+    const seen = new Set<string>();
+    const soloAgents = [coder, critic, publisher].filter(a => a && !seen.has(a.name) && seen.add(a.name));
+    const has = (n: string) => soloAgents.some(a => a.name === n);
+    const edges: Edge[] = [];
+    if (has(coder.name) && has(critic.name) && coder.name !== critic.name) edges.push({ source: coder.name, target: critic.name });
+    if (has(critic.name) && has(publisher.name) && critic.name !== publisher.name) edges.push({ source: critic.name, target: publisher.name });
+    return { ...renderTeam, agents: soloAgents, edges };
+  }, [renderTeam, roleByName]);
+
   // ----- Per-agent log mutation helpers -----
   // Append a fresh entry to a given agent's buffer.
   const appendLog = (agent: string, msg: GoalMsg) => {
@@ -12608,18 +12580,15 @@ export default function AgentsPage() {
             onToggleSolo={() => setSoloMode(!soloMode)}
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>
-            {soloMode && viewMode !== "chat" ? (
-              // Solo-Loop mode: the diagram/graph collapses to the lean
-              // Coder → Critic → Publisher loop (chat mode still uses the grid).
-              <SoloLoopCanvas
-                projectCwd={runCwd || null}
-                activeNode={busy ? "coder" : null}
-              />
-            ) : viewMode === "diagram" ? (
+            {/* Solo-Loop reuses the SAME canvases as the team — just the 3-agent
+                Coder → Critic → Publisher roster (soloRenderTeam). So diagram, graph
+                AND chat all render with the real cards/tiles, and the Publisher tile
+                is the exact PublisherTilePanel. No bespoke canvas. */}
+            {viewMode === "diagram" ? (
               <TeamCanvas
                 width={canvasSize.size.w || 800}
                 height={canvasSize.size.h || 600}
-                team={renderTeam}
+                team={soloMode ? soloRenderTeam : renderTeam}
                 roleByName={roleByName}
                 activeAgents={activeAgents}
                 selectedNode={selectedNode}
@@ -12629,13 +12598,13 @@ export default function AgentsPage() {
               <GraphCanvas
                 width={canvasSize.size.w || 800}
                 height={canvasSize.size.h || 600}
-                team={renderTeam}
+                team={soloMode ? soloRenderTeam : renderTeam}
                 roleByName={roleByName}
                 selectedNode={selectedNode}
                 onSelectNode={setSelectedNode}
                 activeAgents={activeAgents}
-                edges={currentEdges}
-                onEdgesChange={(es) => { setEditedEdges(es); setSelectedEdgeIdx(null); }}
+                edges={soloMode ? (soloRenderTeam?.edges ?? []) : currentEdges}
+                onEdgesChange={soloMode ? (() => {}) : ((es) => { setEditedEdges(es); setSelectedEdgeIdx(null); })}
                 selectedEdgeIdx={selectedEdgeIdx}
                 onSelectEdge={setSelectedEdgeIdx}
                 positions={nodePositions}
@@ -12644,7 +12613,7 @@ export default function AgentsPage() {
               />
             ) : (
               <AgentChatGrid
-                team={renderTeam}
+                team={soloMode ? soloRenderTeam : renderTeam}
                 roleByName={roleByName}
                 agentLogs={agentLogs}
                 activeAgents={activeAgents}

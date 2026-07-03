@@ -33,6 +33,7 @@ mod fleet;
 mod git;
 mod hardware;
 mod huggingface;
+mod kvm;
 mod mcp;
 mod memory;
 mod models;
@@ -213,6 +214,8 @@ pub fn run() {
             slack::slack_open_connection,
             slack::slack_send_message,
             slack::slack_download_file,
+            kvm::kvm_node_exec,
+            kvm::kvm_node_consent,
             browser::browser_ensure,
             browser::browser_start,
             browser::browser_cmd,

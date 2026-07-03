@@ -83,7 +83,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -10070,6 +10070,8 @@ export default function AgentsPage() {
     // Key the shared team memory by this project's stable ID so it matches across
     // machines (and syncs via the vault) rather than by the per-PC folder path.
     setTeamMemoryScope(selectedProjectId);
+    // Pin the run's goal so every snapshot refresh ranks facts by relevance to it.
+    setTeamMemoryGoal(text);
     // Warm the shared-memory snapshot so it's injected into the orchestrator's and
     // every specialist's prompt this run (readable on every model path).
     await refreshTeamMemorySnapshot();

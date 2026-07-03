@@ -58,11 +58,78 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
             content TEXT NOT NULL,\
             tags TEXT NOT NULL DEFAULT '',\
             author TEXT NOT NULL DEFAULT '',\
-            ts INTEGER NOT NULL\
+            ts INTEGER NOT NULL,\
+            kind TEXT NOT NULL DEFAULT 'fact'\
         );\
         CREATE INDEX IF NOT EXISTS idx_team_memory ON team_memory(scope, id);",
     )
-    .map_err(|e| format!("ensure memory schema: {e}"))
+    .map_err(|e| format!("ensure memory schema: {e}"))?;
+    // Legacy DBs predate the `kind` column (fact vs worklog). Ignored-error
+    // ALTER is the repo's migration idiom (see projects.rs); the backfill runs
+    // ONLY when the column was actually added — kind is otherwise derived from
+    // the entry point (team_memory_log → worklog, team_memory_write → fact),
+    // never from tags, so an agent writing tags="worklog" can't be reclassified.
+    let added = conn
+        .execute(
+            "ALTER TABLE team_memory ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact'",
+            [],
+        )
+        .is_ok();
+    if added {
+        let _ = conn.execute(
+            "UPDATE team_memory SET kind = 'worklog' WHERE tags = 'worklog'",
+            [],
+        );
+        normalize_existing_tags(conn);
+    }
+    Ok(())
+}
+
+/// Collapse whitespace runs and trim — the identity used for keyless-fact
+/// dedup. Case is PRESERVED: commands, paths and env names are case-significant
+/// and lowercasing would falsely merge them.
+pub(crate) fn normalize_content(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Canonical tag spelling: lowercase, trimmed, hyphenated, comma-joined,
+/// deduped. Free-form tags are kept (they feed the ranker and the graph);
+/// only the spelling is normalized so clusters actually cluster.
+pub(crate) fn normalize_tags(s: &str) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    for raw in s.split([',', '\n', ';']) {
+        let t = raw
+            .trim()
+            .to_lowercase()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join("-");
+        if !t.is_empty() && !seen.iter().any(|x| x == &t) {
+            seen.push(t);
+        }
+    }
+    seen.join(",")
+}
+
+/// One-time (gated on the kind-column ALTER) canonicalization of tags written
+/// before normalization existed.
+fn normalize_existing_tags(conn: &rusqlite::Connection) {
+    let rows: Vec<(i64, String)> = match conn.prepare("SELECT id, tags FROM team_memory WHERE tags != ''") {
+        Ok(mut stmt) => match stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+            Err(_) => return,
+        },
+        Err(_) => return,
+    };
+    for (id, tags) in rows {
+        let norm = normalize_tags(&tags);
+        if norm != tags {
+            let _ = conn.execute(
+                "UPDATE team_memory SET tags = ?1 WHERE id = ?2",
+                rusqlite::params![norm, id],
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -183,6 +250,9 @@ pub struct TeamMemoryEntry {
     pub tags: String,
     pub author: String,
     pub ts: i64,
+    /// 'fact' (durable, curated, vault-synced) or 'worklog' (auto-captured
+    /// work transcript: local-only, hard-capped, never exported).
+    pub kind: String,
 }
 
 fn scope_of(s: &str) -> String {
@@ -206,7 +276,7 @@ pub async fn team_memory_write(
     }
     let sc = scope_of(&scope);
     let k = key.unwrap_or_default();
-    let tg = tags.unwrap_or_default();
+    let tg = normalize_tags(&tags.unwrap_or_default());
     let au = author.unwrap_or_default();
     tokio::task::spawn_blocking(move || {
         let conn = open_db()?;
@@ -215,7 +285,7 @@ pub async fn team_memory_write(
             // Upsert by (scope, key): update in place if present.
             let updated = conn
                 .execute(
-                    "UPDATE team_memory SET content = ?1, tags = ?2, author = ?3, ts = ?4 \
+                    "UPDATE team_memory SET content = ?1, tags = ?2, author = ?3, ts = ?4, kind = 'fact' \
                      WHERE scope = ?5 AND mkey = ?6",
                     rusqlite::params![content, tg, au, ts, sc, k],
                 )
@@ -230,10 +300,37 @@ pub async fn team_memory_write(
                     .map_err(|e| format!("select id: {e}"))?;
                 return Ok(id);
             }
+        } else {
+            // Keyless: fold into an existing fact with the same normalized
+            // content instead of piling duplicates (re-run goals re-derive the
+            // same facts). Whitespace-insensitive, case-SENSITIVE compare.
+            let norm = normalize_content(&content);
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, content FROM team_memory \
+                     WHERE scope = ?1 AND mkey = '' AND kind = 'fact'",
+                )
+                .map_err(|e| format!("prepare dedup: {e}"))?;
+            let existing: Option<i64> = stmt
+                .query_map(rusqlite::params![sc], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })
+                .map_err(|e| format!("dedup query: {e}"))?
+                .filter_map(|r| r.ok())
+                .find(|(_, c)| normalize_content(c) == norm)
+                .map(|(id, _)| id);
+            if let Some(id) = existing {
+                conn.execute(
+                    "UPDATE team_memory SET tags = ?1, author = ?2, ts = ?3 WHERE id = ?4",
+                    rusqlite::params![tg, au, ts, id],
+                )
+                .map_err(|e| format!("touch duplicate: {e}"))?;
+                return Ok(id);
+            }
         }
         conn.execute(
-            "INSERT INTO team_memory (scope, mkey, content, tags, author, ts) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO team_memory (scope, mkey, content, tags, author, ts, kind) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'fact')",
             rusqlite::params![sc, k, content, tg, au, ts],
         )
         .map_err(|e| format!("insert: {e}"))?;
@@ -260,22 +357,22 @@ pub async fn team_memory_log(
         return Err("content is empty".to_string());
     }
     let sc = scope_of(&scope);
-    let keep = keep.unwrap_or(300).clamp(20, 2000) as i64;
+    let keep = keep.unwrap_or(100).clamp(20, 2000) as i64;
     tokio::task::spawn_blocking(move || {
         let conn = open_db()?;
         let ts = now_ms();
         conn.execute(
-            "INSERT INTO team_memory (scope, mkey, content, tags, author, ts) \
-             VALUES (?1, '', ?2, 'worklog', ?3, ?4)",
+            "INSERT INTO team_memory (scope, mkey, content, tags, author, ts, kind) \
+             VALUES (?1, '', ?2, 'worklog', ?3, ?4, 'worklog')",
             rusqlite::params![sc, content, agent, ts],
         )
         .map_err(|e| format!("insert worklog: {e}"))?;
         let id = conn.last_insert_rowid();
         // Keep only the newest `keep` worklog rows for this scope; opt-in
-        // memory_write facts (other tags) are never pruned here.
+        // memory_write facts (kind='fact') are never pruned here.
         conn.execute(
-            "DELETE FROM team_memory WHERE scope = ?1 AND tags = 'worklog' AND id NOT IN (\
-               SELECT id FROM team_memory WHERE scope = ?1 AND tags = 'worklog' \
+            "DELETE FROM team_memory WHERE scope = ?1 AND kind = 'worklog' AND id NOT IN (\
+               SELECT id FROM team_memory WHERE scope = ?1 AND kind = 'worklog' \
                ORDER BY id DESC LIMIT ?2)",
             rusqlite::params![sc, keep],
         )
@@ -286,15 +383,29 @@ pub async fn team_memory_log(
     .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Keyword-scored retrieval over a project's shared memory. Splits the query
-/// into terms; scores each row by the number of distinct terms it contains
-/// (content + tags + key), tie-broken by recency. An empty query returns the
-/// most recent entries (acts as "list"). Light, deterministic, dependency-free.
+/// Split into lowercase alphanumeric tokens (≥2 chars) — the shared tokenizer
+/// for both query and rows, so matching is exact-token ("ci" no longer hits
+/// "specific") rather than substring.
+fn tokenize(s: &str) -> Vec<String> {
+    s.to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 2)
+        .map(|t| t.to_string())
+        .collect()
+}
+
+/// Keyword-scored retrieval over a project's shared memory — a dependency-free
+/// BM25-lite. Exact-token matching per field with weights (key×3, tags×2,
+/// content×1), corpus IDF so ubiquitous words stop dominating, light length
+/// normalization so verbose worklogs stop out-scoring concise facts; ties break
+/// by recency. `kinds` optionally restricts to 'fact' / 'worklog' rows. An
+/// empty query returns the most recent entries (acts as "list").
 #[tauri::command]
 pub async fn team_memory_search(
     scope: String,
     query: String,
     limit: Option<u32>,
+    kinds: Option<Vec<String>>,
 ) -> Result<Vec<TeamMemoryEntry>, String> {
     let sc = scope_of(&scope);
     // Up to 500 so the graph view can show the whole brain; the agent-facing
@@ -304,7 +415,7 @@ pub async fn team_memory_search(
         let conn = open_db()?;
         let mut stmt = conn
             .prepare(
-                "SELECT id, mkey, content, tags, author, ts FROM team_memory \
+                "SELECT id, mkey, content, tags, author, ts, kind FROM team_memory \
                  WHERE scope = ?1 ORDER BY id DESC LIMIT 500",
             )
             .map_err(|e| format!("prepare: {e}"))?;
@@ -317,6 +428,7 @@ pub async fn team_memory_search(
                     tags: r.get(3)?,
                     author: r.get(4)?,
                     ts: r.get(5)?,
+                    kind: r.get(6)?,
                 })
             })
             .map_err(|e| format!("query: {e}"))?;
@@ -324,29 +436,102 @@ pub async fn team_memory_search(
         for r in rows {
             all.push(r.map_err(|e| format!("row: {e}"))?);
         }
-        let terms: Vec<String> = query
-            .to_lowercase()
-            .split(|c: char| !c.is_alphanumeric())
-            .filter(|t| t.len() >= 2)
-            .map(|t| t.to_string())
-            .collect();
+        if let Some(ks) = kinds.as_ref().filter(|ks| !ks.is_empty()) {
+            all.retain(|e| ks.iter().any(|k| k == &e.kind));
+        }
+        let mut terms = tokenize(&query);
+        terms.dedup();
+        terms.sort();
+        terms.dedup();
         if terms.is_empty() {
             all.truncate(lim);
             return Ok(all);
         }
-        // Score by distinct-term hits; keep only rows that match ≥1 term.
-        let mut scored: Vec<(i32, i64, TeamMemoryEntry)> = all
-            .into_iter()
+        // Pre-tokenize each row's fields once.
+        struct RowTokens {
+            key: std::collections::HashSet<String>,
+            tags: std::collections::HashSet<String>,
+            content: std::collections::HashSet<String>,
+            content_len: usize,
+        }
+        let toks: Vec<RowTokens> = all
+            .iter()
             .map(|e| {
-                let hay = format!("{} {} {}", e.content, e.tags, e.key).to_lowercase();
-                let score = terms.iter().filter(|t| hay.contains(t.as_str())).count() as i32;
-                (score, e.ts, e)
+                let content: Vec<String> = tokenize(&e.content);
+                let content_len = content.len();
+                RowTokens {
+                    key: tokenize(&e.key).into_iter().collect(),
+                    tags: tokenize(&e.tags).into_iter().collect(),
+                    content: content.into_iter().collect(),
+                    content_len,
+                }
             })
-            .filter(|(score, _, _)| *score > 0)
+            .collect();
+        let n = all.len() as f64;
+        let avg_len = (toks.iter().map(|t| t.content_len).sum::<usize>() as f64 / n.max(1.0)).max(1.0);
+        // IDF per query term over the loaded corpus: a term present in every
+        // row scores ~0, a rare term scores high — corpus-specific stopwording.
+        let idf: Vec<f64> = terms
+            .iter()
+            .map(|t| {
+                let df = toks
+                    .iter()
+                    .filter(|r| r.content.contains(t) || r.tags.contains(t) || r.key.contains(t))
+                    .count() as f64;
+                (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+            })
+            .collect();
+        let mut scored: Vec<(f64, i64, TeamMemoryEntry)> = all
+            .into_iter()
+            .zip(toks)
+            .map(|(e, r)| {
+                let raw: f64 = terms
+                    .iter()
+                    .zip(&idf)
+                    .map(|(t, w)| {
+                        let field = if r.key.contains(t) {
+                            3.0
+                        } else if r.tags.contains(t) {
+                            2.0
+                        } else if r.content.contains(t) {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                        field * w
+                    })
+                    .sum();
+                let norm = 0.75 + 0.25 * (r.content_len as f64 / avg_len);
+                (raw / norm, e.ts, e)
+            })
+            .filter(|(score, _, _)| *score > 0.0)
             .collect();
         // Highest score first, then most-recent.
-        scored.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
+        scored.sort_by(|a, b| {
+            b.0.partial_cmp(&a.0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(b.1.cmp(&a.1))
+        });
         Ok(scored.into_iter().take(lim).map(|(_, _, e)| e).collect())
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Promote one auto-captured worklog row into a durable fact (the viewer's
+/// "promote" affordance). Clears the 'worklog' tag so the row survives the
+/// vault import quarantine on other devices.
+#[tauri::command]
+pub async fn team_memory_promote(scope: String, id: i64) -> Result<usize, String> {
+    let sc = scope_of(&scope);
+    tokio::task::spawn_blocking(move || {
+        let conn = open_db()?;
+        conn.execute(
+            "UPDATE team_memory SET kind = 'fact', tags = '' \
+             WHERE scope = ?1 AND id = ?2 AND kind = 'worklog'",
+            rusqlite::params![sc, id],
+        )
+        .map_err(|e| format!("promote: {e}"))
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -379,7 +564,7 @@ pub async fn team_memory_read(
     tokio::task::spawn_blocking(move || {
         let conn = open_db()?;
         let res = conn.query_row(
-            "SELECT id, mkey, content, tags, author, ts FROM team_memory \
+            "SELECT id, mkey, content, tags, author, ts, kind FROM team_memory \
              WHERE scope = ?1 AND mkey = ?2 ORDER BY id DESC LIMIT 1",
             rusqlite::params![sc, key],
             |r| {
@@ -390,6 +575,7 @@ pub async fn team_memory_read(
                     tags: r.get(3)?,
                     author: r.get(4)?,
                     ts: r.get(5)?,
+                    kind: r.get(6)?,
                 })
             },
         );

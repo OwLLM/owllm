@@ -264,6 +264,7 @@ pub fn run() {
             release::repo_merge,
             memory::team_memory_read,
             memory::team_memory_delete,
+            memory::team_memory_promote,
             server::server_status,
             server::server_start,
             server::server_stop,

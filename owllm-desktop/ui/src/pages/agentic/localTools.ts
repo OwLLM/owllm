@@ -49,19 +49,39 @@ export const MEMORY_TOOL_NAMES = new Set(["memory_search", "memory_write", "memo
 /// dispatch entry points set this at run start; the memory_* tools read it.
 /// Falls back to the cwd passed to executeToolCall when unset (e.g. ad-hoc use).
 let _teamMemoryScope = "";
-/// Cached, prompt-ready snapshot of the most recent shared-memory entries for the
-/// current scope. The dispatch loops inject this into EVERY agent's system prompt
-/// (buildOrchestratorPrompt / buildSpecialistPrompt) so team memory is READABLE on
-/// every model path — including the cloud CLI / API agents that can't host the
-/// memory_* native tools. Refreshed at run start and after each write; "" if empty.
+/// The current run's goal, cached module-side so EVERY snapshot refresh (run
+/// start, after logTeamWork, after memory_write, after harvest) stays
+/// goal-relevant instead of silently reverting to recency mid-run.
+let _teamMemoryGoal = "";
+/// Cached, prompt-ready snapshot of the shared memory for the current scope:
+/// goal-relevant FACTS + a short recency tail of LATEST TEAM ACTIVITY (worklog),
+/// so both "what do we know" and "what just happened" survive. The dispatch loops
+/// inject this into EVERY agent's system prompt (buildOrchestratorPrompt /
+/// buildSpecialistPrompt) so team memory is READABLE on every model path —
+/// including the cloud CLI / API agents that can't host the memory_* native
+/// tools. Refreshed at run start and after each write; "" if empty.
 let _teamMemorySnapshot = "";
+/// Row ids currently in the snapshot — retrieveTeamMemory excludes them so the
+/// per-task RAG block never duplicates what the system prompt already carries.
+let _snapshotIds = new Set<number>();
 
 export function setTeamMemoryScope(projectId: string | null | undefined): void {
   const next = (projectId ?? "").trim();
-  // Scope changed (different project) → the cached snapshot is stale; drop it so a
-  // builder can't splice another project's memory in before the next refresh.
-  if (next !== _teamMemoryScope) _teamMemorySnapshot = "";
+  // Scope changed (different project) → the cached snapshot + goal are stale;
+  // drop them so a builder can't splice another project's memory in before the
+  // next refresh.
+  if (next !== _teamMemoryScope) {
+    _teamMemorySnapshot = "";
+    _teamMemoryGoal = "";
+    _snapshotIds = new Set();
+  }
   _teamMemoryScope = next;
+}
+
+/// Set the current run's goal (dispatch entry points, right after
+/// setTeamMemoryScope) so snapshot refreshes rank facts by relevance to it.
+export function setTeamMemoryGoal(goal: string | null | undefined): void {
+  _teamMemoryGoal = (goal ?? "").replace(/\s+/g, " ").trim().slice(0, 300);
 }
 
 /// The current rendered team-memory snapshot block (or "" when empty/unloaded).
@@ -71,45 +91,79 @@ export function getTeamMemorySnapshot(): string {
   return _teamMemorySnapshot;
 }
 
-type RawTeamMemEntry = { id: number; key: string; content: string; tags: string; author: string; ts: number };
+type RawTeamMemEntry = { id: number; key: string; content: string; tags: string; author: string; ts: number; kind: string };
 
-/// Render shared-memory entries into a prompt block the model reads directly — the
-/// READ half of "memory usable on every model path". Pure; empty list → "".
-export function renderTeamMemorySnapshot(entries: RawTeamMemEntry[]): string {
-  if (!entries.length) return "";
-  const lines = entries.map((e) => {
+/// Render the two-section snapshot the model reads directly — the READ half of
+/// "memory usable on every model path". Facts are the curated knowledge base
+/// (goal-relevant first); the activity tail is the newest worklog so intra-run
+/// handoff and "what happened last session" survive relevance ranking. Pure;
+/// both lists empty → "".
+export function renderTeamMemorySnapshot(facts: RawTeamMemEntry[], worklog: RawTeamMemEntry[] = []): string {
+  if (!facts.length && !worklog.length) return "";
+  const line = (e: RawTeamMemEntry, max: number) => {
     const k = e.key ? `[${e.key}] ` : "";
-    const tg = e.tags ? `  (tags: ${e.tags})` : "";
-    return `  • ${k}${truncate(e.content, 400).replace(/\s*\n+\s*/g, " ")}${tg}`;
-  });
-  return [
-    "TEAM MEMORY — current shared knowledge (most recent first), injected so you can",
-    "read it WITHOUT any tool call. Consult it before re-deriving or asking:",
-    ...lines,
-  ].join("\n");
+    const tg = e.tags && e.tags !== "worklog" ? `  (tags: ${e.tags})` : "";
+    return `  • ${k}${truncate(e.content, max).replace(/\s*\n+\s*/g, " ")}${tg}`;
+  };
+  const out: string[] = [];
+  if (facts.length) {
+    out.push(
+      "TEAM MEMORY — durable shared knowledge (most relevant first), injected so you can",
+      "read it WITHOUT any tool call. Consult it before re-deriving or asking:",
+      ...facts.map((e) => line(e, 400)),
+    );
+  }
+  if (worklog.length) {
+    out.push(
+      "LATEST TEAM ACTIVITY (newest first — what teammates just did):",
+      ...worklog.map((e) => line(e, 300)),
+    );
+  }
+  return out.join("\n");
 }
 
-/// Refresh the cached snapshot for the current scope. Best-effort: any failure
-/// leaves the previous snapshot intact and never throws — memory must not break a
-/// run. The dispatch loops call this at run start and after writes.
+/// Refresh the cached snapshot for the current scope: goal-relevant facts,
+/// back-filled with the newest facts (so a brand-new goal with zero term overlap
+/// still surfaces the knowledge base), plus a short recency tail of worklog.
+/// Best-effort: any failure leaves the previous snapshot intact and never throws
+/// — memory must not break a run. The dispatch loops call this at run start and
+/// after writes.
 export async function refreshTeamMemorySnapshot(limit = 12): Promise<void> {
   const scope = _teamMemoryScope || "";
+  const factLim = Math.max(4, Math.round((limit * 2) / 3));
+  const logLim = Math.max(2, limit - factLim);
   try {
-    const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit });
-    _teamMemorySnapshot = renderTeamMemorySnapshot(entries);
+    const [relevant, recent, worklog] = await Promise.all([
+      _teamMemoryGoal
+        ? invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: _teamMemoryGoal, limit: factLim, kinds: ["fact"] })
+        : Promise.resolve([] as RawTeamMemEntry[]),
+      invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: factLim, kinds: ["fact"] }),
+      invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: logLim, kinds: ["worklog"] }),
+    ]);
+    const seen = new Set<number>();
+    const facts: RawTeamMemEntry[] = [];
+    for (const e of [...relevant, ...recent]) {
+      if (facts.length >= factLim) break;
+      if (!seen.has(e.id)) { seen.add(e.id); facts.push(e); }
+    }
+    _teamMemorySnapshot = renderTeamMemorySnapshot(facts, worklog);
+    _snapshotIds = new Set([...facts, ...worklog].map((e) => e.id));
   } catch { /* keep the last good snapshot */ }
 }
 
-/// Retrieve the shared work-state RELEVANT to a task (term-hit ranked by
+/// Retrieve the shared work-state RELEVANT to a task (BM25-lite ranked by
 /// team_memory_search) and render it as a prompt block. This is the RAG READ path
 /// done right: query BY THE TASK, not by recency — so a specialist sees what
-/// teammates already did on this exact thing. Empty/failed → "". The dispatch
+/// teammates already did on this exact thing. Rows already carried by the injected
+/// snapshot are excluded (no double token spend). Empty/failed → "". The dispatch
 /// loops prepend this to each specialist's instruction (enrichInstructionWithMemory).
 export async function retrieveTeamMemory(task: string, limit = 8): Promise<string> {
   const scope = _teamMemoryScope || "";
   try {
-    const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit });
-    return renderRelevantWork(entries);
+    // Overfetch: up to `limit` of the top hits may already sit in the snapshot.
+    const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit: limit + 12 });
+    const fresh = entries.filter((e) => !_snapshotIds.has(e.id)).slice(0, limit);
+    return renderRelevantWork(fresh);
   } catch { return ""; /* memory must never break a run */ }
 }
 
@@ -1494,7 +1548,7 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
       case "memory_search": {
         // Shared team memory, scoped to the stable project ID (Rust maps "" → "global").
         const memScope = _teamMemoryScope || projectCwd || "";
-        const entries = await invoke<Array<{ id: number; key: string; content: string; tags: string; author: string; ts: number }>>(
+        const entries = await invoke<RawTeamMemEntry[]>(
           "team_memory_search",
           { scope: memScope, query: call.args.query ?? "", limit: clampInt(call.args.limit, 8, 1, 50) },
         );
@@ -1503,8 +1557,9 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         }
         const rendered = entries.map((e) => {
           const k = e.key ? `[${e.key}] ` : "";
-          const tg = e.tags ? `  (tags: ${e.tags})` : "";
-          return `• ${k}${e.content}${tg}`;
+          const tg = e.tags && e.tags !== "worklog" ? `  (tags: ${e.tags})` : "";
+          const wl = e.kind === "worklog" ? " (worklog)" : "";
+          return `• ${k}${e.content}${tg}${wl}`;
         }).join("\n");
         return { ok: true, output: `Team memory (${entries.length}):\n${rendered}` };
       }

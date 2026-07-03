@@ -28,6 +28,7 @@ export type MemEntry = {
   tags: string;
   author: string;
   ts: number;
+  kind: string; // 'fact' | 'worklog'
 };
 
 type GNode = {
@@ -38,6 +39,8 @@ type GNode = {
   ekey?: string;
   tags?: string;
   author?: string;
+  ekind?: string; // entry nodes: 'fact' | 'worklog'
+  color?: string;
   val: number;
   x?: number; y?: number; z?: number;
 };
@@ -45,6 +48,18 @@ type GNode = {
 function splitTags(s: string): string[] {
   return (s || "").split(/[,\n]/).map((t) => t.trim()).filter(Boolean);
 }
+
+// Stable per-tag palette so each tag hub (and the fact entries around it) keeps
+// one recognizable hue across reopens — clusters read as clusters, not confetti.
+const TAG_PALETTE = ["#ffcf5a", "#6fe3a5", "#ff9ad9", "#7fd4ff", "#ffb37f", "#c9a6ff", "#9be37f", "#ff8c8c", "#5ad9cf", "#e3d06f"];
+function tagColor(tag: string): string {
+  let h = 0;
+  for (let i = 0; i < tag.length; i++) h = (h * 31 + tag.charCodeAt(i)) >>> 0;
+  return TAG_PALETTE[h % TAG_PALETTE.length];
+}
+
+const FACT_COLOR = "#4da3ff";
+const WORKLOG_COLOR = "#6b7688";
 
 const NODE_REL_SIZE = 4;
 const LABEL_WORLD_H = 7; // world-space height of a label sprite
@@ -129,12 +144,19 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
 
     for (const e of entries) {
       const nid = `e:${e.id}`;
+      const isWorklog = e.kind === "worklog";
       const label = (e.key && e.key.trim()) || e.content.slice(0, 48) + (e.content.length > 48 ? "…" : "");
+      const firstTag = splitTags(e.tags).find((t) => t.toLowerCase() !== "worklog");
       nodes.push({
         id: nid, kind: "entry", label,
-        content: e.content, ekey: e.key, tags: e.tags, author: e.author, val: 2.5,
+        content: e.content, ekey: e.key, tags: e.tags, author: e.author, ekind: e.kind,
+        // Facts inherit their first tag's cluster colour; untagged facts stay
+        // blue; worklog rows recede to gray so the knowledge base pops.
+        color: isWorklog ? WORKLOG_COLOR : firstTag ? tagColor(firstTag) : FACT_COLOR,
+        val: isWorklog ? 1.6 : 2.5,
       });
       for (const tg of splitTags(e.tags)) {
+        if (tg.toLowerCase() === "worklog") continue; // synthetic tag — a hub of ALL worklog rows is noise
         const tid = `t:${tg.toLowerCase()}`;
         tagDegree.set(tid, (tagDegree.get(tid) ?? 0) + 1);
         links.push({ source: nid, target: tid, kind: "tag" });
@@ -148,7 +170,7 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
       }
     }
     for (const [tid, deg] of tagDegree) {
-      nodes.push({ id: tid, kind: "tag", label: tid.slice(2), val: 4 + deg * 2.5 });
+      nodes.push({ id: tid, kind: "tag", label: tid.slice(2), color: tagColor(tid.slice(2)), val: 4 + deg * 2.5 });
     }
     return { nodes, links };
   }, [entries]);
@@ -181,7 +203,7 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
           showNavInfo={false}
           nodeRelSize={NODE_REL_SIZE}
           nodeVal={(n: GNode) => n.val}
-          nodeColor={(n: GNode) => (n.kind === "tag" ? "#ffcf5a" : "#4da3ff")}
+          nodeColor={(n: GNode) => n.color || (n.kind === "tag" ? "#ffcf5a" : FACT_COLOR)}
           nodeOpacity={0.9}
           nodeLabel={(n: GNode) => (n.kind === "tag" ? `🏷 ${n.label}` : (n.content || n.label))}
           nodeThreeObjectExtend={true}
@@ -200,8 +222,9 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
       {/* Legend */}
       {!empty && (
         <div style={{ position: "absolute", left: 10, bottom: 10, display: "flex", gap: 12, fontSize: 11, color: "var(--fg-muted)", background: "rgba(6,8,13,0.6)", padding: "5px 9px", borderRadius: 7, pointerEvents: "none" }}>
-          <span><span style={{ color: "#4da3ff" }}>●</span> memory</span>
-          <span><span style={{ color: "#ffcf5a" }}>●</span> tag</span>
+          <span><span style={{ color: FACT_COLOR }}>●</span> fact (colored by tag)</span>
+          <span><span style={{ color: WORKLOG_COLOR }}>●</span> worklog</span>
+          <span><span style={{ color: "#ffcf5a" }}>●</span> tag hub</span>
           <span><span style={{ color: "#ff9ad9" }}>—</span> same key</span>
         </div>
       )}
@@ -214,8 +237,8 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
           padding: "12px 14px", boxShadow: "0 10px 30px rgba(0,0,0,0.45)",
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 8 }}>
-            <span style={{ fontSize: 11, fontWeight: 700, color: selected.kind === "tag" ? "#ffcf5a" : "#4da3ff", textTransform: "uppercase", letterSpacing: 0.5 }}>
-              {selected.kind === "tag" ? "🏷 Tag" : "🧠 Memory"}
+            <span style={{ fontSize: 11, fontWeight: 700, color: selected.kind === "tag" ? "#ffcf5a" : selected.ekind === "worklog" ? WORKLOG_COLOR : FACT_COLOR, textTransform: "uppercase", letterSpacing: 0.5 }}>
+              {selected.kind === "tag" ? "🏷 Tag" : selected.ekind === "worklog" ? "📋 Worklog" : "🧠 Fact"}
             </span>
             <div style={{ flex: 1 }} />
             <button onClick={() => setSelected(null)} style={{ width: 22, height: 22, padding: 0, border: "none", borderRadius: 5, background: "rgba(255,255,255,0.06)", color: "var(--fg)", cursor: "pointer", fontSize: 12 }}>✕</button>

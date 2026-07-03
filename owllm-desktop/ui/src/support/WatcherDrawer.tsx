@@ -118,6 +118,7 @@ const PAGE_DOCS: Record<string, string> = {
     "• Goal/Run row: 📎 attach an image/audio, the goal box, 🧠 Brainstorm, Run, Cancel, 📊 telemetry, 🔊 voice.\n" +
     "• The orchestrator leads and dispatches to specialists; the arrows between cards ARE the dispatch graph. Each agent's model + voice are set on its card and PERSIST per project.\n" +
     "• Brainstorm (🧠): a co-founder chat → deep research (competitors, open-source, real user pain, pricing) → writes BRIEF.md → '🤝 Assemble team from brief' (proposes + saves a runnable team) → a live feature Board view.\n" +
+    "• Memory (🧠 on the canvas header): the team's shared memory viewer, two tabs — FACTS (durable knowledge agents saved on purpose; syncs across PCs via the vault; filter by tag chips) and WORKLOG (auto-captured record of recent agent turns; local-only, capped; 📌 promotes a worklog row to a durable fact). Also a 3D graph view colored by tag cluster.\n" +
     "COMMON ISSUES → FIX: (1) 🧠 button greyed = the project has NO folder; click it — it opens ⚙ Settings; set a Folder there, then 🧠 works. (2) The wrong agent acts as orchestrator = a renamed lead; keep 'orchestrator' in its name. (3) Telegram replies 'dispatch error codex CLI' = the orchestrator's model is Codex and it failed (rate-limited / not signed in) — set its model to a working one on its card. (4) Team empty after restart = roster edits on the canvas aren't persisted yet; assembling a team via Brainstorm DOES persist it.",
   code:
     "CODE — a single coding agent working in ONE project folder.\n" +

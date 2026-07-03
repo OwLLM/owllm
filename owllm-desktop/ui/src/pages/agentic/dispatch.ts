@@ -13,6 +13,7 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import {
   executeToolCall,
   setTeamMemoryScope,
+  setTeamMemoryGoal,
   getTeamMemorySnapshot,
   refreshTeamMemorySnapshot,
   harvestMemoryWrites,
@@ -2886,8 +2887,10 @@ export async function runCriticDispatch(opts: {
 export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks): Promise<string> {
   const { team, roleByName, goal, modelFor, models, port, projectCwd, projectId, history, autoApprove, signal, directives, directorMode, attachments } = opts;
   // Key the shared team memory by stable project ID (cross-PC / vault-syncable),
-  // then warm the snapshot so the orchestrator + specialists get it injected.
+  // pin the goal so every snapshot refresh this run ranks facts by relevance to
+  // it, then warm the snapshot so the orchestrator + specialists get it injected.
   setTeamMemoryScope(projectId);
+  setTeamMemoryGoal(goal);
   await refreshTeamMemorySnapshot();
   // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
   // provider can self-load a skill by reading it with their native file tool

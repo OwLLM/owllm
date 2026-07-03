@@ -507,19 +507,31 @@ fn merge_directives(
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 struct VaultMemEntry {
     key: String,
     content: String,
     tags: String,
     author: String,
     ts: i64,
+    // 'fact' | 'worklog'. Empty when the blob was written by a pre-kind client
+    // (or round-tripped through one — old serde drops unknown fields).
+    kind: String,
+}
+
+/// True for auto-captured worklog rows, whether flagged by the kind column
+/// (new blobs) or the legacy tags convention (pre-kind blobs, and any blob
+/// laundered through an old client that dropped the kind field).
+fn is_worklog(kind: &str, tags: &str) -> bool {
+    kind == "worklog" || tags.split(',').any(|t| t.trim().eq_ignore_ascii_case("worklog"))
 }
 
 /// Read a project's shared team-memory rows (scope == project id) for export.
+/// FACTS ONLY — the auto-captured worklog transcript is local, never synced.
 fn export_team_memory(conn: &rusqlite::Connection, project_id: &str) -> Vec<VaultMemEntry> {
     let mut stmt = match conn.prepare(
-        "SELECT mkey, content, tags, author, ts FROM team_memory WHERE scope = ?1 ORDER BY id ASC",
+        "SELECT mkey, content, tags, author, ts, kind FROM team_memory \
+         WHERE scope = ?1 AND kind != 'worklog' ORDER BY id ASC",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -531,6 +543,7 @@ fn export_team_memory(conn: &rusqlite::Connection, project_id: &str) -> Vec<Vaul
             tags: r.get::<_, String>(2).unwrap_or_default(),
             author: r.get::<_, String>(3).unwrap_or_default(),
             ts: r.get::<_, i64>(4).unwrap_or(0),
+            kind: r.get::<_, String>(5).unwrap_or_else(|_| "fact".into()),
         })
     });
     match rows {
@@ -541,13 +554,32 @@ fn export_team_memory(conn: &rusqlite::Connection, project_id: &str) -> Vec<Vaul
 
 /// Merge remote team-memory entries into the local store for one project scope.
 /// Keyed entries upsert by (scope, key) keeping the newer ts; keyless entries
-/// insert if an identical (scope, content) isn't already present. Additive — a
-/// shared brain must never lose another device's contributions.
+/// insert if a whitespace-normalized-identical (scope, content) isn't already
+/// present. Additive for facts — a shared brain must never lose another
+/// device's contributions — but worklog rows are quarantined: blobs pushed by
+/// pre-kind clients still carry the whole work transcript, and adopting it
+/// would re-inflate every device forever. This import filter is permanent, not
+/// a migration shim.
 fn merge_team_memory(conn: &rusqlite::Connection, project_id: &str, entries: &[VaultMemEntry]) {
+    // Preload keyless content identities once for normalized dedup.
+    let mut seen: std::collections::HashSet<String> = conn
+        .prepare("SELECT content FROM team_memory WHERE scope = ?1 AND mkey = ''")
+        .ok()
+        .and_then(|mut s| {
+            s.query_map(rusqlite::params![project_id], |r| r.get::<_, String>(0))
+                .ok()
+                .map(|it| {
+                    it.filter_map(|r| r.ok())
+                        .map(|c| crate::memory::normalize_content(&c))
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
     for e in entries {
-        if e.content.trim().is_empty() {
+        if e.content.trim().is_empty() || is_worklog(&e.kind, &e.tags) {
             continue;
         }
+        let tags = crate::memory::normalize_tags(&e.tags);
         if !e.key.trim().is_empty() {
             let local_ts: Option<i64> = conn
                 .query_row(
@@ -560,33 +592,27 @@ fn merge_team_memory(conn: &rusqlite::Connection, project_id: &str, entries: &[V
                 Some(ts) if ts >= e.ts => { /* local is same/newer — keep it */ }
                 Some(_) => {
                     let _ = conn.execute(
-                        "UPDATE team_memory SET content = ?1, tags = ?2, author = ?3, ts = ?4 \
+                        "UPDATE team_memory SET content = ?1, tags = ?2, author = ?3, ts = ?4, kind = 'fact' \
                          WHERE scope = ?5 AND mkey = ?6",
-                        rusqlite::params![e.content, e.tags, e.author, e.ts, project_id, e.key],
+                        rusqlite::params![e.content, tags, e.author, e.ts, project_id, e.key],
                     );
                 }
                 None => {
                     let _ = conn.execute(
-                        "INSERT INTO team_memory (scope, mkey, content, tags, author, ts) \
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        rusqlite::params![project_id, e.key, e.content, e.tags, e.author, e.ts],
+                        "INSERT INTO team_memory (scope, mkey, content, tags, author, ts, kind) \
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'fact')",
+                        rusqlite::params![project_id, e.key, e.content, tags, e.author, e.ts],
                     );
                 }
             }
         } else {
-            // Keyless: dedup on identical content within the scope.
-            let dup: i64 = conn
-                .query_row(
-                    "SELECT count(*) FROM team_memory WHERE scope = ?1 AND mkey = '' AND content = ?2",
-                    rusqlite::params![project_id, e.content],
-                    |r| r.get(0),
-                )
-                .unwrap_or(0);
-            if dup == 0 {
+            // Keyless: dedup on whitespace-normalized (case-sensitive) content.
+            let norm = crate::memory::normalize_content(&e.content);
+            if seen.insert(norm) {
                 let _ = conn.execute(
-                    "INSERT INTO team_memory (scope, mkey, content, tags, author, ts) \
-                     VALUES (?1, '', ?2, ?3, ?4, ?5)",
-                    rusqlite::params![project_id, e.content, e.tags, e.author, e.ts],
+                    "INSERT INTO team_memory (scope, mkey, content, tags, author, ts, kind) \
+                     VALUES (?1, '', ?2, ?3, ?4, ?5, 'fact')",
+                    rusqlite::params![project_id, e.content, tags, e.author, e.ts],
                 );
             }
         }

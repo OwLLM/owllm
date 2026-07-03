@@ -988,7 +988,37 @@ function FlowHeader({
   };
   return (
     <div style={{ position:"relative", display:"flex", alignItems:"center", padding:"6px 10px", gap:6, borderBottom:"1px solid var(--border)" }}>
-      <div data-ui="FlowTitle" style={{ fontSize:16, fontWeight:700, color:"var(--fg-strong)", height:28, display:"flex", alignItems:"center", fontFamily:"Segoe UI", paddingRight:8 }}>Orchestrated Workflow</div>
+      {/* The title IS the mode switch — Orchestrated Workflow ⟷ Solo-Loop. The
+          active mode is bright gold + glow; the other stays visible but shadowed.
+          This replaces the old 👥 Team / ⚡ Solo button. */}
+      <div data-ui="FlowModeSwitch" style={{ display:"flex", alignItems:"center", gap:2, height:30, fontFamily:"Segoe UI", paddingRight:6 }}>
+        {[
+          { label:"Orchestrated Workflow", active:!soloMode, target:false,
+            title:"Full agentic team — the orchestrator dispatches specialists" },
+          { label:"Solo-Loop", active:!!soloMode, target:true,
+            title:"Solo-Loop — one coder does the whole job, a single critic check, rule-based publish" },
+        ].map((m, i) => (
+          <React.Fragment key={m.label}>
+            {i === 1 && <span style={{ color:"#2f3850", fontSize:16, fontWeight:700, padding:"0 2px", userSelect:"none" }}>⟷</span>}
+            <button
+              data-ui={m.target ? "FlowModeSolo" : "FlowModeOrch"}
+              onClick={() => { if (!!soloMode !== m.target) onToggleSolo?.(); }}
+              aria-pressed={m.active}
+              title={m.title}
+              style={{
+                appearance:"none", border:0, cursor:"pointer", fontFamily:"inherit",
+                fontSize:14.5, fontWeight:800, letterSpacing:0.2, lineHeight:1, whiteSpace:"nowrap",
+                padding:"6px 11px", borderRadius:8,
+                transition:"color .25s, text-shadow .25s, background .25s, box-shadow .25s",
+                color: m.active ? "#ffd97a" : "#39435a",
+                textShadow: m.active ? "0 0 18px rgba(255,217,122,0.5)" : "0 1px 0 rgba(0,0,0,0.5)",
+                background: m.active ? "rgba(255,217,122,0.15)" : "transparent",
+                boxShadow: m.active ? "inset 0 0 0 1px rgba(255,217,122,0.42)" : "none",
+              }}
+            >{m.label}</button>
+          </React.Fragment>
+        ))}
+      </div>
       {/* Team stopwatch — absolute-centered so it sits in the middle of the header
           regardless of the buttons on either side. Shows how long the team has run
           autonomously; green + ⏱ while live, muted + ✓ once the run stops. */}
@@ -1028,22 +1058,7 @@ function FlowHeader({
         </button>
       )}
       <div style={{ flex:1 }} />
-      {onToggleSolo && (
-        <button
-          data-ui="FlowSoloBtn"
-          className="ghost-btn"
-          onClick={onToggleSolo}
-          title={soloMode
-            ? "SOLO-LOOP is ON: one agent runs the task (edit → verify → fix) + rule-based host publish — no orchestrator/critic/red-team. Click to switch to the full Team."
-            : "TEAM (full orchestration). Click for SOLO-LOOP: one agent, fast, for simple tasks — and the host publishes by rule when you ask."}
-          style={{
-            height:28, padding:"0 10px", fontSize:11, fontWeight:700,
-            background: soloMode ? "rgba(127,212,255,0.20)" : "rgba(255,217,122,0.20)",
-            color: soloMode ? "#7fd4ff" : "#ffd97a",
-            border: soloMode ? "1px solid rgba(127,212,255,0.5)" : "1px solid rgba(255,217,122,0.6)",
-          }}
-        >{soloMode ? "⚡ Solo" : "👥 Team"}</button>
-      )}
+      {/* (old FlowSoloBtn removed — the header title-switch above now controls the mode) */}
       <button
         data-ui="FlowMemoryBtn"
         className="ghost-btn"
@@ -3145,6 +3160,59 @@ function useCanvasGestures(opts?: { minZoom?: number; maxZoom?: number; factor?:
 // gesture set in agent_team_canvas.py::wheelEvent. Click an agent to
 // select it (drives the top-left info card); click empty space to
 // deselect.
+// SoloLoopCanvas — the Solo-Loop mode's minimal graph. One full-stack Coder does
+// the WHOLE job (lanes off), a Critical Thinker checks it once (and can act as Super
+// User for a confirmation), then the Publisher ships it. The Publisher node reuses the
+// EXACT PublisherTilePanel (Commit / Merge / Publish + ⚙ Set up repo) from the team
+// canvas — same component, same host-side logic, no rebuild.
+function SoloLoopCanvas({ projectCwd, activeNode }: {
+  projectCwd: string | null;
+  /// Which node is currently working, so it glows (set by the solo run in phase 3).
+  activeNode?: "coder" | "critic" | "publisher" | null;
+}) {
+  const card = (icon: string, name: string, sub: string, hex: string, active: boolean) => (
+    <div style={{
+      width: 152, borderRadius: 12, padding: "11px 10px 10px", textAlign: "center",
+      background: "linear-gradient(180deg, var(--bg-elevated), #0d1524)",
+      border: `1.5px solid ${active ? hex : "var(--border-strong)"}`,
+      boxShadow: active ? `0 0 22px -2px ${hex}` : "0 6px 22px rgba(0,0,0,0.4)",
+      transition: "box-shadow .25s, border-color .25s",
+    }}>
+      <div style={{ fontSize: 22, lineHeight: 1 }}>{icon}</div>
+      <div style={{ fontSize: 13, fontWeight: 700, marginTop: 5, color: "var(--fg)" }}>{name}</div>
+      <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 2 }}>{sub}</div>
+    </div>
+  );
+  return (
+    <div data-ui="SoloLoopCanvas" style={{ position: "absolute", inset: 0, overflow: "auto" }}>
+      <svg viewBox="0 0 900 600" preserveAspectRatio="xMidYMid meet"
+        style={{ position: "absolute", inset: 0, width: "100%", height: "100%", pointerEvents: "none" }}>
+        <defs>
+          <marker id="sl-ah" markerWidth={9} markerHeight={9} refX={7} refY={3} orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="rgba(255,217,122,0.7)" /></marker>
+          <marker id="sl-ahp" markerWidth={9} markerHeight={9} refX={7} refY={3} orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="rgba(255,154,217,0.6)" /></marker>
+        </defs>
+        <path d="M 320 150 C 400 120, 500 120, 578 150" stroke="rgba(255,217,122,0.5)" strokeWidth={2} fill="none" markerEnd="url(#sl-ah)" />
+        <path d="M 578 190 C 500 220, 400 220, 326 190" stroke="rgba(255,154,217,0.5)" strokeWidth={2} fill="none" strokeDasharray="5 5" markerEnd="url(#sl-ahp)" />
+        <path d="M 300 210 C 330 300, 400 330, 452 330" stroke="rgba(255,217,122,0.5)" strokeWidth={2} fill="none" markerEnd="url(#sl-ah)" />
+        <text x={450} y={116} fill="#8494ac" fontSize={12} textAnchor="middle" fontFamily="Segoe UI, sans-serif">writes everything</text>
+        <text x={452} y={240} fill="#ff9ad9" fontSize={11} textAnchor="middle" fontFamily="Segoe UI, sans-serif">checks once ↺</text>
+      </svg>
+      <div style={{ position: "absolute", left: "30%", top: "20%", transform: "translate(-50%,-50%)" }}>{card("🧰", "Coder", "full-stack · lanes off", "#7fb4ff", activeNode === "coder")}</div>
+      <div style={{ position: "absolute", left: "66%", top: "20%", transform: "translate(-50%,-50%)" }}>{card("🧠", "Critical Thinker", "one review · Super User", "#ff9ad9", activeNode === "critic")}</div>
+      <div style={{ position: "absolute", left: "50%", top: "52%", transform: "translate(-50%,0)", width: "min(300px, 82%)" }}>
+        <div style={{ textAlign: "center", fontSize: 10.5, color: "var(--fg-muted)", marginBottom: 6, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase" }}>🚀 Publisher · rule-based</div>
+        <div style={{
+          borderRadius: 12, transition: "box-shadow .25s, border-color .25s",
+          border: `1.5px solid ${activeNode === "publisher" ? "#6ff0c0" : "var(--border-strong)"}`,
+          boxShadow: activeNode === "publisher" ? "0 0 22px -2px #6ff0c0" : "0 6px 22px rgba(0,0,0,0.4)",
+        }}>
+          <PublisherTilePanel cwd={projectCwd} rgb="111,240,192" />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNode, onSelectNode }: {
   width: number; height: number; team: Team | null; roleByName: Map<string, RoleData>;
   /// Set of currently-running agents (specialists run in parallel during
@@ -12417,7 +12485,14 @@ export default function AgentsPage() {
             onToggleSolo={() => setSoloMode(!soloMode)}
           />
           <div ref={canvasSize.ref} data-ui="CanvasStack" style={{ flex:1, minHeight:0, position:"relative" }}>
-            {viewMode === "diagram" ? (
+            {soloMode && viewMode !== "chat" ? (
+              // Solo-Loop mode: the diagram/graph collapses to the lean
+              // Coder → Critic → Publisher loop (chat mode still uses the grid).
+              <SoloLoopCanvas
+                projectCwd={runCwd || null}
+                activeNode={busy ? "coder" : null}
+              />
+            ) : viewMode === "diagram" ? (
               <TeamCanvas
                 width={canvasSize.size.w || 800}
                 height={canvasSize.size.h || 600}

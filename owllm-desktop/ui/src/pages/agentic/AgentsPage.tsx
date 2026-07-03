@@ -16,6 +16,7 @@ import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
+import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
 import IconPickerDialog, {
   getAgentIconOverride,
   setAgentIconOverride,
@@ -1059,6 +1060,13 @@ function FlowHeader({
       )}
       <div style={{ flex:1 }} />
       {/* (old FlowSoloBtn removed — the header title-switch above now controls the mode) */}
+      <button
+        data-ui="FlowNotebookBtn"
+        className="ghost-btn"
+        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-run-notebook"))}
+        title="Notebook — brainstorm while the agents work, keep a Next-steps list, feed steps to the running team (or auto-feed them run after run), and let the 🪄 Digest agent turn raw notes into implementable steps."
+        style={{ height:28, padding:"0 8px", fontSize:11 }}
+      >📓 Notebook</button>
       <button
         data-ui="FlowMemoryBtn"
         className="ghost-btn"
@@ -7028,6 +7036,10 @@ async function streamChatCompletion(
   /// lands (green "🎤 <text>" bubble) instead of waiting for the model
   /// to echo it back. Mirrors dispatch.ts streamChatCompletion.
   onTranscript?: (filename: string, text: string) => void,
+  /// Mid-run steering tap — see dispatch.ts streamChatCompletion. Polled at
+  /// each tool-loop boundary on the LOCAL path so a message typed while the
+  /// agent works is injected between tool calls; CLI/API paths ignore it.
+  getSteer?: () => string,
 ): Promise<string> {
   // Strip the optional route prefix encoded by the ModelPicker before
   // handing the bare model id to the provider-specific call.
@@ -7074,7 +7086,7 @@ async function streamChatCompletion(
     return streamChatCompletion(
       port, res.modelId, res.provider, systemPrompt, userMessage, temperature, signal,
       onDelta, projectCwd, history, autoApprove, onThought, allowedTools, attachments,
-      sessionId, onSystemWarning,
+      sessionId, onSystemWarning, onTranscript, getSteer,
     );
   }
   if (provider === "anthropic") {
@@ -7160,6 +7172,7 @@ async function streamChatCompletion(
     projectCwd,
     history,
     allowedTools,
+    getSteer,
   });
 }
 
@@ -8344,6 +8357,35 @@ export function AgentsPage({
     if (!q.length) return "";
     return q.splice(0, q.length).join("\n");
   };
+  // 📓 Notebook feed: a step goes to the team NOW — as a live steer while a
+  // run is active (picked up at the next agent boundary, or between tool
+  // calls on local models), or as a fresh dispatch when idle.
+  const feedFromNotebook = (text: string): "queued" | "dispatched" | "no-team" => {
+    const t = text.trim();
+    if (!t) return "no-team";
+    if (supSendBusyRef.current || dispatchInFlightRef.current) {
+      steerQueueRef.current.push(t);
+      setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `📓⚡ notebook step queued to steer the run → ${t}`, ts: Date.now(), seq: nextSeq() }]);
+      return "queued";
+    }
+    void onSupSendRef.current?.(`📓 Next step from the Notebook:\n${t}`);
+    return "dispatched";
+  };
+  // 📓 Auto-feed: called at each CLEAN run end. If the Notebook's auto-feed
+  // toggle is on and a pending step exists, dispatch it as the next goal once
+  // the busy flags have settled (they clear synchronously right after the
+  // run's finally, before this timeout fires).
+  const scheduleNotebookAutoFeed = () => {
+    const pid = selectedProjectId;
+    setTimeout(() => {
+      if (supSendBusyRef.current || dispatchInFlightRef.current) return;
+      const step = takeNextAutoStep(pid);
+      if (step) void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
+    }, 800);
+  };
+  // onSupSend is declared later in this component — reach it via a ref so the
+  // notebook helpers above (defined early, next to the steer queue) can call it.
+  const onSupSendRef = useRef<((text: string, images?: Attachment[]) => Promise<void>) | null>(null);
   // Synchronous reentrancy guard for dispatchGoal. The busy/running flags it
   // already checks are React/store state set only AFTER an async preflight, so
   // two rapid dispatches both passed the guard and ran concurrently — two
@@ -9939,6 +9981,7 @@ export function AgentsPage({
       }
     }
   };
+  onSupSendRef.current = onSupSend; // the notebook helpers (declared earlier) dispatch through this
 
   const trustWrites = trustWritesOverride ?? (selectedProject?.trust_writes ?? false);
 
@@ -10577,6 +10620,8 @@ export function AgentsPage({
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
               attachments.length > 0 ? attachments : undefined,
               getClaudeSession(selectedProjectId, coder.name),
+              undefined, undefined,
+              drainSteers, // local models drain steers between tool calls (mid-turn)
             )).trim();
           } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }
           if (isAuthError(sText)) break;  // 401 came back as reply text — don't gate/retry; handled below
@@ -10710,6 +10755,7 @@ export function AgentsPage({
         setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now(), seq: nextSeq() }]);
         setPhase("done");
         setRunEndedAt(Date.now());
+        if (okRun) scheduleNotebookAutoFeed(); // 📓 clean finish → next pending step
         return;
       }
 
@@ -11350,9 +11396,19 @@ export function AgentsPage({
           let finalGate: GateResult | null = null;
           let prevFailNorm = "";
           for (let attempt = 1; attempt <= MAX_FIX; attempt++) {
-            const turn = attempt === 1
+            // Mid-run steering (team path): a message the user typed while the
+            // team worked reaches the NEXT specialist to start a turn, instead
+            // of waiting for the whole run's integration phase (the "my
+            // messages are ignored" bug). Deeper still, getSteer below lets a
+            // LOCAL model pick it up between tool calls, mid-turn.
+            const specSteer = drainSteers();
+            if (specSteer) appendThought(spec.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${specSteer}` });
+            const turnBase = attempt === 1
               ? enrichedInstruction
               : `Your previous change did NOT pass the project's verification:\n${renderGateLine(finalGate!)}\n\nFix it so the check passes — change the approach if needed. Original task:\n${instruction}`;
+            const turn = specSteer
+              ? `${turnBase}\n\n⚡ The user sent this WHILE the team was working — it applies to the whole team's goal; address it too:\n${specSteer}`
+              : turnBase;
             try {
               specText = (await streamChatCompletion(
                 port, specModel, providerFor(specModel),
@@ -11370,6 +11426,8 @@ export function AgentsPage({
                 allowed,
                 undefined,
                 getClaudeSession(selectedProjectId, spec.name),
+                undefined, undefined,
+                drainSteers, // local models drain steers between tool calls (mid-turn)
               )).trim();
             } catch (e: any) {
               specText = `(error: ${cleanAgentError(e)})`;
@@ -12008,6 +12066,7 @@ export function AgentsPage({
       } catch { /* tracing must never break a run */ }
 
       setPhase("done");
+      scheduleNotebookAutoFeed(); // 📓 clean finish → next pending step
     } catch (e: any) {
       if (e?.name === "AbortError") {
         setRunError("Stopped.");
@@ -12588,6 +12647,16 @@ export function AgentsPage({
         );
       })()}
       <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} active={isActive} />
+      <RunNotebook
+        projectId={selectedProjectId}
+        projectName={activeTeam?.display}
+        active={isActive}
+        running={busy || supSendBusy}
+        onFeed={feedFromNotebook}
+        modelId={effectiveTeamModel || (serverState.model_id ?? "local")}
+        port={serverState.port ?? 0}
+        models={models}
+      />
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{
           margin: "0 23px 6px",

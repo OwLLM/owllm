@@ -1774,6 +1774,14 @@ export async function streamChatCompletion(
   /// drop the transcribed text into the chat AS the user's input
   /// (rather than waiting for the orchestrator to echo it back).
   onTranscript?: (filename: string, text: string) => void,
+  /// Mid-run steering tap (VS Code-style): polled at each tool-loop
+  /// boundary on the LOCAL path — a non-empty return is injected into the
+  /// in-flight conversation as a user message, so a message typed while
+  /// the agent works reaches it between tool calls instead of after the
+  /// whole turn. The callback must DRAIN its queue (return once). CLI/API
+  /// paths can't be interrupted mid-process, so they ignore it — their
+  /// steers land at the caller's turn boundaries instead.
+  getSteer?: () => string,
 ): Promise<string> {
   const forceSub = modelId.startsWith("sub/");
   const forceApi = modelId.startsWith("api/");
@@ -1801,7 +1809,7 @@ export async function streamChatCompletion(
     return streamChatCompletion(
       port, res.modelId, res.provider, systemPrompt, userMessage, temperature, signal,
       onDelta, projectCwd, history, autoApprove, onThought, allowedTools, attachments,
-      sessionId, onSystemWarning, onTranscript,
+      sessionId, onSystemWarning, onTranscript, getSteer,
     );
   }
   if (provider === "anthropic") {
@@ -1827,6 +1835,7 @@ export async function streamChatCompletion(
     projectCwd,
     history,
     allowedTools,
+    getSteer,
   });
 }
 
@@ -1857,6 +1866,9 @@ export type StreamLocalChatParams = {
   /// profile from modelProfiles.ts.
   samplingOverride?: Partial<Record<string, number>>;
   events?: LocalToolEvents;
+  /// See streamChatCompletion — polled once per tool round; a non-empty
+  /// return is appended as a user message before the next model turn.
+  getSteer?: () => string;
 };
 
 /// THE single local-model chat loop. Shared by dispatch.ts (bridge +
@@ -2059,6 +2071,17 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
     liveMessages.push({ role: "assistant", content: lastReply });
     liveMessages.push({ role: "user", content: parts.join("\n\n") });
+    // Mid-run steering: the user typed something WHILE this agent was in its
+    // tool loop — inject it right here, between tool rounds, so the very next
+    // model turn sees it (the VS Code behavior). Rides its own user message
+    // after the tool results.
+    const steer = p.getSteer?.();
+    if (steer && steer.trim()) {
+      liveMessages.push({
+        role: "user",
+        content: `⚡ USER (sent while you were working — incorporate into what you are doing NOW):\n${steer.trim()}`,
+      });
+    }
   }
   // Forced synthesis: the loop exhausted MAX_TOOL_TURNS while the model
   // was still calling tools, so it never wrote a user-facing answer (the

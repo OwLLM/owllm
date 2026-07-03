@@ -1692,7 +1692,14 @@ function AgentChatGrid({
 // NOT READY tag is COMPUTED by real probes (incl. `git ls-remote`, the
 // credential check sandboxed agents fail with "could not read Username").
 type PublisherReadyCheck = { id: string; label: string; ok: boolean; detail: string };
-type PublisherCfg = { targetBranch: string; commitScope: string; commitMsg: string };
+// signThumbprint / signSubject / signTsa map 1:1 onto publish-release.sh's own
+// OWLLM_SIGN_THUMBPRINT / OWLLM_SIGN_SUBJECT / OWLLM_SIGN_TSA knobs, so any user
+// can point the release at whatever Authenticode cert is installed on their host
+// (SimplySign/Certum, a PFX, an HSM) without editing scripts. Empty = unsigned.
+type PublisherCfg = {
+  targetBranch: string; commitScope: string; commitMsg: string;
+  signThumbprint: string; signSubject: string; signTsa: string;
+};
 
 function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
   const [checks, setChecks] = useState<PublisherReadyCheck[] | null>(null);
@@ -1701,7 +1708,7 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
   const [setupOpen, setSetupOpen] = useState(false);
   const storageKey = `publisherCard:${cwd ?? "none"}`;
   const [cfg, setCfg] = useState<PublisherCfg>(() => {
-    const base: PublisherCfg = { targetBranch: "main", commitScope: "", commitMsg: "" };
+    const base: PublisherCfg = { targetBranch: "main", commitScope: "", commitMsg: "", signThumbprint: "", signSubject: "", signTsa: "" };
     try { return { ...base, ...JSON.parse(localStorage.getItem(storageKey) ?? "{}") }; }
     catch { return base; }
   });
@@ -1789,8 +1796,19 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
             ? "Bump version → commit → tag → push → CI drafts the release"
             : reasonFor(["repo", "remote", "auth", "version", "script"]),
           () => {
-            if (!window.confirm("Publish a new release?\n\nThis bumps the version, commits, tags, pushes, and triggers the CI release build (lands as a DRAFT on GitHub).")) return;
-            void run("publish", () => invoke<string>("finish_and_publish", { repoDir: cwd, notes: "" }));
+            const signed = !!(cfg.signThumbprint.trim() || cfg.signSubject.trim());
+            if (!window.confirm(
+              `Publish a new release?\n\nThis bumps the version, commits, tags, pushes, and runs the host build → ${signed ? "code-signs" : "does NOT code-sign"} → publishes to GitHub.` +
+              (signed ? "" : "\n\nNo signing certificate is configured (⚙ Set up repo → Code signing), so this build will be UNSIGNED.")
+            )) return;
+            void run("publish", () => invoke<string>("finish_and_publish", {
+              repoDir: cwd, notes: "",
+              // Client side of the signing contract — flows to publish-release.sh's
+              // OWLLM_SIGN_* env. Backend finish_and_publish must forward `sign`.
+              sign: (cfg.signThumbprint.trim() || cfg.signSubject.trim())
+                ? { thumbprint: cfg.signThumbprint.trim() || null, subject: cfg.signSubject.trim() || null, tsa: cfg.signTsa.trim() || null }
+                : null,
+            }));
           })}
       </div>
       {/* Repo-setup bar with the computed READY / NOT READY tag */}
@@ -1875,6 +1893,42 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
               ["Merge target branch", "targetBranch", "main", "The branch Merge fast-forwards and pushes"],
               ["Commit scope (pathspec)", "commitScope", "empty = whole tree", "Limit Commit to a sub-path, e.g. owllm-desktop/ — keeps unrelated clutter out"],
               ["Commit message", "commitMsg", "auto if empty", "Used by the Commit button"],
+            ] as const).map(([label, key, ph, hint]) => (
+              <label key={key} style={{ display: "block", marginBottom: 10 }}>
+                <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, color: "var(--fg-muted)", marginBottom: 3 }}>{label}</div>
+                <input
+                  value={cfg[key]}
+                  placeholder={ph}
+                  title={hint}
+                  onChange={(e) => saveCfg({ ...cfg, [key]: e.target.value })}
+                  style={{
+                    width: "100%", boxSizing: "border-box", padding: "6px 8px",
+                    background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: 6, color: "var(--fg)", fontSize: 12,
+                  }}
+                />
+              </label>
+            ))}
+            {/* Code signing — generic per-project cert config. Maps onto
+                publish-release.sh's OWLLM_SIGN_* knobs; empty = unsigned. */}
+            <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", margin: "6px 0 10px" }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: "var(--fg-strong)" }}>Code signing (Windows)</span>
+              <span style={{
+                fontSize: 9, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase",
+                padding: "1px 7px", borderRadius: 4,
+                color: (cfg.signThumbprint.trim() || cfg.signSubject.trim()) ? "#3cf26b" : "#ffd97a",
+                background: (cfg.signThumbprint.trim() || cfg.signSubject.trim()) ? "rgba(60,242,107,0.12)" : "rgba(255,217,122,0.12)",
+                border: `1px solid ${(cfg.signThumbprint.trim() || cfg.signSubject.trim()) ? "rgba(60,242,107,0.5)" : "rgba(255,217,122,0.5)"}`,
+              }}>{(cfg.signThumbprint.trim() || cfg.signSubject.trim()) ? "Signed" : "Unsigned"}</span>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginBottom: 10, lineHeight: 1.5 }}>
+              Set a certificate to Authenticode-sign the release .exe/installer and clear SmartScreen "unknown publisher". Leave both empty to ship unsigned. The cert must be installed on the machine that runs Publish (e.g. SimplySign/Certum cloud card, a PFX, or an HSM).
+            </div>
+            {([
+              ["Cert thumbprint (SHA-1)", "signThumbprint", "empty = unsigned", "SHA-1 thumbprint of the signing cert in the host store (signtool /sha1). Takes priority over subject."],
+              ["…or cert subject (CN)", "signSubject", "e.g. Your Company Ltd", "Match the cert by subject name instead of thumbprint (signtool /n). Ignored if a thumbprint is set."],
+              ["Timestamp URL (RFC3161)", "signTsa", "http://time.certum.pl", "TSA used to timestamp the signature so it stays valid after the cert expires."],
             ] as const).map(([label, key, ph, hint]) => (
               <label key={key} style={{ display: "block", marginBottom: 10 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, color: "var(--fg-muted)", marginBottom: 3 }}>{label}</div>

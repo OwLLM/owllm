@@ -122,8 +122,32 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   decryption is Windows-only in this build; macOS/Linux Chromium key stores
   (Keychain / Secret Service) are the next step.
 - **UI**: 🌐 Browser panel (shared `BrowserPanel.tsx`, Code + Agents pages) —
-  Browse / Passwords / Import tabs. Local + API agents only; subscription CLIs
-  can't reach `executeToolCall` (known CLI-tools limitation).
+  Browse / Passwords / Import tabs.
+- **Reachable by ALL agent kinds**: local + API agents call `browser_*` through
+  `executeToolCall`; subscription-CLI agents (Claude Code) reach the SAME
+  browser natively via the MCP gateway below (host runs). No per-tool harvest
+  hack.
+
+## MCP gateway — OWLLM tools for subscription-CLI agents (`mcp_gateway.rs`)
+
+- **The problem it solves**: subscription-CLI agents never reach the app's
+  `executeToolCall`, so OWLLM-only tools were invisible to them. Instead of
+  patching each tool with a `[HARVEST]`-style hack, the app now speaks the
+  protocol the CLI already supports — **MCP**.
+- **How**: a tiny MCP server hosted INSIDE the app on `127.0.0.1` (ephemeral
+  port, **loopback only**, `Authorization: Bearer <token>` on every request),
+  speaking MCP Streamable-HTTP (POST → one JSON-RPC reply). `claude_cli_stream`
+  writes an `--mcp-config` pointing the CLI at it and adds `mcp__owllm__*` to
+  `--allowedTools`. The CLI model then calls `mcp__owllm__browser_open` etc.
+  natively — no puppet model, no paraphrase layer. Tool calls dispatch to the
+  same `browser::*` functions the local path uses (one engine, no twin).
+- **Scope**: wired for HOST runs only (loopback is reachable there, and the
+  browser window is a host-desktop object). WSL-isolated runs keep today's
+  behaviour (browser unavailable). Extending to isolated runs (host-IP binding
+  or WSL mirrored-networking) and adding memory_*/kvm_node to the catalogue are
+  follow-ups. **Runtime-unverified**: the CLI↔gateway handshake is implemented
+  to spec + unit-tested for framing, but the live round-trip needs a real app
+  session to confirm the installed CLI's `--mcp-config` HTTP shape.
 
 ## OWLLM Node — KVM remote control (`kvm.rs`)
 

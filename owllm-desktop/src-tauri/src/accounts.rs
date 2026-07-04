@@ -1716,6 +1716,9 @@ fn map_owllm_tool_to_cli(name: &str) -> Option<&'static str> {
 
 #[tauri::command]
 pub async fn claude_cli_stream(
+    // Injected by Tauri (not passed from JS) — needed to host the in-app MCP
+    // gateway that lends OWLLM tools (browser_*) to the CLI on host runs.
+    app: tauri::AppHandle,
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
@@ -1749,6 +1752,34 @@ pub async fn claude_cli_stream(
         // distro (so the agent's tools can't touch the Windows drive).
         let mut args: Vec<String> = Vec::new();
         args.push("--print".into());
+
+        // MCP GATEWAY: expose OWLLM's browser_* tools to this CLI agent natively
+        // (as mcp__owllm__browser_*). Only for HOST runs — a WSL-isolated run
+        // can't reach the loopback gateway, and the browser is a host-desktop
+        // window anyway. Wanted when the role is unrestricted (operator) or its
+        // allowlist explicitly names a browser_ tool. Best-effort: a gateway
+        // failure logs and falls back to today's behaviour (no browser for CLI).
+        let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
+        let browser_wanted = match allowed_tools.as_ref() {
+            None => true,
+            Some(a) => a.is_empty() || a.iter().any(|t| t == "all" || t.starts_with("browser_")),
+        };
+        let mcp_config_path: Option<String> = if host_run && browser_wanted {
+            match crate::mcp_gateway::write_cli_config(&app) {
+                Ok(p) => Some(p.to_string_lossy().to_string()),
+                Err(e) => {
+                    eprintln!("mcp gateway not started ({e}); CLI agent runs without browser tools");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let mcp_tool_names: Vec<String> = if mcp_config_path.is_some() {
+            crate::mcp_gateway::cli_tool_names()
+        } else {
+            Vec::new()
+        };
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             args.push("--model".into());
             args.push(m.to_string());
@@ -1774,15 +1805,23 @@ pub async fn claude_cli_stream(
         if let Some(allowed) = allowed_tools.as_ref() {
             let wants_all = allowed.iter().any(|t| t == "all");
             if !wants_all && !allowed.is_empty() {
-                let cli_tools: Vec<&str> = allowed
+                let mut cli_tools: Vec<String> = allowed
                     .iter()
-                    .filter_map(|t| map_owllm_tool_to_cli(t))
+                    .filter_map(|t| map_owllm_tool_to_cli(t).map(|s| s.to_string()))
                     .collect();
+                // Permit the gateway's MCP tools too (availability via --mcp-config
+                // is a separate axis from this permission allowlist).
+                cli_tools.extend(mcp_tool_names.iter().cloned());
                 if !cli_tools.is_empty() {
                     args.push("--allowedTools".into());
                     args.push(cli_tools.join(" "));
                 }
             }
+        }
+        // Point the CLI at the in-app MCP gateway (host runs with browser access).
+        if let Some(cfg) = mcp_config_path.as_ref() {
+            args.push("--mcp-config".into());
+            args.push(cfg.clone());
         }
         // Widen the CLI's filesystem SCOPE to the user's home profile so an agent
         // can open a file the user points it at OUTSIDE the project (e.g.

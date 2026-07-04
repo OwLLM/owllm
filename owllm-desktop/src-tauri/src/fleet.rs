@@ -27,8 +27,10 @@
 // behaviour without a hard error.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Per-run scratch root for OWLLM-managed worktrees.
 ///   Windows: %LOCALAPPDATA%\owllm\fleet
@@ -41,6 +43,46 @@ fn fleet_root() -> Option<PathBuf> {
             .map(|d| PathBuf::from(d).join("owllm").join("fleet"))
     } else {
         std::env::var_os("HOME").map(|d| PathBuf::from(d).join(".owllm").join("fleet"))
+    }
+}
+
+/// Per-source-repo lock so two Code pages (or a page + a team dispatch) that
+/// cut a worktree off the SAME repo at the same moment don't race on
+/// `.git/index.lock`. `git worktree add`/`branch -D` briefly take the repo
+/// index lock; concurrent calls otherwise fail with "Unable to create
+/// '.git/index.lock': File exists", which surfaced as "Couldn't create the
+/// worktree" when opening a second page on a project. Keyed by the repo path.
+fn repo_create_lock(repo: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
+    let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = repo.to_string_lossy().to_string();
+    let mut guard = map.lock().unwrap_or_else(|p| p.into_inner());
+    guard.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+}
+
+/// App-managed scratch that must NEVER wedge the worktree workflow: the image
+/// inbox (`.owllm-inbox/`, where the app itself writes pasted/agent images) and
+/// the project card dir (`.owllm/`). These are tracked in some repos and the app
+/// rewrites them, so a `git status` on the source is perpetually "dirty" through
+/// no fault of the user — which used to make EVERY `fleet_worktree_create` bounce
+/// with DirtyWorkingTree. The worktree is cut from HEAD regardless, so ignoring
+/// these in the guard changes nothing about what lands in the worktree.
+fn is_app_scratch(path: &str) -> bool {
+    let p = path.trim().trim_start_matches("./").replace('\\', "/");
+    p == ".owllm-inbox"
+        || p == ".owllm"
+        || p.starts_with(".owllm-inbox/")
+        || p.starts_with(".owllm/")
+}
+
+/// Extract the file path from one `git status --porcelain` line, resolving the
+/// rename form (`R  old -> new`) to the new path. Returns "" for a malformed line.
+fn porcelain_path(line: &str) -> &str {
+    // Format: two status columns + a space, then the path (columns 3..).
+    let rest = line.get(3..).unwrap_or("").trim();
+    match rest.rsplit_once(" -> ") {
+        Some((_, new)) => new.trim(),
+        None => rest,
     }
 }
 
@@ -150,6 +192,10 @@ pub async fn fleet_worktree_create(
     if !is_git_repo(&cwd) {
         return Ok(CreateOutcome::NotAGitRepo);
     }
+    // Serialize creates against THIS repo so two pages opening the same project
+    // don't race on `.git/index.lock`. Held for the whole create sequence.
+    let lock = repo_create_lock(&cwd);
+    let _create_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
     // Reject if there are uncommitted TRACKED changes — the branch is cut from
     // HEAD, so those edits would be silently missing from the new worktree.
     // CRITICAL perf: `--untracked-files=no` skips enumerating untracked files.
@@ -157,10 +203,16 @@ pub async fn fleet_worktree_create(
     // venvs, build output) — a 20-40s stall on a real project, which is exactly
     // why opening a Code page on a recent folder felt frozen. Untracked files
     // aren't in HEAD anyway, so not warning about them costs nothing.
+    // App-managed scratch (.owllm-inbox/, .owllm/) is filtered out: the app keeps
+    // those "dirty" on its own, and blocking on them wedged the Code page.
     let (_, status_out, _) = git(&cwd, &["status", "--porcelain", "--untracked-files=no"])?;
-    if !status_out.trim().is_empty() {
+    let dirty: Vec<&str> = status_out
+        .lines()
+        .filter(|l| !l.trim().is_empty() && !is_app_scratch(porcelain_path(l)))
+        .collect();
+    if !dirty.is_empty() {
         return Ok(CreateOutcome::DirtyWorkingTree {
-            details: status_out.lines().take(20).collect::<Vec<_>>().join("\n"),
+            details: dirty.into_iter().take(20).collect::<Vec<_>>().join("\n"),
         });
     }
     // Resolve the current HEAD SHA so the merge step later can squash
@@ -530,4 +582,34 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{is_app_scratch, porcelain_path};
+
+    #[test]
+    fn app_scratch_is_ignored_but_source_is_not() {
+        // The perpetually-"dirty" app-managed paths that used to wedge creates.
+        assert!(is_app_scratch(".owllm-inbox/image_1.png"));
+        assert!(is_app_scratch(".owllm-inbox"));
+        assert!(is_app_scratch(".owllm/project.json"));
+        assert!(is_app_scratch("./.owllm-inbox/x.png"));
+        assert!(is_app_scratch(".owllm-inbox\\image_1.png")); // porcelain can emit backslashes
+        // Real source changes must STILL block (branch cuts from HEAD).
+        assert!(!is_app_scratch("src/main.rs"));
+        assert!(!is_app_scratch("owllm-desktop/ui/src/App.tsx"));
+        assert!(!is_app_scratch(".owllm-inbox-notes.md")); // sibling file, not the dir
+        assert!(!is_app_scratch(".github/workflows/ci.yml"));
+    }
+
+    #[test]
+    fn porcelain_path_parsing() {
+        assert_eq!(porcelain_path(" M .owllm-inbox/image_1.png"), ".owllm-inbox/image_1.png");
+        assert_eq!(porcelain_path("A  src/new.rs"), "src/new.rs");
+        assert_eq!(porcelain_path("R  old/path.rs -> new/path.rs"), "new/path.rs");
+        assert_eq!(porcelain_path("?? untracked.txt"), "untracked.txt");
+        // A source file next to a scratch change is still seen as source.
+        assert!(!is_app_scratch(porcelain_path("M  Cargo.toml")));
+    }
 }

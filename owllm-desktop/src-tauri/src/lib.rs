@@ -37,6 +37,7 @@ mod hardware;
 mod huggingface;
 mod kvm;
 mod mcp;
+mod mcp_gateway;
 mod memory;
 mod models;
 mod modules;

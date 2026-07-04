@@ -22,6 +22,7 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
+import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 
 export type NotebookStep = {
   id: string;
@@ -36,6 +37,9 @@ export type NotebookState = {
   steps: NotebookStep[];
   autoFeed: boolean;
   digest: Array<{ role: "you" | "digest"; text: string }>;
+  /// User-picked digest model (per project). Empty/undefined = inherit the
+  /// surface's default (team model → server model), same rule as before.
+  digestModel?: string;
 };
 
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
@@ -53,6 +57,7 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       steps: Array.isArray(p.steps) ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string") : [],
       autoFeed: p.autoFeed === true,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
+      digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
     };
   } catch { return { ...EMPTY }; }
 }
@@ -118,9 +123,14 @@ type Props = {
   /// default; the Code page mounts its own instance on a separate event so
   /// the two surfaces never open each other's modal.
   openEvent?: string;
+  /// Needed by the digest-model ModelPicker (which providers are signed in).
+  accountsStatus?: AccountsStatusLite | null;
+  /// Render the notebook INLINE (fills its parent, stacked vertically) instead
+  /// of as a modal — used by the Code page's right-column Notebook tab.
+  inline?: boolean;
 };
 
-export default function RunNotebook({ projectId, projectName, active = true, running, onFeed, modelId, port, models, openEvent = "owllm:open-run-notebook" }: Props) {
+export default function RunNotebook({ projectId, projectName, active = true, running, onFeed, modelId, port, models, openEvent = "owllm:open-run-notebook", accountsStatus = null, inline = false }: Props) {
   const [open, setOpen] = useState(false);
   const [nb, setNb] = useState<NotebookState>(() => loadNotebook(projectId));
   const [newStep, setNewStep] = useState("");
@@ -134,10 +144,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   projRef.current = projectId;
 
   useEffect(() => {
+    if (inline) return; // inline instances are always visible — no open event
     const onOpen = () => { if (activeRef.current) { setNb(loadNotebook(projRef.current)); setOpen(true); } };
     window.addEventListener(openEvent, onOpen as EventListener);
     return () => window.removeEventListener(openEvent, onOpen as EventListener);
-  }, [openEvent]);
+  }, [openEvent, inline]);
   // Reload when the page (auto-feed) or another tab touches the same blob.
   useEffect(() => {
     const onChanged = (e: Event) => {
@@ -198,8 +209,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       ].filter(Boolean).join("\n\n");
       let reply = "";
       const ctrl = new AbortController();
+      // User override (persisted per project) wins; else the inherited default.
+      const dm = nb.digestModel || modelId;
       await streamChatCompletion(
-        port, modelId, providerFor(modelId, models),
+        port, dm, providerFor(dm, models),
         DIGEST_SYSTEM, user, 0.3, ctrl.signal,
         (d) => { reply += d; },
       );
@@ -214,42 +227,46 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
 
   const pendingCount = useMemo(() => nb.steps.filter((s) => s.status === "pending").length, [nb.steps]);
-  // Human-readable digest model: the raw id with any file path stripped.
+  // Human-readable INHERITED digest model (the default when no override is
+  // picked): the raw id with any file path stripped.
   const digestModelLabel = useMemo(() => {
     const raw = (modelId || "").trim();
     return raw ? (raw.split(/[\\/]/).pop() || raw) : "server model";
   }, [modelId]);
-  if (!open) return null;
+  if (!inline && !open) return null;
 
   const statusIcon = (s: NotebookStep) => (s.status === "done" ? "✓" : s.status === "sent" ? "⚡" : "○");
   const statusColor = (s: NotebookStep) => (s.status === "done" ? "#7ff0c5" : s.status === "sent" ? "#ffd97a" : "var(--fg-muted)");
 
-  return (
-    <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(8,12,20,0.6)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div onClick={(e) => e.stopPropagation()} style={{
+  // Same panel serves the modal AND the Code page's inline right-column tab;
+  // inline stacks the two body columns vertically (the column is narrow).
+  const panel = (
+      <div onClick={(e) => e.stopPropagation()} style={inline ? {
+        width: "100%", height: "100%", minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden",
+      } : {
         width: "min(1060px, 94vw)", height: "min(680px, 90vh)", display: "flex", flexDirection: "column",
         background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 12,
         boxShadow: "0 18px 60px rgba(0,0,0,0.55)", overflow: "hidden",
       }}>
         {/* Header */}
-        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: "1px solid var(--border)" }}>
-          <span style={{ fontSize: 17 }}>📓</span>
-          <span style={{ fontSize: 14, fontWeight: 700, color: "var(--fg-strong)" }}>Notebook{projectName ? ` — ${projectName}` : ""}</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, padding: inline ? "6px 10px" : "12px 16px", borderBottom: "1px solid var(--border)", flexWrap: "wrap" }}>
+          <span style={{ fontSize: inline ? 14 : 17 }}>📓</span>
+          {!inline && <span style={{ fontSize: 14, fontWeight: 700, color: "var(--fg-strong)" }}>Notebook{projectName ? ` — ${projectName}` : ""}</span>}
           <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-            {running ? "team is running — fed steps steer it live" : "team idle — fed steps start a run"}
+            {running ? (inline ? "run live — steps steer it" : "team is running — fed steps steer it live") : (inline ? "idle — steps start a run" : "team idle — fed steps start a run")}
           </span>
           <div style={{ flex: 1 }} />
           <label title="When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it." style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: nb.autoFeed ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}>
             <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked })} />
             Auto-feed next step
           </label>
-          <button className="ghost-btn" onClick={() => setOpen(false)} style={{ height: 26, width: 28, padding: 0, fontSize: 13 }}>✕</button>
+          {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} style={{ height: 26, width: 28, padding: 0, fontSize: 13 }}>✕</button>}
         </div>
 
-        {/* Body: notes | steps */}
-        <div style={{ flex: 1, minHeight: 0, display: "flex" }}>
+        {/* Body: notes | steps (side by side in the modal, stacked inline) */}
+        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: inline ? "column" : "row" }}>
           {/* Brainstorm notes */}
-          <div style={{ flex: "1 1 0", minWidth: 0, display: "flex", flexDirection: "column", borderRight: "1px solid var(--border)" }}>
+          <div style={{ flex: "1 1 0", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", ...(inline ? { borderBottom: "1px solid var(--border)" } : { borderRight: "1px solid var(--border)" }) }}>
             <div style={{ padding: "8px 14px 4px", fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: "var(--fg-muted)", textTransform: "uppercase" }}>Brainstorm</div>
             <textarea
               value={nb.text}
@@ -260,7 +277,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
           </div>
 
           {/* Next steps */}
-          <div style={{ flex: "1.15 1 0", minWidth: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ flex: "1.15 1 0", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column" }}>
             <div style={{ padding: "8px 14px 4px", display: "flex", alignItems: "center", gap: 8 }}>
               <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: "var(--fg-muted)", textTransform: "uppercase" }}>Next steps</span>
               <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{pendingCount} pending</span>
@@ -342,11 +359,22 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               >Add all</button>
             </div>
           )}
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span
-              title="The digest agent runs on the team's default model (pending override → project's team model → the loaded server model). Change it in Team settings."
-              style={{ flexShrink: 0, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", height: 22, lineHeight: "22px", padding: "0 9px", border: "1px solid var(--border)", borderRadius: 999, background: "var(--bg-surface)", color: "var(--fg-muted)", fontSize: 10.5 }}
-            >🪄 {digestModelLabel}</span>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: inline ? "wrap" : undefined }}>
+            {/* Digest model — the SAME shared ModelPicker as every other model
+                dropdown. Empty value = inherit the default (team model rule);
+                a pick is persisted per project; ✕ returns to inherit. */}
+            <div title="Digest agent model. Default: the team's model (pending override → project's team model → loaded server model)." style={{ flexShrink: 0, width: inline ? 170 : 220 }}>
+              <ModelPicker
+                value={nb.digestModel || ""}
+                onChange={(id) => update({ digestModel: id })}
+                models={models}
+                status={accountsStatus}
+                fallbackLabel={`🪄 ${digestModelLabel}`}
+              />
+            </div>
+            {nb.digestModel && (
+              <button className="ghost-btn" onClick={() => update({ digestModel: undefined })} title="Back to the default (team model)" style={{ height: 24, width: 24, padding: 0, fontSize: 11, flexShrink: 0 }}>✕</button>
+            )}
             <input
               value={digestInput}
               onChange={(e) => setDigestInput(e.target.value)}
@@ -362,6 +390,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
           </div>
         </div>
       </div>
+  );
+
+  if (inline) return panel;
+  return (
+    <div onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, background: "rgba(8,12,20,0.6)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      {panel}
     </div>
   );
 }

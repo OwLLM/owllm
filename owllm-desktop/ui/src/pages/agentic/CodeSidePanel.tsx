@@ -1,24 +1,46 @@
 // CodeSidePanel — the Code page's right column (user spec 2026-07-04):
-// ⚡ Super User options for the solo coding agent. Two sections:
-//   1. RULES — the SAME per-project directives the agentic team uses
-//      (directives.rs; auto-seeded with the native best-practice set).
-//      When the folder matches an agentic project the rules are stored
-//      under that project's id, so the team page and the Code page edit
-//      ONE rule set. Rules are injected into every coder turn.
-//   2. NOTEBOOK — the Run Notebook (brainstorm + next steps + digest
-//      agent), shared with the Agents page on the same project. The
-//      panel shows a live pending-steps summary + the auto-feed toggle;
-//      the full notebook opens as the usual popup.
-import { useEffect, useState, type CSSProperties } from "react";
+// a RESIZABLE column (drag its left edge; default 15% of the window, min
+// 300px) with a small utility header + TWO pages on a tab strip (the same
+// tab pattern as TeamMemoryModal):
+//   • header: agent MODE (plan / auto / chat) + Terminal popup toggle +
+//     VS Code-style USAGE bars for the account behind the active model
+//     (account_usage — Claude subscription today, "n/a" note otherwise).
+//   • ⚡ Super User page — the SAME per-project directives the agentic team
+//     uses (directives.rs; auto-seeded native best-practice set). When the
+//     folder matches an agentic project the rules are stored under that
+//     project's id, so the team page and the Code page edit ONE rule set.
+//   • 📓 Notebook page — the shared RunNotebook rendered INLINE (passed in
+//     as `notebook` by CodePage so all its wiring stays in one place).
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { type Directive } from "./dispatch";
-import { loadNotebook, saveNotebook, NOTEBOOK_EVENT, type NotebookState } from "./RunNotebook";
 
 const KIND_COLOR: Record<Directive["kind"], string> = {
   must: "#ff9d7a",
   prefer: "#7fd4ff",
   avoid: "#ffd27a",
 };
+
+export type CodeAgentMode = "plan" | "auto" | "chat";
+
+const WIDTH_KEY = "owllm:code:sidew";
+const TAB_KEY = "owllm:code:sidetab";
+const MIN_W = 300;
+
+type UsageWindow = { label: string; usedPct: number; resetsAt?: string | null };
+type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[] };
+
+/// "Resets in 3h" from an ISO timestamp — coarse on purpose (like VS Code).
+function resetsIn(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const ms = Date.parse(iso) - Date.now();
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const m = Math.round(ms / 60000);
+  if (m < 60) return `Resets in ${m}m`;
+  const h = Math.round(m / 60);
+  if (h < 48) return `Resets in ${h}h`;
+  return `Resets in ${Math.round(h / 24)}d`;
+}
 
 type Props = {
   /// Directives + notebook scope: the matching agentic project id when the
@@ -28,12 +50,67 @@ type Props = {
   sharedWithTeam: boolean;
   directives: Directive[];
   onDirectivesChanged: () => void | Promise<void>;
-  /// Coder turn in flight — feeding a step becomes a mid-run steer.
-  busy: boolean;
-  onOpenNotebook: () => void;
+  /// Agent mode — drives what the composer's primary button does.
+  mode: CodeAgentMode;
+  onModeChange: (m: CodeAgentMode) => void;
+  /// Terminal popup (owned by CodePage; the button here just toggles it).
+  terminalOpen: boolean;
+  onToggleTerminal: () => void;
+  /// providerFor(modelId) for the active model — drives the usage fetch.
+  usageProvider: string;
+  /// The inline RunNotebook (CodePage owns its props/wiring).
+  notebook: ReactNode;
 };
 
-export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, busy, onOpenNotebook }: Props) {
+export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, mode, onModeChange, terminalOpen, onToggleTerminal, usageProvider, notebook }: Props) {
+  // ---- Resizable width: default 15% of the window, floor at the original 300px ----
+  const [width, setWidth] = useState<number>(() => {
+    try {
+      const saved = parseInt(localStorage.getItem(WIDTH_KEY) || "", 10);
+      if (Number.isFinite(saved) && saved >= MIN_W) return saved;
+    } catch { /* default below */ }
+    return Math.max(MIN_W, Math.round(window.innerWidth * 0.15));
+  });
+  const dragRef = useRef<{ startX: number; startW: number } | null>(null);
+  const onDragStart = (e: React.MouseEvent) => {
+    e.preventDefault();
+    dragRef.current = { startX: e.clientX, startW: width };
+    const move = (ev: MouseEvent) => {
+      const d = dragRef.current;
+      if (!d) return;
+      const w = Math.min(Math.round(window.innerWidth * 0.6), Math.max(MIN_W, d.startW + (d.startX - ev.clientX)));
+      setWidth(w);
+    };
+    const up = () => {
+      dragRef.current = null;
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+      setWidth((w) => { try { localStorage.setItem(WIDTH_KEY, String(w)); } catch { } return w; });
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+
+  // ---- Tabs (same strip pattern as TeamMemoryModal Facts/Worklog) ----
+  const [tab, setTab] = useState<"super" | "notebook">(() => {
+    try { return localStorage.getItem(TAB_KEY) === "notebook" ? "notebook" : "super"; } catch { return "super"; }
+  });
+  const pickTab = (t: "super" | "notebook") => { setTab(t); try { localStorage.setItem(TAB_KEY, t); } catch { } };
+
+  // ---- Account usage (VS Code-style) — refreshed on provider change + every 5 min ----
+  const [usage, setUsage] = useState<AccountUsage | null>(null);
+  useEffect(() => {
+    let alive = true;
+    const load = () => {
+      invoke<AccountUsage>("account_usage", { provider: usageProvider || "" })
+        .then((u) => { if (alive) setUsage(u); })
+        .catch(() => { if (alive) setUsage(null); });
+    };
+    load();
+    const t = setInterval(load, 5 * 60 * 1000);
+    return () => { alive = false; clearInterval(t); };
+  }, [usageProvider]);
+
   // ---- Rules editing (same add/edit/delete/restore logic as the team's SuperUserCard) ----
   const [newKind, setNewKind] = useState<Directive["kind"]>("must");
   const [newText, setNewText] = useState("");
@@ -82,60 +159,102 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
     finally { setRulesBusy(false); }
   };
 
-  // ---- Notebook summary (live against the shared per-project blob) ----
-  const [nb, setNb] = useState<NotebookState>(() => loadNotebook(scopeId));
-  useEffect(() => { setNb(loadNotebook(scopeId)); }, [scopeId]);
-  useEffect(() => {
-    const onChanged = (e: Event) => {
-      const pid = (e as CustomEvent).detail?.projectId;
-      if (!pid || pid === scopeId) setNb(loadNotebook(scopeId));
-    };
-    window.addEventListener(NOTEBOOK_EVENT, onChanged as EventListener);
-    return () => window.removeEventListener(NOTEBOOK_EVENT, onChanged as EventListener);
-  }, [scopeId]);
-  const pending = nb.steps.filter((s) => s.status === "pending");
-  const toggleAutoFeed = () => {
-    const next = { ...nb, autoFeed: !nb.autoFeed };
-    setNb(next);
-    saveNotebook(scopeId, next);
-  };
-
-  const sectionTitle: CSSProperties ={ fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: "var(--fg-muted)", textTransform: "uppercase" };
+  const sectionTitle: CSSProperties = { fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: "var(--fg-muted)", textTransform: "uppercase" };
   const byKind = (k: Directive["kind"]) => directives.filter((d) => d.kind === k);
 
+  const MODES: Array<{ id: CodeAgentMode; label: string; hint: string }> = [
+    { id: "plan", label: "📋 Plan", hint: "Break the goal into ordered Kanban steps, then build them one by one." },
+    { id: "auto", label: "⚡ Auto", hint: "Act directly — read, edit, create files and run commands to do the task." },
+    { id: "chat", label: "💬 Chat", hint: "Discuss/review only — read-only tools, no edits, no state-changing commands." },
+  ];
+
+  const tabBtn = (t: "super" | "notebook", label: string) => (
+    <button
+      key={t}
+      onClick={() => pickTab(t)}
+      style={{
+        height: 28, padding: "0 12px", cursor: "pointer", fontSize: 12, fontWeight: 600,
+        border: "1px solid " + (tab === t ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
+        borderBottom: "none", borderRadius: "8px 8px 0 0",
+        background: tab === t ? "rgba(var(--accent-rgb),0.12)" : "transparent",
+        color: tab === t ? "var(--accent)" : "var(--fg-muted)",
+      }}
+    >{label}</button>
+  );
+
   return (
-    <div data-ui="CodeSidePanel" style={{ width: 300, flexShrink: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, overflowY: "auto", background: "linear-gradient(135deg, rgba(38,30,10,0.55) 0%, rgba(18,14,4,0.55) 100%)", border: "1px solid rgba(255,200,80,0.3)", borderRadius: 8, padding: "8px 10px" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-        <span style={{ fontSize: 13, fontWeight: 700, color: "#ffd27a" }}>⚡ Super User</span>
+    <div data-ui="CodeSidePanel" style={{ position: "relative", width, flexShrink: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 6, background: "linear-gradient(135deg, rgba(38,30,10,0.55) 0%, rgba(18,14,4,0.55) 100%)", border: "1px solid rgba(255,200,80,0.3)", borderRadius: 8, padding: "8px 10px 8px 12px" }}>
+      {/* Drag handle — resize by dragging the column's left edge. */}
+      <div
+        onMouseDown={onDragStart}
+        title="Drag to resize"
+        style={{ position: "absolute", left: -2, top: 0, bottom: 0, width: 7, cursor: "col-resize", zIndex: 2 }}
+      />
+
+      {/* ---- Utility header: mode + terminal, then account usage ---- */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", border: "1px solid var(--border-strong)", borderRadius: 7, overflow: "hidden" }}>
+            {MODES.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => onModeChange(m.id)}
+                title={m.hint}
+                style={{
+                  height: 26, padding: "0 9px", fontSize: 11, fontWeight: 700, cursor: "pointer", border: "none",
+                  background: mode === m.id ? "rgba(var(--accent-rgb),0.22)" : "transparent",
+                  color: mode === m.id ? "var(--accent)" : "var(--fg-muted)",
+                }}
+              >{m.label}</button>
+            ))}
+          </div>
+          <span style={{ flex: 1 }} />
+          <button
+            className="btn"
+            onClick={onToggleTerminal}
+            title="Open a terminal in the workspace folder — floats above the app (this app only)."
+            style={{ fontSize: 11, padding: "3px 10px", ...(terminalOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+          >🖥 Terminal</button>
+        </div>
+        {/* USAGE — like VS Code: label, % used, bar, reset time. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+          <span style={{ ...sectionTitle, fontSize: 10 }}>Usage</span>
+          {usage?.available ? usage.windows.map((w, i) => (
+            <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <div style={{ display: "flex", alignItems: "baseline", fontSize: 11.5, color: "var(--fg)" }}>
+                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.label}</span>
+                <span style={{ fontWeight: 700 }}>{Math.round(w.usedPct)}%</span>
+              </div>
+              <div style={{ height: 4, borderRadius: 2, background: "var(--bg-surface)", overflow: "hidden" }}>
+                <div style={{ height: "100%", width: `${Math.min(100, Math.max(0, w.usedPct))}%`, borderRadius: 2, background: w.usedPct >= 90 ? "#ff8c8c" : w.usedPct >= 70 ? "#ffd27a" : "var(--accent)" }} />
+              </div>
+              {resetsIn(w.resetsAt) && <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>{resetsIn(w.resetsAt)}</span>}
+            </div>
+          )) : (
+            <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }} title={usage?.note || ""}>
+              {usage ? "no quota data for this account" : "…"}
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ---- Tab strip: ⚡ Super User | 📓 Notebook (two PAGES) ---- */}
+      <div style={{ display: "flex", gap: 4, alignItems: "flex-end", borderBottom: "1px solid var(--border)", paddingTop: 2 }}>
+        {tabBtn("super", "⚡ Super User")}
+        {tabBtn("notebook", "📓 Notebook")}
         {sharedWithTeam && (
-          <span title="This folder is also an agentic project — rules and notebook are SHARED with the team pages." style={{ fontSize: 10, color: "var(--fg-muted)", border: "1px solid var(--border-strong)", borderRadius: 6, padding: "1px 6px" }}>shared with team</span>
+          <span title="This folder is also an agentic project — rules and notebook are SHARED with the team pages." style={{ marginLeft: "auto", marginBottom: 4, fontSize: 10, color: "var(--fg-muted)", border: "1px solid var(--border-strong)", borderRadius: 6, padding: "1px 6px", whiteSpace: "nowrap" }}>shared with team</span>
         )}
       </div>
 
-      {/* ---- Notebook ---- */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={sectionTitle}>📓 Notebook</span>
-          <span style={{ flex: 1 }} />
-          <button className="btn" style={{ fontSize: 11, padding: "2px 10px" }} onClick={onOpenNotebook}>Open</button>
-        </div>
-        <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.45 }}>
-          {pending.length === 0
-            ? "No pending next steps. Brainstorm + plan in the notebook; steps feed the coder."
-            : <>Next up{busy ? " (feeds as a mid-run steer)" : ""}:</>}
-        </div>
-        {pending.slice(0, 4).map((s) => (
-          <div key={s.id} style={{ fontSize: 12, color: "var(--fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }} title={s.text}>• {s.text}</div>
-        ))}
-        {pending.length > 4 && <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>… +{pending.length - 4} more</div>}
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "var(--fg)", cursor: "pointer" }} title="When the coder finishes a turn cleanly, the next pending step is sent by itself.">
-          <input type="checkbox" checked={nb.autoFeed} onChange={toggleAutoFeed} />
-          Auto-feed next step
-        </label>
+      {/* ---- Page: Notebook (kept mounted so notes/digest survive tab flips) ---- */}
+      <div style={{ flex: 1, minHeight: 0, display: tab === "notebook" ? "flex" : "none", flexDirection: "column" }}>
+        {notebook}
       </div>
 
-      {/* ---- Rules ---- */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)", minHeight: 0 }}>
+      {/* ---- Page: Super User (project rules) ---- */}
+      {tab === "super" && (
+      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
           <span style={sectionTitle}>📐 Project rules</span>
           <span style={{ flex: 1 }} />
@@ -185,6 +304,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
           <button className="btn" style={{ fontSize: 11, padding: "2px 8px" }} onClick={() => void addRule()} disabled={rulesBusy || !newText.trim()}>+ Add</button>
         </div>
       </div>
+      )}
     </div>
   );
 }

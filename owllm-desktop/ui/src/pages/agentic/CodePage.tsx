@@ -18,8 +18,9 @@ import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
-import CodeSidePanel from "./CodeSidePanel";
+import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
+import PtyTerminal from "../advanced/PtyTerminal";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -78,6 +79,9 @@ type CodeState = {
   isolated?: boolean;      // true when `workspace` is an OWLLM-managed worktree
   preparing?: boolean;     // worktree is being created in the background (page is
                            // shown immediately; Send is gated until it's ready)
+  // Agent MODE (right-column selector): plan = Kanban plan/act, auto = act
+  // directly (the old Send), chat = discuss only (read-only tools, no edits).
+  agentMode?: CodeAgentMode;
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
@@ -448,6 +452,9 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const isWsl = sbox ? sbox.kind === "wsl" : true;
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
   const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing } = stx;
+  const agentMode: CodeAgentMode = stx.agentMode ?? "auto";
+  // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
+  const [termOpen, setTermOpen] = useState(false);
   const [mergeBusy, setMergeBusy] = useState(false);
   busySendRef.current = busy;
   // Resolve the rules/notebook scope whenever the folder changes: prefer the
@@ -526,6 +533,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const setDraft = (v: string | ((s: string) => string)) => setField("draft", v);
   const setBusy = (v: boolean) => setField("busy", v);
   const setStatus = (v: string) => setField("status", v);
+  const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
 
   // SAME model source as every other page — the full list_models result fed
   // to the shared ModelPicker (localOnly does the filtering). Refresh on focus
@@ -1102,9 +1110,14 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const dDelta = opts?.silent ? () => {} : onDelta;
     const dThought = opts?.silent ? () => {} : onThought;
     const imgs = opts?.images ?? [];
+    // CHAT mode (right-column selector): discuss/review only — read-only
+    // tools, and the system prompt forbids edits/state-changing commands.
+    const chatOnly = agentMode === "chat";
+    const roTools = ["read_file", "list_dir", "grep", "glob", "web_search", "web_fetch"];
     // Project rules ride every turn — the same directives the agentic team
     // follows (empty string when the scope has none yet).
-    const sys = system + formatDirectivesBlock(directivesRef.current);
+    const sys = system + formatDirectivesBlock(directivesRef.current)
+      + (chatOnly ? "\n\nMODE: CHAT — discuss, review, plan and answer questions ONLY. Do NOT edit or create files, and do NOT run commands that change any state. You may read files and search to ground your answers." : "");
     if (isLocal) {
       const port = await ensureServer(modelId);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
@@ -1113,10 +1126,11 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         userContent: imgs.length ? openaiUserContent(user, imgs) : user, temperature: 0.3,
         signal, onDelta: dDelta, onThought: dThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall, onToolResult } : undefined,
+        allowedTools: chatOnly ? roTools : undefined,
         getSteer: drainSteer,
       });
     }
-    return streamChatCompletion(0, modelId, provider, sys, user, 0.3, signal, dDelta, workspace, history, true, dThought, undefined, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
+    return streamChatCompletion(0, modelId, provider, sys, user, 0.3, signal, dDelta, workspace, history, true, dThought, chatOnly ? roTools : undefined, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
   };
 
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
@@ -1191,13 +1205,20 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     void sendRef.current?.(text);
     return "dispatched";
   };
-  const openNotebook = () => {
-    // Refresh the digest agent's local port (best-effort — 0 = server down).
-    invoke<ServerStatus>("server_status")
-      .then((s) => setSrvPort(s && s.running && s.port ? s.port : 0))
-      .catch(() => setSrvPort(0));
-    window.dispatchEvent(new CustomEvent("owllm:open-code-notebook"));
-  };
+  // The notebook now lives INLINE in the right column (always mounted), so its
+  // digest agent's local port is kept fresh with a light poll instead of a
+  // refresh-on-open (best-effort — 0 = server down).
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      invoke<ServerStatus>("server_status")
+        .then((s) => { if (alive) setSrvPort(s && s.running && s.port ? s.port : 0); })
+        .catch(() => { if (alive) setSrvPort(0); });
+    };
+    refresh();
+    const t = setInterval(refresh, 60_000);
+    return () => { alive = false; clearInterval(t); };
+  }, [workspace]);
 
   const startChat = () => {
     setChatMode(true);
@@ -1843,32 +1864,57 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           })
         )}
         </div>
-        {/* Right column: ⚡ Super User — project rules (shared with the team)
-            + the Run Notebook (brainstorm / next steps). User spec 2026-07-04. */}
+        {/* Right column (resizable): utility header (mode / terminal / usage)
+            + two PAGES on a tab strip — ⚡ Super User (project rules, shared
+            with the team) and 📓 Notebook (the shared RunNotebook, inline).
+            User spec 2026-07-04. */}
         {workspace && ruleScope.id && (
           <CodeSidePanel
             scopeId={ruleScope.id}
             sharedWithTeam={ruleScope.shared}
             directives={directives}
             onDirectivesChanged={reloadDirectives}
-            busy={busy}
-            onOpenNotebook={openNotebook}
+            mode={agentMode}
+            onModeChange={setAgentMode}
+            terminalOpen={termOpen}
+            onToggleTerminal={() => setTermOpen((o) => !o)}
+            usageProvider={providerFor(modelId, availableModels)}
+            notebook={
+              <RunNotebook
+                inline
+                projectId={ruleScope.id || null}
+                projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
+                running={busy}
+                onFeed={feedFromNotebook}
+                modelId={modelId}
+                port={srvPort}
+                models={availableModels}
+                accountsStatus={accountsStatus}
+              />
+            }
           />
         )}
       </div>
 
-      {/* Notebook popup — same component the Agents page uses, on its own
-          open event and the SAME per-project blob (shared brainstorm/steps). */}
-      <RunNotebook
-        projectId={ruleScope.id || null}
-        projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
-        running={busy}
-        onFeed={feedFromNotebook}
-        modelId={modelId}
-        port={srvPort}
-        models={availableModels}
-        openEvent="owllm:open-code-notebook"
-      />
+      {/* 🖥 Terminal popup — a real PTY shell in the workspace folder, floating
+          above THIS app's UI only (fixed overlay, no OS always-on-top). */}
+      {termOpen && workspace && (
+        <div style={{ position: "fixed", right: 24, bottom: 24, width: "min(720px, 80vw)", height: "min(440px, 70vh)", zIndex: 1200, display: "flex", flexDirection: "column", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 10, boxShadow: "0 18px 60px rgba(0,0,0,0.6)", overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--border)" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)" }}>🖥 Terminal — {wsShort}</span>
+            <span style={{ flex: 1 }} />
+            <button className="ghost-btn" onClick={() => setTermOpen(false)} title="Close (ends the shell)" style={{ height: 24, width: 26, padding: 0, fontSize: 12 }}>✕</button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <PtyTerminal
+              cli={navigator.userAgent.includes("Windows") ? "powershell" : "bash"}
+              args={[]}
+              cwd={workspace}
+              onExit={() => setTermOpen(false)}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Status line — expands to multiple lines for the per-credential
           sync report (P1-2); stays a single ellipsized line otherwise. */}
@@ -1901,18 +1947,25 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-            placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? "Describe the change, bug, or feature… (paste/drop images too)" : "Pick a workspace folder first…"}
-            rows={2}
-            style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 160, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, fontFamily: "inherit", boxSizing: "border-box" }}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
+            placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
+            rows={3}
+            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
           />
           {busy ? (
             <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
           ) : (
-            <>
-              <button onClick={planAndExecute} disabled={!draft.trim() || preparing} title="Break the goal into ordered steps, then build them one by one (Kanban)" style={{ ...btn, height: 44, padding: "0 14px", opacity: (draft.trim() && !preparing) ? 1 : 0.5 }}>📋 Plan</button>
-              <button onClick={() => void send()} disabled={(!draft.trim() && codeImages.length === 0) || preparing} title={preparing ? "Preparing the workspace — unlocks in a moment" : undefined} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || codeImages.length) && !preparing) ? 1 : 0.5 }}>{preparing ? "⏳ Preparing…" : "Send"}</button>
-            </>
+            /* One primary button — what it does follows the right-column MODE:
+               plan → Kanban plan/act, auto → act directly, chat → discuss only. */
+            <button
+              onClick={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
+              disabled={(!draft.trim() && (agentMode === "plan" || codeImages.length === 0)) || preparing}
+              title={preparing ? "Preparing the workspace — unlocks in a moment"
+                : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
+                : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
+                : "Act directly — read, edit and run in the workspace"}
+              style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeImages.length)) && !preparing) ? 1 : 0.5 }}
+            >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
           )}
         </div>
       </div>

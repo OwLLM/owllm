@@ -205,6 +205,139 @@ fn accounts_status_blocking() -> AccountsStatus {
     }
 }
 
+// ---------------------------------------------------------------------
+// Account usage — VS Code-style quota bars for the account behind the
+// active model. Today only the Claude Code subscription exposes usage
+// (the CLI's own /usage screen reads the same OAuth endpoint); plain API
+// keys have no client-readable quota, so every other provider reports
+// `available:false` with a reason instead of failing.
+// ---------------------------------------------------------------------
+
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageWindow {
+    /// Human label, e.g. "Session (5hr)" / "Weekly (7 day)".
+    pub label: String,
+    /// 0..100 — percentage of the window already used.
+    pub used_pct: f64,
+    /// ISO timestamp when the window resets (UI renders "Resets in Xh").
+    pub resets_at: Option<String>,
+}
+
+#[derive(Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountUsage {
+    pub available: bool,
+    pub provider: String,
+    /// Why usage is unavailable (ignored when `available`).
+    pub note: String,
+    pub windows: Vec<UsageWindow>,
+}
+
+/// Pretty label for the OAuth usage endpoint's window keys. Unknown keys
+/// (new windows Anthropic adds) fall back to the key with underscores
+/// spaced — never dropped.
+fn usage_window_label(key: &str) -> String {
+    match key {
+        "five_hour" => "Session (5hr)".to_string(),
+        "seven_day" => "Weekly (7 day)".to_string(),
+        "seven_day_opus" => "Weekly Opus".to_string(),
+        "seven_day_sonnet" => "Weekly Sonnet".to_string(),
+        "seven_day_oauth_apps" => "Weekly (apps)".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+/// Usage for the account behind `provider` (a `providerFor()` string from
+/// the UI, e.g. "claude_cli"). Network + file reads → spawn_blocking-free
+/// async via reqwest; every failure path returns a explanatory struct
+/// instead of an Err so the UI never surfaces a red toast for a quota bar.
+#[tauri::command]
+pub async fn account_usage(provider: String) -> AccountUsage {
+    let p = provider.to_lowercase();
+    let unavailable = |note: &str| AccountUsage {
+        available: false,
+        provider: provider.clone(),
+        note: note.to_string(),
+        windows: Vec::new(),
+    };
+    if !(p.contains("claude") || p.contains("anthropic")) {
+        return unavailable("usage reporting is only available for the Claude subscription (CLI login)");
+    }
+    // OAuth token from the Claude CLI's credential store (same file
+    // claude_cli_logged_in() checks; sandbox mirroring copies this too).
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        return unavailable("no home dir");
+    };
+    let creds_path = PathBuf::from(home).join(".claude").join(".credentials.json");
+    let Ok(raw) = std::fs::read_to_string(&creds_path) else {
+        return unavailable("Claude CLI is not logged in (no credentials file)");
+    };
+    let token = serde_json::from_str::<serde_json::Value>(&raw)
+        .ok()
+        .and_then(|v| {
+            v.get("claudeAiOauth")
+                .and_then(|o| o.get("accessToken"))
+                .and_then(|t| t.as_str())
+                .map(|s| s.to_string())
+        });
+    let Some(token) = token else {
+        return unavailable("no OAuth access token in the Claude CLI credentials");
+    };
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return unavailable(&format!("http client: {e}")),
+    };
+    // The same endpoint the Claude CLI's /usage screen reads.
+    let resp = client
+        .get("https://api.anthropic.com/api/oauth/usage")
+        .header("Authorization", format!("Bearer {token}"))
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .await;
+    let resp = match resp {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => return unavailable(&format!("usage endpoint returned {}", r.status())),
+        Err(e) => return unavailable(&format!("usage request failed: {e}")),
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return unavailable(&format!("usage response unreadable: {e}")),
+    };
+    // Parse generically: every top-level object carrying a numeric
+    // "utilization" is a quota window — robust to Anthropic adding windows.
+    let mut windows = Vec::new();
+    if let Some(map) = body.as_object() {
+        for (key, val) in map {
+            let Some(util) = val.get("utilization").and_then(|u| u.as_f64()) else { continue };
+            windows.push(UsageWindow {
+                label: usage_window_label(key),
+                used_pct: util,
+                resets_at: val
+                    .get("resets_at")
+                    .and_then(|r| r.as_str())
+                    .map(|s| s.to_string()),
+            });
+        }
+    }
+    if windows.is_empty() {
+        return unavailable("usage endpoint returned no quota windows");
+    }
+    // Fractions (all ≤ 1.0) → percentages; the endpoint has reported 0-100.
+    if windows.iter().all(|w| w.used_pct <= 1.0) {
+        for w in &mut windows {
+            w.used_pct *= 100.0;
+        }
+    }
+    for w in &mut windows {
+        w.used_pct = w.used_pct.clamp(0.0, 100.0);
+    }
+    AccountUsage { available: true, provider, note: String::new(), windows }
+}
+
 /// Save a single API key. `name` is the env-var name
 /// (ANTHROPIC_API_KEY / OPENAI_API_KEY); `value` is the raw key.
 /// Empty value behaves like `accounts_delete_secret` for parity with

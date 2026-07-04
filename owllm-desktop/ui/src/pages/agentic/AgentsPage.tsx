@@ -12656,6 +12656,7 @@ export function AgentsPage({
         modelId={effectiveTeamModel || (serverState.model_id ?? "local")}
         port={serverState.port ?? 0}
         models={models}
+        accountsStatus={accountsStatus}
       />
       {llamaLoading !== null && (
         <div data-ui="LlamaLoadingBanner" style={{

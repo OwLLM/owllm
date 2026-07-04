@@ -235,11 +235,33 @@ const BRIDGE_JS: &str = r##"
   var SEL = "a,button,input,select,textarea,[role=button],[role=link]," +
             "[role=checkbox],[role=radio],[role=tab],[role=menuitem]," +
             "[role=option],[contenteditable=true],[onclick]";
+  // React/Vue menus often use a plain <div>/<span>/<li> with an onClick handler:
+  // no role, no onclick attribute — so SEL misses them (e.g. language switchers,
+  // custom dropdowns). Second pass catches the INNERMOST cursor:pointer element
+  // that carries a short label, without exploding on big clickable wrappers.
+  function pointerClickable(el) {
+    if (getComputedStyle(el).cursor !== "pointer") return false;
+    var txt = (el.innerText || el.textContent || "").trim();
+    if (!txt || txt.length > 60) return false;
+    var kids = el.getElementsByTagName("*");
+    for (var k = 0; k < kids.length; k++) {
+      if ((kids[k].innerText || "").trim() &&
+          getComputedStyle(kids[k]).cursor === "pointer") return false; // not innermost
+    }
+    return true;
+  }
   function reindex() {
-    var all = Array.prototype.slice.call(document.querySelectorAll(SEL));
     var els = [];
-    for (var i = 0; i < all.length && els.length < 150; i++) {
-      if (visible(all[i])) els.push(all[i]);
+    var primary = document.querySelectorAll(SEL);
+    for (var i = 0; i < primary.length && els.length < 150; i++) {
+      if (visible(primary[i])) els.push(primary[i]);
+    }
+    if (els.length < 150) {
+      var extra = document.querySelectorAll("div,span,li");
+      for (var j = 0; j < extra.length && j < 4000 && els.length < 150; j++) {
+        var e = extra[j];
+        if (els.indexOf(e) === -1 && visible(e) && pointerClickable(e)) els.push(e);
+      }
     }
     window.__owllmEls = els;
     return els;

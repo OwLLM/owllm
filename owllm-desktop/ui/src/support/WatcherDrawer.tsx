@@ -36,6 +36,43 @@ function openExternal(url: string) {
   });
 }
 
+// Landing-card icons are inline SVG, NOT emoji, on purpose: the life-ring emoji
+// (🛟 U+1F6DF, Emoji 13.0) ships in Windows 11's Segoe UI Emoji but is MISSING on
+// Windows 10, where it renders as a "tofu" box. SVG paints identically on Win10/
+// Win11/macOS/Linux and inherits the theme accent, so the icons stop differing
+// across OS versions. Sized to match the old 32px emoji.
+function LifeRingIcon() {
+  return (
+    <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"
+      stroke="var(--accent)" strokeWidth={2.5} strokeLinecap="round">
+      <circle cx="16" cy="16" r="13" />
+      <circle cx="16" cy="16" r="5.5" />
+      <line x1="16" y1="3" x2="16" y2="10.5" />
+      <line x1="16" y1="21.5" x2="16" y2="29" />
+      <line x1="3" y1="16" x2="10.5" y2="16" />
+      <line x1="21.5" y1="16" x2="29" y2="16" />
+    </svg>
+  );
+}
+function BugIcon() {
+  return (
+    <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"
+      stroke="var(--accent)" strokeWidth={2.5} strokeLinecap="round">
+      <ellipse cx="16" cy="18" rx="8" ry="9.5" />
+      <line x1="16" y1="8.5" x2="16" y2="27.5" />
+      <circle cx="16" cy="7" r="3" />
+      <line x1="14" y1="5" x2="11.5" y2="2.5" />
+      <line x1="18" y1="5" x2="20.5" y2="2.5" />
+      <line x1="8" y1="14" x2="4.5" y2="12" />
+      <line x1="8" y1="18" x2="4.5" y2="18" />
+      <line x1="8" y1="22" x2="4.5" y2="24" />
+      <line x1="24" y1="14" x2="27.5" y2="12" />
+      <line x1="24" y1="18" x2="27.5" y2="18" />
+      <line x1="24" y1="22" x2="27.5" y2="24" />
+    </svg>
+  );
+}
+
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
 type SupportSnapshot = {
   appVersion: string;
@@ -744,14 +781,14 @@ export default function WatcherDrawer({
           /* Landing menu — the 1×2 table: Help using the app · Report a bug. */
           <div style={{ padding: 22, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "stretch" }}>
             <button style={homeCard} disabled={busy} onClick={enterHelp}>
-              <div style={{ fontSize: 32 }}>🛟</div>
+              <div style={{ height: 32, display: "flex", alignItems: "center" }}><LifeRingIcon /></div>
               <div style={{ fontWeight: 800, fontSize: 15 }}>Help using the app</div>
               <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                 Pick a model, get guided walkthroughs, or screenshot your screen and ask.
               </div>
             </button>
             <button style={homeCard} disabled={busy} onClick={startBugReport}>
-              <div style={{ fontSize: 32 }}>🐞</div>
+              <div style={{ height: 32, display: "flex", alignItems: "center" }}><BugIcon /></div>
               <div style={{ fontWeight: 800, fontSize: 15 }}>Report a bug</div>
               <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                 Grabs a screenshot automatically and opens a box to describe the issue.

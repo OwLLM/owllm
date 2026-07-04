@@ -18,16 +18,21 @@
 // request. It speaks MCP Streamable-HTTP in single-JSON-response mode (POST →
 // one application/json JSON-RPC reply; GET → 405, we offer no server push).
 //
-// SCOPE — host runs only (for now)
-// Wired ONLY for non-isolated (host) CLI runs: 127.0.0.1 is reachable there.
-// A WSL-isolated run can't reach the host loopback without binding a non-loopback
-// interface (bigger attack surface) — and the browser window is a host-desktop
-// object anyway, so host-only is the principled boundary. Isolated runs keep
-// today's behaviour (browser tools simply unavailable).
+// SCOPE — host + full-access (trusted) WSL runs
+// HOST runs reach 127.0.0.1 directly (HTTP transport). A WSL-isolated run can't
+// reach the host loopback over TCP (NAT + Windows Firewall drop WSL→host —
+// verified empirically), but a FULL-ACCESS (trusted) WSL run can reach it via
+// interop: an MCP *stdio* relay (write_cli_config_wsl) forwards each JSON-RPC
+// message through curl.exe, which runs on the host and hits its own loopback.
+// A bwrap-JAILED run is deliberately excluded: interop is unavailable in the
+// jail, and a jailed agent is meant to be cut off from the host — handing it the
+// user's logged-in browser would defeat the sandbox.
 //
-// RUNTIME-VERIFICATION NOTE: the CLI↔server MCP handshake cannot be exercised
-// from a headless build box. The protocol is implemented to spec + unit-tested
-// for framing, but the live round-trip needs a real app session to confirm.
+// RUNTIME-VERIFICATION NOTE: the transport is verified in pieces — the real
+// `claude` CLI speaks this MCP protocol (mock-gateway test), and the stdio relay
+// reaches the host gateway through interop curl.exe (WSL round-trip test). The
+// one seam not exercisable from a headless box is the CLI spawning THIS relay
+// inside a live full-access WSL agentic run.
 
 use serde_json::{json, Value};
 use std::io::Read;
@@ -123,6 +128,69 @@ pub fn write_cli_config(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     std::fs::write(&path, serde_json::to_vec_pretty(&cfg).unwrap_or_default())
         .map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(path)
+}
+
+/// stdio↔HTTP relay for FULL-ACCESS WSL runs.
+///
+/// A WSL-isolated agent can't reach the host loopback gateway over TCP (NAT +
+/// Windows Firewall drops WSL→host — verified). But WSL *interop* lets a Linux
+/// process exec a Windows `.exe`, which runs on the HOST and so reaches the
+/// host's own 127.0.0.1. So instead of MCP-over-HTTP we hand the in-distro CLI
+/// an MCP **stdio** server: this tiny bash relay forwards each newline-delimited
+/// JSON-RPC message to the gateway via `curl.exe` (interop → host → loopback)
+/// and prints the reply. Notifications (HTTP 202, empty body) produce no line,
+/// exactly as MCP stdio requires. Only wired for full-access (trusted) WSL
+/// projects — a bwrap-jailed run has no interop and is deliberately cut off from
+/// the host, so its agent never gets host-browser control.
+///   $1 = gateway URL (http://127.0.0.1:PORT/)   $2 = "Bearer <token>"
+///   $3 = /mnt path to Windows curl.exe
+#[cfg(windows)]
+const WSL_RELAY_SH: &str = r#"#!/usr/bin/env bash
+# OWLLM MCP stdio<->HTTP relay (full-access WSL runs). See mcp_gateway.rs.
+url="$1"; auth="$2"; curlexe="$3"
+[ -x "$curlexe" ] || curlexe="curl.exe"   # fall back to interop PATH
+while IFS= read -r line; do
+  [ -z "$line" ] && continue
+  resp=$(printf '%s' "$line" | "$curlexe" -s -m 120 \
+      -H "Authorization: $auth" -H "Content-Type: application/json" \
+      --data-binary @- "$url" 2>/dev/null)
+  [ -n "$resp" ] && printf '%s\n' "$resp"
+done
+"#;
+
+/// Ensure the gateway is up and write a `--mcp-config` that a FULL-ACCESS WSL
+/// CLI run can use. Returns the config path as a Linux (/mnt) path the in-distro
+/// CLI reads. Windows-only: interop is a WSL concept.
+#[cfg(windows)]
+pub fn write_cli_config_wsl(app: &AppHandle) -> Result<String, String> {
+    let info = ensure_started(app)?;
+    let dir = crate::paths::user_data_root().ok_or_else(|| "no user-data dir".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+
+    // Materialize the relay script and translate its path into the distro.
+    let relay_win = dir.join("mcp_wsl_relay.sh");
+    std::fs::write(&relay_win, WSL_RELAY_SH.replace("\r\n", "\n"))
+        .map_err(|e| format!("write relay: {e}"))?;
+    let relay_mnt = crate::sandbox::win_to_mnt(&relay_win.to_string_lossy())?;
+
+    // Windows curl.exe, expressed as its /mnt path (robust to a non-C: SystemRoot).
+    let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
+    let curl_win = format!("{}\\System32\\curl.exe", sysroot.trim_end_matches('\\'));
+    let curl_mnt = crate::sandbox::win_to_mnt(&curl_win).unwrap_or_else(|_| "curl.exe".to_string());
+
+    let cfg = json!({
+        "mcpServers": {
+            SERVER_NAME: {
+                "type": "stdio",
+                "command": "bash",
+                "args": [ relay_mnt, info.url, format!("Bearer {}", info.token), curl_mnt ]
+            }
+        }
+    });
+    let cfg_win = dir.join("mcp-gateway-wsl.json");
+    std::fs::write(&cfg_win, serde_json::to_vec_pretty(&cfg).unwrap_or_default())
+        .map_err(|e| format!("write {}: {e}", cfg_win.display()))?;
+    crate::sandbox::win_to_mnt(&cfg_win.to_string_lossy())
 }
 
 /// The fully-namespaced CLI tool names this gateway exposes, e.g.

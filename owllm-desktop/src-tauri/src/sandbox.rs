@@ -1398,7 +1398,7 @@ pub async fn sandbox_provision() -> Result<String, String> {
 // ---- login sync (host CLI creds → sandbox) --------------------------------
 
 #[cfg(windows)]
-fn win_to_mnt(p: &str) -> Result<String, String> {
+pub(crate) fn win_to_mnt(p: &str) -> Result<String, String> {
     let p = p.replace('\\', "/");
     let b = p.as_bytes();
     if b.len() >= 2 && b[1] == b':' {

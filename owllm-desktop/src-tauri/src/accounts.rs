@@ -1754,14 +1754,19 @@ pub async fn claude_cli_stream(
         args.push("--print".into());
 
         // MCP GATEWAY: expose OWLLM's browser_* tools to this CLI agent natively
-        // (as mcp__owllm__browser_*). Only for HOST runs — a WSL-isolated run
-        // can't reach the loopback gateway, and the browser is a host-desktop
-        // window anyway. The browser is a CROSS-CUTTING capability (one window
-        // shared with the user, mirroring BROWSER_TOOL_NAMES in localTools.ts):
-        // never gated by the role tool_allowlist — no role YAML names browser_*,
-        // so gating here meant specialist CLI agents could never see the page
-        // the user opened. Best-effort: a gateway failure logs and falls back
-        // to today's behaviour (no browser for CLI).
+        // (as mcp__owllm__browser_*). The browser is a CROSS-CUTTING capability
+        // (one window shared with the user, mirroring BROWSER_TOOL_NAMES in
+        // localTools.ts): never gated by the role tool_allowlist — no role YAML
+        // names browser_*, so gating here meant specialist CLI agents could never
+        // see the page the user opened.
+        //   * HOST run → HTTP transport on 127.0.0.1 (directly reachable).
+        //   * FULL-ACCESS (trusted) WSL run → MCP *stdio* relay: the in-distro CLI
+        //     reaches the host gateway via interop (curl.exe runs on the host),
+        //     no firewall rule needed (verified: WSL→host loopback via curl.exe).
+        //   * bwrap-JAILED WSL run → no browser: interop is unavailable in the
+        //     jail and a jailed agent is deliberately cut off from the host, so
+        //     handing it the user's logged-in browser would defeat the sandbox.
+        // Best-effort: a gateway failure logs and falls back to no browser tools.
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
         let mcp_config_path: Option<String> = if host_run {
             match crate::mcp_gateway::write_cli_config(&app) {
@@ -1772,7 +1777,24 @@ pub async fn claude_cli_stream(
                 }
             }
         } else {
-            None
+            #[cfg(windows)]
+            {
+                if crate::sandbox::is_full_access(cwd.as_deref()) {
+                    match crate::mcp_gateway::write_cli_config_wsl(&app) {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            eprintln!("mcp wsl gateway not started ({e}); CLI agent runs without browser tools");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
         };
         let mcp_tool_names: Vec<String> = if mcp_config_path.is_some() {
             crate::mcp_gateway::cli_tool_names()

@@ -52,34 +52,77 @@ const SENTINEL: &str = "\u{2063}OWLLM\u{2063}";
 /// mistaken for the current reply.
 static REQ: AtomicU64 = AtomicU64::new(1);
 
+/// A reply being assembled from one-or-more title-channel chunks.
+/// `document.title` can't reliably carry a large payload in a single write (a
+/// long page's base64 gets truncated in transit → decode failure → the agent
+/// got raw base64). So a reply is base64-split into CAP-sized chunks that Rust
+/// pulls one at a time and reassembles. A short reply is a single chunk
+/// (total = 1) — same one-write path as before, no extra round-trips.
+struct ReplyAcc {
+    total: u64,
+    chunks: std::collections::BTreeMap<u64, String>,
+}
+
 /// Replies pushed by the document-title-changed handler, keyed by request id.
 /// Bounded: entries older than the newest 64 are dropped on insert.
-static REPLIES: Mutex<Option<HashMap<u64, String>>> = Mutex::new(None);
+static REPLIES: Mutex<Option<HashMap<u64, ReplyAcc>>> = Mutex::new(None);
 
-/// Parse a sentinel-tagged title into (request id, base64 payload).
-/// Returns None for ordinary page titles.
-fn parse_reply(title: &str) -> Option<(u64, &str)> {
+/// Parse a sentinel-tagged title into (request id, chunk index, total chunks,
+/// base64 payload). Returns None for ordinary page titles.
+/// Wire format: SENTINEL + id + U+2063 + k + U+2063 + total + U+2063 + b64.
+fn parse_reply(title: &str) -> Option<(u64, u64, u64, &str)> {
     let rest = title.strip_prefix(SENTINEL)?;
-    let (id, payload) = rest.split_once('\u{2063}')?;
-    Some((id.parse().ok()?, payload))
+    let (id, rest) = rest.split_once('\u{2063}')?;
+    let (k, rest) = rest.split_once('\u{2063}')?;
+    let (total, payload) = rest.split_once('\u{2063}')?;
+    Some((id.parse().ok()?, k.parse().ok()?, total.parse().ok()?, payload))
 }
 
 /// Called by the title-changed handler for every title the page sets.
 fn capture_reply(title: &str) {
-    let Some((id, payload)) = parse_reply(title) else { return };
+    let Some((id, k, total, payload)) = parse_reply(title) else { return };
     let mut guard = REPLIES.lock().unwrap_or_else(|p| p.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
-    map.insert(id, payload.to_string());
+    let acc = map.entry(id).or_insert_with(|| ReplyAcc { total, chunks: Default::default() });
+    acc.total = total; // trust the latest report for this id
+    acc.chunks.insert(k, payload.to_string());
     if map.len() > 64 {
         let min_keep = id.saturating_sub(64);
-        map.retain(|k, _| *k >= min_keep);
+        map.retain(|kk, _| *kk >= min_keep);
     }
 }
 
-/// Take (consume) the reply for `req`, if it has arrived.
-fn take_reply(req: u64) -> Option<String> {
+/// Total chunk count + which indices have arrived so far for `req` (None until
+/// the first chunk lands). Lets the puller ask for exactly the missing chunk.
+fn reply_progress(req: u64) -> Option<(u64, std::collections::BTreeSet<u64>)> {
+    let guard = REPLIES.lock().unwrap_or_else(|p| p.into_inner());
+    let acc = guard.as_ref()?.get(&req)?;
+    Some((acc.total, acc.chunks.keys().copied().collect()))
+}
+
+/// If every chunk for `req` has arrived, consume the entry and return the
+/// reassembled base64 payload (chunks concatenated in index order).
+fn take_if_complete(req: u64) -> Option<String> {
     let mut guard = REPLIES.lock().unwrap_or_else(|p| p.into_inner());
-    guard.as_mut()?.remove(&req)
+    let map = guard.as_mut()?;
+    let acc = map.get(&req)?;
+    if acc.total == 0 || (acc.chunks.len() as u64) < acc.total {
+        return None;
+    }
+    let assembled: String = acc.chunks.values().cloned().collect();
+    map.remove(&req);
+    Some(assembled)
+}
+
+/// Decode a base64 reply payload back to text, falling back to the raw string
+/// if it somehow isn't valid base64 (never silently lose the reply).
+fn decode_b64(payload: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::STANDARD
+        .decode(payload.trim())
+        .ok()
+        .and_then(|b| String::from_utf8(b).ok())
+        .unwrap_or_else(|| payload.to_string())
 }
 
 #[derive(Serialize)]
@@ -155,21 +198,34 @@ const BRIDGE_JS: &str = r##"
   window.__owllmBridge = true;
   var Z = String.fromCharCode(8291); // U+2063 invisible separator
   var SENT = Z + "OWLLM" + Z;
-  var CAP = 4000; // keep the whole reply inside one document.title write
+  var CAP = 1600; // base64 chars per title write — safely within any title limit
   function b64(s) {
     // UTF-8 → base64 so the reply survives the title channel intact (base64
     // has no whitespace for anything to collapse).
     try { return btoa(unescape(encodeURIComponent(s))); } catch (e) { return btoa("(encode error)"); }
   }
+  // A reply is base64-split into CAP-sized chunks that Rust pulls one at a time
+  // via __owllmEmit and reassembles — a single title write can't reliably carry
+  // a whole page (long titles get truncated → the agent used to get raw base64).
+  // A short reply is a single chunk (total=1): the same one-write path as before.
   function report(reqId, text) {
-    var s = String(text == null ? "" : text);
-    if (s.length > CAP) s = s.slice(0, CAP) + "\n…[truncated]";
-    var old = document.title;
-    // Rust receives this via the engine's title-changed event (pushed), so we
-    // can restore the user-visible title right after.
-    document.title = SENT + reqId + Z + b64(s);
-    setTimeout(function () { try { document.title = old; } catch (e) {} }, 60);
+    var b = b64(String(text == null ? "" : text));
+    var chunks = [];
+    for (var i = 0; i < b.length; i += CAP) chunks.push(b.slice(i, i + CAP));
+    if (!chunks.length) chunks.push("");
+    (window.__owllmReplies = window.__owllmReplies || {})[reqId] = chunks;
+    emit(reqId, 0);
   }
+  function emit(reqId, k) {
+    var chunks = (window.__owllmReplies || {})[reqId];
+    if (!chunks || k < 0 || k >= chunks.length) return;
+    // Remember the last REAL (non-sentinel) title so restores never persist a
+    // sentinel, even while several chunks are pulled in sequence.
+    if (document.title.indexOf(SENT) !== 0) window.__owllmTitle0 = document.title;
+    document.title = SENT + reqId + Z + k + Z + chunks.length + Z + chunks[k];
+    setTimeout(function () { try { document.title = window.__owllmTitle0 || ""; } catch (e) {} }, 60);
+  }
+  window.__owllmEmit = function (reqId, k) { emit(reqId, k); };
   function visible(el) {
     var r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return false;
@@ -467,25 +523,47 @@ fn eval_until_reply(
     let params_js = serde_json::to_string(&params.to_string()).unwrap_or_else(|_| "\"{}\"".to_string());
     let call = format!("try{{window.__owllmRun&&window.__owllmRun({req},{action:?},{params_js})}}catch(e){{}}");
     let start = Instant::now();
-    let mut last_eval = Instant::now() - Duration::from_secs(1);
+    let mut last_invoke = Instant::now() - Duration::from_secs(1);
+    let mut requested: Option<u64> = None;
+    let mut requested_at = Instant::now() - Duration::from_secs(1);
     loop {
-        // Re-eval periodically (covers the case where the first eval hit a
-        // transitional/loading document before the bridge was injected).
-        if last_eval.elapsed() >= Duration::from_millis(250) {
-            let _ = win.eval(&call);
-            last_eval = Instant::now();
-        }
-        if let Some(b64_payload) = take_reply(req) {
-            use base64::Engine as _;
-            let out = base64::engine::general_purpose::STANDARD
-                .decode(b64_payload.trim())
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_else(|| b64_payload.clone());
+        // Reply fully assembled → reassemble base64 + decode.
+        if let Some(b64_payload) = take_if_complete(req) {
+            let out = decode_b64(&b64_payload);
             if let Some(msg) = out.strip_prefix("ERROR: ") {
                 return Err(msg.to_string());
             }
             return Ok(out);
+        }
+        match reply_progress(req) {
+            // No chunk yet — (re)invoke the action. The page may still be loading
+            // (bridge not injected), so retry until the first chunk lands. Once
+            // ANY chunk arrives we stop re-invoking, so a side-effecting action
+            // (click/fill) runs at most until its first report — no repeat click.
+            None => {
+                if last_invoke.elapsed() >= Duration::from_millis(250) {
+                    let _ = win.eval(&call);
+                    last_invoke = Instant::now();
+                }
+            }
+            // First chunk arrived; pull the rest ONE AT A TIME. Requesting several
+            // at once would coalesce into a single title event and lose the
+            // intermediate chunks — so ask for the smallest missing index, advance
+            // as it arrives, and re-ask every 120ms if a title event was dropped.
+            Some((total, have)) => {
+                if total > 1 {
+                    if let Some(k) = (0..total).find(|k| !have.contains(k)) {
+                        let advanced = requested != Some(k);
+                        if advanced || requested_at.elapsed() >= Duration::from_millis(120) {
+                            let _ = win.eval(&format!(
+                                "try{{window.__owllmEmit&&window.__owllmEmit({req},{k})}}catch(e){{}}"
+                            ));
+                            requested = Some(k);
+                            requested_at = Instant::now();
+                        }
+                    }
+                }
+            }
         }
         if start.elapsed() > timeout {
             return Err(format!(
@@ -555,29 +633,45 @@ mod tests {
     fn reply_channel_round_trip() {
         use base64::Engine as _;
         let payload = base64::engine::general_purpose::STANDARD.encode("hello page");
-        // Exactly what BRIDGE_JS's report() writes into document.title.
-        let title = format!("{SENTINEL}42\u{2063}{payload}");
-        assert_eq!(parse_reply(&title), Some((42u64, payload.as_str())));
-        // Ordinary page titles are ignored.
+        // A single-chunk reply (total=1) — exactly what report() writes for a
+        // short payload: SENTINEL id Z 0 Z 1 Z b64.
+        let title = format!("{SENTINEL}42\u{2063}0\u{2063}1\u{2063}{payload}");
+        assert_eq!(parse_reply(&title), Some((42u64, 0u64, 1u64, payload.as_str())));
+        // Ordinary page titles + malformed sentinels are ignored.
         assert_eq!(parse_reply("GitHub — where software is built"), None);
         assert_eq!(parse_reply(""), None);
-        // Sentinel without an id/separator is ignored.
         assert_eq!(parse_reply("\u{2063}OWLLM\u{2063}garbage"), None);
+        assert_eq!(parse_reply(&format!("{SENTINEL}42\u{2063}0")), None); // missing fields
 
-        // capture → take consumes exactly once.
+        // capture → complete → decode consumes exactly once.
         capture_reply(&title);
-        assert_eq!(take_reply(42), Some(payload.clone()));
-        assert_eq!(take_reply(42), None);
+        assert_eq!(take_if_complete(42).as_deref(), Some(payload.as_str()));
+        assert_eq!(take_if_complete(42), None);
 
-        // The map is bounded: old entries are pruned as new ones arrive.
-        // (Same test fn as above — REPLIES is a process-global, and parallel
-        // test threads pruning it would race each other.)
-        let b = base64::engine::general_purpose::STANDARD.encode("x");
+        // Multi-chunk: 3 chunks arriving OUT OF ORDER only complete once all
+        // present, and reassemble in index order.
+        let full = base64::engine::general_purpose::STANDARD.encode("the quick brown fox");
+        let a = &full[0..6];
+        let b = &full[6..12];
+        let c = &full[12..];
+        assert!(take_if_complete(7).is_none());
+        capture_reply(&format!("{SENTINEL}7\u{2063}2\u{2063}3\u{2063}{c}"));
+        assert!(take_if_complete(7).is_none()); // still missing 0,1
+        capture_reply(&format!("{SENTINEL}7\u{2063}0\u{2063}3\u{2063}{a}"));
+        assert!(take_if_complete(7).is_none()); // still missing 1
+        capture_reply(&format!("{SENTINEL}7\u{2063}1\u{2063}3\u{2063}{b}"));
+        assert_eq!(take_if_complete(7).as_deref(), Some(full.as_str()));
+        assert_eq!(decode_b64(&full), "the quick brown fox");
+
+        // The map is bounded: old ids are pruned as new ones arrive.
+        // (Kept in ONE test fn — REPLIES is a process-global; parallel test
+        // threads pruning it would race.)
+        let x = base64::engine::general_purpose::STANDARD.encode("x");
         for id in 1000..1100u64 {
-            capture_reply(&format!("{SENTINEL}{id}\u{2063}{b}"));
+            capture_reply(&format!("{SENTINEL}{id}\u{2063}0\u{2063}1\u{2063}{x}"));
         }
-        assert_eq!(take_reply(1000), None);
-        assert_eq!(take_reply(1099), Some(b));
+        assert_eq!(take_if_complete(1000), None);
+        assert_eq!(take_if_complete(1099).as_deref(), Some(x.as_str()));
     }
 
     #[test]

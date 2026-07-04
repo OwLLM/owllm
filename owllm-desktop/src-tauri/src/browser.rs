@@ -289,6 +289,25 @@ const BRIDGE_JS: &str = r##"
   }
   function elAt(i) { var e = (window.__owllmEls || [])[i]; if (!e) throw new Error("no element at index " + i); return e; }
   function fire(el, type) { el.dispatchEvent(new Event(type, { bubbles: true })); }
+  // A bare el.click() dispatches ONLY a 'click' event — it skips the hover and
+  // pointer/mouse-down events a real cursor emits. Menus that open on hover or
+  // pointerdown (React/Radix/Headless language switchers, custom dropdowns)
+  // therefore never open under automation even though a human mouse works.
+  // Replay the full trusted-mouse sequence, ending in a SINGLE native click so a
+  // toggle button can't open-then-close (no double click event).
+  function realClick(el) {
+    var r = el.getBoundingClientRect();
+    var cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    var base = { bubbles: true, cancelable: true, view: window, clientX: cx, clientY: cy };
+    function pt(t, ex) { try { el.dispatchEvent(new PointerEvent(t, Object.assign({ pointerId: 1, pointerType: "mouse", isPrimary: true }, base, ex || {}))); } catch (e) {} }
+    function ms(t, ex) { try { el.dispatchEvent(new MouseEvent(t, Object.assign({ button: 0 }, base, ex || {}))); } catch (e) {} }
+    pt("pointerover"); ms("mouseover"); pt("pointerenter"); ms("mouseenter");
+    pt("pointermove"); ms("mousemove");
+    pt("pointerdown", { buttons: 1 }); ms("mousedown", { buttons: 1 });
+    try { el.focus(); } catch (e) {}
+    pt("pointerup"); ms("mouseup");
+    try { el.click(); } catch (e) { ms("click"); }
+  }
   window.__owllmRun = function (reqId, action, paramsJson) {
     var p = {};
     try { p = paramsJson ? JSON.parse(paramsJson) : {}; } catch (e) {}
@@ -311,8 +330,11 @@ const BRIDGE_JS: &str = r##"
         }
         case "click": {
           var el = elAt(p.index); el.scrollIntoView({ block: "center" });
-          el.click();
-          return setTimeout(function () { report(reqId, "clicked [" + p.index + "] " + label(el) + "\n\n" + snapshot()); }, 350);
+          realClick(el);
+          // 500ms lets a just-opened menu finish its enter animation before the
+          // re-snapshot re-indexes it (the newly-rendered items are then caught
+          // by the cursor:pointer pass in reindex()).
+          return setTimeout(function () { report(reqId, "clicked [" + p.index + "] " + label(el) + "\n\n" + snapshot()); }, 500);
         }
         case "fill": {
           var f = elAt(p.index); f.focus();

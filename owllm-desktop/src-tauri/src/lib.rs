@@ -20,6 +20,8 @@ mod audio;
 mod bootstrap;
 mod bridges;
 mod browser;
+mod browser_import;
+mod browser_vault;
 mod code;
 mod crypt;
 mod data_layer;
@@ -230,6 +232,13 @@ pub fn run() {
             browser::browser_stop,
             browser::browser_status,
             browser::browser_view,
+            browser::browser_focus,
+            browser_vault::browser_vault_list,
+            browser_vault::browser_vault_add,
+            browser_vault::browser_vault_delete,
+            browser_vault::browser_vault_autofill,
+            browser_import::browser_import_scan,
+            browser_import::browser_import_run,
             git::git_status,
             git::git_branches,
             git::git_checkout,

@@ -1969,8 +1969,9 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         </div>
       )}
 
-      {/* 🌐 Agent Browser popup — viewer/remote for the app-global Playwright
-          daemon the agents drive with the browser_* tools. Shared component. */}
+      {/* 🌐 Agent Browser popup — remote/manager for the native embedded browser
+          (a real OwLLM WebviewWindow) the agents drive with the browser_* tools.
+          Shared component; also handles the password vault + browser import. */}
       <BrowserPanel open={browserOpen} onClose={() => setBrowserOpen(false)} />
 
       {/* Status line — expands to multiple lines for the per-credential

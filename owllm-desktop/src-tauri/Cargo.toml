@@ -149,6 +149,14 @@ symphonia-adapter-libopus = "0.1"
 aes = "0.8"
 cbc = { version = "0.1", features = ["alloc"] }
 md-5 = "0.10"
+# Agent-browser credential IMPORT (browser_import.rs). Chrome/Edge/Brave/Opera
+# all share Chromium's "v10" password scheme: a per-profile AES-256 key stored
+# in `Local State` (DPAPI-wrapped on Windows), then each password blob is
+# AES-256-GCM (12-byte nonce, 16-byte tag). aes-gcm is the pure-Rust RustCrypto
+# AEAD for that. `url` (already in the tree via tauri) is named directly here
+# and in browser_vault.rs for origin normalisation.
+aes-gcm = "0.10"
+url = "2"
 
 # Windows-only: needed by overlay_frame to make the cyan chrome window
 # an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).

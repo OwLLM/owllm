@@ -1,304 +1,352 @@
-// Browser Control — the SERVER side of the OWLLM "logged-in browser" feature.
+// Agent Browser — a NATIVE, embedded browser the agents drive.
 //
-// A single persistent Playwright daemon (resources/tools/browser_daemon.py)
-// runs as a child process; we own it here and talk to it over stdio with
-// newline-delimited JSON. The frontend (localTools.ts) never sees Python — it
-// calls these five Tauri commands and gets text back:
+// This replaces the old Playwright/Python daemon entirely. Instead of a
+// separate downloaded Chromium driven over stdio, we open a real Tauri
+// `WebviewWindow` (the SAME WebView2 / WKWebView / WebKitGTK engine the app
+// already ships) pointed at the live web page. The user sees it as an
+// OwLLM-owned popup window they can watch, move, and log into; the agents
+// drive it with the browser_* tools. Cookies/logins persist because the
+// window is pinned to a stable data directory under the app's user-data tree.
 //
-//   browser_ensure  -> verify Playwright + Chromium are available (actionable
-//                      error otherwise); does NOT spawn the daemon.
-//   browser_start   -> spawn the daemon (idempotent: no-op if already alive).
-//   browser_cmd     -> send one {action, params} line, return the daemon's text.
-//   browser_stop    -> close the session, return a text reply.
-//   browser_status  -> {running, pid}; resilient to a dead child.
+// HOW WE DRIVE IT (no Python, no IPC ACL gymnastics):
+//   * An `initialization_script` (BRIDGE_JS) is injected at document-start on
+//     every navigation, defining window.__owllmRun(reqId, action, paramsJson).
+//     It does the DOM work (snapshot/click/fill/…) and reports the result by
+//     writing a sentinel-prefixed string into `document.title`.
+//   * Rust calls webview.eval(...) to invoke __owllmRun, then polls
+//     webview.title() until the sentinel for that reqId appears, and reads the
+//     payload back out. This channel is engine-agnostic and needs no remote
+//     capability grant. Payloads are truncated JS-side (see CAP) so a single
+//     title carries the whole reply — no multi-chunk loop that could hang.
 //
-// Concurrency: exactly one daemon. SESSION is a Mutex<Option<Session>>; every
-// command locks it, so requests to the single daemon are serialized (a slow
-// navigate blocks a concurrent snapshot — correct for one shared browser).
+// The Tauri command NAMES are unchanged (browser_ensure/start/cmd/stop/
+// status/view) so localTools.ts and BrowserPanel.tsx keep working as-is.
 
-use once_cell::sync::Lazy;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
-struct Session {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
+/// Label of the single agent-browser window. Looked up by label everywhere, so
+/// there is no global handle to keep in sync — if the user closes the window,
+/// `get_webview_window` simply returns None and we report "not running".
+const BROWSER_LABEL: &str = "owllm-browser";
 
-static SESSION: Lazy<Mutex<Option<Session>>> = Lazy::new(|| Mutex::new(None));
+/// Sentinel that fronts every reply written into `document.title`. Uses an
+/// invisible separator (U+2063) so it can never collide with real page titles.
+const SENTINEL: &str = "\u{2063}OWLLM\u{2063}";
+
+/// Monotonic request id so a stale title from a previous action is never
+/// mistaken for the current reply.
+static REQ: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Serialize)]
 pub struct BrowserStatus {
     running: bool,
-    pid: Option<u32>,
+    /// URL the window is currently on (best-effort; empty if unknown).
+    url: String,
 }
 
-/// Resolve a Python interpreter to run the daemon. Mirrors how other bundled
-/// scripts are spawned (prefer OWLLM_PYTHON, then the app's bundled runtime),
-/// then falls back to a `python3`/`python` on PATH so the feature works on a
-/// dev machine or a Playwright-provisioned host.
-fn python_cmd() -> Result<String, String> {
-    if let Ok(p) = std::env::var("OWLLM_PYTHON") {
-        if !p.is_empty() && std::path::Path::new(&p).is_file() {
-            return Ok(p);
+/// Injected at document-start on every page. Defines the driver used by
+/// `browser_cmd`. Everything is plain DOM — works on any site, any engine.
+const BRIDGE_JS: &str = r##"
+(function () {
+  if (window.__owllmBridge) return;
+  window.__owllmBridge = true;
+  var SENT = "⁣OWLLM⁣";
+  var CAP = 4000; // keep the whole reply inside one document.title write
+  function b64(s) {
+    // UTF-8 → latin1 → base64 so the reply survives the OS title channel with
+    // no whitespace (document.title collapses whitespace; base64 has none).
+    try { return btoa(unescape(encodeURIComponent(s))); } catch (e) { return btoa("(encode error)"); }
+  }
+  function report(reqId, text) {
+    var s = String(text == null ? "" : text);
+    if (s.length > CAP) s = s.slice(0, CAP) + "\n…[truncated]";
+    document.title = SENT + reqId + "⁣" + b64(s);
+  }
+  function visible(el) {
+    var r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    var st = getComputedStyle(el);
+    return st.visibility !== "hidden" && st.display !== "none" && st.opacity !== "0";
+  }
+  var SEL = "a,button,input,select,textarea,[role=button],[role=link]," +
+            "[role=checkbox],[role=radio],[role=tab],[role=menuitem]," +
+            "[role=option],[contenteditable=true],[onclick]";
+  function reindex() {
+    var all = Array.prototype.slice.call(document.querySelectorAll(SEL));
+    var els = [];
+    for (var i = 0; i < all.length && els.length < 150; i++) {
+      if (visible(all[i])) els.push(all[i]);
+    }
+    window.__owllmEls = els;
+    return els;
+  }
+  function label(el) {
+    var tag = el.tagName.toLowerCase();
+    var txt = (el.getAttribute("aria-label") || el.getAttribute("placeholder") ||
+               el.getAttribute("name") || el.value || el.innerText || el.textContent || "").trim();
+    txt = txt.replace(/\s+/g, " ").slice(0, 80);
+    var extra = tag === "input" ? ("[" + (el.getAttribute("type") || "text") + "]") : "";
+    return "#" + tag + extra + (txt ? " " + txt : "");
+  }
+  function snapshot() {
+    var els = reindex();
+    var lines = ["URL: " + location.href, "TITLE: " + document.title, "",
+                 "INTERACTIVE ELEMENTS (act on these by index):"];
+    for (var i = 0; i < els.length; i++) lines.push("[" + i + "] " + label(els[i]));
+    return lines.join("\n");
+  }
+  function elAt(i) { var e = (window.__owllmEls || [])[i]; if (!e) throw new Error("no element at index " + i); return e; }
+  function fire(el, type) { el.dispatchEvent(new Event(type, { bubbles: true })); }
+  window.__owllmRun = function (reqId, action, paramsJson) {
+    var p = {};
+    try { p = paramsJson ? JSON.parse(paramsJson) : {}; } catch (e) {}
+    try {
+      switch (action) {
+        case "info":
+          return report(reqId, JSON.stringify({ url: location.href, title: document.title, ready: document.readyState }));
+        case "await_load":
+          if (document.readyState === "complete" || document.readyState === "interactive") {
+            return report(reqId, "Loaded: " + location.href + " — " + document.title);
+          }
+          window.addEventListener("DOMContentLoaded", function () {
+            report(reqId, "Loaded: " + location.href + " — " + document.title);
+          }, { once: true });
+          return;
+        case "snapshot": return report(reqId, snapshot());
+        case "get_text": {
+          var t = (document.body ? document.body.innerText : "") || "";
+          return report(reqId, t.replace(/\n{3,}/g, "\n\n").trim());
         }
-    }
-    if let Some(p) = crate::paths::bundled_python_exe() {
-        return Ok(p.to_string_lossy().into_owned());
-    }
-    for cand in ["python3", "python"] {
-        let ok = Command::new(cand)
-            .arg("--version")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            return Ok(cand.to_string());
+        case "click": {
+          var el = elAt(p.index); el.scrollIntoView({ block: "center" });
+          el.click();
+          return setTimeout(function () { report(reqId, "clicked [" + p.index + "] " + label(el) + "\n\n" + snapshot()); }, 350);
         }
-    }
-    Err("No Python interpreter found. Set OWLLM_PYTHON, install the python-runtime module, \
-         or add python3 to PATH."
-        .to_string())
-}
+        case "fill": {
+          var f = elAt(p.index); f.focus();
+          if (f.isContentEditable) { f.textContent = p.text; }
+          else { f.value = p.text; }
+          fire(f, "input"); fire(f, "change");
+          return report(reqId, "filled [" + p.index + "] with " + JSON.stringify(p.text));
+        }
+        case "select": {
+          var s = elAt(p.index); var matched = false;
+          for (var i = 0; i < s.options.length; i++) {
+            if (s.options[i].value === p.value || s.options[i].text === p.value) { s.selectedIndex = i; matched = true; break; }
+          }
+          fire(s, "change");
+          return report(reqId, matched ? ("selected " + JSON.stringify(p.value)) : ("no option matching " + JSON.stringify(p.value)));
+        }
+        case "press": {
+          var t2 = document.activeElement || document.body;
+          ["keydown", "keypress", "keyup"].forEach(function (k) {
+            t2.dispatchEvent(new KeyboardEvent(k, { key: p.key, bubbles: true }));
+          });
+          if (p.key === "Enter" && t2.form) { try { t2.form.requestSubmit ? t2.form.requestSubmit() : t2.form.submit(); } catch (e) {} }
+          return report(reqId, "pressed " + p.key);
+        }
+        case "fill_login": {
+          // Autofill from the vault: fill the first visible password field and
+          // the nearest preceding text/email field. Returns what it did.
+          var pw = null, els = reindex();
+          for (var i = 0; i < els.length; i++) { if (els[i].tagName === "INPUT" && (els[i].type === "password")) { pw = els[i]; break; } }
+          var user = null;
+          var inputs = Array.prototype.slice.call(document.querySelectorAll("input"));
+          for (var j = 0; j < inputs.length; j++) {
+            var ty = (inputs[j].type || "text");
+            if (ty === "text" || ty === "email" || inputs[j].name && /user|email|login/i.test(inputs[j].name)) { user = inputs[j]; }
+            if (pw && inputs[j] === pw) break;
+          }
+          var did = [];
+          if (user && p.username) { user.focus(); user.value = p.username; fire(user, "input"); fire(user, "change"); did.push("username"); }
+          if (pw && p.password) { pw.focus(); pw.value = p.password; fire(pw, "input"); fire(pw, "change"); did.push("password"); }
+          return report(reqId, did.length ? ("autofilled " + did.join(" + ")) : "no login fields found on this page");
+        }
+        default: return report(reqId, "(unknown action: " + action + ")");
+      }
+    } catch (e) { report(reqId, "ERROR: " + (e && e.message ? e.message : e)); }
+  };
+})();
+"##;
 
-/// Locate the daemon script — prefer the bundled resources copy, fall back to
-/// the legacy LLM/tools/ tree (same order as `paths::abliterate_script()`).
-fn daemon_script() -> Result<PathBuf, String> {
-    if let Some(root) = crate::paths::resources_root() {
-        let p = root.join("tools").join("browser_daemon.py");
-        if p.is_file() {
-            return Ok(p);
-        }
-    }
-    if let Some(root) = crate::paths::llm_root() {
-        let p = root.join("tools").join("browser_daemon.py");
-        if p.is_file() {
-            return Ok(p);
-        }
-    }
-    Err("browser_daemon.py not found in resources/tools/ or LLM/tools/".to_string())
-}
-
-/// Stable default profile dir so browser logins persist across app runs.
-/// The daemon has the same default; we set it explicitly to keep the two in
-/// lockstep and rooted in the app's user-data tree.
-fn default_profile_dir() -> Option<PathBuf> {
+/// Stable data directory so cookies/logins in the agent browser persist across
+/// runs and are isolated from the app UI's own webview storage.
+#[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
+fn browser_data_dir() -> Option<std::path::PathBuf> {
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
-/// True when a session exists AND its child is still alive. Clears a dead
-/// session in place so callers never reuse a stale handle.
-fn session_alive(guard: &mut Option<Session>) -> bool {
-    let dead = match guard.as_mut() {
-        Some(sess) => matches!(sess.child.try_wait(), Ok(Some(_))),
-        None => return false,
-    };
-    if dead {
-        *guard = None;
-        return false;
-    }
-    true
+fn get_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
+    app.get_webview_window(BROWSER_LABEL)
 }
 
-/// Verify Playwright (and a real Chromium binary) are usable by the resolved
-/// Python. Does NOT spawn the daemon — cheap enough to call before start.
+/// Native engine is always available — nothing to install. Kept so the tool
+/// contract (localTools.ts calls browser_ensure before browser_start) is stable.
 #[tauri::command]
 pub fn browser_ensure() -> Result<String, String> {
-    let py = python_cmd()?;
-    // Import Playwright AND confirm the Chromium executable actually exists,
-    // so we fail here (with the install command) instead of at launch time.
-    let probe = r#"
-import os, sys
-try:
-    from playwright.sync_api import sync_playwright
-except Exception as e:
-    sys.stderr.write("IMPORT:%s" % e); sys.exit(2)
-with sync_playwright() as p:
-    exe = p.chromium.executable_path
-    if not exe or not os.path.exists(exe):
-        sys.stderr.write("CHROMIUM_MISSING"); sys.exit(3)
-"#;
-    let out = Command::new(&py)
-        .arg("-c")
-        .arg(probe)
-        .output()
-        .map_err(|e| format!("failed to run Python ({py}): {e}"))?;
-    if out.status.success() {
-        return Ok(format!("Playwright + Chromium available ({py})"));
-    }
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    if stderr.contains("CHROMIUM_MISSING") {
-        return Err(format!(
-            "Chromium is not installed for this Python. Install it:\n  {py} -m playwright install chromium"
-        ));
-    }
-    Err(format!(
-        "Playwright is not available for {py}. Install it:\n  \
-         {py} -m pip install playwright && {py} -m playwright install chromium\n\n{stderr}"
-    ))
+    Ok("native browser ready".to_string())
 }
 
-/// Spawn the daemon child. Idempotent: if a live daemon already exists this is
-/// a no-op. Reads the daemon's one-line startup handshake so a launch failure
-/// (missing Chromium, unwritable profile) surfaces here, not on first command.
+/// Create the agent-browser window if it isn't already open. Idempotent.
 #[tauri::command]
-pub fn browser_start() -> Result<String, String> {
-    let mut guard = SESSION.lock().map_err(|_| "browser session lock poisoned".to_string())?;
-    if session_alive(&mut guard) {
+pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
+    if get_window(&app).is_some() {
         return Ok("browser already running".to_string());
     }
-
-    let py = python_cmd()?;
-    let script = daemon_script()?;
-
-    let mut cmd = Command::new(&py);
-    cmd.arg(&script)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    // Give the daemon a stable profile dir (unless the user pinned one).
-    if std::env::var_os("OWLLM_BROWSER_PROFILE").is_none() {
-        if let Some(dir) = default_profile_dir() {
-            cmd.env("OWLLM_BROWSER_PROFILE", dir);
-        }
+    let start_url = "about:blank"
+        .parse()
+        .map_err(|e| format!("bad start url: {e}"))?;
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::new(&app, BROWSER_LABEL, WebviewUrl::External(start_url))
+        .title("OwLLM — Agent Browser")
+        .inner_size(1180.0, 820.0)
+        .initialization_script(BRIDGE_JS)
+        .decorations(true)
+        .resizable(true)
+        .visible(true);
+    // A stable, isolated data dir so agent-browser logins persist across runs.
+    // The builder method is only present on Windows/Linux; macOS WKWebView uses
+    // the app's default per-app store (logins still persist there).
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(dir) = browser_data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        builder = builder.data_directory(dir);
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("failed to spawn browser daemon ({py}): {e}"))?;
-    let stdin = child
-        .stdin
-        .take()
-        .ok_or_else(|| "browser daemon: no stdin pipe".to_string())?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| "browser daemon: no stdout pipe".to_string())?;
-    let mut reader = BufReader::new(stdout);
-
-    // Startup handshake — one JSON line: ready, or an actionable launch error.
-    let mut line = String::new();
-    let n = reader
-        .read_line(&mut line)
-        .map_err(|e| format!("browser daemon: reading startup line: {e}"))?;
-    if n == 0 {
-        let _ = child.kill();
-        return Err("browser daemon exited before signalling ready".to_string());
-    }
-    let v: Value = serde_json::from_str(line.trim())
-        .map_err(|e| format!("browser daemon: bad startup line {line:?}: {e}"))?;
-    if v.get("ok").and_then(Value::as_bool) != Some(true) {
-        let _ = child.kill();
-        let msg = v.get("output").and_then(Value::as_str).unwrap_or("unknown launch error");
-        return Err(msg.to_string());
-    }
-
-    *guard = Some(Session { child, stdin, stdout: reader });
+    builder
+        .build()
+        .map_err(|e| format!("failed to open agent browser window: {e}"))?;
     Ok("browser started".to_string())
 }
 
-/// Send one action to the daemon and return its text reply. Rechecks the child
-/// is alive before use (never talks to a stale session).
+/// Run one action against the live page and return its text reply.
+///
+/// `navigate` uses the native `webview.navigate()` (robust across origins),
+/// then awaits the new document's load through the bridge. All other actions
+/// eval __owllmRun directly. Read-back is via the sentinel title channel.
 #[tauri::command]
-pub fn browser_cmd(action: String, params: Value) -> Result<String, String> {
-    let mut guard = SESSION.lock().map_err(|_| "browser session lock poisoned".to_string())?;
-    if !session_alive(&mut guard) {
-        return Err("browser is not running — call browser_start first".to_string());
-    }
-    let req = json!({ "action": action, "params": params });
-    let line = serde_json::to_string(&req).map_err(|e| format!("serialize request: {e}"))?;
+pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
+    let win = get_window(&app).ok_or_else(|| "browser is not running — call browser_start first".to_string())?;
+    let req = REQ.fetch_add(1, Ordering::SeqCst);
 
-    let sess = guard.as_mut().expect("session present after alive check");
-    let write_res = sess
-        .stdin
-        .write_all(line.as_bytes())
-        .and_then(|_| sess.stdin.write_all(b"\n"))
-        .and_then(|_| sess.stdin.flush());
-    if let Err(e) = write_res {
-        *guard = None;
-        return Err(format!("browser daemon: writing request failed (daemon gone?): {e}"));
-    }
-
-    let sess = guard.as_mut().expect("session present");
-    let mut resp = String::new();
-    let read_res = sess.stdout.read_line(&mut resp);
-    let n = match read_res {
-        Ok(n) => n,
-        Err(e) => return Err(format!("browser daemon: reading reply failed: {e}")),
-    };
-    if n == 0 {
-        *guard = None;
-        return Err("browser daemon closed the connection".to_string());
-    }
-    let v: Value = serde_json::from_str(resp.trim())
-        .map_err(|e| format!("browser daemon: bad reply {resp:?}: {e}"))?;
-    let output = v.get("output").and_then(Value::as_str).unwrap_or("").to_string();
-    if v.get("ok").and_then(Value::as_bool) == Some(true) {
-        Ok(output)
-    } else {
-        Err(if output.is_empty() { "browser command failed".to_string() } else { output })
+    match action.as_str() {
+        "navigate" | "open" => {
+            let url_s = params.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            if url_s.is_empty() {
+                return Err("navigate requires a url".to_string());
+            }
+            let full = if url_s.contains("://") { url_s } else { format!("https://{url_s}") };
+            let url = full.parse().map_err(|e| format!("bad url {full:?}: {e}"))?;
+            win.navigate(url).map_err(|e| format!("navigate failed: {e}"))?;
+            // Give the new document a moment to begin, then await its load via
+            // the (re-injected) bridge. Evaled every poll tick until it reports.
+            std::thread::sleep(Duration::from_millis(200));
+            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(30))
+        }
+        "back" => {
+            let _ = win.eval("history.back()");
+            std::thread::sleep(Duration::from_millis(300));
+            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
+        }
+        "reload" => {
+            let _ = win.eval("location.reload()");
+            std::thread::sleep(Duration::from_millis(300));
+            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
+        }
+        "screenshot" => {
+            // Native window is visible to the user; return a page summary rather
+            // than pixels (agents act via snapshot). Honest + cheap.
+            eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(8))
+        }
+        _ => eval_until_reply(&win, req, &action, &params, Duration::from_secs(12)),
     }
 }
 
-/// Close the session: tell the daemon to shut down, read its final reply, reap
-/// the child, and clear SESSION. Safe to call when nothing is running.
-#[tauri::command]
-pub fn browser_stop() -> Result<String, String> {
-    let mut guard = SESSION.lock().map_err(|_| "browser session lock poisoned".to_string())?;
-    let mut sess = match guard.take() {
-        Some(s) => s,
-        None => return Ok("browser was not running".to_string()),
-    };
-    let mut reply = "browser stopped".to_string();
-    let _ = sess.stdin.write_all(b"{\"action\":\"close\",\"params\":{}}\n");
-    let _ = sess.stdin.flush();
-    let mut line = String::new();
-    if sess.stdout.read_line(&mut line).unwrap_or(0) > 0 {
-        if let Ok(v) = serde_json::from_str::<Value>(line.trim()) {
-            if let Some(o) = v.get("output").and_then(Value::as_str) {
-                reply = o.to_string();
+/// Eval `__owllmRun(req, action, params)` on a poll loop and wait for the
+/// sentinel reply in the window title. Re-evals each tick so a still-loading
+/// document (where the bridge isn't defined yet) is retried until ready.
+fn eval_until_reply(
+    win: &WebviewWindow,
+    req: u64,
+    action: &str,
+    params: &Value,
+    timeout: Duration,
+) -> Result<String, String> {
+    let params_js = serde_json::to_string(&params.to_string()).unwrap_or_else(|_| "\"{}\"".to_string());
+    let call = format!("try{{window.__owllmRun&&window.__owllmRun({req},{action:?},{params_js})}}catch(e){{}}");
+    let prefix = format!("{SENTINEL}{req}\u{2063}");
+    let start = Instant::now();
+    let mut last_eval = Instant::now() - Duration::from_secs(1);
+    loop {
+        // Re-eval periodically (covers the case where the first eval hit a
+        // transitional/loading document before the bridge was injected).
+        if last_eval.elapsed() >= Duration::from_millis(250) {
+            let _ = win.eval(&call);
+            last_eval = Instant::now();
+        }
+        if let Ok(title) = win.title() {
+            if let Some(rest) = title.strip_prefix(&prefix) {
+                use base64::Engine as _;
+                let out = base64::engine::general_purpose::STANDARD
+                    .decode(rest.trim())
+                    .ok()
+                    .and_then(|b| String::from_utf8(b).ok())
+                    .unwrap_or_else(|| rest.to_string());
+                // Neutralise the title so this reply isn't re-read next tick.
+                let _ = win.eval("try{document.title=location.href}catch(e){}");
+                if let Some(msg) = out.strip_prefix("ERROR: ") {
+                    return Err(msg.to_string());
+                }
+                return Ok(out);
             }
         }
+        if start.elapsed() > timeout {
+            return Err(format!("browser action '{action}' timed out"));
+        }
+        std::thread::sleep(Duration::from_millis(20));
     }
-    // Ensure the child is gone even if it ignored `close`.
-    let _ = sess.child.wait();
-    Ok(reply)
 }
 
-/// Grab a screenshot of the live session and return it as base64 PNG — the
-/// UI Browser panel's live view. Reuses the daemon `screenshot` action (which
-/// writes a PNG and replies with its path) and inlines the bytes so the
-/// webview can render it as a data: URL without any asset-protocol setup.
+/// Close the agent-browser window. Safe when nothing is open.
 #[tauri::command]
-pub fn browser_view() -> Result<String, String> {
-    let path = browser_cmd("screenshot".to_string(), json!({}))?;
-    let p = path.trim();
-    let bytes = std::fs::read(p).map_err(|e| format!("read screenshot {p}: {e}"))?;
-    use base64::Engine as _;
-    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
+    match get_window(&app) {
+        Some(win) => {
+            win.close().map_err(|e| format!("close failed: {e}"))?;
+            Ok("browser stopped".to_string())
+        }
+        None => Ok("browser was not running".to_string()),
+    }
 }
 
-/// Whether a live daemon is running. Resilient to a dead child: if the process
-/// has exited we clear SESSION and report running:false.
+/// Panel view: current URL + title as JSON (the window itself is the live view).
 #[tauri::command]
-pub fn browser_status() -> Result<BrowserStatus, String> {
-    let mut guard = SESSION.lock().map_err(|_| "browser session lock poisoned".to_string())?;
-    if !session_alive(&mut guard) {
-        return Ok(BrowserStatus { running: false, pid: None });
+pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
+    let win = get_window(&app).ok_or_else(|| "browser not running".to_string())?;
+    let req = REQ.fetch_add(1, Ordering::SeqCst);
+    eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(6))
+}
+
+/// Focus/raise the agent-browser window so the user can watch or log in.
+#[tauri::command]
+pub fn browser_focus(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(win) = get_window(&app) {
+        let _ = win.show();
+        let _ = win.set_focus();
     }
-    let pid = guard.as_ref().map(|s| s.child.id());
-    Ok(BrowserStatus { running: true, pid })
+    Ok(())
+}
+
+#[tauri::command]
+pub fn browser_status(app: tauri::AppHandle) -> Result<BrowserStatus, String> {
+    match get_window(&app) {
+        Some(win) => {
+            let url = win.url().map(|u| u.to_string()).unwrap_or_default();
+            Ok(BrowserStatus { running: true, url })
+        }
+        None => Ok(BrowserStatus { running: false, url: String::new() }),
+    }
 }

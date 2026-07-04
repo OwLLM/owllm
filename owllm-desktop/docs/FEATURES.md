@@ -91,16 +91,30 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
 - Sandbox disk card: usage view, cache clear, WSL disk reclaim.
 - GitHub connect for clone/push from inside the sandbox.
 
-## Browser control (`browser.rs` + `resources/tools/browser_daemon.py`)
+## Browser control (`browser.rs`, `browser_vault.rs`, `browser_import.rs`)
 
-- **Agent web browser**: one app-global persistent Chromium (Playwright,
-  `launch_persistent_context` — logins/cookies survive runs) driven by the
-  `browser_*` tools: open/navigate, indexed snapshot, click, fill, press,
-  select, back, reload, get_text, screenshot (file path), close.
-- **UI**: 🌐 Browser panel (shared `BrowserPanel.tsx`, mounted on Code +
-  Agents pages) — live page screenshot, manual URL open (agents inherit the
-  session), stop. Local + API agents only; subscription CLIs can't reach
-  `executeToolCall` (known CLI-tools limitation).
+- **Native agent web browser**: a real OwLLM-owned `WebviewWindow` (the app's
+  own WebView2 / WKWebView / WebKitGTK engine — **no Python/Playwright, no
+  external Chromium**). Opens as a popup the user can watch and log into;
+  logins/cookies persist via a pinned data dir. Driven by the same `browser_*`
+  tools (open/navigate, indexed snapshot, click, fill, press, select, back,
+  reload, get_text, close) — the tool contract is unchanged. Rust injects a JS
+  bridge (`initialization_script`) and reads results back through a
+  base64-over-`document.title` channel (`eval` → poll `title()`), so no remote
+  IPC capability is needed.
+- **Password vault** (`browser_vault.rs`): site logins saved encrypted at rest
+  via `crypt` (DPAPI per Windows user account; passthrough on macOS/Linux for
+  now — OS-keychain backing is a follow-up). Agents autofill the current page
+  (`fill_login`); passwords never reach the frontend, only the target page.
+- **Import** (`browser_import.rs`): pull saved logins from **Chrome, Edge,
+  Brave, Opera** — all Chromium, one code path: AES-256 profile key unwrapped
+  from `Local State` via DPAPI, each `v10`/`v11` password blob AES-256-GCM.
+  Firefox (NSS) is detected + counted but decryption is a follow-up. Full
+  decryption is Windows-only in this build; macOS/Linux Chromium key stores
+  (Keychain / Secret Service) are the next step.
+- **UI**: 🌐 Browser panel (shared `BrowserPanel.tsx`, Code + Agents pages) —
+  Browse / Passwords / Import tabs. Local + API agents only; subscription CLIs
+  can't reach `executeToolCall` (known CLI-tools limitation).
 
 ## OWLLM Node — KVM remote control (`kvm.rs`)
 

@@ -1166,8 +1166,9 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     name: "browser_screenshot",
     aliases: ["browser_capture", "capture_page", "page_screenshot"],
     description:
-      "Take a screenshot of the current page in the persistent browser. Use to visually " +
-      "confirm state when the snapshot's element list isn't enough.",
+      "Report the current page (URL + title + load state) of the persistent browser. " +
+      "The browser is a visible window; use browser_snapshot for the element list and " +
+      "browser_get_text to read page content.",
     args: [],
   },
   {

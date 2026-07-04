@@ -82,6 +82,11 @@ pub fn run() {
             // user skills dir if absent, so they're visible + editable in Studio
             // and equippable. Never clobbers a user-edited copy.
             bootstrap::seed_builtin_skills();
+            // First run only: auto-download the curated skill libraries
+            // (Anthropic + obra/superpowers) in the background so a fresh
+            // install ships with a rich, equippable skill set. Gated by a
+            // sentinel; retries on a later launch if git/network is unavailable.
+            bootstrap::provision_curated_skills_first_run();
             // Diagnostic: log the resolved paths on startup so missing
             // models / disappeared user state can be triaged from the
             // log file without F12 console acrobatics. Tries three

@@ -503,6 +503,63 @@ pub async fn list_installed_skill_folders() -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+/// First-run auto-provision: clone EVERY curated source and install all of its
+/// skills into the user skills dir. Blocking + offline-safe; per-source failures
+/// are logged and skipped. Returns how many skills are now installed (newly
+/// copied OR already present). Reuses the exact clone → discover → install →
+/// alias-rewrite path as the interactive Skill Library, so results are identical
+/// to a manual install. Requires `git` on PATH (Err if absent — caller retries).
+pub fn provision_all_curated_skills() -> Result<usize, String> {
+    let git_exe = which_git().ok_or_else(|| {
+        "git not on PATH — cannot auto-download skill libraries".to_string()
+    })?;
+    let remote = remote_root().ok_or("skills dir unavailable")?;
+    std::fs::create_dir_all(&remote).map_err(|e| format!("mkdir {}: {e}", remote.display()))?;
+    let inst_root = installed_root().ok_or("skills dir unavailable")?;
+    std::fs::create_dir_all(&inst_root).map_err(|e| format!("mkdir {}: {e}", inst_root.display()))?;
+
+    let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut installed = 0usize;
+    for source in known_sources() {
+        let target = remote.join(&source.key);
+        if let Err(e) = run_git(&git_exe, &source.git_url, &target, false) {
+            eprintln!("[skills] auto-provision: clone {} failed: {e}", source.key);
+            continue;
+        }
+        let mut discovered = Vec::new();
+        walk_for_skill_md(&target, &target, &source.key, &empty, &mut discovered);
+        for d in discovered {
+            let src = target.join(&d.relative_dir);
+            if !src.is_dir() {
+                continue;
+            }
+            let folder = format!(
+                "{}__{}",
+                source.key,
+                src.file_name().and_then(|n| n.to_str()).unwrap_or("")
+            );
+            let dest = inst_root.join(&folder);
+            if dest.exists() {
+                installed += 1; // already installed — count it, don't re-copy
+                continue;
+            }
+            if let Err(e) = copy_dir_recursive(&src, &dest) {
+                eprintln!("[skills] auto-provision: install {folder} failed: {e}");
+                continue;
+            }
+            let dest_md = dest.join("SKILL.md");
+            if let Ok(text) = std::fs::read_to_string(&dest_md) {
+                let rewritten = rewrite_tool_aliases(&text);
+                if rewritten != text {
+                    let _ = std::fs::write(&dest_md, rewritten);
+                }
+            }
+            installed += 1;
+        }
+    }
+    Ok(installed)
+}
+
 // NOTE: skill-pack enumeration + body access for the per-agent equip UI is
 // served by the pre-existing `agents::list_skill_packs` command, which already
 // returns {id, path, dir, frontmatter, body} across BOTH the new and legacy

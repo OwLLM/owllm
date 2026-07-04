@@ -148,6 +148,40 @@ pub fn seed_builtin_skills() {
     }
 }
 
+/// First-run auto-download of the curated skill libraries (Anthropic +
+/// obra/superpowers) so a fresh install ships with a rich, equippable skill set
+/// instead of an almost-empty picker. Runs ONCE — gated by a sentinel in the
+/// skills dir — on a BACKGROUND thread so a slow git clone never blocks startup.
+/// If git is missing or the network is down nothing is installed and NO sentinel
+/// is written, so it simply retries on a later launch. Safe to call every boot.
+pub fn provision_curated_skills_first_run() {
+    let Some(skills_root) = crate::paths::skills_dir() else {
+        return;
+    };
+    let sentinel = skills_root.join(".curated_provisioned");
+    if sentinel.is_file() {
+        return; // already provisioned
+    }
+    std::thread::spawn(move || {
+        match crate::skill_library::provision_all_curated_skills() {
+            Ok(n) if n > 0 => {
+                let _ = std::fs::create_dir_all(&skills_root);
+                let _ = std::fs::write(
+                    &sentinel,
+                    format!("auto-provisioned {n} curated skill(s)\n"),
+                );
+                eprintln!("[bootstrap] auto-provisioned {n} curated skill(s)");
+            }
+            Ok(_) => {
+                eprintln!("[bootstrap] curated skill provision installed 0 — will retry next launch");
+            }
+            Err(e) => {
+                eprintln!("[bootstrap] curated skill provision skipped: {e} — will retry next launch");
+            }
+        }
+    });
+}
+
 fn write_sentinel(path: &Path, summary: &str) -> std::io::Result<()> {
     let body = format!(
         "OwLLM Desktop user-state migration ran at {}.\n{summary}\n",

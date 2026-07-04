@@ -107,13 +107,16 @@ fn session_alive(guard: &mut Option<Session>) -> bool {
     true
 }
 
-/// Verify Playwright (and a real Chromium binary) are usable by the resolved
-/// Python. Does NOT spawn the daemon — cheap enough to call before start.
-#[tauri::command]
-pub fn browser_ensure() -> Result<String, String> {
-    let py = python_cmd()?;
-    // Import Playwright AND confirm the Chromium executable actually exists,
-    // so we fail here (with the install command) instead of at launch time.
+/// Outcome of probing `py` for Playwright + a real Chromium binary.
+enum ProbeResult {
+    Ready,
+    NoPlaywright,
+    NoChromium,
+    Error(String),
+}
+
+/// Ask `py` whether Playwright imports AND a Chromium executable exists on disk.
+fn probe_playwright(py: &str) -> ProbeResult {
     let probe = r#"
 import os, sys
 try:
@@ -125,24 +128,103 @@ with sync_playwright() as p:
     if not exe or not os.path.exists(exe):
         sys.stderr.write("CHROMIUM_MISSING"); sys.exit(3)
 "#;
-    let out = Command::new(&py)
-        .arg("-c")
-        .arg(probe)
-        .output()
-        .map_err(|e| format!("failed to run Python ({py}): {e}"))?;
+    let out = match Command::new(py).arg("-c").arg(probe).output() {
+        Ok(o) => o,
+        Err(e) => return ProbeResult::Error(format!("failed to run Python ({py}): {e}")),
+    };
     if out.status.success() {
-        return Ok(format!("Playwright + Chromium available ({py})"));
+        return ProbeResult::Ready;
     }
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains("CHROMIUM_MISSING") {
-        return Err(format!(
-            "Chromium is not installed for this Python. Install it:\n  {py} -m playwright install chromium"
-        ));
+        return ProbeResult::NoChromium;
     }
+    if stderr.contains("IMPORT:") {
+        return ProbeResult::NoPlaywright;
+    }
+    ProbeResult::Error(format!("Playwright probe failed for {py}: {stderr}"))
+}
+
+/// Run `py <args...>` for a provisioning step, surfacing stdout+stderr on failure.
+/// Blocking — the Chromium download is ~150 MB, so callers run this off the UI.
+fn run_py_step(py: &str, args: &[&str], label: &str) -> Result<(), String> {
+    let mut cmd = Command::new(py);
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("failed to run {label} ({py}): {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
     Err(format!(
-        "Playwright is not available for {py}. Install it:\n  \
-         {py} -m pip install playwright && {py} -m playwright install chromium\n\n{stderr}"
+        "{label} failed:\n{}\n{}",
+        stdout.trim(),
+        stderr.trim()
     ))
+}
+
+/// Ensure Playwright + Chromium are usable by `py`, INSTALLING whatever is
+/// missing (pip install playwright, then `playwright install chromium`). This is
+/// the auto-provision the browser feature relies on so a fresh machine "just
+/// works" on first use — no manual pip step. Blocking (the Chromium download can
+/// take a minute or two), so it runs from `browser_ensure`/`browser_start`, both
+/// of which the UI drives behind a busy state.
+fn ensure_playwright(py: &str) -> Result<String, String> {
+    match probe_playwright(py) {
+        ProbeResult::Ready => return Ok(format!("Playwright + Chromium available ({py})")),
+        ProbeResult::Error(e) => return Err(e),
+        ProbeResult::NoPlaywright => {
+            // The bundled Python may not have pip bootstrapped yet.
+            let _ = run_py_step(py, &["-m", "ensurepip", "--upgrade"], "ensurepip");
+            run_py_step(
+                py,
+                &["-m", "pip", "install", "--upgrade", "playwright"],
+                "pip install playwright",
+            )?;
+            run_py_step(
+                py,
+                &["-m", "playwright", "install", "chromium"],
+                "playwright install chromium",
+            )?;
+        }
+        ProbeResult::NoChromium => {
+            run_py_step(
+                py,
+                &["-m", "playwright", "install", "chromium"],
+                "playwright install chromium",
+            )?;
+        }
+    }
+    // Confirm the install actually worked before we claim success.
+    match probe_playwright(py) {
+        ProbeResult::Ready => Ok(format!("Playwright + Chromium installed ({py})")),
+        ProbeResult::NoPlaywright => Err(format!(
+            "Playwright still not importable after install for {py}. \
+             Try manually: {py} -m pip install playwright"
+        )),
+        ProbeResult::NoChromium => Err(format!(
+            "Chromium still missing after install for {py}. \
+             Try manually: {py} -m playwright install chromium"
+        )),
+        ProbeResult::Error(e) => Err(e),
+    }
+}
+
+/// Verify Playwright + Chromium are usable by the resolved Python, INSTALLING
+/// them if absent. Does NOT spawn the daemon. Called by the UI before the first
+/// navigate so a fresh install self-provisions instead of erroring.
+#[tauri::command]
+pub fn browser_ensure() -> Result<String, String> {
+    let py = python_cmd()?;
+    ensure_playwright(&py)
 }
 
 /// Spawn the daemon child. Idempotent: if a live daemon already exists this is
@@ -156,6 +238,11 @@ pub fn browser_start() -> Result<String, String> {
     }
 
     let py = python_cmd()?;
+    // Auto-provision Playwright + Chromium if missing, so the AGENT path
+    // (browser_cmd → browser_start) self-heals on a fresh install too — not
+    // just the UI panel that calls browser_ensure first. No-op (one cheap
+    // probe) once installed.
+    ensure_playwright(&py)?;
     let script = daemon_script()?;
 
     let mut cmd = Command::new(&py);

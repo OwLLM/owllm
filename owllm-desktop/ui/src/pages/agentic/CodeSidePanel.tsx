@@ -1,27 +1,21 @@
 // CodeSidePanel — the Code page's right column (user spec 2026-07-04):
 // a RESIZABLE column (drag its left edge; default 15% of the window, min
-// 300px) with a small utility header + TWO pages on a tab strip (the same
-// tab pattern as TeamMemoryModal):
-//   • header: agent MODE (plan / auto / chat) + Terminal popup toggle +
-//     VS Code-style USAGE for the account behind the active model
-//     (account_usage): provider quota bars where a quota API exists
-//     (Claude subscription) + the app's own recorded traffic for EVERY
-//     model — local, API keys, and CLIs alike.
-//   • ⚡ Super User page — the SAME per-project directives the agentic team
-//     uses (directives.rs; auto-seeded native best-practice set). When the
-//     folder matches an agentic project the rules are stored under that
-//     project's id, so the team page and the Code page edit ONE rule set.
+// 300px) with TWO pages on a tab strip (the same tab pattern as
+// TeamMemoryModal) and a utility container docked at the BOTTOM:
+//   • ⚡ Super User page — the SHARED RulesEditor (the exact rules UI the
+//     agentic team's Rules tab renders — one component, never forked).
+//     When the folder matches an agentic project the rules are stored
+//     under that project's id, so the team page and the Code page edit
+//     ONE rule set.
 //   • 📓 Notebook page — the shared RunNotebook rendered INLINE (passed in
 //     as `notebook` by CodePage so all its wiring stays in one place).
+//   • bottom container: USAGE on top (VS Code-style — provider quota bars
+//     where a quota API exists + the app's own recorded traffic for EVERY
+//     model), then the agent MODE (plan / auto / chat) + Terminal toggle.
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { type Directive } from "./dispatch";
-
-const KIND_COLOR: Record<Directive["kind"], string> = {
-  must: "#ff9d7a",
-  prefer: "#7fd4ff",
-  avoid: "#ffd27a",
-};
+import RulesEditor from "./RulesEditor";
 
 export type CodeAgentMode = "plan" | "auto" | "chat";
 
@@ -121,56 +115,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
     return () => { alive = false; clearInterval(t); };
   }, [usageProvider]);
 
-  // ---- Rules editing (same add/edit/delete/restore logic as the team's SuperUserCard) ----
-  const [newKind, setNewKind] = useState<Directive["kind"]>("must");
-  const [newText, setNewText] = useState("");
-  const [rulesBusy, setRulesBusy] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editText, setEditText] = useState("");
-
-  const addRule = async () => {
-    const text = newText.trim();
-    if (!text || !scopeId) return;
-    setRulesBusy(true);
-    try {
-      await invoke("directives_add", { input: { projectId: scopeId, kind: newKind, text } });
-      setNewText("");
-      await onDirectivesChanged();
-    } catch (e) { console.error("directives_add failed", e); }
-    finally { setRulesBusy(false); }
-  };
-  const saveEdit = async () => {
-    if (!editingId) return;
-    const text = editText.trim();
-    if (!text) return;
-    setRulesBusy(true);
-    try {
-      await invoke("directives_update", { input: { id: editingId, text } });
-      setEditingId(null);
-      await onDirectivesChanged();
-    } catch (e) { console.error("directives_update failed", e); }
-    finally { setRulesBusy(false); }
-  };
-  const deleteRule = async (id: string) => {
-    setRulesBusy(true);
-    try {
-      await invoke("directives_delete", { id });
-      await onDirectivesChanged();
-    } catch (e) { console.error("directives_delete failed", e); }
-    finally { setRulesBusy(false); }
-  };
-  const restoreDefaults = async () => {
-    if (!scopeId) return;
-    setRulesBusy(true);
-    try {
-      await invoke<number>("directives_restore_defaults", { projectId: scopeId });
-      await onDirectivesChanged();
-    } catch (e) { console.error("directives_restore_defaults failed", e); }
-    finally { setRulesBusy(false); }
-  };
-
   const sectionTitle: CSSProperties = { fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: "var(--fg-muted)", textTransform: "uppercase" };
-  const byKind = (k: Directive["kind"]) => directives.filter((d) => d.kind === k);
 
   const MODES: Array<{ id: CodeAgentMode; label: string; hint: string }> = [
     { id: "plan", label: "📋 Plan", hint: "Break the goal into ordered Kanban steps, then build them one by one." },
@@ -201,31 +146,36 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
         style={{ position: "absolute", left: -2, top: 0, bottom: 0, width: 7, cursor: "col-resize", zIndex: 2 }}
       />
 
-      {/* ---- Utility header: mode + terminal, then account usage ---- */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-          <div style={{ display: "flex", border: "1px solid var(--border-strong)", borderRadius: 7, overflow: "hidden" }}>
-            {MODES.map((m) => (
-              <button
-                key={m.id}
-                onClick={() => onModeChange(m.id)}
-                title={m.hint}
-                style={{
-                  height: 26, padding: "0 9px", fontSize: 11, fontWeight: 700, cursor: "pointer", border: "none",
-                  background: mode === m.id ? "rgba(var(--accent-rgb),0.22)" : "transparent",
-                  color: mode === m.id ? "var(--accent)" : "var(--fg-muted)",
-                }}
-              >{m.label}</button>
-            ))}
-          </div>
-          <span style={{ flex: 1 }} />
-          <button
-            className="btn"
-            onClick={onToggleTerminal}
-            title="Open a terminal in the workspace folder — floats above the app (this app only)."
-            style={{ fontSize: 11, padding: "3px 10px", ...(terminalOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
-          >🖥 Terminal</button>
+      {/* ---- Tab strip: ⚡ Super User | 📓 Notebook (two PAGES) ---- */}
+      <div style={{ display: "flex", gap: 4, alignItems: "flex-end", borderBottom: "1px solid var(--border)", paddingTop: 2 }}>
+        {tabBtn("super", "⚡ Super User")}
+        {tabBtn("notebook", "📓 Notebook")}
+        {sharedWithTeam && (
+          <span title="This folder is also an agentic project — rules and notebook are SHARED with the team pages." style={{ marginLeft: "auto", marginBottom: 4, fontSize: 10, color: "var(--fg-muted)", border: "1px solid var(--border-strong)", borderRadius: 6, padding: "1px 6px", whiteSpace: "nowrap" }}>shared with team</span>
+        )}
+      </div>
+
+      {/* ---- Page: Notebook (kept mounted so notes/digest survive tab flips) ---- */}
+      <div style={{ flex: 1, minHeight: 0, display: tab === "notebook" ? "flex" : "none", flexDirection: "column" }}>
+        {notebook}
+      </div>
+
+      {/* ---- Page: Super User (project rules) — the SHARED RulesEditor ---- */}
+      {tab === "super" && (
+        <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)" }}>
+          <RulesEditor
+            projectId={scopeId}
+            directives={directives}
+            onChanged={onDirectivesChanged}
+            scopeNote={sharedWithTeam
+              ? "Applied to every coder turn AND every agent on this project's team — one shared rule set."
+              : "Applied to every coder turn in this workspace."}
+          />
         </div>
+      )}
+
+      {/* ---- Bottom utility container: USAGE on top, then mode + terminal ---- */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)", flexShrink: 0 }}>
         {/* USAGE — like VS Code: provider quota bars when the account
             reports them, plus the app's own recorded traffic for EVERY
             model (local, API keys, CLIs — model-agnostic by design). */}
@@ -256,75 +206,30 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
           )}
           {!usage && <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>…</span>}
         </div>
-      </div>
-
-      {/* ---- Tab strip: ⚡ Super User | 📓 Notebook (two PAGES) ---- */}
-      <div style={{ display: "flex", gap: 4, alignItems: "flex-end", borderBottom: "1px solid var(--border)", paddingTop: 2 }}>
-        {tabBtn("super", "⚡ Super User")}
-        {tabBtn("notebook", "📓 Notebook")}
-        {sharedWithTeam && (
-          <span title="This folder is also an agentic project — rules and notebook are SHARED with the team pages." style={{ marginLeft: "auto", marginBottom: 4, fontSize: 10, color: "var(--fg-muted)", border: "1px solid var(--border-strong)", borderRadius: 6, padding: "1px 6px", whiteSpace: "nowrap" }}>shared with team</span>
-        )}
-      </div>
-
-      {/* ---- Page: Notebook (kept mounted so notes/digest survive tab flips) ---- */}
-      <div style={{ flex: 1, minHeight: 0, display: tab === "notebook" ? "flex" : "none", flexDirection: "column" }}>
-        {notebook}
-      </div>
-
-      {/* ---- Page: Super User (project rules) ---- */}
-      {tab === "super" && (
-      <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-          <span style={sectionTitle}>📐 Project rules</span>
+        <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", borderTop: "1px solid var(--border)", paddingTop: 6 }}>
+          <div style={{ display: "flex", border: "1px solid var(--border-strong)", borderRadius: 7, overflow: "hidden" }}>
+            {MODES.map((m) => (
+              <button
+                key={m.id}
+                onClick={() => onModeChange(m.id)}
+                title={m.hint}
+                style={{
+                  height: 26, padding: "0 9px", fontSize: 11, fontWeight: 700, cursor: "pointer", border: "none",
+                  background: mode === m.id ? "rgba(var(--accent-rgb),0.22)" : "transparent",
+                  color: mode === m.id ? "var(--accent)" : "var(--fg-muted)",
+                }}
+              >{m.label}</button>
+            ))}
+          </div>
           <span style={{ flex: 1 }} />
-          <button className="btn" style={{ fontSize: 10.5, padding: "2px 8px" }} onClick={() => void restoreDefaults()} disabled={rulesBusy} title="Re-add any built-in best-practice rules you deleted.">Restore defaults</button>
-        </div>
-        <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
-          Applied to every coder turn — the same rule set the agentic team follows.
-        </div>
-        {(["must", "prefer", "avoid"] as const).map((kind) => {
-          const rules = byKind(kind);
-          if (rules.length === 0) return null;
-          return (
-            <div key={kind} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
-              <span style={{ fontSize: 10.5, fontWeight: 700, color: KIND_COLOR[kind], letterSpacing: 0.5 }}>{kind.toUpperCase()}</span>
-              {rules.map((d) => (
-                <div key={d.id} style={{ display: "flex", alignItems: "flex-start", gap: 5 }}>
-                  {editingId === d.id ? (
-                    <>
-                      <input value={editText} onChange={(e) => setEditText(e.target.value)}
-                        onKeyDown={(e) => { if (e.key === "Enter") void saveEdit(); if (e.key === "Escape") setEditingId(null); }}
-                        autoFocus
-                        style={{ flex: 1, fontSize: 11.5, background: "var(--bg-panel)", color: "var(--fg)", border: "1px solid var(--border-strong)", borderRadius: 5, padding: "2px 6px" }} />
-                      <button className="btn" style={{ fontSize: 10, padding: "1px 6px" }} onClick={() => void saveEdit()} disabled={rulesBusy}>✓</button>
-                    </>
-                  ) : (
-                    <>
-                      <span style={{ flex: 1, fontSize: 11.5, color: "var(--fg)", lineHeight: 1.4 }}>{d.text}</span>
-                      <button title="Edit" onClick={() => { setEditingId(d.id); setEditText(d.text); }} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--fg-muted)", fontSize: 10, padding: 0 }}>✏️</button>
-                      <button title="Delete" onClick={() => void deleteRule(d.id)} style={{ background: "none", border: "none", cursor: "pointer", color: "#ff8c8c", fontSize: 10, padding: 0 }}>🗑</button>
-                    </>
-                  )}
-                </div>
-              ))}
-            </div>
-          );
-        })}
-        <div style={{ display: "flex", gap: 5, alignItems: "center" }}>
-          <select value={newKind} onChange={(e) => setNewKind(e.target.value as Directive["kind"])}
-            style={{ fontSize: 11, background: "var(--bg-panel)", color: KIND_COLOR[newKind], border: "1px solid var(--border-strong)", borderRadius: 5, padding: "2px 4px" }}>
-            <option value="must">must</option>
-            <option value="prefer">prefer</option>
-            <option value="avoid">avoid</option>
-          </select>
-          <input value={newText} onChange={(e) => setNewText(e.target.value)} placeholder="Add a rule…"
-            onKeyDown={(e) => { if (e.key === "Enter") void addRule(); }}
-            style={{ flex: 1, fontSize: 11.5, background: "var(--bg-panel)", color: "var(--fg)", border: "1px solid var(--border-strong)", borderRadius: 5, padding: "3px 6px" }} />
-          <button className="btn" style={{ fontSize: 11, padding: "2px 8px" }} onClick={() => void addRule()} disabled={rulesBusy || !newText.trim()}>+ Add</button>
+          <button
+            className="btn"
+            onClick={onToggleTerminal}
+            title="Open a terminal in the workspace folder — floats above the app (this app only). Drag its title bar to move it; — hides it without killing the shell."
+            style={{ fontSize: 11, padding: "3px 10px", ...(terminalOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+          >🖥 Terminal</button>
         </div>
       </div>
-      )}
     </div>
   );
 }

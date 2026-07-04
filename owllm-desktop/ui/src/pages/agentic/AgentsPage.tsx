@@ -17,6 +17,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
+import RulesEditor from "./RulesEditor";
 import IconPickerDialog, {
   getAgentIconOverride,
   setAgentIconOverride,
@@ -1559,8 +1560,11 @@ function resolveAgentSkillIds(
 function AgentChatGrid({
   team, roleByName, agentLogs, activeAgents, agentIconOverrides,
   selectedAgent, onSelectAgent, onOpenEditor, modelFor, providerFor, agentTiming,
-  perAgentSkills, projectCwd,
+  perAgentSkills, projectCwd, labelOverrides,
 }: {
+  /// Display-only label swaps (e.g. solo mode shows the picked writer as
+  /// "Coder"). Never touches the underlying agent name — that's identity.
+  labelOverrides?: Record<string, string>;
   /// Project working directory — threaded to the publisher tile's
   /// Commit / Merge / Publish host controls.
   projectCwd?: string | null;
@@ -1681,6 +1685,7 @@ function AgentChatGrid({
           <AgentChatTile
             key={a.name}
             name={a.name}
+            label={labelOverrides?.[a.name]}
             icon={icon}
             messages={lastMessages}
             isActive={isActive}
@@ -1992,9 +1997,12 @@ function AgentChatTile({
   isActive, isSelected, accent, onClick, onOpenEditor,
   modelLabel, modelTint, modelTitle,
   ringPx, outerPx, alphaA, alphaB,
-  timing, skills, isPublisher, projectCwd,
+  timing, skills, isPublisher, projectCwd, label,
 }: {
   name: string;
+  /// Display-only override for the tile title (solo mode → "Coder");
+  /// falls back to displayLabel(name).
+  label?: string;
   icon: string;
   /// Publisher tile: replaces the chat preview with the deterministic
   /// Commit / Merge / Publish controls + repo-setup bar (user spec).
@@ -2058,7 +2066,7 @@ function AgentChatTile({
   ), [messages]);
   return (
     <div
-      title={`Click to view ${displayLabel(name)}'s chat — click the name to edit model · colour · prompt`}
+      title={`Click to view ${label ?? displayLabel(name)}'s chat — click the name to edit model · colour · prompt`}
       onClick={() => {
         // Clicking the tile body ONLY selects this agent for the workspace
         // chat pane — it no longer pops the editor. The editor used to open
@@ -2115,7 +2123,7 @@ function AgentChatTile({
           <span
             role="button"
             tabIndex={0}
-            title={`Edit ${displayLabel(name)} — model · colour · prompt`}
+            title={`Edit ${label ?? displayLabel(name)} — model · colour · prompt`}
             onClick={(e) => { e.stopPropagation(); onOpenEditor(); }}
             onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpenEditor(); } }}
             style={{
@@ -2124,7 +2132,7 @@ function AgentChatTile({
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
               cursor: "pointer", textDecoration: "underline", textDecorationColor: "rgba(255,255,255,0.25)", textUnderlineOffset: 2,
             }}
-          >{displayLabel(name)}</span>
+          >{label ?? displayLabel(name)}</span>
         </div>
         {/* Model logo-chip — right side of the header. The app has no per-
             provider brand image, so show the resolved model's short name in the
@@ -2673,59 +2681,8 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
   // by the parent via the `mode` prop. `activeTab` retained as a local
   // alias to minimise downstream churn.
   const activeTab = mode === "rules" ? "rules" : "chat";
-  // Inline-rules state — ports the DirectivesPanel modal's add / edit
-  // logic into the card so the user never leaves the canvas to manage
-  // the project's rules (user spec 2026-05-20).
-  const [newKind, setNewKind] = useState<"must" | "prefer" | "avoid">("must");
-  const [newText, setNewText] = useState("");
-  const [rulesBusy, setRulesBusy] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
-  const [editText, setEditText] = useState("");
-  const [editKind, setEditKind] = useState<"must" | "prefer" | "avoid">("must");
-  const addRule = async () => {
-    const text = newText.trim();
-    if (!text || !projectId) return;
-    setRulesBusy(true);
-    try {
-      await invoke("directives_add", { input: { projectId, kind: newKind, text } });
-      setNewText("");
-      await onDirectivesChanged();
-    } catch (e) { console.error("directives_add failed", e); }
-    finally { setRulesBusy(false); }
-  };
-  const beginEdit = (d: Directive) => {
-    setEditingId(d.id);
-    setEditText(d.text);
-    setEditKind(d.kind);
-  };
-  const saveEdit = async () => {
-    if (!editingId) return;
-    setRulesBusy(true);
-    try {
-      await invoke("directives_update", { input: { id: editingId, kind: editKind, text: editText } });
-      setEditingId(null);
-      await onDirectivesChanged();
-    } catch (e) { console.error("directives_update failed", e); }
-    finally { setRulesBusy(false); }
-  };
-  const deleteRule = async (id: string) => {
-    setRulesBusy(true);
-    try {
-      await invoke("directives_delete", { id });
-      await onDirectivesChanged();
-    } catch (e) { console.error("directives_delete failed", e); }
-    finally { setRulesBusy(false); }
-  };
-  // Re-add any built-in best-practice rules the user deleted (no duplicates).
-  const restoreDefaults = async () => {
-    if (!projectId) return;
-    setRulesBusy(true);
-    try {
-      await invoke<number>("directives_restore_defaults", { projectId });
-      await onDirectivesChanged();
-    } catch (e) { console.error("directives_restore_defaults failed", e); }
-    finally { setRulesBusy(false); }
-  };
+  // Rules add/edit/delete live in the shared RulesEditor (RulesEditor.tsx)
+  // — the ONE rules UI, also mounted on the Code page's right column.
   return (
     // Width: fills the 450 px overlay column; height: fills the
     // available canvas vertical space (parent passes flex:1) so the
@@ -2805,144 +2762,17 @@ function SuperUserCard({ team, roleByName, chat, onSend, sendBusy, autoApprove, 
           })()}
         </>
       ) : (
-        // Rules tab — full inline add / edit / delete UI. No more
-        // popup modal: the user manages project rules right inside
-        // the card (user spec 2026-05-20).
-        <div data-ui="suRules" style={{ display:"flex", flexDirection:"column", gap:8 }}>
-          {/* Explanation block — three kinds of rule, each with a
-              one-line meaning. The closing sentence states the scope:
-              every agent on the active team sees every rule, so users
-              don't have to wonder whether a rule attached to the
-              orchestrator also reaches the specialists. */}
-          <div data-ui="suRulesHelp" style={{
-            background:"rgba(255,107,107,0.08)",
-            border:"1px solid rgba(255,107,107,0.25)",
-            borderRadius:8,
-            padding:"8px 10px",
-            fontSize:11, lineHeight:1.5,
-            color:"var(--fg)",
-            display:"flex", flexDirection:"column", gap:4,
-          }}>
-            <div style={{ fontSize:10, fontWeight:800, letterSpacing:0.8, color:"#ff6b6b", textTransform:"uppercase" }}>About rules</div>
-            <div><b style={{ color:"#ff8c8c" }}>MUST</b> — hard requirement; the team should refuse the goal if it can't comply.</div>
-            <div><b style={{ color:"#9af0a8" }}>PREFER</b> — soft hint; bias the plan toward this when there's a choice.</div>
-            <div><b style={{ color:"#ffd97a" }}>AVOID</b> — anti-pattern; do NOT do this unless the goal is impossible without it.</div>
-            <div style={{ color:"var(--fg-muted)", marginTop:2 }}>
-              Rules are injected into every agent on the active team
-              ({team?.agents.length ?? 0} {team?.agents.length === 1 ? "agent" : "agents"}) — orchestrator, specialists, and the critic all see them on every turn.
-            </div>
-          </div>
-          {/* Add-rule row — kind dropdown + text input + + button. */}
-          <div data-ui="suRulesAdd" style={{ display:"flex", alignItems:"center", gap:6 }}>
-            <select
-              value={newKind}
-              onChange={e => setNewKind(e.target.value as any)}
-              disabled={rulesBusy || !projectId}
-              style={{
-                height:28, borderRadius:6, padding:"0 6px",
-                background:"rgba(20,16,4,0.6)", color:"var(--fg)",
-                border:"1px solid rgba(255,200,80,0.25)",
-                fontSize:11, fontWeight:700,
-              }}
-            >
-              <option value="must">MUST</option>
-              <option value="prefer">PREFER</option>
-              <option value="avoid">AVOID</option>
-            </select>
-            <input
-              value={newText}
-              onChange={e => setNewText(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter" && newText.trim()) addRule(); }}
-              placeholder={projectId ? "New rule — Enter to add" : "Pick a project first"}
-              disabled={rulesBusy || !projectId}
-              style={{
-                flex:1, height:28, borderRadius:6, padding:"0 8px",
-                background:"rgba(20,16,4,0.6)", color:"var(--fg)",
-                border:"1px solid rgba(255,200,80,0.25)",
-                fontSize:13,
-              }}
-            />
-            <button
-              onClick={addRule}
-              disabled={rulesBusy || !projectId || !newText.trim()}
-              title="Add rule"
-              style={{
-                width:28, height:28, borderRadius:6,
-                border:"1px solid #ffd97a",
-                background: newText.trim() && projectId ? "#ffd97a" : "rgba(255,217,122,0.25)",
-                color: newText.trim() && projectId ? "#1a1404" : "#7d6f4b",
-                fontSize:16, fontWeight:700,
-                cursor: newText.trim() && projectId ? "pointer" : "not-allowed",
-              }}
-            >+</button>
-          </div>
-          {/* Restore the native best-practice set (re-adds any you deleted; no
-              duplicates). The defaults seed automatically on a new project; this
-              is the "I deleted some and want them back" affordance. */}
-          <div style={{ display:"flex", justifyContent:"flex-end" }}>
-            <button
-              onClick={restoreDefaults}
-              disabled={rulesBusy || !projectId}
-              title="Re-add the built-in best-practice rules you've deleted (won't duplicate ones you kept)"
-              style={{ background:"none", border:"none", color:"var(--fg-muted)", fontSize:10.5, cursor: projectId ? "pointer" : "not-allowed", textDecoration:"underline", padding:"2px 0" }}
-            >↺ Restore best-practices</button>
-          </div>
-          {/* Rule list — grouped by kind, each row has Edit + Delete
-              inline. While editing, the row swaps to inline form. */}
-          <div style={{ background:"rgba(20,16,4,0.6)", border:"1px solid rgba(255,200,80,0.20)", borderRadius:8, padding:"8px 10px", maxHeight:220, overflow:"auto", fontSize:12, color:"var(--fg)", display:"flex", flexDirection:"column", gap:6 }}>
-            {directives.length === 0 ? (
-              <div style={{ color:"var(--fg-subtle)", fontStyle:"italic" }}>
-                No project rules yet — type one above to add.
-              </div>
-            ) : (
-              (["must", "prefer", "avoid"] as const).flatMap(kind => {
-                const items = directives.filter(d => d.kind === kind);
-                if (items.length === 0) return [];
-                const kc = kind === "must" ? "#ff8c8c" : kind === "prefer" ? "#9af0a8" : "#ffd97a";
-                return [
-                  <div key={`h-${kind}`} style={{ fontSize:10, fontWeight:800, letterSpacing:0.6, color:kc, textTransform:"uppercase", marginTop:4 }}>{kind}</div>,
-                  ...items.map(d => editingId === d.id ? (
-                    <div key={d.id} style={{ display:"flex", flexDirection:"column", gap:4, paddingLeft:8, borderLeft:`2px solid ${kc}` }}>
-                      <div style={{ display:"flex", gap:4 }}>
-                        <select
-                          value={editKind}
-                          onChange={e => setEditKind(e.target.value as any)}
-                          style={{ height:24, borderRadius:4, padding:"0 4px", background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.25)", fontSize:10, fontWeight:700 }}
-                        >
-                          <option value="must">MUST</option>
-                          <option value="prefer">PREFER</option>
-                          <option value="avoid">AVOID</option>
-                        </select>
-                        <input
-                          value={editText}
-                          onChange={e => setEditText(e.target.value)}
-                          onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingId(null); }}
-                          autoFocus
-                          style={{ flex:1, height:24, borderRadius:4, padding:"0 6px", background:"rgba(20,16,4,0.6)", color:"var(--fg)", border:"1px solid rgba(255,200,80,0.25)", fontSize:12 }}
-                        />
-                      </div>
-                      <div style={{ display:"flex", gap:4, justifyContent:"flex-end" }}>
-                        <button onClick={() => setEditingId(null)} disabled={rulesBusy} style={{ height:22, padding:"0 8px", borderRadius:4, border:"1px solid rgba(255,255,255,0.15)", background:"transparent", color:"var(--fg-muted)", fontSize:10, cursor:"pointer" }}>Cancel</button>
-                        <button onClick={saveEdit} disabled={rulesBusy || !editText.trim()} style={{ height:22, padding:"0 10px", borderRadius:4, border:"1px solid #ffd97a", background:"#ffd97a", color:"#1a1404", fontSize:10, fontWeight:700, cursor:"pointer" }}>Save</button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div key={d.id} style={{ display:"flex", alignItems:"flex-start", gap:6, paddingLeft:8, borderLeft:`2px solid ${kc}`, lineHeight:1.4 }}>
-                      <span style={{ flex:1 }}>
-                        {d.text}
-                        {d.source === "builtin" && (
-                          <span title="Built-in best practice — edit or delete it like any rule" style={{ marginLeft:6, fontSize:9, fontWeight:700, letterSpacing:0.4, color:"var(--fg-subtle)", border:"1px solid var(--border)", borderRadius:4, padding:"0 4px", verticalAlign:"middle", textTransform:"uppercase" }}>native</span>
-                        )}
-                      </span>
-                      <button onClick={() => beginEdit(d)} disabled={rulesBusy} title="Edit" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"var(--fg-muted)", fontSize:12, cursor:"pointer" }}>✏️</button>
-                      <button onClick={() => deleteRule(d.id)} disabled={rulesBusy} title="Delete" style={{ width:22, height:22, padding:0, borderRadius:4, border:"none", background:"transparent", color:"#ff8c8c", fontSize:12, cursor:"pointer" }}>🗑</button>
-                    </div>
-                  )),
-                ];
-              })
-            )}
-          </div>
-        </div>
+        // Rules tab — the SHARED RulesEditor (same component as the Code
+        // page's right column). One rules UI everywhere, never forked.
+        <RulesEditor
+          projectId={projectId}
+          directives={directives}
+          onChanged={onDirectivesChanged}
+          scopeNote={<>
+            Rules are injected into every agent on the active team
+            ({team?.agents.length ?? 0} {team?.agents.length === 1 ? "agent" : "agents"}) — orchestrator, specialists, and the critic all see them on every turn.
+          </>}
+        />
       )}
     </div>
   );
@@ -3222,7 +3052,7 @@ function useCanvasGestures(opts?: { minZoom?: number; maxZoom?: number; factor?:
 // gesture set in agent_team_canvas.py::wheelEvent. Click an agent to
 // select it (drives the top-left info card); click empty space to
 // deselect.
-function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNode, onSelectNode }: {
+function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNode, onSelectNode, labelOverrides }: {
   width: number; height: number; team: Team | null; roleByName: Map<string, RoleData>;
   /// Set of currently-running agents (specialists run in parallel during
   /// phase 2, so this can hold multiple names simultaneously). The
@@ -3231,6 +3061,9 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
   activeAgents: Set<string>;
   selectedNode: string | null;
   onSelectNode: (name: string | null) => void;
+  /// Display-only label swaps (e.g. solo mode shows the picked writer as
+  /// "Coder"). Never touches the underlying agent name — that's identity.
+  labelOverrides?: Record<string, string>;
 }) {
   // Pan + zoom via the shared gesture hook so the diagram and graph
   // views behave IDENTICALLY: middle-mouse-drag pans, plain wheel
@@ -3284,14 +3117,14 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
         const rawDepth = Math.max(1, depths.get(a.name) ?? 1);
         return {
           name: a.name,
-          label: teamMemberLabel(a.name, group),
+          label: labelOverrides?.[a.name] ?? teamMemberLabel(a.name, group),
           iconRef: agentIconRef(a, roleByName),
           depth: Math.min(2, rawDepth),
           active: activeAgents.has(a.name),
           group,
         };
       });
-  }, [team, roleByName, activeAgents]);
+  }, [team, roleByName, activeAgents, labelOverrides]);
   // Separate critic ref so the renderer can place it at depth-0 next
   // to the orchestrator (peer position, not on a specialist arc).
   const criticSpec = useMemo(
@@ -3859,6 +3692,7 @@ function GraphCanvas({
   selectedEdgeIdx, onSelectEdge,
   positions, onPositionsChange,
   modelFor,
+  labelOverrides,
 }: {
   width: number; height: number;
   team: Team | null; roleByName: Map<string, RoleData>;
@@ -3874,6 +3708,9 @@ function GraphCanvas({
   /// graph card so the user can see at a glance which model each
   /// agent is wired to.
   modelFor: (agentName: string) => string;
+  /// Display-only label swaps (e.g. solo mode shows the picked writer as
+  /// "Coder"). Never touches the underlying agent name — that's identity.
+  labelOverrides?: Record<string, string>;
 }) {
   const w = width, h = height;
   // Live mouse position for the rubber-band edge while dragging from a
@@ -4466,8 +4303,8 @@ function GraphCanvas({
                 display:"-webkit-box", WebkitLineClamp:2, WebkitBoxOrient:"vertical",
                 overflow:"hidden", wordBreak:"break-word",
                 minHeight:"2.4em",
-              }} title={teamMemberLabel(n.name, group)}>
-                {teamMemberLabel(n.name, group)}
+              }} title={labelOverrides?.[n.name] ?? teamMemberLabel(n.name, group)}>
+                {labelOverrides?.[n.name] ?? teamMemberLabel(n.name, group)}
               </div>
               {isOrch && (
                 <div style={{ display:"flex", alignItems:"center", justifyContent:"center" }}>
@@ -8337,6 +8174,10 @@ export function AgentsPage({
   const [editedEdges, setEditedEdges] = useState<Edge[] | null>(null);
   const [selectedEdgeIdx, setSelectedEdgeIdx] = useState<number | null>(null);
   const [nodePositions, setNodePositions] = useState<GraphPos | null>(null);
+  // Solo-Loop gets its OWN position map: the solo canvas shares agent NAMES
+  // with the team canvas, so dragging cards in solo mode used to silently
+  // corrupt the team layout when toggling back (user bug 2026-07-04).
+  const [soloPositions, setSoloPositions] = useState<GraphPos | null>(null);
 
   // Super User card chat (supChat) + its setter are derived from the
   // chatRuntime session above — they used to be component useState here, but
@@ -9179,6 +9020,7 @@ export function AgentsPage({
     setEditedEdges(null);
     setSelectedEdgeIdx(null);
     setNodePositions(null);
+    setSoloPositions(null);
     setSelectedNode(null);
     // RELOAD (not wipe) this project's saved per-agent model + voice picks.
     // This effect fires on EVERY activeTeam recompute — which includes every
@@ -9411,6 +9253,15 @@ export function AgentsPage({
     if (has(critic.name) && has(publisher.name) && critic.name !== publisher.name) edges.push({ source: critic.name, target: publisher.name });
     return { ...renderTeam, agents: soloAgents, edges };
   }, [renderTeam, roleByName]);
+
+  // Solo card labels: the picked writer keeps its dispatch identity (name is
+  // used for @routing + log keys) but READS as "Coder" on the canvases —
+  // showing its team lane name ("Frontend") in solo mode was misleading
+  // (user bug 2026-07-04). agents[0] is the coder by construction above.
+  const soloLabels = useMemo<Record<string, string>>(() => {
+    const coder = soloRenderTeam?.agents[0];
+    return coder ? { [coder.name]: "Coder" } : {};
+  }, [soloRenderTeam]);
 
   // ----- Per-agent log mutation helpers -----
   // Append a fresh entry to a given agent's buffer.
@@ -10597,6 +10448,12 @@ export function AgentsPage({
         const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd) + "\n" + SOLO_OVERRIDE;
         const sAllowed = roleByName.get(coder.base)?.toolAllowlist;
         const sMem = await loadAgentMemory(selectedProjectId, coder.name);
+        // Continuity (memory-loss fix 2026-07-04): a chat-driven send carries the
+        // visible conversation (priorHistory) — in solo mode the coder IS the
+        // conversation partner, so that thread wins; per-agent memory is the
+        // fallback for Run-button dispatches with no chat context.
+        const sHist = priorHistory && priorHistory.length > 0 ? priorHistory
+          : (sMem.length > 0 ? sMem : undefined);
         // Scope the gate to the coder's domain (mirrors the team path) so the card's
         // frontend/backend lanes apply — a UI edit runs the fast frontend check, a
         // backend edit runs the heavier backend one, not always "full".
@@ -10616,7 +10473,7 @@ export function AgentsPage({
               port, modelFor(coder.name), providerFor(modelFor(coder.name)),
               sPrompt, turn, tempFor(coder, 0.3), ctrl.signal,
               (d) => streamLog(coder.name, d), projectCwd,
-              sMem.length > 0 ? sMem : undefined, autoApprove,
+              sHist, autoApprove,
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
               attachments.length > 0 ? attachments : undefined,
               getClaudeSession(selectedProjectId, coder.name),
@@ -10659,7 +10516,7 @@ export function AgentsPage({
               sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteer}`,
               tempFor(coder, 0.3), ctrl.signal,
               (d) => streamLog(coder.name, d), projectCwd,
-              sMem.length > 0 ? sMem : undefined, autoApprove,
+              sHist, autoApprove,
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed, undefined,
               getClaudeSession(selectedProjectId, coder.name),
             )).trim();
@@ -10878,7 +10735,7 @@ export function AgentsPage({
               tempFor(orch, 0.4), ctrl.signal,
               (delta) => streamLog(orch.name, delta),
               projectCwd,
-              undefined, undefined,
+              priorHistory, undefined,   // history: replans must keep the user's chat thread (memory-loss fix 2026-07-04)
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
               READONLY_LOCAL_TOOLS,
               undefined,
@@ -10984,7 +10841,7 @@ export function AgentsPage({
               tempFor(orch, 0.4), ctrl.signal,
               (delta) => streamLog(orch.name, delta),
               projectCwd,
-              undefined, undefined,
+              priorHistory, undefined,   // history: replans must keep the user's chat thread (memory-loss fix 2026-07-04)
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
               READONLY_LOCAL_TOOLS,
               undefined,
@@ -11061,7 +10918,7 @@ export function AgentsPage({
               tempFor(orch, 0.3), ctrl.signal,
               (delta) => streamLog(orch.name, delta),
               projectCwd,
-              undefined, undefined,
+              priorHistory, undefined,   // history: replans must keep the user's chat thread (memory-loss fix 2026-07-04)
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
               READONLY_LOCAL_TOOLS,
               undefined,
@@ -11107,7 +10964,7 @@ export function AgentsPage({
               tempFor(orch, 0.3), ctrl.signal,
               (delta) => streamLog(orch.name, delta),
               projectCwd,
-              undefined, undefined,
+              priorHistory, undefined,   // history: replans must keep the user's chat thread (memory-loss fix 2026-07-04)
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
               READONLY_LOCAL_TOOLS,
               undefined,
@@ -12709,6 +12566,7 @@ export function AgentsPage({
                 activeAgents={activeAgents}
                 selectedNode={selectedNode}
                 onSelectNode={setSelectedNode}
+                labelOverrides={soloMode ? soloLabels : undefined}
               />
             ) : viewMode === "graph" ? (
               <GraphCanvas
@@ -12723,13 +12581,15 @@ export function AgentsPage({
                 onEdgesChange={soloMode ? (() => {}) : ((es) => { setEditedEdges(es); setSelectedEdgeIdx(null); })}
                 selectedEdgeIdx={selectedEdgeIdx}
                 onSelectEdge={setSelectedEdgeIdx}
-                positions={nodePositions}
-                onPositionsChange={setNodePositions}
+                positions={soloMode ? soloPositions : nodePositions}
+                onPositionsChange={soloMode ? setSoloPositions : setNodePositions}
                 modelFor={modelFor}
+                labelOverrides={soloMode ? soloLabels : undefined}
               />
             ) : (
               <AgentChatGrid
                 team={soloMode ? soloRenderTeam : renderTeam}
+                labelOverrides={soloMode ? soloLabels : undefined}
                 roleByName={roleByName}
                 agentLogs={agentLogs}
                 activeAgents={activeAgents}

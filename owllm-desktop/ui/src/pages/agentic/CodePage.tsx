@@ -455,6 +455,37 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const agentMode: CodeAgentMode = stx.agentMode ?? "auto";
   // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
   const [termOpen, setTermOpen] = useState(false);
+  // Terminal popup chrome: hide (— keeps the shell alive, just display:none)
+  // and drag (title bar). null pos = default docked bottom-right.
+  const [termHidden, setTermHidden] = useState(false);
+  const [termPos, setTermPos] = useState<{ x: number; y: number } | null>(null);
+  const termBoxRef = useRef<HTMLDivElement>(null);
+  const termDragRef = useRef<{ dx: number; dy: number } | null>(null);
+  const onTermDragStart = (e: React.MouseEvent) => {
+    if ((e.target as HTMLElement).closest("button")) return; // don't drag from the buttons
+    const box = termBoxRef.current;
+    if (!box) return;
+    e.preventDefault();
+    const r = box.getBoundingClientRect();
+    termDragRef.current = { dx: e.clientX - r.left, dy: e.clientY - r.top };
+    const move = (ev: MouseEvent) => {
+      const d = termDragRef.current;
+      const b = termBoxRef.current;
+      if (!d || !b) return;
+      const w = b.offsetWidth, h = b.offsetHeight;
+      setTermPos({
+        x: Math.min(Math.max(0, ev.clientX - d.dx), Math.max(0, window.innerWidth - w)),
+        y: Math.min(Math.max(0, ev.clientY - d.dy), Math.max(0, window.innerHeight - h)),
+      });
+    };
+    const up = () => {
+      termDragRef.current = null;
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
   const [mergeBusy, setMergeBusy] = useState(false);
   busySendRef.current = busy;
   // Resolve the rules/notebook scope whenever the folder changes: prefer the
@@ -1876,8 +1907,13 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             onDirectivesChanged={reloadDirectives}
             mode={agentMode}
             onModeChange={setAgentMode}
-            terminalOpen={termOpen}
-            onToggleTerminal={() => setTermOpen((o) => !o)}
+            terminalOpen={termOpen && !termHidden}
+            onToggleTerminal={() => {
+              // Closed → open. Hidden → re-show (shell was kept alive).
+              // Visible → hide (shell stays alive; ✕ on the popup kills it).
+              if (!termOpen) { setTermOpen(true); setTermHidden(false); }
+              else setTermHidden((h) => !h);
+            }}
             usageProvider={providerFor(modelId, availableModels)}
             notebook={
               <RunNotebook
@@ -1899,18 +1935,30 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       {/* 🖥 Terminal popup — a real PTY shell in the workspace folder, floating
           above THIS app's UI only (fixed overlay, no OS always-on-top). */}
       {termOpen && workspace && (
-        <div style={{ position: "fixed", right: 24, bottom: 24, width: "min(720px, 80vw)", height: "min(440px, 70vh)", zIndex: 1200, display: "flex", flexDirection: "column", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 10, boxShadow: "0 18px 60px rgba(0,0,0,0.6)", overflow: "hidden" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--border)" }}>
+        <div
+          ref={termBoxRef}
+          style={{
+            position: "fixed",
+            ...(termPos ? { left: termPos.x, top: termPos.y } : { right: 24, bottom: 24 }),
+            width: "min(720px, 80vw)", height: "min(440px, 70vh)", zIndex: 1200,
+            display: termHidden ? "none" : "flex", flexDirection: "column",
+            background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 10,
+            boxShadow: "0 18px 60px rgba(0,0,0,0.6)", overflow: "hidden",
+          }}
+        >
+          {/* Title bar — drag to move the popup anywhere over the app. */}
+          <div onMouseDown={onTermDragStart} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", borderBottom: "1px solid var(--border)", cursor: "move", userSelect: "none" }}>
             <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)" }}>🖥 Terminal — {wsShort}</span>
             <span style={{ flex: 1 }} />
-            <button className="ghost-btn" onClick={() => setTermOpen(false)} title="Close (ends the shell)" style={{ height: 24, width: 26, padding: 0, fontSize: 12 }}>✕</button>
+            <button className="ghost-btn" onClick={() => setTermHidden(true)} title="Hide (shell keeps running — reopen from the 🖥 Terminal button)" style={{ height: 24, width: 26, padding: 0, fontSize: 13 }}>—</button>
+            <button className="ghost-btn" onClick={() => { setTermOpen(false); setTermHidden(false); }} title="Close (ends the shell)" style={{ height: 24, width: 26, padding: 0, fontSize: 12 }}>✕</button>
           </div>
           <div style={{ flex: 1, minHeight: 0 }}>
             <PtyTerminal
               cli={navigator.userAgent.includes("Windows") ? "powershell" : "bash"}
               args={[]}
               cwd={workspace}
-              onExit={() => setTermOpen(false)}
+              onExit={() => { setTermOpen(false); setTermHidden(false); }}
             />
           </div>
         </div>

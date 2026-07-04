@@ -34,6 +34,10 @@ export type NotebookStep = {
 
 export type NotebookState = {
   text: string;
+  /// The PLAN — a living document the digest agent drafts from the
+  /// brainstorm (objective, approach, ordered milestones) and the user
+  /// edits freely. Steps are the feedable units cut from it.
+  plan: string;
   steps: NotebookStep[];
   autoFeed: boolean;
   digest: Array<{ role: "you" | "digest"; text: string }>;
@@ -43,7 +47,7 @@ export type NotebookState = {
 };
 
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
-const EMPTY: NotebookState = { text: "", steps: [], autoFeed: false, digest: [] };
+const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [] };
 const keyFor = (projectId: string) => `owllm:agents:notebook:${projectId}`;
 
 export function loadNotebook(projectId: string | null | undefined): NotebookState {
@@ -54,6 +58,7 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
     const p = JSON.parse(raw);
     return {
       text: typeof p.text === "string" ? p.text : "",
+      plan: typeof p.plan === "string" ? p.plan : "",
       steps: Array.isArray(p.steps) ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string") : [],
       autoFeed: p.autoFeed === true,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
@@ -85,25 +90,40 @@ export function takeNextAutoStep(projectId: string | null | undefined): Notebook
 
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
-/// Parse "- step" / "1. step" lines out of a digest reply.
-function parseProposedSteps(reply: string): string[] {
-  const out: string[] = [];
+/// Split a digest reply into the updated PLAN block (between "PLAN:" and
+/// "STEPS:") and the proposed "- step" lines. Replies without a PLAN:
+/// header keep the old shape — steps only.
+function parseDigestReply(reply: string): { plan: string; steps: string[] } {
+  let planLines: string[] | null = null;
+  const steps: string[] = [];
+  let inPlan = false;
   for (const line of reply.split(/\r?\n/)) {
+    const t = line.trim();
+    if (/^PLAN\s*:?\s*$/i.test(t)) { inPlan = true; planLines = planLines ?? []; continue; }
+    if (/^(NEXT\s+)?STEPS\s*:?\s*$/i.test(t)) { inPlan = false; continue; }
+    if (inPlan) { planLines!.push(line); continue; }
     const m = line.match(/^\s*(?:[-*•]|\d+[.)])\s+(.{3,})$/);
-    if (m) out.push(m[1].trim());
+    if (m) steps.push(m[1].trim());
   }
-  return out;
+  return { plan: (planLines ?? []).join("\n").trim(), steps };
 }
 
 const DIGEST_SYSTEM = [
   "You are the Notebook Digest agent inside OWLLM. An agent team is working on the user's project;",
-  "the user brainstorms alongside it. Your ONLY job: turn their raw notes/requests into clear,",
-  "self-contained, implementable NEXT STEPS for that team.",
+  "the user brainstorms alongside it. Your job: turn their raw notes/requests into (1) an updated",
+  "implementation PLAN and (2) clear, self-contained, implementable NEXT STEPS for that team.",
   "Rules:",
-  "- ADDITIVE: never rewrite, merge or remove the existing steps you are shown — only propose NEW ones.",
+  "- PLAN: a short living document — objective, approach, ordered milestones. You are shown the",
+  "  CURRENT PLAN; extend and refine it ADDITIVELY (keep what still holds, never silently drop the",
+  "  user's decisions). If the notes add nothing plan-worthy, omit the PLAN section entirely.",
+  "- STEPS are ADDITIVE: never rewrite, merge or remove the existing steps you are shown — only propose NEW ones.",
   "- Each step must stand alone: an agent receives it with no other context, so name the feature/file/behavior explicitly.",
   "- Small and actionable beats big and vague; split compound ideas into separate steps.",
-  "- Output: one short line of reasoning at most, then EVERY proposed step on its own line starting with '- '.",
+  "- Output format, nothing else:",
+  "  PLAN:",
+  "  <the full updated plan, a few short lines>",
+  "  STEPS:",
+  "  - <each proposed step on its own line starting with '- '>",
 ].join("\n");
 
 type Props = {
@@ -137,6 +157,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const [digestInput, setDigestInput] = useState("");
   const [digestBusy, setDigestBusy] = useState(false);
   const [proposed, setProposed] = useState<string[]>([]);
+  /// Digest-drafted plan awaiting the user's one-click apply (mirrors the
+  /// propose→add pattern steps use — the digest never overwrites silently).
+  const [proposedPlan, setProposedPlan] = useState<string>("");
   const digestScroll = useStickyScroll<HTMLDivElement>([nb.digest, proposed, digestBusy]);
   const activeRef = useRef(active);
   activeRef.current = active;
@@ -159,7 +182,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     return () => window.removeEventListener(NOTEBOOK_EVENT, onChanged as EventListener);
   }, []);
   // Project switch → swap to that project's notebook.
-  useEffect(() => { setNb(loadNotebook(projectId)); setProposed([]); }, [projectId]);
+  useEffect(() => { setNb(loadNotebook(projectId)); setProposed([]); setProposedPlan(""); }, [projectId]);
 
   const update = (patch: Partial<NotebookState>) => {
     setNb((prev) => {
@@ -197,12 +220,14 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     if ((!ask && !notes) || digestBusy) return;
     setDigestBusy(true);
     setProposed([]);
-    const youText = ask || "(digest my notebook notes into next steps)";
+    setProposedPlan("");
+    const youText = ask || "(digest my notebook notes into a plan + next steps)";
     const history = [...nb.digest, { role: "you" as const, text: youText }];
     update({ digest: history });
     setDigestInput("");
     try {
       const user = [
+        nb.plan.trim() ? `CURRENT PLAN (extend/refine additively):\n${nb.plan.trim()}` : "",
         nb.steps.length ? `EXISTING STEPS (do not repeat or rewrite):\n${nb.steps.map((s) => `- ${s.text}`).join("\n")}` : "",
         notes ? `NOTEBOOK NOTES:\n${notes}` : "",
         ask ? `USER REQUEST:\n${ask}` : "",
@@ -216,9 +241,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
         DIGEST_SYSTEM, user, 0.3, ctrl.signal,
         (d) => { reply += d; },
       );
-      const steps = parseProposedSteps(reply);
+      const parsed = parseDigestReply(reply);
       update({ digest: [...history, { role: "digest", text: reply.trim() || "(no reply)" }] });
-      setProposed(steps);
+      setProposed(parsed.steps);
+      if (parsed.plan && parsed.plan !== nb.plan.trim()) setProposedPlan(parsed.plan);
     } catch (e: any) {
       update({ digest: [...history, { role: "digest", text: `(error: ${String(e?.message ?? e)})` }] });
     } finally {
@@ -263,7 +289,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
           {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} style={{ height: 26, width: 28, padding: 0, fontSize: 13 }}>✕</button>}
         </div>
 
-        {/* Body: notes | steps (side by side in the modal, stacked inline) */}
+        {/* Body: notes | plan | steps (side by side in the modal, stacked inline) */}
         <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: inline ? "column" : "row" }}>
           {/* Brainstorm notes */}
           <div style={{ flex: "1 1 0", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", ...(inline ? { borderBottom: "1px solid var(--border)" } : { borderRight: "1px solid var(--border)" }) }}>
@@ -271,7 +297,18 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             <textarea
               value={nb.text}
               onChange={(e) => update({ text: e.target.value })}
-              placeholder={"Think out loud while the agents work — ideas, refactors, features…\nThen 🪄 Digest turns this into feedable steps."}
+              placeholder={"Think out loud while the agents work — ideas, refactors, features…\nThen 🪄 Digest drafts the plan + feedable steps."}
+              style={{ flex: 1, margin: "4px 14px 12px", padding: 10, resize: "none", background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12.5, lineHeight: 1.5, outline: "none" }}
+            />
+          </div>
+
+          {/* Plan — the digest's living document (editable). */}
+          <div style={{ flex: "1 1 0", minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", ...(inline ? { borderBottom: "1px solid var(--border)" } : { borderRight: "1px solid var(--border)" }) }}>
+            <div style={{ padding: "8px 14px 4px", fontSize: 11, fontWeight: 700, letterSpacing: 0.6, color: "var(--fg-muted)", textTransform: "uppercase" }}>📋 Plan</div>
+            <textarea
+              value={nb.plan}
+              onChange={(e) => update({ plan: e.target.value })}
+              placeholder={"The implementation plan — 🪄 Digest drafts it from your brainstorm (objective, approach, milestones); edit it freely."}
               style={{ flex: 1, margin: "4px 14px 12px", padding: 10, resize: "none", background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", borderRadius: 8, fontSize: 12.5, lineHeight: 1.5, outline: "none" }}
             />
           </div>
@@ -341,6 +378,16 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 </div>
               ))}
               {digestBusy && <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>🪄 digesting…</div>}
+            </div>
+          )}
+          {proposedPlan && (
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <button
+                onClick={() => { update({ plan: proposedPlan }); setProposedPlan(""); }}
+                title={proposedPlan}
+                style={{ height: 24, padding: "0 10px", border: "1px solid rgba(154,217,255,0.45)", borderRadius: 999, background: "rgba(14,28,40,0.7)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+              >📋 Apply updated plan</button>
+              <button className="ghost-btn" onClick={() => setProposedPlan("")} title="Discard the proposed plan" style={{ height: 24, width: 24, padding: 0, fontSize: 11 }}>✕</button>
             </div>
           )}
           {proposed.length > 0 && (

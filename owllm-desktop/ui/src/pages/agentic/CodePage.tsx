@@ -366,9 +366,23 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // is also editable: ✎ Edit turns the <pre> into a <textarea>, and once the text
   // is modified the button becomes 💾 Save (writes back via tool_write_file).
   // `content` is what's on disk; `draft` is the in-progress edit; dirty = draft≠content.
-  const [viewer, setViewer] = useState<
-    { abs: string; rel: string; content: string; loading: boolean; editing: boolean; draft: string; saving: boolean; saveError?: string } | null
-  >(null);
+  // Open files are TABS — several can be open at once and you switch between
+  // them. `tabs` holds every open file; `activeAbs` is the one shown. `viewer`
+  // (derived) is the active tab, so all the viewer code below reads the same.
+  type FileTab = { abs: string; rel: string; content: string; loading: boolean; editing: boolean; draft: string; saving: boolean; saveError?: string };
+  const [tabs, setTabs] = useState<FileTab[]>([]);
+  const [activeAbs, setActiveAbs] = useState<string | null>(null);
+  const viewer = tabs.find((t) => t.abs === activeAbs) ?? null;
+  // Patch one tab in place (partial or updater), keyed by its absolute path.
+  const patchTab = (abs: string, patch: Partial<FileTab> | ((t: FileTab) => Partial<FileTab>)) =>
+    setTabs((ts) => ts.map((t) => (t.abs === abs ? { ...t, ...(typeof patch === "function" ? patch(t) : patch) } : t)));
+  // Remove a tab; if it was the active one, focus a neighbour (or close all).
+  const dropTab = (abs: string) => {
+    const idx = tabs.findIndex((t) => t.abs === abs);
+    const next = tabs.filter((t) => t.abs !== abs);
+    setTabs(next);
+    if (activeAbs === abs) setActiveAbs(next[idx]?.abs ?? next[idx - 1]?.abs ?? null);
+  };
   // Fallback working dir for chats with NO workspace folder selected. A pasted
   // image needs somewhere to be saved so a CLI/subscription model can READ it
   // (codex -i / claude file-ref) — without a cwd the image was silently dropped
@@ -1383,40 +1397,47 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // makes the tree useful instead of decorative.
   const openFile = async (abs: string) => {
     const rel = relOf(abs);
-    setViewer({ abs, rel, content: "", loading: true, editing: false, draft: "", saving: false });
+    const alreadyOpen = tabs.some((t) => t.abs === abs);
+    setActiveAbs(abs);
+    if (alreadyOpen) return; // already a tab — just focus it, keep its state/edits
+    setTabs((ts) => (ts.some((t) => t.abs === abs) ? ts : [...ts, { abs, rel, content: "", loading: true, editing: false, draft: "", saving: false }]));
     try {
       const content = await invoke<string>("tool_read_file", { path: abs, cwd: undefined });
-      setViewer({ abs, rel, content, loading: false, editing: false, draft: content, saving: false });
+      patchTab(abs, { content, loading: false, draft: content });
     } catch (e: any) {
-      setViewer({ abs, rel, content: `⚠ Couldn't open this file: ${String(e?.message ?? e)}\n\n(It may be binary, too large, or outside the workspace.)`, loading: false, editing: false, draft: "", saving: false });
+      patchTab(abs, { content: `⚠ Couldn't open this file: ${String(e?.message ?? e)}\n\n(It may be binary, too large, or outside the workspace.)`, loading: false, draft: "" });
     }
   };
   // ✎ Edit → make the open file editable (seed the draft from the on-disk text).
-  const startEdit = () => setViewer((v) => (v ? { ...v, editing: true, draft: v.content, saveError: undefined } : v));
+  const startEdit = () => { if (activeAbs) patchTab(activeAbs, (t) => ({ editing: true, draft: t.content, saveError: undefined })); };
   // Leave edit mode, discarding any unsaved changes.
-  const cancelEdit = () => setViewer((v) => (v ? { ...v, editing: false, draft: v.content, saveError: undefined } : v));
+  const cancelEdit = () => { if (activeAbs) patchTab(activeAbs, (t) => ({ editing: false, draft: t.content, saveError: undefined })); };
   // 💾 Save → write the draft back to disk (cwd = workspace so it clears the
   // write-jail, which only allows writes inside the project/temp/~OwLLM).
   const saveFile = async () => {
     if (!viewer) return;
     const { abs, draft } = viewer;
-    setViewer((v) => (v ? { ...v, saving: true, saveError: undefined } : v));
+    patchTab(abs, { saving: true, saveError: undefined });
     try {
       await invoke("tool_write_file", { path: abs, content: draft, cwd: workspace || undefined });
-      setViewer((v) => (v ? { ...v, content: draft, editing: false, saving: false } : v));
+      patchTab(abs, { content: draft, editing: false, saving: false });
     } catch (e: any) {
-      setViewer((v) => (v ? { ...v, saving: false, saveError: String(e?.message ?? e) } : v));
+      patchTab(abs, { saving: false, saveError: String(e?.message ?? e) });
     }
   };
-  // Close the viewer, but don't silently drop unsaved edits.
-  const closeViewer = () => {
-    if (viewer && viewer.editing && viewer.draft !== viewer.content && !window.confirm("Discard unsaved changes to this file?")) return;
-    setViewer(null);
+  // Close a tab (default: the active one), but don't silently drop unsaved edits.
+  const closeViewer = (abs?: string) => {
+    const target = abs ?? activeAbs;
+    if (!target) return;
+    const t = tabs.find((x) => x.abs === target);
+    if (t && t.editing && t.draft !== t.content && !window.confirm("Discard unsaved changes to this file?")) return;
+    dropTab(target);
   };
-  // Drop an @reference to the open file into the composer (so the model edits it).
+  // Drop an @reference to the open file into the composer (so the model edits it),
+  // then dismiss just that tab.
   const referenceInChat = (rel: string) => {
     setDraft((d) => (d.trim() ? `${d.replace(/\s*$/, "")} @${rel} ` : `@${rel} `));
-    setViewer(null);
+    if (activeAbs) dropTab(activeAbs);
   };
   // Project-composer image attachments — mirror addChatFiles (just-chat box).
   const addCodeFiles = async (files: FileList | File[]) => {
@@ -2034,8 +2055,27 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         const dirty = viewer.editing && viewer.draft !== viewer.content;
         const canEdit = !viewer.loading && !viewer.content.startsWith("⚠ Couldn't open");
         return (
-        <div onClick={closeViewer} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
+        <div onClick={() => closeViewer()} style={{ position: "fixed", inset: 0, zIndex: 60, background: "rgba(0,0,0,0.55)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24 }}>
           <div onClick={(e) => e.stopPropagation()} style={{ width: "min(980px, 94vw)", maxHeight: "88vh", display: "flex", flexDirection: "column", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 12, overflow: "hidden", boxShadow: "var(--shadow-lg)" }}>
+            {/* Tab strip — every open file. Click to switch, ✕ to close. Shown once
+                more than one file is open. */}
+            {tabs.length > 1 && (
+              <div style={{ display: "flex", alignItems: "stretch", gap: 2, padding: "6px 8px 0", borderBottom: "1px solid var(--border)", overflowX: "auto", background: "var(--bg-panel)" }}>
+                {tabs.map((t) => {
+                  const active = t.abs === activeAbs;
+                  const tdirty = t.editing && t.draft !== t.content;
+                  return (
+                    <div key={t.abs} onClick={() => setActiveAbs(t.abs)} title={t.abs}
+                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 8px 6px 10px", cursor: "pointer", maxWidth: 220, flex: "0 0 auto", borderRadius: "8px 8px 0 0",
+                        background: active ? "var(--bg-input)" : "transparent", borderTop: `2px solid ${active ? "#7ff0c5" : "transparent"}`, color: active ? "var(--fg)" : "var(--fg-muted)" }}>
+                      <span style={{ fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>📄 {t.rel.split(/[\\/]/).pop()}{tdirty ? " •" : ""}</span>
+                      <span onClick={(e) => { e.stopPropagation(); closeViewer(t.abs); }} title="Close tab"
+                        style={{ fontSize: 12, lineHeight: 1, padding: "1px 4px", borderRadius: 4, color: "var(--fg-muted)" }}>✕</span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "10px 14px", borderBottom: "1px solid var(--border)" }}>
               <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }} title={viewer.abs}>📄 {viewer.rel}{dirty ? " •" : ""}</span>
               {/* ✎ Edit turns the file editable; once modified it becomes 💾 Save. */}
@@ -2054,7 +2094,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                 </>
               )}
               <button onClick={() => referenceInChat(viewer.rel)} title="Insert @reference into the composer so the model edits this file" style={{ ...btn, height: 30, padding: "0 10px" }}>↳ Reference in chat</button>
-              <button onClick={closeViewer} style={{ ...btn, height: 30, padding: "0 12px" }}>✕ Close</button>
+              <button onClick={() => closeViewer()} style={{ ...btn, height: 30, padding: "0 12px" }}>✕ Close</button>
             </div>
             {viewer.saveError && (
               <div style={{ padding: "8px 14px", fontSize: 12, color: "#ff8c8c", borderBottom: "1px solid var(--border)", background: "rgba(255,140,140,0.08)" }}>⚠ Couldn't save: {viewer.saveError}</div>
@@ -2064,7 +2104,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                 <div style={{ padding: 20, color: "var(--fg-muted)", fontSize: 13 }}>Loading…</div>
               ) : viewer.editing ? (
                 <textarea value={viewer.draft} spellCheck={false}
-                  onChange={(e) => { const val = e.target.value; setViewer((v) => (v ? { ...v, draft: val } : v)); }}
+                  onChange={(e) => { const val = e.target.value; if (viewer) patchTab(viewer.abs, { draft: val }); }}
                   style={{ display: "block", width: "100%", minHeight: "60vh", boxSizing: "border-box", margin: 0, padding: 14, border: "none", outline: "none", resize: "none", background: "var(--bg-input)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "Consolas, 'JetBrains Mono', monospace", color: "var(--fg)", whiteSpace: "pre", overflowWrap: "normal" }} />
               ) : (
                 <pre style={{ margin: 0, padding: 14, fontSize: 12.5, lineHeight: 1.5, fontFamily: "Consolas, 'JetBrains Mono', monospace", color: "var(--fg)", whiteSpace: "pre", overflowX: "auto" }}>{viewer.content}</pre>

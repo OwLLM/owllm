@@ -21,6 +21,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState } from "./localTools";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
+import { RunTimerChip } from "./RunTimer";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
 import {
@@ -84,6 +85,10 @@ type CodeState = {
   // Agent MODE (right-column selector): plan = Kanban plan/act, auto = act
   // directly (the old Send), chat = discuss only (read-only tools, no edits).
   agentMode?: CodeAgentMode;
+  // Run stopwatch — stamped when an agent turn starts, frozen when it ends.
+  // Mirrors the Agents-page team timer; rendered as the header RunTimerChip.
+  runStartedAt?: number;
+  runEndedAt?: number;
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
@@ -126,12 +131,21 @@ function savePages(pages: CodePageMeta[]): void {
 // Per-PAGE session persistence (keyed by page id, NOT the folder/worktree path,
 // so an isolated page survives the worktree being re-created at a new path).
 function pageSessionKey(pageId: string): string { return PAGE_SESSION_PREFIX + pageId; }
+// A run interrupted by app-close persists busy:false with a runStartedAt but no
+// runEndedAt — clear that half-open stopwatch on load so it doesn't render a
+// bogus multi-hour "frozen" duration. A completed run (both stamps set) is kept.
+function closeStaleTimer(s: CodeState): CodeState {
+  if (s.runStartedAt != null && s.runEndedAt == null) {
+    return { ...s, runStartedAt: undefined, runEndedAt: undefined };
+  }
+  return s;
+}
 function loadPageSession(pageId: string): CodeState | null {
   try {
     const raw = localStorage.getItem(pageSessionKey(pageId));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
-    return { ...DEFAULT_CODE_STATE, ...s, busy: false };
+    return closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, busy: false });
   } catch { return null; }
 }
 function savePageSession(pageId: string, s: CodeState | null | undefined): void {
@@ -213,7 +227,7 @@ function loadCodeSession(ws: string): CodeState | null {
     const raw = localStorage.getItem(codeSessionKey(ws));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
-    return { ...DEFAULT_CODE_STATE, ...s, workspace: ws, busy: false };
+    return closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, workspace: ws, busy: false });
   } catch { return null; }
 }
 
@@ -467,7 +481,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // True on Windows, where the WSL-specific toolchain probe + installer apply.
   const isWsl = sbox ? sbox.kind === "wsl" : true;
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
-  const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing } = stx;
+  const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing, runStartedAt, runEndedAt } = stx;
   const agentMode: CodeAgentMode = stx.agentMode ?? "auto";
   // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
   const [termOpen, setTermOpen] = useState(false);
@@ -580,7 +594,17 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const setWorkspace = (v: string) => setField("workspace", v);
   const setModelId = (v: string | ((s: string) => string)) => setField("modelId", v);
   const setDraft = (v: string | ((s: string) => string)) => setField("draft", v);
-  const setBusy = (v: boolean) => setField("busy", v);
+  // Toggling busy also drives the header stopwatch: stamp runStartedAt fresh on
+  // start, freeze runEndedAt on stop (only if a run was actually live, so a
+  // double stop() doesn't move the frozen time).
+  const setBusy = (v: boolean) => {
+    chatRuntime.setPayload(SID, (prev) => {
+      const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
+      if (v) return { ...cur, busy: true, runStartedAt: Date.now(), runEndedAt: undefined };
+      const live = cur.runStartedAt != null && cur.runEndedAt == null;
+      return { ...cur, busy: false, runEndedAt: live ? Date.now() : cur.runEndedAt };
+    });
+  };
   const setStatus = (v: string) => setField("status", v);
   const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
 
@@ -1829,6 +1853,15 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             {mergeBusy ? "⏳ Merging…" : `⤴ Merge to ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`}
           </button>
         )}
+        <div style={{ flex: 1 }} />
+        {/* Run stopwatch — same component as the Agents-page team timer. Ticks
+            green while the agent works this turn, freezes muted when it stops. */}
+        <RunTimerChip
+          runStartedAt={runStartedAt}
+          runEndedAt={runEndedAt}
+          active={busy}
+          title={busy ? "The agent is working — elapsed time" : "How long the last turn took"}
+        />
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
         <div style={{ minWidth: 260, maxWidth: 360 }}>

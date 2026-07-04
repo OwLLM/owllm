@@ -17,6 +17,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
+import { formatDuration, useTick, RunTimerChip } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
 import IconPickerDialog, {
@@ -914,25 +915,9 @@ function GoalRow({ onCancel, busy, onBrainstorm, hasBrief, brainstormReady, left
 }
 
 // ---- Run timers (team-wide + per-agent) ----
-// h:mm:ss once past an hour, else m:ss. For the header stopwatch + per-agent cards.
-function formatDuration(ms: number): string {
-  const total = Math.max(0, Math.floor(ms / 1000));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
-}
-/// Force a 1-s re-render while `active` so a running stopwatch ticks live; stops
-/// the interval (no churn) once the clock freezes. Each timer ticks itself.
-function useTick(active: boolean): void {
-  const [, force] = useState(0);
-  useEffect(() => {
-    if (!active) return;
-    const id = setInterval(() => force(x => (x + 1) % 1_000_000), 1000);
-    return () => clearInterval(id);
-  }, [active]);
-}
+// formatDuration + useTick + the header RunTimerChip live in the shared
+// ./RunTimer module (reused by the Code page). Only the per-agent timing math
+// below is specific to this page.
 /// Per-agent active timing: cumulative working time, ticking while active.
 export type AgentTiming = { activeSince: number | null; accumMs: number };
 function agentElapsedMs(t: AgentTiming | undefined): number {
@@ -970,7 +955,6 @@ function FlowHeader({
   runEndedAt?: number | null;
 }) {
   const runActive = runStartedAt != null && runEndedAt == null;
-  useTick(runActive);
   const seg = (id: "diagram" | "graph" | "chat", label: string, title: string) => {
     const on = viewMode === id;
     return (
@@ -1028,19 +1012,17 @@ function FlowHeader({
       {runStartedAt != null && (
         <div
           data-ui="FlowRunTimer"
-          title={runActive ? "The team is running — elapsed time" : "How long the last run took"}
           style={{
             position:"absolute", left:"50%", top:"50%", transform:"translate(-50%,-50%)",
-            display:"flex", alignItems:"center", gap:6, height:24, padding:"0 12px",
-            borderRadius:999, fontSize:13, fontWeight:700, fontVariantNumeric:"tabular-nums",
-            color: runActive ? "#5af09c" : "var(--fg-muted)",
-            background: runActive ? "rgba(60,242,107,0.12)" : "rgba(255,255,255,0.05)",
-            border: `1px solid ${runActive ? "rgba(60,242,107,0.45)" : "var(--border)"}`,
             pointerEvents:"none",
           }}
         >
-          <span style={{ fontSize:12 }}>{runActive ? "⏱" : "✓"}</span>
-          {formatDuration((runEndedAt ?? Date.now()) - runStartedAt)}
+          <RunTimerChip
+            runStartedAt={runStartedAt}
+            runEndedAt={runEndedAt}
+            active={runActive}
+            title={runActive ? "The team is running — elapsed time" : "How long the last run took"}
+          />
         </div>
       )}
       {teamLabel && (

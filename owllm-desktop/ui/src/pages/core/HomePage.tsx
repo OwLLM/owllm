@@ -88,10 +88,10 @@ const LAUNCHERS: LauncherSpec[] = [
     // The local-model pipeline, with the user's supplied icon art: explore a
     // model → abliterate (uncensor) → build a dataset → fine-tune.
     actions: [
-      { label: "Explore Models", targetPage: "models", icon: "📦", iconPng: "ExploreModels.png" },
-      { label: "Abliterate",     targetPage: "models", icon: "🚫", iconPng: "Abliterate.png" },
-      { label: "Create Dataset", targetPage: "train",  icon: "🗂", iconPng: "CreateDataset.png" },
-      { label: "Fine Tune",      targetPage: "train",  icon: "🎯", iconPng: "FineTune.png" },
+      { label: "Explore Models", targetPage: "models",  icon: "📦", iconPng: "ExploreModels.png" },
+      { label: "Abliterate",     targetPage: "train",   icon: "🚫", iconPng: "Abliterate.png" },
+      { label: "Create Dataset", targetPage: "dataset", icon: "🗂", iconPng: "CreateDataset.png" },
+      { label: "Fine Tune",      targetPage: "train",   icon: "🎯", iconPng: "FineTune.png" },
     ],
   },
   {

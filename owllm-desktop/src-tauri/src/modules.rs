@@ -216,6 +216,8 @@ impl HardwareSnapshot {
                 let name = g.name.to_lowercase();
                 let vendor = if name.contains("nvidia") || name.contains("rtx") || name.contains("gtx") {
                     Some(GpuVendor::Nvidia)
+                } else if name.contains("apple") {
+                    Some(GpuVendor::Apple)
                 } else if name.contains("amd") || name.contains("radeon") {
                     Some(GpuVendor::Amd)
                 } else if name.contains("intel") || name.contains("arc") {
@@ -775,6 +777,15 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
                 .map_err(|e| format!("create {}: {e}", out_path.display()))?;
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("extract {}: {e}", out_path.display()))?;
+            // Restore unix modes so llama-server & friends stay executable.
+            // Zips repacked on Windows carry no modes — default those to
+            // 0755, which is correct for module payloads (binaries + libs).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = entry.unix_mode().unwrap_or(0o755);
+                let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(mode));
+            }
         }
     }
     Ok(())
@@ -883,6 +894,36 @@ mod tests {
         }
     }
 
+    fn apple_silicon() -> HardwareSnapshot {
+        HardwareSnapshot {
+            platform: Platform::MacOsAarch64,
+            gpu_vendor: Some(GpuVendor::Apple),
+            vram_gb: 24, // unified budget (75 % of 32 GB RAM)
+            ram_gb: 32,
+            free_disk_gb: 200,
+        }
+    }
+
+    fn linux_nvidia() -> HardwareSnapshot {
+        HardwareSnapshot {
+            platform: Platform::LinuxX86_64,
+            gpu_vendor: Some(GpuVendor::Nvidia),
+            vram_gb: 24,
+            ram_gb: 64,
+            free_disk_gb: 500,
+        }
+    }
+
+    fn linux_headless() -> HardwareSnapshot {
+        HardwareSnapshot {
+            platform: Platform::LinuxX86_64,
+            gpu_vendor: None,
+            vram_gb: 0,
+            ram_gb: 16,
+            free_disk_gb: 100,
+        }
+    }
+
     fn parse_registry() -> Registry {
         let raw = include_str!("../../../data/modules/registry.json");
         serde_json::from_str(raw).expect("registry.json parses against types")
@@ -925,6 +966,30 @@ mod tests {
         let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
         let (v, _) = resolve_variant(m, &cpu_only_laptop(), Channel::Stable).unwrap();
         assert_eq!(v.id, "local-inference-cpu");
+    }
+
+    #[test]
+    fn apple_silicon_gets_metal_inference() {
+        let r = parse_registry();
+        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let (v, _) = resolve_variant(m, &apple_silicon(), Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-metal");
+    }
+
+    #[test]
+    fn linux_gpu_gets_vulkan_inference() {
+        let r = parse_registry();
+        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let (v, _) = resolve_variant(m, &linux_nvidia(), Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-linux-vulkan");
+    }
+
+    #[test]
+    fn linux_headless_gets_cpu_inference() {
+        let r = parse_registry();
+        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let (v, _) = resolve_variant(m, &linux_headless(), Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-linux-cpu");
     }
 
     #[test]

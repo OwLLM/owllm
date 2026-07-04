@@ -76,6 +76,11 @@
       # (the cu128 build); 0.45.0/0.45.1 had build-system support but NO
       # Blackwell binaries. Verified: bitsandbytes releases + issue #1642.
       version_blackwell: "0.45.3"
+      # CUDA/ROCm-only package — on Apple Silicon there is no wheel, so a
+      # hard requirement would block the whole env. The probe still FAILS a
+      # CUDA machine whose bitsandbytes is missing (it imports it on the
+      # CUDA path), so this cannot silently regress NVIDIA installs.
+      optional: true
     - name: datasets
       version: "3.0.1"
     - name: sentencepiece
@@ -96,19 +101,33 @@
       version: "2.7.0.post2"
       optional: true
   probe: |
-    import torch, transformers, peft, accelerate, bitsandbytes, datasets
+    import torch, transformers, peft, accelerate, datasets
     # Import what finetune.py actually imports — `import trl` lazily succeeds
     # even if SFTTrainer's deps (e.g. rich) are missing, which made a broken
     # env falsely report "ready". This catches it.
     from trl import SFTTrainer, SFTConfig
-    assert torch.cuda.is_available(), "torch built without CUDA — wheel install picked the CPU build"
+    # Accelerator check — accept ANY torch backend, not just CUDA:
+    #   CUDA (NVIDIA) · ROCm/HIP (AMD — surfaces as cuda.is_available with
+    #   torch.version.hip set) · MPS (Apple Silicon). bitsandbytes (4-bit /
+    #   QLoRA) is CUDA/ROCm-only, so import it on that path only; on MPS
+    #   training runs LoRA fp16/bf16 without 4-bit loading.
+    if torch.cuda.is_available():
+        import bitsandbytes
+        hip = getattr(torch.version, "hip", None)
+        kind = f"ROCm {hip}" if hip else f"CUDA {torch.version.cuda}"
+        dev = torch.cuda.get_device_name(0)
+    elif getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+        kind = "Apple Metal (MPS) — LoRA fp16/bf16; QLoRA 4-bit needs CUDA"
+        dev = "Apple Silicon GPU"
+    else:
+        raise AssertionError("no GPU accelerator visible to torch (CUDA/ROCm/MPS) — the wheel install picked a CPU build, or this machine has no supported GPU")
     try:
         import flash_attn
         fa = f"flash-attn {flash_attn.__version__}"
     except Exception:
         fa = "flash-attn not installed (optional — using default attention)"
     print(f"torch {torch.__version__} · transformers {transformers.__version__} · peft {peft.__version__}")
-    print(f"cuda {torch.version.cuda} · device {torch.cuda.get_device_name(0)} · {fa}")
+    print(f"{kind} · device {dev} · {fa}")
     print("OK")
 
 - name: unsloth
@@ -146,7 +165,9 @@
       version: "latest"
   probe: |
     import unsloth, torch
-    assert torch.cuda.is_available(), "torch built without CUDA"
+    # Unsloth's patched kernels are genuinely CUDA/ROCm-only — no MPS path
+    # exists upstream. Apple Silicon users: use the "standard" profile.
+    assert torch.cuda.is_available(), "no CUDA/ROCm GPU visible to torch — Unsloth needs one (on Apple Silicon use the 'standard' profile instead)"
     # finetune.py drives training through trl's SFTTrainer for BOTH envs, so
     # verify the REAL import here — `import unsloth` alone wouldn't catch a
     # missing trl/SFTTrainer dependency (e.g. rich) and the env would falsely

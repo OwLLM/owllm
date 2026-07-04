@@ -1,17 +1,22 @@
 // Hardware probe — native Rust. NO Python. NO console popups.
 //
 // CPU + RAM come from the `sysinfo` crate (cross-platform). GPU
-// detection on Windows prefers `nvidia-smi --query-gpu=name,memory.total,uuid`
-// because:
-//   * it reports the REAL VRAM (wmic's AdapterRAM field is a 32-bit
-//     DWORD that wraps anything > 4 GiB → showed "4 GiB" for a 24 GiB
-//     RTX 4090),
-//   * it skips virtual adapters automatically (Microsoft Remote
-//     Display Adapter etc. don't appear in NVML), and
-//   * it gives us a stable per-card UUID we can store as the user's
-//     selection without depending on the volatile FASTEST_FIRST index.
-// Falls back to a filtered wmic probe when nvidia-smi is missing
-// (non-NVIDIA / no driver).
+// discovery is a chain, first hit wins:
+//   1. nvidia-smi (Windows + Linux) — real VRAM + stable per-card UUIDs,
+//     skips virtual adapters. wmic's AdapterRAM is a 32-bit DWORD that
+//     wraps anything > 4 GiB → showed "4 GiB" for a 24 GiB RTX 4090.
+//   2. system_profiler (macOS) — Apple Silicon reports UNIFIED memory
+//     (the GPU shares system RAM), discrete Macs report VRAM.
+//   3. /sys/class/drm sysfs (Linux) — amdgpu/i915 VRAM + GTT (the
+//     shared-RAM pool APUs actually run models from).
+//   4. wmic (Windows) — filtered fallback for non-NVIDIA rigs.
+//
+// UNIFIED MEMORY: on Apple Silicon, AMD APUs (Strix Halo / Ryzen AI
+// Max) and Intel iGPUs the "VRAM" number is meaningless — the GPU
+// addresses system RAM. Those GPUs get `unified: true` and `vram_gb`
+// rewritten to the realistic GPU-addressable budget, so every consumer
+// (model-fit tags, context sizing, module resolver, UI) is correct
+// without special-casing.
 
 use crate::paths;
 use serde::{Deserialize, Serialize};
@@ -38,6 +43,11 @@ pub struct GpuInfo {
     /// Whether this GPU is currently selected for use by the runtime.
     /// Persisted to gpu_config.json; mirrors the legacy PySide6 store.
     pub selected: bool,
+    /// Unified/shared-memory architecture (Apple Silicon, AMD APU, Intel
+    /// iGPU): `vram_gb` is a budget carved from system RAM, not dedicated
+    /// VRAM. Additive field — older UI code simply ignores it.
+    #[serde(default)]
+    pub unified: bool,
 }
 
 /// Tauri command: native hardware probe.
@@ -74,7 +84,8 @@ pub async fn vram_status() -> Result<VramStatus, String> {
     })
 }
 
-#[cfg(windows)]
+/// nvidia-smi is identical on Windows and Linux; on macOS the binary is
+/// absent so `.output()` errors → None and the UI degrades gracefully.
 async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
     use tokio::process::Command;
     let mut cmd = Command::new("nvidia-smi");
@@ -82,6 +93,7 @@ async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
         "--query-gpu=memory.used,memory.total",
         "--format=csv,noheader,nounits",
     ]);
+    #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     let out = cmd.output().await.ok()?;
     if !out.status.success() {
@@ -91,32 +103,17 @@ async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
     Some(parse_nvidia_smi(&stdout))
 }
 
-#[cfg(not(windows))]
-async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
-    None
-}
-
 /// Max CUDA version the installed NVIDIA driver supports, parsed from the
 /// `nvidia-smi` banner line ("... CUDA Version: 12.6 ..."). Returns None
 /// when nvidia-smi is missing (no NVIDIA driver). This is the *driver's*
 /// CUDA, not a toolkit install — it's what gates which torch wheel the
 /// fine-tuning env can use. Used by the Home readiness panel.
-#[cfg(windows)]
 pub async fn cuda_driver_version() -> Option<String> {
     use tokio::process::Command;
     let mut cmd = Command::new("nvidia-smi");
+    #[cfg(windows)]
     cmd.creation_flags(0x08000000);
     let out = cmd.output().await.ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_cuda_banner(&String::from_utf8_lossy(&out.stdout))
-}
-
-#[cfg(not(windows))]
-pub async fn cuda_driver_version() -> Option<String> {
-    use tokio::process::Command;
-    let out = Command::new("nvidia-smi").output().await.ok()?;
     if !out.status.success() {
         return None;
     }
@@ -182,16 +179,28 @@ async fn probe() -> HardwareInfo {
         info.ram_used_gb = bytes_to_gb(sys.used_memory());
     }
 
-    // GPU discovery — nvidia-smi first (real VRAM + UUIDs, no virtual
-    // adapters). Fall back to a virtual-filtered wmic only if NVML is
-    // unavailable on this machine.
-    info.gpus = gpus_via_nvidia_smi()
-        .await
-        .or_else(|| futures_block(gpus_via_wmic()))
-        .unwrap_or_default();
+    // GPU discovery chain — first probe that finds anything wins.
+    // nvidia-smi runs on Windows + Linux; system_profiler only exists on
+    // macOS; the drm sysfs scan only finds anything on Linux; wmic is the
+    // Windows fallback. Every probe degrades to None off its platform, so
+    // the chain is safe to run everywhere. (Known v1 limit: on a Linux
+    // hybrid NVIDIA-dGPU + AMD-iGPU box the dGPU wins and the iGPU is
+    // not listed — the dGPU is the right inference target anyway.)
+    let mut gpus = gpus_via_nvidia_smi().await.unwrap_or_default();
+    if gpus.is_empty() {
+        gpus = gpus_via_system_profiler().await.unwrap_or_default();
+    }
+    if gpus.is_empty() {
+        gpus = gpus_via_drm_sysfs().unwrap_or_default();
+    }
+    if gpus.is_empty() {
+        gpus = gpus_via_wmic().await.unwrap_or_default();
+    }
+    info.gpus = gpus;
     for (i, g) in info.gpus.iter_mut().enumerate() {
         g.index = i as u32;
     }
+    apply_unified_budgets(&mut info.gpus, info.ram_total_gb);
 
     // Apply saved selection. When no config exists yet, default to ALL
     // GPUs selected — mirrors the legacy PySide6 behaviour.
@@ -208,14 +217,6 @@ async fn probe() -> HardwareInfo {
     }
 
     info
-}
-
-/// Bridge async->sync for the wmic fallback inside the (already async)
-/// nvidia-smi `or_else` chain. We can't `.await` inside that closure
-/// without restructuring, so we spawn a fresh blocking executor for the
-/// few-millisecond fallback. Acceptable because this path is rare.
-fn futures_block<F: std::future::Future<Output = Option<Vec<GpuInfo>>>>(fut: F) -> Option<Vec<GpuInfo>> {
-    tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
 }
 
 fn bytes_to_gb(b: u64) -> f64 {
@@ -266,6 +267,7 @@ fn parse_nvidia_smi_gpus(text: &str) -> Vec<GpuInfo> {
                 vram_gb: (total_mib as f64) / 1024.0,
                 uuid,
                 selected: true,
+                unified: false,
             })
         })
         .collect()
@@ -315,9 +317,207 @@ fn is_virtual_adapter(name: &str) -> bool {
 
 #[cfg(not(windows))]
 async fn gpus_via_wmic() -> Option<Vec<GpuInfo>> {
-    // Non-Windows: caller falls back to an empty GPU list. We don't
-    // ship this app outside Windows today.
     None
+}
+
+// ---------------------------------------------------------------------
+// macOS — system_profiler. Apple Silicon GPUs have NO vram field (the
+// GPU shares system RAM → unified); discrete Macs report spdisplays_vram.
+// ---------------------------------------------------------------------
+
+async fn gpus_via_system_profiler() -> Option<Vec<GpuInfo>> {
+    use tokio::process::Command;
+    let out = Command::new("system_profiler")
+        .args(["SPDisplaysDataType", "-json"])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let parsed = parse_system_profiler_displays(&String::from_utf8_lossy(&out.stdout));
+    if parsed.is_empty() { None } else { Some(parsed) }
+}
+
+/// Pure parser for `system_profiler SPDisplaysDataType -json`. Kept
+/// platform-independent so the Windows CI/test run exercises it.
+fn parse_system_profiler_displays(json: &str) -> Vec<GpuInfo> {
+    let v: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return Vec::new(),
+    };
+    let Some(cards) = v.get("SPDisplaysDataType").and_then(|c| c.as_array()) else {
+        return Vec::new();
+    };
+    cards
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let name = c
+                .get("sppci_model")
+                .or_else(|| c.get("_name"))
+                .and_then(|n| n.as_str())?
+                .to_string();
+            // "spdisplays_vram" looks like "8 GB" / "1536 MB" on discrete
+            // cards; absent on Apple Silicon (unified — budget applied later).
+            let vram_gb = c
+                .get("spdisplays_vram")
+                .and_then(|s| s.as_str())
+                .and_then(parse_mem_size_gb)
+                .unwrap_or(0.0);
+            let unified = name.to_lowercase().contains("apple");
+            Some(GpuInfo {
+                index: i as u32,
+                name,
+                vram_gb,
+                uuid: String::new(),
+                selected: true,
+                unified,
+            })
+        })
+        .collect()
+}
+
+/// "8 GB" → 8.0, "1536 MB" → 1.5. None on anything unparseable.
+fn parse_mem_size_gb(s: &str) -> Option<f64> {
+    let t = s.trim().to_lowercase();
+    let (num, unit) = t.split_once(' ')?;
+    let n: f64 = num.trim().parse().ok()?;
+    match unit.trim() {
+        "gb" => Some(n),
+        "mb" => Some(n / 1024.0),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------
+// Linux — /sys/class/drm. amdgpu (vendor 0x1002) and i915/xe (0x8086)
+// expose mem_info_vram_total + mem_info_gtt_total (the shared-RAM pool
+// an APU actually runs models from). NVIDIA is handled by nvidia-smi.
+// ---------------------------------------------------------------------
+
+fn gpus_via_drm_sysfs() -> Option<Vec<GpuInfo>> {
+    let entries = std::fs::read_dir("/sys/class/drm").ok()?;
+    let mut out: Vec<GpuInfo> = Vec::new();
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| e.file_name().to_str().map(String::from))
+        // card0, card1… — skip card0-DP-1 connector nodes and renderD nodes.
+        .filter(|n| n.starts_with("card") && !n.contains('-'))
+        .collect();
+    names.sort();
+    for n in names {
+        let dev = std::path::Path::new("/sys/class/drm").join(&n).join("device");
+        let read = |f: &str| std::fs::read_to_string(dev.join(f)).unwrap_or_default();
+        let vendor = read("vendor");
+        let vendor = vendor.trim();
+        let (vendor_name, is_amd_intel) = match vendor {
+            "0x1002" => ("AMD GPU", true),
+            "0x8086" => ("Intel GPU", true),
+            _ => ("", false),
+        };
+        if !is_amd_intel {
+            continue;
+        }
+        let vram = read("mem_info_vram_total").trim().parse::<u64>().unwrap_or(0);
+        let gtt = read("mem_info_gtt_total").trim().parse::<u64>().unwrap_or(0);
+        // GTT (shared system RAM) dominating dedicated VRAM = APU/iGPU.
+        let unified = gtt > vram;
+        let total = if unified { vram + gtt } else { vram };
+        if total == 0 {
+            continue;
+        }
+        out.push(GpuInfo {
+            index: out.len() as u32,
+            name: format!("{vendor_name} ({n})"),
+            vram_gb: bytes_to_gb(total),
+            uuid: String::new(),
+            selected: true,
+            unified,
+        });
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+// ---------------------------------------------------------------------
+// Unified-memory budgets.
+// ---------------------------------------------------------------------
+
+/// Integrated-GPU heuristic for probes that only give us a NAME (wmic).
+/// These report a tiny dedicated pool while the real budget is shared
+/// system RAM — the classic "7B model shows red on a 32 GB Strix Halo".
+fn is_integrated_gpu(name: &str) -> bool {
+    let n = name.to_lowercase();
+    if n.contains("apple") {
+        return true;
+    }
+    // Intel iGPUs. NOT Arc — Arc cards have real dedicated VRAM.
+    if n.contains("intel") && (n.contains("uhd") || n.contains("iris") || n.contains("hd graphics")) {
+        return true;
+    }
+    // AMD APUs: "AMD Radeon(TM) Graphics", "Radeon 680M/780M/890M",
+    // "Vega 8 Graphics", "Ryzen … with Radeon Graphics". The "RX" line
+    // is discrete (incl. mobile "RX 7900M") — never treat it as an APU.
+    if n.contains("radeon") && !n.contains(" rx ") {
+        if n.contains("(tm) graphics") || n.ends_with("radeon graphics") || n.contains("vega") {
+            return true;
+        }
+        // "…780M" / "…890M Graphics" model numbers are the RDNA APU line.
+        if n.split_whitespace().any(|w| {
+            w.len() >= 4
+                && w.ends_with('m')
+                && w[..w.len() - 1].chars().all(|c| c.is_ascii_digit())
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Rewrite `vram_gb` to a realistic GPU-addressable budget on unified
+/// architectures. Fractions are deliberately conservative:
+///   * Apple Silicon: ~75 % of RAM — approximates Metal's
+///     recommendedMaxWorkingSetSize (llama.cpp queries the exact value
+///     at runtime; this is only for fit tags / context sizing).
+///   * Windows/other iGPU-by-name: 50 % of RAM — Windows' shared GPU
+///     memory pool is capped at half of system RAM.
+///   * Linux drm probes already carry real VRAM+GTT totals — untouched.
+fn apply_unified_budgets(gpus: &mut [GpuInfo], ram_total_gb: f64) {
+    for g in gpus.iter_mut() {
+        if g.unified {
+            if g.vram_gb <= 0.1 {
+                // Apple Silicon via system_profiler (no vram field).
+                g.vram_gb = ram_total_gb * 0.75;
+            }
+        } else if is_integrated_gpu(&g.name) {
+            g.unified = true;
+            g.vram_gb = g.vram_gb.max(ram_total_gb * 0.5);
+        }
+    }
+}
+
+/// The single GPU-memory number the rest of the app should plan around:
+/// the largest effective budget among the user's SELECTED GPUs (all
+/// GPUs when nothing is explicitly selected). `unified` tells callers
+/// the budget is shared with the OS/CPU so they can reserve more.
+pub struct GpuMemoryBudget {
+    pub gb: f64,
+    pub unified: bool,
+}
+
+pub async fn gpu_memory_budget() -> Option<GpuMemoryBudget> {
+    let info = probe().await;
+    let pool: Vec<&GpuInfo> = {
+        let sel: Vec<&GpuInfo> = info.gpus.iter().filter(|g| g.selected).collect();
+        if sel.is_empty() { info.gpus.iter().collect() } else { sel }
+    };
+    let best = pool.into_iter().max_by(|a, b| {
+        a.vram_gb.partial_cmp(&b.vram_gb).unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    if best.vram_gb <= 0.1 {
+        return None;
+    }
+    Some(GpuMemoryBudget { gb: best.vram_gb, unified: best.unified })
 }
 
 // ---------------------------------------------------------------------
@@ -390,14 +590,15 @@ pub fn selected_gpu_uuids() -> Vec<String> {
 /// Vulkan/CUDA index. Synchronous so the server spawn path can call it
 /// without an async hop. Returns names in nvidia-smi order for the
 /// matching UUIDs; empty when nvidia-smi is unavailable.
-#[cfg(windows)]
 pub fn gpu_names_for_uuids(uuids: &[String]) -> Vec<String> {
-    use std::os::windows::process::CommandExt;
-    let out = std::process::Command::new("nvidia-smi")
-        .args(["--query-gpu=name,memory.total,uuid", "--format=csv,noheader,nounits"])
-        .creation_flags(0x08000000)
-        .output();
-    let Ok(out) = out else { return Vec::new(); };
+    let mut cmd = std::process::Command::new("nvidia-smi");
+    cmd.args(["--query-gpu=name,memory.total,uuid", "--format=csv,noheader,nounits"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let Ok(out) = cmd.output() else { return Vec::new(); };
     if !out.status.success() { return Vec::new(); }
     let stdout = String::from_utf8_lossy(&out.stdout);
     parse_nvidia_smi_gpus(&stdout)
@@ -406,8 +607,6 @@ pub fn gpu_names_for_uuids(uuids: &[String]) -> Vec<String> {
         .map(|g| g.name)
         .collect()
 }
-#[cfg(not(windows))]
-pub fn gpu_names_for_uuids(_uuids: &[String]) -> Vec<String> { Vec::new() }
 
 fn save_gpu_selection(sel: &GpuSelection) -> Result<(), String> {
     let path = gpu_config_path().ok_or_else(|| "LLM/ tree not found".to_string())?;
@@ -529,5 +728,65 @@ mod tests {
         let gpus = parse_wmic_list(sample);
         assert_eq!(gpus.len(), 1);
         assert_eq!(gpus[0].name, "Real GPU");
+    }
+
+    #[test]
+    fn parses_system_profiler_apple_silicon() {
+        // Apple Silicon: no vram field → unified, budget applied later.
+        let sample = r#"{"SPDisplaysDataType":[{"_name":"Apple M3 Max","sppci_model":"Apple M3 Max","spdisplays_ndrvs":[]}]}"#;
+        let gpus = parse_system_profiler_displays(sample);
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "Apple M3 Max");
+        assert!(gpus[0].unified);
+        assert!(gpus[0].vram_gb < 0.1);
+    }
+
+    #[test]
+    fn parses_system_profiler_discrete_mac() {
+        let sample = r#"{"SPDisplaysDataType":[{"_name":"Radeon Pro 5500M","sppci_model":"AMD Radeon Pro 5500M","spdisplays_vram":"8 GB"}]}"#;
+        let gpus = parse_system_profiler_displays(sample);
+        assert_eq!(gpus.len(), 1);
+        assert!(!gpus[0].unified);
+        assert!((gpus[0].vram_gb - 8.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parses_mem_sizes() {
+        assert_eq!(parse_mem_size_gb("8 GB"), Some(8.0));
+        assert_eq!(parse_mem_size_gb("1536 MB"), Some(1.5));
+        assert_eq!(parse_mem_size_gb("garbage"), None);
+    }
+
+    #[test]
+    fn integrated_gpu_heuristics() {
+        // AMD APUs — the Strix Halo / Ryzen AI class this exists for.
+        assert!(is_integrated_gpu("AMD Radeon(TM) Graphics"));
+        assert!(is_integrated_gpu("AMD Radeon 780M Graphics"));
+        assert!(is_integrated_gpu("AMD Radeon(TM) 890M"));
+        assert!(is_integrated_gpu("Radeon Vega 8 Graphics"));
+        // Intel iGPUs.
+        assert!(is_integrated_gpu("Intel(R) UHD Graphics 770"));
+        assert!(is_integrated_gpu("Intel(R) Iris(R) Xe Graphics"));
+        // Apple.
+        assert!(is_integrated_gpu("Apple M2"));
+        // Discrete cards must stay discrete.
+        assert!(!is_integrated_gpu("NVIDIA GeForce RTX 4090"));
+        assert!(!is_integrated_gpu("AMD Radeon RX 7900 XTX"));
+        assert!(!is_integrated_gpu("Intel(R) Arc(TM) A770 Graphics"));
+    }
+
+    #[test]
+    fn unified_budget_rewrites() {
+        let mut gpus = vec![
+            GpuInfo { index: 0, name: "Apple M3".into(), vram_gb: 0.0, uuid: String::new(), selected: true, unified: true },
+            GpuInfo { index: 1, name: "AMD Radeon(TM) Graphics".into(), vram_gb: 2.0, uuid: String::new(), selected: true, unified: false },
+            GpuInfo { index: 2, name: "NVIDIA GeForce RTX 4090".into(), vram_gb: 24.0, uuid: "GPU-x".into(), selected: true, unified: false },
+        ];
+        apply_unified_budgets(&mut gpus, 32.0);
+        assert!((gpus[0].vram_gb - 24.0).abs() < 0.01); // 75 % of 32 GB
+        assert!(gpus[1].unified);
+        assert!((gpus[1].vram_gb - 16.0).abs() < 0.01); // max(2, 50 % of 32)
+        assert!(!gpus[2].unified);
+        assert!((gpus[2].vram_gb - 24.0).abs() < 0.01); // discrete untouched
     }
 }

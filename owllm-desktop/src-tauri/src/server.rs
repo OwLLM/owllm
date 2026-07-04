@@ -433,12 +433,20 @@ pub async fn server_start(
     // We compute the fitting size from headroom = VRAM − weights − reserve, and then
     // CAP the requested/stored value to it: a stale 32768 default must not be allowed
     // to silently spill to CPU. A SMALLER explicit value is still honoured.
-    let vram = crate::recommendations::detect_vram_gb().await.unwrap_or(8.0) as f64;
+    let budget = crate::hardware::gpu_memory_budget().await;
+    let (vram, unified) = budget
+        .map(|b| (b.gb, b.unified))
+        .unwrap_or((8.0, false));
     let model_gb = std::fs::metadata(&base_model)
         .map(|m| m.len() as f64 / 1_000_000_000.0)
         .unwrap_or(0.0);
-    // ~2 GB reserved for the CUDA context + compute buffers (also covers a small mmproj).
-    let headroom = (vram - model_gb - 2.0).max(0.0);
+    // Reserve: ~2 GB for the CUDA/Vulkan context + compute buffers (also
+    // covers a small mmproj) on discrete cards. On UNIFIED memory (Apple
+    // Silicon, APUs) the "GPU budget" is the same RAM the OS and every app
+    // run from, so reserve much more — otherwise the KV cache starves the
+    // system (the inverse of the discrete-VRAM spill bug this formula fixed).
+    let reserve = if unified { (vram * 0.25).max(4.0) } else { 2.0 };
+    let headroom = (vram - model_gb - reserve).max(0.0);
     let max_fit: u32 = if headroom >= 8.0 { 32768 }
         else if headroom >= 5.0 { 16384 }
         else if headroom >= 3.0 { 12288 }
@@ -453,8 +461,8 @@ pub async fn server_start(
                 let _ = app.emit("server-log", ServerLogEvent {
                     stream: "stdout".into(),
                     line: format!(
-                        "[supervisor] context {c} would spill to CPU — capped to {max_fit} so the {:.1} GB model + KV fit your {:.1} GB VRAM (a stale 32k default was the cause of the slow tok/s). For a bigger window at full GPU speed, use a smaller model/quant.",
-                        model_gb, vram,
+                        "[supervisor] context {c} would spill to CPU — capped to {max_fit} so the {:.1} GB model + KV fit your {:.1} GB {} (a stale 32k default was the cause of the slow tok/s). For a bigger window at full GPU speed, use a smaller model/quant.",
+                        model_gb, vram, if unified { "unified memory" } else { "VRAM" },
                     ),
                 });
                 max_fit
@@ -467,8 +475,10 @@ pub async fn server_start(
                 let _ = app.emit("server-log", ServerLogEvent {
                     stream: "stdout".into(),
                     line: format!(
-                        "[supervisor] auto context {} — model {:.1} GB + KV must fit your {:.1} GB VRAM (headroom {:.1} GB). For a bigger context with full GPU speed, use a smaller model/quant.",
-                        max_fit, model_gb, vram, headroom,
+                        "[supervisor] auto context {} — model {:.1} GB + KV must fit your {:.1} GB {} (headroom {:.1} GB). For a bigger context with full GPU speed, use a smaller model/quant.",
+                        max_fit, model_gb, vram,
+                        if unified { "unified memory (shared with the OS)" } else { "VRAM" },
+                        headroom,
                     ),
                 });
             }

@@ -135,7 +135,7 @@ fn now_ms() -> i64 {
 
 // ---- Tauri commands ----
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_vault_list() -> Vec<CredMeta> {
     let mut out: Vec<CredMeta> = load()
         .into_iter()
@@ -145,7 +145,7 @@ pub fn browser_vault_list() -> Vec<CredMeta> {
     out
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_vault_add(origin: String, username: String, password: String, note: Option<String>) -> Result<String, String> {
     let cred = BrowserCred {
         origin: normalize_origin(&origin),
@@ -162,7 +162,7 @@ pub fn browser_vault_add(origin: String, username: String, password: String, not
     Ok("saved".to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_vault_delete(origin: String, username: String) -> Result<String, String> {
     let norm = normalize_origin(&origin);
     let mut creds = load();
@@ -178,7 +178,7 @@ pub fn browser_vault_delete(origin: String, username: String) -> Result<String, 
 /// Autofill the current agent-browser page from the vault. Resolves the page's
 /// origin from the live window, finds a matching cred, and injects it via the
 /// browser bridge. The password only ever travels Rust → the page, never to JS.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_vault_autofill(app: tauri::AppHandle) -> Result<String, String> {
     let info = crate::browser::browser_view(app.clone())?;
     let page_url = serde_json::from_str::<serde_json::Value>(&info)

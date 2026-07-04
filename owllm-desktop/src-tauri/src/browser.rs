@@ -12,18 +12,28 @@
 //   * An `initialization_script` (BRIDGE_JS) is injected at document-start on
 //     every navigation, defining window.__owllmRun(reqId, action, paramsJson).
 //     It does the DOM work (snapshot/click/fill/…) and reports the result by
-//     writing a sentinel-prefixed string into `document.title`.
-//   * Rust calls webview.eval(...) to invoke __owllmRun, then polls
-//     webview.title() until the sentinel for that reqId appears, and reads the
-//     payload back out. This channel is engine-agnostic and needs no remote
-//     capability grant. Payloads are truncated JS-side (see CAP) so a single
-//     title carries the whole reply — no multi-chunk loop that could hang.
+//     writing a sentinel-prefixed string into `document.title` (then restoring
+//     the real title a tick later).
+//   * Rust registers `on_document_title_changed` on the window — the engine
+//     PUSHES every title change to us (WebView2 DocumentTitleChanged etc.), and
+//     sentinel-tagged ones are parked in REPLIES keyed by request id. The
+//     waiting command polls that in-process map, not the OS window title.
+//     Payloads are truncated JS-side (see CAP) so a single title write carries
+//     the whole reply — no multi-chunk loop that could hang.
 //
-// The Tauri command NAMES are unchanged (browser_ensure/start/cmd/stop/
-// status/view) so localTools.ts and BrowserPanel.tsx keep working as-is.
+// THREADING — THE PART THAT BIT US (v0.7.53 white-screen/freeze): a plain
+// #[tauri::command] fn is executed INLINE ON THE MAIN THREAD. These commands
+// wait (up to tens of seconds) for the page, so running them there froze the
+// whole event loop: the browser window never painted (white), its ✕ never
+// responded, and navigation itself could not proceed. Every command below is
+// therefore #[tauri::command(async)] — Tauri runs the sync fn on a threadpool,
+// and the WebviewWindow handle methods (eval/navigate/…) safely dispatch to
+// the (now free) main thread. Window creation is also thread-safe: the runtime
+// routes it through Message::CreateWindow to the event loop.
 
 use serde::Serialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -41,6 +51,36 @@ const SENTINEL: &str = "\u{2063}OWLLM\u{2063}";
 /// Monotonic request id so a stale title from a previous action is never
 /// mistaken for the current reply.
 static REQ: AtomicU64 = AtomicU64::new(1);
+
+/// Replies pushed by the document-title-changed handler, keyed by request id.
+/// Bounded: entries older than the newest 64 are dropped on insert.
+static REPLIES: Mutex<Option<HashMap<u64, String>>> = Mutex::new(None);
+
+/// Parse a sentinel-tagged title into (request id, base64 payload).
+/// Returns None for ordinary page titles.
+fn parse_reply(title: &str) -> Option<(u64, &str)> {
+    let rest = title.strip_prefix(SENTINEL)?;
+    let (id, payload) = rest.split_once('\u{2063}')?;
+    Some((id.parse().ok()?, payload))
+}
+
+/// Called by the title-changed handler for every title the page sets.
+fn capture_reply(title: &str) {
+    let Some((id, payload)) = parse_reply(title) else { return };
+    let mut guard = REPLIES.lock().unwrap_or_else(|p| p.into_inner());
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.insert(id, payload.to_string());
+    if map.len() > 64 {
+        let min_keep = id.saturating_sub(64);
+        map.retain(|k, _| *k >= min_keep);
+    }
+}
+
+/// Take (consume) the reply for `req`, if it has arrived.
+fn take_reply(req: u64) -> Option<String> {
+    let mut guard = REPLIES.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_mut()?.remove(&req)
+}
 
 #[derive(Serialize)]
 pub struct BrowserStatus {
@@ -113,17 +153,22 @@ const BRIDGE_JS: &str = r##"
 (function () {
   if (window.__owllmBridge) return;
   window.__owllmBridge = true;
-  var SENT = "⁣OWLLM⁣";
+  var Z = String.fromCharCode(8291); // U+2063 invisible separator
+  var SENT = Z + "OWLLM" + Z;
   var CAP = 4000; // keep the whole reply inside one document.title write
   function b64(s) {
-    // UTF-8 → latin1 → base64 so the reply survives the OS title channel with
-    // no whitespace (document.title collapses whitespace; base64 has none).
+    // UTF-8 → base64 so the reply survives the title channel intact (base64
+    // has no whitespace for anything to collapse).
     try { return btoa(unescape(encodeURIComponent(s))); } catch (e) { return btoa("(encode error)"); }
   }
   function report(reqId, text) {
     var s = String(text == null ? "" : text);
     if (s.length > CAP) s = s.slice(0, CAP) + "\n…[truncated]";
-    document.title = SENT + reqId + "⁣" + b64(s);
+    var old = document.title;
+    // Rust receives this via the engine's title-changed event (pushed), so we
+    // can restore the user-visible title right after.
+    document.title = SENT + reqId + Z + b64(s);
+    setTimeout(function () { try { document.title = old; } catch (e) {} }, 60);
   }
   function visible(el) {
     var r = el.getBoundingClientRect();
@@ -268,7 +313,7 @@ fn is_local_host(url: &str) -> bool {
 
 /// Native engine is always available — nothing to install. Kept so the tool
 /// contract (localTools.ts calls browser_ensure before browser_start) is stable.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_ensure() -> Result<String, String> {
     Ok("native browser ready".to_string())
 }
@@ -281,6 +326,9 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<WebviewWindow
         .title("OwLLM — Agent Browser")
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
+        // The engine pushes every document.title change here; sentinel-tagged
+        // ones are the bridge's replies. This is the read half of the channel.
+        .on_document_title_changed(|_win, title| capture_reply(&title))
         .decorations(true)
         .resizable(true)
         .visible(true);
@@ -301,7 +349,7 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<WebviewWindow
 }
 
 /// Create the agent-browser window if it isn't already open. Idempotent.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
         return Ok("browser already running".to_string());
@@ -316,7 +364,7 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 /// Switch device emulation (desktop / iphone / android / tablet). The UA can
 /// only be set at build time, so if the window is open we rebuild it in place
 /// and re-navigate to the page it was on. Logins survive (stable profile dir).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<String, String> {
     let dev = device_by_name(&device).ok_or_else(|| {
         format!("unknown device {device:?} — use desktop, iphone, android or tablet")
@@ -358,7 +406,7 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
 /// `navigate` uses the native `webview.navigate()` (robust across origins),
 /// then awaits the new document's load through the bridge. All other actions
 /// eval __owllmRun directly. Read-back is via the sentinel title channel.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
     let win = get_window(&app).ok_or_else(|| "browser is not running — call browser_start first".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
@@ -383,7 +431,7 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
             // Give the new document a moment to begin, then await its load via
             // the (re-injected) bridge. Evaled every poll tick until it reports.
             std::thread::sleep(Duration::from_millis(200));
-            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(30))
+            eval_until_reply(&win, req, "await_load", &json!({}), Duration::from_secs(20))
         }
         "back" => {
             let _ = win.eval("history.back()");
@@ -404,9 +452,11 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
     }
 }
 
-/// Eval `__owllmRun(req, action, params)` on a poll loop and wait for the
-/// sentinel reply in the window title. Re-evals each tick so a still-loading
-/// document (where the bridge isn't defined yet) is retried until ready.
+/// Eval `__owllmRun(req, action, params)` and wait for its reply, which the
+/// title-changed handler parks in REPLIES. Re-evals each tick so a
+/// still-loading document (where the bridge isn't defined yet) is retried
+/// until ready. Runs on a threadpool thread (commands are `async`), so the
+/// waiting never touches the main event loop.
 fn eval_until_reply(
     win: &WebviewWindow,
     req: u64,
@@ -416,7 +466,6 @@ fn eval_until_reply(
 ) -> Result<String, String> {
     let params_js = serde_json::to_string(&params.to_string()).unwrap_or_else(|_| "\"{}\"".to_string());
     let call = format!("try{{window.__owllmRun&&window.__owllmRun({req},{action:?},{params_js})}}catch(e){{}}");
-    let prefix = format!("{SENTINEL}{req}\u{2063}");
     let start = Instant::now();
     let mut last_eval = Instant::now() - Duration::from_secs(1);
     loop {
@@ -426,35 +475,35 @@ fn eval_until_reply(
             let _ = win.eval(&call);
             last_eval = Instant::now();
         }
-        if let Ok(title) = win.title() {
-            if let Some(rest) = title.strip_prefix(&prefix) {
-                use base64::Engine as _;
-                let out = base64::engine::general_purpose::STANDARD
-                    .decode(rest.trim())
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
-                    .unwrap_or_else(|| rest.to_string());
-                // Neutralise the title so this reply isn't re-read next tick.
-                let _ = win.eval("try{document.title=location.href}catch(e){}");
-                if let Some(msg) = out.strip_prefix("ERROR: ") {
-                    return Err(msg.to_string());
-                }
-                return Ok(out);
+        if let Some(b64_payload) = take_reply(req) {
+            use base64::Engine as _;
+            let out = base64::engine::general_purpose::STANDARD
+                .decode(b64_payload.trim())
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+                .unwrap_or_else(|| b64_payload.clone());
+            if let Some(msg) = out.strip_prefix("ERROR: ") {
+                return Err(msg.to_string());
             }
+            return Ok(out);
         }
         if start.elapsed() > timeout {
-            return Err(format!("browser action '{action}' timed out"));
+            return Err(format!(
+                "browser action '{action}' timed out — the page may still be loading; try again or browser_reload"
+            ));
         }
         std::thread::sleep(Duration::from_millis(20));
     }
 }
 
 /// Close the agent-browser window. Safe when nothing is open.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
     match get_window(&app) {
         Some(win) => {
-            win.close().map_err(|e| format!("close failed: {e}"))?;
+            // destroy() tears the window down unconditionally — close() asks
+            // the page politely, and an unresponsive page could refuse.
+            win.destroy().map_err(|e| format!("close failed: {e}"))?;
             Ok("browser stopped".to_string())
         }
         None => Ok("browser was not running".to_string()),
@@ -462,7 +511,7 @@ pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 /// Panel view: current URL + title as JSON (the window itself is the live view).
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
     let win = get_window(&app).ok_or_else(|| "browser not running".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
@@ -470,7 +519,7 @@ pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 /// Focus/raise the agent-browser window so the user can watch or log in.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_focus(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(win) = get_window(&app) {
         let _ = win.show();
@@ -503,6 +552,35 @@ mod tests {
     }
 
     #[test]
+    fn reply_channel_round_trip() {
+        use base64::Engine as _;
+        let payload = base64::engine::general_purpose::STANDARD.encode("hello page");
+        // Exactly what BRIDGE_JS's report() writes into document.title.
+        let title = format!("{SENTINEL}42\u{2063}{payload}");
+        assert_eq!(parse_reply(&title), Some((42u64, payload.as_str())));
+        // Ordinary page titles are ignored.
+        assert_eq!(parse_reply("GitHub — where software is built"), None);
+        assert_eq!(parse_reply(""), None);
+        // Sentinel without an id/separator is ignored.
+        assert_eq!(parse_reply("\u{2063}OWLLM\u{2063}garbage"), None);
+
+        // capture → take consumes exactly once.
+        capture_reply(&title);
+        assert_eq!(take_reply(42), Some(payload.clone()));
+        assert_eq!(take_reply(42), None);
+
+        // The map is bounded: old entries are pruned as new ones arrive.
+        // (Same test fn as above — REPLIES is a process-global, and parallel
+        // test threads pruning it would race each other.)
+        let b = base64::engine::general_purpose::STANDARD.encode("x");
+        for id in 1000..1100u64 {
+            capture_reply(&format!("{SENTINEL}{id}\u{2063}{b}"));
+        }
+        assert_eq!(take_reply(1000), None);
+        assert_eq!(take_reply(1099), Some(b));
+    }
+
+    #[test]
     fn device_aliases_resolve() {
         assert_eq!(device_by_name("iPhone").unwrap().name, "iphone");
         assert_eq!(device_by_name("phone").unwrap().name, "iphone");
@@ -517,7 +595,7 @@ mod tests {
     }
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_status(app: tauri::AppHandle) -> Result<BrowserStatus, String> {
     let device = current_device().name.to_string();
     match get_window(&app) {

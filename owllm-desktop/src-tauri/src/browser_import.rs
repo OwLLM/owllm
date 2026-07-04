@@ -194,7 +194,7 @@ fn with_temp_copy<T>(src: &PathBuf, f: impl FnOnce(&PathBuf) -> Option<T>) -> Op
 }
 
 /// Detect installed browsers with saved-login counts.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_import_scan() -> Vec<DetectedBrowser> {
     let mut out = Vec::new();
     for kind in ALL {
@@ -228,7 +228,7 @@ pub fn browser_import_scan() -> Vec<DetectedBrowser> {
 
 /// Import saved logins from one browser into the vault. Returns a status line
 /// with the number added/updated.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn browser_import_run(id: String) -> Result<String, String> {
     let kind = BrowserKind::from_id(&id).ok_or_else(|| format!("unknown browser '{id}'"))?;
     if !kind.is_chromium() {

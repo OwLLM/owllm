@@ -34,6 +34,10 @@ check("trailing punctuation trimmed", extractAbsPaths("build C:\\a\\b.md.").incl
 check("no false path in plain prose", extractAbsPaths("make the button bigger and ship it").length === 0);
 check("directory (no extension) ignored", extractAbsPaths("look in C:\\Users\\mc\\Downloads").length === 0);
 check("dedup", extractAbsPaths("C:\\a\\b.md and again C:\\a\\b.md").length === 1);
+check("https URL is NOT a path (the 's://github.com' bug)", extractAbsPaths("read https://github.com/foo/bar and build it").length === 0);
+check("URL with file-ish path segments is NOT a path", extractAbsPaths("see https://example.com/c/docs/spec.md").length === 0);
+check("URL ending in .com is NOT a path", extractAbsPaths("go to https://github.com").length === 0);
+check("real path NEXT TO a URL is still found", extractAbsPaths("read https://github.com/foo and C:\\a\\b.md").includes("C:\\a\\b.md"));
 
 // 2) canonPath — cross-format normalization.
 section("2) canonPath normalizes formats to the same canonical string");

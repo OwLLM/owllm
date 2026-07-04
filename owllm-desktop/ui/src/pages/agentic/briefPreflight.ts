@@ -14,15 +14,20 @@
 /// after referenced files, not directories. De-duplicated; original form preserved.
 export function extractAbsPaths(text: string | null | undefined): string[] {
   if (!text) return [];
+  // URLs are NOT file paths — without this, the drive-letter regex matches
+  // inside "https://github.com" ("s:" drive + ".com" extension) and the
+  // git-bash regex matches URL path segments like https://x.com/c/y/file.md,
+  // aborting the run over a website the agents can perfectly well fetch.
+  const scrubbed = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>|]+/gi, " ");
   const out: string[] = [];
   const seen = new Set<string>();
   const add = (m: string) => { const t = m.trim(); if (t && !seen.has(t)) { seen.add(t); out.push(t); } };
   // \\wsl.localhost\distro\... or \\wsl$\... UNC (check before generic backslash).
-  for (const m of text.match(/\\\\wsl[^\s"'`<>|]+\.[A-Za-z0-9]{1,8}/gi) ?? []) add(m);
+  for (const m of scrubbed.match(/\\\\wsl[^\s"'`<>|]+\.[A-Za-z0-9]{1,8}/gi) ?? []) add(m);
   // Windows drive path: C:\… or C:/… ending in .ext
-  for (const m of text.match(/[A-Za-z]:[\\/][^\s"'`<>|]*\.[A-Za-z0-9]{1,8}/g) ?? []) add(m);
+  for (const m of scrubbed.match(/[A-Za-z]:[\\/][^\s"'`<>|]*\.[A-Za-z0-9]{1,8}/g) ?? []) add(m);
   // POSIX: /mnt/<d>/… or /<d>/… (single-letter drive) ending in .ext
-  for (const m of text.match(/(?:\/mnt\/[a-zA-Z]|\/[a-zA-Z])\/[^\s"'`<>|]*\.[A-Za-z0-9]{1,8}/g) ?? []) add(m);
+  for (const m of scrubbed.match(/(?:\/mnt\/[a-zA-Z]|\/[a-zA-Z])\/[^\s"'`<>|]*\.[A-Za-z0-9]{1,8}/g) ?? []) add(m);
   return out;
 }
 

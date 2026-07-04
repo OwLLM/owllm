@@ -274,14 +274,14 @@ pub fn compat_for(inference_gb: f32, lora_train_gb: f32, qlora_gb: f32, vram_gb:
     }
 }
 
-/// Detect total VRAM in GB. Picks the largest GPU when multiple are
-/// present (training usually targets a single device). Returns None
-/// when no NVIDIA GPU is found.
+/// Detect the effective GPU memory budget in GB — the largest among the
+/// user's selected GPUs (training/inference usually target one device).
+/// Goes through hardware::gpu_memory_budget so unified-memory machines
+/// (Apple Silicon, AMD APUs, Intel iGPUs) report their real shared-RAM
+/// budget instead of a tiny dedicated pool — previously a 7B model
+/// showed "Too large" on a 32 GB APU. Returns None when no GPU is found.
 pub async fn detect_vram_gb() -> Option<f32> {
-    let status = crate::hardware::vram_status().await.ok()?;
-    let max_mib = status.gpus.iter().map(|g| g.total_mib).max()?;
-    if max_mib == 0 { return None; }
-    Some(max_mib as f32 / 1024.0)
+    crate::hardware::gpu_memory_budget().await.map(|b| b.gb as f32)
 }
 
 /// Returns the curated list with hardware-aware compat tags filled in.

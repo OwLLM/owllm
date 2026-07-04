@@ -29,6 +29,27 @@
       "extractStrip": 0,
       "include": ["llama-server.exe", "*.dll"]
     },
+    "local-inference-metal": {
+      "moduleVersion": "b9488-metal",
+      "_comment": "macOS Apple Silicon. Upstream is a tar.gz with SYMLINK chains (libggml.dylib -> .0 -> .0.13.1) — repack as a FLAT zip with symlinks materialized as real copies and unix modes preserved in external_attr (the app's zip extractor writes plain files; see scripts/repack note in modules registry commit 2026.07.04).",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-macos-arm64.tar.gz",
+      "extractStrip": 1,
+      "include": ["llama-server", "*.dylib", "*.metal"]
+    },
+    "local-inference-linux-vulkan": {
+      "moduleVersion": "b9488-vulkan",
+      "_comment": "Linux x64, Vulkan (NVIDIA/AMD/Intel). Same tar.gz→flat-zip repack rule as local-inference-metal.",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-ubuntu-vulkan-x64.tar.gz",
+      "extractStrip": 1,
+      "include": ["llama-server", "*.so*"]
+    },
+    "local-inference-linux-cpu": {
+      "moduleVersion": "b9488-cpu",
+      "_comment": "Linux x64, CPU-only. Same tar.gz→flat-zip repack rule as local-inference-metal.",
+      "upstreamUrl": "https://github.com/ggml-org/llama.cpp/releases/download/b9488/llama-b9488-bin-ubuntu-x64.tar.gz",
+      "extractStrip": 1,
+      "include": ["llama-server", "*.so*"]
+    },
     "audio-stt-whisper-base": {
       "moduleVersion": "v1.8.4-base",
       "components": [

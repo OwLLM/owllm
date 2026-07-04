@@ -110,19 +110,25 @@ async fn probe_gpu() -> ReadinessRow {
     if hw.gpus.is_empty() {
         return ReadinessRow {
             ok: false,
-            warn: true, // not fatal — training falls back to CPU
-            detail: "No NVIDIA GPU — CPU only".to_string(),
+            warn: true, // not fatal — inference falls back to CPU
+            detail: "No GPU detected — CPU only".to_string(),
         };
     }
     let first = hw.gpus[0].name.clone();
+    let unified = hw.gpus[0].unified;
     let extra = hw.gpus.len().saturating_sub(1);
     let mut detail = if extra > 0 {
         format!("{first} +{extra}")
     } else {
         first
     };
+    if unified {
+        detail = format!("{detail} · {:.0} GB unified memory", hw.gpus[0].vram_gb);
+    }
     match cuda {
         Some(v) => detail = format!("{detail} · CUDA {v}"),
+        // Non-NVIDIA (Apple/AMD/Intel): no CUDA is expected, not a defect.
+        None if unified => {}
         None => detail = format!("{detail} · driver CUDA n/a"),
     }
     ReadinessRow { ok: true, warn: false, detail }

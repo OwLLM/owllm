@@ -76,10 +76,10 @@ That's it — agents and chat now run locally and isolated, using the remote GPU
 | | Status |
 |---|---|
 | **Windows 10 / 11** | ✅ shipping |
-| **Linux** | 🚧 in progress (the agent backend is light to provision: node/git/CLIs/uv — the heavy GPU stack can stay on the Windows server via the split) |
-| **macOS** (Metal) | 🗺 roadmap |
+| **Linux** (Vulkan / CPU) | 🧪 beta — llama.cpp engine payloads, GPU probes (NVIDIA + AMD/Intel via sysfs), AppImage/deb/rpm bundles and auto-update wiring are all in place; awaiting hardware verification |
+| **macOS** (Apple Silicon, Metal) | 🧪 beta — Metal engine payload, unified-memory-aware model sizing, dmg bundle and auto-update wiring are all in place; awaiting hardware verification |
 
-The runtime is delivered by a **cross-platform module system** (registry-driven, per-OS variants) — the same installer that provisions Windows extends to Linux/macOS.
+The runtime is delivered by a **cross-platform module system** (registry-driven, per-OS variants) — the same installer flow provisions all three OSes. **Unified-memory machines** (Apple Silicon, AMD Strix Halo / Ryzen AI APUs, Intel iGPUs) get model-fit ratings and context sizing computed from their real shared-RAM GPU budget, not a meaningless dedicated-VRAM number.
 
 ## Architecture deep-dive
 

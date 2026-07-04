@@ -1,8 +1,12 @@
 {
   "schemaVersion": 1,
-  "registryVersion": "2026.06.03",
-  "publishedAt": "2026-06-03T00:00:00Z",
-  "channels": ["stable", "beta", "nightly"],
+  "registryVersion": "2026.07.04",
+  "publishedAt": "2026-07-04T00:00:00Z",
+  "channels": [
+    "stable",
+    "beta",
+    "nightly"
+  ],
   "modules": [
     {
       "id": "local-inference",
@@ -10,14 +14,22 @@
       "description": "Run GGUF models on your own hardware via llama.cpp.",
       "category": "runtime",
       "required": false,
-      "uiSlots": ["server-page", "model-browser", "chat-local-models"],
+      "uiSlots": [
+        "server-page",
+        "model-browser",
+        "chat-local-models"
+      ],
       "dependsOn": [],
       "variants": [
         {
           "id": "local-inference-cuda",
           "displayName": "NVIDIA CUDA build",
           "platform": "windows-x86_64",
-          "requires": { "gpu": "nvidia", "vramGb": 4, "diskGb": 1 },
+          "requires": {
+            "gpu": "nvidia",
+            "vramGb": 4,
+            "diskGb": 1
+          },
           "sizeBytes": 285212672,
           "channels": {
             "stable": {
@@ -34,7 +46,10 @@
           "id": "local-inference-vulkan",
           "displayName": "Vulkan build (NVIDIA/AMD/Intel)",
           "platform": "windows-x86_64",
-          "requires": { "vramGb": 4, "diskGb": 1 },
+          "requires": {
+            "vramGb": 4,
+            "diskGb": 1
+          },
           "sizeBytes": 67108864,
           "channels": {
             "stable": {
@@ -51,7 +66,9 @@
           "id": "local-inference-cpu",
           "displayName": "CPU-only build",
           "platform": "windows-x86_64",
-          "requires": { "diskGb": 1 },
+          "requires": {
+            "diskGb": 1
+          },
           "sizeBytes": 33554432,
           "channels": {
             "stable": {
@@ -59,6 +76,64 @@
               "releasedAt": "2026-05-28T00:00:00Z",
               "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-cpu-b3850.zip",
               "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "local-inference-metal",
+          "displayName": "Apple Metal build (Apple Silicon)",
+          "platform": "macos-aarch64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 18362870,
+          "channels": {
+            "stable": {
+              "version": "b9488-metal",
+              "releasedAt": "2026-07-04T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-metal-b9488.zip",
+              "sha256": "0e384b906b00532849af904dfbdccd5edf1b620292d7601fedab1ae64dd9d4d1",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "local-inference-linux-vulkan",
+          "displayName": "Linux Vulkan build (NVIDIA/AMD/Intel)",
+          "platform": "linux-x86_64",
+          "requires": {
+            "vramGb": 2,
+            "diskGb": 1
+          },
+          "sizeBytes": 39544175,
+          "channels": {
+            "stable": {
+              "version": "b9488-vulkan",
+              "releasedAt": "2026-07-04T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-vulkan-b9488.zip",
+              "sha256": "c1c264fd7e6f30e69f0ca8a156dbfcb159409124fa2aa049bbfa685d8c849d7d",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "local-inference-linux-cpu",
+          "displayName": "Linux CPU-only build",
+          "platform": "linux-x86_64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 21832443,
+          "channels": {
+            "stable": {
+              "version": "b9488-cpu",
+              "releasedAt": "2026-07-04T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-cpu-b9488.zip",
+              "sha256": "179c9e227fc17bf3333ee535698dc07b33185e9063df0b66f2dc2b2f01025b40",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -72,14 +147,20 @@
       "description": "Voice transcription via whisper.cpp. Enables Telegram voice messages, in-app mic input, audio file ingestion.",
       "category": "audio",
       "required": false,
-      "uiSlots": ["voice-input", "telegram-voice-transcribe", "audio-upload"],
+      "uiSlots": [
+        "voice-input",
+        "telegram-voice-transcribe",
+        "audio-upload"
+      ],
       "dependsOn": [],
       "variants": [
         {
           "id": "audio-stt-whisper-base",
           "displayName": "Whisper base (multilingual, fast)",
           "platform": "windows-x86_64",
-          "requires": { "diskGb": 1 },
+          "requires": {
+            "diskGb": 1
+          },
           "sizeBytes": 155189248,
           "channels": {
             "stable": {
@@ -96,7 +177,10 @@
           "id": "audio-stt-whisper-large",
           "displayName": "Whisper large-v3 (highest accuracy)",
           "platform": "windows-x86_64",
-          "requires": { "diskGb": 4, "ramGb": 8 },
+          "requires": {
+            "diskGb": 4,
+            "ramGb": 8
+          },
           "sizeBytes": 3173552128,
           "channels": {
             "stable": {
@@ -124,7 +208,9 @@
           "id": "python-3.11-embed-win",
           "displayName": "Python 3.11 embedded distribution",
           "platform": "windows-x86_64",
-          "requires": { "diskGb": 1 },
+          "requires": {
+            "diskGb": 1
+          },
           "sizeBytes": 157286400,
           "channels": {
             "stable": {
@@ -145,14 +231,26 @@
       "description": "Local LoRA fine-tuning, full fine-tuning, and weight-orthogonalisation (abliteration). Includes Unsloth, TRL, PEFT, bitsandbytes. GPU variant matches your CUDA generation.",
       "category": "training",
       "required": false,
-      "uiSlots": ["train-page", "adapters-page", "abliterate-tool", "dataset-tools"],
-      "dependsOn": ["python-runtime"],
+      "uiSlots": [
+        "train-page",
+        "adapters-page",
+        "abliterate-tool",
+        "dataset-tools"
+      ],
+      "dependsOn": [
+        "python-runtime"
+      ],
       "variants": [
         {
           "id": "finetune-unsloth-cu124",
           "displayName": "Unsloth + CUDA 12.4 (Blackwell, Ada, Hopper)",
           "platform": "windows-x86_64",
-          "requires": { "gpu": "nvidia", "vramGb": 8, "ramGb": 16, "diskGb": 14 },
+          "requires": {
+            "gpu": "nvidia",
+            "vramGb": 8,
+            "ramGb": 16,
+            "diskGb": 14
+          },
           "sizeBytes": 12884901888,
           "channels": {
             "stable": {
@@ -169,7 +267,12 @@
           "id": "finetune-unsloth-cu121",
           "displayName": "Unsloth + CUDA 12.1 (Ampere, Ada)",
           "platform": "windows-x86_64",
-          "requires": { "gpu": "nvidia", "vramGb": 8, "ramGb": 16, "diskGb": 14 },
+          "requires": {
+            "gpu": "nvidia",
+            "vramGb": 8,
+            "ramGb": 16,
+            "diskGb": 14
+          },
           "sizeBytes": 12884901888,
           "channels": {
             "stable": {
@@ -186,7 +289,12 @@
           "id": "finetune-base-cu118",
           "displayName": "Base trainer + CUDA 11.8 (Turing fallback)",
           "platform": "windows-x86_64",
-          "requires": { "gpu": "nvidia", "vramGb": 8, "ramGb": 16, "diskGb": 20 },
+          "requires": {
+            "gpu": "nvidia",
+            "vramGb": 8,
+            "ramGb": 16,
+            "diskGb": 20
+          },
           "sizeBytes": 19327352832,
           "channels": {
             "stable": {
@@ -207,14 +315,22 @@
       "description": "Node.js + uv. Required to spawn npx-based MCP servers (filesystem, git, github, brave-search, postgres, puppeteer, sequential-thinking) and uvx-based Python MCP servers. Without this, the MCP runtime can only invoke binary servers.",
       "category": "runtime",
       "required": false,
-      "uiSlots": ["mcp-page-full", "mcp-pack-install", "team-mcp-autoinstall"],
-      "dependsOn": ["python-runtime"],
+      "uiSlots": [
+        "mcp-page-full",
+        "mcp-pack-install",
+        "team-mcp-autoinstall"
+      ],
+      "dependsOn": [
+        "python-runtime"
+      ],
       "variants": [
         {
           "id": "mcp-toolchain-node-uv",
           "displayName": "Node.js 20 LTS + uv",
           "platform": "windows-x86_64",
-          "requires": { "diskGb": 1 },
+          "requires": {
+            "diskGb": 1
+          },
           "sizeBytes": 272629760,
           "channels": {
             "stable": {
@@ -235,14 +351,20 @@
       "description": "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight — under 50 MB on top of python-runtime.",
       "category": "content",
       "required": false,
-      "uiSlots": ["agent-tools-screenshot"],
-      "dependsOn": ["python-runtime"],
+      "uiSlots": [
+        "agent-tools-screenshot"
+      ],
+      "dependsOn": [
+        "python-runtime"
+      ],
       "variants": [
         {
           "id": "tools-python-base",
           "displayName": "Pillow + requests bundle",
           "platform": "windows-x86_64",
-          "requires": { "diskGb": 1 },
+          "requires": {
+            "diskGb": 1
+          },
           "sizeBytes": 41943040,
           "channels": {
             "stable": {

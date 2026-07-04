@@ -36,9 +36,42 @@ cd "$APP"
 VERSION="$(node -e 'process.stdout.write(require("./src-tauri/tauri.conf.json").version)')"
 TAG="v$VERSION"
 KEY_FILE=".tauri-keys/owllm-updater.key"
-INSTALLER="dist/OwLLM Desktop Setup.exe"
 LATEST="dist/latest.json"
-URL="https://github.com/$REPO/releases/latest/download/OwLLM.Desktop.Setup.exe"
+
+# ---- per-platform artifact map -------------------------------------------
+# One script, three OSes. INSTALLER = the human-download asset (stable name),
+# UPDATER_ARTIFACT = what minisign signs and latest.json points at.
+# Windows keeps its historical /latest/ URL (unchanged behaviour); macOS and
+# Linux use VERSIONED URLs so a later Windows-only publish can never leave a
+# platform key pointing at an asset that no longer matches its signature.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) HOST_OS="windows" ;;
+  Darwin)               HOST_OS="macos" ;;
+  *)                    HOST_OS="linux" ;;
+esac
+ARCH="$(uname -m)"
+case "$ARCH" in arm64|aarch64) ARCH="aarch64" ;; *) ARCH="x86_64" ;; esac
+case "$HOST_OS" in
+  windows)
+    PLATFORM_KEY="windows-x86_64"
+    INSTALLER="dist/OwLLM Desktop Setup.exe"
+    UPDATER_ARTIFACT="$INSTALLER"
+    URL="https://github.com/$REPO/releases/latest/download/OwLLM.Desktop.Setup.exe"
+    ;;
+  macos)
+    PLATFORM_KEY="darwin-$ARCH"
+    INSTALLER="dist/OwLLM.Desktop.Setup.dmg"
+    # Tauri's macOS updater consumes a .app tar.gz, not the dmg.
+    UPDATER_ARTIFACT="dist/OwLLM.Desktop_$ARCH.app.tar.gz"
+    URL="https://github.com/$REPO/releases/download/$TAG/OwLLM.Desktop_$ARCH.app.tar.gz"
+    ;;
+  linux)
+    PLATFORM_KEY="linux-$ARCH"
+    INSTALLER="dist/OwLLM.Desktop.AppImage"
+    UPDATER_ARTIFACT="$INSTALLER"   # Tauri's Linux updater consumes the AppImage
+    URL="https://github.com/$REPO/releases/download/$TAG/OwLLM.Desktop.AppImage"
+    ;;
+esac
 
 step() { echo ""; echo "=== $* ==="; }
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
@@ -119,19 +152,40 @@ case "$(uname -s)" in
 esac
 
 step "1/5 build  (version $VERSION)"
-# TS/Rust changes need a fresh bundle; drop the stale installer so a skipped
+# TS/Rust changes need a fresh bundle; drop the stale artifacts so a skipped
 # relink can't ship an old version string.
-rm -f "$INSTALLER" "$INSTALLER.sig"
-case "$(uname -s)" in
+rm -f "$INSTALLER" "$UPDATER_ARTIFACT" "$UPDATER_ARTIFACT.sig"
+case "$HOST_OS" in
   # cmd.exe needs the FULL Windows path to the .bat (a relative name or a POSIX
   # "/c/…" path gets mangled by MSYS and silently no-ops). cygpath -w resolves it.
-  MINGW*|MSYS*|CYGWIN*)
+  windows)
     WINBAT="$(cygpath -w "$APP/build-release.bat")"
     cmd.exe //c "$WINBAT" || fail "build-release.bat failed"
     ;;
-  *) npm run tauri -- build || fail "tauri build failed" ;;  # macOS/Linux native bundle
+  *)
+    npm run tauri -- build || fail "tauri build failed"
+    mkdir -p dist
+    BUNDLE="src-tauri/target/release/bundle"
+    if [ "$HOST_OS" = "macos" ]; then
+      DMG="$(ls "$BUNDLE"/dmg/*.dmg 2>/dev/null | head -1 || true)"
+      [ -n "$DMG" ] || fail "no .dmg under $BUNDLE/dmg — tauri bundle step failed"
+      cp -f "$DMG" "$INSTALLER"
+      APPB="$(ls -d "$BUNDLE"/macos/*.app 2>/dev/null | head -1 || true)"
+      [ -n "$APPB" ] || fail "no .app under $BUNDLE/macos — tauri bundle step failed"
+      tar -czf "$UPDATER_ARTIFACT" -C "$(dirname "$APPB")" "$(basename "$APPB")"
+    else
+      AI="$(ls "$BUNDLE"/appimage/*.AppImage 2>/dev/null | head -1 || true)"
+      [ -n "$AI" ] || fail "no .AppImage under $BUNDLE/appimage — tauri bundle step failed"
+      cp -f "$AI" "$INSTALLER"
+      # Convenience packages for non-AppImage distros (download-only; the
+      # updater path is the AppImage).
+      cp -f "$BUNDLE"/deb/*.deb dist/OwLLM.Desktop.deb 2>/dev/null || true
+      cp -f "$BUNDLE"/rpm/*.rpm dist/OwLLM.Desktop.rpm 2>/dev/null || true
+    fi
+    ;;
 esac
 [ -f "$INSTALLER" ] || fail "build produced no installer at $INSTALLER (build step did not run or failed)"
+[ -f "$UPDATER_ARTIFACT" ] || fail "no updater artifact at $UPDATER_ARTIFACT"
 
 step "1b/5 authenticode sign (SimplySign / Certum) — must run BEFORE minisign"
 # Windows code signing to clear SmartScreen "unknown publisher". Uses the cloud
@@ -166,17 +220,26 @@ esac
 step "2/5 sign   (minisign — empty password, closed stdin)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
 KEY_CONTENT="$(cat "$KEY_FILE")"
-npx @tauri-apps/cli signer sign --private-key "$KEY_CONTENT" "$INSTALLER" < /dev/null
-SIG="$(cat "$INSTALLER.sig")"
+npx @tauri-apps/cli signer sign --private-key "$KEY_CONTENT" "$UPDATER_ARTIFACT" < /dev/null
+SIG="$(cat "$UPDATER_ARTIFACT.sig")"
 [ "${#SIG}" -ge 200 ] || fail "signature looks wrong (${#SIG} chars)"
 
-step "3/5 latest.json"
-SIG="$SIG" NOTES="$NOTES" VERSION="$VERSION" URL="$URL" node -e '
+step "3/5 latest.json (merge platform keys)"
+# Preserve OTHER platforms' entries only when they were published for THIS
+# same version (coordinated multi-OS publish of one tag). A stale entry from
+# an older version would make that platform's updater "install" an update
+# that leaves the app on the old version — an infinite update loop.
+EXISTING_LATEST="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" 2>/dev/null || true)"
+SIG="$SIG" NOTES="$NOTES" VERSION="$VERSION" URL="$URL" \
+PLATFORM_KEY="$PLATFORM_KEY" EXISTING_LATEST="$EXISTING_LATEST" node -e '
   const fs=require("fs");
+  let prev={}; try{ prev=JSON.parse(process.env.EXISTING_LATEST||"{}"); }catch{}
+  const platforms=(prev.version===process.env.VERSION && prev.platforms)?{...prev.platforms}:{};
+  platforms[process.env.PLATFORM_KEY]={signature:process.env.SIG,url:process.env.URL};
   const m={version:process.env.VERSION,notes:process.env.NOTES||("Release "+process.env.VERSION),
-    pub_date:new Date().toISOString(),
-    platforms:{"windows-x86_64":{signature:process.env.SIG,url:process.env.URL}}};
-  fs.writeFileSync("dist/latest.json",JSON.stringify(m,null,2));'
+    pub_date:new Date().toISOString(),platforms};
+  fs.writeFileSync("dist/latest.json",JSON.stringify(m,null,2));
+  console.log("  platforms in manifest:",Object.keys(platforms).join(", "));'
 
 if [ "$DRY_RUN" = 1 ]; then
   echo ""; echo "PUBLISH_DRYRUN_OK: built + signed $VERSION; $INSTALLER + $LATEST ready (gh release skipped)."
@@ -185,8 +248,13 @@ fi
 
 step "4/5 gh release ($TAG, $([ "$DRAFT" = 1 ] && echo draft || echo latest))"
 LATEST_FLAG="--latest"; [ "$DRAFT" = 1 ] && LATEST_FLAG="--draft"
+UPLOADS=("$INSTALLER" "$LATEST")
+[ "$UPDATER_ARTIFACT" = "$INSTALLER" ] || UPLOADS+=("$UPDATER_ARTIFACT")
+for extra in dist/OwLLM.Desktop.deb dist/OwLLM.Desktop.rpm; do
+  [ -f "$extra" ] && UPLOADS+=("$extra")
+done
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
-  gh release upload "$TAG" "$INSTALLER" "$LATEST" --repo "$REPO" --clobber
+  gh release upload "$TAG" "${UPLOADS[@]}" --repo "$REPO" --clobber
   # Refresh the body too — but never clobber notes a human wrote by hand:
   # only overwrite when the existing body is empty or just the tag/version.
   EXISTING_BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null | tr -d ' \r\n')"
@@ -195,7 +263,7 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   fi
   [ "$DRAFT" = 1 ] || gh release edit "$TAG" --repo "$REPO" --draft=false --latest
 else
-  gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "$NOTES" $LATEST_FLAG "$INSTALLER" "$LATEST"
+  gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "$NOTES" $LATEST_FLAG "${UPLOADS[@]}"
 fi
 
 step "5/5 verify"

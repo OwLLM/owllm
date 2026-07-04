@@ -226,6 +226,12 @@ const BRIDGE_JS: &str = r##"
     setTimeout(function () { try { document.title = window.__owllmTitle0 || ""; } catch (e) {} }, 60);
   }
   window.__owllmEmit = function (reqId, k) { emit(reqId, k); };
+  // The reply channel briefly parks a sentinel in document.title (restored after
+  // 60ms). A title READ that lands inside that window would capture the encoded
+  // reply — so page-title readouts fall back to the last real title instead.
+  function realTitle() {
+    return document.title.indexOf(SENT) === 0 ? (window.__owllmTitle0 || "") : document.title;
+  }
   function visible(el) {
     var r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return false;
@@ -276,7 +282,7 @@ const BRIDGE_JS: &str = r##"
   }
   function snapshot() {
     var els = reindex();
-    var lines = ["URL: " + location.href, "TITLE: " + document.title, "",
+    var lines = ["URL: " + location.href, "TITLE: " + realTitle(), "",
                  "INTERACTIVE ELEMENTS (act on these by index):"];
     for (var i = 0; i < els.length; i++) lines.push("[" + i + "] " + label(els[i]));
     return lines.join("\n");
@@ -289,13 +295,13 @@ const BRIDGE_JS: &str = r##"
     try {
       switch (action) {
         case "info":
-          return report(reqId, JSON.stringify({ url: location.href, title: document.title, ready: document.readyState }));
+          return report(reqId, JSON.stringify({ url: location.href, title: realTitle(), ready: document.readyState }));
         case "await_load":
           if (document.readyState === "complete" || document.readyState === "interactive") {
-            return report(reqId, "Loaded: " + location.href + " — " + document.title);
+            return report(reqId, "Loaded: " + location.href + " — " + realTitle());
           }
           window.addEventListener("DOMContentLoaded", function () {
-            report(reqId, "Loaded: " + location.href + " — " + document.title);
+            report(reqId, "Loaded: " + location.href + " — " + realTitle());
           }, { once: true });
           return;
         case "snapshot": return report(reqId, snapshot());

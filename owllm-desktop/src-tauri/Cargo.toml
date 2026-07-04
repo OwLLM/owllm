@@ -179,6 +179,11 @@ windows-sys = { version = "0.59", features = [
     # PrintWindow itself lives under Storage_Xps in windows-sys.
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
+    # GetShortPathNameW — collapse a spaced path (…\OwLLM Desktop\…) to its 8.3
+    # form so the `--mcp-config` arg survives the Claude CLI batch-shim spawn
+    # (Rust Command → cmd.exe → claude.cmd → node), which splits on the space
+    # even when quoted and drops the browser gateway. See mcp_gateway::cli_safe_path.
+    "Win32_Storage_FileSystem",
 ] }
 
 [dev-dependencies]

@@ -108,9 +108,75 @@ pub fn ensure_started(app: &AppHandle) -> Result<GatewayInfo, String> {
     Ok(GatewayInfo { url, token })
 }
 
+/// Look up the Windows 8.3 short path for an existing file (spaces collapse:
+/// `…\OwLLM Desktop\mcp-gateway.json` → `…\OWLLMD~1\MCP-GA~1.JSO`). Returns None
+/// if 8.3 generation is disabled on the volume or the call fails.
+#[cfg(windows)]
+fn short_path(p: &std::path::Path) -> Option<String> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    unsafe {
+        let len = GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0);
+        if len == 0 {
+            return None;
+        }
+        let mut buf = vec![0u16; len as usize];
+        let got = GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), len);
+        if got == 0 || got >= len {
+            return None;
+        }
+        Some(std::ffi::OsString::from_wide(&buf[..got as usize]).to_string_lossy().into_owned())
+    }
+}
+
+/// A path safe to hand the Claude CLI as `--mcp-config`. The app's user-data dir
+/// is `…\OwLLM Desktop\…` — the SPACE gets split by the Windows batch-shim spawn
+/// chain (Rust Command → cmd.exe → claude.cmd → node) even when quoted, so the
+/// CLI reports "MCP config file not found" and silently runs WITHOUT the gateway
+/// → browser tools vanish (root cause of "the agent says it has no browser
+/// tools"). Collapse to the 8.3 short name; if 8.3 is off, relocate the file
+/// under the (usually space-free) temp dir. Verified: the short path loads the
+/// tools where the spaced path does not.
+fn cli_safe_path(p: &std::path::Path) -> String {
+    let raw = p.to_string_lossy().into_owned();
+    if !raw.contains(' ') {
+        return raw;
+    }
+    #[cfg(windows)]
+    {
+        if let Some(s) = short_path(p) {
+            if !s.contains(' ') {
+                return s;
+            }
+        }
+        // 8.3 disabled → copy the config under a space-free temp dir instead.
+        let tmp = std::env::temp_dir().join("owllm-mcp");
+        if std::fs::create_dir_all(&tmp).is_ok() {
+            if let Some(name) = p.file_name() {
+                let dest = tmp.join(name);
+                if std::fs::copy(p, &dest).is_ok() {
+                    let d = dest.to_string_lossy().into_owned();
+                    if !d.contains(' ') {
+                        return d;
+                    }
+                    if let Some(s) = short_path(&dest) {
+                        if !s.contains(' ') {
+                            return s;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    raw // best effort (non-Windows shells quote spaces fine)
+}
+
 /// Ensure the gateway is up and write the `--mcp-config` JSON the Claude CLI
-/// consumes, returning its path. The config carries the bearer token, so it goes
-/// in the app's user-data dir (user-readable only), not the project tree.
+/// consumes, returning a path safe to pass on the CLI (see `cli_safe_path` — a
+/// SPACE in the path breaks the Windows batch-shim spawn). The config carries the
+/// bearer token, so it goes in the app's user-data dir (user-readable only), not
+/// the project tree.
 pub fn write_cli_config(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     let info = ensure_started(app)?;
     let dir = crate::paths::user_data_root().ok_or_else(|| "no user-data dir".to_string())?;
@@ -127,7 +193,7 @@ pub fn write_cli_config(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     });
     std::fs::write(&path, serde_json::to_vec_pretty(&cfg).unwrap_or_default())
         .map_err(|e| format!("write {}: {e}", path.display()))?;
-    Ok(path)
+    Ok(std::path::PathBuf::from(cli_safe_path(&path)))
 }
 
 /// stdio↔HTTP relay for non-jailed WSL runs (full-access or no bwrap).
@@ -440,6 +506,30 @@ mod tests {
         assert_eq!(t.len(), 64);
         assert!(t.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(new_token(), new_token()); // fresh each call
+    }
+
+    #[test]
+    fn cli_safe_path_passthrough_when_no_space() {
+        // A path without a space is returned verbatim on every platform.
+        let p = std::path::Path::new("/tmp/owllm/mcp-gateway.json");
+        assert_eq!(cli_safe_path(p), "/tmp/owllm/mcp-gateway.json");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cli_safe_path_removes_space_for_existing_file() {
+        // Regression for the 10-round "agent has no browser tools" bug: the
+        // config lived at …\OwLLM Desktop\… and the SPACE split the --mcp-config
+        // arg in the CLI batch-shim spawn. cli_safe_path must hand back a
+        // space-free, still-readable path for a file under a spaced dir.
+        let dir = std::env::temp_dir().join("owllm mcp space test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("mcp-gateway.json");
+        std::fs::write(&f, b"{}").unwrap();
+        let safe = cli_safe_path(&f);
+        assert!(!safe.contains(' '), "expected space-free path, got: {safe}");
+        assert!(std::fs::read(&safe).is_ok(), "safe path not readable: {safe}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -8,6 +8,7 @@
 
 [![installer](https://img.shields.io/badge/installer-OwLLM.Desktop.Setup.exe-3ec5d8?style=for-the-badge&logo=windows)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)
 [![portable](https://img.shields.io/badge/portable_(zip)-no_install-7e8aa0?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM-Desktop-Portable.zip)
+[![signed](https://img.shields.io/badge/EV--signed-binary_%2B_installer-3ec58a?style=for-the-badge&logo=gnuprivacyguard&logoColor=white)](https://github.com/OwLLM/owllm/releases/latest)
 
 ---
 
@@ -35,6 +36,29 @@ Most AI tools give you a chatbox. **OwLLM gives you a workforce.**
 
 You compose teams of specialised agents — an orchestrator that plans, a coder that writes, a critic that reviews, a researcher that fact-checks — and they collaborate on real tasks in parallel. Each team is a graph of roles + prompts you define. The 18 teams shipped in this repo are **starter samples**, not the menu.
 
+```mermaid
+flowchart LR
+    G(["🎯 Your goal<br/>typed · Telegram · WhatsApp<br/>Slack · Discord · email"])
+    G --> O["🧠 Orchestrator<br/>plans + right-sizes the round"]
+    O -->|"@coder"| A1["👷 Coder<br/>edits in its own worktree"]
+    O -->|"@researcher"| A2["🔎 Researcher<br/>web + citations"]
+    O -->|"@critic"| A3["🧐 Critic<br/>reviews what a build can't catch"]
+    A1 --> V{"✅ Verification Gate<br/>a REAL command's exit code<br/>never the model's say-so"}
+    V -->|"fail — captured error"| A1
+    V -->|"pass"| P["🚀 Publisher<br/>version → commit → tag →<br/>build → sign → release"]
+    A2 --> O
+    A3 --> O
+    N["📓 Run Notebook<br/>your ideas while they work"] -.->|"⚡ steers mid-run"| O
+
+    classDef goal fill:#0a2230,stroke:#3ec5d8,stroke-width:2px,color:#dff6ff;
+    classDef agent fill:#1a1430,stroke:#8a7ad8,stroke-width:1.5px,color:#e8dfff;
+    classDef gate fill:#2a2208,stroke:#ffcf5a,stroke-width:2px,color:#fff3d0;
+    classDef ship fill:#0e2a1e,stroke:#3ec58a,stroke-width:2px,color:#d6ffe9;
+    class G goal; class O,A1,A2,A3,N agent; class V gate; class P ship;
+```
+
+*And you're never locked out while it runs: messages you type mid-run are injected into the working agents (on local models, between tool calls), and the **Run Notebook** lets you brainstorm next steps that auto-feed the team as each run finishes.*
+
 | | What OwLLM gives you that others don't |
 |---|---|
 | 🧩 **Build your own teams** | Compose agents from 8 base roles + custom prompts. Visual graph builder. Hot-updates through this repo — push a team JSON, it lands on every installed app. |
@@ -46,6 +70,29 @@ You compose teams of specialised agents — an orchestrator that plans, a coder 
 | 🔒 **Sealed to ONE folder (Win/Mac/Linux)** | Flip it on and every tool your agents run — shell, file writes, edits, search, **and the cloud CLIs (Claude/Codex/Gemini/Kimi)** — runs **inside a real Linux sandbox** (WSL2 on Windows, Lima VM on macOS, bubblewrap on Linux *(Mac/Linux beta)*). Agents are **sealed to ONLY the project folder**: they work on your **real Windows folder — no copy** — but **cannot see the rest of your C: drive, other projects, or your home / SSH keys**. A model that runs `rm -rf` simply has nothing else to reach. Isolated **by default**; the seal and toolchain **auto-install**; provider logins (CLIs **and** API keys) **auto-sync** in so cloud agents just work. **Connect GitHub** to clone/push private repos from inside. See the **🔒 Sealed to one folder** section below for the diagram. |
 | 🔌 **MCP-first tooling** | Plug in any Model Context Protocol server (filesystem, git, browser, Postgres, GitHub…). **Keyless DuckDuckGo web search is auto-installed on first run** — no API key, no card. Engine-agnostic: any search MCP you add is used automatically. Curated packs per team. |
 | 🏠 **Run anywhere** | Desktop today. **Headless on a $5/mo VPS, 24/7** — on the roadmap. Containerised / VM — on the roadmap. Your agents, your hardware, your terms. |
+
+## ⚔️ OwLLM vs the field
+
+Every tool below is good at its one thing. OwLLM's pitch is that **the whole pipeline lives in one app** — and the pieces compound: the team you built fine-tunes the model it runs on, inside a sandbox, reachable from your phone.
+
+| Capability | **OwLLM** | LM Studio | Ollama | Jan | AnythingLLM | Cursor |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Local GGUF serving + model browser | ✅ | ✅ | ✅ | ✅ | ⚠️ via others | ❌ |
+| **Agent teams** (orchestrator + parallel specialists) | ✅ | ❌ | ❌ | ❌ | ⚠️ basic | ❌ |
+| Verified "done" (real exit-code gate, not model claims) | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ |
+| **Fine-tuning** (LoRA/QLoRA) built in | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| GGUF conversion + quantization built in | ✅ | ❌ | ⚠️ import | ❌ | ❌ | ❌ |
+| Abliteration / safety-research tooling | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **6 messaging bridges** (Telegram · WhatsApp · Discord · Slack · Email · LINE) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Folder-sealed Linux sandbox for agent tools **and cloud CLIs** | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ |
+| Mid-run steering + Run Notebook (plan while they work) | ✅ | ❌ | ❌ | ❌ | ❌ | ⚠️ |
+| Team memory: durable facts + RAG, synced across your PCs | ✅ | ❌ | ❌ | ❌ | ⚠️ | ❌ |
+| Subscription CLIs as agents (Claude Code · Codex · Gemini · Kimi) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Rule-based release pipeline (agents that actually SHIP versions) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| In-app support agent that sees your screen (the Watcher) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Price | **Free** | Free | Free | Free | Free | $20+/mo |
+
+*Fair notes: LM Studio is a superb model runner; Cursor is a superb code editor. OwLLM doesn't replace your editor — it replaces the **five separate apps** between "I have a GPU" and "my own trained, sandboxed, always-reachable agent workforce".*
 
 ## 🔒 Sealed to one folder — nothing else
 
@@ -148,7 +195,7 @@ You don't need a 4090. Many users will never have one.
 
 Same teams. Same agent definitions. Same UI. The model layer is just plumbing.
 
-## Run anywhere
+## Run anywhere — and places nothing else can go
 
 | Mode | Status | Use case |
 |---|:---:|---|
@@ -156,13 +203,48 @@ Same teams. Same agent definitions. Same UI. The model layer is just plumbing.
 | **Desktop (macOS / Linux)** | 🔜 Q3 2026 | Mac / Ubuntu users |
 | **Headless on VPS (24/7)** | 🔜 Q4 2026 | Run your custom teams on a $5/mo box. Reach them via Telegram, web, API. Always-on agentic services. |
 | **Containerised / VM** | 🔜 Q4 2026 | Drop OwLLM into your existing infra. |
+| **🔑 OwLLM Go (USB)** | 🧪 in design | Your entire AI workforce **on a hardware key** — see below. |
+| **🖥️ OwLLM Node (KVM)** | 🧪 prototyping | Teams that control **other computers' physical screens** — see below. |
 
 The team definitions, role prompts, MCP configs, and model selections are all portable across deployment modes — build a team once, run it anywhere.
+
+```mermaid
+flowchart TB
+    T(("🦉 YOUR team<br/>roles · rules · memory<br/>built once"))
+    T --> D["💻 Desktop<br/>daily driver"]
+    T --> V["☁️ VPS 24/7<br/>answers Telegram/WhatsApp<br/>while you sleep"]
+    T --> U["🔑 OwLLM Go<br/>USB key — any PC becomes<br/>YOUR workstation in 60s"]
+    T --> K["🖥️ OwLLM Node<br/>KVM — hands + eyes on<br/>remote physical machines"]
+
+    classDef hub fill:#0a2230,stroke:#3ec5d8,stroke-width:3px,color:#dff6ff;
+    classDef mode fill:#0e2a1e,stroke:#3ec58a,stroke-width:1.5px,color:#d6ffe9;
+    class T hub; class D,V,U,K mode;
+```
+
+### 🔑 OwLLM Go — your workforce in your pocket
+
+A hardware key that carries the **whole thing**: the app, your models, your teams, your memory, your logins. Plug it into *any* computer — a hotel business center, a client's spare laptop, a fresh machine after yours died — and sixty seconds later **your** agents are running, with **your** knowledge, signed into **your** accounts. Pull the key and nothing stays behind. The device *is* the license, the backup, and the security boundary all at once. No install, no cloud account, no trace.
+
+### 🖥️ OwLLM Node — agent teams with hands on real screens
+
+A palm-sized KVM device (HDMI in, USB-HID out) that gives an agent team **eyes and hands on any physical computer** — below the OS, BIOS included, no software installed on the target. Now scale that thought:
+
+- **Fleet support** — an airport, a mall, a hotel lobby: dozens of screens nobody watches. A vision-capable team *watches all of them*, spots the frozen kiosk / crashed signage / stuck till, and **fixes it** — or files a ticket with a screenshot and what it already tried.
+- **Remote hands for IT** — "the server in the branch office won't boot" no longer means driving there. The team enters the BIOS, changes the boot order, reinstalls, reports back.
+- **Legacy machines** — the lab instrument PC from 2009 that can't have anything installed on it? A Node gives your agents control without touching its disk.
+- **Grandma's PC** — a Node on her desk means your concierge team is her tech support, with infinite patience, on demand.
+
+### 🧭 More places this architecture goes
+
+- **🔒 The air-gapped consultant** — regulated site, no internet, no cloud? OwLLM is local-first by construction: models, fine-tuning, memory, teams — all offline on one workstation. Defense, medical, legal — the industries priced out of cloud AI are the ones OwLLM serves best.
+- **🏭 The model foundry** — fine-tune → abliterate (for safety research) → quantize → GGUF → publish. A one-person model lab, end to end, in one app. Your niche expert model, trained on your data, shippable to anyone with llama.cpp.
+- **🎓 The intern that actually learns** — your corrections don't evaporate: the Dataset Builder turns your documents and feedback into training JSONL, and this weekend's fine-tune is next week's smarter local agent. A workforce with a *growth curve* — try that with a SaaS chatbot.
+- **📟 The personal firm** — secretary, finance, research, health-coach teams, all reachable from the messenger already in your pocket. Not "an assistant app": a staff.
 
 ## Install (Windows only — for now)
 
 1. **[Download `OwLLM.Desktop.Setup.exe`](https://github.com/OwLLM/owllm/releases/latest)** (~30 MB — one file, that's it)
-2. Run `OwLLM-Desktop-Setup-x64.exe`. Windows SmartScreen may flag it the first time (the binary isn't EV-signed yet) — click "More info" → "Run anyway".
+2. Run it. The installer **and** the app binary are **EV code-signed** (Certum EV certificate). If SmartScreen still shows a prompt while the certificate's reputation builds, click "More info" → "Run anyway" — the publisher name confirms the signature.
 3. On first launch, a **hardware-aware wizard** opens. It detects your hardware and offers the modules that fit:
    - **Local Inference** (~33 MB CPU / ~32 MB Vulkan / ~285 MB CUDA) — only needed if you want local models
    - **Audio / Speech-to-Text** (~148 MB) — for voice messages, mic input
@@ -185,7 +267,23 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.7.3** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.7.46** releases.
+
+### 📓 Plan while they work — mid-run steering + the Run Notebook (0.7.44 → 0.7.46)
+The single most requested workflow fix: **you are never locked out while agents run.**
+- **Mid-run steering that actually lands** — messages typed during a run are queued as ⚡ steers and **injected into the working agents**: at the next agent boundary on cloud paths, and **between tool calls** on local models (the same trick VS Code uses). Never ignored, never lost.
+- **The Run Notebook** — a scratchpad popup that lives alongside the run: brainstorm freely, keep an ordered NEXT-STEPS list, and let the 🪄 **Digest agent** rewrite your raw notes into clear, self-contained steps (additive — it proposes, you approve). Feed a step to the running team with one click, or flip **Auto-feed** and the team walks your roadmap by itself, one step per clean finish.
+- **Multiple Agents pages** — a tab strip (like the Code page) opens several agent teams at once, same or different projects, running **in parallel**. Tabs stay alive; a green ● marks a page with a live run.
+- **The Code page grew a ⚡ Super User column** — the same project RULES the team follows (shared rule set when the folder is a team project) + the Notebook, wired into the solo coder with the same mid-run steering.
+
+### 🧠 Team memory made real (0.7.37)
+The shared brain got a ground-up rebuild: **durable FACTS** (curated, deduped, synced across your PCs) split from the **worklog** (auto-captured activity, local, capped), a **BM25-lite ranker** so a one-line fact beats 700 chars of chatter, a two-tab viewer with tag filters and 📌 promote-to-fact, and a 3D graph that clusters by topic instead of one giant hairball.
+
+### 🌐 Browser Control + a signed, trustworthy binary (0.7.27 → 0.7.36)
+- **Browser Control v1** — a persistent, logged-in browser the model drives: your sessions, your cookies, real sites.
+- **EV code-signing everywhere** — the app binary AND installer are signed with an EV certificate (0.7.33), building SmartScreen reputation under one identity.
+- **Solo-Loop v2** — one canvas switch flips between full **Orchestrated Workflow** and a lean **Coder → Critic → Publisher** loop for quick fixes; same cards, same release controls.
+- **Deterministic preflight** — a goal that points at an unreadable out-of-project file stops in *seconds* with the exact fix, before any agent burns a token; readable ones are **auto-copied in**. (URLs pass straight through to the agents' web tools.)
 
 ### 📇 The Project Card — your project's rules in one committed file (0.7.0 → 0.7.3)
 One file, `.owllm/project.json`, holds **how this project is built**: its goal, the **verify** command(s) that ground "done", and the **release** config. It's committed, so the rules **travel with the repo** — every machine, every teammate, every OS uses the same ones — with sensible defaults so existing projects keep working untouched.
@@ -241,10 +339,21 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.6.87)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.7.46)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.7.46** | URL-in-goal preflight fix (websites are fetched, never mistaken for files) · Notebook shows the digest agent's model |
+| **0.7.45** | Mid-run steering that actually lands (injected between tool calls on local models) + the 📓 Run Notebook with Digest agent + auto-feed |
+| **0.7.44** | Multiple Agents pages — tab strip, parallel teams on same/different projects, runs survive tab switches |
+| **0.7.37** | Team Memory rebuilt — FACTS vs worklog split, vault quarantine, BM25-lite retrieval, redesigned viewer + graph |
+| **0.7.36** | Solo-Loop v2 — canvas-title switch, lean Coder → Critic → Publisher loop, code-signing config on the Publisher card |
+| **0.7.33** | EV code-signing for the app binary AND installer (one identity, SmartScreen reputation) |
+| **0.7.32** | Catch-up Latest — Browser Control v1 (persistent logged-in browser the model drives) + out-of-project file auto-ingest |
+| **0.7.25–.26** | Deterministic preflight — unreadable out-of-project brief stops the run in seconds with the exact fix; readable files auto-copied in |
+| **0.7.23** | Agent editor ✨ Organize — split a freeform prompt into Mission / Rules / Definition of Done |
+| **0.7.13** | Editable file viewer + verifiable skill sync |
+| **0.7.4** | 📇 Project Card editor in ⚙ Project settings — goal, verify, release config, Steward lint inline |
 | **0.6.87** | Cross-provider skill self-load — agents on Claude/Codex/Gemini/local pull any skill by reading `.owllm/skills/<id>` with their native file tool |
 | **0.6.86** | Auto-install the full skill library on first run (background, idempotent) — no manual Skill Library dialog |
 | **0.6.85** | Skill badges — every agent card shows a ribbon of its equipped-skill icons (hover for names); capability is finally visible, not hidden in config |
@@ -308,7 +417,13 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - [x] MCP-first tool architecture
 - [x] Fine-tuning + abliteration pipeline
 - [x] GGUF / quantization pipeline
-- [x] Telegram bridge
+- [x] **Six messaging bridges** — Telegram, WhatsApp, Discord, Slack, Email, LINE (one shared dispatch core)
+- [x] **EV-signed binaries** — installer + app under one EV certificate
+- [x] **Browser Control v1** — a persistent logged-in browser the model drives
+- [x] **Multiple Agents pages** — parallel teams in tabs, runs survive switching
+- [x] **Mid-run steering + Run Notebook** — steer working agents; roadmap auto-feeds the team
+- [x] **Team memory (FACTS + RAG)** — durable, deduped, ranked, synced across PCs
+- [x] **Verification Gate + Project Card** — "done" = a real exit code; rules travel with the repo
 - [x] **WSL tool isolation** — agents run their tools inside Ubuntu, off your Windows drive
 - [x] **Folder-sealed isolation** — agents see **only the project folder** (bubblewrap inside WSL), on your **real Windows folder, no copy**
 - [x] **Sandbox disk management** — usage view, one-click cache clear, disk reclaim; auto-cleanup on project delete
@@ -321,9 +436,10 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - [ ] **macOS + Linux desktop** — Q3 2026
 - [ ] **24/7 headless / VPS mode** — Q4 2026
 - [ ] **Container / VM deployment** — Q4 2026
+- [x] **Local vision models** — image-capable GGUFs work out of the box (projectors auto-fetched)
 - [ ] **Gamification** (agent-vs-agent arena, achievements) — Q4 2026 *(in progress)*
-- [ ] **WhatsApp bridge** — Q4 2026
-- [ ] **Vision models** (LLaVA / Pixtral) — Q4 2026
+- [ ] **🔑 OwLLM Go** — the workforce-on-a-USB-key hardware edition *(in design)*
+- [ ] **🖥️ OwLLM Node** — KVM device: teams with eyes + hands on remote physical machines *(prototyping)*
 - [ ] **Voice output (TTS)** — Q1 2027
 - [ ] **Public team marketplace** — Q1 2027
 

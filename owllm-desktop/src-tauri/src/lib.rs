@@ -238,6 +238,7 @@ pub fn run() {
             browser::browser_status,
             browser::browser_view,
             browser::browser_focus,
+            browser::browser_set_device,
             browser_vault::browser_vault_list,
             browser_vault::browser_vault_add,
             browser_vault::browser_vault_delete,

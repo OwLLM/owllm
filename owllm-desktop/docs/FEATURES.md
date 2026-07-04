@@ -102,6 +102,15 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   bridge (`initialization_script`) and reads results back through a
   base64-over-`document.title` channel (`eval` → poll `title()`), so no remote
   IPC capability is needed.
+- **Local dev servers**: scheme-less localhost-family URLs (`localhost:5173`,
+  `127.0.0.1:3000`, `[::1]`, `192.168.*`, `10.*`, `*.localhost`) default to
+  `http://` instead of `https://`, so agents can open and test a web app they
+  are building.
+- **Device emulation** (`browser_set_device` / `browser_device` tool): desktop,
+  iphone, android, tablet presets — real viewport dimensions plus a mobile
+  user-agent. The UA is build-time-only on the webview, so switching device
+  rebuilds the window in place and re-navigates (logins survive; the profile
+  dir is stable). UI chips in the panel's Browse tab mirror the tool.
 - **Password vault** (`browser_vault.rs`): site logins saved encrypted at rest
   via `crypt` (DPAPI per Windows user account; passthrough on macOS/Linux for
   now — OS-keychain backing is a follow-up). Agents autofill the current page

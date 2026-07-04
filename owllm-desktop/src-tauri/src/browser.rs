@@ -25,6 +25,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 
@@ -46,6 +47,64 @@ pub struct BrowserStatus {
     running: bool,
     /// URL the window is currently on (best-effort; empty if unknown).
     url: String,
+    /// Current device emulation preset ("desktop" | "iphone" | "android" | "tablet").
+    device: String,
+}
+
+/// Device emulation presets. Emulation = viewport size (window inner size IS
+/// the CSS viewport, so 390px wide genuinely triggers responsive mobile
+/// layouts) + user-agent override (for sites that sniff UA). The UA can only
+/// be set at window-build time, so switching device rebuilds the window —
+/// the profile data dir is stable, so logins survive the rebuild.
+struct Device {
+    name: &'static str,
+    ua: Option<&'static str>,
+    width: f64,
+    height: f64,
+}
+
+const DEVICES: &[Device] = &[
+    Device { name: "desktop", ua: None, width: 1180.0, height: 820.0 },
+    Device {
+        name: "iphone",
+        ua: Some("Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"),
+        width: 390.0,
+        height: 844.0,
+    },
+    Device {
+        name: "android",
+        ua: Some("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36"),
+        width: 412.0,
+        height: 915.0,
+    },
+    Device {
+        name: "tablet",
+        ua: Some("Mozilla/5.0 (iPad; CPU OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1"),
+        width: 820.0,
+        height: 1180.0,
+    },
+];
+
+/// Currently selected device preset — used by browser_start so a device chosen
+/// before the window opens (or after a stop) sticks.
+static CURRENT_DEVICE: Mutex<&'static str> = Mutex::new("desktop");
+
+fn device_by_name(name: &str) -> Option<&'static Device> {
+    let n = name.trim().to_lowercase();
+    // Friendly aliases so agents/users don't have to guess the exact key.
+    let key = match n.as_str() {
+        "phone" | "mobile" | "ios" => "iphone",
+        "pixel" => "android",
+        "ipad" => "tablet",
+        "pc" | "default" => "desktop",
+        other => other,
+    };
+    DEVICES.iter().find(|d| d.name == key)
+}
+
+fn current_device() -> &'static Device {
+    let name = *CURRENT_DEVICE.lock().unwrap_or_else(|p| p.into_inner());
+    device_by_name(name).unwrap_or(&DEVICES[0])
 }
 
 /// Injected at document-start on every page. Defines the driver used by
@@ -184,11 +243,61 @@ fn get_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
     app.get_webview_window(BROWSER_LABEL)
 }
 
+/// True when a scheme-less URL clearly points at a local dev server, so the
+/// default scheme should be http (dev servers rarely have TLS certs).
+fn is_local_host(url: &str) -> bool {
+    let host = url
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('@')
+        .next()
+        .unwrap_or("");
+    let bare = host.strip_prefix('[').map(|h| h.split(']').next().unwrap_or(h));
+    if let Some(v6) = bare {
+        return v6 == "::1";
+    }
+    let name = host.split(':').next().unwrap_or("").to_lowercase();
+    name == "localhost"
+        || name == "0.0.0.0"
+        || name.ends_with(".localhost")
+        || name.starts_with("127.")
+        || name.starts_with("192.168.")
+        || name.starts_with("10.")
+}
+
 /// Native engine is always available — nothing to install. Kept so the tool
 /// contract (localTools.ts calls browser_ensure before browser_start) is stable.
 #[tauri::command]
 pub fn browser_ensure() -> Result<String, String> {
     Ok("native browser ready".to_string())
+}
+
+/// Build the agent-browser window at `url` with the current device preset.
+fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<WebviewWindow, String> {
+    let dev = current_device();
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::new(app, BROWSER_LABEL, WebviewUrl::External(url))
+        .title("OwLLM — Agent Browser")
+        .inner_size(dev.width, dev.height)
+        .initialization_script(BRIDGE_JS)
+        .decorations(true)
+        .resizable(true)
+        .visible(true);
+    if let Some(ua) = dev.ua {
+        builder = builder.user_agent(ua);
+    }
+    // A stable, isolated data dir so agent-browser logins persist across runs.
+    // The builder method is only present on Windows/Linux; macOS WKWebView uses
+    // the app's default per-app store (logins still persist there).
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(dir) = browser_data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        builder = builder.data_directory(dir);
+    }
+    builder
+        .build()
+        .map_err(|e| format!("failed to open agent browser window: {e}"))
 }
 
 /// Create the agent-browser window if it isn't already open. Idempotent.
@@ -200,26 +309,48 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
     let start_url = "about:blank"
         .parse()
         .map_err(|e| format!("bad start url: {e}"))?;
-    #[allow(unused_mut)]
-    let mut builder = WebviewWindowBuilder::new(&app, BROWSER_LABEL, WebviewUrl::External(start_url))
-        .title("OwLLM — Agent Browser")
-        .inner_size(1180.0, 820.0)
-        .initialization_script(BRIDGE_JS)
-        .decorations(true)
-        .resizable(true)
-        .visible(true);
-    // A stable, isolated data dir so agent-browser logins persist across runs.
-    // The builder method is only present on Windows/Linux; macOS WKWebView uses
-    // the app's default per-app store (logins still persist there).
-    #[cfg(any(windows, target_os = "linux"))]
-    if let Some(dir) = browser_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        builder = builder.data_directory(dir);
-    }
-    builder
-        .build()
-        .map_err(|e| format!("failed to open agent browser window: {e}"))?;
+    build_window(&app, start_url)?;
     Ok("browser started".to_string())
+}
+
+/// Switch device emulation (desktop / iphone / android / tablet). The UA can
+/// only be set at build time, so if the window is open we rebuild it in place
+/// and re-navigate to the page it was on. Logins survive (stable profile dir).
+#[tauri::command]
+pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<String, String> {
+    let dev = device_by_name(&device).ok_or_else(|| {
+        format!("unknown device {device:?} — use desktop, iphone, android or tablet")
+    })?;
+    *CURRENT_DEVICE.lock().unwrap_or_else(|p| p.into_inner()) = dev.name;
+
+    let Some(win) = get_window(&app) else {
+        return Ok(format!("device set to {} (applies when the browser opens)", dev.name));
+    };
+    // Remember where we were, tear down, rebuild with the new UA + viewport.
+    let back_to = win.url().map(|u| u.to_string()).unwrap_or_default();
+    win.destroy().map_err(|e| format!("could not rebuild browser window: {e}"))?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while get_window(&app).is_some() {
+        if Instant::now() > deadline {
+            return Err("old browser window did not close".to_string());
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let url = if back_to.is_empty() || back_to == "about:blank" {
+        "about:blank".to_string()
+    } else {
+        back_to
+    };
+    let parsed = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
+    build_window(&app, parsed)?;
+    Ok(format!(
+        "device set to {} ({}×{}{}) — reloaded {}",
+        dev.name,
+        dev.width as u32,
+        dev.height as u32,
+        if dev.ua.is_some() { ", mobile user-agent" } else { "" },
+        if url == "about:blank" { "blank page".to_string() } else { url }
+    ))
 }
 
 /// Run one action against the live page and return its text reply.
@@ -238,7 +369,15 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
             if url_s.is_empty() {
                 return Err("navigate requires a url".to_string());
             }
-            let full = if url_s.contains("://") { url_s } else { format!("https://{url_s}") };
+            // Scheme-less URLs default to https — EXCEPT local dev servers
+            // (localhost:5173, 127.0.0.1:3000, …), which are plain http.
+            let full = if url_s.contains("://") {
+                url_s
+            } else if is_local_host(&url_s) {
+                format!("http://{url_s}")
+            } else {
+                format!("https://{url_s}")
+            };
             let url = full.parse().map_err(|e| format!("bad url {full:?}: {e}"))?;
             win.navigate(url).map_err(|e| format!("navigate failed: {e}"))?;
             // Give the new document a moment to begin, then await its load via
@@ -340,13 +479,52 @@ pub fn browser_focus(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_hosts_get_http() {
+        for u in [
+            "localhost:5173",
+            "localhost:3000/app",
+            "127.0.0.1:8080",
+            "0.0.0.0:4000",
+            "app.localhost/dash",
+            "192.168.1.20:3000",
+            "10.0.0.5",
+            "[::1]:5173",
+        ] {
+            assert!(is_local_host(u), "{u} should default to http");
+        }
+        for u in ["github.com", "example.com/login", "127x.com", "myapp.io:443", "1270.0.0.1"] {
+            assert!(!is_local_host(u), "{u} should default to https");
+        }
+    }
+
+    #[test]
+    fn device_aliases_resolve() {
+        assert_eq!(device_by_name("iPhone").unwrap().name, "iphone");
+        assert_eq!(device_by_name("phone").unwrap().name, "iphone");
+        assert_eq!(device_by_name("mobile").unwrap().name, "iphone");
+        assert_eq!(device_by_name("Pixel").unwrap().name, "android");
+        assert_eq!(device_by_name("ipad").unwrap().name, "tablet");
+        assert_eq!(device_by_name("default").unwrap().name, "desktop");
+        assert!(device_by_name("watch").is_none());
+        // mobile presets carry a UA override; desktop uses the engine default
+        assert!(device_by_name("iphone").unwrap().ua.is_some());
+        assert!(device_by_name("desktop").unwrap().ua.is_none());
+    }
+}
+
 #[tauri::command]
 pub fn browser_status(app: tauri::AppHandle) -> Result<BrowserStatus, String> {
+    let device = current_device().name.to_string();
     match get_window(&app) {
         Some(win) => {
             let url = win.url().map(|u| u.to_string()).unwrap_or_default();
-            Ok(BrowserStatus { running: true, url })
+            Ok(BrowserStatus { running: true, url, device })
         }
-        None => Ok(BrowserStatus { running: false, url: String::new() }),
+        None => Ok(BrowserStatus { running: false, url: String::new(), device }),
     }
 }

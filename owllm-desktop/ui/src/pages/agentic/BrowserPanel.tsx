@@ -13,7 +13,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type BrowserStatus = { running: boolean; url: string };
+type BrowserStatus = { running: boolean; url: string; device: string };
 type PageInfo = { url?: string; title?: string; ready?: string };
 type CredMeta = { origin: string; username: string; note: string; ts: number };
 type Detected = { id: string; name: string; profile: string; count: number; supported: boolean; note: string };
@@ -75,6 +75,12 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
   };
 
   const showWindow = async () => { try { await invoke("browser_start"); await invoke("browser_focus"); await refreshStatus(); } catch (e) { setErr(String(e)); } };
+  const setDevice = async (device: string) => {
+    if (busy) return;
+    setBusy(true); setErr("");
+    try { await invoke("browser_set_device", { device }); await refreshStatus(); await refreshPage(); }
+    catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
   const stop = async () => {
     setBusy(true);
     try { await invoke("browser_stop"); setPage(null); await refreshStatus(); }
@@ -194,6 +200,19 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
               <span style={{ flex: 1 }} />
               <button className="btn" disabled={busy || !status?.running} onClick={() => void stop()} style={{ fontSize: 11, padding: "3px 10px", color: "#ff8c8c" }}>⏹ Stop</button>
             </div>
+            <div style={{ display: "flex", gap: 6, marginTop: 8, alignItems: "center" }}>
+              <span style={{ fontSize: 10.5, color: "var(--fg-muted)", fontWeight: 600 }}>DEVICE</span>
+              {([["desktop", "🖥 Desktop"], ["iphone", "📱 iPhone"], ["android", "📱 Android"], ["tablet", "📱 Tablet"]] as const).map(([id, label]) => (
+                <button key={id} className="btn" disabled={busy} onClick={() => void setDevice(id)}
+                  title="Emulate this device: real viewport size + mobile user-agent (page reloads)"
+                  style={{
+                    fontSize: 10.5, padding: "2px 8px",
+                    border: "1px solid " + (status?.device === id ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
+                    background: status?.device === id ? "rgba(var(--accent-rgb),0.12)" : "transparent",
+                    color: status?.device === id ? "var(--accent)" : "var(--fg-muted)",
+                  }}>{label}</button>
+              ))}
+            </div>
             {(page?.url || status?.url) && (
               <div style={{ marginTop: 10, fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5, wordBreak: "break-all" }}>
                 <div style={{ color: "var(--fg)", fontWeight: 600 }}>{page?.title || "(current page)"}</div>
@@ -204,6 +223,7 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
               <div style={{ marginTop: 10, padding: "12px", fontSize: 11.5, color: "var(--fg-muted)", textAlign: "center", border: "1px dashed var(--border)", borderRadius: 8, lineHeight: 1.6 }}>
                 The agents' browser is a real window they drive with the browser_* tools
                 (open pages, click, type, fill forms). Open a URL above to start it and pre-log into a site — the agents inherit the session.
+                Local dev servers work too (localhost:5173 opens as http), and the DEVICE chips preview mobile layouts.
               </div>
             )}
             {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)" }}>{scanMsg}</div>}

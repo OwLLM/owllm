@@ -1100,19 +1100,33 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     name: "browser_open",
     aliases: ["open_browser", "browser_launch", "start_browser", "browse_to"],
     description:
-      "Open a URL in the REAL persistent browser — a full logged-in Chromium session " +
+      "Open a URL in the REAL persistent browser — a native OwLLM browser window " +
       "that keeps the user's cookies/logins across calls (not a headless scrape). " +
+      "Works for the public web AND local dev servers (localhost:5173, 127.0.0.1:3000 " +
+      "default to http) — use it to check a web app you are building. " +
       "Starts the browser if needed, then navigates. After this, call browser_snapshot " +
       "to get the indexed list of interactive elements before clicking or filling.",
-    args: [{ name: "url", required: true, description: "Absolute URL to open (e.g. https://example.com).", aliases: ["link", "address", "uri", "href", "u"] }],
+    args: [{ name: "url", required: true, description: "URL to open (e.g. https://example.com or localhost:5173).", aliases: ["link", "address", "uri", "href", "u"] }],
   },
   {
     name: "browser_navigate",
     aliases: ["browser_goto", "navigate", "goto_url", "browser_go"],
     description:
       "Navigate the already-open persistent browser to a new URL (same logged-in " +
-      "session). Call browser_snapshot afterward to re-read the interactive elements.",
-    args: [{ name: "url", required: true, description: "Absolute URL to navigate to.", aliases: ["link", "address", "uri", "href", "u"] }],
+      "session; localhost URLs default to http). Call browser_snapshot afterward " +
+      "to re-read the interactive elements.",
+    args: [{ name: "url", required: true, description: "URL to navigate to (web or localhost).", aliases: ["link", "address", "uri", "href", "u"] }],
+  },
+  {
+    name: "browser_device",
+    aliases: ["set_device", "browser_viewport", "mobile_view", "device_mode"],
+    description:
+      "Switch the browser's device emulation: 'desktop', 'iphone', 'android' or " +
+      "'tablet'. Mobile presets resize the viewport to real phone/tablet dimensions " +
+      "AND send a mobile user-agent, so responsive layouts and UA-sniffing sites " +
+      "behave as on a real device — use it to test how a web app looks on mobile. " +
+      "The page reloads; call browser_snapshot afterward for fresh element indexes.",
+    args: [{ name: "device", required: true, description: "One of: desktop, iphone, android, tablet.", aliases: ["mode", "preset", "viewport", "d"] }],
   },
   {
     name: "browser_snapshot",
@@ -1652,6 +1666,10 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
       }
       case "browser_navigate": {
         const result = await invoke<string>("browser_cmd", { action: "navigate", params: { url: call.args.url } });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_device": {
+        const result = await invoke<string>("browser_set_device", { device: String(call.args.device ?? "") });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_snapshot": {

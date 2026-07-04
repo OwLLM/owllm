@@ -1647,6 +1647,14 @@ function AgentChatGrid({
       gap: 8,
       overflow: "hidden",
     }}>
+      {/* Rainbow "running" aura: a rotating conic-gradient border shown on
+          tiles whose agent is active this moment (see AgentChatTile). The
+          @property makes the angle animatable; browsers without Houdini
+          fall back to a static (non-spinning) rainbow — still on-brand. */}
+      <style>{`
+        @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+        @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+      `}</style>
       {arranged.length === 0 && (
         <div style={{
           gridColumn: "1 / -1",
@@ -2074,22 +2082,36 @@ function AgentChatTile({
       }}
       style={{
         minWidth: 0, minHeight: 0,
+        boxSizing: "border-box",
         // Body fill: was rgba(rgb, 0.06); +10% to 0.16, then +20% to
         // 0.36 per user request "20% less transparent". The team
         // colour now clearly reads through the tile while message text
         // stays legible against the darker bottom of the gradient.
-        background: `linear-gradient(180deg, rgba(${rgb},0.36) 0%, rgba(20,23,31,0.95) 100%)`,
+        // ACTIVE (running now): the body fill is clipped to padding-box and a
+        // rotating rainbow conic-gradient paints the 2px border (border-box),
+        // giving the "rainbow aura" the user asked for. The spin comes from the
+        // --owllm-aura-angle @property animated by owllm-aura-spin.
+        background: isActive
+          ? `linear-gradient(180deg, rgba(${rgb},0.36) 0%, rgba(20,23,31,0.95) 100%) padding-box,`
+            + ` conic-gradient(from var(--owllm-aura-angle),`
+            + ` #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box`
+          : `linear-gradient(180deg, rgba(${rgb},0.36) 0%, rgba(20,23,31,0.95) 100%)`,
         border: isActive
-          ? "1px solid rgba(60,242,107,0.85)"
+          ? "2px solid transparent"
           : isSelected
             ? `1.5px solid rgba(${rgb},0.85)`
             : `1px solid rgba(${rgb},0.40)`,
         borderRadius: 10,
+        // Soft rainbow halo (violet→cyan) that breathes with the pulse, sitting
+        // outside the gradient border to read as an aura rather than a hard ring.
         boxShadow: isActive
-          ? `0 0 0 ${ringPx}px rgba(60,242,107,${alphaA}), 0 0 ${outerPx}px rgba(60,242,107,${alphaB})`
+          ? `0 0 0 1px rgba(255,255,255,${0.18 * alphaA}),`
+            + ` 0 0 ${12 + outerPx}px rgba(176,124,255,${alphaB}),`
+            + ` 0 0 ${22 + outerPx}px rgba(127,212,255,${alphaB * 0.6})`
           : isSelected
             ? `0 0 0 2px rgba(${rgb},0.45), 0 4px 14px rgba(0,0,0,0.5)`
             : "0 2px 6px rgba(0,0,0,0.4)",
+        animation: isActive ? "owllm-aura-spin 4s linear infinite" : undefined,
         display: "flex", flexDirection: "column",
         overflow: "hidden",
         cursor: "pointer",

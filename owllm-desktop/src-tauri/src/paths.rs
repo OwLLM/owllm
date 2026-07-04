@@ -265,6 +265,45 @@ pub fn owllm_config_home() -> Option<PathBuf> {
     Some(PathBuf::from(home).join(".owllm"))
 }
 
+/// USB-portable Block 2 — one-shot portable-mode bootstrap, called from
+/// lib::run() BEFORE the webview or any path helper runs.
+///
+/// Detection (either is enough):
+///   1. `OWLLM_PORTABLE_ROOT` already set (the portable launcher .bat does this).
+///   2. A `portable.json` marker file sitting NEXT TO the exe → the exe's
+///      folder becomes the root (drop the app on a stick, no launcher needed).
+///
+/// When portable, seed the EXISTING env-override family so every data root
+/// lands under the stick with zero changes to the path helpers themselves:
+///   OWLLM_PORTABLE_ROOT        → <root>            (config + secrets home)
+///   OWLLM_USER_DATA            → <root>\.owllm\user-data   (state DB, consent, …)
+///   OWLLM_LLM_ROOT             → <root>\runtime-data       (models / llama-server)
+///   WEBVIEW2_USER_DATA_FOLDER  → <root>\.owllm\webview2    (webview cache/cookies)
+/// Vars the user already set explicitly are left untouched.
+pub fn init_portable_mode() {
+    let root: Option<PathBuf> = match std::env::var_os("OWLLM_PORTABLE_ROOT") {
+        Some(r) if !r.is_empty() => Some(PathBuf::from(r)),
+        _ => std::env::current_exe().ok().and_then(|exe| {
+            let dir = exe.parent()?.to_path_buf();
+            dir.join("portable.json").is_file().then_some(dir)
+        }),
+    };
+    let Some(root) = root else { return };
+    let seed = |key: &str, val: PathBuf| {
+        if std::env::var_os(key).map(|v| !v.is_empty()).unwrap_or(false) {
+            return; // explicit user override wins
+        }
+        let _ = std::fs::create_dir_all(&val);
+        std::env::set_var(key, &val);
+    };
+    // Also (re)export the root itself so child processes (subscription CLIs,
+    // spawned tools) inherit portable mode.
+    std::env::set_var("OWLLM_PORTABLE_ROOT", &root);
+    seed("OWLLM_USER_DATA", root.join(".owllm").join("user-data"));
+    seed("OWLLM_LLM_ROOT", root.join("runtime-data"));
+    seed("WEBVIEW2_USER_DATA_FOLDER", root.join(".owllm").join("webview2"));
+}
+
 /// Path to `llama-quantize.exe` — used by the GGUF export pipeline to
 /// turn an f16 intermediate into K-quants (Q4_K_M etc) that the
 /// convert script can't produce directly.

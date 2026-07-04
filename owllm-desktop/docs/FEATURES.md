@@ -91,6 +91,36 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
 - Sandbox disk card: usage view, cache clear, WSL disk reclaim.
 - GitHub connect for clone/push from inside the sandbox.
 
+## Browser control (`browser.rs` + `resources/tools/browser_daemon.py`)
+
+- **Agent web browser**: one app-global persistent Chromium (Playwright,
+  `launch_persistent_context` — logins/cookies survive runs) driven by the
+  `browser_*` tools: open/navigate, indexed snapshot, click, fill, press,
+  select, back, reload, get_text, screenshot (file path), close.
+- **UI**: 🌐 Browser panel (shared `BrowserPanel.tsx`, mounted on Code +
+  Agents pages) — live page screenshot, manual URL open (agents inherit the
+  session), stop. Local + API agents only; subscription CLIs can't reach
+  `executeToolCall` (known CLI-tools limitation).
+
+## OWLLM Node — KVM remote control (`kvm.rs`)
+
+- Agents see + operate a REMOTE computer through a stock NanoKVM/PiKVM
+  (no firmware fork): `kvm_node` tool — screenshot (MJPEG frame), type,
+  keys, mouse, boot_key, power (GPIO), mount_iso. Verified live against
+  NanoKVM firmware 2.4.3.
+- **Safety**: ships DISABLED; enable via the Accounts-page 🖥🔌 panel (or
+  `OWLLM_KVM_NODE=1`); per-host consent allowlist, fail-closed for all
+  injection actions; every action → redacted JSONL audit (`kvm_audit.jsonl`).
+
+## USB-portable mode — "OwLLM Go" (`paths.rs::init_portable_mode`)
+
+- Drop the app on a stick with a `portable.json` marker next to the exe (or
+  launch via `scripts/portable/OwLLM-Portable.bat`): secrets, configs, state
+  DB, models and the webview cache ALL redirect under the stick
+  (`OWLLM_PORTABLE_ROOT` + the existing env-override family) — no trace on
+  the host. Blocks 3–5 (encrypted vault, GitHub mirror, bundled CPU models)
+  are still roadmap: `docs/USB_PORTABLE_OWLLM.md`.
+
 ## Fine-tuning & model surgery (`resources/*.py`, spawned from Rust)
 
 - **Train**: LoRA/QLoRA (Unsloth/TRL/PEFT/bnb) on consumer GPUs, live loss,

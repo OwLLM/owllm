@@ -24,6 +24,7 @@ import {
   MistralLogo, TogetherLogo,
 } from "./brandLogos";
 import PtyTerminal from "./PtyTerminal";
+import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
 
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
@@ -1197,6 +1198,7 @@ export default function AccountsPage() {
         live into the right-side log — no pop-out console.
       </div>
       <VoiceRuntimePanel />
+      <KvmNodePanel />
 
 
       <div

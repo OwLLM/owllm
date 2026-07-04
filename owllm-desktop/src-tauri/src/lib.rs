@@ -59,6 +59,10 @@ mod wsl_setup;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // USB-portable Block 2: detect portable mode (env var or a portable.json
+    // marker next to the exe) BEFORE the webview or any path helper runs, and
+    // seed the whole env-override family so every data root lands on the stick.
+    paths::init_portable_mode();
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -218,11 +222,14 @@ pub fn run() {
             slack::slack_download_file,
             kvm::kvm_node_exec,
             kvm::kvm_node_consent,
+            kvm::kvm_node_status,
+            kvm::kvm_node_set_enabled,
             browser::browser_ensure,
             browser::browser_start,
             browser::browser_cmd,
             browser::browser_stop,
             browser::browser_status,
+            browser::browser_view,
             git::git_status,
             git::git_branches,
             git::git_checkout,

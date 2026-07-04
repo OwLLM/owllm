@@ -78,6 +78,46 @@ fi
 command -v node >/dev/null 2>&1 || fail "node/npx not on PATH (needed to sign)"
 [ "$DRY_RUN" = 1 ] || command -v gh >/dev/null 2>&1 || fail "gh not on PATH (needed to publish)"
 
+# Resolve the Authenticode cert once, up front — used by the payload-sign step
+# below AND the installer-sign step 1b. Priority: env thumbprint · env subject ·
+# .tauri-keys/authenticode.thumbprint file. Unconfigured → both steps skip.
+SIGN_THUMBPRINT="${OWLLM_SIGN_THUMBPRINT:-}"
+SIGN_SUBJECT="${OWLLM_SIGN_SUBJECT:-}"
+SIGN_TSA="${OWLLM_SIGN_TSA:-http://time.certum.pl}"          # Certum RFC3161 timestamp
+THUMB_FILE=".tauri-keys/authenticode.thumbprint"
+if [ -z "$SIGN_THUMBPRINT" ] && [ -z "$SIGN_SUBJECT" ] && [ -f "$THUMB_FILE" ]; then
+  SIGN_THUMBPRINT="$(tr -d ' \r\n\t' < "$THUMB_FILE")"
+fi
+
+step "0b/5 payload sign — every exe/dll bundled under resources/ must be signed"
+# Unsigned binaries INSIDE an EV-signed installer are a classic SmartScreen /
+# Defender heuristic trigger (bit us with the whisper.cpp runtime). Sign any
+# unsigned exe/dll the bundle will carry, with the same cert as the installer.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; then
+      SIGNTOOL="$(command -v signtool.exe 2>/dev/null || true)"
+      [ -n "$SIGNTOOL" ] || SIGNTOOL="$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64/signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+      [ -n "$SIGNTOOL" ] || fail "signtool.exe not found — install the Windows 10/11 SDK (or put signtool on PATH)"
+      if [ -n "$SIGN_THUMBPRINT" ]; then SEL=(/sha1 "$SIGN_THUMBPRINT"); else SEL=(/n "$SIGN_SUBJECT"); fi
+      PAYLOAD_SIGNED=0
+      while IFS= read -r bin; do
+        WBIN="$(cygpath -w "$bin")"
+        # already signed (by us or upstream, e.g. Microsoft's WebView2Loader)? skip.
+        if MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" verify /pa "$WBIN" >/dev/null 2>&1; then continue; fi
+        echo "  signing payload: $bin"
+        MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" sign "${SEL[@]}" /fd sha256 /tr "$SIGN_TSA" /td sha256 /d "OwLLM Desktop" "$WBIN" \
+          || fail "payload sign failed on $bin"
+        PAYLOAD_SIGNED=$((PAYLOAD_SIGNED + 1))
+      done < <(find "$APP/resources" -type f \( -name '*.exe' -o -name '*.dll' \) 2>/dev/null)
+      echo "  ✓ payload check done ($PAYLOAD_SIGNED newly signed)"
+    else
+      echo "  (skipped — no signing cert configured)"
+    fi
+    ;;
+  *) echo "  (skipped — Windows-only step)" ;;
+esac
+
 step "1/5 build  (version $VERSION)"
 # TS/Rust changes need a fresh bundle; drop the stale installer so a skipped
 # relink can't ship an old version string.
@@ -101,13 +141,6 @@ step "1b/5 authenticode sign (SimplySign / Certum) — must run BEFORE minisign"
 # Unconfigured → SKIP (installer stays unsigned, today's behaviour). Configured
 # but signing fails → FAIL (never ship a "signed" release that isn't). Authenticode
 # MUST precede minisign: it rewrites the .exe, which would void the updater sig.
-SIGN_THUMBPRINT="${OWLLM_SIGN_THUMBPRINT:-}"
-SIGN_SUBJECT="${OWLLM_SIGN_SUBJECT:-}"
-SIGN_TSA="${OWLLM_SIGN_TSA:-http://time.certum.pl}"          # Certum RFC3161 timestamp
-THUMB_FILE=".tauri-keys/authenticode.thumbprint"
-if [ -z "$SIGN_THUMBPRINT" ] && [ -z "$SIGN_SUBJECT" ] && [ -f "$THUMB_FILE" ]; then
-  SIGN_THUMBPRINT="$(tr -d ' \r\n\t' < "$THUMB_FILE")"
-fi
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*)
     if [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; then

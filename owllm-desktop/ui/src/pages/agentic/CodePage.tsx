@@ -21,6 +21,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
 import PtyTerminal from "../advanced/PtyTerminal";
+import BrowserPanel from "./BrowserPanel";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -459,6 +460,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // and drag (title bar). null pos = default docked bottom-right.
   const [termHidden, setTermHidden] = useState(false);
   const [termPos, setTermPos] = useState<{ x: number; y: number } | null>(null);
+  // Agent Browser popup (right-column 🌐 button) — viewer for the shared daemon.
+  const [browserOpen, setBrowserOpen] = useState(false);
   const termBoxRef = useRef<HTMLDivElement>(null);
   const termDragRef = useRef<{ dx: number; dy: number } | null>(null);
   const onTermDragStart = (e: React.MouseEvent) => {
@@ -1914,6 +1917,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
               if (!termOpen) { setTermOpen(true); setTermHidden(false); }
               else setTermHidden((h) => !h);
             }}
+            browserOpen={browserOpen}
+            onToggleBrowser={() => setBrowserOpen((v) => !v)}
             usageProvider={providerFor(modelId, availableModels)}
             notebook={
               <RunNotebook
@@ -1963,6 +1968,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           </div>
         </div>
       )}
+
+      {/* 🌐 Agent Browser popup — viewer/remote for the app-global Playwright
+          daemon the agents drive with the browser_* tools. Shared component. */}
+      <BrowserPanel open={browserOpen} onClose={() => setBrowserOpen(false)} />
 
       {/* Status line — expands to multiple lines for the per-credential
           sync report (P1-2); stays a single ellipsized line otherwise. */}

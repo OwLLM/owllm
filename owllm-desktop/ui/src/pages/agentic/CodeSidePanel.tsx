@@ -60,13 +60,16 @@ type Props = {
   /// Terminal popup (owned by CodePage; the button here just toggles it).
   terminalOpen: boolean;
   onToggleTerminal: () => void;
+  /// Agent Browser popup (owned by CodePage; the button here just toggles it).
+  browserOpen: boolean;
+  onToggleBrowser: () => void;
   /// providerFor(modelId) for the active model — drives the usage fetch.
   usageProvider: string;
   /// The inline RunNotebook (CodePage owns its props/wiring).
   notebook: ReactNode;
 };
 
-export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, mode, onModeChange, terminalOpen, onToggleTerminal, usageProvider, notebook }: Props) {
+export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, mode, onModeChange, terminalOpen, onToggleTerminal, browserOpen, onToggleBrowser, usageProvider, notebook }: Props) {
   // ---- Resizable width: default 15% of the window, floor at the original 300px ----
   const [width, setWidth] = useState<number>(() => {
     try {
@@ -222,6 +225,12 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
             ))}
           </div>
           <span style={{ flex: 1 }} />
+          <button
+            className="btn"
+            onClick={onToggleBrowser}
+            title="View + drive the agents' shared web browser (browser_* tools) — see the live page, open URLs, stop the daemon."
+            style={{ fontSize: 11, padding: "3px 10px", ...(browserOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+          >🌐 Browser</button>
           <button
             className="btn"
             onClick={onToggleTerminal}

@@ -69,13 +69,24 @@ pub struct KvmTarget {
 // Feature flag — default OFF
 // ------------------------------------------------------------------
 
-/// True only when OWLLM_KVM_NODE is set to a truthy value. Default OFF, so the
-/// whole capability stays dormant unless a user explicitly opts in — same
-/// env-var flag style as overlay_frame::enabled().
+/// True when OWLLM_KVM_NODE is set to a truthy value (env override, same style
+/// as overlay_frame::enabled()) OR when the user flipped the persisted toggle
+/// in the UI (`"enabled": true` in kvm_consent.json). Default OFF either way,
+/// so the whole capability stays dormant unless a user explicitly opts in.
 fn feature_enabled() -> bool {
-    std::env::var("OWLLM_KVM_NODE")
+    let env_on = std::env::var("OWLLM_KVM_NODE")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"))
-        .unwrap_or(false)
+        .unwrap_or(false);
+    env_on || load_enabled_setting()
+}
+
+/// Read the persisted UI toggle. Any read/parse failure → false (fail-closed),
+/// mirroring load_consent().
+fn load_enabled_setting() -> bool {
+    let Some(path) = consent_path() else { return false };
+    let Ok(txt) = std::fs::read_to_string(&path) else { return false };
+    let Ok(v) = serde_json::from_str::<Value>(&txt) else { return false };
+    v.get("enabled").and_then(Value::as_bool) == Some(true)
 }
 
 // ------------------------------------------------------------------
@@ -804,7 +815,7 @@ pub async fn kvm_node_exec(
 ) -> Result<Value, String> {
     if !feature_enabled() {
         return Err(
-            "OWLLM Node is disabled. Set OWLLM_KVM_NODE=1 to enable (default off).".to_string(),
+            "OWLLM Node is disabled. Enable it on the Accounts page (OWLLM Node card) or set OWLLM_KVM_NODE=1 (default off).".to_string(),
         );
     }
 
@@ -828,6 +839,36 @@ pub fn kvm_node_consent(host: String, grant: bool) -> Result<Value, String> {
     }
     save_consent(&host, grant)?;
     Ok(json!({ "ok": true, "host": host, "granted": grant }))
+}
+
+/// UI status: is the feature on (and why), plus the consented-host list.
+/// Read-only — safe to call regardless of the flag.
+#[tauri::command]
+pub fn kvm_node_status() -> Result<Value, String> {
+    let mut hosts: Vec<String> = load_consent().into_iter().collect();
+    hosts.sort();
+    Ok(json!({
+        "enabled": feature_enabled(),
+        "envOverride": std::env::var("OWLLM_KVM_NODE").is_ok(),
+        "hosts": hosts,
+    }))
+}
+
+/// Flip the persisted UI toggle (kvm_consent.json "enabled"). The env var, when
+/// set, still force-enables regardless of this setting.
+#[tauri::command]
+pub fn kvm_node_set_enabled(enabled: bool) -> Result<Value, String> {
+    let path = consent_path()
+        .ok_or_else(|| "could not resolve app data dir for kvm_consent.json".to_string())?;
+    let mut doc = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(|v| v.get("hosts").map(Value::is_object).unwrap_or(false))
+        .unwrap_or_else(|| json!({ "hosts": {} }));
+    doc["enabled"] = json!(enabled);
+    let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, txt).map_err(|e| format!("write kvm_consent.json: {e}"))?;
+    Ok(json!({ "ok": true, "enabled": enabled }))
 }
 
 // ------------------------------------------------------------------

@@ -278,6 +278,19 @@ pub fn browser_stop() -> Result<String, String> {
     Ok(reply)
 }
 
+/// Grab a screenshot of the live session and return it as base64 PNG — the
+/// UI Browser panel's live view. Reuses the daemon `screenshot` action (which
+/// writes a PNG and replies with its path) and inlines the bytes so the
+/// webview can render it as a data: URL without any asset-protocol setup.
+#[tauri::command]
+pub fn browser_view() -> Result<String, String> {
+    let path = browser_cmd("screenshot".to_string(), json!({}))?;
+    let p = path.trim();
+    let bytes = std::fs::read(p).map_err(|e| format!("read screenshot {p}: {e}"))?;
+    use base64::Engine as _;
+    Ok(base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
 /// Whether a live daemon is running. Resilient to a dead child: if the process
 /// has exited we clear SESSION and report running:false.
 #[tauri::command]

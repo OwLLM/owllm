@@ -17,6 +17,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
+import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
 import IconPickerDialog, {
   getAgentIconOverride,
@@ -1068,6 +1069,13 @@ function FlowHeader({
         title="Notebook — brainstorm while the agents work, keep a Next-steps list, feed steps to the running team (or auto-feed them run after run), and let the 🪄 Digest agent turn raw notes into implementable steps."
         style={{ height:28, padding:"0 8px", fontSize:11 }}
       >📓 Notebook</button>
+      <button
+        data-ui="FlowBrowserBtn"
+        className="ghost-btn"
+        onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-browser-panel"))}
+        title="Agent Browser — view and drive the shared web browser your agents control with the browser_* tools (live page view, open URLs, persistent logins)."
+        style={{ height:28, padding:"0 8px", fontSize:11 }}
+      >🌐 Browser</button>
       <button
         data-ui="FlowMemoryBtn"
         className="ghost-btn"
@@ -8602,6 +8610,17 @@ export function AgentsPage({
     return () => window.removeEventListener("owllm:open-workbench", onOpen as EventListener);
   }, []);
 
+  // 🌐 header button opens the shared Agent Browser panel (daemon is app-global).
+  const [browserPanelOpen, setBrowserPanelOpen] = useState(false);
+  useEffect(() => {
+    const onOpen = () => {
+      if (!isActiveRef.current) return; // only the visible tab opens it
+      setBrowserPanelOpen(true);
+    };
+    window.addEventListener("owllm:open-browser-panel", onOpen as EventListener);
+    return () => window.removeEventListener("owllm:open-browser-panel", onOpen as EventListener);
+  }, []);
+
   // Register the subscription-CLI auth-retry notifier so a mid-run 401 (Claude
   // OR Codex) surfaces a visible "team paused / retrying" notice in the user
   // thread while the token refreshes and the call backs off (10s → 30s → 2min).
@@ -12504,6 +12523,7 @@ export function AgentsPage({
         );
       })()}
       <TeamMemoryModal projectId={selectedProjectId} projectName={activeTeam?.display} active={isActive} />
+      <BrowserPanel open={browserPanelOpen} onClose={() => setBrowserPanelOpen(false)} />
       <RunNotebook
         projectId={selectedProjectId}
         projectName={activeTeam?.display}

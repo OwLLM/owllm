@@ -178,10 +178,17 @@ export async function refreshBrowserState(): Promise<void> {
         "SHARED AGENT BROWSER: an in-app browser window is OPEN" +
         (st.url ? ` at ${st.url}` : "") + dev + ". " +
         "The user sees this same window — it is your shared screen. " +
-        "When asked about 'the page', 'the site' or 'my browser', call browser_snapshot " +
-        "(element list) or browser_get_text (visible text) to look at it, and " +
-        "browser_click / browser_fill / browser_select to act on it. " +
-        "Never claim you cannot see the user's browser.";
+        "Look at it with browser_snapshot (indexed element list) or browser_get_text " +
+        "(visible text); act on it with browser_click / browser_fill / browser_select " +
+        "by the index from the latest snapshot. " +
+        // Subscription-CLI agents receive these via the MCP gateway, where every tool
+        // is renamed mcp__owllm__<tool>; a bare `browser_snapshot` lookup then finds
+        // nothing and the model wrongly concludes it has no browser. Name the prefix
+        // and how to surface them (ToolSearch query 'browser' loads all 12 — verified).
+        "If you run via a subscription CLI these tools are prefixed mcp__owllm__ " +
+        "(e.g. mcp__owllm__browser_snapshot); if they are not already in your tool list, " +
+        "load them first with ToolSearch query 'browser'. " +
+        "Never claim you cannot see the user's browser — snapshot it first.";
     } else {
       _browserStateLine = "";
     }

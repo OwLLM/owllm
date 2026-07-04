@@ -441,6 +441,7 @@ export default function ModelPicker({
                     <button
                       key={e.id}
                       type="button"
+                      title={e.hint ? `${e.label} — ${e.hint}` : e.label}
                       onClick={() => { onChange(e.id); setOpen(false); }}
                       disabled={muted}
                       style={{

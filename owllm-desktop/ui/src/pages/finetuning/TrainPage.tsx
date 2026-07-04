@@ -752,7 +752,7 @@ export default function TrainPage() {
             <option value="">— Select a model —</option>
             <optgroup label="Downloaded (ready to train)">
               {baseOptions.filter((m) => isDownloaded(m)).map((m) => (
-                <option key={m} value={m}>✓ {m}</option>
+                <option key={m} value={m} title={m}>✓ {m}</option>
               ))}
               {baseOptions.filter((m) => isDownloaded(m)).length === 0 && (
                 <option disabled>— none downloaded yet —</option>
@@ -760,7 +760,7 @@ export default function TrainPage() {
             </optgroup>
             <optgroup label="Not downloaded (download first ↓)">
               {baseOptions.filter((m) => !isDownloaded(m)).map((m) => (
-                <option key={m} value={m}>⬇ {m}</option>
+                <option key={m} value={m} title={m}>⬇ {m}</option>
               ))}
             </optgroup>
             <option value="__custom__">✏️ Custom HuggingFace id…</option>

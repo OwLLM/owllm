@@ -207,10 +207,11 @@ fn accounts_status_blocking() -> AccountsStatus {
 
 // ---------------------------------------------------------------------
 // Account usage — VS Code-style quota bars for the account behind the
-// active model. Today only the Claude Code subscription exposes usage
-// (the CLI's own /usage screen reads the same OAuth endpoint); plain API
-// keys have no client-readable quota, so every other provider reports
-// `available:false` with a reason instead of failing.
+// active model — works for ALL models: provider quota bars where a
+// quota API exists (today only the Claude subscription — the CLI's own
+// /usage screen reads the same OAuth endpoint), plus the app's OWN
+// recorded traffic (usage_tally) for every provider, since plain API
+// keys and local models have no client-readable quota.
 // ---------------------------------------------------------------------
 
 #[derive(Serialize, Clone)]
@@ -229,9 +230,108 @@ pub struct UsageWindow {
 pub struct AccountUsage {
     pub available: bool,
     pub provider: String,
-    /// Why usage is unavailable (ignored when `available`).
+    /// Why quota windows are unavailable (ignored when `available`).
     pub note: String,
     pub windows: Vec<UsageWindow>,
+    /// App-recorded traffic for this provider — present for EVERY model
+    /// (local GGUF, API keys, CLIs), independent of quota availability.
+    pub stats: Vec<UsageStat>,
+}
+
+/// One aggregate row of the app's own usage tally ("Session (5h)" /
+/// "Weekly (7 day)"). `tokens_est` is chars/4 — an ESTIMATE, and the UI
+/// labels it as one; we never fabricate provider-exact token counts.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct UsageStat {
+    pub label: String,
+    pub turns: i64,
+    pub tokens_est: i64,
+}
+
+// ---- Local usage tally: model-agnostic usage recording ----------------
+// Quota APIs are provider-specific (today only the Claude subscription
+// exposes one), so the app records its OWN traffic per provider in
+// owllm_state.db. That makes the USAGE panel work for ALL models: quota
+// bars when the provider reports them, recorded-traffic stats always.
+
+fn usage_db() -> Option<rusqlite::Connection> {
+    let path = crate::projects::project_db_path()?;
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let conn = rusqlite::Connection::open(&path).ok()?;
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS usage_tally (\
+            id INTEGER PRIMARY KEY AUTOINCREMENT,\
+            provider TEXT NOT NULL,\
+            model TEXT NOT NULL DEFAULT '',\
+            chars_in INTEGER NOT NULL DEFAULT 0,\
+            chars_out INTEGER NOT NULL DEFAULT 0,\
+            ts INTEGER NOT NULL\
+        );\
+        CREATE INDEX IF NOT EXISTS idx_usage_tally ON usage_tally(provider, ts);",
+    )
+    .ok()?;
+    Some(conn)
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Record one completed model turn. Fired best-effort from the UI's
+/// single dispatch router (streamChatCompletion) after each turn, for
+/// every provider. Also prunes rows older than 8 days (the widest
+/// window shown is 7 days).
+#[tauri::command]
+pub async fn usage_record(provider: String, model: String, chars_in: i64, chars_out: i64) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        let Some(conn) = usage_db() else { return };
+        let ts = now_ms();
+        let _ = conn.execute(
+            "INSERT INTO usage_tally(provider, model, chars_in, chars_out, ts) VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![provider.to_lowercase(), model, chars_in.max(0), chars_out.max(0), ts],
+        );
+        let _ = conn.execute(
+            "DELETE FROM usage_tally WHERE ts < ?1",
+            rusqlite::params![ts - 8 * 24 * 3600 * 1000],
+        );
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// Session (5h) + Weekly (7d) aggregates of the app's recorded traffic
+/// for `provider`. Empty when nothing was recorded yet.
+fn usage_tally_stats(provider: &str) -> Vec<UsageStat> {
+    let Some(conn) = usage_db() else { return Vec::new() };
+    let now = now_ms();
+    let p = provider.to_lowercase();
+    let mut out = Vec::new();
+    for (label, span_ms) in [
+        ("Session (5h)", 5i64 * 3600 * 1000),
+        ("Weekly (7 day)", 7i64 * 24 * 3600 * 1000),
+    ] {
+        let row = conn
+            .query_row(
+                "SELECT count(*), coalesce(sum(chars_in + chars_out), 0) FROM usage_tally WHERE provider = ?1 AND ts >= ?2",
+                rusqlite::params![p, now - span_ms],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap_or((0, 0));
+        if row.0 > 0 {
+            out.push(UsageStat {
+                label: label.to_string(),
+                turns: row.0,
+                tokens_est: row.1 / 4,
+            });
+        }
+    }
+    out
 }
 
 /// Pretty label for the OAuth usage endpoint's window keys. Unknown keys
@@ -255,14 +355,23 @@ fn usage_window_label(key: &str) -> String {
 #[tauri::command]
 pub async fn account_usage(provider: String) -> AccountUsage {
     let p = provider.to_lowercase();
+    // App-recorded traffic first — present for EVERY provider, so the
+    // panel shows real numbers even where no quota API exists.
+    let stats = {
+        let p2 = p.clone();
+        tokio::task::spawn_blocking(move || usage_tally_stats(&p2))
+            .await
+            .unwrap_or_default()
+    };
     let unavailable = |note: &str| AccountUsage {
         available: false,
         provider: provider.clone(),
         note: note.to_string(),
         windows: Vec::new(),
+        stats: stats.clone(),
     };
     if !(p.contains("claude") || p.contains("anthropic")) {
-        return unavailable("usage reporting is only available for the Claude subscription (CLI login)");
+        return unavailable("no quota API for this provider — showing this app's recorded traffic");
     }
     // OAuth token from the Claude CLI's credential store (same file
     // claude_cli_logged_in() checks; sandbox mirroring copies this too).
@@ -335,7 +444,7 @@ pub async fn account_usage(provider: String) -> AccountUsage {
     for w in &mut windows {
         w.used_pct = w.used_pct.clamp(0.0, 100.0);
     }
-    AccountUsage { available: true, provider, note: String::new(), windows }
+    AccountUsage { available: true, provider, note: String::new(), windows, stats: stats.clone() }
 }
 
 /// Save a single API key. `name` is the env-var name

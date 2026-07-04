@@ -161,6 +161,7 @@ pub fn run() {
             data_layer::data_cache_list,
             accounts::accounts_status,
             accounts::account_usage,
+            accounts::usage_record,
             accounts::accounts_save_api_key,
             accounts::accounts_delete_secret,
             accounts::accounts_get_secret,

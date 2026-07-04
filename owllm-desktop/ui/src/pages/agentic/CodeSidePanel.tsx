@@ -3,8 +3,10 @@
 // 300px) with a small utility header + TWO pages on a tab strip (the same
 // tab pattern as TeamMemoryModal):
 //   • header: agent MODE (plan / auto / chat) + Terminal popup toggle +
-//     VS Code-style USAGE bars for the account behind the active model
-//     (account_usage — Claude subscription today, "n/a" note otherwise).
+//     VS Code-style USAGE for the account behind the active model
+//     (account_usage): provider quota bars where a quota API exists
+//     (Claude subscription) + the app's own recorded traffic for EVERY
+//     model — local, API keys, and CLIs alike.
 //   • ⚡ Super User page — the SAME per-project directives the agentic team
 //     uses (directives.rs; auto-seeded native best-practice set). When the
 //     folder matches an agentic project the rules are stored under that
@@ -28,7 +30,15 @@ const TAB_KEY = "owllm:code:sidetab";
 const MIN_W = 300;
 
 type UsageWindow = { label: string; usedPct: number; resetsAt?: string | null };
-type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[] };
+type UsageStat = { label: string; turns: number; tokensEst: number };
+type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[]; stats: UsageStat[] };
+
+/// "34k" / "1.2M" for the tokens-estimate stat.
+function compactNum(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}k`;
+  return String(n);
+}
 
 /// "Resets in 3h" from an ISO timestamp — coarse on purpose (like VS Code).
 function resetsIn(iso: string | null | undefined): string {
@@ -216,10 +226,12 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
             style={{ fontSize: 11, padding: "3px 10px", ...(terminalOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
           >🖥 Terminal</button>
         </div>
-        {/* USAGE — like VS Code: label, % used, bar, reset time. */}
+        {/* USAGE — like VS Code: provider quota bars when the account
+            reports them, plus the app's own recorded traffic for EVERY
+            model (local, API keys, CLIs — model-agnostic by design). */}
         <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
           <span style={{ ...sectionTitle, fontSize: 10 }}>Usage</span>
-          {usage?.available ? usage.windows.map((w, i) => (
+          {usage?.available && usage.windows.map((w, i) => (
             <div key={i} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
               <div style={{ display: "flex", alignItems: "baseline", fontSize: 11.5, color: "var(--fg)" }}>
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.label}</span>
@@ -230,11 +242,19 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
               </div>
               {resetsIn(w.resetsAt) && <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>{resetsIn(w.resetsAt)}</span>}
             </div>
-          )) : (
-            <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }} title={usage?.note || ""}>
-              {usage ? "no quota data for this account" : "…"}
+          ))}
+          {(usage?.stats?.length ?? 0) > 0 && usage!.stats.map((s, i) => (
+            <div key={`s${i}`} style={{ display: "flex", alignItems: "baseline", fontSize: 11, color: "var(--fg)" }} title="This app's recorded traffic for this provider — token count is an estimate (~4 chars/token).">
+              <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--fg-muted)" }}>{s.label}</span>
+              <span>{s.turns} turns · ~{compactNum(s.tokensEst)} tok</span>
+            </div>
+          ))}
+          {usage && !usage.available && (usage.stats?.length ?? 0) === 0 && (
+            <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }} title={usage.note || ""}>
+              no traffic recorded yet for this account
             </span>
           )}
+          {!usage && <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>…</span>}
         </div>
       </div>
 

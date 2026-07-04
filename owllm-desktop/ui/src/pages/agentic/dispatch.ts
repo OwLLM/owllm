@@ -1812,31 +1812,42 @@ export async function streamChatCompletion(
       sessionId, onSystemWarning, onTranscript, getSteer,
     );
   }
+  let reply: string;
   if (provider === "anthropic") {
-    return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
+    reply = await streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
+  } else if (provider === "openai") {
+    reply = await streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd);
+  } else {
+    // ---- Local llama-server path (GGUF) ----
+    // Native tool-calling ONLY: the model's own chat template (llama-server
+    // --jinja) renders the `tools` array and parses the model's structured
+    // delta.tool_calls back for us. No XML catalog injected, no dialect
+    // parsing. Cloud/sub/API branches above are untouched.
+    reply = await streamLocalChat({
+      port,
+      modelId,
+      systemPrompt,
+      userContent: openaiUserContent(effectiveText, images),
+      temperature,
+      signal,
+      onDelta,
+      onThought,
+      projectCwd,
+      history,
+      allowedTools,
+      getSteer,
+    });
   }
-  if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd);
-  }
-  // ---- Local llama-server path (GGUF) ----
-  // Native tool-calling ONLY: the model's own chat template (llama-server
-  // --jinja) renders the `tools` array and parses the model's structured
-  // delta.tool_calls back for us. No XML catalog injected, no dialect
-  // parsing. Cloud/sub/API branches above are untouched.
-  return streamLocalChat({
-    port,
-    modelId,
-    systemPrompt,
-    userContent: openaiUserContent(effectiveText, images),
-    temperature,
-    signal,
-    onDelta,
-    onThought,
-    projectCwd,
-    history,
-    allowedTools,
-    getSteer,
-  });
+  // Model-agnostic usage tally: every provider (local, API keys, CLIs)
+  // gets a row per completed turn so the USAGE panel has real numbers
+  // even where no quota API exists. Best-effort — never blocks a reply.
+  // The `auto` branch above records via its recursive call, not here.
+  try {
+    const charsIn = systemPrompt.length + effectiveText.length
+      + (history ?? []).reduce((n, h) => n + (typeof h.content === "string" ? h.content.length : 0), 0);
+    void invoke("usage_record", { provider, model: bareId, charsIn, charsOut: reply.length }).catch(() => { });
+  } catch { /* tally must never break a turn */ }
+  return reply;
 }
 
 /// Optional UI hooks so a rich caller (ChatPage) can render per-tool

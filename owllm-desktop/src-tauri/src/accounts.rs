@@ -1760,13 +1760,12 @@ pub async fn claude_cli_stream(
         // names browser_*, so gating here meant specialist CLI agents could never
         // see the page the user opened.
         //   * HOST run → HTTP transport on 127.0.0.1 (directly reachable).
-        //   * FULL-ACCESS (trusted) WSL run → MCP *stdio* relay: the in-distro CLI
-        //     reaches the host gateway via interop (curl.exe runs on the host),
-        //     no firewall rule needed (verified: WSL→host loopback via curl.exe).
-        //   * bwrap-JAILED WSL run → no browser: interop is unavailable in the
-        //     jail and a jailed agent is deliberately cut off from the host, so
-        //     handing it the user's logged-in browser would defeat the sandbox.
-        // Best-effort: a gateway failure logs and falls back to no browser tools.
+        //   * NON-JAILED WSL run (full-access OR bwrap not installed) → MCP *stdio*
+        //     relay: interop (curl.exe) runs on the host, reaches its own loopback,
+        //     no firewall rule needed.
+        //   * bwrap-JAILED WSL run → no browser: interop unavailable in the jail;
+        //     deliberately excluded (jailed agent must not control the host browser).
+        // Best-effort: any gateway failure logs and falls back gracefully.
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
         let mcp_config_path: Option<String> = if host_run {
             match crate::mcp_gateway::write_cli_config(&app) {
@@ -1779,7 +1778,8 @@ pub async fn claude_cli_stream(
         } else {
             #[cfg(windows)]
             {
-                if crate::sandbox::is_full_access(cwd.as_deref()) {
+                // Wire relay for any non-jailed WSL run (full-access *or* no bwrap).
+                if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) {
                     match crate::mcp_gateway::write_cli_config_wsl(&app) {
                         Ok(p) => Some(p),
                         Err(e) => {

@@ -18,15 +18,15 @@
 // request. It speaks MCP Streamable-HTTP in single-JSON-response mode (POST →
 // one application/json JSON-RPC reply; GET → 405, we offer no server push).
 //
-// SCOPE — host + full-access (trusted) WSL runs
+// SCOPE — host + non-jailed WSL runs
 // HOST runs reach 127.0.0.1 directly (HTTP transport). A WSL-isolated run can't
 // reach the host loopback over TCP (NAT + Windows Firewall drop WSL→host —
-// verified empirically), but a FULL-ACCESS (trusted) WSL run can reach it via
-// interop: an MCP *stdio* relay (write_cli_config_wsl) forwards each JSON-RPC
-// message through curl.exe, which runs on the host and hits its own loopback.
-// A bwrap-JAILED run is deliberately excluded: interop is unavailable in the
-// jail, and a jailed agent is meant to be cut off from the host — handing it the
-// user's logged-in browser would defeat the sandbox.
+// verified empirically), but any non-jailed WSL run (full-access OR bwrap not
+// installed) can reach it via interop: an MCP *stdio* relay (write_cli_config_wsl)
+// forwards each JSON-RPC message through curl.exe, which runs on the host and
+// hits its own loopback. A bwrap-JAILED run is deliberately excluded: interop is
+// unavailable inside the jail, and a jailed agent is meant to be cut off from the
+// host — handing it the user's logged-in browser would defeat the sandbox.
 //
 // RUNTIME-VERIFICATION NOTE: the transport is verified in pieces — the real
 // `claude` CLI speaks this MCP protocol (mock-gateway test), and the stdio relay
@@ -130,7 +130,7 @@ pub fn write_cli_config(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
-/// stdio↔HTTP relay for FULL-ACCESS WSL runs.
+/// stdio↔HTTP relay for non-jailed WSL runs (full-access or no bwrap).
 ///
 /// A WSL-isolated agent can't reach the host loopback gateway over TCP (NAT +
 /// Windows Firewall drops WSL→host — verified). But WSL *interop* lets a Linux
@@ -139,9 +139,8 @@ pub fn write_cli_config(app: &AppHandle) -> Result<std::path::PathBuf, String> {
 /// an MCP **stdio** server: this tiny bash relay forwards each newline-delimited
 /// JSON-RPC message to the gateway via `curl.exe` (interop → host → loopback)
 /// and prints the reply. Notifications (HTTP 202, empty body) produce no line,
-/// exactly as MCP stdio requires. Only wired for full-access (trusted) WSL
-/// projects — a bwrap-jailed run has no interop and is deliberately cut off from
-/// the host, so its agent never gets host-browser control.
+/// exactly as MCP stdio requires. Not wired for bwrap-jailed runs — interop is
+/// unavailable in the jail and jailed agents are deliberately cut off from the host.
 ///   $1 = gateway URL (http://127.0.0.1:PORT/)   $2 = "Bearer <token>"
 ///   $3 = /mnt path to Windows curl.exe
 #[cfg(windows)]
@@ -158,9 +157,9 @@ while IFS= read -r line; do
 done
 "#;
 
-/// Ensure the gateway is up and write a `--mcp-config` that a FULL-ACCESS WSL
-/// CLI run can use. Returns the config path as a Linux (/mnt) path the in-distro
-/// CLI reads. Windows-only: interop is a WSL concept.
+/// Ensure the gateway is up and write a `--mcp-config` that a non-jailed WSL
+/// CLI run can use (full-access or bwrap not installed). Returns the config path
+/// as a Linux (/mnt) path the in-distro CLI reads. Windows-only.
 #[cfg(windows)]
 pub fn write_cli_config_wsl(app: &AppHandle) -> Result<String, String> {
     let info = ensure_started(app)?;

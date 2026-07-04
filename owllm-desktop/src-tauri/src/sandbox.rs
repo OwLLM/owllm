@@ -376,6 +376,21 @@ pub fn is_full_access(cwd: Option<&str>) -> bool {
     matches!(cwd, Some(c) if !c.trim().is_empty() && full_access_set().contains(&norm_cwd(c)))
 }
 
+/// True when the CLI agent will run INSIDE a bubblewrap jail for this cwd.
+/// A jailed agent has no interop access (no /mnt, no curl.exe), so the MCP
+/// relay cannot reach the host gateway — used to gate browser-tool wiring.
+/// False for: host runs, full-access WSL (no jail), WSL without bwrap installed.
+#[cfg(windows)]
+pub fn is_bwrap_jailed(cwd: Option<&str>) -> bool {
+    if is_full_access(cwd) { return false; }
+    if let Some((distro, _)) = cwd.and_then(|c| crate::wsl::parse_wsl_unc(c)) {
+        return ensure_sandbox(&distro.to_string());
+    }
+    false
+}
+#[cfg(not(windows))]
+pub fn is_bwrap_jailed(_cwd: Option<&str>) -> bool { false }
+
 #[cfg(windows)]
 fn full_access_get_impl(cwd: String) -> bool { is_full_access(Some(&cwd)) }
 #[cfg(not(windows))]

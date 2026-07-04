@@ -6,9 +6,10 @@
 # LLM shelling them ad-hoc gets it wrong. Encode it once, correctly, here.
 #
 # Usage:
-#   scripts/publish-release.sh --notes "release notes"        # build, sign, publish to Latest
-#   scripts/publish-release.sh --notes "..." --dry-run         # build + sign + latest.json, NO gh release (safe rehearsal)
-#   scripts/publish-release.sh --notes "..." --draft           # publish as a DRAFT (human flips public)
+#   scripts/publish-release.sh                                 # build, sign, publish to Latest (notes auto-derived from git log)
+#   scripts/publish-release.sh --notes "release notes"        # same, with explicit notes
+#   scripts/publish-release.sh --dry-run                       # build + sign + latest.json, NO gh release (safe rehearsal)
+#   scripts/publish-release.sh --draft                         # publish as a DRAFT (human flips public)
 #
 # Version is read from src-tauri/tauri.conf.json (bump + commit + tag BEFORE
 # calling this). Requires on PATH: cargo+mingw (build), node/npx (sign), gh (publish).
@@ -41,6 +42,37 @@ URL="https://github.com/$REPO/releases/latest/download/OwLLM.Desktop.Setup.exe"
 
 step() { echo ""; echo "=== $* ==="; }
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
+
+# No --notes → derive them from git history. Version-bump commits (the ones
+# touching tauri.conf.json) mark release boundaries, and commit subjects in
+# this repo are written as release notes ("vX.Y.Z: what shipped"), so the
+# bullets below are real user-facing lines. This is what the GitHub release
+# body AND the in-app update popup (latest.json "notes") show — an empty
+# --notes must never again publish a body that is just the tag.
+if [ -z "$NOTES" ]; then
+  # Boundary = the bump commit of the release users are actually ON (gh latest),
+  # so a version that never shipped (failed build) still lands in the next
+  # release's notes. Fall back to the previous bump commit, then to -n 15.
+  PREV_BUMP=""
+  PREV_TAG="$(gh release view --repo "$REPO" --json tagName --jq .tagName 2>/dev/null || true)"
+  if [ -n "$PREV_TAG" ]; then
+    PREV_VER_RE="$(printf '%s' "${PREV_TAG#v}" | sed 's/\./\\./g')"
+    # awk, not grep -P: MSYS grep rejects \x escapes under non-UTF8 locales.
+    PREV_BUMP="$(git log --format='%H%x09%s' -n 200 -- src-tauri/tauri.conf.json \
+      | awk -F'\t' -v re="^v?${PREV_VER_RE}([:,. ]|\$)" \
+          '{ s=$2; sub(/^\xef\xbb\xbf/, "", s); if (s ~ re) { print $1; exit } }' || true)"
+  fi
+  [ -n "$PREV_BUMP" ] || PREV_BUMP="$(git log --format=%H -n 2 -- src-tauri/tauri.conf.json | sed -n 2p || true)"
+  if [ -n "$PREV_BUMP" ]; then LOGSPEC=("$PREV_BUMP..HEAD"); else LOGSPEC=(-n 15); fi
+  NOTES="$(git log --no-merges --format='%s' "${LOGSPEC[@]}" | awk '
+    { sub(/^\xef\xbb\xbf/, "");                      # strip UTF-8 BOM some subjects carry
+      sub(/^v?[0-9]+\.[0-9]+\.[0-9]+[.:,]?[ \t]*/, ""); # strip "vX.Y.Z:" release prefix
+      gsub(/^[ \t]+|[ \t]+$/, "");
+      if ($0 == "") next;                            # bare "vX.Y.Z" bump commits
+      if (!seen[$0]++) print "- " $0 }')"
+  [ -n "$NOTES" ] || NOTES="Release $VERSION"
+  echo "auto-derived release notes:"; printf '%s\n' "$NOTES"
+fi
 
 [ -f "$KEY_FILE" ] || fail "signing key not found at $KEY_FILE (host-only secret — run on the host, not a sandbox)"
 command -v node >/dev/null 2>&1 || fail "node/npx not on PATH (needed to sign)"
@@ -122,9 +154,15 @@ step "4/5 gh release ($TAG, $([ "$DRAFT" = 1 ] && echo draft || echo latest))"
 LATEST_FLAG="--latest"; [ "$DRAFT" = 1 ] && LATEST_FLAG="--draft"
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   gh release upload "$TAG" "$INSTALLER" "$LATEST" --repo "$REPO" --clobber
+  # Refresh the body too — but never clobber notes a human wrote by hand:
+  # only overwrite when the existing body is empty or just the tag/version.
+  EXISTING_BODY="$(gh release view "$TAG" --repo "$REPO" --json body --jq .body 2>/dev/null | tr -d ' \r\n')"
+  if [ -z "$EXISTING_BODY" ] || [ "$EXISTING_BODY" = "$TAG" ] || [ "$EXISTING_BODY" = "$VERSION" ] || [ "$EXISTING_BODY" = "Release$VERSION" ]; then
+    gh release edit "$TAG" --repo "$REPO" --notes "$NOTES"
+  fi
   [ "$DRAFT" = 1 ] || gh release edit "$TAG" --repo "$REPO" --draft=false --latest
 else
-  gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "${NOTES:-$TAG}" $LATEST_FLAG "$INSTALLER" "$LATEST"
+  gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "$NOTES" $LATEST_FLAG "$INSTALLER" "$LATEST"
 fi
 
 step "5/5 verify"

@@ -766,13 +766,21 @@ function computeDepths(team: Team): Map<string, number> {
   if (!team.agents.length) return out;
   const orchName = orchestratorOf(team.agents)?.name ?? team.agents[0].name;
   out.set(orchName, 0);
-  // Synthetic Critic — when present in the augmented team, it sits at
-  // the same layer as the orchestrator. They are peers: the critic
-  // reviews orchestrator output and stands in for the user when
-  // Director Mode is on, so it never depends on a specialist.
-  if (team.agents.some(a => a.name === CRITIC_AGENT_NAME && a.name !== orchName)) {
-    out.set(CRITIC_AGENT_NAME, 0);
-  }
+  // A GENUINE orchestrator — not the agents[0] fallback orchestratorOf returns
+  // for a headless roster. Solo-Loop (coder→critic→publisher) has none: its
+  // root IS the coder.
+  const hasRealOrch = team.agents.some(a =>
+    a.name === "orchestrator" || a.base === "orchestrator" ||
+    /\borchestrator\b/i.test(a.name) || /\borchestrator\b/i.test(a.base));
+  // Synthetic Critic — sits at layer 0 as an orchestrator PEER (reviews its
+  // output, stands in for the user in Director Mode), but ONLY when there's a
+  // real orchestrator to peer with. In Solo-Loop the critic is a sequential
+  // step and must flow DOWN the chain; pinning it to layer 0 dropped it onto
+  // the coder's centred slot and the two cards rendered smashed together
+  // (user bug 2026-07-04).
+  const pinCritic = hasRealOrch
+    && team.agents.some(a => a.name === CRITIC_AGENT_NAME && a.name !== orchName);
+  if (pinCritic) out.set(CRITIC_AGENT_NAME, 0);
 
   // Predecessor set per agent, EXCLUDING orchestrator-originated edges.
   // (e.source === orchName) is skipped because the orchestrator is a
@@ -785,13 +793,13 @@ function computeDepths(team: Team): Map<string, number> {
     if (preds.has(e.target)) preds.get(e.target)!.add(e.source);
   }
 
-  // Seed every non-orchestrator (and non-critic — the critic is a
-  // layer-0 peer, not a specialist) at layer 1, then relax: layer of
-  // node = max(layer of predecessors) + 1. Bounded iteration so a
+  // Seed every non-orchestrator at layer 1, then relax: layer of
+  // node = max(layer of predecessors) + 1. The critic is a specialist here
+  // UNLESS it was pinned to layer 0 above (team mode). Bounded iteration so a
   // cyclic routing graph (rare but legal) can't spin forever — N+5
   // passes is plenty to converge for any topology that fits on the
   // canvas.
-  const specialists = team.agents.map(a => a.name).filter(n => n !== orchName && n !== CRITIC_AGENT_NAME);
+  const specialists = team.agents.map(a => a.name).filter(n => n !== orchName && !(pinCritic && n === CRITIC_AGENT_NAME));
   for (const n of specialists) out.set(n, 1);
   let changed = true;
   let iter = 0;

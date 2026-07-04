@@ -125,7 +125,10 @@ const PAGE_DOCS: Record<string, string> = {
     "COMMON ISSUES → FIX: (1) 🧠 button greyed = the project has NO folder; click it — it opens ⚙ Settings; set a Folder there, then 🧠 works. (2) The wrong agent acts as orchestrator = a renamed lead; keep 'orchestrator' in its name. (3) Telegram replies 'dispatch error codex CLI' = the orchestrator's model is Codex and it failed (rate-limited / not signed in) — set its model to a working one on its card. (4) Team empty after restart = roster edits on the canvas aren't persisted yet; assembling a team via Brainstorm DOES persist it.",
   code:
     "CODE — a single coding agent working in ONE project folder.\n" +
-    "Runs isolated inside WSL when the green 'Isolated' badge shows. The chat + plan/Kanban + workspace persist when you switch tabs and come back. Paste images for the model to read. Set the folder + model at the top. Subscription CLIs (Claude Code, Codex) and cloud/local models all work.",
+    "Runs isolated inside WSL when the green 'Isolated' badge shows. The chat + plan/Kanban + workspace persist when you switch tabs and come back. Paste images for the model to read. Set the folder + model at the top. Subscription CLIs (Claude Code, Codex) and cloud/local models all work.\n" +
+    "• RIGHT COLUMN (⚡ Super User): PROJECT RULES — the same must/prefer/avoid directives the agentic team uses (auto-seeded with the native best-practice set; add/edit/delete + 'Restore defaults'); they ride EVERY coder turn. If the folder is also an agentic project, rules + notebook are SHARED with the team pages ('shared with team' chip).\n" +
+    "• 📓 NOTEBOOK (Open in the right column): Brainstorm notes + a NEXT-STEPS list + the 🪄 Digest agent that rewrites raw notes into implementable steps. Feeding a step while the coder works = a ⚡ steer (injected between tool calls on local models); idle = a new turn. 'Auto-feed next step' walks the list by itself after each clean finish.\n" +
+    "• Typing in the chat WHILE the coder works is never dropped — it queues as a ⚡ steer and is injected the same way.",
   chat:
     "CHAT (fine-tuning playground) — talk to local OR cloud models, with tools, in up to three columns side by side. Paste images. Subscription CLIs (Claude Code, Codex) work here too. Great for trying a model before wiring it into a team.",
   train:

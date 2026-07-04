@@ -114,9 +114,13 @@ type Props = {
   modelId: string;
   port: number;
   models: ModelInfo[];
+  /// Window event that opens this instance. The Agents pages listen on the
+  /// default; the Code page mounts its own instance on a separate event so
+  /// the two surfaces never open each other's modal.
+  openEvent?: string;
 };
 
-export default function RunNotebook({ projectId, projectName, active = true, running, onFeed, modelId, port, models }: Props) {
+export default function RunNotebook({ projectId, projectName, active = true, running, onFeed, modelId, port, models, openEvent = "owllm:open-run-notebook" }: Props) {
   const [open, setOpen] = useState(false);
   const [nb, setNb] = useState<NotebookState>(() => loadNotebook(projectId));
   const [newStep, setNewStep] = useState("");
@@ -131,9 +135,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
 
   useEffect(() => {
     const onOpen = () => { if (activeRef.current) { setNb(loadNotebook(projRef.current)); setOpen(true); } };
-    window.addEventListener("owllm:open-run-notebook", onOpen as EventListener);
-    return () => window.removeEventListener("owllm:open-run-notebook", onOpen as EventListener);
-  }, []);
+    window.addEventListener(openEvent, onOpen as EventListener);
+    return () => window.removeEventListener(openEvent, onOpen as EventListener);
+  }, [openEvent]);
   // Reload when the page (auto-feed) or another tab touches the same blob.
   useEffect(() => {
     const onChanged = (e: Event) => {

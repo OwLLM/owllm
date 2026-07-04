@@ -16,8 +16,10 @@ import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
+import CodeSidePanel from "./CodeSidePanel";
+import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -316,6 +318,27 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // ---- Right column: Super User (rules + notebook) — user spec 2026-07-04 ----
+  // Rules/notebook scope: reuse the AGENTIC project's id when this folder is
+  // also a team project (one shared rule set + notebook across both pages);
+  // otherwise a stable per-folder key. directives_list auto-seeds the native
+  // best-practice defaults on first use — the same "suggested" set the team gets.
+  const [ruleScope, setRuleScope] = useState<{ id: string; shared: boolean }>({ id: "", shared: false });
+  const ruleScopeRef = useRef(ruleScope);
+  ruleScopeRef.current = ruleScope;
+  const [directives, setDirectives] = useState<Directive[]>([]);
+  const directivesRef = useRef<Directive[]>([]);
+  directivesRef.current = directives;
+  const sendRef = useRef<((textOverride?: string) => Promise<void>) | null>(null);
+  // Mid-run steer queue (VS Code-style): notebook steps fed while the coder is
+  // busy are drained between tool calls on local models (getSteer), or at the
+  // end of the turn on CLI/API paths.
+  const steerRef = useRef<string[]>([]);
+  const drainSteer = () => steerRef.current.splice(0, steerRef.current.length).join("\n\n");
+  const busySendRef = useRef(false);
+  // Live port for the notebook's digest agent (refreshed when the notebook opens).
+  const [srvPort, setSrvPort] = useState(0);
+
   // Plain "just chat" mode (no project) — opened from the Start screen's "New
   // chat" action. Reuses the same model picker + streaming as the coder, but
   // with no tools and no workspace. Conversations are PERSISTED (localStorage)
@@ -426,6 +449,34 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
   const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing } = stx;
   const [mergeBusy, setMergeBusy] = useState(false);
+  busySendRef.current = busy;
+  // Resolve the rules/notebook scope whenever the folder changes: prefer the
+  // matching AGENTIC project id (shared rule set + notebook with the team),
+  // fall back to a stable per-folder key.
+  useEffect(() => {
+    const folder = (projectRoot || workspace || "").trim();
+    if (!folder) { setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
+    const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+    let alive = true;
+    (async () => {
+      let id = `code:${norm(folder)}`;
+      let shared = false;
+      try {
+        const rows = await invoke<{ id: string; location: string }[]>("list_projects");
+        const hit = (rows || []).find((r) => r.location && norm(r.location) === norm(folder));
+        if (hit) { id = hit.id; shared = true; }
+      } catch { /* no projects table reachable — per-folder scope */ }
+      if (!alive) return;
+      setRuleScope({ id, shared });
+      try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: id })); }
+      catch { setDirectives([]); }
+    })();
+    return () => { alive = false; };
+  }, [projectRoot, workspace]);
+  const reloadDirectives = async () => {
+    if (!ruleScope.id) return;
+    try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: ruleScope.id })); } catch { /* keep last */ }
+  };
   // Keep the shell's tab label in sync with this page's project.
   useEffect(() => {
     const label = projectRoot ? projectRoot.replace(/^.*[\\/]/, "")
@@ -1051,27 +1102,44 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const dDelta = opts?.silent ? () => {} : onDelta;
     const dThought = opts?.silent ? () => {} : onThought;
     const imgs = opts?.images ?? [];
+    // Project rules ride every turn — the same directives the agentic team
+    // follows (empty string when the scope has none yet).
+    const sys = system + formatDirectivesBlock(directivesRef.current);
     if (isLocal) {
       const port = await ensureServer(modelId);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
-        port, modelId, systemPrompt: system,
+        port, modelId, systemPrompt: sys,
         userContent: imgs.length ? openaiUserContent(user, imgs) : user, temperature: 0.3,
         signal, onDelta: dDelta, onThought: dThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall, onToolResult } : undefined,
+        getSteer: drainSteer,
       });
     }
-    return streamChatCompletion(0, modelId, provider, system, user, 0.3, signal, dDelta, workspace, history, true, dThought, undefined, imgs.length ? imgs : undefined);
+    return streamChatCompletion(0, modelId, provider, sys, user, 0.3, signal, dDelta, workspace, history, true, dThought, undefined, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
   };
 
-  const send = async () => {
-    const text = draft.trim();
-    const images = imageAttachments(codeImages);
-    if ((!text && images.length === 0) || busy) return;
+  // `textOverride` = a notebook step (or leftover steer) dispatched directly,
+  // bypassing the composer draft. Composer sends pass nothing.
+  const send = async (textOverride?: string) => {
+    const fromComposer = textOverride === undefined;
+    const text = (textOverride ?? draft).trim();
+    const images = fromComposer ? imageAttachments(codeImages) : [];
+    if (!text && images.length === 0) return;
+    if (busy) {
+      // Coder is mid-turn → the message becomes a ⚡ steer (VS Code-style),
+      // injected between tool calls on local models, at turn end otherwise —
+      // never silently dropped. (Images can't ride a steer — text only.)
+      if (text) {
+        steerRef.current.push(text);
+        if (fromComposer) setDraft("");
+        setMessages((msgs) => [...msgs, { role: "user", content: `⚡ queued to steer the run → ${text}`, ts: Date.now() }]);
+      }
+      return;
+    }
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setStatus("No model selected — pick one above."); return; }
-    setDraft("");
-    setCodeImages([]);
+    if (fromComposer) { setDraft(""); setCodeImages([]); }
     setBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -1081,18 +1149,54 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     // The bubble shows a 🖼 marker; the actual images ride to the model via runTurn.
     const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
     setMessages((msgs) => [...msgs, { role: "user", content: label, ts: Date.now() }]);
+    let ok = false;
+    let aborted = false;
     try {
       setStatus(`Coding in ${workspace}`);
       await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
+      ok = true;
     } catch (e) {
       const err = e as { name?: string; message?: string };
-      if (err.name !== "AbortError") {
+      aborted = err.name === "AbortError";
+      if (!aborted) {
         setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }]);
       }
     } finally {
       setBusy(false);
       abortRef.current = null;
+      // After state settles: steers queued on a path that can't inject
+      // mid-turn (CLI/API) land as a follow-up turn — never silently dropped
+      // (unless the user hit Stop). Then, on a clean finish, auto-feed the
+      // next pending notebook step (opt-in toggle).
+      setTimeout(() => {
+        if (busySendRef.current) return;
+        const leftover = drainSteer();
+        if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
+        if (ok) {
+          const st = takeNextAutoStep(ruleScopeRef.current.id);
+          if (st) void sendRef.current?.(st.text);
+        }
+      }, 80);
     }
+  };
+  // Ref-dispatch so follow-ups (steers / auto-feed / notebook) always hit the
+  // CURRENT closure — fresh messages history, fresh busy state.
+  sendRef.current = send;
+
+  // Notebook → coder: idle = dispatch now; busy = mid-run steer (drained
+  // between tool calls on local models, at turn end otherwise).
+  const feedFromNotebook = (text: string): "queued" | "dispatched" | "no-team" => {
+    if (!workspace || !modelId) return "no-team";
+    if (busySendRef.current) { steerRef.current.push(text); return "queued"; }
+    void sendRef.current?.(text);
+    return "dispatched";
+  };
+  const openNotebook = () => {
+    // Refresh the digest agent's local port (best-effort — 0 = server down).
+    invoke<ServerStatus>("server_status")
+      .then((s) => setSrvPort(s && s.running && s.port ? s.port : 0))
+      .catch(() => setSrvPort(0));
+    window.dispatchEvent(new CustomEvent("owllm:open-code-notebook"));
   };
 
   const startChat = () => {
@@ -1739,7 +1843,32 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           })
         )}
         </div>
+        {/* Right column: ⚡ Super User — project rules (shared with the team)
+            + the Run Notebook (brainstorm / next steps). User spec 2026-07-04. */}
+        {workspace && ruleScope.id && (
+          <CodeSidePanel
+            scopeId={ruleScope.id}
+            sharedWithTeam={ruleScope.shared}
+            directives={directives}
+            onDirectivesChanged={reloadDirectives}
+            busy={busy}
+            onOpenNotebook={openNotebook}
+          />
+        )}
       </div>
+
+      {/* Notebook popup — same component the Agents page uses, on its own
+          open event and the SAME per-project blob (shared brainstorm/steps). */}
+      <RunNotebook
+        projectId={ruleScope.id || null}
+        projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
+        running={busy}
+        onFeed={feedFromNotebook}
+        modelId={modelId}
+        port={srvPort}
+        models={availableModels}
+        openEvent="owllm:open-code-notebook"
+      />
 
       {/* Status line — expands to multiple lines for the per-credential
           sync report (P1-2); stays a single ellipsized line otherwise. */}
@@ -1782,7 +1911,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           ) : (
             <>
               <button onClick={planAndExecute} disabled={!draft.trim() || preparing} title="Break the goal into ordered steps, then build them one by one (Kanban)" style={{ ...btn, height: 44, padding: "0 14px", opacity: (draft.trim() && !preparing) ? 1 : 0.5 }}>📋 Plan</button>
-              <button onClick={send} disabled={(!draft.trim() && codeImages.length === 0) || preparing} title={preparing ? "Preparing the workspace — unlocks in a moment" : undefined} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || codeImages.length) && !preparing) ? 1 : 0.5 }}>{preparing ? "⏳ Preparing…" : "Send"}</button>
+              <button onClick={() => void send()} disabled={(!draft.trim() && codeImages.length === 0) || preparing} title={preparing ? "Preparing the workspace — unlocks in a moment" : undefined} style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || codeImages.length) && !preparing) ? 1 : 0.5 }}>{preparing ? "⏳ Preparing…" : "Send"}</button>
             </>
           )}
         </div>

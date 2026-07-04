@@ -13,6 +13,10 @@ behaviour*, work in `owllm-desktop/`. Treat the legacy paths below as history.
 - Agentic team logic: `owllm-desktop/ui/src/pages/agentic/`
 - Fine-tuning chat: `owllm-desktop/ui/src/pages/finetuning/`
 
+**What the app DOES** (full feature map + where each feature lives):
+`owllm-desktop/docs/FEATURES.md` — read it before changing behaviour, and
+keep it current when you ship a feature.
+
 ## Tool-calling: NATIVE GGUF ONLY — there is no XML path
 
 Chat **and** agentic tool-calling use the model's native chat template:

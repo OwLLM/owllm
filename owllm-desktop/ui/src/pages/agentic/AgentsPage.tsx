@@ -86,7 +86,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, getTeamMemorySnapshot, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -6605,6 +6605,7 @@ function buildOrchestratorPrompt(
     TEAM_MEMORY_HINT,
     "  - As orchestrator, recover what the team already established from the snapshot below at the START of a run, and record key decisions (with `[REMEMBER ...]` or memory_write) so later runs and other agents inherit them.",
     getTeamMemorySnapshot(),
+    getBrowserStateLine(),
   ].join("\n");
 }
 
@@ -6657,6 +6658,8 @@ function buildSpecialistPrompt(
   layers.push(TEAM_MEMORY_HINT);
   const memSnapshot = getTeamMemorySnapshot();
   if (memSnapshot) layers.push(memSnapshot);
+  const browserLine = getBrowserStateLine();
+  if (browserLine) layers.push(browserLine);
   layers.push(routingHint(team, spec));
   return layers.join("\n");
 }

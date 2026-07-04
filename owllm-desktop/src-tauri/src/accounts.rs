@@ -1756,15 +1756,14 @@ pub async fn claude_cli_stream(
         // MCP GATEWAY: expose OWLLM's browser_* tools to this CLI agent natively
         // (as mcp__owllm__browser_*). Only for HOST runs — a WSL-isolated run
         // can't reach the loopback gateway, and the browser is a host-desktop
-        // window anyway. Wanted when the role is unrestricted (operator) or its
-        // allowlist explicitly names a browser_ tool. Best-effort: a gateway
-        // failure logs and falls back to today's behaviour (no browser for CLI).
+        // window anyway. The browser is a CROSS-CUTTING capability (one window
+        // shared with the user, mirroring BROWSER_TOOL_NAMES in localTools.ts):
+        // never gated by the role tool_allowlist — no role YAML names browser_*,
+        // so gating here meant specialist CLI agents could never see the page
+        // the user opened. Best-effort: a gateway failure logs and falls back
+        // to today's behaviour (no browser for CLI).
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
-        let browser_wanted = match allowed_tools.as_ref() {
-            None => true,
-            Some(a) => a.is_empty() || a.iter().any(|t| t == "all" || t.starts_with("browser_")),
-        };
-        let mcp_config_path: Option<String> = if host_run && browser_wanted {
+        let mcp_config_path: Option<String> = if host_run {
             match crate::mcp_gateway::write_cli_config(&app) {
                 Ok(p) => Some(p.to_string_lossy().to_string()),
                 Err(e) => {

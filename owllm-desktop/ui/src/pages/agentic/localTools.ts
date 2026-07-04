@@ -43,6 +43,10 @@ export const SKILL_TOOL_NAMES = new Set(["load_skill", "list_skills"]);
 /// advertised. Backed by SQLite (memory.rs) and scoped by the project cwd.
 export const MEMORY_TOOL_NAMES = new Set(["memory_search", "memory_write", "memory_read"]);
 
+/// Shared agent-browser tools are also cross-cutting (never allowlist-gated);
+/// see BROWSER_TOOL_NAMES below LOCAL_TOOL_SPECS (it derives from the specs,
+/// which aren't initialized yet at this point in the module).
+
 /// Scope key for the shared team memory. We key it by the stable PROJECT ID
 /// (not the project cwd, which differs per machine: C:\foo vs /home/you/foo) so
 /// the store matches across PCs and can sync through the GitHub vault. The
@@ -149,6 +153,46 @@ export async function refreshTeamMemorySnapshot(limit = 12): Promise<void> {
     _teamMemorySnapshot = renderTeamMemorySnapshot(facts, worklog);
     _snapshotIds = new Set([...facts, ...worklog].map((e) => e.id));
   } catch { /* keep the last good snapshot */ }
+  // Piggyback: keep the browser-state line warm on the same cadence (run start,
+  // after every logTeamWork/memory write) so prompts built for ANY model path —
+  // including CLI agents that never call formatToolsForOpenAI — carry it.
+  void refreshBrowserState();
+}
+
+/// Cached one-line state of the shared agent browser, spliced into every
+/// prompt (like the memory snapshot) so agents KNOW the window the user is
+/// looking at exists and is theirs to inspect. "" when no window is open.
+/// Without this line a model asked "what do you see on the page I opened?"
+/// truthfully answers "I can't see your browser" — the tools alone don't tell
+/// it there is a live shared session.
+let _browserStateLine = "";
+
+/// Best-effort refresh of the cached line from browser_status (cheap: reads
+/// window presence + URL, no page round-trip). Never throws.
+export async function refreshBrowserState(): Promise<void> {
+  try {
+    const st = await invoke<{ running: boolean; url: string; device: string }>("browser_status");
+    if (st && st.running) {
+      const dev = st.device && st.device !== "desktop" ? ` (emulating ${st.device})` : "";
+      _browserStateLine =
+        "SHARED AGENT BROWSER: an in-app browser window is OPEN" +
+        (st.url ? ` at ${st.url}` : "") + dev + ". " +
+        "The user sees this same window — it is your shared screen. " +
+        "When asked about 'the page', 'the site' or 'my browser', call browser_snapshot " +
+        "(element list) or browser_get_text (visible text) to look at it, and " +
+        "browser_click / browser_fill / browser_select to act on it. " +
+        "Never claim you cannot see the user's browser.";
+    } else {
+      _browserStateLine = "";
+    }
+  } catch { _browserStateLine = ""; }
+}
+
+/// SYNC accessor for the (sync) prompt builders, same pattern as
+/// getTeamMemorySnapshot(). Kept warm by refreshTeamMemorySnapshot and
+/// formatToolsForOpenAI.
+export function getBrowserStateLine(): string {
+  return _browserStateLine;
 }
 
 /// Retrieve the shared work-state RELEVANT to a task (BM25-lite ranked by
@@ -521,6 +565,7 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
   ).filter((t) =>
     !SKILL_TOOL_NAMES.has(t.name) &&
     !MEMORY_TOOL_NAMES.has(t.name) &&
+    !BROWSER_TOOL_NAMES.has(t.name) &&
     (!allowSet || allowSet.has(t.name)),
   );
   // Advertise the skill tools (load_skill / list_skills) regardless of the
@@ -536,6 +581,15 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
   for (const t of LOCAL_TOOL_SPECS.filter((t) => MEMORY_TOOL_NAMES.has(t.name))) {
     localTools.push(t);
   }
+  // Shared agent-browser tools — same rule. The browser is ONE window shared
+  // with the user; an agent must always be able to look at it (browser_snapshot)
+  // or open a page, regardless of its role allowlist.
+  for (const t of LOCAL_TOOL_SPECS.filter((t) => BROWSER_TOOL_NAMES.has(t.name))) {
+    localTools.push(t);
+  }
+  // Keep the browser-state prompt line warm on every tool-catalog build (i.e.
+  // before every local/API model turn) so mid-run browser opens are noticed.
+  void refreshBrowserState();
   for (const t of localTools) {
     const properties: Record<string, unknown> = {};
     const required: string[] = [];
@@ -1266,6 +1320,17 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     ],
   },
 ];
+
+/// Shared agent-browser tools — the native in-app browser window is ONE session
+/// shared by the user and every agent, so (like memory) it's a cross-cutting
+/// capability: NEVER gated by a role's tool_allowlist, always advertised.
+/// Without this, specialists with a concrete allowlist (none of the role YAMLs
+/// list browser_*) could not see the page the user just opened — the exact
+/// "I can't see your browser" failure. Derived from the specs so a new
+/// browser_* tool is automatically included.
+export const BROWSER_TOOL_NAMES = new Set(
+  LOCAL_TOOL_SPECS.filter((t) => t.name.startsWith("browser_")).map((t) => t.name),
+);
 
 // ---- Canonical-name + arg-alias resolution (the "normalize" half of
 // the universal tool layer). Built once from LOCAL_TOOL_SPECS so the

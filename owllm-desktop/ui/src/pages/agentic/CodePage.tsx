@@ -18,6 +18,7 @@ import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
+import { getBrowserStateLine, refreshBrowserState } from "./localTools";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
 import PtyTerminal from "../advanced/PtyTerminal";
@@ -1164,7 +1165,12 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const roTools = ["read_file", "list_dir", "grep", "glob", "web_search", "web_fetch"];
     // Project rules ride every turn — the same directives the agentic team
     // follows (empty string when the scope has none yet).
+    // Shared agent-browser awareness: refresh (cheap window probe) so the coder
+    // knows a page the user just opened is there to snapshot.
+    await refreshBrowserState();
+    const browserLine = getBrowserStateLine();
     const sys = system + formatDirectivesBlock(directivesRef.current)
+      + (browserLine ? `\n\n${browserLine}` : "")
       + (chatOnly ? "\n\nMODE: CHAT — discuss, review, plan and answer questions ONLY. Do NOT edit or create files, and do NOT run commands that change any state. You may read files and search to ground your answers." : "");
     if (isLocal) {
       const port = await ensureServer(modelId);

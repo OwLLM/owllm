@@ -15,6 +15,7 @@ import {
   setTeamMemoryScope,
   setTeamMemoryGoal,
   getTeamMemorySnapshot,
+  getBrowserStateLine,
   refreshTeamMemorySnapshot,
   harvestMemoryWrites,
   harvestPublishRequest,
@@ -1029,6 +1030,7 @@ export function buildOrchestratorPrompt(
     TEAM_MEMORY_HINT,
     "  - As orchestrator, recover what the team already established from the snapshot below at the START of a run, and record key decisions (with `[REMEMBER ...]` or memory_write) so later runs and other agents inherit them.",
     getTeamMemorySnapshot(),
+    getBrowserStateLine(),
   ].join("\n");
 }
 
@@ -1074,6 +1076,8 @@ export function buildSpecialistPrompt(
   layers.push(TEAM_MEMORY_HINT);
   const memSnapshot = getTeamMemorySnapshot();
   if (memSnapshot) layers.push(memSnapshot);
+  const browserLine = getBrowserStateLine();
+  if (browserLine) layers.push(browserLine);
   layers.push(routingHint(team, spec));
   return layers.join("\n");
 }

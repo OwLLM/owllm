@@ -149,13 +149,25 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   `--allowedTools`. The CLI model then calls `mcp__owllm__browser_open` etc.
   natively — no puppet model, no paraphrase layer. Tool calls dispatch to the
   same `browser::*` functions the local path uses (one engine, no twin).
-- **Scope**: wired for HOST runs only (loopback is reachable there, and the
-  browser window is a host-desktop object). WSL-isolated runs keep today's
-  behaviour (browser unavailable). Extending to isolated runs (host-IP binding
-  or WSL mirrored-networking) and adding memory_*/kvm_node to the catalogue are
-  follow-ups. **Runtime-unverified**: the CLI↔gateway handshake is implemented
-  to spec + unit-tested for framing, but the live round-trip needs a real app
-  session to confirm the installed CLI's `--mcp-config` HTTP shape.
+- **Scope**: three transports, decided per run in `claude_cli_stream`:
+  * HOST run → HTTP on `127.0.0.1` (config path handed to the CLI as the 8.3
+    short path — the plain path contains a space that the batch-shim spawn
+    splits; see v0.7.62).
+  * Non-jailed WSL run (full-access or bwrap absent) → MCP *stdio* relay that
+    shells each call through Windows `curl.exe` interop to the host loopback —
+    no firewall rule needed.
+  * bwrap-JAILED WSL run → excluded (interop is dead inside the jail), with
+    ONE exception: the **Browser role**. Detected Rust-side from its
+    `tool_allowlist` naming `browser_*` (Publisher pattern —
+    `is_browser_role_allowlist`, accounts.rs), that single agent is spawned via
+    `sandbox::program_argv_unjailed` (plain WSL, interop alive) and wired to
+    the relay, while every other agent in the team stays jailed. Deliberate,
+    disclosed tradeoff: the Browser agent's run gains /mnt + interop access
+    like a full-access run.
+  Adding memory_*/kvm_node to the catalogue is a follow-up. The CLI↔gateway
+  handshake + tool loading were verified against the real installed CLI
+  (2026-07-05); the jail-exception spawn path is code-verified but needs one
+  live isolated-team run to confirm end-to-end.
 
 ## OWLLM Node — KVM remote control (`kvm.rs`)
 

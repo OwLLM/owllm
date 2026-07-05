@@ -642,6 +642,30 @@ pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option
     ))
 }
 
+/// Like [`program_argv`] but NEVER applies the bwrap jail: a WSL project runs
+/// via plain WSL routing even when bubblewrap is installed and the project is
+/// not full-access. This is the BROWSER-ROLE EXCEPTION (accounts.rs
+/// claude_cli_stream): that one role must keep WSL interop (curl.exe) alive so
+/// the MCP stdio relay can reach the host browser gateway. Deliberate
+/// tradeoff, scoped to that role only: the run gains /mnt + interop access
+/// like a full-access run, while every other agent in the team stays jailed.
+#[cfg(windows)]
+pub fn program_argv_unjailed(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+    let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
+    let script = format!("cd {} && {}", crate::wsl::sh_quote(&linux_cwd), exec_script(program, args));
+    Some((
+        "wsl.exe".to_string(),
+        vec!["-d".into(), distro, "--".into(), "bash".into(), "-lc".into(), script],
+    ))
+}
+/// Non-Windows: the sandbox model differs (bwrap/Lima share the host network
+/// namespace, so the gateway is reachable without an interop exception) —
+/// same routing as [`program_argv`].
+#[cfg(not(windows))]
+pub fn program_argv_unjailed(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+    program_argv(cwd, program, args)
+}
+
 #[cfg(windows)]
 pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;

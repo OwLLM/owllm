@@ -1714,6 +1714,24 @@ fn map_owllm_tool_to_cli(name: &str) -> Option<&'static str> {
     }
 }
 
+/// True when a role's tool allowlist marks it as the BROWSER role — the only
+/// role whose YAML names browser_* tools (resources/agents/roles/browser.yaml).
+/// Same capability-keyed pattern as the Publisher (`publish_release` in the
+/// allowlist). Accepts both bare (`browser_open`) and MCP-prefixed
+/// (`mcp__owllm__browser_open`) spellings so a future allowlist rewrite can't
+/// silently un-grant the exception.
+pub(crate) fn is_browser_role_allowlist(allowed: Option<&Vec<String>>) -> bool {
+    allowed
+        .map(|v| {
+            v.iter().any(|t| {
+                let t = t.trim();
+                let bare = t.strip_prefix("mcp__owllm__").unwrap_or(t);
+                bare.starts_with("browser_")
+            })
+        })
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 pub async fn claude_cli_stream(
     // Injected by Tauri (not passed from JS) — needed to host the in-app MCP
@@ -1766,6 +1784,15 @@ pub async fn claude_cli_stream(
         //   * bwrap-JAILED WSL run → no browser: interop unavailable in the jail;
         //     deliberately excluded (jailed agent must not control the host browser).
         // Best-effort: any gateway failure logs and falls back gracefully.
+        //
+        // BROWSER-ROLE JAIL EXCEPTION: the Browser role is the ONE role allowed
+        // to drive the host browser from an isolated project. Detected the same
+        // way the Publisher is (capability keyed on the role's tool_allowlist —
+        // browser.yaml is the only role naming browser_*), so no new dispatch
+        // parameter is needed and both UI dispatch copies are covered. When it
+        // would be bwrap-jailed, this role instead runs via PLAIN WSL routing
+        // (program_argv_unjailed) so interop stays alive for the stdio relay.
+        let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
         let mcp_config_path: Option<String> = if host_run {
             match crate::mcp_gateway::write_cli_config(&app) {
@@ -1778,8 +1805,10 @@ pub async fn claude_cli_stream(
         } else {
             #[cfg(windows)]
             {
-                // Wire relay for any non-jailed WSL run (full-access *or* no bwrap).
-                if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) {
+                // Wire relay for any non-jailed WSL run (full-access *or* no
+                // bwrap) — and for the Browser role, which is spawned unjailed
+                // below precisely so this relay can work.
+                if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) || browser_role {
                     match crate::mcp_gateway::write_cli_config_wsl(&app) {
                         Ok(p) => Some(p),
                         Err(e) => {
@@ -1888,8 +1917,14 @@ pub async fn claude_cli_stream(
         let run_once = |args: &[String]| -> Result<String, String> {
         // WSL-isolated project → run `claude` inside the distro; else the
         // Windows CLI exactly as before (no regression for normal folders).
-        let mut cmd = if let Some((exe, sargs)) =
+        // The Browser role skips the bwrap jail (plain WSL) so the MCP relay's
+        // interop path works — every other role keeps today's routing.
+        let spawn_argv = if browser_role {
+            crate::sandbox::program_argv_unjailed(cwd.as_deref(), "claude", args)
+        } else {
             crate::sandbox::program_argv(cwd.as_deref(), "claude", args)
+        };
+        let mut cmd = if let Some((exe, sargs)) = spawn_argv
         {
             let mut c = Command::new(exe);
             c.args(sargs);
@@ -3166,4 +3201,32 @@ pub async fn kimi_cli_complete(
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_browser_role_allowlist;
+
+    #[test]
+    fn browser_role_detected_from_bare_and_prefixed_names() {
+        let bare = vec!["browser_open".to_string(), "read_file".to_string()];
+        assert!(is_browser_role_allowlist(Some(&bare)));
+        let prefixed = vec!["mcp__owllm__browser_snapshot".to_string()];
+        assert!(is_browser_role_allowlist(Some(&prefixed)));
+    }
+
+    #[test]
+    fn non_browser_roles_are_not_matched() {
+        let publisher = vec![
+            "read_file".to_string(),
+            "shell".to_string(),
+            "publish_release".to_string(),
+        ];
+        assert!(!is_browser_role_allowlist(Some(&publisher)));
+        assert!(!is_browser_role_allowlist(Some(&vec![])));
+        assert!(!is_browser_role_allowlist(None));
+        // "web_fetch"/"web_search" must NOT trip the browser exception.
+        let researcher = vec!["web_fetch".to_string(), "web_search".to_string()];
+        assert!(!is_browser_role_allowlist(Some(&researcher)));
+    }
 }

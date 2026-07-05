@@ -223,11 +223,53 @@ while IFS= read -r line; do
 done
 "#;
 
+/// Per-distro cache of the interop probe below — one wsl.exe round-trip per
+/// distro per app run, same pattern as sandbox.rs::sandbox_cache.
+#[cfg(windows)]
+fn interop_cache() -> &'static Mutex<std::collections::HashMap<String, bool>> {
+    static C: std::sync::OnceLock<Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    C.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Probe whether Windows interop actually works inside `distro` by exec'ing the
+/// host curl.exe from in there — the exact operation the stdio relay performs on
+/// every request. When interop is disabled (`[interop] enabled=false` in
+/// /etc/wsl.conf, common on hardened setups), the relay dies silently and the
+/// CLI just reports zero MCP tools — this probe turns that into a precise,
+/// user-visible error instead. Cached per distro.
+#[cfg(windows)]
+fn wsl_interop_ok(distro: &str, curl_mnt: &str) -> bool {
+    if let Some(v) = interop_cache().lock().ok().and_then(|m| m.get(distro).copied()) {
+        return v;
+    }
+    use std::os::windows::process::CommandExt;
+    let script = format!(
+        "{} --version >/dev/null 2>&1 && echo OWLLM_INTEROP_OK",
+        crate::wsl::sh_quote(curl_mnt)
+    );
+    let ok = std::process::Command::new("wsl.exe")
+        .args(["-d", distro, "--", "bash", "-lc", &script])
+        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("OWLLM_INTEROP_OK"))
+        .unwrap_or(false);
+    if let Ok(mut m) = interop_cache().lock() {
+        m.insert(distro.to_string(), ok);
+    }
+    ok
+}
+
 /// Ensure the gateway is up and write a `--mcp-config` that a non-jailed WSL
 /// CLI run can use (full-access or bwrap not installed). Returns the config path
 /// as a Linux (/mnt) path the in-distro CLI reads. Windows-only.
+///
+/// `cwd` is the project's `\\wsl.localhost\...` path — used to derive the distro
+/// so the relay's transport (interop → curl.exe) can be preflighted. Wiring a
+/// config whose relay can't exec curl.exe would produce the silent
+/// "0 tools" failure this preflight exists to name.
 #[cfg(windows)]
-pub fn write_cli_config_wsl(app: &AppHandle) -> Result<String, String> {
+pub fn write_cli_config_wsl(app: &AppHandle, cwd: Option<&str>) -> Result<String, String> {
     let info = ensure_started(app)?;
     let dir = crate::paths::user_data_root().ok_or_else(|| "no user-data dir".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
@@ -242,6 +284,18 @@ pub fn write_cli_config_wsl(app: &AppHandle) -> Result<String, String> {
     let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".to_string());
     let curl_win = format!("{}\\System32\\curl.exe", sysroot.trim_end_matches('\\'));
     let curl_mnt = crate::sandbox::win_to_mnt(&curl_win).unwrap_or_else(|_| "curl.exe".to_string());
+
+    // Preflight the relay's transport: the relay execs Windows curl.exe via
+    // interop on every request. If interop is off in this distro, fail HERE
+    // with a precise reason instead of wiring a dead relay (CLI would list
+    // zero MCP tools with no explanation).
+    if let Some((distro, _)) = cwd.and_then(crate::wsl::parse_wsl_unc) {
+        if !wsl_interop_ok(&distro, &curl_mnt) {
+            return Err(format!(
+                "WSL interop is disabled in distro '{distro}' (can't exec Windows curl.exe from inside it) — the browser-gateway relay needs it. Enable it: in the distro set /etc/wsl.conf [interop] enabled=true, then run `wsl --shutdown` and retry"
+            ));
+        }
+    }
 
     let cfg = json!({
         "mcpServers": {

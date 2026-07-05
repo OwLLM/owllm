@@ -1794,11 +1794,16 @@ pub async fn claude_cli_stream(
         // (program_argv_unjailed) so interop stays alive for the stdio relay.
         let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
+        // Track the wiring outcome so it can be SURFACED INTO THE RUN LOG below.
+        // Every prior failure in this chain was an eprintln nobody sees — the
+        // agent then truthfully reports "no browser tools" and the user gets a
+        // 10-turn goose chase instead of the one-line reason.
+        let mut gateway_err: Option<String> = None;
         let mcp_config_path: Option<String> = if host_run {
             match crate::mcp_gateway::write_cli_config(&app) {
                 Ok(p) => Some(p.to_string_lossy().to_string()),
                 Err(e) => {
-                    eprintln!("mcp gateway not started ({e}); CLI agent runs without browser tools");
+                    gateway_err = Some(e);
                     None
                 }
             }
@@ -1809,10 +1814,10 @@ pub async fn claude_cli_stream(
                 // bwrap) — and for the Browser role, which is spawned unjailed
                 // below precisely so this relay can work.
                 if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) || browser_role {
-                    match crate::mcp_gateway::write_cli_config_wsl(&app) {
+                    match crate::mcp_gateway::write_cli_config_wsl(&app, cwd.as_deref()) {
                         Ok(p) => Some(p),
                         Err(e) => {
-                            eprintln!("mcp wsl gateway not started ({e}); CLI agent runs without browser tools");
+                            gateway_err = Some(e);
                             None
                         }
                     }
@@ -1825,6 +1830,23 @@ pub async fn claude_cli_stream(
                 None
             }
         };
+        if let Some(e) = gateway_err.as_ref() {
+            eprintln!("mcp gateway not wired ({e}); CLI agent runs without browser tools");
+            // Non-fatal by design: the run continues, just without browser tools —
+            // but now the run log SAYS SO, with the exact reason.
+            let _ = on_event.send(ClaudeStreamEvent::Error {
+                message: format!(
+                    "browser gateway not wired — {e}. Browser tools (mcp__owllm__browser_*) are unavailable for this run."
+                ),
+            });
+        } else if mcp_config_path.is_some() && !host_run {
+            // The WSL relay is the fragile transport (interop + stdio bridge) —
+            // record that it was wired so a later "0 tools" report can be
+            // separated into app-side vs CLI-side at a glance.
+            let _ = on_event.send(ClaudeStreamEvent::Thinking {
+                delta: "[owllm] browser gateway: wired via WSL interop relay\n".to_string(),
+            });
+        }
         let mcp_tool_names: Vec<String> = if mcp_config_path.is_some() {
             crate::mcp_gateway::cli_tool_names()
         } else {

@@ -156,19 +156,31 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
   const field: React.CSSProperties = { flex: 1, height: 26, fontSize: 12, padding: "0 8px", background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 7, color: "var(--fg)" };
 
   return (
-    <div
-      ref={boxRef}
-      style={{
-        position: "fixed", zIndex: 1200,
-        ...(pos ? { left: pos.x, top: pos.y } : { right: 24, bottom: 24 }),
-        width: 560, maxWidth: "92vw", maxHeight: "82vh",
-        display: "flex", flexDirection: "column",
-        background: "var(--bg-panel)", border: "1px solid var(--border-strong)",
-        borderRadius: 12, boxShadow: "0 12px 40px rgba(0,0,0,0.5)", overflow: "hidden",
-      }}
-    >
+    <>
+      <style>{`@keyframes owllmBrowserFrameHue { to { filter: hue-rotate(360deg); } }`}</style>
       <div
-        onMouseDown={onDragStart}
+        ref={boxRef}
+        style={{
+          position: "fixed", zIndex: 1200,
+          // Default 300px up from the bottom-right corner so it doesn't sit on
+          // the app's own controls (user spec 2026-07-05).
+          ...(pos ? { left: pos.x, top: pos.y } : { right: 24, bottom: 324 }),
+          width: 560, maxWidth: "92vw",
+          // Psychedelic rainbow frame — the same conic-gradient ring as the
+          // Critical Thinker card. The 3px padding shows the gradient, the inner
+          // panel covers the centre, and owllmBrowserFrameHue slowly hue-shifts it.
+          padding: 3, borderRadius: 15,
+          background: "conic-gradient(from 0deg, #ff5e7e, #ffb84c, #ffe14c, #6cff5e, #5ec6ff, #b86cff, #ff5e7e)",
+          animation: "owllmBrowserFrameHue 8s linear infinite",
+          boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
+        }}
+      >
+        <div style={{
+          display: "flex", flexDirection: "column", maxHeight: "calc(82vh - 6px)",
+          background: "var(--bg-panel)", borderRadius: 12, overflow: "hidden",
+        }}>
+          <div
+            onMouseDown={onDragStart}
         style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", cursor: "move", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)" }}
       >
         <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)" }}>🌐 Agent Browser</span>
@@ -281,6 +293,8 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
 
         {err && <div style={{ marginTop: 8, fontSize: 11, color: "#ff8c8c", whiteSpace: "pre-wrap" }}>{err}</div>}
       </div>
-    </div>
+        </div>
+      </div>
+    </>
   );
 }

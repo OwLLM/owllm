@@ -8,8 +8,10 @@
 ///   • Passwords: a local encrypted vault (DPAPI on Windows) the agents autofill
 ///   • Import: pull saved logins from Chrome / Edge / Brave / Opera (Firefox soon)
 ///
-/// ONE shared component: mounted by CodePage (side-panel 🌐) and AgentsPage
-/// (header 🌐). Draggable popup, same chrome as the terminal popup.
+/// ONE shared component, three mounts: CodePage (side-panel 🌐), AgentsPage
+/// (header 🌐), and — via `inline` — the Browser agent's card body. Draggable
+/// popup by default; inline drops the floating frame/drag/close and fills its
+/// container so the exact same controls live on the agent card (no recode).
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -18,7 +20,7 @@ type PageInfo = { url?: string; title?: string; ready?: string };
 type CredMeta = { origin: string; username: string; note: string; ts: number };
 type Detected = { id: string; name: string; profile: string; count: number; supported: boolean; note: string };
 
-export default function BrowserPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export default function BrowserPanel({ open = false, onClose, inline = false }: { open?: boolean; onClose?: () => void; inline?: boolean }) {
   const [status, setStatus] = useState<BrowserStatus | null>(null);
   const [page, setPage] = useState<PageInfo | null>(null);
   const [url, setUrl] = useState("");
@@ -52,12 +54,12 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
   };
 
   useEffect(() => {
-    if (!open) return;
+    if (!open && !inline) return;
     void refreshStatus();
     void loadCreds();
     const t = window.setInterval(() => { void refreshStatus(); }, 3000);
     return () => window.clearInterval(t);
-  }, [open]);
+  }, [open, inline]);
 
   const navigate = async () => {
     const u = url.trim();
@@ -140,7 +142,7 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
     window.addEventListener("mouseup", up);
   };
 
-  if (!open) return null;
+  if (!open && !inline) return null;
   const tabBtn = (id: typeof tab, label: string) => (
     <button
       onClick={() => { setTab(id); if (id === "import" && !detected.length) void scan(); }}
@@ -160,7 +162,10 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
       <style>{`@keyframes owllmBrowserFrameHue { to { filter: hue-rotate(360deg); } }`}</style>
       <div
         ref={boxRef}
-        style={{
+        style={inline
+          // Inline (Browser agent card): no floating frame — fill the tile.
+          ? { flex: 1, minHeight: 0, display: "flex" }
+          : {
           position: "fixed", zIndex: 1200,
           // Default 300px up from the bottom-right corner so it doesn't sit on
           // the app's own controls (user spec 2026-07-05).
@@ -175,20 +180,22 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
           boxShadow: "0 12px 40px rgba(0,0,0,0.5)",
         }}
       >
-        <div style={{
+        <div style={inline
+          ? { flex: 1, minHeight: 0, display: "flex", flexDirection: "column", background: "var(--bg-panel)", overflow: "hidden" }
+          : {
           display: "flex", flexDirection: "column", maxHeight: "calc(82vh - 6px)",
           background: "var(--bg-panel)", borderRadius: 12, overflow: "hidden",
         }}>
           <div
-            onMouseDown={onDragStart}
-        style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", cursor: "move", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)" }}
+            onMouseDown={inline ? undefined : onDragStart}
+        style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", cursor: inline ? "default" : "move", borderBottom: "1px solid var(--border)", background: "var(--bg-surface)" }}
       >
         <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)" }}>🌐 Agent Browser</span>
         <span style={{ fontSize: 11, color: status?.running ? "#7dd87d" : "var(--fg-muted)" }}>
           {status?.running ? "● open" : "○ not open"}
         </span>
         <span style={{ flex: 1 }} />
-        <button className="ghost-btn" onClick={onClose} title="Close this panel (the browser keeps running for the agents)" style={{ height: 24, width: 26, padding: 0, fontSize: 13 }}>✕</button>
+        {!inline && <button className="ghost-btn" onClick={() => onClose?.()} title="Close this panel (the browser keeps running for the agents)" style={{ height: 24, width: 26, padding: 0, fontSize: 13 }}>✕</button>}
       </div>
 
       <div style={{ display: "flex", gap: 4, padding: "6px 10px 0" }}>
@@ -197,7 +204,7 @@ export default function BrowserPanel({ open, onClose }: { open: boolean; onClose
         {tabBtn("import", "Import")}
       </div>
 
-      <div style={{ padding: 10, overflow: "auto" }}>
+      <div style={{ padding: 10, overflow: "auto", ...(inline ? { flex: 1, minHeight: 0 } : {}) }}>
         {tab === "browse" && (
           <>
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>

@@ -11,12 +11,13 @@
       "base": "orchestrator",
       "description": "Plans the build, dispatches one task at a time, integrates results.",
       "icon": "owl:owl_orchestrator1",
-      "extra_prompt": "Your team for this project:\n  - coder    : reads/edits files, runs shell commands, writes code\n  - critic   : reviews code changes for correctness, safety, completeness\n  - devops   : SSH into remote hosts, deploys, inspects production\n  - docs     : updates READMEs, docs, runbooks, changelogs\n\nReview chain: coder -> critic. On REVISE/REJECT, send the critic's notes back to coder and try again. On APPROVE, hand off to docs (if user-facing) and/or devops (if deploy-needed)."
+      "extra_prompt": "Your team for this project:\n  - coder    : reads/edits files, runs shell commands, writes code\n  - critic   : reviews code changes for correctness, safety, completeness\n  - devops   : SSH into remote hosts, deploys, inspects production\n  - docs     : updates READMEs, docs, runbooks, changelogs\n  - browser  : opens the shared web browser — localhost previews, live sites, fills/tests forms, checks mobile layouts\n\nReview chain: coder -> critic. On REVISE/REJECT, send the critic's notes back to coder and try again. On APPROVE, hand off to docs (if user-facing) and/or devops (if deploy-needed). When building a web app, dispatch the browser agent to open the running site (localhost or deployed) and verify it actually renders/works before you call it done."
     },
     { "name": "coder", "base": "coder" },
     { "name": "critic", "base": "critic" },
     { "name": "devops", "base": "devops" },
-    { "name": "docs", "base": "documentation" }
+    { "name": "docs", "base": "documentation" },
+    { "name": "browser", "base": "browser", "description": "Drives the shared web browser — opens localhost previews & live sites, reads pages, fills & tests forms, checks mobile layouts." }
   ],
   "graph": {
     "edges": [
@@ -24,7 +25,8 @@
       { "source": "coder", "target": "critic" },
       { "source": "critic", "target": "orchestrator" },
       { "source": "orchestrator", "target": "docs" },
-      { "source": "orchestrator", "target": "devops" }
+      { "source": "orchestrator", "target": "devops" },
+      { "source": "orchestrator", "target": "browser" }
     ]
   }
 }

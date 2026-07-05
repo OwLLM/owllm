@@ -123,6 +123,14 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   (Keychain / Secret Service) are the next step.
 - **UI**: 🌐 Browser panel (shared `BrowserPanel.tsx`, Code + Agents pages) —
   Browse / Passwords / Import tabs.
+- **Browser agent** (role `resources/agents/roles/browser.yaml`, base `browser`):
+  a dedicated team member that owns the non-isolated web work — localhost
+  previews, live sites, form filling/testing, cross-device checks. Its team card
+  swaps the chat preview for the SAME `BrowserPanel` mounted `inline`
+  (`isBrowser` in `AgentsPage.tsx`, mirroring the Publisher's rule-based card),
+  so the card IS the browser remote. Included in the `dev_squad` template.
+  Card controls fire host-side (the window + gateway are host objects), so they
+  work even when the rest of the team is sandboxed.
 - **Reachable by ALL agent kinds**: local + API agents call `browser_*` through
   `executeToolCall`; subscription-CLI agents (Claude Code) reach the SAME
   browser natively via the MCP gateway below (host runs). No per-tool harvest

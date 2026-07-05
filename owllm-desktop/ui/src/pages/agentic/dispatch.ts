@@ -165,6 +165,9 @@ export async function runCodexCliStream(args: {
   systemPrompt: string;
   userMessage: string;
   cwd?: string | null;
+  // Per-role allowlist — forwarded so the Rust side can detect the Browser role
+  // (its allowlist names browser_*) and wire the MCP browser gateway for it.
+  allowedTools?: string[];
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -200,6 +203,7 @@ export async function runCodexCliStream(args: {
     userMessage: args.userMessage,
     cwd: args.cwd ?? null,
     imagePaths: args.imagePaths ?? null,
+    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
     onEvent: ch,
   });
 }
@@ -1820,7 +1824,7 @@ export async function streamChatCompletion(
   if (provider === "anthropic") {
     reply = await streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   } else if (provider === "openai") {
-    reply = await streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd);
+    reply = await streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
   } else {
     // ---- Local llama-server path (GGUF) ----
     // Native tool-calling ONLY: the model's own chat template (llama-server
@@ -2407,6 +2411,9 @@ async function streamOpenAI(
   /// Project working dir. Threaded to the Codex CLI so it runs IN the
   /// project (can read the codebase) instead of an arbitrary cwd.
   projectCwd?: string,
+  /// Per-role tool allowlist — forwarded to the Codex CLI stream so the Rust
+  /// side can detect the Browser role and wire the MCP browser gateway.
+  allowedTools?: string[],
 ): Promise<string> {
   // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
   // the Claude subscription routes through claude_cli_complete. Without
@@ -2441,6 +2448,7 @@ async function streamOpenAI(
         userMessage: codexPrompt,
         cwd: codexCwd ?? null,
         imagePaths: codexImagePaths,
+        allowedTools,
         onDelta,
         onThought,
       });

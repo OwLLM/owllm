@@ -2273,10 +2273,19 @@ fn codex_result_text(r: &serde_json::Value) -> String {
 
 #[tauri::command]
 pub async fn codex_cli_stream(
+    // Injected by Tauri (not passed from JS) — needed to host the in-app MCP
+    // gateway that lends OWLLM's browser_* tools to the Codex CLI, mirroring
+    // claude_cli_stream. Without this, an OpenAI/Codex team agent had NO browser
+    // tools on any run (the whole "team can't see the browser" bug for OpenAI users).
+    app: tauri::AppHandle,
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
     image_paths: Option<Vec<String>>,
+    // Per-role tool gate. Codex has no `--allowedTools` flag, so this is used
+    // ONLY to detect the Browser role (its allowlist names browser_*, the same
+    // capability-key the Publisher uses) for the jail exception below.
+    allowed_tools: Option<Vec<String>>,
     on_event: Channel<CodexStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -2284,6 +2293,77 @@ pub async fn codex_cli_stream(
             user_message.clone()
         } else {
             format!("{}\n\n{}", system_prompt.trim(), user_message)
+        };
+
+        // ---- MCP GATEWAY (browser_* tools) — the Codex counterpart of the
+        // claude_cli_stream block. Codex configures MCP via `-c mcp_servers.*`
+        // overrides (no `--mcp-config` flag) and reads a streamable-HTTP bearer
+        // token from an env var. VERIFIED against codex 0.128.0:
+        //   * HOST run  → `-c mcp_servers.owllm.url=…` + `bearer_token_env_var`
+        //                 (token in OWLLM_GW_TOKEN env).
+        //   * WSL run   → `-c mcp_servers.owllm.command="bash"` + args = the same
+        //                 stdio interop relay the Claude WSL path uses.
+        // CRUCIAL codex quirk (verified): `codex exec` SILENTLY CANCELS every MCP
+        // tool call under `--sandbox workspace-write` — they execute only with
+        // `approval_policy=never` AND `--sandbox danger-full-access`. So the
+        // gateway is wired + the sandbox escalated ONLY where dropping codex's
+        // OWN inner sandbox is acceptable: the dedicated Browser role (host-
+        // capable by design, like Publisher) or a user-granted full-access
+        // project. A normal sandboxed Codex coder is left untouched — no browser,
+        // no escalation, no surprise. (Asymmetry vs Claude — which needs no
+        // escalation for MCP — is inherent to codex coupling MCP approval to the
+        // sandbox mode; documented so the next reader doesn't "fix" it.)
+        let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
+        let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
+        let full_access = crate::sandbox::is_full_access(cwd.as_deref());
+        let grant_browser = browser_role || full_access;
+        let mut gateway_err: Option<String> = None;
+        let mut gw_cfg: Vec<String> = Vec::new();
+        let mut token_env: Option<String> = None;
+        if grant_browser {
+            if host_run {
+                match crate::mcp_gateway::codex_http_config(&app) {
+                    Ok((cfg, token)) => {
+                        gw_cfg = cfg;
+                        token_env = Some(token);
+                    }
+                    Err(e) => gateway_err = Some(e),
+                }
+            } else {
+                #[cfg(windows)]
+                {
+                    // Isolated run: wire the stdio relay unless this is a
+                    // bwrap-jailed NON-browser agent (jail exclusion). The
+                    // Browser role is spawned unjailed below so interop works.
+                    if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) || browser_role {
+                        match crate::mcp_gateway::codex_wsl_config(&app, cwd.as_deref()) {
+                            Ok(cfg) => gw_cfg = cfg,
+                            Err(e) => gateway_err = Some(e),
+                        }
+                    }
+                }
+            }
+        }
+        let gateway_wired = !gw_cfg.is_empty();
+        if let Some(e) = gateway_err.as_ref() {
+            eprintln!("codex mcp gateway not wired ({e}); agent runs without browser tools");
+            let _ = on_event.send(CodexStreamEvent::Error {
+                message: format!(
+                    "browser gateway not wired — {e}. Browser tools (mcp__owllm__browser_*) are unavailable for this run."
+                ),
+            });
+        } else if gateway_wired && !host_run {
+            let _ = on_event.send(CodexStreamEvent::Thinking {
+                delta: "[owllm] browser gateway: wired via WSL interop relay\n".to_string(),
+            });
+        }
+        // Escalate the sandbox only when we actually wired the gateway (see the
+        // codex-quirk note above). `never` stops the non-interactive auto-cancel
+        // of MCP tool calls; `danger-full-access` is what lets them execute.
+        let sandbox_mode = if gateway_wired {
+            "danger-full-access"
+        } else {
+            "workspace-write"
         };
 
         // Same non-interactive flags as codex_cli_complete, plus --json for the
@@ -2303,10 +2383,18 @@ pub async fn codex_cli_stream(
             // for isolated projects the WSL/Lima/bwrap sandbox is the outer
             // boundary, so nothing escapes the workspace either way. In `codex
             // exec` the approval policy already defaults to never, so writes in
-            // the workspace proceed without a prompt.
+            // the workspace proceed without a prompt. (Escalated to
+            // danger-full-access above only when the browser gateway is wired.)
             "--sandbox".into(),
-            "workspace-write".into(),
+            sandbox_mode.into(),
         ];
+        // Point Codex at the in-app MCP gateway (browser_* tools) + let its calls
+        // actually execute (approval_policy=never — see the codex-quirk note).
+        if gateway_wired {
+            args.extend(gw_cfg.iter().cloned());
+            args.push("-c".into());
+            args.push("approval_policy=\"never\"".into());
+        }
         // Pasted images via codex's native `-i` flag (one per file so the
         // positional prompt isn't swallowed). Relative paths (cwd-rooted).
         for p in image_paths.iter().flatten() {
@@ -2324,9 +2412,16 @@ pub async fn codex_cli_stream(
         }
 
         // WSL-isolated project → run `codex` inside the distro; else Windows CLI.
-        let mut cmd = if let Some((exe, sargs)) =
+        // BROWSER-ROLE JAIL EXCEPTION: the Browser role runs UNJAILED (plain WSL)
+        // even in a bwrap-isolated team, so interop stays alive for the stdio
+        // relay — mirrors the claude_cli_stream exception. Every other role keeps
+        // its normal (possibly jailed) routing.
+        let resolved = if browser_role && crate::sandbox::is_bwrap_jailed(cwd.as_deref()) {
+            crate::sandbox::program_argv_unjailed(cwd.as_deref(), "codex", &args)
+        } else {
             crate::sandbox::program_argv(cwd.as_deref(), "codex", &args)
-        {
+        };
+        let mut cmd = if let Some((exe, sargs)) = resolved {
             let mut c = Command::new(exe);
             c.args(sargs);
             c
@@ -2351,6 +2446,12 @@ pub async fn codex_cli_stream(
             }
             c
         };
+        // Host run: hand codex the gateway bearer token via env (its MCP config
+        // references it by name, so the secret never lands on the argv). No-op for
+        // WSL runs — there the token travels inside the relay args instead.
+        if let Some(tok) = token_env.as_ref() {
+            cmd.env(crate::mcp_gateway::CODEX_TOKEN_ENV, tok);
+        }
         cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());

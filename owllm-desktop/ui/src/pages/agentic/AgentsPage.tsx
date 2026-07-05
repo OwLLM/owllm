@@ -7031,7 +7031,7 @@ async function streamChatCompletion(
     return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   }
   if (provider === "openai") {
-    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd);
+    return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
   }
   if (provider === "moonshot") {
     return streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
@@ -7494,6 +7494,9 @@ async function streamOpenAI(
   images?: Attachment[],
   /// Project working dir — threaded to the Codex CLI so it runs IN the project.
   projectCwd?: string,
+  /// Per-role tool allowlist — forwarded to the Codex CLI stream so the Rust
+  /// side can detect the Browser role and wire the MCP browser gateway.
+  allowedTools?: AllowedTools,
 ): Promise<string> {
   // OpenAI SUBSCRIPTION (ChatGPT / Codex) → run the Codex CLI, exactly as
   // the Claude / Kimi subscriptions route through their CLIs. Without this,
@@ -7520,7 +7523,7 @@ async function streamOpenAI(
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, onDelta, onThought,
+        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, allowedTools, onDelta, onThought,
       }), codexCwd);
     }
     const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {

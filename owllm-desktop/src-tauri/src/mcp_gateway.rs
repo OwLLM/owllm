@@ -45,6 +45,11 @@ use tauri::AppHandle;
 /// becomes `mcp__owllm__browser_open` in the CLI's allowedTools space.
 pub const SERVER_NAME: &str = "owllm";
 
+/// Env var the Codex CLI reads the gateway bearer token from (its HTTP MCP
+/// config references it via `bearer_token_env_var`, so the token never lands
+/// on the argv). The caller sets this in the codex child's environment.
+pub const CODEX_TOKEN_ENV: &str = "OWLLM_GW_TOKEN";
+
 struct Gateway {
     url: String,
     token: String,
@@ -270,6 +275,32 @@ fn wsl_interop_ok(distro: &str, curl_mnt: &str) -> bool {
 /// "0 tools" failure this preflight exists to name.
 #[cfg(windows)]
 pub fn write_cli_config_wsl(app: &AppHandle, cwd: Option<&str>) -> Result<String, String> {
+    // argv = [ "bash", relay_mnt, url, "Bearer <token>", curl_mnt ]
+    let argv = wsl_relay_argv(app, cwd)?;
+    let dir = crate::paths::user_data_root().ok_or_else(|| "no user-data dir".to_string())?;
+    let cfg = json!({
+        "mcpServers": {
+            SERVER_NAME: {
+                "type": "stdio",
+                "command": argv[0],
+                "args": &argv[1..],
+            }
+        }
+    });
+    let cfg_win = dir.join("mcp-gateway-wsl.json");
+    std::fs::write(&cfg_win, serde_json::to_vec_pretty(&cfg).unwrap_or_default())
+        .map_err(|e| format!("write {}: {e}", cfg_win.display()))?;
+    crate::sandbox::win_to_mnt(&cfg_win.to_string_lossy())
+}
+
+/// The stdio-relay command+args a non-jailed WSL CLI uses to reach the host
+/// gateway via interop. Returns `["bash", relay_mnt, url, "Bearer <token>",
+/// curl_mnt]`. Materializes the relay script and runs the interop preflight, so
+/// a dead-relay config is turned into a precise error here rather than a silent
+/// "0 tools" downstream. Shared by the Claude JSON config (`write_cli_config_wsl`)
+/// and the Codex `-c` overrides (`codex_wsl_config`). Windows-only.
+#[cfg(windows)]
+pub fn wsl_relay_argv(app: &AppHandle, cwd: Option<&str>) -> Result<Vec<String>, String> {
     let info = ensure_started(app)?;
     let dir = crate::paths::user_data_root().ok_or_else(|| "no user-data dir".to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
@@ -297,19 +328,53 @@ pub fn write_cli_config_wsl(app: &AppHandle, cwd: Option<&str>) -> Result<String
         }
     }
 
-    let cfg = json!({
-        "mcpServers": {
-            SERVER_NAME: {
-                "type": "stdio",
-                "command": "bash",
-                "args": [ relay_mnt, info.url, format!("Bearer {}", info.token), curl_mnt ]
-            }
-        }
-    });
-    let cfg_win = dir.join("mcp-gateway-wsl.json");
-    std::fs::write(&cfg_win, serde_json::to_vec_pretty(&cfg).unwrap_or_default())
-        .map_err(|e| format!("write {}: {e}", cfg_win.display()))?;
-    crate::sandbox::win_to_mnt(&cfg_win.to_string_lossy())
+    Ok(vec![
+        "bash".to_string(),
+        relay_mnt,
+        info.url,
+        format!("Bearer {}", info.token),
+        curl_mnt,
+    ])
+}
+
+/// TOML basic-string literal for a `-c key=value` override. JSON string escaping
+/// is a subset of TOML basic-string escaping for the characters that occur in
+/// URLs/paths, so `serde_json` gives us a value codex parses correctly.
+fn toml_str(s: &str) -> String {
+    serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
+}
+
+/// Codex CLI `-c` overrides + bearer token for a HOST run (HTTP transport).
+/// Returns `(["-c", "mcp_servers.owllm.url=…", "-c", "…bearer_token_env_var=…"],
+/// token)`. The caller puts `token` in the child's [`CODEX_TOKEN_ENV`] env var.
+/// Codex only accepts MCP config via `-c` overrides (no `--mcp-config` flag),
+/// which is why this returns args rather than a file path like the Claude path.
+pub fn codex_http_config(app: &AppHandle) -> Result<(Vec<String>, String), String> {
+    let info = ensure_started(app)?;
+    let cfg = vec![
+        "-c".to_string(),
+        format!("mcp_servers.{SERVER_NAME}.url={}", toml_str(&info.url)),
+        "-c".to_string(),
+        format!(
+            "mcp_servers.{SERVER_NAME}.bearer_token_env_var={}",
+            toml_str(CODEX_TOKEN_ENV)
+        ),
+    ];
+    Ok((cfg, info.token))
+}
+
+/// Codex CLI `-c` overrides for a NON-JAILED WSL run (stdio relay, token carried
+/// in the relay args exactly like the Claude WSL config). Windows-only.
+#[cfg(windows)]
+pub fn codex_wsl_config(app: &AppHandle, cwd: Option<&str>) -> Result<Vec<String>, String> {
+    let argv = wsl_relay_argv(app, cwd)?; // [ bash, relay, url, "Bearer <token>", curl ]
+    let args_arr = serde_json::to_string(&argv[1..]).unwrap_or_else(|_| "[]".to_string());
+    Ok(vec![
+        "-c".to_string(),
+        format!("mcp_servers.{SERVER_NAME}.command={}", toml_str(&argv[0])),
+        "-c".to_string(),
+        format!("mcp_servers.{SERVER_NAME}.args={args_arr}"),
+    ])
 }
 
 /// The fully-namespaced CLI tool names this gateway exposes, e.g.

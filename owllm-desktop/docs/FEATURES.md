@@ -168,6 +168,19 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   handshake + tool loading were verified against the real installed CLI
   (2026-07-05); the jail-exception spawn path is code-verified but needs one
   live isolated-team run to confirm end-to-end.
+- **OpenAI / Codex parity** (`codex_cli_stream`): the same gateway now reaches
+  Codex-CLI agents too — Codex has no `--mcp-config` flag, so it's wired via
+  `-c mcp_servers.owllm.*` overrides (HOST → HTTP `url` + `bearer_token_env_var`
+  with the token in `OWLLM_GW_TOKEN`; WSL → the same stdio relay as `command` +
+  `args`). VERIFIED against codex 0.128.0: `codex exec` **silently cancels**
+  every MCP tool call under `--sandbox workspace-write`; they execute only with
+  `approval_policy="never"` AND `--sandbox danger-full-access`. So for Codex the
+  gateway is wired + the sandbox escalated ONLY for the **Browser role** (host-
+  capable by design) or a **full-access** project — a normal sandboxed Codex
+  coder is untouched (no browser, no escalation). This role/full-access scoping
+  is the deliberate difference from the Claude path (which needs no escalation);
+  it exists because codex couples MCP-call approval to the sandbox mode. Kimi/
+  Gemini CLIs remain one-shot (no streaming tool path) — a later follow-up.
 
 ## OWLLM Node — KVM remote control (`kvm.rs`)
 

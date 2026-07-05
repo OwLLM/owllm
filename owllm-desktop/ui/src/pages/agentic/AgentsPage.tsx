@@ -3704,6 +3704,31 @@ function TeamCanvas({ width, height, team, roleByName, activeAgents, selectedNod
 // across mode toggles; falls back to BFS-row auto-layout when null.
 type GraphPos = Map<string, { x: number; y: number }>;
 
+// Manual card positions survive tab switches AND app restarts, per project +
+// canvas mode (team | solo). Keyed by project so one project's placement never
+// leaks onto another's roster. Team + solo keep SEPARATE maps (they share agent
+// names, so a shared map would corrupt one when dragging in the other).
+const graphPosKey = (scope: string, mode: "team" | "solo") => `owllm:graphpos:${scope || "none"}:${mode}`;
+function loadGraphPos(scope: string, mode: "team" | "solo"): GraphPos | null {
+  try {
+    const raw = localStorage.getItem(graphPosKey(scope, mode));
+    if (!raw) return null;
+    const obj = JSON.parse(raw) as Record<string, { x: number; y: number }>;
+    const m: GraphPos = new Map();
+    for (const [k, v] of Object.entries(obj)) {
+      if (v && typeof v.x === "number" && typeof v.y === "number") m.set(k, { x: v.x, y: v.y });
+    }
+    return m.size ? m : null;
+  } catch { return null; }
+}
+function saveGraphPos(scope: string, mode: "team" | "solo", pos: GraphPos | null) {
+  try {
+    const key = graphPosKey(scope, mode);
+    if (!pos || pos.size === 0) { localStorage.removeItem(key); return; }
+    localStorage.setItem(key, JSON.stringify(Object.fromEntries(pos)));
+  } catch { /* quota — non-fatal */ }
+}
+
 function GraphCanvas({
   width, height, team, roleByName,
   selectedNode, onSelectNode,
@@ -3713,6 +3738,7 @@ function GraphCanvas({
   positions, onPositionsChange,
   modelFor,
   labelOverrides,
+  soloLayout,
 }: {
   width: number; height: number;
   team: Team | null; roleByName: Map<string, RoleData>;
@@ -3731,6 +3757,10 @@ function GraphCanvas({
   /// Display-only label swaps (e.g. solo mode shows the picked writer as
   /// "Coder"). Never touches the underlying agent name — that's identity.
   labelOverrides?: Record<string, string>;
+  /// Solo-Loop layout: coder + critic side by side on the top row, publisher
+  /// centred below (user spec 2026-07-05). Also suppresses the design/build
+  /// cluster boxes, which are meaningless for the 3-agent solo roster.
+  soloLayout?: boolean;
 }) {
   const w = width, h = height;
   // Live mouse position for the rubber-band edge while dragging from a
@@ -3793,6 +3823,24 @@ function GraphCanvas({
   const autoLayout = useMemo<GraphPos>(() => {
     const out: GraphPos = new Map();
     if (!team || team.agents.length === 0) return out;
+
+    // Solo-Loop: explicit 3-card arrangement. The generic depth/column machinery
+    // centres the critic (an "outsider") on the full canvas and the coder in its
+    // column — which collapse to the SAME x on a single-column roster and overlap
+    // (user bug). Here coder + critic share the top row (side by side) and the
+    // publisher sits centred below.
+    if (soloLayout) {
+      const publisher = team.agents.find(a =>
+        a.base === "publisher"
+        || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release"));
+      const topRow = team.agents.filter(a => a.name !== publisher?.name);
+      const rowW = topRow.length * NODE_W + Math.max(0, topRow.length - 1) * COL_GAP;
+      const startX = (w - rowW) / 2;
+      topRow.forEach((a, i) => out.set(a.name, { x: startX + i * (NODE_W + COL_GAP), y: TOP_PAD }));
+      if (publisher) out.set(publisher.name, { x: (w - NODE_W) / 2, y: TOP_PAD + NODE_H + ROW_GAP });
+      return out;
+    }
+
     const depths = computeDepths(team);
 
     // Outside-team predicate: orchestrator and the synthetic critical
@@ -3859,7 +3907,7 @@ function GraphCanvas({
       curY += NODE_H + ROW_GAP;
     }
     return out;
-  }, [team, w]);
+  }, [team, w, soloLayout, roleByName]);
 
   // Effective positions. Parent-supplied positions WIN where present;
   // any agent missing from `positions` (notably the synthetic Critical
@@ -3975,6 +4023,7 @@ function GraphCanvas({
   // svg proved unreliable: edges kept hiding behind the cluster boxes.) The
   // labels stay as HTML badges, rendered above.
   const clusterRegions: Array<{ group: TeamGroup; label: string; x: number; y: number; w: number; h: number }> = (() => {
+    if (soloLayout) return [];
     const byGroup: Record<TeamGroup, GNode[]> = { design: [], build: [], critic: [] };
     for (const n of placed) {
       if (n.name === orchName) continue;
@@ -4210,6 +4259,15 @@ function GraphCanvas({
             }}>{r.label}</div>
           );
         })}
+        {/* Rainbow "running" aura for ACTIVE graph cards — the same rotating
+            conic-gradient border the chat tiles use, so the psychedelic effect
+            is consistent across ALL agents in BOTH views (user spec 2026-07-05).
+            @property makes the angle animatable; non-Houdini browsers fall back
+            to a static rainbow. */}
+        <style>{`
+          @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+          @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+        `}</style>
         {placed.map(n => {
           const isOrch = n.name === orchName;
           const accent = isOrch ? "#ffd76a" : LAYER_COLORS[(n.depth + 1) % LAYER_COLORS.length];
@@ -4266,10 +4324,19 @@ function GraphCanvas({
                 zIndex: 2,
                 width: NODE_W, height: NODE_H, borderRadius: 14,
                 opacity: dimNode ? 0.3 : 1, transition: "opacity .15s",
-                background: baseBg,
-                border: `1.8px solid ${borderColor}`,
+                // ACTIVE (running now): a rotating rainbow conic-gradient paints
+                // the border (border-box) while the card fill is clipped to
+                // padding-box — the same "aura" the chat tiles show, so the
+                // psychedelic effect is identical in the graph for EVERY agent.
+                background: isActive
+                  ? `${baseBg} padding-box,`
+                    + ` conic-gradient(from var(--owllm-aura-angle),`
+                    + ` #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box`
+                  : baseBg,
+                border: isActive ? "2px solid transparent" : `1.8px solid ${borderColor}`,
+                animation: isActive ? "owllm-aura-spin 4s linear infinite" : undefined,
                 boxShadow: isActive
-                  ? `0 0 0 ${activeRingPx}px rgba(60,242,107,${activeAlphaA}), 0 0 ${activeOuterPx}px rgba(60,242,107,${activeAlphaB}), 0 6px 22px rgba(0,0,0,0.6)`
+                  ? `0 0 0 1px rgba(255,255,255,${0.18 * activeAlphaA}), 0 0 ${12 + activeOuterPx}px rgba(176,124,255,${activeAlphaB}), 0 0 ${22 + activeOuterPx}px rgba(127,212,255,${activeAlphaB * 0.6}), 0 6px 22px rgba(0,0,0,0.6)`
                   : sel
                   ? `0 0 0 2px ${accent}55, 0 6px 22px rgba(0,0,0,0.6)`
                   : isDragTarget
@@ -9053,8 +9120,12 @@ export function AgentsPage({
   useEffect(() => {
     setEditedEdges(null);
     setSelectedEdgeIdx(null);
-    setNodePositions(null);
-    setSoloPositions(null);
+    // Reload this team's saved card placements (team + solo kept separate) so a
+    // layout the user arranged survives project/tab switches and app restarts,
+    // instead of snapping back to auto-layout. Null when they've never dragged.
+    const posScope = selectedProject?.id ?? activeTeam?.id ?? "";
+    setNodePositions(loadGraphPos(posScope, "team"));
+    setSoloPositions(loadGraphPos(posScope, "solo"));
     setSelectedNode(null);
     // RELOAD (not wipe) this project's saved per-agent model + voice picks.
     // This effect fires on EVERY activeTeam recompute — which includes every
@@ -9069,6 +9140,18 @@ export function AgentsPage({
     setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject?.graph_json));
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTeam?.id]);
+
+  // Persist manual card placements (team + solo) as the user drags, so the
+  // layout is remembered across tab switches and restarts. Keyed the same way
+  // the reload above reads them.
+  useEffect(() => {
+    saveGraphPos(selectedProject?.id ?? activeTeam?.id ?? "", "team", nodePositions);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nodePositions, activeTeam?.id]);
+  useEffect(() => {
+    saveGraphPos(selectedProject?.id ?? activeTeam?.id ?? "", "solo", soloPositions);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [soloPositions, activeTeam?.id]);
 
   // Persist edge edits back to the project's graph_json so the wiring
   // survives across app restarts. Only fires when the user is editing
@@ -12620,6 +12703,7 @@ export function AgentsPage({
                 onPositionsChange={soloMode ? setSoloPositions : setNodePositions}
                 modelFor={modelFor}
                 labelOverrides={soloMode ? soloLabels : undefined}
+                soloLayout={soloMode}
               />
             ) : (
               <AgentChatGrid

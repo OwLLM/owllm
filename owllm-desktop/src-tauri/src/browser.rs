@@ -380,6 +380,32 @@ const BRIDGE_JS: &str = r##"
       }
     } catch (e) { report(reqId, "ERROR: " + (e && e.message ? e.message : e)); }
   };
+  // Psychedelic frame — a fixed rainbow ring around the viewport (the same
+  // conic-gradient mask-border the Critical Thinker card uses) that slowly
+  // hue-shifts, so every page the agent browser loads is unmistakably OwLLM's
+  // (user spec 2026-07-05). Lives on <html> (survives body rewrites),
+  // pointer-events:none + no text/cursor:pointer so it never affects clicks or
+  // snapshots.
+  function mountFrame() {
+    try {
+      if (!document.documentElement || document.getElementById("__owllmFrame")) return;
+      var st = document.createElement("style");
+      st.textContent = "@keyframes owllmHue{to{filter:hue-rotate(360deg)}}";
+      (document.head || document.documentElement).appendChild(st);
+      var f = document.createElement("div");
+      f.id = "__owllmFrame";
+      f.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;" +
+        "padding:3px;border-radius:10px;" +
+        "background:conic-gradient(from 0deg,#ff5e7e,#ffb84c,#ffe14c,#6cff5e,#5ec6ff,#b86cff,#ff5e7e);" +
+        "-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);" +
+        "-webkit-mask-composite:xor;mask-composite:exclude;" +
+        "animation:owllmHue 8s linear infinite;";
+      document.documentElement.appendChild(f);
+    } catch (e) {}
+  }
+  mountFrame();
+  document.addEventListener("DOMContentLoaded", mountFrame);
+  window.addEventListener("load", mountFrame);
 })();
 "##;
 
@@ -440,6 +466,14 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<WebviewWindow
         .visible(true);
     if let Some(ua) = dev.ua {
         builder = builder.user_agent(ua);
+    }
+    // Open 300px ABOVE vertical centre (centred horizontally) so the browser
+    // doesn't land on top of the app it was launched from (user spec 2026-07-05).
+    if let Ok(Some(m)) = app.primary_monitor() {
+        let ls = m.size().to_logical::<f64>(m.scale_factor());
+        let x = ((ls.width - dev.width) / 2.0).max(0.0);
+        let y = ((ls.height - dev.height) / 2.0 - 300.0).max(12.0);
+        builder = builder.position(x, y);
     }
     // A stable, isolated data dir so agent-browser logins persist across runs.
     // The builder method is only present on Windows/Linux; macOS WKWebView uses

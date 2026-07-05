@@ -24,6 +24,11 @@ import type { RoleData, Edge, Team as DispatchTeam, AgentSpec as DispatchAgentSp
 import { owlSrc, resolveAgentIcon, displayLabel } from "./StudioPage";
 import { CRITIC_AGENT_NAME } from "./AgentsPage";
 
+/// Shown before discarding unsaved workbench edits. Exported so a wrapping popup
+/// (TeamWorkbenchModal) can guard its own close paths — backdrop click / Esc —
+/// with the exact same message the in-workbench "← Teams" button uses.
+export const DISCARD_CONFIRM = "You have unsaved changes to this team. Discard them and close?";
+
 // ---- shapes the workbench consumes (structurally satisfied by StudioPage) ----
 
 /// A role/skill definition as the catalog + inspector need it. StudioPage's
@@ -149,7 +154,7 @@ function computeTiers(agents: WAgent[], edges: Edge[], orchName: string | null):
 
 export default function TeamWorkbench({
   backend, roleDefs, skillPacks, models, accountsStatus,
-  onClose, onSaved, onOpenSkillLibrary,
+  onClose, onSaved, onOpenSkillLibrary, onDirtyChange,
 }: {
   backend: TeamTemplateBackend;
   roleDefs: WorkbenchRole[];
@@ -159,6 +164,9 @@ export default function TeamWorkbench({
   onClose: () => void;
   onSaved: (newName: string) => void;
   onOpenSkillLibrary: () => void;
+  /// Optional — a wrapping popup subscribes so it can guard backdrop/Esc close
+  /// with the same unsaved-changes confirm as the "← Teams" button.
+  onDirtyChange?: (dirty: boolean) => void;
 }) {
   const d0 = backend.data ?? {};
   const [display, setDisplay] = useState<string>(d0.display_name ?? backend.id);
@@ -184,6 +192,11 @@ export default function TeamWorkbench({
   const builtIn = backend.built_in;
 
   const mark = () => setDirty(true);
+
+  // Report dirty state upward so a wrapping popup can guard its own close paths.
+  useEffect(() => { onDirtyChange?.(dirty); }, [dirty]);
+  // Guarded close — confirm once if there are unsaved edits, then close.
+  const requestClose = () => { if (dirty && !window.confirm(DISCARD_CONFIRM)) return; onClose(); };
 
   // role lookup (for tools / temp / dispatch defaults + the normalizer)
   const roleByName = useMemo(() => {
@@ -479,7 +492,7 @@ export default function TeamWorkbench({
     <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, gap: 8 }}>
       {/* ---- top bar ---- */}
       <div style={{ ...card, display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", flexWrap: "wrap" }}>
-        <button onClick={onClose} title="Back to all teams"
+        <button onClick={requestClose} title="Back to all teams"
           style={{ background: "var(--bg-elevated)", border: "1px solid var(--border-strong)", color: "var(--fg)", borderRadius: 8, height: 30, padding: "0 12px", fontSize: 12, fontWeight: 700, cursor: "pointer" }}>
           ← Teams
         </button>

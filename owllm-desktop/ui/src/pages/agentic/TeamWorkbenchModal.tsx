@@ -8,9 +8,9 @@
 // project_hierarchical_team_leader. Saving here updates the template the active
 // project is built from; the host should reload the team after onSaved.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import TeamWorkbench, { type WorkbenchRole, type SkillPackBackend, type TeamTemplateBackend } from "./TeamWorkbench";
+import TeamWorkbench, { DISCARD_CONFIRM, type WorkbenchRole, type SkillPackBackend, type TeamTemplateBackend } from "./TeamWorkbench";
 import { type ModelInfo, type AccountsStatusLite } from "./ModelPicker";
 
 type AgentRoleBackend = { id: string; path: string; built_in: boolean; data: any };
@@ -63,6 +63,13 @@ export default function TeamWorkbenchModal({
   const [skillPacks, setSkillPacks] = useState<SkillPackBackend[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  // The workbench reports its unsaved-changes state up here so the popup's own
+  // close paths (backdrop click, Esc) prompt before discarding — a live ref so
+  // the stable Esc listener always reads the current value.
+  const [dirty, setDirty] = useState(false);
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const guardedClose = () => { if (dirtyRef.current && !window.confirm(DISCARD_CONFIRM)) return; onClose(); };
 
   useEffect(() => {
     let dead = false;
@@ -93,16 +100,16 @@ export default function TeamWorkbenchModal({
     return () => { dead = true; };
   }, [teamName]);
 
-  // Esc closes the popup.
+  // Esc closes the popup (guarded — prompts if there are unsaved edits).
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") guardedClose(); };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
 
   return (
     <div
-      onClick={onClose}
+      onClick={guardedClose}
       style={{
         position: "fixed", inset: 0, zIndex: 1000,
         background: "rgba(4,6,12,0.62)", backdropFilter: "blur(3px)",
@@ -137,8 +144,9 @@ export default function TeamWorkbenchModal({
             models={models}
             accountsStatus={accountsStatus}
             onClose={onClose}
+            onDirtyChange={setDirty}
             onSaved={(newName) => { onSaved?.(newName); onClose(); }}
-            onOpenSkillLibrary={onClose}
+            onOpenSkillLibrary={guardedClose}
           />
         )}
       </div>

@@ -2144,6 +2144,103 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   return lastReply;
 }
 
+export async function streamOpenAiApiWithTools(args: {
+  modelId: string;
+  systemPrompt: string;
+  userMessage: string;
+  temperature: number;
+  signal: AbortSignal;
+  onDelta: StreamHandler;
+  history?: HistoryItem[];
+  onThought?: ThoughtHandler;
+  images?: Attachment[];
+  projectCwd?: string;
+  allowedTools?: string[];
+}): Promise<string> {
+  const sep = args.modelId.indexOf(":");
+  const wireModel = sep === -1 ? args.modelId : args.modelId.slice(0, sep);
+  const effort = sep === -1 ? null : args.modelId.slice(sep + 1);
+  const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
+  if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
+  const openaiTools = await formatToolsForOpenAI(args.allowedTools);
+  const headers = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${key}`,
+  };
+  const liveMessages: Array<{ role: string; content: unknown }> = [
+    { role: "system", content: args.systemPrompt },
+    ...(args.history ?? []),
+    { role: "user", content: openaiUserContent(args.userMessage, args.images ?? []) },
+  ];
+  const MAX_TOOL_TURNS = 16;
+  let lastReply = "";
+  let answeredWithoutTools = false;
+  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
+    const nativeCalls: RawNativeCall[] = [];
+    const resp = await fetchNetRetry(() => fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: wireModel,
+        ...(effort ? { reasoning_effort: effort } : {}),
+        messages: liveMessages,
+        stream: true,
+        temperature: args.temperature,
+        tools: openaiTools.length > 0 ? openaiTools : undefined,
+        tool_choice: openaiTools.length > 0 ? "auto" : undefined,
+      }),
+      signal: args.signal,
+    }), args.signal);
+    lastReply = await consumeOpenAISse(resp, args.onDelta, args.onThought, nativeCalls);
+    if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
+    const calls = canonicalizeNativeCalls(nativeCalls, { firstRequiredArg });
+    if (calls.length === 0) { answeredWithoutTools = true; break; }
+    const valid: ToolCall[] = [];
+    const invalid: Array<{ name: string; error: string }> = [];
+    for (const c of calls) {
+      const v = validateCall(c);
+      if (v.ok) valid.push(c);
+      else invalid.push({ name: c.name, error: v.error });
+    }
+    const results: ToolExecResult[] = [];
+    for (const c of valid) {
+      if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
+      const r = await executeToolCall(c, args.projectCwd ?? "");
+      results.push(r);
+    }
+    const parts: string[] = [];
+    if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
+    if (invalid.length > 0) parts.push(renderValidationErrorsForModel(invalid));
+    liveMessages.push({ role: "assistant", content: lastReply });
+    liveMessages.push({ role: "user", content: parts.join("\n\n") });
+  }
+  if (!answeredWithoutTools && openaiTools.length > 0) {
+    if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
+    liveMessages.push({
+      role: "user",
+      content:
+        "You have reached your tool-call limit — do NOT request any more tools. " +
+        "Using only the tool results already gathered above, write the final answer for the user now.",
+    });
+    const resp = await fetchNetRetry(() => fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        model: wireModel,
+        ...(effort ? { reasoning_effort: effort } : {}),
+        messages: liveMessages,
+        stream: true,
+        temperature: args.temperature,
+      }),
+      signal: args.signal,
+    }), args.signal);
+    const finalText = await consumeOpenAISse(resp, args.onDelta, args.onThought, []);
+    if (finalText.trim()) lastReply = finalText;
+  }
+  return lastReply;
+}
+
 async function streamAnthropic(
   modelId: string,
   route: CloudRoute,
@@ -2462,37 +2559,19 @@ async function streamOpenAI(
     if (reply) onDelta(reply);
     return reply;
   }
-  // ModelPicker encodes reasoning-effort variants as "<id>:<level>"
-  // (e.g. "gpt-5.5:high"). Split it back out here so the wire model id
-  // stays clean and the level rides as reasoning_effort. "extra_high"
-  // is forwarded verbatim — it matches the VS Code Copilot Chat label
-  // the user is mirroring; if the API rejects it we want the rejection
-  // to surface, not be silently rewritten.
-  const sep = modelId.indexOf(":");
-  const wireModel = sep === -1 ? modelId : modelId.slice(0, sep);
-  const effort = sep === -1 ? null : modelId.slice(sep + 1);
-  const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
-  if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
-  const resp = await fetchNetRetry(() => fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${key}`,
-    },
-    body: JSON.stringify({
-      model: wireModel,
-      ...(effort ? { reasoning_effort: effort } : {}),
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...(history ?? []),
-        { role: "user", content: openaiUserContent(userMessage, images ?? []) },
-      ],
-      stream: true,
-      temperature,
-    }),
+  return streamOpenAiApiWithTools({
+    modelId,
+    systemPrompt,
+    userMessage,
+    temperature,
     signal,
-  }), signal);
-  return consumeOpenAISse(resp, onDelta, onThought);
+    onDelta,
+    history,
+    onThought,
+    images,
+    projectCwd,
+    allowedTools,
+  });
 }
 
 // OpenAI-compatible SSE consumer (api.openai.com + llama-server).

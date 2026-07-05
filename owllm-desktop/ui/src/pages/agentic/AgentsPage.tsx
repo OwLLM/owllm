@@ -64,6 +64,7 @@ import {
   loadAgentMemory,
   appendAgentMemory,
   streamLocalChat,
+  streamOpenAiApiWithTools,
   runCodexCliStream,
   ensureCliWarm,
   clearCliWarm,
@@ -7532,28 +7533,19 @@ async function streamOpenAI(
     if (reply) onDelta(reply);
     return reply;
   }
-  // API path — needs a saved key.
-  const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
-  if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
-  const resp = await fetchNetRetry(() => fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${key}`,
-    },
-    body: JSON.stringify({
-      model: modelId,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...(history ?? []),
-        { role: "user", content: openaiUserContent(userMessage, images ?? []) },
-      ],
-      stream: true,
-      temperature,
-    }),
+  return streamOpenAiApiWithTools({
+    modelId,
+    systemPrompt,
+    userMessage,
+    temperature,
     signal,
-  }), signal);
-  return consumeOpenAISse(resp, onDelta, onThought);
+    onDelta,
+    history,
+    onThought,
+    images,
+    projectCwd,
+    allowedTools,
+  });
 }
 
 /// Moonshot AI / Kimi streaming. Two routes:

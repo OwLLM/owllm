@@ -1732,6 +1732,10 @@ pub(crate) fn is_browser_role_allowlist(allowed: Option<&Vec<String>>) -> bool {
         .unwrap_or(false)
 }
 
+fn codex_should_grant_browser(browser_role: bool, full_access: bool) -> bool {
+    browser_role || full_access
+}
+
 #[tauri::command]
 pub async fn claude_cli_stream(
     // Injected by Tauri (not passed from JS) — needed to host the in-app MCP
@@ -2283,8 +2287,10 @@ pub async fn codex_cli_stream(
     cwd: Option<String>,
     image_paths: Option<Vec<String>>,
     // Per-role tool gate. Codex has no `--allowedTools` flag, so this is used
-    // ONLY to detect the Browser role (its allowlist names browser_*, the same
-    // capability-key the Publisher uses) for the jail exception below.
+    // to detect the Browser role (its allowlist names browser_*, the same
+    // capability-key the Publisher uses). Browser is the host-capable role
+    // that owns the shared browser; ordinary coders should dispatch browser
+    // work to @browser instead of receiving host-browser privileges.
     allowed_tools: Option<Vec<String>>,
     on_event: Channel<CodexStreamEvent>,
 ) -> Result<String, String> {
@@ -2305,18 +2311,18 @@ pub async fn codex_cli_stream(
         //                 stdio interop relay the Claude WSL path uses.
         // CRUCIAL codex quirk (verified): `codex exec` SILENTLY CANCELS every MCP
         // tool call under `--sandbox workspace-write` — they execute only with
-        // `approval_policy=never` AND `--sandbox danger-full-access`. So the
-        // gateway is wired + the sandbox escalated ONLY where dropping codex's
-        // OWN inner sandbox is acceptable: the dedicated Browser role (host-
-        // capable by design, like Publisher) or a user-granted full-access
-        // project. A normal sandboxed Codex coder is left untouched — no browser,
-        // no escalation, no surprise. (Asymmetry vs Claude — which needs no
-        // escalation for MCP — is inherent to codex coupling MCP approval to the
-        // sandbox mode; documented so the next reader doesn't "fix" it.)
+        // `approval_policy=never` AND `--sandbox danger-full-access`.
+        // The Browser role is host-capable by design (like Publisher): it owns
+        // the shared browser window, localhost previews, external sites and
+        // credentials. Codex only executes MCP tools when its own inner sandbox
+        // is disabled, so the escalation is scoped to that Browser role (or an
+        // explicitly full-access project). Ordinary jailed coders stay sealed;
+        // they should dispatch browser work to @browser instead of controlling
+        // the host browser themselves.
         let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
         let full_access = crate::sandbox::is_full_access(cwd.as_deref());
-        let grant_browser = browser_role || full_access;
+        let grant_browser = codex_should_grant_browser(browser_role, full_access);
         let mut gateway_err: Option<String> = None;
         let mut gw_cfg: Vec<String> = Vec::new();
         let mut token_env: Option<String> = None;
@@ -3328,7 +3334,7 @@ pub async fn kimi_cli_complete(
 
 #[cfg(test)]
 mod tests {
-    use super::is_browser_role_allowlist;
+    use super::{codex_should_grant_browser, is_browser_role_allowlist};
 
     #[test]
     fn browser_role_detected_from_bare_and_prefixed_names() {
@@ -3351,5 +3357,12 @@ mod tests {
         // "web_fetch"/"web_search" must NOT trip the browser exception.
         let researcher = vec!["web_fetch".to_string(), "web_search".to_string()];
         assert!(!is_browser_role_allowlist(Some(&researcher)));
+    }
+
+    #[test]
+    fn codex_browser_grant_is_role_or_full_access_scoped() {
+        assert!(!codex_should_grant_browser(false, false));
+        assert!(codex_should_grant_browser(true, false));
+        assert!(codex_should_grant_browser(false, true));
     }
 }

@@ -70,6 +70,39 @@ export type ProjectSettingsDialogProps = {
 const LBL: React.CSSProperties = { fontSize: 11, color: "var(--fg-muted)", letterSpacing: 0.5, textTransform: "uppercase" };
 const INPUT: React.CSSProperties = { height: 38, padding: "0 12px", borderRadius: 8, background: "var(--bg-input)", color: "var(--fg)", border: "1px solid var(--border)", fontSize: 14 };
 
+// ---- New-project onboarding: intent cards with precooked setups ----
+// Each card maps "what the user wants to make" to a bundled team template
+// (first name in `teams` that exists wins), plus seeds for the form. The
+// grid replaces the raw template <select> as the FIRST step of creation;
+// the old controls stay reachable under Advanced / the Custom card.
+type ProjectKind = {
+  key: string; icon: string; title: string; blurb: string;
+  /// Preferred team template `name`s, in order; first available wins.
+  teams: string[];
+  namePh: string;
+  /// Seeds the (editable) description — one line of context the team starts with.
+  descSeed: string;
+};
+const PROJECT_KINDS: ProjectKind[] = [
+  { key: "web", icon: "🌐", title: "Website / Web app", blurb: "Design, build and preview a site or web app — a Browser agent checks it live on localhost.", teams: ["dev_squad"], namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website / web app. Run it on a localhost dev server and verify pages render in the browser before calling anything done." },
+  { key: "mobile", icon: "📱", title: "Mobile app", blurb: "Build a mobile app — the Browser agent previews it with phone-sized viewports.", teams: ["dev_squad"], namePh: "e.g. fitness-app, todo-mobile", descSeed: "Build a mobile app. Preview web builds with a phone-sized viewport in the browser; keep layouts responsive and touch-friendly." },
+  { key: "software", icon: "🛠", title: "Software / tool", blurb: "General coding: CLIs, backends, libraries — plan, implement, review, verify.", teams: ["owllm_team", "dev_squad"], namePh: "e.g. esp-flash, csv-tool", descSeed: "Build software in this folder. Verify every change (build/tests) before reporting done." },
+  { key: "assistant", icon: "🤖", title: "Personal assistant", blurb: "A secretary team for daily work: notes, plans, mail drafts, reminders, files.", teams: ["secretary", "concierge"], namePh: "e.g. my-desk, daily-ops", descSeed: "Act as my personal assistant: organize notes and files, draft messages, plan tasks and keep track of follow-ups." },
+  { key: "bugfix", icon: "🐛", title: "Fix bugs", blurb: "Point it at an existing repo — hunts, reproduces and fixes bugs at the root.", teams: ["bug_hunter"], namePh: "e.g. fix-login, crash-hunt", descSeed: "Find, reproduce and fix bugs in this codebase. Always verify the fix with a build/test before reporting done." },
+  { key: "review", icon: "🧐", title: "Code review", blurb: "Multi-axis review of a repo or PR: correctness, security, performance, style.", teams: ["code_reviewer"], namePh: "e.g. review-pr42", descSeed: "Review the code in this folder: correctness, security, performance and maintainability. Report concrete findings with file:line references." },
+  { key: "research", icon: "🔬", title: "Research", blurb: "Deep research with sources: compare options, verify claims, write it up.", teams: ["research_lab"], namePh: "e.g. market-scan, paper-notes", descSeed: "Research the topic thoroughly, verify claims across sources, and produce a written summary with references." },
+  { key: "writing", icon: "✍️", title: "Writing & content", blurb: "Articles, docs, scripts, books — drafted, critiqued and polished by a writers room.", teams: ["writers_room"], namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content in this folder. Keep a consistent voice; critique and polish drafts before final." },
+  { key: "data", icon: "📊", title: "Data analysis", blurb: "Explore datasets, crunch numbers, chart findings and explain what they mean.", teams: ["data_analyst"], namePh: "e.g. sales-analysis", descSeed: "Analyze the data in this folder: clean it, extract insights, and present findings clearly." },
+  { key: "social", icon: "📣", title: "Social media", blurb: "Plan and draft posts, threads and campaigns across your channels.", teams: ["social_desk"], namePh: "e.g. launch-campaign", descSeed: "Plan and draft social media content. Match each platform's tone and format; prepare a posting schedule." },
+  { key: "product", icon: "🚀", title: "New product", blurb: "From idea to plan: brainstorm, spec, design and an execution roadmap.", teams: ["product_studio"], namePh: "e.g. saas-idea", descSeed: "Take this product idea from concept to an actionable plan: positioning, spec, milestones." },
+  { key: "custom", icon: "⚙️", title: "Custom…", blurb: "Pick any team template yourself and configure every setting by hand.", teams: [], namePh: "e.g. esp-flash, cleanup-pr, paper-draft", descSeed: "" },
+];
+/// First bundled template (by `name`) this kind prefers that actually exists.
+function kindTeam(kind: ProjectKind, teams: Team[]): Team | null {
+  for (const n of kind.teams) { const t = teams.find(x => x.name === n); if (t) return t; }
+  return null;
+}
+
 export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
   const {
     open, mode, onClose, teams, pickedTeamId, onPickTeam, onResetTeam,
@@ -90,6 +123,11 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [newTrust, setNewTrust] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Visual onboarding: step 1 = "what do you want to make?" card grid,
+  // step 2 = details form pre-seeded by the chosen card.
+  const [step, setStep] = useState<"kind" | "form">("kind");
+  const [kindKey, setKindKey] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   // --- edit-project local state ---
   const [renameVal, setRenameVal] = useState("");
@@ -117,8 +155,14 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     setErr(null); setActMsg(null); setActBusy(null); setConfirmDelete(false);
     if (mode === "new") {
       setName(""); setDescription(""); setNewLocation(""); setNewTrust(false);
-      const initialTeam = (defaultTeamName ? teams.find(t => t.name === defaultTeamName) : null) ?? teams[0] ?? null;
-      setTeamId(initialTeam?.id ?? "");
+      // A template explicitly handed in (e.g. "use this team" from the teams
+      // page) skips the card grid — the user already chose their setup.
+      const preset = defaultTeamName ? teams.find(t => t.name === defaultTeamName) : null;
+      if (preset) {
+        setTeamId(preset.id); setKindKey("custom"); setStep("form"); setShowAdvanced(true);
+      } else {
+        setTeamId(teams[0]?.id ?? ""); setKindKey(""); setStep("kind"); setShowAdvanced(false);
+      }
     } else {
       setRenameVal(project?.name ?? "");
     }
@@ -354,7 +398,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
 
   return (
     <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "var(--bg-overlay)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
-      <div onClick={e => e.stopPropagation()} style={{ width: "min(640px, 92vw)", maxHeight: "92vh", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 14, padding: 22, display: "flex", flexDirection: "column", gap: 14, boxShadow: "var(--shadow-lg)", overflow: "auto" }}>
+      <div onClick={e => e.stopPropagation()} style={{ width: mode === "new" && step === "kind" ? "min(760px, 94vw)" : "min(640px, 92vw)", maxHeight: "92vh", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 14, padding: 22, display: "flex", flexDirection: "column", gap: 14, boxShadow: "var(--shadow-lg)", overflow: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ fontSize: 20, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>
             {mode === "new" ? "+ New project" : `⚙ Project settings${project ? ` — ${project.name}` : ""}`}
@@ -363,36 +407,121 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
         </div>
 
         {mode === "new" ? (
-          <>
-            <div style={{ color: "var(--fg-muted)", fontSize: 12, lineHeight: 1.5 }}>
-              A project couples a folder, a roster of agents, and the team's wiring. The
-              orchestrator dispatches against this roster when you click Run.
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <label style={LBL}>Name</label>
-              <input autoFocus value={name} onChange={e => setName(e.target.value)} placeholder="e.g. esp-flash, cleanup-pr, paper-draft" style={INPUT} />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <label style={LBL}>Description (optional)</label>
-              <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="One line of context for the team to start with." rows={2} style={{ ...INPUT, height: "auto", padding: "8px 12px", resize: "vertical", minHeight: 40 }} />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <label style={LBL}>Folder / location</label>
-              <div style={{ display: "flex", gap: 8 }}>
-                <input value={newLocation} onChange={e => setNewLocation(e.target.value)} placeholder="/path/to/repo or any project folder" style={{ ...INPUT, flex: 1 }} />
-                <button onClick={() => browse(setNewLocation)} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
+          step === "kind" ? (
+            <>
+              {/* STEP 1 — visual onboarding: what do you want to make? */}
+              <div style={{ color: "var(--fg-muted)", fontSize: 12.5, lineHeight: 1.5 }}>
+                What do you want to make? Pick a card — the right team of agents and
+                settings are prepared for you. You can adjust everything afterwards.
               </div>
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <label style={LBL}>Team template</label>
-              {teamSelect(teamId, setTeamId)}
-              {team && <div style={{ color: "var(--fg-muted)", fontSize: 12, lineHeight: 1.5, padding: "4px 2px" }}>{team.description}</div>}
-            </div>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: newTrust ? "#ffb56a" : "var(--fg)" }}>
-              <input type="checkbox" checked={newTrust} onChange={() => setNewTrust(v => !v)} style={{ width: 14, height: 14, accentColor: "var(--accent)" }} />
-              <span>Trust writes — let the team edit files directly without the sandbox guard.</span>
-            </label>
-          </>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(168px, 1fr))", gap: 10 }}>
+                {PROJECT_KINDS.map(k => {
+                  const t = k.key === "custom" ? null : kindTeam(k, teams);
+                  const disabled = k.key !== "custom" && !t;
+                  return (
+                    <button
+                      key={k.key}
+                      type="button"
+                      disabled={disabled}
+                      title={disabled ? "Template not installed" : (t ? `Team: ${t.display} (${t.agents.length} agents)` : "Configure everything yourself")}
+                      onClick={() => {
+                        setKindKey(k.key);
+                        if (t) setTeamId(t.id);
+                        setDescription(k.descSeed);
+                        setShowAdvanced(k.key === "custom");
+                        setStep("form");
+                      }}
+                      style={{
+                        display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 6,
+                        padding: "12px 12px 10px", minHeight: 118, textAlign: "left",
+                        background: "var(--bg-elevated)", border: "1px solid var(--border)",
+                        borderRadius: 12, cursor: disabled ? "not-allowed" : "pointer",
+                        opacity: disabled ? 0.45 : 1,
+                        transition: "border-color 120ms, background 120ms, transform 120ms",
+                      }}
+                      onMouseEnter={e => { if (!disabled) { e.currentTarget.style.borderColor = "rgba(var(--accent-rgb),0.65)"; e.currentTarget.style.background = "rgba(var(--accent-rgb),0.08)"; } }}
+                      onMouseLeave={e => { e.currentTarget.style.borderColor = "var(--border)"; e.currentTarget.style.background = "var(--bg-elevated)"; }}
+                    >
+                      <span style={{ fontSize: 24, lineHeight: 1 }}>{k.icon}</span>
+                      <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>{k.title}</span>
+                      <span style={{ fontSize: 10.5, color: "var(--fg-muted)", lineHeight: 1.45, flex: 1 }}>{k.blurb}</span>
+                      <span style={{ fontSize: 10, color: t ? "rgba(var(--accent-rgb),0.9)" : "var(--fg-subtle)", fontWeight: 700 }}>
+                        {t ? `👥 ${t.display} · ${t.agents.length} agents` : (k.key === "custom" ? "all templates" : "not installed")}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </>
+          ) : (
+            <>
+              {/* STEP 2 — details, pre-seeded by the chosen card. */}
+              {(() => {
+                const kind = PROJECT_KINDS.find(k => k.key === kindKey) ?? null;
+                return (
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "5px 10px", background: "rgba(var(--accent-rgb),0.12)", border: "1px solid rgba(var(--accent-rgb),0.4)", borderRadius: 8, fontSize: 12.5, fontWeight: 700, color: "var(--fg-strong)" }}>
+                      {kind ? `${kind.icon} ${kind.title}` : "⚙️ Custom"}
+                    </span>
+                    <button type="button" className="ghost-btn" style={{ height: 26, padding: "0 10px", fontSize: 11.5 }}
+                      onClick={() => setStep("kind")}>← Change</button>
+                  </div>
+                );
+              })()}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={LBL}>Name</label>
+                <input autoFocus value={name} onChange={e => setName(e.target.value)}
+                  placeholder={(PROJECT_KINDS.find(k => k.key === kindKey)?.namePh) ?? "e.g. esp-flash, cleanup-pr, paper-draft"} style={INPUT} />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={LBL}>Folder / location</label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input value={newLocation} onChange={e => setNewLocation(e.target.value)} placeholder="/path/to/repo or any project folder — new or existing" style={{ ...INPUT, flex: 1 }} />
+                  <button onClick={() => browse(setNewLocation)} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
+                </div>
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                <label style={LBL}>Context for the team <span style={{ opacity: 0.6, textTransform: "none", letterSpacing: 0 }}>— editable, seeded by your pick</span></label>
+                <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="One line of context for the team to start with." rows={2} style={{ ...INPUT, height: "auto", padding: "8px 12px", resize: "vertical", minHeight: 40 }} />
+              </div>
+              {/* What you get — the precooked setup, stated honestly. */}
+              {team && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, borderRadius: 10, background: "var(--bg-elevated)", border: "1px solid var(--border)" }}>
+                  <label style={LBL}>What you get</label>
+                  <div style={{ fontSize: 12.5, color: "var(--fg-strong)", fontWeight: 700 }}>👥 {team.display} <span style={{ color: "var(--fg-muted)", fontWeight: 400 }}>— {team.agents.length} agents, wired and ready</span></div>
+                  <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5 }}>{team.description}</div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
+                    {team.agents.map(a => (
+                      <span key={a.name} style={{ background: "var(--bg-surface)", color: "var(--fg-muted)", fontSize: 10, fontFamily: "Consolas, monospace", borderRadius: 4, padding: "2px 6px" }}>{a.name}</span>
+                    ))}
+                  </div>
+                  {(team.requiredMcp?.length ?? 0) > 0 && (
+                    <div style={{ color: "#a8b8ff", fontSize: 11, lineHeight: 1.4 }}>Uses MCP: {team.requiredMcp!.map(m => m.replace(/^mcp\./, "")).join(", ")}.</div>
+                  )}
+                  <div style={{ color: "var(--fg-subtle)", fontSize: 10.5, lineHeight: 1.4 }}>
+                    Agents run sandboxed by default — security, folder and team can all be changed later in ⚙ Project settings.
+                  </div>
+                </div>
+              )}
+              {/* Advanced — the raw controls (template picker + trust). */}
+              <button type="button" onClick={() => setShowAdvanced(v => !v)}
+                style={{ alignSelf: "flex-start", background: "none", border: "none", color: "var(--fg-muted)", fontSize: 12, cursor: "pointer", padding: 0 }}>
+                {showAdvanced ? "▾" : "▸"} Advanced — team template & permissions
+              </button>
+              {showAdvanced && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, paddingLeft: 12, borderLeft: "2px solid var(--border)" }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    <label style={LBL}>Team template</label>
+                    {teamSelect(teamId, setTeamId)}
+                  </div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: newTrust ? "#ffb56a" : "var(--fg)" }}>
+                    <input type="checkbox" checked={newTrust} onChange={() => setNewTrust(v => !v)} style={{ width: 14, height: 14, accentColor: "var(--accent)" }} />
+                    <span>Trust writes — let the team edit files directly without the sandbox guard.</span>
+                  </label>
+                </div>
+              )}
+            </>
+          )
         ) : (
           <>
             {/* Name + rename */}
@@ -575,7 +704,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
         <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
           <button onClick={onClose} disabled={busy} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>{mode === "new" ? "Cancel" : "Done"}</button>
           <div style={{ flex: 1 }} />
-          {mode === "new" && (
+          {mode === "new" && step === "form" && (
             <button onClick={onCreate} disabled={busy || !name.trim() || !team}
               style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: busy || !name.trim() || !team ? "rgba(var(--accent-rgb),0.30)" : "var(--accent)", color: busy || !name.trim() || !team ? "var(--fg-muted)" : "var(--accent-fg)", fontWeight: 700, fontSize: 14, cursor: busy || !name.trim() || !team ? "not-allowed" : "pointer" }}
             >{busy ? "Creating…" : "Create project"}</button>

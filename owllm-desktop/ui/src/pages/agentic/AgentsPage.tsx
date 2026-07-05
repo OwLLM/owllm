@@ -10502,6 +10502,16 @@ export function AgentsPage({
               try { briefText = await invoke<string>("tool_read_file", { path: base, cwd: projectCwd }); } catch { /* agents still read the ./ path */ }
             }
           } catch (e: any) {
+            // Distinguish "the source isn't a real file on the host" from "it
+            // exists but I couldn't bring it in". A path that isn't a file was
+            // almost certainly INCIDENTAL context the user pasted — an error-log
+            // path or a config that doesn't exist yet (e.g. "set an Auth method in
+            // C:\Users\me\.gemini\settings.json") — NOT a file the team must
+            // ingest. Halting the whole run over pasted diagnostic text is wrong:
+            // skip it and dispatch normally. Only a real, on-disk file we genuinely
+            // can't copy in (permission/lock) still stops before churn.
+            const emsg = String(e?.message ?? e ?? "");
+            if (/\bnot a file\b/i.test(emsg)) continue;
             // Even the host copy failed (unreadable source / no workspace) — now it's
             // genuinely the user's call. Surface it in SECONDS, not after churn.
             const dest = suggestInRoot(p, projectCwd);

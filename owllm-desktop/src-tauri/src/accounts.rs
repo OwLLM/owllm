@@ -643,7 +643,7 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
         // stdin (no --prompt flag — that's REPL-only). Matches how
         // claude_cli_complete invokes it elsewhere in this file.
         "claude_cli" => probe_cli_subscription(
-            find_claude_cli(), &["--print"], "Claude", Some("ok")).await,
+            find_claude_cli(), vec!["--print".into()], "Claude", Some("ok")).await,
         // OpenAI Codex CLI: `codex exec <prompt>` is the non-interactive
         // shape. There's no --print/--prompt; older docs to the contrary.
         // Two things have to be right or it exits 1 with "Reading additional
@@ -662,23 +662,28 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
         //      the flags.
         "codex_cli" => probe_cli_subscription(
             find_codex_cli(),
-            &["exec", "--skip-git-repo-check", "--color", "never",
-              "--sandbox", "read-only", "ok"],
+            ["exec", "--skip-git-repo-check", "--color", "never",
+             "--sandbox", "read-only", "ok"].iter().map(|s| s.to_string()).collect(),
             "Codex", Some("ok"),
         ).await,
-        "kimi_cli" => probe_cli_subscription(
-            find_kimi_cli(),
-            // `--model kimi-latest` so the probe works even when the
-            // user's kimi config has no default model set (CLI's REPL
-            // welcome screen prints "Model: not set" and any --print
-            // call exits 1 without a model). kimi-latest is Moonshot's
-            // always-available alias.
-            &["--print", "--output-format", "text", "--final-message-only",
-              "--model", "kimi-latest", "--prompt", "ok"],
-            "Kimi", None,
-        ).await,
+        "kimi_cli" => {
+            // Model flag is config-aware: current kimi-cli hard-rejects any
+            // model id not declared in ~/.kimi/config.toml (LLMNotSet), and
+            // after login it always writes a default_model — so the probe
+            // must NOT force the old `kimi-latest` alias (that was the
+            // "subscription never ties after login" bug). kimi_model_args
+            // only adds `--model kimi-latest` for ancient CLIs with no
+            // config default.
+            let mut args: Vec<String> =
+                ["--print", "--output-format", "text", "--final-message-only"]
+                    .iter().map(|s| s.to_string()).collect();
+            args.extend(kimi_model_args(None));
+            args.push("--prompt".into());
+            args.push("ok".into());
+            probe_cli_subscription(find_kimi_cli(), args, "Kimi", None).await
+        }
         "gemini_cli" => probe_cli_subscription(
-            find_gemini_cli(), &["--prompt", "ok"], "Gemini", None).await,
+            find_gemini_cli(), vec!["--prompt".into(), "ok".into()], "Gemini", None).await,
 
         // -- API keys: HTTP GET the provider's /v1/models endpoint
         //    with the key in Authorization. 200 = valid. 401/403 =
@@ -828,14 +833,14 @@ fn wsl_probe(_backend: &str) -> (bool, String) {
 // stdin (CLIs that accept the prompt as an argument).
 async fn probe_cli_subscription(
     exe: Option<PathBuf>,
-    args: &'static [&'static str],
+    args: Vec<String>,
     name: &'static str,
     stdin_text: Option<&'static str>,
 ) -> (bool, String) {
     let Some(exe) = exe else {
         return (false, format!("{name} CLI not found on PATH"));
     };
-    let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    let args_vec: Vec<String> = args;
     let exe_clone = exe.clone();
     let stdin_owned: Option<String> = stdin_text.map(|s| s.to_string());
 
@@ -2690,15 +2695,66 @@ fn codex_cli_logged_in() -> bool {
     p1.exists() || p2.exists()
 }
 
-/// Kimi Code CLI (MoonshotAI/kimi-cli) saves its OAuth config to
-/// ~/.kimi/config.toml after `kimi /login`. Same presence-of-file
-/// signal as Claude / Codex.
+/// Kimi Code CLI (MoonshotAI/kimi-cli) marks a login two ways depending on
+/// version: older CLIs put OAuth straight into ~/.kimi/config.toml; current
+/// ones (verified live 2026-07-05) write ~/.kimi/credentials/kimi-code.json
+/// (access_token/refresh_token) alongside a token-free config.toml. Accept
+/// either marker.
 fn kimi_cli_logged_in() -> bool {
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
         return false;
     };
-    let cfg = PathBuf::from(home).join(".kimi").join("config.toml");
-    cfg.exists()
+    let kimi = PathBuf::from(home).join(".kimi");
+    kimi.join("credentials").join("kimi-code.json").is_file() || kimi.join("config.toml").exists()
+}
+
+/// Raw text of ~/.kimi/config.toml (None when absent/unreadable).
+fn kimi_config_text() -> Option<String> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    std::fs::read_to_string(PathBuf::from(home).join(".kimi").join("config.toml")).ok()
+}
+
+/// Does the kimi config define a default model? Current kimi-cli writes
+/// `default_model = "kimi-code/kimi-for-coding"` at login; when present the
+/// CLI runs fine with NO --model flag — and rejects any model id that isn't
+/// declared in its [models] table with a hard `LLMNotSet` error.
+fn kimi_config_has_default(text: &str) -> bool {
+    text.lines().any(|l| l.trim_start().starts_with("default_model"))
+}
+
+/// Model ids declared in the kimi config's `[models."<id>"]` tables.
+fn kimi_config_model_keys(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            t.strip_prefix("[models.\"")
+                .and_then(|rest| rest.strip_suffix("\"]"))
+                .map(|k| k.to_string())
+        })
+        .collect()
+}
+
+/// `--model` args for a kimi invocation, resilient to the CLI's config:
+/// pass the requested id only when the config declares it (or when there is
+/// no config default to fall back on — old CLIs NEED an explicit model).
+/// Forcing an undeclared id (the old hardcoded `kimi-latest`) makes current
+/// kimi-cli abort with `LLMNotSet` — that was the "subscription never ties
+/// after login" bug (reproduced live 2026-07-05: exit 1 with the forced
+/// model, exit 0 without it).
+fn kimi_model_args(requested: Option<&str>) -> Vec<String> {
+    let cfg = kimi_config_text();
+    let has_default = cfg.as_deref().map(kimi_config_has_default).unwrap_or(false);
+    let keys = cfg.as_deref().map(kimi_config_model_keys).unwrap_or_default();
+    match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(req) if keys.iter().any(|k| k == req) => vec!["--model".into(), req.to_string()],
+        Some(req) if !has_default => vec!["--model".into(), req.to_string()],
+        // Requested id isn't declared but a default exists → let the CLI use
+        // its default instead of dying on LLMNotSet.
+        Some(_) => Vec::new(),
+        None if has_default => Vec::new(),
+        // No config default at all (ancient CLI): keep the old always-valid alias.
+        None => vec!["--model".into(), "kimi-latest".into()],
+    }
 }
 
 /// Google Gemini CLI (google-gemini/gemini-cli) caches OAuth at
@@ -3165,11 +3221,26 @@ pub fn cli_install(backend: String) -> Result<(), String> {
 /// Gemini API on the user's subscription.
 #[tauri::command]
 pub async fn gemini_cli_complete(
+    app: tauri::AppHandle,
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
 ) -> Result<String, String> {
+    // Host runs get the in-app browser gateway. Gemini CLI has no per-run
+    // MCP flag — it reads project-scoped `<cwd>/.gemini/settings.json`
+    // (shape verified against `gemini mcp add -s project -t http` 0.43.0).
+    // The entry is merge-written on every spawn so the gateway's fresh
+    // port/token always win; other settings keys are preserved.
+    if !crate::sandbox::is_isolated(cwd.as_deref()) {
+        if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            if std::path::Path::new(dir).is_dir() {
+                if let Err(e) = crate::mcp_gateway::write_gemini_project_config(&app, dir) {
+                    eprintln!("gemini: browser gateway not wired ({e}); run continues without browser tools");
+                }
+            }
+        }
+    }
     tokio::task::spawn_blocking(move || {
         let composed = if system_prompt.trim().is_empty() {
             user_message
@@ -3252,11 +3323,31 @@ pub async fn gemini_cli_complete(
 /// separator instead.
 #[tauri::command]
 pub async fn kimi_cli_complete(
+    app: tauri::AppHandle,
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
 ) -> Result<String, String> {
+    // Host runs get the in-app browser gateway: kimi-cli natively accepts the
+    // SAME Claude-format MCP config file via --mcp-config-file (verified live
+    // 2026-07-05: kimi listed all 12 browser_* tools and executed
+    // browser_snapshot against the running gateway — bare names, no approval
+    // prompt needed in --print mode). WSL-isolated runs skip it: the kimi in
+    // the distro can't reach host loopback and no relay is plumbed for this
+    // one-shot path yet.
+    let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
+    let mcp_config: Option<String> = if host_run {
+        match crate::mcp_gateway::write_cli_config(&app) {
+            Ok(p) => Some(p.to_string_lossy().to_string()),
+            Err(e) => {
+                eprintln!("kimi: browser gateway not wired ({e}); run continues without browser tools");
+                None
+            }
+        }
+    } else {
+        None
+    };
     tokio::task::spawn_blocking(move || {
         // Compose system + user into a single prompt — Kimi --print
         // mode doesn't expose a system-message flag.
@@ -3274,9 +3365,12 @@ pub async fn kimi_cli_complete(
             "text".into(),
             "--final-message-only".into(),
         ];
-        if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-            args.push("--model".into());
-            args.push(m.to_string());
+        // Config-aware model flag: forcing an id the CLI's config doesn't
+        // declare aborts with LLMNotSet (see kimi_model_args).
+        args.extend(kimi_model_args(model.as_deref()));
+        if let Some(cfg) = mcp_config.as_ref() {
+            args.push("--mcp-config-file".into());
+            args.push(cfg.clone());
         }
         args.push("--prompt".into());
         args.push(composed);
@@ -3307,6 +3401,11 @@ pub async fn kimi_cli_complete(
             }
             c
         };
+        // kimi-cli is Python: on Windows its piped stdout defaults to the
+        // legacy charmap codec and CRASHES on any non-ANSI character in the
+        // reply ("'charmap' codec can't encode…" — reproduced live with a
+        // Korean page snapshot). Force UTF-8 so Unicode output survives.
+        cmd.env("PYTHONUTF8", "1");
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
@@ -3334,7 +3433,52 @@ pub async fn kimi_cli_complete(
 
 #[cfg(test)]
 mod tests {
-    use super::{codex_should_grant_browser, is_browser_role_allowlist};
+    use super::{
+        codex_should_grant_browser, is_browser_role_allowlist, kimi_config_has_default,
+        kimi_config_model_keys,
+    };
+
+    // Reproduces the "subscription never ties after login" bug: a login-time
+    // config declares a default + one model; forcing an undeclared id (the old
+    // hardcoded `kimi-latest`) is what triggered LLMNotSet.
+    const KIMI_CFG: &str = "default_model = \"kimi-code/kimi-for-coding\"\n\
+        [models.\"kimi-code/kimi-for-coding\"]\nmodel = \"kimi-for-coding\"\n";
+
+    #[test]
+    fn kimi_config_default_and_keys_parse() {
+        assert!(kimi_config_has_default(KIMI_CFG));
+        assert_eq!(kimi_config_model_keys(KIMI_CFG), vec!["kimi-code/kimi-for-coding"]);
+        assert!(!kimi_config_has_default("theme = \"dark\"\n"));
+        assert!(kimi_config_model_keys("theme = \"dark\"\n").is_empty());
+    }
+
+    #[test]
+    fn kimi_model_args_policy() {
+        use super::{kimi_config_has_default, kimi_config_model_keys};
+        // Mirror kimi_model_args' decision without touching the real ~/.kimi.
+        let decide = |req: Option<&str>, cfg: Option<&str>| -> Vec<String> {
+            let has_default = cfg.map(kimi_config_has_default).unwrap_or(false);
+            let keys = cfg.map(kimi_config_model_keys).unwrap_or_default();
+            match req.map(str::trim).filter(|s| !s.is_empty()) {
+                Some(r) if keys.iter().any(|k| k == r) => vec!["--model".into(), r.to_string()],
+                Some(r) if !has_default => vec!["--model".into(), r.to_string()],
+                Some(_) => Vec::new(),
+                None if has_default => Vec::new(),
+                None => vec!["--model".into(), "kimi-latest".into()],
+            }
+        };
+        // Undeclared id + a config default → drop the flag (the bug fix).
+        assert!(decide(Some("kimi-latest"), Some(KIMI_CFG)).is_empty());
+        // Declared id → pass it through.
+        assert_eq!(
+            decide(Some("kimi-code/kimi-for-coding"), Some(KIMI_CFG)),
+            vec!["--model", "kimi-code/kimi-for-coding"]
+        );
+        // No config at all (ancient CLI) → keep the always-valid alias.
+        assert_eq!(decide(None, None), vec!["--model", "kimi-latest"]);
+        // Config default, no request → let the CLI use its default.
+        assert!(decide(None, Some(KIMI_CFG)).is_empty());
+    }
 
     #[test]
     fn browser_role_detected_from_bare_and_prefixed_names() {

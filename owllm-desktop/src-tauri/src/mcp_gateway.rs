@@ -201,6 +201,52 @@ pub fn write_cli_config(app: &AppHandle) -> Result<std::path::PathBuf, String> {
     Ok(std::path::PathBuf::from(cli_safe_path(&path)))
 }
 
+/// Wire the gateway into Gemini CLI, which (unlike Claude/Codex/Kimi) has NO
+/// per-run MCP flag — it reads project-scoped `<cwd>/.gemini/settings.json`.
+/// We MERGE our `owllm` server entry into any existing settings (preserving
+/// the user's other keys) and rewrite it every spawn so the fresh
+/// port/token win. Entry shape verified against `gemini mcp add -s project
+/// -t http … -H "Authorization: Bearer …" --trust` (gemini-cli 0.43.0):
+///   { "mcpServers": { "owllm": { "url":…, "type":"http",
+///       "headers": {"Authorization":"Bearer …"}, "trust": true } } }
+/// `trust: true` skips per-tool confirmation prompts, which would otherwise
+/// stall a non-interactive `--prompt` run.
+pub fn write_gemini_project_config(app: &AppHandle, cwd: &str) -> Result<(), String> {
+    let info = ensure_started(app)?;
+    let dir = std::path::Path::new(cwd).join(".gemini");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    let path = dir.join("settings.json");
+
+    // Preserve existing settings; only replace our own server entry.
+    let mut root: serde_json::Value = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({}));
+    if !root.is_object() {
+        root = json!({});
+    }
+    let servers = root
+        .as_object_mut()
+        .unwrap()
+        .entry("mcpServers")
+        .or_insert_with(|| json!({}));
+    if !servers.is_object() {
+        *servers = json!({});
+    }
+    servers.as_object_mut().unwrap().insert(
+        SERVER_NAME.to_string(),
+        json!({
+            "url": info.url,
+            "type": "http",
+            "headers": { "Authorization": format!("Bearer {}", info.token) },
+            "trust": true
+        }),
+    );
+    std::fs::write(&path, serde_json::to_vec_pretty(&root).unwrap_or_default())
+        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    Ok(())
+}
+
 /// stdio↔HTTP relay for non-jailed WSL runs (full-access or no bwrap).
 ///
 /// A WSL-isolated agent can't reach the host loopback gateway over TCP (NAT +

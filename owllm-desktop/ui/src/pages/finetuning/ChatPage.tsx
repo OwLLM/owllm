@@ -799,7 +799,18 @@ export default function ChatPage() {
     const augmentedSystem = [modeInstruction, col.system].filter(Boolean).join("\n\n");
     const liveMessages: Array<{ role: string; content: string }> = [
       { role: "system", content: augmentedSystem },
-      ...next.map((m) => ({ role: m.role, content: m.content })),
+      // Only REAL conversation turns go to the model. The store also holds
+      // role:"system" UI cards (the tool/terminal/notice rows added by
+      // appendEvent / appendNoticeAll for the transcript). Mapping those in
+      // sends a system message mid-array, so strict Jinja chat templates
+      // (Mistral, some Qwen/Gemma) hit raise_exception("System message must
+      // be at the beginning") — which is why the chat worked for the first
+      // turn (clean system+user) then broke once a notice/tool card landed.
+      // Keep only user/assistant turns; the real system prompt is prepended
+      // explicitly above.
+      ...next
+        .filter((m) => m.role === "user" || m.role === "assistant")
+        .map((m) => ({ role: m.role, content: m.content })),
     ];
     // Tool-turn budget — MUST match the agent chat (streamLocalChat in
     // dispatch.ts uses 16). The old cap of 4 was why the fine-tuning chat

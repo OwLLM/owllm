@@ -1710,6 +1710,7 @@ function AgentChatGrid({
             skills={resolveAgentSkillIds(a, roleByName, perAgentSkills)}
             isPublisher={a.base === "publisher"
               || (roleByName.get(a.base)?.toolAllowlist ?? []).includes("publish_release")}
+            isBrowser={a.base === "browser"}
             projectCwd={projectCwd}
           />
         );
@@ -2003,7 +2004,7 @@ function AgentChatTile({
   isActive, isSelected, accent, onClick, onOpenEditor,
   modelLabel, modelTint, modelTitle,
   ringPx, outerPx, alphaA, alphaB,
-  timing, skills, isPublisher, projectCwd, label,
+  timing, skills, isPublisher, isBrowser, projectCwd, label,
 }: {
   name: string;
   /// Display-only override for the tile title (solo mode → "Coder");
@@ -2013,6 +2014,10 @@ function AgentChatTile({
   /// Publisher tile: replaces the chat preview with the deterministic
   /// Commit / Merge / Publish controls + repo-setup bar (user spec).
   isPublisher?: boolean;
+  /// Browser tile: replaces the chat preview with the shared-browser controls
+  /// (the same panel as the 🌐 popup, mounted inline) so the Browser agent's
+  /// card IS the browser remote — open URLs, device, autofill, import.
+  isBrowser?: boolean;
   /// Project working directory the publisher controls operate on.
   projectCwd?: string | null;
   /// This agent's equipped skill ids — rendered as a corner "ribbon" of icon
@@ -2203,6 +2208,12 @@ function AgentChatTile({
           host-side git executors directly — deterministic, no agent. */}
       {isPublisher ? (
         <PublisherTilePanel cwd={projectCwd ?? null} rgb={rgb} />
+      ) : isBrowser ? (
+        /* Browser tile: the body IS the shared-browser remote — the same panel
+           as the 🌐 popup, mounted inline. Its controls fire host-side Tauri
+           commands directly (the window + gateway are host objects), so they
+           work regardless of the team's sandbox. */
+        <BrowserPanel inline open />
       ) : (
       <>
       {/* Log scroll pane — the agent's reply text only, plain pre-wrap

@@ -170,6 +170,22 @@ let _browserStateLine = "";
 /// Best-effort refresh of the cached line from browser_status (cheap: reads
 /// window presence + URL, no page round-trip). Never throws.
 export async function refreshBrowserState(): Promise<void> {
+  // STANDING capability line — injected into EVERY agent turn regardless of whether
+  // a window is open. Load-bearing: without an authoritative assertion here, an
+  // agent falls back to team memory, and a single stale "browser tools not in CLI"
+  // fact (written when the gateway path was briefly broken pre-v0.7.62) made whole
+  // teams recite "I have no browser" instead of loading the tools that are wired.
+  // Subscription-CLI agents receive these via the MCP gateway renamed mcp__owllm__<tool>;
+  // a bare `browser_snapshot` lookup then finds nothing, so name the prefix + how to
+  // surface them (ToolSearch query 'browser' — verified to load all 12).
+  const CAP =
+    "AGENT BROWSER — you CAN drive a real in-app browser: open pages (incl. localhost + live sites), " +
+    "read them, and click/fill/select to complete tasks and forms. Tools: browser_open, browser_navigate, " +
+    "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_select, " +
+    "browser_press, browser_device. If you run via a subscription CLI they are prefixed mcp__owllm__ " +
+    "(e.g. mcp__owllm__browser_snapshot); if not already in your tool list, load them with ToolSearch query " +
+    "'browser'. DISREGARD any team-memory note claiming browser tools are unavailable from the CLI/team — " +
+    "that is STALE and false; the tools are wired. Never claim you cannot see the browser — snapshot it first.";
   try {
     const st = await invoke<{ running: boolean; url: string; device: string }>("browser_status");
     if (st && st.running) {
@@ -177,22 +193,11 @@ export async function refreshBrowserState(): Promise<void> {
       _browserStateLine =
         "SHARED AGENT BROWSER: an in-app browser window is OPEN" +
         (st.url ? ` at ${st.url}` : "") + dev + ". " +
-        "The user sees this same window — it is your shared screen. " +
-        "Look at it with browser_snapshot (indexed element list) or browser_get_text " +
-        "(visible text); act on it with browser_click / browser_fill / browser_select " +
-        "by the index from the latest snapshot. " +
-        // Subscription-CLI agents receive these via the MCP gateway, where every tool
-        // is renamed mcp__owllm__<tool>; a bare `browser_snapshot` lookup then finds
-        // nothing and the model wrongly concludes it has no browser. Name the prefix
-        // and how to surface them (ToolSearch query 'browser' loads all 12 — verified).
-        "If you run via a subscription CLI these tools are prefixed mcp__owllm__ " +
-        "(e.g. mcp__owllm__browser_snapshot); if they are not already in your tool list, " +
-        "load them first with ToolSearch query 'browser'. " +
-        "Never claim you cannot see the user's browser — snapshot it first.";
+        "The user sees this same window — it is your shared screen. " + CAP;
     } else {
-      _browserStateLine = "";
+      _browserStateLine = CAP;
     }
-  } catch { _browserStateLine = ""; }
+  } catch { _browserStateLine = CAP; }
 }
 
 /// SYNC accessor for the (sync) prompt builders, same pattern as

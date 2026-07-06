@@ -9,7 +9,7 @@
 // / onToggleTrustWrites …), which already persist to the project row via the
 // AgentsPage effects — so this dialog adds NO new persistence path for those.
 
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isolationBadge } from "./isolationBadge";
 import { isWslPath } from "./wslIsolation";
@@ -128,6 +128,10 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [step, setStep] = useState<"kind" | "form">("kind");
   const [kindKey, setKindKey] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  // Backdrop-dismiss guard: remember whether a mouse press BEGAN on the overlay.
+  // Without this, selecting text in a field and releasing the mouse outside the
+  // dialog bubbles a click to the backdrop and nukes the whole half-filled form.
+  const downOnBackdrop = useRef(false);
 
   // --- edit-project local state ---
   const [renameVal, setRenameVal] = useState("");
@@ -397,7 +401,19 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   );
 
   return (
-    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "var(--bg-overlay)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
+    <div
+      onMouseDown={e => { downOnBackdrop.current = e.target === e.currentTarget; }}
+      onClick={e => {
+        // Dismiss only when BOTH the press and release landed on the backdrop
+        // itself — never on a click that bubbled from inside, and never on a
+        // text-selection drag that began in a field and released out here.
+        if (e.target !== e.currentTarget || !downOnBackdrop.current) return;
+        downOnBackdrop.current = false;
+        if (mode === "new" && (name.trim() || description.trim() || newLocation.trim())
+            && !window.confirm("Discard this new project and close?")) return;
+        onClose();
+      }}
+      style={{ position: "fixed", inset: 0, background: "var(--bg-overlay)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000 }}>
       <div onClick={e => e.stopPropagation()} style={{ width: mode === "new" && step === "kind" ? "min(760px, 94vw)" : "min(640px, 92vw)", maxHeight: "92vh", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 14, padding: 22, display: "flex", flexDirection: "column", gap: 14, boxShadow: "var(--shadow-lg)", overflow: "auto" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={{ fontSize: 20, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>

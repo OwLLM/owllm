@@ -719,9 +719,20 @@ export type Directive = {
 /// to avoid").
 export function formatDirectivesBlock(directives: Directive[] | null | undefined): string {
   if (!directives || directives.length === 0) return "";
-  const must = directives.filter(d => d.kind === "must");
-  const prefer = directives.filter(d => d.kind === "prefer");
-  const avoid = directives.filter(d => d.kind === "avoid");
+  // Dedup by (kind, text): a broken seed-version stamp used to re-insert the
+  // default set on every list for Code-page scopes (observed 11x duplicates),
+  // multiplying every agent's system prompt. The DB heals itself on next seed,
+  // but rows synced from other PCs may still carry dupes — never inject them.
+  const seen = new Set<string>();
+  const unique = directives.filter(d => {
+    const key = `${d.kind} ${(d.text || "").trim()}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  const must = unique.filter(d => d.kind === "must");
+  const prefer = unique.filter(d => d.kind === "prefer");
+  const avoid = unique.filter(d => d.kind === "avoid");
   const lines: string[] = ["", "--- PROJECT RULES (set by the user — apply to every turn) ---"];
   if (must.length > 0) {
     lines.push("MUST:");

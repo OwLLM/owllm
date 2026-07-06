@@ -122,6 +122,19 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "ALTER TABLE agent_projects ADD COLUMN directives_updated_at TEXT NOT NULL DEFAULT ''",
         [],
     );
+    // Seed-version marks that work for ANY scope id. The agent_projects stamp
+    // only sticks for real agent projects — Code-page scopes ("code:<path>")
+    // have no agent_projects row, so their UPDATE hit 0 rows and every
+    // directives_list RE-SEEDED the full default set (observed: 11x duplicate
+    // rules injected into every prompt). This table is the stamp that always
+    // sticks; agent_projects.directives_seeded is kept for back-compat/sync.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS directives_seed_marks (\
+            project_id TEXT PRIMARY KEY,\
+            version INTEGER NOT NULL\
+        )",
+        [],
+    ).map_err(|e| format!("create directives_seed_marks: {e}"))?;
     Ok(())
 }
 
@@ -214,16 +227,36 @@ fn insert_defaults(
 ///     to 'user_typed'. So upgrades refresh the defaults without losing user work.
 /// Idempotent once at CURRENT_SEED_VERSION.
 fn seed_defaults_if_needed(conn: &rusqlite::Connection, project_id: &str) -> Result<(), String> {
-    let seeded: i64 = conn
+    // Effective seed version = max of the two stamps. agent_projects only has a
+    // row for real agent projects; Code-page scopes ("code:<path>") rely on the
+    // marks table (see ensure_schema for the duplicate-seeding bug this fixes).
+    let seeded_proj: i64 = conn
         .query_row(
             "SELECT COALESCE(directives_seeded, 0) FROM agent_projects WHERE id = ?1",
             rusqlite::params![project_id],
             |r| r.get(0),
         )
         .unwrap_or(0);
+    let seeded_mark: i64 = conn
+        .query_row(
+            "SELECT version FROM directives_seed_marks WHERE project_id = ?1",
+            rusqlite::params![project_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let seeded = seeded_proj.max(seeded_mark);
     if seeded >= CURRENT_SEED_VERSION {
         return Ok(());
     }
+    // Heal duplicates from the broken-stamp era: keep the oldest copy of each
+    // built-in per (kind, text), drop the rest. User-typed rows are untouched.
+    let _ = conn.execute(
+        "DELETE FROM agent_directives WHERE project_id = ?1 AND source = 'builtin' \
+         AND rowid NOT IN (SELECT MIN(rowid) FROM agent_directives \
+                           WHERE project_id = ?1 AND source = 'builtin' \
+                           GROUP BY kind, text)",
+        rusqlite::params![project_id],
+    );
     if seeded > 0 {
         // Upgrade: drop the previous version's untouched built-ins before re-seeding.
         let _ = conn.execute(
@@ -231,9 +264,15 @@ fn seed_defaults_if_needed(conn: &rusqlite::Connection, project_id: &str) -> Res
             rusqlite::params![project_id],
         );
     }
-    insert_defaults(conn, project_id, false)?;
-    // Stamp the current seed version. No-op if the project row isn't there yet —
-    // the next call re-checks. Swallow the error so listing never fails on it.
+    // skip_existing_by_text: seeding is idempotent by construction — a surviving
+    // (healed) rule set is never duplicated even if the stamp write failed.
+    insert_defaults(conn, project_id, true)?;
+    // Stamp the current seed version in BOTH places: the marks row always
+    // sticks (any scope id); the agent_projects column is kept for sync/back-compat.
+    let _ = conn.execute(
+        "INSERT OR REPLACE INTO directives_seed_marks (project_id, version) VALUES (?1, ?2)",
+        rusqlite::params![project_id, CURRENT_SEED_VERSION],
+    );
     let _ = conn.execute(
         "UPDATE agent_projects SET directives_seeded = ?2 WHERE id = ?1",
         rusqlite::params![project_id, CURRENT_SEED_VERSION],
@@ -372,6 +411,10 @@ pub async fn directives_restore_defaults(project_id: String) -> Result<usize, St
         let conn = open_conn()?;
         let added = insert_defaults(&conn, &project_id, true)?;
         let _ = conn.execute(
+            "INSERT OR REPLACE INTO directives_seed_marks (project_id, version) VALUES (?1, ?2)",
+            rusqlite::params![project_id, CURRENT_SEED_VERSION],
+        );
+        let _ = conn.execute(
             "UPDATE agent_projects SET directives_seeded = ?2 WHERE id = ?1",
             rusqlite::params![project_id, CURRENT_SEED_VERSION],
         );
@@ -438,5 +481,76 @@ fn normalize_kind(k: &str) -> String {
     match k.trim().to_ascii_lowercase().as_str() {
         "must" | "prefer" | "avoid" => k.trim().to_ascii_lowercase(),
         _ => "must".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mem_conn() -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open_in_memory().expect("in-memory db");
+        ensure_schema(&conn).expect("schema");
+        conn
+    }
+
+    fn count_rules(conn: &rusqlite::Connection, pid: &str) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM agent_directives WHERE project_id = ?1",
+            rusqlite::params![pid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// The Code-page scope bug: "code:<path>" ids have no agent_projects row,
+    /// so the old stamp never stuck and EVERY directives_list re-seeded the
+    /// full default set (observed 11x duplicates → 11x rules in every prompt).
+    /// Seeding must now be idempotent for such scopes.
+    #[test]
+    fn seeding_code_scope_twice_does_not_duplicate() {
+        let conn = mem_conn();
+        let pid = r"code:c:\some\folder";
+        seed_defaults_if_needed(&conn, pid).unwrap();
+        assert_eq!(count_rules(&conn, pid), DEFAULT_DIRECTIVES.len() as i64);
+        // Second, third call — the marks-table stamp must hold.
+        seed_defaults_if_needed(&conn, pid).unwrap();
+        seed_defaults_if_needed(&conn, pid).unwrap();
+        assert_eq!(count_rules(&conn, pid), DEFAULT_DIRECTIVES.len() as i64);
+    }
+
+    /// A DB already poisoned by the broken-stamp era (N copies of every
+    /// builtin) must heal down to one copy on the next seed pass.
+    #[test]
+    fn seeding_heals_duplicates_from_broken_stamp_era() {
+        let conn = mem_conn();
+        let pid = r"code:c:\1_git\locallm";
+        // Simulate the old behaviour: three raw re-seeds with no dedup.
+        insert_defaults(&conn, pid, false).unwrap();
+        insert_defaults(&conn, pid, false).unwrap();
+        insert_defaults(&conn, pid, false).unwrap();
+        assert_eq!(count_rules(&conn, pid), 3 * DEFAULT_DIRECTIVES.len() as i64);
+        seed_defaults_if_needed(&conn, pid).unwrap();
+        assert_eq!(count_rules(&conn, pid), DEFAULT_DIRECTIVES.len() as i64);
+        // And it stays healed.
+        seed_defaults_if_needed(&conn, pid).unwrap();
+        assert_eq!(count_rules(&conn, pid), DEFAULT_DIRECTIVES.len() as i64);
+    }
+
+    /// User deletions must survive: once seeded, deleting a builtin and
+    /// re-listing must NOT bring it back (the stamp keeps re-seed away).
+    #[test]
+    fn deleted_builtin_stays_deleted_after_reseed_check() {
+        let conn = mem_conn();
+        let pid = r"code:c:\proj";
+        seed_defaults_if_needed(&conn, pid).unwrap();
+        conn.execute(
+            "DELETE FROM agent_directives WHERE project_id = ?1 AND kind = 'avoid'",
+            rusqlite::params![pid],
+        )
+        .unwrap();
+        let after_delete = count_rules(&conn, pid);
+        seed_defaults_if_needed(&conn, pid).unwrap();
+        assert_eq!(count_rules(&conn, pid), after_delete);
     }
 }

@@ -111,6 +111,10 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
   const labelCache = useRef<Map<string, LabelMat>>(new Map());
   const [dim, setDim] = useState({ w: 800, h: 520 });
   const [selected, setSelected] = useState<GNode | null>(null);
+  // Worklog rows carry no tag/key, so they float as unconnected confetti around
+  // the real knowledge cluster. Default the graph to facts-only (the connected
+  // brain); the toggle below reveals the worklog transcript on demand.
+  const [showWorklog, setShowWorklog] = useState(false);
 
   // Always-visible label sprite per node (kept ALONGSIDE the default sphere via
   // nodeThreeObjectExtend). Fresh Sprite per call; material/texture is cached.
@@ -136,13 +140,22 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
     return () => ro.disconnect();
   }, []);
 
+  const worklogCount = useMemo(
+    () => entries.reduce((n, e) => n + (e.kind === "worklog" ? 1 : 0), 0),
+    [entries],
+  );
+  const visibleEntries = useMemo(
+    () => (showWorklog ? entries : entries.filter((e) => e.kind !== "worklog")),
+    [entries, showWorklog],
+  );
+
   const data = useMemo(() => {
     const nodes: GNode[] = [];
     const links: { source: string; target: string; kind: string }[] = [];
     const tagDegree = new Map<string, number>();
     const byKey = new Map<string, string>(); // key -> first entry node id
 
-    for (const e of entries) {
+    for (const e of visibleEntries) {
       const nid = `e:${e.id}`;
       const isWorklog = e.kind === "worklog";
       const label = (e.key && e.key.trim()) || e.content.slice(0, 48) + (e.content.length > 48 ? "…" : "");
@@ -173,7 +186,7 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
       nodes.push({ id: tid, kind: "tag", label: tid.slice(2), color: tagColor(tid.slice(2)), val: 4 + deg * 2.5 });
     }
     return { nodes, links };
-  }, [entries]);
+  }, [visibleEntries]);
 
   const focus = (n: GNode) => {
     setSelected(n);
@@ -185,13 +198,15 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
     }
   };
 
-  const empty = entries.length === 0;
+  const empty = data.nodes.length === 0;
 
   return (
     <div ref={wrapRef} style={{ position: "relative", width: "100%", height: "100%", overflow: "hidden" }}>
       {empty ? (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--fg-muted)", fontSize: 13 }}>
-          No memory to graph yet — agents (and you) add notes as the team works.
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%", color: "var(--fg-muted)", fontSize: 13, textAlign: "center", padding: "0 24px" }}>
+          {worklogCount > 0 && !showWorklog
+            ? "No durable facts to graph yet — toggle “Show worklog” to see recent agent activity."
+            : "No memory to graph yet — agents (and you) add notes as the team works."}
         </div>
       ) : (
         <FG
@@ -219,11 +234,29 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
         />
       )}
 
+      {/* Facts-only ↔ show-worklog toggle (only when worklog rows exist). Kept
+          OUTSIDE the !empty gate so a worklog-only project can still un-hide. */}
+      {worklogCount > 0 && (
+        <button
+          onClick={() => setShowWorklog((v) => !v)}
+          title={showWorklog
+            ? "Hide the worklog transcript — show only the durable knowledge (facts)"
+            : "Also show the auto-captured worklog transcript (unconnected recent-activity rows)"}
+          style={{
+            position: "absolute", left: 10, top: 10, height: 28, padding: "0 11px",
+            border: "1px solid var(--border-strong)", borderRadius: 7, cursor: "pointer",
+            fontSize: 11.5, fontWeight: 600,
+            background: showWorklog ? "rgba(var(--accent-rgb),0.18)" : "rgba(6,8,13,0.6)",
+            color: showWorklog ? "var(--accent)" : "var(--fg-muted)",
+          }}
+        >{showWorklog ? "📋 Worklog shown — hide" : `📋 Show worklog (${worklogCount})`}</button>
+      )}
+
       {/* Legend */}
       {!empty && (
         <div style={{ position: "absolute", left: 10, bottom: 10, display: "flex", gap: 12, fontSize: 11, color: "var(--fg-muted)", background: "rgba(6,8,13,0.6)", padding: "5px 9px", borderRadius: 7, pointerEvents: "none" }}>
           <span><span style={{ color: FACT_COLOR }}>●</span> fact (colored by tag)</span>
-          <span><span style={{ color: WORKLOG_COLOR }}>●</span> worklog</span>
+          {showWorklog && <span><span style={{ color: WORKLOG_COLOR }}>●</span> worklog</span>}
           <span><span style={{ color: "#ffcf5a" }}>●</span> tag hub</span>
           <span><span style={{ color: "#ff9ad9" }}>—</span> same key</span>
         </div>

@@ -1998,9 +1998,12 @@ pub async fn claude_cli_stream(
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(stdin_payload.as_bytes())
-                .map_err(|e| format!("write stdin: {e}"))?;
+            // Best-effort: the CLI can read what it needs and exit while we're still
+            // writing the (large agentic) payload → "pipe has been ended (os error
+            // 109)". Propagating that (the old `?`) aborted the whole stream and
+            // discarded the reply — the "done" with no output on the Code page. Swallow
+            // it; the drop() below signals EOF and we still read stdout for the reply.
+            let _ = stdin.write_all(stdin_payload.as_bytes());
             // Closing stdin signals EOF — without this the CLI sits
             // waiting for more input and never emits anything.
             drop(stdin);

@@ -2738,25 +2738,58 @@ fn kimi_config_model_keys(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// True when a modern kimi-code login is present (credentials/kimi-code.json).
+/// The current CLI writes this at login and resolves its own model from it —
+/// often WITHOUT writing a `config.toml` default. So the config parse alone
+/// can't tell we're safely logged in; without this check a modern-logged-in
+/// user reads as `has_default=false` and an undeclared id gets force-passed.
+fn kimi_has_modern_login() -> bool {
+    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
+        return false;
+    };
+    PathBuf::from(home)
+        .join(".kimi")
+        .join("credentials")
+        .join("kimi-code.json")
+        .is_file()
+}
+
 /// `--model` args for a kimi invocation, resilient to the CLI's config:
-/// pass the requested id only when the config declares it (or when there is
-/// no config default to fall back on — old CLIs NEED an explicit model).
-/// Forcing an undeclared id (the old hardcoded `kimi-latest`) makes current
-/// kimi-cli abort with `LLMNotSet` — that was the "subscription never ties
-/// after login" bug (reproduced live 2026-07-05: exit 1 with the forced
-/// model, exit 0 without it).
+/// pass the requested id only when the config declares it. Forcing an
+/// undeclared id makes current kimi-cli abort with `LLMNotSet` — that was the
+/// "subscription never ties after login" bug AND the ~1s silent crash when a
+/// team requests a catalogue id (e.g. `kimi-k2.7`) the CLI's config doesn't
+/// list (reproduced live 2026-07-05: exit 1 with the forced model, exit 0
+/// without it).
 fn kimi_model_args(requested: Option<&str>) -> Vec<String> {
     let cfg = kimi_config_text();
     let has_default = cfg.as_deref().map(kimi_config_has_default).unwrap_or(false);
     let keys = cfg.as_deref().map(kimi_config_model_keys).unwrap_or_default();
+    kimi_model_args_inner(requested, has_default, &keys, kimi_has_modern_login())
+}
+
+/// Pure decision core for `kimi_model_args` (no filesystem) so the policy is
+/// unit-tested. `self_sufficient` = the CLI can resolve its own model (a config
+/// default OR a modern credentials login); when true we must NOT force an
+/// undeclared id, or the CLI dies on `LLMNotSet`.
+fn kimi_model_args_inner(
+    requested: Option<&str>,
+    has_default: bool,
+    keys: &[String],
+    modern_login: bool,
+) -> Vec<String> {
+    let self_sufficient = has_default || modern_login;
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
+        // Declared in the config's [models] table → safe to pass explicitly.
         Some(req) if keys.iter().any(|k| k == req) => vec!["--model".into(), req.to_string()],
-        Some(req) if !has_default => vec!["--model".into(), req.to_string()],
-        // Requested id isn't declared but a default exists → let the CLI use
-        // its default instead of dying on LLMNotSet.
-        Some(_) => Vec::new(),
-        None if has_default => Vec::new(),
-        // No config default at all (ancient CLI): keep the old always-valid alias.
+        // Undeclared id but the CLI can resolve its own model → drop the flag.
+        // Forcing an undeclared id here is exactly the LLMNotSet ~1s crash.
+        Some(_) if self_sufficient => Vec::new(),
+        // Genuinely ancient CLI (no default, no modern creds): it needs an
+        // explicit model, so pass the request as a last resort.
+        Some(req) => vec!["--model".into(), req.to_string()],
+        None if self_sufficient => Vec::new(),
+        // No config default and no modern login: keep the always-valid alias.
         None => vec!["--model".into(), "kimi-latest".into()],
     }
 }
@@ -3462,30 +3495,35 @@ mod tests {
 
     #[test]
     fn kimi_model_args_policy() {
-        use super::{kimi_config_has_default, kimi_config_model_keys};
-        // Mirror kimi_model_args' decision without touching the real ~/.kimi.
-        let decide = |req: Option<&str>, cfg: Option<&str>| -> Vec<String> {
+        use super::{kimi_config_has_default, kimi_config_model_keys, kimi_model_args_inner};
+        // Exercise the REAL decision core (no filesystem) so the shipped policy
+        // is what's tested — the old copy-of-the-logic closure hid the crash.
+        let decide = |req: Option<&str>, cfg: Option<&str>, modern: bool| -> Vec<String> {
             let has_default = cfg.map(kimi_config_has_default).unwrap_or(false);
             let keys = cfg.map(kimi_config_model_keys).unwrap_or_default();
-            match req.map(str::trim).filter(|s| !s.is_empty()) {
-                Some(r) if keys.iter().any(|k| k == r) => vec!["--model".into(), r.to_string()],
-                Some(r) if !has_default => vec!["--model".into(), r.to_string()],
-                Some(_) => Vec::new(),
-                None if has_default => Vec::new(),
-                None => vec!["--model".into(), "kimi-latest".into()],
-            }
+            kimi_model_args_inner(req, has_default, &keys, modern)
         };
         // Undeclared id + a config default → drop the flag (the bug fix).
-        assert!(decide(Some("kimi-latest"), Some(KIMI_CFG)).is_empty());
+        assert!(decide(Some("kimi-latest"), Some(KIMI_CFG), false).is_empty());
         // Declared id → pass it through.
         assert_eq!(
-            decide(Some("kimi-code/kimi-for-coding"), Some(KIMI_CFG)),
+            decide(Some("kimi-code/kimi-for-coding"), Some(KIMI_CFG), false),
             vec!["--model", "kimi-code/kimi-for-coding"]
         );
         // No config at all (ancient CLI) → keep the always-valid alias.
-        assert_eq!(decide(None, None), vec!["--model", "kimi-latest"]);
+        assert_eq!(decide(None, None, false), vec!["--model", "kimi-latest"]);
         // Config default, no request → let the CLI use its default.
-        assert!(decide(None, Some(KIMI_CFG)).is_empty());
+        assert!(decide(None, Some(KIMI_CFG), false).is_empty());
+        // THE ~1s CRASH: modern login (credentials json) writes NO config.toml,
+        // so has_default=false — a team asking for `kimi-k2.7` must still NOT
+        // force the flag (that id isn't declared → LLMNotSet). Drop it.
+        assert!(decide(Some("kimi-k2.7"), None, true).is_empty());
+        // Same undeclared id with neither a default nor a modern login (truly
+        // ancient) → pass it as a last resort (unchanged behaviour).
+        assert_eq!(
+            decide(Some("kimi-k2.7"), None, false),
+            vec!["--model", "kimi-k2.7"]
+        );
     }
 
     #[test]

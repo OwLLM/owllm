@@ -1,0 +1,356 @@
+#!/usr/bin/env node
+// OWLLM PRODUCTION SMOKE MATRIX — the ship/no-ship gate.
+//
+// Green matrix = shippable. Anything less = not. Run before every publish
+// (publish-release.sh runs it automatically; OWLLM_SKIP_SMOKE=1 to override).
+//
+//   node owllm-desktop/scripts/smoke-matrix.mjs [--static-only]
+//
+// Four sections:
+//   S  Static tripwires — one source assertion per shipped regression fix, so
+//      none of them can silently return. Each names the bug + version it guards.
+//   H  Layer-1 harnesses — every ui/src/pages/agentic/*.verify.run.mjs (routing,
+//      gate, preflight, …) must exit 0. Auto-discovers new harnesses.
+//   P  Live provider cells — ONE REAL TURN per installed+logged-in CLI at the
+//      exact spawn shapes the Rust side builds (small prompt / ≥40 KB prompt via
+//      stdin / MCP tool round-trip against a mock gateway). Providers that are
+//      not installed or not logged in SKIP with a reason — never a false FAIL.
+//   W  WSL probes — interop + CLIs visible on the bwrap-jail PATH + creds.
+//      Advisory (WARN), because an unprovisioned distro is environmental, not a
+//      code regression.
+//
+// WHY the spawn boundary: every provider failure of 2026-07 (kimi 206, kimi
+// LLMNotSet, kimi MCP-fatal, codex ToolSearch guidance, claude cmd-line limit,
+// spaced --mcp-config path, Code-page provider routing) happened in the process
+// invocation the app builds — and all three surfaces (Chat / Code / Agents)
+// converge on those same Rust functions. The P cells mirror accounts.rs /
+// mcp_gateway.rs shapes byte-for-byte; the S tripwires pin the Rust/TS source
+// so mirror-drift gets caught by whichever side moved.
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import http from "node:http";
+import crypto from "node:crypto";
+import { spawn, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const HERE = path.dirname(fileURLToPath(import.meta.url)); // …/owllm-desktop/scripts
+const APP = path.resolve(HERE, "..");                      // owllm-desktop
+const STATIC_ONLY = process.argv.includes("--static-only");
+const IS_WIN = process.platform === "win32";
+
+// ---------------------------------------------------------------- results ---
+const cells = []; // {section, name, status, note, ms}
+function record(section, name, status, note = "", ms = 0) {
+  cells.push({ section, name, status, note, ms });
+  const icon = { PASS: "✓", FAIL: "✗", SKIP: "-", WARN: "!" }[status];
+  const dur = ms ? ` · ${(ms / 1000).toFixed(1)}s` : "";
+  console.log(`  ${icon} [${status}] ${name}${note ? ` — ${note}` : ""}${dur}`);
+}
+
+// ------------------------------------------------------- S: static tripwires
+// [file relative to owllm-desktop, regex, "bug it guards (version)"]
+const TRIPWIRES = [
+  ["src-tauri/src/accounts.rs", /fold_prompt_into_stdin/, "kimi 32KB cmdline crash — os error 206 (v0.7.90)"],
+  ["src-tauri/src/accounts.rs", /fold_system_into_stdin/, "claude 'command line too long' fold (v0.7.88)"],
+  ["src-tauri/src/accounts.rs", /kimi_model_args/, "kimi LLMNotSet on undeclared --model id (v0.7.82)"],
+  ["src-tauri/src/accounts.rs", /kimi_output_mcp_failed/, "kimi fatal abort on MCP connect failure → retry (v0.7.83)"],
+  ["src-tauri/src/accounts.rs", /is_browser_role_allowlist/, "browser gateway gated to Browser role, not every agent (v0.7.84)"],
+  ["src-tauri/src/mcp_gateway.rs", /cli_safe_path/, "spaced 'OwLLM Desktop' --mcp-config path split → 8.3 short path (v0.7.62)"],
+  ["src-tauri/src/mcp_gateway.rs", /bearer_token_env_var/, "codex MCP wiring via -c overrides + env token (v0.7.72)"],
+  ["src-tauri/src/directives.rs", /directives_seed_marks/, "project rules re-seeded 11x into every prompt (v0.7.91)"],
+  ["ui/src/pages/agentic/dispatch.ts", /streamMoonshot/, "shared dispatch routes kimi — Code page 'unknown model_id' (v0.7.89)"],
+  ["ui/src/pages/agentic/dispatch.ts", /streamGemini/, "shared dispatch routes gemini (v0.7.89)"],
+  ["ui/src/pages/agentic/dispatch.ts", /deepseek/, "shared dispatch routes OpenAI-compatible providers (v0.7.89)"],
+  ["ui/src/pages/agentic/localTools.ts", /NO ToolSearch/i, "codex chased Claude-only ToolSearch → 'Found 0 tools' (v0.7.74)"],
+  ["resources/agents/roles/browser.yaml", /browser_snapshot/, "Browser role allowlist keys the jail exception (v0.7.69)"],
+];
+
+function runStatic() {
+  console.log("\nS) Static tripwires — regression fixes pinned in source");
+  for (const [rel, re, guard] of TRIPWIRES) {
+    const p = path.join(APP, rel);
+    let ok = false, note = guard;
+    try { ok = re.test(fs.readFileSync(p, "utf8")); }
+    catch { note = `${guard} — FILE MISSING: ${rel}`; }
+    record("S", `${rel} :: ${re.source.slice(0, 32)}`, ok ? "PASS" : "FAIL", ok ? guard : note);
+  }
+}
+
+// -------------------------------------------------- H: layer-1 harnesses ---
+function runHarnesses() {
+  console.log("\nH) Layer-1 harnesses (control-flow verifiers)");
+  const dir = path.join(APP, "ui/src/pages/agentic");
+  const tsc = path.join(APP, "node_modules/typescript/lib/typescript.js");
+  if (!fs.existsSync(tsc)) {
+    record("H", "all *.verify.run.mjs", "SKIP", "node_modules/typescript missing — run npm install in owllm-desktop first");
+    return;
+  }
+  for (const f of fs.readdirSync(dir).filter((f) => f.endsWith(".verify.run.mjs")).sort()) {
+    const t0 = Date.now();
+    const r = spawnSync(process.execPath, [path.join(dir, f)], { encoding: "utf8", timeout: 120_000 });
+    const ok = r.status === 0;
+    const tail = ((r.stdout || "") + (r.stderr || "")).trim().split(/\r?\n/).slice(-1)[0] || "";
+    record("H", f, ok ? "PASS" : "FAIL", ok ? "" : tail.slice(0, 120), Date.now() - t0);
+  }
+}
+
+// -------------------------------------------------- mock MCP gateway -------
+// Minimal MCP streamable-HTTP server speaking the same dialect the in-app
+// gateway does (plain-JSON replies — verified live against claude/codex/kimi).
+// Bearer-token auth like mcp_gateway.rs; tools/call returns a magic token the
+// cells assert on, so a pass means the FULL loop ran: config → connect → auth
+// → initialize → tools/list → tools/call → result back into the reply.
+const MCP_MAGIC = `SMOKE_MCP_${crypto.randomBytes(3).toString("hex")}`;
+function startMockGateway(token) {
+  return new Promise((resolve) => {
+    const server = http.createServer((req, res) => {
+      if (req.method !== "POST") { res.writeHead(405).end(); return; }
+      if ((req.headers.authorization || "") !== `Bearer ${token}`) { res.writeHead(401).end(); return; }
+      let body = "";
+      req.on("data", (d) => (body += d));
+      req.on("end", () => {
+        let msg; try { msg = JSON.parse(body); } catch { res.writeHead(400).end(); return; }
+        const reply = (result) => res
+          .writeHead(200, { "content-type": "application/json" })
+          .end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result }));
+        if (msg.method === "initialize") {
+          reply({ protocolVersion: msg.params?.protocolVersion || "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "owllm", version: "0.0.0-smoke" } });
+        } else if (!("id" in msg)) { res.writeHead(202).end(); }
+        else if (msg.method === "tools/list") {
+          reply({ tools: [{ name: "browser_snapshot", description: "Snapshot the shared agent browser page — returns the indexed interactive elements.", inputSchema: { type: "object", properties: {} } }] });
+        } else if (msg.method === "tools/call") {
+          reply({ content: [{ type: "text", text: `${MCP_MAGIC} [1] About [2] Designs [7] English` }], isError: false });
+        } else reply({});
+      });
+    });
+    server.listen(0, "127.0.0.1", () => resolve({ url: `http://127.0.0.1:${server.address().port}/`, close: () => server.close() }));
+  });
+}
+
+// ------------------------------------------------------- CLI plumbing ------
+// Quote one argv element for the MSVC cmdline parser (same rules the app's
+// win_quote_arg follows). Args here never contain newlines.
+const winq = (s) => '"' + String(s).replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1") + '"';
+
+function findCli(name) {
+  const w = spawnSync(IS_WIN ? "where.exe" : "which", [name], { encoding: "utf8" });
+  const hits = (w.stdout || "").split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+  // Prefer a real launcher (.cmd/.exe) over the extension-less git-bash shim.
+  const best = hits.find((h) => /\.(cmd|exe|bat)$/i.test(h)) || hits[0];
+  if (best) return best;
+  if (IS_WIN && name === "kimi") {
+    // Mirror find_kimi_cli's extra dirs: pip installs land in Python Scripts.
+    const roots = [path.join(process.env.APPDATA || "", "Python"), path.join(process.env.LOCALAPPDATA || "", "Programs", "Python")];
+    for (const root of roots) {
+      try {
+        for (const v of fs.readdirSync(root)) {
+          const p = path.join(root, v, "Scripts", "kimi.exe");
+          if (fs.existsSync(p)) return p;
+        }
+      } catch { /* dir absent */ }
+    }
+  }
+  return null;
+}
+
+function runCli(bin, args, { stdinText, env, cwd, timeoutMs = 180_000 } = {}) {
+  return new Promise((resolve) => {
+    const t0 = Date.now();
+    let child;
+    const isBatch = IS_WIN && /\.(cmd|bat)$/i.test(bin);
+    const opts = {
+      cwd: cwd || APP,
+      env: { ...process.env, ...(env || {}) },
+      stdio: [stdinText != null ? "pipe" : "ignore", "pipe", "pipe"],
+      windowsHide: true,
+    };
+    if (isBatch) {
+      // node refuses direct .cmd spawn (CVE-2024-27980 guard) — go through
+      // cmd.exe with a hand-quoted verbatim line, the same layer the app uses.
+      const line = `"${[winq(bin), ...args.map(winq)].join(" ")}"`;
+      child = spawn("cmd.exe", ["/d", "/s", "/c", line], { ...opts, windowsVerbatimArguments: true });
+    } else {
+      child = spawn(bin, args, opts);
+    }
+    let out = "", err = "", done = false, timedOut = false;
+    const finish = (code) => {
+      if (done) return; done = true;
+      resolve({ code, out, err, timedOut, ms: Date.now() - t0 });
+    };
+    const timer = setTimeout(() => { timedOut = true; try { child.kill("SIGKILL"); } catch { } }, timeoutMs);
+    child.stdout.on("data", (d) => (out += d));
+    child.stderr.on("data", (d) => (err += d));
+    child.on("error", (e) => { err += `\nspawn error: ${e.message}`; clearTimeout(timer); finish(-1); });
+    child.on("close", (code) => { clearTimeout(timer); finish(code); });
+    if (stdinText != null) { child.stdin.on("error", () => { }); child.stdin.end(stdinText); }
+  });
+}
+
+// A ≥40 KB payload — over the 32 KB CreateProcess cap and the 8 KB cmd-shim
+// cap, so it only survives through stdin (the shape the app now uses).
+function bigPrompt(token) {
+  const filler = "Reference material line for the smoke matrix; ignore its content entirely.\n".repeat(560); // ~43 KB
+  return `${filler}\nEnd of reference. Reply with exactly ${token} and nothing else.`;
+}
+
+async function cell(section, name, fn) {
+  const t0 = Date.now();
+  try {
+    const r = await fn(); // {status, note}
+    record(section, name, r.status, r.note || "", Date.now() - t0);
+  } catch (e) {
+    record(section, name, "FAIL", String(e?.message ?? e).slice(0, 140), Date.now() - t0);
+  }
+}
+
+// An expired / invalid subscription token is a credential STATE, not a code
+// regression — same class as "not logged in", which already SKIPs. So an auth
+// error downgrades the cell to SKIP-with-reason (re-login) rather than blocking
+// a ship of unrelated code. The matrix stays honest (it does not claim the
+// provider works) without a false red.
+const AUTH_ERR = /invalid[_ ]?authentication|authentication[_ ]?error|verify your credentials|401 unauthorized|not (?:logged in|authenticated)|please (?:re-?)?login|token (?:expired|invalid)/i;
+const expectToken = (r, token) => {
+  if (r.timedOut) return { status: "FAIL", note: "timed out" };
+  if (r.out.includes(token)) return { status: "PASS" };
+  if (AUTH_ERR.test(r.out + " " + r.err)) return { status: "SKIP", note: "credentials invalid/expired — re-login on the Accounts page" };
+  const tail = (r.out + " " + r.err).trim().replace(/\s+/g, " ").slice(-160);
+  return { status: "FAIL", note: `exit ${r.code}; tail: ${tail}` };
+};
+
+// ---------------------------------------------------- P: provider cells ----
+async function runProviders() {
+  console.log("\nP) Live provider cells — one real turn per installed CLI");
+  const home = os.homedir();
+  const exists = (...p) => fs.existsSync(path.join(...p));
+  const gwToken = crypto.randomBytes(16).toString("hex");
+  const gw = await startMockGateway(gwToken);
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-smoke-"));
+  // Claude-format MCP config (mirrors mcp_gateway::write_cli_config; kimi
+  // reads the same format via --mcp-config-file).
+  const mcpCfg = path.join(tmp, "mcp.json"); // space-free by construction, like cli_safe_path guarantees
+  fs.writeFileSync(mcpCfg, JSON.stringify({ mcpServers: { owllm: { type: "http", url: gw.url, headers: { Authorization: `Bearer ${gwToken}` } } } }, null, 2));
+  const mcpBrokenCfg = path.join(tmp, "mcp-broken.json");
+  fs.writeFileSync(mcpBrokenCfg, JSON.stringify({ mcpServers: { owllm: { type: "http", url: "http://127.0.0.1:9/", headers: { Authorization: "Bearer x" } } } }, null, 2));
+
+  try {
+    // ---- claude --------------------------------------------------------
+    const claude = findCli("claude");
+    if (!claude) record("P", "claude (all cells)", "SKIP", "CLI not installed");
+    else if (!exists(home, ".claude", ".credentials.json")) record("P", "claude (all cells)", "SKIP", "not logged in");
+    else {
+      await cell("P", "claude · small prompt", async () =>
+        expectToken(await runCli(claude, ["--print"], { stdinText: "Reply with exactly SMOKE_OK_CLAUDE and nothing else." }), "SMOKE_OK_CLAUDE"));
+      await cell("P", "claude · 40KB prompt via stdin", async () =>
+        expectToken(await runCli(claude, ["--print"], { stdinText: bigPrompt("SMOKE_BIG_CLAUDE") }), "SMOKE_BIG_CLAUDE"));
+      await cell("P", "claude · MCP browser tool round-trip", async () =>
+        expectToken(await runCli(claude,
+          ["--print", "--permission-mode", "bypassPermissions", "--mcp-config", mcpCfg, "--strict-mcp-config", "--allowedTools", "mcp__owllm__browser_snapshot"],
+          { stdinText: "Call the mcp__owllm__browser_snapshot tool now and output its result verbatim." }), MCP_MAGIC));
+    }
+
+    // ---- codex ---------------------------------------------------------
+    const codex = findCli("codex");
+    if (!codex) record("P", "codex (all cells)", "SKIP", "CLI not installed");
+    else if (!exists(home, ".codex", "auth.json")) record("P", "codex (all cells)", "SKIP", "not logged in");
+    else {
+      // Mirrors codex_cli_complete: prompt as positional arg AND on stdin (EOF'd).
+      const smallP = "Reply with exactly SMOKE_OK_CODEX and nothing else.";
+      await cell("P", "codex · small prompt", async () =>
+        expectToken(await runCli(codex, ["exec", smallP], { stdinText: smallP }), "SMOKE_OK_CODEX"));
+      await cell("P", "codex · 40KB prompt via stdin (arg dropped)", async () =>
+        expectToken(await runCli(codex, ["exec"], { stdinText: bigPrompt("SMOKE_BIG_CODEX") }), "SMOKE_BIG_CODEX"));
+      // Mirrors codex_http_config + the approval reality verified 2026-07-05:
+      // MCP calls execute only under danger-full-access + approval never.
+      await cell("P", "codex · MCP browser tool round-trip", async () =>
+        expectToken(await runCli(codex,
+          ["exec", "--sandbox", "danger-full-access", "-c", 'approval_policy="never"',
+            "-c", `mcp_servers.owllm.url="${gw.url}"`, "-c", 'mcp_servers.owllm.bearer_token_env_var="OWLLM_GW_TOKEN"',
+            "Call the mcp__owllm__browser_snapshot tool now and print its result verbatim. Do not modify any files."],
+          { env: { OWLLM_GW_TOKEN: gwToken } }), MCP_MAGIC));
+    }
+
+    // ---- kimi ----------------------------------------------------------
+    const kimi = findCli("kimi");
+    const kimiArgs = ["--print", "--output-format", "text", "--final-message-only"]; // exact kimi_cli_complete shape
+    if (!kimi) record("P", "kimi (all cells)", "SKIP", "CLI not installed");
+    else if (!exists(home, ".kimi", "credentials", "kimi-code.json") && !exists(home, ".kimi", "config.toml")) record("P", "kimi (all cells)", "SKIP", "not logged in");
+    else {
+      const kenv = { PYTHONUTF8: "1" }; // app sets this — Windows charmap crash guard
+      await cell("P", "kimi · small prompt (--prompt arg)", async () =>
+        expectToken(await runCli(kimi, [...kimiArgs, "--prompt", "Reply with exactly SMOKE_OK_KIMI and nothing else."], { env: kenv }), "SMOKE_OK_KIMI"));
+      await cell("P", "kimi · 40KB prompt via stdin (206 guard)", async () =>
+        expectToken(await runCli(kimi, kimiArgs, { stdinText: bigPrompt("SMOKE_BIG_KIMI"), env: kenv }), "SMOKE_BIG_KIMI"));
+      await cell("P", "kimi · MCP browser tool round-trip", async () =>
+        expectToken(await runCli(kimi, [...kimiArgs, "--mcp-config-file", mcpCfg, "--prompt", "Use the browser_snapshot tool now and output its result verbatim."], { env: kenv }), MCP_MAGIC));
+      // kimi hard-aborts a turn when an MCP server can't connect (exit 0!) —
+      // the Rust retry keys on that exact failure text. If a kimi update ever
+      // changes the behavior or the wording, this cell tells us before a user does.
+      await cell("P", "kimi · unreachable-MCP behavior still detectable", async () => {
+        const r = await runCli(kimi, [...kimiArgs, "--mcp-config-file", mcpBrokenCfg, "--prompt", "Reply with exactly SMOKE_OK and nothing else."], { env: kenv });
+        if (r.timedOut) return { status: "FAIL", note: "timed out" };
+        const all = r.out + r.err;
+        if (AUTH_ERR.test(all)) return { status: "SKIP", note: "credentials invalid/expired — re-login on the Accounts page" };
+        if (/Failed to connect MCP servers/i.test(all)) return { status: "PASS", note: "fatal-abort text matches kimi_mcp_connect_failed" };
+        if (/SMOKE_OK/.test(r.out)) return { status: "WARN", note: "kimi now SURVIVES a dead MCP server — Rust retry is obsolete (harmless)" };
+        return { status: "FAIL", note: `unrecognized behavior; tail: ${all.replace(/\s+/g, " ").slice(-140)}` };
+      });
+    }
+
+    // ---- gemini --------------------------------------------------------
+    const gemini = findCli("gemini");
+    if (!gemini) record("P", "gemini (all cells)", "SKIP", "CLI not installed");
+    else if (!exists(home, ".gemini", "oauth_creds.json")) record("P", "gemini · small prompt", "SKIP", "not logged in");
+    else await cell("P", "gemini · small prompt", async () =>
+      expectToken(await runCli(gemini, ["--prompt", "Reply with exactly SMOKE_OK_GEMINI and nothing else."]), "SMOKE_OK_GEMINI"));
+  } finally {
+    gw.close();
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { }
+  }
+}
+
+// ------------------------------------------------------- W: WSL probes -----
+// Advisory: an unprovisioned distro is environmental, not a code regression —
+// so WARN, never FAIL. (The bugs these catch: kimi in ~/.local invisible to the
+// jail; interop OFF killing the gateway relay; creds never synced.)
+function runWsl() {
+  console.log("\nW) WSL probes (advisory)");
+  if (!IS_WIN) { record("W", "wsl", "SKIP", "not Windows"); return; }
+  const list = spawnSync("wsl.exe", ["-l", "-q"], { encoding: "utf8" });
+  const distro = (list.stdout || "").replace(/\0/g, "").split(/\r?\n/).map((s) => s.trim()).filter((d) => d && !/docker/i.test(d))[0];
+  if (!distro) { record("W", "wsl", "SKIP", "no distro installed"); return; }
+  const sh = (cmd, t = 30_000) => spawnSync("wsl.exe", ["-d", distro, "--", "sh", "-c", cmd], { encoding: "utf8", timeout: t });
+
+  const interop = sh("/mnt/c/Windows/System32/curl.exe --version 2>&1 | head -1");
+  record("W", `${distro} · Windows interop (gateway relay transport)`, /curl \d/.test(interop.stdout || "") ? "PASS" : "WARN",
+    /curl \d/.test(interop.stdout || "") ? "" : "interop OFF — WSL agents get no browser gateway; fix /etc/wsl.conf [interop]");
+
+  const clis = sh('PATH=/usr/local/bin:/usr/bin:/bin; for c in claude codex gemini kimi; do printf "%s=%s\\n" "$c" "$(command -v $c || echo MISSING)"; done');
+  for (const line of (clis.stdout || "").trim().split(/\n/)) {
+    const [name, where] = line.split("=");
+    if (!name) continue;
+    record("W", `${distro} · ${name} on jail PATH`, where && where !== "MISSING" ? "PASS" : "WARN",
+      where === "MISSING" ? "not provisioned — run Install CLI for WSL" : where);
+  }
+  const kimiCreds = sh('[ -f "$HOME/.kimi/credentials/kimi-code.json" ] || [ -f "$HOME/.kimi/config.toml" ] && echo YES || echo NO');
+  record("W", `${distro} · kimi creds synced`, /YES/.test(kimiCreds.stdout || "") ? "PASS" : "WARN",
+    /YES/.test(kimiCreds.stdout || "") ? "" : "run Sync logins on the Accounts page");
+}
+
+// ----------------------------------------------------------------- main ----
+console.log(`OWLLM smoke matrix — ${new Date().toISOString()} — ${APP}`);
+runStatic();
+runHarnesses();
+if (!STATIC_ONLY) { await runProviders(); runWsl(); }
+else console.log("\n(—static-only: provider + WSL sections skipped)");
+
+const n = (s) => cells.filter((c) => c.status === s).length;
+const fails = cells.filter((c) => c.status === "FAIL");
+console.log(`\n${"─".repeat(64)}\nMATRIX: ${n("PASS")} pass · ${fails.length} fail · ${n("SKIP")} skip · ${n("WARN")} warn`);
+if (fails.length) {
+  console.log("FAILED CELLS:");
+  for (const c of fails) console.log(`  ✗ [${c.section}] ${c.name} — ${c.note}`);
+  console.log("\nNOT SHIPPABLE. Fix the failures or (emergencies only) OWLLM_SKIP_SMOKE=1.");
+  process.exit(1);
+}
+console.log("SHIPPABLE — matrix green.");

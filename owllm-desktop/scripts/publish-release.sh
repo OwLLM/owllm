@@ -154,6 +154,22 @@ case "$(uname -s)" in
   *) echo "  (skipped — Windows-only step)" ;;
 esac
 
+# ---- ship gate: smoke matrix ---------------------------------------------
+# Green matrix = shippable. This runs BEFORE the expensive build so a known
+# regression fails fast instead of after a 10-minute compile + sign. Default is
+# --static-only: the source tripwires (one per shipped provider fix) + the
+# Layer-1 control-flow harnesses — deterministic, no credentials, safe on a
+# headless/CI box. OWLLM_SMOKE_FULL=1 also runs the live provider cells (needs
+# logged-in CLIs). OWLLM_SKIP_SMOKE=1 bypasses entirely (emergencies only).
+if [ "${OWLLM_SKIP_SMOKE:-0}" = "1" ]; then
+  echo "⚠ smoke matrix SKIPPED (OWLLM_SKIP_SMOKE=1) — shipping unverified"
+else
+  step "0/5 smoke matrix (ship gate)"
+  SMOKE_ARGS="--static-only"; [ "${OWLLM_SMOKE_FULL:-0}" = "1" ] && SMOKE_ARGS=""
+  node "$APP/scripts/smoke-matrix.mjs" $SMOKE_ARGS \
+    || fail "smoke matrix red — not shippable. Fix the failing cell, or OWLLM_SKIP_SMOKE=1 for an emergency override."
+fi
+
 step "1/5 build  (version $VERSION)"
 # TS/Rust changes need a fresh bundle; drop the stale artifacts so a skipped
 # relink can't ship an old version string.

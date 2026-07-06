@@ -3388,23 +3388,30 @@ pub async fn kimi_cli_complete(
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
 ) -> Result<String, String> {
-    // Host runs get the in-app browser gateway: kimi-cli natively accepts the
-    // SAME Claude-format MCP config file via --mcp-config-file (verified live
-    // 2026-07-05: kimi listed all 12 browser_* tools and executed
-    // browser_snapshot against the running gateway — bare names, no approval
-    // prompt needed in --print mode). WSL-isolated runs skip it: the kimi in
-    // the distro can't reach host loopback and no relay is plumbed for this
-    // one-shot path yet.
-    // Within a session, once kimi proves it can't reach the browser gateway,
-    // stop wiring it: kimi FATALLY aborts the whole turn on any MCP-connect
-    // failure (MCPRuntimeError, but exit 0 — verified live 2026-07-06 in
-    // kimi.log), so wiring an unreachable gateway would cost a doubled spawn on
-    // every call. 0=unknown, 1=reachable, 2=broken this session.
+    // The browser gateway is wired ONLY for the Browser role, never for a plain
+    // coder/orchestrator/critic. This is load-bearing for kimi specifically:
+    // kimi-cli FATALLY aborts the whole turn if ANY configured MCP server can't
+    // connect (wait_for_background_mcp_loading -> MCPRuntimeError; exit 0, error
+    // only in stdout — verified live 2026-07-06 via ~/.kimi/logs/kimi.log),
+    // unlike Claude/Codex which just proceed. So wiring the gateway into every
+    // host Kimi agent meant the FIRST agent whose gateway wasn't reachable
+    // crashed the whole team in ~1s. Gating on the Browser role makes a normal
+    // Kimi agent's invocation byte-identical to the (proven-working) Accounts
+    // Test path — it cannot crash on a gateway it never touches. The Browser
+    // agent still gets it (verified live 2026-07-05: kimi listed all 12
+    // browser_* tools and executed browser_snapshot via --mcp-config-file), with
+    // the retry below as a safety net if that one agent's gateway is unreachable.
+    // WSL-isolated runs skip it regardless: the distro kimi can't reach host
+    // loopback and no relay is plumbed for this one-shot path yet.
+    // Session cache: once the Browser agent's gateway proves unreachable, stop
+    // wiring it (avoids a doubled spawn per call). 0=unknown, 1=reachable, 2=broken.
     static KIMI_GATEWAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
+    let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
     let gw_broken = KIMI_GATEWAY.load(std::sync::atomic::Ordering::Relaxed) == 2;
-    let mcp_config: Option<String> = if host_run && !gw_broken {
+    let mcp_config: Option<String> = if host_run && browser_role && !gw_broken {
         match crate::mcp_gateway::write_cli_config(&app) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {

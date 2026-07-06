@@ -7035,7 +7035,7 @@ async function streamChatCompletion(
     return streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
   }
   if (provider === "moonshot") {
-    return streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images);
+    return streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
   }
   if (provider === "deepseek") {
     return streamOpenAICompatible({
@@ -7567,6 +7567,7 @@ async function streamMoonshot(
   history?: HistoryItem[],
   onThought?: ThoughtHandler,
   images?: Attachment[],
+  allowedTools?: AllowedTools,
 ): Promise<string> {
   // Subscription path — shell to `kimi --print`. Fold history into the
   // user prompt because the CLI's --print mode is single-turn.
@@ -7578,11 +7579,14 @@ async function streamMoonshot(
     // Retry transient network blips (and surface a clear auth error) like the
     // Claude/Codex subscription paths — a Rust-side non-zero exit now carries the
     // real auth/network text, so withCliAuthRetry can recognize and retry it.
+    // allowedTools gates the browser gateway to the Browser role only (a normal
+    // Kimi agent must not wire it — kimi fatally aborts if it can't connect).
     const reply = await withCliAuthRetry("kimi_cli", signal, () => invoke<string>("kimi_cli_complete", {
       systemPrompt,
       userMessage: composed,
       cwd: projectCwd ?? null,
       model: modelId,
+      allowedTools: allowedTools ?? null,
     }));
     if (reply) onDelta(reply);
     // No thought stream for --print mode; CLI emits a single blob.

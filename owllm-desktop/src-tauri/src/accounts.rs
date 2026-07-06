@@ -3474,6 +3474,18 @@ pub async fn kimi_cli_complete(
         // declare aborts with LLMNotSet (see kimi_model_args).
         let model_args = kimi_model_args(model.as_deref());
 
+        // Windows caps a command line at ~32 KB. kimi passes the composed prompt
+        // as the `--prompt` ARG, so a large agentic system prompt (rules + tools +
+        // roster + memory) overflows: "The filename or extension is too long.
+        // (os error 206)" — the "spawn kimi" crash on a full team. kimi also reads
+        // the prompt from stdin when `--prompt` is omitted (verified live: identical
+        // clean stdout, the "resume session" line goes to stderr). So for a large
+        // prompt we DROP `--prompt` and feed it on stdin (an unbounded pipe). Small
+        // prompts keep `--prompt` + null stdin — byte-identical to the proven
+        // Accounts Test path. Mirrors the claude/codex fold (MAX_PROMPT_ARG).
+        const MAX_PROMPT_ARG: usize = 4000;
+        let fold_prompt_into_stdin = composed.len() > MAX_PROMPT_ARG;
+
         // One kimi invocation. `with_mcp` controls whether the browser gateway
         // is wired. Returns (final assistant text, whether MCP loading failed).
         let attempt = |with_mcp: bool| -> Result<(String, bool), String> {
@@ -3492,8 +3504,10 @@ pub async fn kimi_cli_complete(
                     args.push(cfg.clone());
                 }
             }
-            args.push("--prompt".into());
-            args.push(composed.clone());
+            if !fold_prompt_into_stdin {
+                args.push("--prompt".into());
+                args.push(composed.clone());
+            }
 
             // WSL-isolated project → run `kimi` inside the distro; else Windows CLI.
             let mut cmd = if let Some((exe, sargs)) =
@@ -3526,7 +3540,7 @@ pub async fn kimi_cli_complete(
             // reply ("'charmap' codec can't encode…" — reproduced live with a
             // Korean page snapshot). Force UTF-8 so Unicode output survives.
             cmd.env("PYTHONUTF8", "1");
-            cmd.stdin(Stdio::null());
+            cmd.stdin(if fold_prompt_into_stdin { Stdio::piped() } else { Stdio::null() });
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
@@ -3534,9 +3548,16 @@ pub async fn kimi_cli_complete(
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
-            let output = cmd
-                .spawn()
-                .map_err(|e| format!("spawn kimi: {e}"))?
+            let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
+            if fold_prompt_into_stdin {
+                if let Some(mut stdin) = child.stdin.take() {
+                    // Best-effort: on the WSL path the pipe can close early ("pipe
+                    // has been ended, os error 109"); the real error still surfaces
+                    // via exit status / stdout, so don't abort on the write.
+                    let _ = stdin.write_all(composed.as_bytes());
+                }
+            }
+            let output = child
                 .wait_with_output()
                 .map_err(|e| format!("wait kimi: {e}"))?;
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();

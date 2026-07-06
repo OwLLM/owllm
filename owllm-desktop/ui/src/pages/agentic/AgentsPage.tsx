@@ -82,6 +82,7 @@ import {
   TEAM_OPERATING_CONTRACT,
   TEAM_MEMORY_HINT,
   projectWorkspaceBlock,
+  providerFor as providerForShared,
 } from "./dispatch";
 // The local-model tool-use loop now lives in ONE shared place
 // (streamLocalChat in dispatch.ts). AgentsPage's local streamChatCompletion
@@ -10089,36 +10090,12 @@ export function AgentsPage({
   //   "api/gpt-..."     → openai, API only
   //   "auto/<flavour>"  → auto routing (resolved at dispatch time)
   //   else              → local (or fall back when unrecognized)
-  const providerFor = (modelId: string): string => {
-    if (!modelId) return "local";
-    if (modelId.startsWith("auto/")) return "auto";
-    const bareId = stripModelPrefix(modelId);
-    if (modelId.startsWith("sub/") || modelId.startsWith("api/")) {
-      // Pure cloud entries — decide which provider by id prefix.
-      if (bareId.startsWith("claude-")) return "anthropic";
-      if (bareId.startsWith("gpt-") || bareId === "o3") return "openai";
-      if (bareId.startsWith("kimi-") || bareId.startsWith("moonshot-")) return "moonshot";
-      if (bareId.startsWith("gemini-")) return "gemini";
-      if (bareId.startsWith("deepseek-")) return "deepseek";
-      if (bareId.startsWith("grok-")) return "xai";
-      // Groq's catalog overlaps with open-weight names (llama-*, qwen3-*,
-      // gpt-oss-*). Match by exact id against the registry instead.
-      const m = models.find(x => x.model_id === bareId);
-      if (m?.provider) return m.provider;
-      if (bareId.startsWith("sonar")) return "perplexity";
-      if (bareId.startsWith("mistral-") || bareId.startsWith("magistral-") || bareId.startsWith("codestral-")) return "mistral";
-      if (bareId.includes("/")) return "together"; // Together uses "owner/model" ids.
-    }
-    const m = models.find(x => x.model_id === bareId);
-    return m?.provider || "local";
-  };
-  // Encoded id → bare model id (strips sub/, api/, auto/ prefixes).
-  function stripModelPrefix(id: string): string {
-    for (const p of ["sub/", "api/", "auto/"]) {
-      if (id.startsWith(p)) return id.slice(p.length);
-    }
-    return id;
-  }
+  // Delegates to the SHARED providerFor in dispatch.ts (single source of truth),
+  // closing over this page's `models`. Previously this was a full copy that
+  // drifted from the shared one — the shared copy only knew claude/gpt, so the
+  // Code page routed sub/kimi-* (and gemini/deepseek/…) to the llama-server and
+  // died with "unknown model_id". Keep this a thin wrapper so they can't diverge.
+  const providerFor = (modelId: string): string => providerForShared(modelId, models);
 
   // ====== Deterministic Load → Send (user spec 2026-05-30) ======
   // Placed after providerFor/modelFor/effectiveTeamModel so const

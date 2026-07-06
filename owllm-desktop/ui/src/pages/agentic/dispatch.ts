@@ -1246,9 +1246,25 @@ export function providerFor(modelId: string, models: ModelInfo[]): string {
   if (!modelId) return "local";
   if (modelId.startsWith("auto/")) return "auto";
   const bare = stripModelPrefix(modelId);
+  // Pure cloud/subscription entries — resolve provider by id prefix. This MUST
+  // cover every provider the dispatch switch handles; a `sub/`/`api/` model that
+  // falls through to "local" gets routed to the llama-server and dies with
+  // "unknown model_id" (Code page regression, kimi/gemini/etc). Kept in lockstep
+  // with AgentsPage's providerFor, which now delegates here.
   if (modelId.startsWith("sub/") || modelId.startsWith("api/")) {
     if (bare.startsWith("claude-")) return "anthropic";
     if (bare.startsWith("gpt-") || bare === "o3") return "openai";
+    if (bare.startsWith("kimi-") || bare.startsWith("moonshot-")) return "moonshot";
+    if (bare.startsWith("gemini-")) return "gemini";
+    if (bare.startsWith("deepseek-")) return "deepseek";
+    if (bare.startsWith("grok-")) return "xai";
+    // Groq's catalog overlaps with open-weight names (llama-*, qwen3-*,
+    // gpt-oss-*). Match by exact id against the registry first.
+    const m = models.find(x => x.model_id === bare);
+    if (m?.provider) return m.provider;
+    if (bare.startsWith("sonar")) return "perplexity";
+    if (bare.startsWith("mistral-") || bare.startsWith("magistral-") || bare.startsWith("codestral-")) return "mistral";
+    if (bare.includes("/")) return "together"; // Together uses "owner/model" ids.
   }
   const m = models.find(x => x.model_id === bare);
   return m?.provider || "local";
@@ -1825,6 +1841,17 @@ export async function streamChatCompletion(
     reply = await streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   } else if (provider === "openai") {
     reply = await streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
+  } else if (provider === "moonshot") {
+    reply = await streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
+  } else if (provider === "gemini") {
+    reply = await streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history);
+  } else if (OPENAI_COMPAT_PROVIDERS[provider]) {
+    const cfg = OPENAI_COMPAT_PROVIDERS[provider];
+    reply = await streamOpenAICompatible({
+      url: cfg.url, keyName: cfg.keyName, modelId: bareId,
+      systemPrompt, userMessage: effectiveText, temperature,
+      signal, onDelta, history, onThought, images, providerLabel: cfg.label,
+    });
   } else {
     // ---- Local llama-server path (GGUF) ----
     // Native tool-calling ONLY: the model's own chat template (llama-server
@@ -2572,6 +2599,186 @@ async function streamOpenAI(
     projectCwd,
     allowedTools,
   });
+}
+
+// The OpenAI-compatible cloud providers — all speak the same
+// /v1/chat/completions shape, so each is a one-line endpoint + key config.
+const OPENAI_COMPAT_PROVIDERS: Record<string, { url: string; keyName: string; label: string }> = {
+  deepseek:   { url: "https://api.deepseek.com/v1/chat/completions",    keyName: "DEEPSEEK_API_KEY",   label: "DeepSeek" },
+  xai:        { url: "https://api.x.ai/v1/chat/completions",            keyName: "XAI_API_KEY",        label: "xAI Grok" },
+  groq:       { url: "https://api.groq.com/openai/v1/chat/completions", keyName: "GROQ_API_KEY",       label: "Groq" },
+  perplexity: { url: "https://api.perplexity.ai/chat/completions",      keyName: "PERPLEXITY_API_KEY", label: "Perplexity" },
+  mistral:    { url: "https://api.mistral.ai/v1/chat/completions",      keyName: "MISTRAL_API_KEY",    label: "Mistral" },
+  together:   { url: "https://api.together.xyz/v1/chat/completions",    keyName: "TOGETHER_API_KEY",   label: "Together AI" },
+};
+
+/// Kimi (Moonshot). Subscription → `kimi --print` via ensureCliWarm +
+/// kimi_cli_complete (the SAME dispatch idiom as the Codex path above; the
+/// browser gateway is gated to the Browser role inside kimi_cli_complete, so
+/// a normal Kimi agent never wires it — kimi fatally aborts if it can't).
+/// API → OpenAI-compatible streaming.
+async function streamMoonshot(
+  modelId: string,
+  route: CloudRoute,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+  projectCwd?: string,
+  history?: HistoryItem[],
+  onThought?: ThoughtHandler,
+  images?: Attachment[],
+  allowedTools?: string[],
+): Promise<string> {
+  if (route.forceSub === true) {
+    await ensureCliWarm("kimi_cli");
+    const convo = (history ?? [])
+      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
+      .join("\n\n");
+    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    const reply = await invoke<string>("kimi_cli_complete", {
+      systemPrompt,
+      userMessage: prompt,
+      cwd: projectCwd ?? null,
+      model: modelId,
+      allowedTools: allowedTools ?? null,
+    });
+    if (reply) onDelta(reply);
+    return reply;
+  }
+  const key = await invoke<string | null>("accounts_get_secret", { name: "MOONSHOT_API_KEY" });
+  if (!key) throw new Error("No MOONSHOT_API_KEY saved — set it on the Accounts page.");
+  const resp = await fetchNetRetry(() => fetch("https://api.moonshot.ai/v1/chat/completions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+    body: JSON.stringify({
+      model: modelId,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...(history ?? []),
+        { role: "user", content: openaiUserContent(userMessage, images ?? []) },
+      ],
+      stream: true,
+      temperature,
+    }),
+    signal,
+  }), signal);
+  return consumeOpenAISse(resp, onDelta, onThought);
+}
+
+/// Generic OpenAI-compatible streamer — DeepSeek, xAI, Groq, Perplexity,
+/// Mistral, Together. API-key only (no subscription CLI for these).
+async function streamOpenAICompatible(args: {
+  url: string;
+  keyName: string;
+  modelId: string;
+  systemPrompt: string;
+  userMessage: string;
+  temperature: number;
+  signal: AbortSignal;
+  onDelta: StreamHandler;
+  history?: HistoryItem[];
+  onThought?: ThoughtHandler;
+  images?: Attachment[];
+  providerLabel: string;
+}): Promise<string> {
+  const key = await invoke<string | null>("accounts_get_secret", { name: args.keyName });
+  if (!key) throw new Error(`No ${args.keyName} saved — set it on the Accounts page (${args.providerLabel}).`);
+  const resp = await fetchNetRetry(() => fetch(args.url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+    body: JSON.stringify({
+      model: args.modelId,
+      messages: [
+        { role: "system", content: args.systemPrompt },
+        ...(args.history ?? []),
+        { role: "user", content: openaiUserContent(args.userMessage, args.images ?? []) },
+      ],
+      stream: true,
+      temperature: args.temperature,
+    }),
+    signal: args.signal,
+  }), args.signal);
+  return consumeOpenAISse(resp, args.onDelta, args.onThought);
+}
+
+/// Google Gemini. Subscription → gemini-cli --print via ensureCliWarm +
+/// gemini_cli_complete. API → REST + SSE (NOT OpenAI-compatible: different
+/// request body and event shape).
+async function streamGemini(
+  modelId: string,
+  route: CloudRoute,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+  projectCwd?: string,
+  history?: HistoryItem[],
+): Promise<string> {
+  if (route.forceSub === true) {
+    await ensureCliWarm("gemini_cli");
+    const convo = (history ?? [])
+      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
+      .join("\n\n");
+    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    const reply = await invoke<string>("gemini_cli_complete", {
+      systemPrompt,
+      userMessage: prompt,
+      cwd: projectCwd ?? null,
+      model: modelId,
+    });
+    if (reply) onDelta(reply);
+    return reply;
+  }
+  const key = await invoke<string | null>("accounts_get_secret", { name: "GEMINI_API_KEY" });
+  const apiKey = key || await invoke<string | null>("accounts_get_secret", { name: "GOOGLE_API_KEY" });
+  if (!apiKey) throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) saved — set it on the Accounts page.");
+  const contents = (history ?? []).map((h) => ({
+    role: h.role === "assistant" ? "model" : "user",
+    parts: [{ text: typeof h.content === "string" ? h.content : "" }],
+  }));
+  contents.push({ role: "user", parts: [{ text: userMessage }] });
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:streamGenerateContent?alt=sse&key=${encodeURIComponent(apiKey)}`;
+  const resp = await fetchNetRetry(() => fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      contents,
+      systemInstruction: systemPrompt ? { parts: [{ text: systemPrompt }] } : undefined,
+      generationConfig: { temperature },
+    }),
+    signal,
+  }), signal);
+  if (!resp.ok || !resp.body) throw new Error(await resp.text().catch(() => `HTTP ${resp.status}`));
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  let acc = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+    let nl;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl).replace(/\r$/, "");
+      buf = buf.slice(nl + 1);
+      if (!line.startsWith("data:")) continue;
+      const body = line.slice(5).trim();
+      if (!body) continue;
+      try {
+        const j = JSON.parse(body);
+        const parts = j?.candidates?.[0]?.content?.parts;
+        if (Array.isArray(parts)) {
+          for (const p of parts) {
+            if (typeof p?.text === "string" && p.text) { acc += p.text; onDelta(p.text); }
+          }
+        }
+      } catch { /* skip malformed event line */ }
+    }
+  }
+  return acc;
 }
 
 // OpenAI-compatible SSE consumer (api.openai.com + llama-server).

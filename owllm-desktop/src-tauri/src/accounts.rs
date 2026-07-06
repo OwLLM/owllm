@@ -785,7 +785,11 @@ fn wsl_probe(backend: &str) -> (bool, String) {
     let script = match backend {
         "claude_cli" => cli_probe("claude", "[ -f ~/.claude/.credentials.json ]"),
         "codex_cli" => cli_probe("codex", "[ -f ~/.codex/auth.json ]"),
-        "kimi_cli" => cli_probe("kimi", "[ -f ~/.kimi/config.toml ]"),
+        // Modern kimi-cli writes ~/.kimi/credentials/kimi-code.json at login;
+        // older ones only ~/.kimi/config.toml. Accept either (mirrors the host
+        // kimi_cli_logged_in detector) — checking config.toml alone falsely
+        // reported a fresh login as NOCRED.
+        "kimi_cli" => cli_probe("kimi", "{ [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }"),
         "gemini_cli" => cli_probe("gemini", "[ -f ~/.gemini/oauth_creds.json ]"),
         other => {
             let var = match other {
@@ -2828,7 +2832,7 @@ fn generic_api_probe(
 /// `*_cli_logged_in()` detector):
 ///   * claude: ~/.claude/.credentials.json
 ///   * codex:  ~/.codex/auth.json + ~/.openai/auth.json (old path)
-///   * kimi:   ~/.kimi/config.toml
+///   * kimi:   ~/.kimi/credentials/kimi-code.json (modern) + ~/.kimi/config.toml (old)
 ///   * gemini: every *.json under ~/.gemini/ (oauth_creds.json,
 ///             settings.json, etc. — the detector greenlights on any
 ///             json present, so we wipe them all)
@@ -2861,6 +2865,10 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
             try_remove(&home.join(".openai").join("auth.json"), &mut removed);
         }
         "kimi_cli" => {
+            // Modern kimi-cli keeps its OAuth in ~/.kimi/credentials/kimi-code.json;
+            // config.toml alone is the OLD marker. Remove BOTH or Disconnect leaves
+            // the real token behind and the card still reports "logged in".
+            try_remove(&home.join(".kimi").join("credentials").join("kimi-code.json"), &mut removed);
             try_remove(&home.join(".kimi").join("config.toml"), &mut removed);
         }
         "gemini_cli" => {

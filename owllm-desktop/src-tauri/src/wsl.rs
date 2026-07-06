@@ -521,12 +521,22 @@ pub fn wsl_toolchain_status(distro: Option<String>) -> WslToolchain {
 }
 
 /// Install the agent toolchain inside the distro: node/npm, git, curl, uv, and
-/// the subscription CLIs (Claude/Codex/Gemini). Runs as root — WSL allows
+/// the subscription CLIs (Claude/Codex/Gemini/Kimi). Runs as root — WSL allows
 /// `-u root` with no password, so apt needs no sudo prompt. Idempotent: apt
 /// install / npm -g are safe to re-run. Long-running (downloads); run off the
 /// async executor. Returns the install log. The CLIs still need a one-time
 /// login INSIDE the distro (`wsl -d <distro> -- claude /login`, etc.) — paid
 /// credentials can't be copied from the Windows install.
+///
+/// Kimi is Python (not npm), so it's installed via `uv tool` with ALL of uv's
+/// dirs redirected under /usr/local: the executable shim (UV_TOOL_BIN_DIR), the
+/// tool venv (UV_TOOL_DIR), and the managed interpreter (UV_PYTHON_INSTALL_DIR)
+/// must ALL live under the jail-bound /usr tree — the bwrap sandbox sets
+/// HOME=$SB and ro-binds /usr, so a default `~/.local/...` install (or the
+/// interpreter a normal uv-tool venv points at) is invisible to isolated agents.
+/// That invisibility was the "Linux (WSL): CLI isn't installed where an isolated
+/// agent can reach it" failure — claude/codex/gemini worked only because
+/// npm-global-as-root already lands them in /usr/local/bin.
 #[tauri::command]
 pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
     // Resolve a REAL Linux distro (skip docker-desktop etc.) — apt/npm don't
@@ -546,14 +556,18 @@ pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
                   export UV_INSTALL_DIR=/usr/local/bin; \
                   (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
                   npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli || true; \
+                  export UV_TOOL_DIR=/usr/local/share/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_INSTALL_DIR=/usr/local/share/uv-python; \
+                  ( /usr/local/bin/uv tool install --force kimi-cli \
+                    || pip3 install --break-system-packages --upgrade kimi-cli \
+                    || pip install --upgrade kimi-cli ) || true; \
                   (command -v gh >/dev/null 2>&1 || ( \
                      curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
                      chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg && \
                      echo \"deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main\" > /etc/apt/sources.list.d/github-cli.list && \
                      apt-get update -y && apt-get install -y gh )) || true; \
                   echo '--- TOOLCHAIN REPORT (what is actually installed) ---'; \
-                  for t in node npm git curl uv gh claude codex gemini bwrap; do \
-                    if command -v \"$t\" >/dev/null 2>&1; then echo \"  OK       $t  ($(command -v \"$t\"))\"; \
+                  for t in node npm git curl uv gh claude codex gemini kimi bwrap; do \
+                    if PATH=/usr/local/bin:/usr/bin:/bin command -v \"$t\" >/dev/null 2>&1; then echo \"  OK       $t  ($(PATH=/usr/local/bin:/usr/bin:/bin command -v \"$t\"))\"; \
                     else echo \"  MISSING  $t  — install above did not land\"; fi; \
                   done; \
                   echo '----------------------------------------------------'; \

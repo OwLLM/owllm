@@ -1326,7 +1326,23 @@ pub async fn claude_cli_complete(
         // path takes a ~32 KB command line; the WSL path wraps args in a bash -lc
         // script (escaping expands length), so fold earlier there.
         let on_wsl = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc).is_some();
-        let max_system_arg: usize = if on_wsl { 10_000 } else { 24_000 };
+        // On Windows the resolved `claude` is usually an npm `.cmd` shim, which Rust
+        // must launch THROUGH cmd.exe — a ~8 KB command-line limit, NOT the ~32 KB of
+        // a direct CreateProcess. A 24 KB --append-system-prompt then dies with "The
+        // command line is too long." (exit 1, empty reply — the Code page "done" with
+        // no output). When the host CLI is a batch shim, budget the system-prompt arg
+        // against what the other flags already consumed and fold the rest into stdin.
+        let host_batch_shim = !on_wsl
+            && !crate::sandbox::is_isolated(cwd.as_deref())
+            && find_claude_cli().map(|p| is_batch_shim(&p)).unwrap_or(false);
+        let max_system_arg: usize = if host_batch_shim {
+            let already: usize = args.iter().map(|a| a.len() + 3).sum::<usize>() + 96;
+            7_000usize.saturating_sub(already)
+        } else if on_wsl {
+            10_000
+        } else {
+            24_000
+        };
         let fold_system_into_stdin =
             !system_prompt.trim().is_empty() && system_prompt.len() > max_system_arg;
         if !system_prompt.trim().is_empty() && !fold_system_into_stdin {
@@ -1388,9 +1404,14 @@ pub async fn claude_cli_complete(
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_payload.as_bytes())
-                    .map_err(|e| format!("write stdin: {e}"))?;
+                // Best-effort, like every OTHER CLI spawn here (`let _ =`). If claude
+                // exited early — a rejected --model, a bad flag, an auth failure — its
+                // stdin pipe is already closed and this write returns "pipe has been
+                // ended (os error 109)". Propagating that (the old `?`) MASKED the real
+                // reason: we returned the pipe error instead of reaching wait_with_output
+                // below, which captures claude's actual stderr/exit. Swallow it; drop
+                // stdin (EOF) and let the real error surface.
+                let _ = stdin.write_all(stdin_payload.as_bytes());
             }
             // Wait as long as the CLI needs (agentic runs can be 15-30 min).
             let output = child
@@ -1931,7 +1952,23 @@ pub async fn claude_cli_stream(
         // path takes a ~32 KB command line; the WSL path wraps args in a bash -lc
         // script (escaping expands length), so fold earlier there.
         let on_wsl = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc).is_some();
-        let max_system_arg: usize = if on_wsl { 10_000 } else { 24_000 };
+        // On Windows the resolved `claude` is usually an npm `.cmd` shim, which Rust
+        // must launch THROUGH cmd.exe — a ~8 KB command-line limit, NOT the ~32 KB of
+        // a direct CreateProcess. A 24 KB --append-system-prompt then dies with "The
+        // command line is too long." (exit 1, empty reply — the Code page "done" with
+        // no output). When the host CLI is a batch shim, budget the system-prompt arg
+        // against what the other flags already consumed and fold the rest into stdin.
+        let host_batch_shim = !on_wsl
+            && !crate::sandbox::is_isolated(cwd.as_deref())
+            && find_claude_cli().map(|p| is_batch_shim(&p)).unwrap_or(false);
+        let max_system_arg: usize = if host_batch_shim {
+            let already: usize = args.iter().map(|a| a.len() + 3).sum::<usize>() + 96;
+            7_000usize.saturating_sub(already)
+        } else if on_wsl {
+            10_000
+        } else {
+            24_000
+        };
         let fold_system_into_stdin =
             !system_prompt.trim().is_empty() && system_prompt.len() > max_system_arg;
         if !system_prompt.trim().is_empty() && !fold_system_into_stdin {
@@ -1993,9 +2030,12 @@ pub async fn claude_cli_stream(
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
         if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(stdin_payload.as_bytes())
-                .map_err(|e| format!("write stdin: {e}"))?;
+            // Best-effort: the CLI can read what it needs and exit while we're still
+            // writing the (large agentic) payload → "pipe has been ended (os error
+            // 109)". Propagating that (the old `?`) aborted the whole stream and
+            // discarded the reply — the "done" with no output on the Code page. Swallow
+            // it; the drop() below signals EOF and we still read stdout for the reply.
+            let _ = stdin.write_all(stdin_payload.as_bytes());
             // Closing stdin signals EOF — without this the CLI sits
             // waiting for more input and never emits anything.
             drop(stdin);

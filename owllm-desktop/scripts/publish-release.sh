@@ -10,6 +10,7 @@
 #   scripts/publish-release.sh --notes "release notes"        # same, with explicit notes
 #   scripts/publish-release.sh --dry-run                       # build + sign + latest.json, NO gh release (safe rehearsal)
 #   scripts/publish-release.sh --draft                         # publish as a DRAFT (human flips public)
+#   scripts/publish-release.sh --prerelease                    # publish as a PRE-RELEASE: public + downloadable, but NOT /latest (auto-updater skips it) — the "test before you promote" channel
 #
 # Version is read from src-tauri/tauri.conf.json (bump + commit + tag BEFORE
 # calling this). Requires on PATH: cargo+mingw (build), node/npx (sign), gh (publish).
@@ -19,11 +20,13 @@ REPO="OwLLM/owllm"
 NOTES=""
 DRY_RUN=0
 DRAFT=0
+PRERELEASE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --notes) NOTES="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --draft) DRAFT=1; shift ;;
+    --prerelease) PRERELEASE=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -246,8 +249,9 @@ if [ "$DRY_RUN" = 1 ]; then
   exit 0
 fi
 
-step "4/5 gh release ($TAG, $([ "$DRAFT" = 1 ] && echo draft || echo latest))"
-LATEST_FLAG="--latest"; [ "$DRAFT" = 1 ] && LATEST_FLAG="--draft"
+_chan="latest"; [ "$PRERELEASE" = 1 ] && _chan="prerelease"; [ "$DRAFT" = 1 ] && _chan="draft"
+step "4/5 gh release ($TAG, $_chan)"
+LATEST_FLAG="--latest"; [ "$PRERELEASE" = 1 ] && LATEST_FLAG="--prerelease"; [ "$DRAFT" = 1 ] && LATEST_FLAG="--draft"
 UPLOADS=("$INSTALLER" "$LATEST")
 [ "$UPDATER_ARTIFACT" = "$INSTALLER" ] || UPLOADS+=("$UPDATER_ARTIFACT")
 for extra in dist/OwLLM.Desktop.deb dist/OwLLM.Desktop.rpm; do
@@ -261,7 +265,10 @@ if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
   if [ -z "$EXISTING_BODY" ] || [ "$EXISTING_BODY" = "$TAG" ] || [ "$EXISTING_BODY" = "$VERSION" ] || [ "$EXISTING_BODY" = "Release$VERSION" ]; then
     gh release edit "$TAG" --repo "$REPO" --notes "$NOTES"
   fi
-  [ "$DRAFT" = 1 ] || gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+  if [ "$DRAFT" = 1 ]; then :
+  elif [ "$PRERELEASE" = 1 ]; then gh release edit "$TAG" --repo "$REPO" --draft=false --prerelease --latest=false
+  else gh release edit "$TAG" --repo "$REPO" --draft=false --latest
+  fi
 else
   gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "$NOTES" $LATEST_FLAG "${UPLOADS[@]}"
 fi
@@ -269,6 +276,17 @@ fi
 step "5/5 verify"
 if [ "$DRAFT" = 1 ]; then
   echo "PUBLISH_DRAFT_OK: $TAG drafted — flip it public on GitHub when ready."
+  exit 0
+fi
+if [ "$PRERELEASE" = 1 ]; then
+  # A pre-release is intentionally NOT /latest — the auto-updater skips it, so
+  # DON'T poll /latest (that would false-fail). Verify the tagged asset is
+  # publicly downloadable and hand back the direct link for a targeted test.
+  DL="https://github.com/$REPO/releases/download/$TAG/$(basename "$INSTALLER" | tr ' ' '.')"
+  HTTP="$(curl -s -o /dev/null -w "%{http_code}" -L "$DL")"
+  echo "  prerelease installer: $DL (HTTP $HTTP)"
+  [ "$HTTP" = "200" ] || fail "prerelease installer HTTP $HTTP (expected 200)"
+  echo "PUBLISH_PRERELEASE_OK: $TAG published as a pre-release (NOT auto-served). Test via the link above, then promote to Latest."
   exit 0
 fi
 # Poll: GitHub's /latest CDN can lag a few seconds behind `gh release create`,

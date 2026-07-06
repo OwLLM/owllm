@@ -10,5 +10,8 @@
   "openai": [
     { "id": "gpt-5.5",       "display": "GPT-5.5",       "api": true, "effort": ["low", "medium", "high", "extra_high"] },
     { "id": "gpt-5.5-codex", "display": "GPT-5.5 Codex", "sub": true, "effort": ["low", "medium", "high", "extra_high"] }
+  ],
+  "kimi": [
+    { "id": "kimi-k2.7", "display": "Kimi K2.7", "sub": true, "api": true }
   ]
 }

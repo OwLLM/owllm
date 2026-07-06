@@ -41,15 +41,23 @@ export type PtyTerminalProps = {
   /// Called when the child exits. Parent can swap the terminal out
   /// for a "process exited" placeholder, or auto-close.
   onExit?: (code: number | null) => void;
+  /// Text to type into the REPL once it has booted — e.g. "/login\r" for
+  /// the Claude / Kimi login REPLs, so Connect logs you in without you
+  /// typing it. Sent ONCE, after the child first produces output and the
+  /// banner settles (a real readiness signal, not a blind timer). Leave
+  /// unset for one-shot login subcommands (codex login, gemini auth login).
+  autoSend?: string;
 };
 
-export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit }: PtyTerminalProps) {
+export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSend }: PtyTerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const sessionRef = useRef<string | null>(null);
   const onExitRef = useRef(onExit);
   onExitRef.current = onExit;
+  const autoSendRef = useRef(autoSend);
+  autoSendRef.current = autoSend;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -91,6 +99,27 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit }: PtyTe
     fitRef.current = fit;
 
     const dim = fit.proposeDimensions() ?? { cols: 100, rows: 28 };
+
+    // Auto-send (e.g. "/login") once the REPL has actually booted. We key
+    // off a REAL signal — the child produced output then went quiet for a
+    // beat (banner finished printing, prompt is waiting) — rather than a
+    // blind fixed delay. Fires exactly once per session.
+    let autoSent = false;
+    let autoSendTimer: number | undefined;
+    const armAutoSend = () => {
+      const payload = autoSendRef.current;
+      if (autoSent || !payload || !sessionRef.current) return;
+      if (autoSendTimer) window.clearTimeout(autoSendTimer);
+      autoSendTimer = window.setTimeout(() => {
+        if (autoSent || !sessionRef.current) return;
+        autoSent = true;
+        invoke("pty_write", {
+          sessionId: sessionRef.current,
+          data: Array.from(new TextEncoder().encode(payload)),
+        }).catch(() => {});
+      }, 600);
+    };
+
     const channel = new Channel<PtyEvent>();
     channel.onmessage = (evt) => {
       if (evt.kind === "data") {
@@ -98,6 +127,7 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit }: PtyTe
         // into a Uint8Array for xterm so binary-safe ANSI sequences
         // survive (xterm decodes UTF-8 internally).
         term.write(new Uint8Array(evt.data));
+        armAutoSend();
       } else if (evt.kind === "exit") {
         // Soft visual hint at exit; the parent decides whether to
         // unmount or leave the terminal up for the user to read.
@@ -152,6 +182,7 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit }: PtyTe
     return () => {
       ro.disconnect();
       if (rafId) cancelAnimationFrame(rafId);
+      if (autoSendTimer) window.clearTimeout(autoSendTimer);
       const sid = sessionRef.current;
       sessionRef.current = null;
       if (sid) invoke("pty_kill", { sessionId: sid }).catch(() => {});

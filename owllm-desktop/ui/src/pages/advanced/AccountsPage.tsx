@@ -207,13 +207,14 @@ function VoiceRuntimePanel() {
 /// what we hand portable-pty's CommandBuilder — PATH resolution
 /// happens there (or in Rust's which_extended fallback). Args mirror
 /// what subscription_cli_login used to pass when opening CMD:
-///   * claude/kimi: bare REPL, the CLI prompts for /login on first run
-///   * codex: `login` subcommand (one-shot OAuth)
-///   * gemini: `auth login` subcommand pair
-const LOGIN_CMD: Record<string, { cli: string; args: string[] } | undefined> = {
-  claude_cli: { cli: "claude", args: [] },
+///   * claude/kimi: bare REPL — we auto-type `send` once it boots so
+///     Connect logs you in without you typing /login yourself.
+///   * codex: `login` subcommand (one-shot OAuth) — no REPL command.
+///   * gemini: `auth login` subcommand pair — no REPL command.
+const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } | undefined> = {
+  claude_cli: { cli: "claude", args: [], send: "/login\r" },
   codex_cli:  { cli: "codex",  args: ["login"] },
-  kimi_cli:   { cli: "kimi",   args: [] },
+  kimi_cli:   { cli: "kimi",   args: [], send: "/login\r" },
   gemini_cli: { cli: "gemini", args: ["auth", "login"] },
 };
 
@@ -719,6 +720,8 @@ type ActiveTerminal = {
   args: string[];
   backend: string;
   providerName: string;
+  /// REPL command auto-typed after the CLI boots (e.g. "/login\r").
+  send?: string;
 };
 
 function RightRail({
@@ -784,7 +787,7 @@ function RightRail({
       </div>
       <div style={{ flex: 1, minHeight: 0, display: tab === "terminal" ? "block" : "none" }}>
         {activeTerm
-          ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} />
+          ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} autoSend={activeTerm.send} />
           : <div style={{ padding: 14, color: "#5a6376", fontSize: 11, fontStyle: "italic" }}>
               Click Connect on any CLI-backed subscription to open a live terminal here.
             </div>}
@@ -1011,9 +1014,9 @@ export default function AccountsPage() {
         return;
       }
       const hint: Record<string, string> = {
-        claude_cli: "type `/login` if the REPL doesn't auto-prompt.",
+        claude_cli: "auto-running /login — complete the browser sign-in.",
         codex_cli:  "follow the OAuth URL that appears.",
-        kimi_cli:   "REPL auto-prompts for /login on first run.",
+        kimi_cli:   "auto-running /login — complete the browser sign-in.",
         gemini_cli: "follow the OAuth URL that appears.",
       };
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
@@ -1022,6 +1025,7 @@ export default function AccountsPage() {
         args: recipe.args,
         backend: route.backend,
         providerName: provider.name,
+        send: recipe.send,
       });
       setRailTab("terminal");
     } else {

@@ -267,7 +267,36 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.7.46** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.7.78** releases.
+
+### 🌐 The Agent Browser — native, shared, and on every model (0.7.53 → 0.7.78)
+The browser your agents drive is now **built into OwLLM** — no Python, no bundled Chromium, no external window. It runs on the app's own engine (WebView2 / WebKit), opens instantly, and renders inside OwLLM's own dark chrome.
+- **You and the agents share one window.** Open a page, log in, and the team inherits the session. Ask *“what's on this page?”* and it snapshots, reads, clicks, and fills forms for you.
+- **A dedicated Browser Agent** — a team role that owns everything the sandbox can't: **localhost dev-server previews, live sites, form testing**. Its card *is* the browser remote (open URL, device, autofill, vault, import). Build a web app with the team, run its dev server, and watch the Browser Agent click through it.
+- **Encrypted password vault + import** — an on-device vault the agents autofill, with one-click import from **Chrome, Edge, Brave, and Opera**.
+- **Mobile simulation + localhost** — device presets (iPhone / Android / Tablet) with real viewports and mobile user-agents; localhost URLs just work.
+- **Not Claude-only anymore.** An in-app **MCP gateway** hands the same browser tools to agents on **local models, Claude, OpenAI / Codex, and Kimi** — on normal projects, and even to the Browser role inside a sealed sandbox.
+
+### 🔌 Bring any model — 11 providers, one team (0.7.76 → 0.7.78)
+Plug in a key or sign into a subscription CLI and the model joins your team:
+
+| | Providers |
+|---|---|
+| **Subscription CLIs** | Claude Code · Codex · Gemini · Kimi |
+| **API keys** | Anthropic · OpenAI · Google Gemini · Kimi / Moonshot · DeepSeek · xAI Grok · Groq · Perplexity · Mistral · Together |
+
+Every one of them **chats** in a team. **Full agentic tool-calling + browser control** runs today on **local models, Claude, OpenAI, and Kimi**, with the rest rolling out. Provider logins — CLIs *and* API keys — **auto-sync into the sandbox**, so cloud agents keep working even when the project is sealed.
+
+### 💻 Cross-platform + unified-memory ready (0.7.52)
+Groundwork for Mac & Linux, and a real fix for modern hardware: the **Metal (Apple) and Linux llama.cpp engines** are packaged, and the GPU probe was rebuilt to understand **unified memory** — Apple Silicon, AMD APUs (Strix Halo / Ryzen AI Max), and NVIDIA Grace now report their *real* GPU-addressable budget, so model-fit colours and context sizing stop mis-judging shared-RAM machines.
+
+### 🎨 Onboarding, redesigned (0.7.70)
+The New Project dialog is now **visual**: pick a card for what you're making — Website / Web app, Mobile app, Software, Personal assistant, Bug fixing, Code review, Research, Writing… — and OwLLM pre-picks the right team, seeds a tailored brief, and sets up the sandbox. One click from *“I want to build X”* to a working team.
+
+### 📝 Notebook & Code-page polish (0.7.47 → 0.7.68)
+- The **Run Notebook** now drafts a real **plan** (objective · approach · milestones) from your brainstorm — not just a step list — and its digest agent's model is a **picker you control**.
+- **Two Code pages on the same project** — run parallel work on separate branches and merge when ready.
+- The Code page's right column is now **two resizable tabs** (Super User rules · Notebook), plus a bottom utility bar: a **mode switch** (Plan / Auto / Chat), a floating **terminal**, and **live account-usage** meters.
 
 ### 📓 Plan while they work — mid-run steering + the Run Notebook (0.7.44 → 0.7.46)
 The single most requested workflow fix: **you are never locked out while agents run.**
@@ -339,10 +368,25 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.7.46)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.7.78)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.7.78** | Kimi CLI works inside the WSL sandbox — installed in the seal, login detected, real disconnect |
+| **0.7.77** | Browser gateway reaches Gemini & Kimi CLI agents · Kimi subscription detected after login |
+| **0.7.76** | OpenAI API-key agents get the full tool loop — browser + files, model-agnostic |
+| **0.7.74** | Non-Claude CLIs call `mcp__owllm__browser_*` directly (no ToolSearch) — fixes “0 browser tools” |
+| **0.7.72** | Codex / OpenAI CLI agents reach the in-app browser gateway |
+| **0.7.70** | Visual New-Project onboarding — pick what you're building, get the right team + sandbox |
+| **0.7.69** | The Browser Agent runs host-side even inside a sealed team (its sandbox exception) |
+| **0.7.66** | The **Browser Agent** — a team role that owns localhost & the web; its card is the browser remote |
+| **0.7.62** | Fix: a space in the config path silently starved CLI browser tools (short-path) |
+| **0.7.60** | CLI agents get the browser under the correct `mcp__owllm__` tool names |
+| **0.7.58** | Solo-loop graph fixed — Coder + Critic share a row, Publisher below; positions remembered per mode |
+| **0.7.53** | **Native Agent Browser** — the app's own engine (no Python/Chromium) · password vault + import (Chrome/Edge/Brave/Opera) · mobile emulation · localhost |
+| **0.7.52** | Cross-platform + unified-memory readiness — Metal/Linux engines packaged; Apple/AMD/NVIDIA shared-RAM budgets |
+| **0.7.49** | Model-agnostic account-usage meters (every provider) |
+| **0.7.48** | Code-page right column — project rules + Run Notebook, wired into the solo coder |
 | **0.7.46** | URL-in-goal preflight fix (websites are fetched, never mistaken for files) · Notebook shows the digest agent's model |
 | **0.7.45** | Mid-run steering that actually lands (injected between tool calls on local models) + the 📓 Run Notebook with Digest agent + auto-feed |
 | **0.7.44** | Multiple Agents pages — tab strip, parallel teams on same/different projects, runs survive tab switches |

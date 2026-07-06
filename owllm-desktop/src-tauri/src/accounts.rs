@@ -1388,9 +1388,14 @@ pub async fn claude_cli_complete(
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
             if let Some(mut stdin) = child.stdin.take() {
-                stdin
-                    .write_all(stdin_payload.as_bytes())
-                    .map_err(|e| format!("write stdin: {e}"))?;
+                // Best-effort, like every OTHER CLI spawn here (`let _ =`). If claude
+                // exited early — a rejected --model, a bad flag, an auth failure — its
+                // stdin pipe is already closed and this write returns "pipe has been
+                // ended (os error 109)". Propagating that (the old `?`) MASKED the real
+                // reason: we returned the pipe error instead of reaching wait_with_output
+                // below, which captures claude's actual stderr/exit. Swallow it; drop
+                // stdin (EOF) and let the real error surface.
+                let _ = stdin.write_all(stdin_payload.as_bytes());
             }
             // Wait as long as the CLI needs (agentic runs can be 15-30 min).
             let output = child

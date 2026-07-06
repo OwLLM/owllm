@@ -135,9 +135,11 @@ async fn probe_gpu() -> ReadinessRow {
 }
 
 async fn probe_env() -> ReadinessRow {
-    // Report the DEFAULT (first) fine-tuning profile's state — one
-    // probe keeps this fast. Other profiles are managed on the Train
-    // page's Environment card.
+    // Report the BEST state across ALL fine-tuning profiles. Checking only
+    // the first ("standard") missed a user whose ONLY installed profile was
+    // unsloth: Train showed it ready while Home insisted "Not set up"
+    // (bug report #33). A ready profile short-circuits, so the common
+    // installed case stays a single status probe.
     let profiles = match env_manager::env_profiles_list().await {
         Ok(p) => p,
         Err(e) => {
@@ -148,45 +150,41 @@ async fn probe_env() -> ReadinessRow {
             }
         }
     };
-    let Some(first) = profiles.first() else {
+    if profiles.is_empty() {
         return ReadinessRow {
             ok: false,
             warn: true,
             detail: "No fine-tuning profiles defined".to_string(),
         };
-    };
-    let label = first.display.clone();
-    match env_manager::env_profile_status(first.name.clone()).await {
-        Ok(env_manager::EnvProfileState::Ready { .. }) => ReadinessRow {
-            ok: true,
-            warn: false,
-            detail: format!("{label} · ready"),
-        },
-        Ok(env_manager::EnvProfileState::Installing) => ReadinessRow {
-            ok: false,
-            warn: true,
-            detail: format!("{label} · installing…"),
-        },
-        Ok(env_manager::EnvProfileState::Stale { .. }) => ReadinessRow {
-            ok: false,
-            warn: true,
-            detail: format!("{label} · update available"),
-        },
-        Ok(env_manager::EnvProfileState::Broken { .. }) => ReadinessRow {
-            ok: false,
-            warn: true,
-            detail: format!("{label} · needs repair"),
-        },
-        Ok(env_manager::EnvProfileState::NotInstalled) => ReadinessRow {
-            ok: false,
-            warn: true, // optional until the user wants to train
-            detail: "Not set up — install on Train".to_string(),
-        },
-        Err(e) => ReadinessRow {
-            ok: false,
-            warn: true,
-            detail: format!("env check failed: {e}"),
-        },
+    }
+    // Best non-ready state seen so far, ranked: installing > stale > broken > error.
+    let mut fallback: Option<(u8, String)> = None;
+    for p in &profiles {
+        let label = p.display.clone();
+        let (rank, detail) = match env_manager::env_profile_status(p.name.clone()).await {
+            Ok(env_manager::EnvProfileState::Ready { .. }) => {
+                return ReadinessRow {
+                    ok: true,
+                    warn: false,
+                    detail: format!("{label} · ready"),
+                }
+            }
+            Ok(env_manager::EnvProfileState::Installing) => (0u8, format!("{label} · installing…")),
+            Ok(env_manager::EnvProfileState::Stale { .. }) => (1, format!("{label} · update available")),
+            Ok(env_manager::EnvProfileState::Broken { .. }) => (2, format!("{label} · needs repair")),
+            Ok(env_manager::EnvProfileState::NotInstalled) => continue,
+            Err(e) => (3, format!("env check failed: {e}")),
+        };
+        if fallback.as_ref().map(|(r, _)| rank < *r).unwrap_or(true) {
+            fallback = Some((rank, detail));
+        }
+    }
+    ReadinessRow {
+        ok: false,
+        warn: true, // optional until the user wants to train
+        detail: fallback
+            .map(|(_, d)| d)
+            .unwrap_or_else(|| "Not set up — install on Train".to_string()),
     }
 }
 

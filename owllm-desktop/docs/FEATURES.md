@@ -44,6 +44,11 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   bespoke team from a brief (and can deep-research first, writes BRIEF.md).
 - **Solo-Loop vs Team**: header toggle; Solo = one coder in an edit→verify→fix
   loop with Critic + Publisher; Team = full orchestration.
+- **Lean prompt profile**: solo and ≤3-agent runs get the trimmed injection
+  stack — short memory hint instead of the tutorial, halved snapshot/RAG
+  budgets (`setLeanRun` in `localTools.ts`, `lean` param on both
+  `buildSpecialistPrompt` copies). "Smallest safe activation" per
+  `docs/AGENTIC_DESIGN.md`; user project rules are never trimmed.
 - **Verification Gate**: "done" = a real command's exit code (auto-detected or
   from the Project Card), never model say-so. Per-agent verify-fix loops.
 - **Project Card** (`.owllm/project.json`): committed per-repo config — goal,

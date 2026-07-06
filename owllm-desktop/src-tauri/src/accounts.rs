@@ -3112,29 +3112,52 @@ pub async fn cli_install_stream(
     backend: String,
     on_event: Channel<CliInstallEvent>,
 ) -> Result<i32, String> {
-    let (tool, args): (&'static str, Vec<&'static str>) = match backend.as_str() {
-        "claude_cli" => ("npm", vec!["install", "-g", "@anthropic-ai/claude-code"]),
-        "codex_cli"  => ("npm", vec!["install", "-g", "@openai/codex"]),
-        "kimi_cli"   => ("pip", vec!["install", "--upgrade", "kimi-cli"]),
-        "gemini_cli" => ("npm", vec!["install", "-g", "@google/gemini-cli"]),
-        other => return Err(format!("unknown CLI backend: {other}")),
+    // kimi-cli requires Python >=3.12; on hosts with an older Python, pip
+    // filters out EVERY release and dies with "No matching distribution
+    // found for kimi-cli" (bug report #32). uv sidesteps the host Python
+    // entirely by provisioning a managed CPython for the tool env — the
+    // same approach the WSL install already uses. Prefer the bundled uv
+    // (MCP toolchain module), then a PATH uv; plain pip stays as the last
+    // resort for machines that have neither but do have Python 3.12+.
+    let kimi_uv: Option<PathBuf> = if backend == "kimi_cli" {
+        crate::paths::module_uv_exe()
+            .or_else(|| ["uv.exe", "uv"].iter().find_map(|n| which_extended(n)))
+    } else {
+        None
     };
+    let kimi_via_pip = backend == "kimi_cli" && kimi_uv.is_none();
 
-    // Find the package manager. Mirrors cli_install's pre-check.
-    let tool_path = {
-        let names = [format!("{tool}.exe"), format!("{tool}.cmd"), tool.to_string()];
-        names.iter().find_map(|n| which_extended(n))
-            .ok_or_else(|| {
-                if tool == "npm" {
-                    // Direct the user at OUR module installer instead
-                    // of nodejs.org — the bundled runtime is one click
-                    // away in the Modules wizard and doesn't require
-                    // a manual download / system Node install.
-                    "Node.js runtime not installed. Open Modules and install 'Node.js runtime' (one click, ~30 MB) — then retry. (Or install Node.js system-wide from https://nodejs.org/ if you prefer.)".to_string()
-                } else {
-                    format!("{tool} not found on PATH — install Python (https://www.python.org/) first.")
-                }
-            })?
+    let (tool_path, args): (PathBuf, Vec<String>) = if let Some(uv) = kimi_uv {
+        // `uv tool install` puts the shim in ~/.local/bin, which
+        // extra_search_dirs() already walks — no restart needed.
+        (uv, ["tool", "install", "--upgrade", "--python", "3.13", "kimi-cli"]
+            .iter().map(|s| s.to_string()).collect())
+    } else {
+        let (tool, args): (&'static str, Vec<&'static str>) = match backend.as_str() {
+            "claude_cli" => ("npm", vec!["install", "-g", "@anthropic-ai/claude-code"]),
+            "codex_cli"  => ("npm", vec!["install", "-g", "@openai/codex"]),
+            "kimi_cli"   => ("pip", vec!["install", "--upgrade", "kimi-cli"]),
+            "gemini_cli" => ("npm", vec!["install", "-g", "@google/gemini-cli"]),
+            other => return Err(format!("unknown CLI backend: {other}")),
+        };
+
+        // Find the package manager. Mirrors cli_install's pre-check.
+        let tool_path = {
+            let names = [format!("{tool}.exe"), format!("{tool}.cmd"), tool.to_string()];
+            names.iter().find_map(|n| which_extended(n))
+                .ok_or_else(|| {
+                    if tool == "npm" {
+                        // Direct the user at OUR module installer instead
+                        // of nodejs.org — the bundled runtime is one click
+                        // away in the Modules wizard and doesn't require
+                        // a manual download / system Node install.
+                        "Node.js runtime not installed. Open Modules and install 'Node.js runtime' (one click, ~30 MB) — then retry. (Or install Node.js system-wide from https://nodejs.org/ if you prefer.)".to_string()
+                    } else {
+                        format!("{tool} not found on PATH — install Python (https://www.python.org/) first.")
+                    }
+                })?
+        };
+        (tool_path, args.iter().map(|s| s.to_string()).collect())
     };
 
     let backend_label = backend.clone();
@@ -3178,6 +3201,12 @@ pub async fn cli_install_stream(
             stream: "stdout".to_string(),
             text: format!("[{backend_label}] installing… this can take 30-90 s for npm packages."),
         });
+        if kimi_via_pip {
+            let _ = on_event.send(CliInstallEvent::Line {
+                stream: "stdout".to_string(),
+                text: "[kimi_cli] note: kimi-cli needs Python 3.12+. If pip ends with 'No matching distribution found', install the 'MCP Server Toolchain' module (bundles uv) and retry — uv provisions its own Python.".to_string(),
+            });
+        }
 
         let mut child = cmd.spawn().map_err(|e| format!("spawn {}: {e}", tool_path.display()))?;
         let stdout = child.stdout.take().ok_or("no stdout pipe")?;

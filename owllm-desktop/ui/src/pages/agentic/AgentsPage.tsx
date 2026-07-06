@@ -81,6 +81,7 @@ import {
   fetchNetRetry,
   TEAM_OPERATING_CONTRACT,
   TEAM_MEMORY_HINT,
+  TEAM_MEMORY_HINT_LEAN,
   projectWorkspaceBlock,
   providerFor as providerForShared,
 } from "./dispatch";
@@ -89,7 +90,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -6712,6 +6713,9 @@ function buildSpecialistPrompt(
   /// Absolute project root the agent runs against — so it knows WHERE the project
   /// is instead of climbing into OwLLM's internal folders.
   projectCwd?: string | null,
+  /// Lean profile (solo / ≤3-agent runs): swap the memory tutorial for the short
+  /// hint. The snapshot/RAG caps shrink via setLeanRun — set at run start.
+  lean?: boolean,
 ): string {
   const role = roleByName.get(spec.base);
   // Layer: role base prompt (from yaml) + team-specific spec
@@ -6747,7 +6751,7 @@ function buildSpecialistPrompt(
   }
   layers.push(projectWorkspaceBlock(projectCwd));
   layers.push(TEAM_OPERATING_CONTRACT);
-  layers.push(TEAM_MEMORY_HINT);
+  layers.push(lean ? TEAM_MEMORY_HINT_LEAN : TEAM_MEMORY_HINT);
   const memSnapshot = getTeamMemorySnapshot();
   if (memSnapshot) layers.push(memSnapshot);
   const browserLine = getBrowserStateLine();
@@ -10210,6 +10214,10 @@ export function AgentsPage({
     setTeamMemoryScope(selectedProjectId);
     // Pin the run's goal so every snapshot refresh ranks facts by relevance to it.
     setTeamMemoryGoal(text);
+    // Lean profile: solo and small (≤3-agent) runs get the trimmed injection stack
+    // — shorter memory hint + halved snapshot/RAG budgets ("smallest safe
+    // activation", docs/AGENTIC_DESIGN.md).
+    setLeanRun(soloMode || (activeTeam?.agents.length ?? 99) <= 3);
     // Warm the shared-memory snapshot so it's injected into the orchestrator's and
     // every specialist's prompt this run (readable on every model path).
     await refreshTeamMemorySnapshot();
@@ -10559,7 +10567,7 @@ export function AgentsPage({
           "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
           "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
         ].join("\n");
-        const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd) + "\n" + SOLO_OVERRIDE;
+        const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd, true) + "\n" + SOLO_OVERRIDE;
         const sAllowed = roleByName.get(coder.base)?.toolAllowlist;
         const sMem = await loadAgentMemory(selectedProjectId, coder.name);
         // Continuity (memory-loss fix 2026-07-04): a chat-driven send carries the
@@ -11351,7 +11359,7 @@ export function AgentsPage({
           // on a context-free sticky note. Model-agnostic (rides the instruction).
           const taskMem = await retrieveTeamMemory(instruction);
           const enrichedInstruction = enrichInstructionWithMemory(taskMem, instruction);
-          const sysPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd);
+          const sysPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd, activeTeam.agents.length <= 3);
           // PER-AGENT VERIFY-FIX LOOP (Build Shape slice 1, step 5+6): a coder does
           // not return one-shot. After it edits, the GATE runs the project's check
           // in the coder's own cwd; on a real FAILURE it gets the captured error and
@@ -11897,7 +11905,7 @@ export function AgentsPage({
         try {
           await streamChatCompletion(
             port, modelFor(docSpec.name), providerFor(modelFor(docSpec.name)),
-            buildSpecialistPrompt(activeTeam, docSpec, roleByName, directives, docSkillBlock, docCwd),
+            buildSpecialistPrompt(activeTeam, docSpec, roleByName, directives, docSkillBlock, docCwd, activeTeam.agents.length <= 3),
             docInstruction, tempFor(docSpec, 0.3), ctrl.signal,
             (delta) => streamLog(docSpec.name, delta),
             docCwd,

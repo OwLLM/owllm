@@ -95,6 +95,20 @@ export function getTeamMemorySnapshot(): string {
   return _teamMemorySnapshot;
 }
 
+/// LEAN RUN — the "smallest safe activation" profile (docs/AGENTIC_DESIGN.md).
+/// Solo runs and small teams (≤3 agents) don't need the full injection stack:
+/// with fewer hands the snapshot/RAG budget halves and prompt boilerplate slims,
+/// which keeps CLI spawns small and the task on top instead of under machinery.
+/// Set by BOTH dispatch loops at run start, so the mid-run snapshot refreshes
+/// (after memory_write / harvest / worklog) inherit the same cap automatically.
+let _leanRun = false;
+export function setLeanRun(v: boolean): void {
+  _leanRun = v;
+}
+export function isLeanRun(): boolean {
+  return _leanRun;
+}
+
 type RawTeamMemEntry = { id: number; key: string; content: string; tags: string; author: string; ts: number; kind: string };
 
 /// Render the two-section snapshot the model reads directly — the READ half of
@@ -134,8 +148,10 @@ export function renderTeamMemorySnapshot(facts: RawTeamMemEntry[], worklog: RawT
 /// after writes.
 export async function refreshTeamMemorySnapshot(limit = 12): Promise<void> {
   const scope = _teamMemoryScope || "";
-  const factLim = Math.max(4, Math.round((limit * 2) / 3));
-  const logLim = Math.max(2, limit - factLim);
+  // Lean runs halve the snapshot budget — fewer agents need less shared context.
+  const eff = _leanRun ? Math.min(limit, 6) : limit;
+  const factLim = Math.max(4, Math.round((eff * 2) / 3));
+  const logLim = Math.max(2, eff - factLim);
   try {
     const [relevant, recent, worklog] = await Promise.all([
       _teamMemoryGoal
@@ -227,10 +243,12 @@ export function getBrowserStateLine(): string {
 /// loops prepend this to each specialist's instruction (enrichInstructionWithMemory).
 export async function retrieveTeamMemory(task: string, limit = 8): Promise<string> {
   const scope = _teamMemoryScope || "";
+  // Lean runs halve the per-task RAG budget (see setLeanRun).
+  const eff = _leanRun ? Math.min(limit, 4) : limit;
   try {
-    // Overfetch: up to `limit` of the top hits may already sit in the snapshot.
-    const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit: limit + 12 });
-    const fresh = entries.filter((e) => !_snapshotIds.has(e.id)).slice(0, limit);
+    // Overfetch: up to `eff` of the top hits may already sit in the snapshot.
+    const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit: eff + 12 });
+    const fresh = entries.filter((e) => !_snapshotIds.has(e.id)).slice(0, eff);
     return renderRelevantWork(fresh);
   } catch { return ""; /* memory must never break a run */ }
 }

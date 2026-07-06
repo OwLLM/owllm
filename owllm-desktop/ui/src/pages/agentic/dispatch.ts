@@ -14,6 +14,7 @@ import {
   executeToolCall,
   setTeamMemoryScope,
   setTeamMemoryGoal,
+  setLeanRun,
   getTeamMemorySnapshot,
   getBrowserStateLine,
   refreshTeamMemorySnapshot,
@@ -1059,6 +1060,9 @@ export function buildSpecialistPrompt(
   /// Absolute project root the agent runs against — injected so it knows WHERE the
   /// project is instead of hunting OwLLM's internal folders.
   projectCwd?: string | null,
+  /// Lean profile (solo / ≤3-agent runs): swap the memory tutorial for the short
+  /// hint. The snapshot/RAG caps shrink via setLeanRun — set by the run loop.
+  lean?: boolean,
 ): string {
   const role = roleByName.get(spec.base);
   const layers: string[] = [
@@ -1088,7 +1092,7 @@ export function buildSpecialistPrompt(
   }
   layers.push(projectWorkspaceBlock(projectCwd));
   layers.push(TEAM_OPERATING_CONTRACT);
-  layers.push(TEAM_MEMORY_HINT);
+  layers.push(lean ? TEAM_MEMORY_HINT_LEAN : TEAM_MEMORY_HINT);
   const memSnapshot = getTeamMemorySnapshot();
   if (memSnapshot) layers.push(memSnapshot);
   const browserLine = getBrowserStateLine();
@@ -1151,6 +1155,15 @@ export const TEAM_MEMORY_HINT =
   "  no `owllm/` or `.owllm` memory file). PROJECT DOCUMENTATION is different: it lives in\n" +
   "  the project's OWN files (README, docs/, comments) — find those with read_file /\n" +
   "  glob / grep, NOT in any OwLLM application folder.";
+
+/// Lean-run replacement for TEAM_MEMORY_HINT (see setLeanRun in localTools).
+/// Solo / ≤3-agent runs don't need the full how-to-use-memory tutorial — the
+/// injected snapshot block is self-explanatory; keep only the two facts the
+/// agent can't infer: how to WRITE a durable fact, and that memory is a DB.
+export const TEAM_MEMORY_HINT_LEAN =
+  "TEAM MEMORY: recent shared knowledge is injected below — consult it before re-deriving\n" +
+  "or asking. To SAVE a durable fact, put a line in your reply:  [REMEMBER key=<id>] <fact>.\n" +
+  "It is a database, not a file — never hunt for a memory file on disk.";
 
 /// The team's standing operating contract — the parts of the "Agent Team Rules"
 /// that are STRUCTURE, not tunable rules: the conflict-resolution priority stack,
@@ -3234,6 +3247,9 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // it, then warm the snapshot so the orchestrator + specialists get it injected.
   setTeamMemoryScope(projectId);
   setTeamMemoryGoal(goal);
+  // Lean profile: small rosters get the trimmed injection stack (shorter memory
+  // hint + halved snapshot/RAG budgets) — smallest safe activation per run.
+  setLeanRun(team.agents.length <= 3);
   await refreshTeamMemorySnapshot();
   // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
   // provider can self-load a skill by reading it with their native file tool
@@ -3624,7 +3640,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     hooks.onAgentStart(spec.name);
     hooks.onThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
     hooks.onLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
-    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives, undefined, projectCwd);
+    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives, undefined, projectCwd, team.agents.length <= 3);
     const specModel = modelFor(spec.name);
     const specProvider = providerFor(specModel, models);
     // Per-agent memory: fold this agent's own prior turns in so the bridge path

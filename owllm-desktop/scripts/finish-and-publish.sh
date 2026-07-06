@@ -13,9 +13,14 @@
 set -euo pipefail
 
 NOTES=""
+PRERELEASE=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --notes) NOTES="${2:-}"; shift 2 ;;
+    # Publish to the PRE-RELEASE channel (public + downloadable, but NOT /latest,
+    # so the auto-updater skips it). The "test before you promote" path — nothing
+    # reaches users until the release is flipped to Latest.
+    --prerelease) PRERELEASE=1; shift ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -41,6 +46,10 @@ if [ -f "$CARD" ]; then
   [ -n "$sp" ] && STAGE_PATH="$sp"
   [ -n "$pc" ] && PUBLISH_CMD="$pc"
 fi
+# Forward the pre-release channel to the publish command (the canonical
+# publish-release.sh understands --prerelease; a card override that doesn't will
+# ignore it or error clearly).
+[ -n "$PRERELEASE" ] && PUBLISH_CMD="$PUBLISH_CMD --prerelease"
 CONF="$REPO/$VERSION_FILE"
 [ -f "$CONF" ] || fail "version file '$VERSION_FILE' not found — set release.versionFile in .owllm/project.json"
 

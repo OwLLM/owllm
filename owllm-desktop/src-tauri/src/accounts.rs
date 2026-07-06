@@ -2754,6 +2754,25 @@ fn kimi_has_modern_login() -> bool {
         .is_file()
 }
 
+/// kimi-cli exits 0 even when its turn FAILS — the error only appears in the
+/// printed output (verified live 2026-07-06 via ~/.kimi/logs/kimi.log). So a
+/// clean exit code can't be trusted; classify the output text instead, or the
+/// caller returns kimi's error message AS the assistant's reply.
+///
+/// kimi's `_agent_loop` calls `wait_for_background_mcp_loading()` which raises
+/// `MCPRuntimeError` if ANY configured MCP server can't connect — it aborts the
+/// whole turn BEFORE the model runs, unlike Claude/Codex which just proceed
+/// without those tools. So an unreachable browser gateway kills the run.
+fn kimi_output_mcp_failed(out: &str) -> bool {
+    let l = out.to_ascii_lowercase();
+    l.contains("failed to connect mcp servers") || l.contains("mcpruntimeerror")
+}
+
+/// kimi prints `LLM not set` and exits 0 when no model resolves (LLMNotSet).
+fn kimi_output_llm_unset(out: &str) -> bool {
+    out.to_ascii_lowercase().contains("llm not set")
+}
+
 /// `--model` args for a kimi invocation, resilient to the CLI's config:
 /// pass the requested id only when the config declares it. Forcing an
 /// undeclared id makes current kimi-cli abort with `LLMNotSet` — that was the
@@ -3377,8 +3396,15 @@ pub async fn kimi_cli_complete(
     // prompt needed in --print mode). WSL-isolated runs skip it: the kimi in
     // the distro can't reach host loopback and no relay is plumbed for this
     // one-shot path yet.
+    // Within a session, once kimi proves it can't reach the browser gateway,
+    // stop wiring it: kimi FATALLY aborts the whole turn on any MCP-connect
+    // failure (MCPRuntimeError, but exit 0 — verified live 2026-07-06 in
+    // kimi.log), so wiring an unreachable gateway would cost a doubled spawn on
+    // every call. 0=unknown, 1=reachable, 2=broken this session.
+    static KIMI_GATEWAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
-    let mcp_config: Option<String> = if host_run {
+    let gw_broken = KIMI_GATEWAY.load(std::sync::atomic::Ordering::Relaxed) == 2;
+    let mcp_config: Option<String> = if host_run && !gw_broken {
         match crate::mcp_gateway::write_cli_config(&app) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
@@ -3397,76 +3423,111 @@ pub async fn kimi_cli_complete(
         } else {
             format!("{system_prompt}\n\n---\n\n{user_message}")
         };
-
-        let mut args: Vec<String> = vec![
-            "--print".into(),
-            // Suppress everything except the final assistant message so
-            // the React side gets a clean blob, not a streaming preamble.
-            "--output-format".into(),
-            "text".into(),
-            "--final-message-only".into(),
-        ];
         // Config-aware model flag: forcing an id the CLI's config doesn't
         // declare aborts with LLMNotSet (see kimi_model_args).
-        args.extend(kimi_model_args(model.as_deref()));
-        if let Some(cfg) = mcp_config.as_ref() {
-            args.push("--mcp-config-file".into());
-            args.push(cfg.clone());
-        }
-        args.push("--prompt".into());
-        args.push(composed);
+        let model_args = kimi_model_args(model.as_deref());
 
-        // WSL-isolated project → run `kimi` inside the distro; else Windows CLI.
-        let mut cmd = if let Some((exe, sargs)) =
-            crate::sandbox::program_argv(cwd.as_deref(), "kimi", &args)
-        {
-            let mut c = Command::new(exe);
-            c.args(sargs);
-            c
-        } else {
-            let exe = find_kimi_cli()
-                .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-cli) first".to_string())?;
-            #[cfg(windows)]
-            let batch = is_batch_shim(&exe);
-            #[cfg(not(windows))]
-            let batch = false;
-            let mut c = Command::new(&exe);
-            for a in &args {
-                push_arg(&mut c, batch, a);
-            }
-            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                let p = std::path::Path::new(dir);
-                if p.is_dir() {
-                    c.current_dir(p);
+        // One kimi invocation. `with_mcp` controls whether the browser gateway
+        // is wired. Returns (final assistant text, whether MCP loading failed).
+        let attempt = |with_mcp: bool| -> Result<(String, bool), String> {
+            let mut args: Vec<String> = vec![
+                "--print".into(),
+                // Suppress everything except the final assistant message so
+                // the React side gets a clean blob, not a streaming preamble.
+                "--output-format".into(),
+                "text".into(),
+                "--final-message-only".into(),
+            ];
+            args.extend(model_args.iter().cloned());
+            if with_mcp {
+                if let Some(cfg) = mcp_config.as_ref() {
+                    args.push("--mcp-config-file".into());
+                    args.push(cfg.clone());
                 }
             }
-            c
-        };
-        // kimi-cli is Python: on Windows its piped stdout defaults to the
-        // legacy charmap codec and CRASHES on any non-ANSI character in the
-        // reply ("'charmap' codec can't encode…" — reproduced live with a
-        // Korean page snapshot). Force UTF-8 so Unicode output survives.
-        cmd.env("PYTHONUTF8", "1");
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::piped());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let output = cmd
-            .spawn()
-            .map_err(|e| format!("spawn kimi: {e}"))?
-            .wait_with_output()
-            .map_err(|e| format!("wait kimi: {e}"))?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            args.push("--prompt".into());
+            args.push(composed.clone());
+
+            // WSL-isolated project → run `kimi` inside the distro; else Windows CLI.
+            let mut cmd = if let Some((exe, sargs)) =
+                crate::sandbox::program_argv(cwd.as_deref(), "kimi", &args)
+            {
+                let mut c = Command::new(exe);
+                c.args(sargs);
+                c
+            } else {
+                let exe = find_kimi_cli()
+                    .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-cli) first".to_string())?;
+                #[cfg(windows)]
+                let batch = is_batch_shim(&exe);
+                #[cfg(not(windows))]
+                let batch = false;
+                let mut c = Command::new(&exe);
+                for a in &args {
+                    push_arg(&mut c, batch, a);
+                }
+                if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    let p = std::path::Path::new(dir);
+                    if p.is_dir() {
+                        c.current_dir(p);
+                    }
+                }
+                c
+            };
+            // kimi-cli is Python: on Windows its piped stdout defaults to the
+            // legacy charmap codec and CRASHES on any non-ANSI character in the
+            // reply ("'charmap' codec can't encode…" — reproduced live with a
+            // Korean page snapshot). Force UTF-8 so Unicode output survives.
+            cmd.env("PYTHONUTF8", "1");
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let output = cmd
+                .spawn()
+                .map_err(|e| format!("spawn kimi: {e}"))?
+                .wait_with_output()
+                .map_err(|e| format!("wait kimi: {e}"))?;
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-            return Err(cli_exit_err("kimi", output.status.code().unwrap_or(-1), &stdout, &stderr));
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            if !output.status.success() {
+                return Err(cli_exit_err("kimi", output.status.code().unwrap_or(-1), &stdout, &stderr));
+            }
+            // kimi exits 0 even on a fatal MCP-load failure; the error is only in
+            // the output. Detect it so we can retry without the gateway.
+            let mcp_failed = kimi_output_mcp_failed(&stdout) || kimi_output_mcp_failed(&stderr);
+            Ok((stdout.trim().to_string(), mcp_failed))
+        };
+
+        let wired = mcp_config.is_some();
+        let (mut reply, mcp_failed) = attempt(wired)?;
+        if wired && mcp_failed {
+            // kimi aborts the whole turn if an MCP server can't connect — retry
+            // once without the browser gateway so the user gets a real answer
+            // (no browser tools this run), and skip it for the rest of the session.
+            KIMI_GATEWAY.store(2, std::sync::atomic::Ordering::Relaxed);
+            eprintln!("kimi: browser gateway unreachable (kimi aborts on MCP-connect failure); retrying without it");
+            reply = attempt(false)?.0;
+        } else if wired {
+            KIMI_GATEWAY.store(1, std::sync::atomic::Ordering::Relaxed);
         }
-        let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
-        Ok(stdout.trim().to_string())
+
+        // kimi prints these and STILL exits 0, so guard explicitly — otherwise
+        // the caller would hand the error text back as the agent's answer.
+        if reply.is_empty() {
+            return Err("kimi returned an empty reply".to_string());
+        }
+        if kimi_output_llm_unset(&reply) {
+            return Err("kimi: no model resolved (LLMNotSet) — run `kimi login`, or set a default model in ~/.kimi/config.toml".to_string());
+        }
+        if kimi_output_mcp_failed(&reply) {
+            return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
+        }
+        Ok(reply)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -3476,8 +3537,29 @@ pub async fn kimi_cli_complete(
 mod tests {
     use super::{
         codex_should_grant_browser, is_browser_role_allowlist, kimi_config_has_default,
-        kimi_config_model_keys,
+        kimi_config_model_keys, kimi_output_llm_unset, kimi_output_mcp_failed,
     };
+
+    // The exact kimi output that crashed a team run (reproduced live 2026-07-06,
+    // ~/.kimi/logs/kimi.log): kimi aborts the turn when the browser gateway
+    // can't connect, but EXITS 0 — so the failure must be detected in the text.
+    #[test]
+    fn kimi_mcp_failure_is_detected_despite_exit_0() {
+        let out = "Unknown error: Failed to connect MCP servers: {'owllm': \
+            RuntimeError('Client failed to connect: All connection attempts failed')}";
+        assert!(kimi_output_mcp_failed(out));
+        assert!(kimi_output_mcp_failed("kimi_cli.exception.MCPRuntimeError: ..."));
+        assert!(!kimi_output_mcp_failed("Here is the summary you asked for."));
+        // A real reply that merely mentions MCP must not trip the detector.
+        assert!(!kimi_output_mcp_failed("I added an MCP server to your config."));
+    }
+
+    #[test]
+    fn kimi_llm_unset_is_detected() {
+        assert!(kimi_output_llm_unset("LLM not set"));
+        assert!(kimi_output_llm_unset("  llm not set\n"));
+        assert!(!kimi_output_llm_unset("The model is set to K2.7."));
+    }
 
     // Reproduces the "subscription never ties after login" bug: a login-time
     // config declares a default + one model; forcing an undeclared id (the old

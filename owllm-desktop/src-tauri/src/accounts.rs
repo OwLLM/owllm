@@ -3072,18 +3072,18 @@ fn kimi_model_args_inner(
     keys: &[String],
     modern_login: bool,
 ) -> Vec<String> {
+    let _ = keys;
     let self_sufficient = has_default || modern_login;
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
-        // Declared in the config's [models] table → safe to pass explicitly.
-        Some(req) if keys.iter().any(|k| k == req) => vec!["--model".into(), req.to_string()],
-        // Undeclared id but the CLI can resolve its own model → drop the flag.
-        // Forcing an undeclared id here is exactly the LLMNotSet ~1s crash.
-        Some(_) if self_sufficient => Vec::new(),
-        // Genuinely ancient CLI (no default, no modern creds): it needs an
-        // explicit model, so pass the request as a last resort.
+        // Always pass the model the user actually selected. Silently dropping
+        // an undeclared id was making OwLLM use the user's unrelated CLI
+        // default (e.g. Claude) instead of the requested Kimi model. If the
+        // id is invalid, Kimi prints LLMNotSet and kimi_cli_complete retries
+        // once without the flag.
         Some(req) => vec!["--model".into(), req.to_string()],
         None if self_sufficient => Vec::new(),
-        // No config default and no modern login: keep the always-valid alias.
+        // No config default, no modern login, and no request: ancient CLI needs
+        // the always-valid alias.
         None => vec!["--model".into(), "kimi-latest".into()],
     }
 }
@@ -3742,37 +3742,34 @@ pub async fn kimi_cli_complete(
         None
     };
     tokio::task::spawn_blocking(move || {
-        // Compose system + user into a single prompt. Kimi --print mode has no
-        // --system-prompt flag, so we must fold the system instructions into the
-        // user payload. The old `---` separator was treated as a turn/rule boundary
-        // and ignored, letting Kimi's built-in "Hello! What would you like to work
-        // on?" greeting override the user's actual task. Use an explicit, visually
-        // strong separator and put the user's task last so it reads as the primary
-        // instruction.
-        let composed = if system_prompt.trim().is_empty() {
-            user_message
+        // Kimi --print mode supports a separate --system-prompt startup flag.
+        // Keeping system and user roles separated stops Kimi's agent loop from
+        // treating the system instructions as just another user turn, which was
+        // causing it to ignore the actual request and hallucinate unrelated
+        // answers (e.g. answering a Claude context-window query instead of the
+        // UI task in the attached screenshot).
+        // If the system prompt is unreasonably large we fall back to folding it
+        // into the user payload via stdin, because --system-prompt is an argv
+        // argument and shares the same ~32 KB Windows command-line budget.
+        const MAX_ARGV: usize = 24_000;
+        const MAX_PROMPT_ARG: usize = 4000;
+        let system_as_flag = !system_prompt.trim().is_empty() && system_prompt.len() <= MAX_ARGV;
+        let user_as_flag = system_as_flag && user_message.len() <= MAX_PROMPT_ARG;
+        let folded_prompt = if system_prompt.trim().is_empty() {
+            user_message.clone()
         } else {
             format!("{system_prompt}\n\n===== YOUR TASK =====\n\n{user_message}")
         };
-        // Config-aware model flag: forcing an id the CLI's config doesn't
-        // declare aborts with LLMNotSet (see kimi_model_args).
+
+        // Pass the model the user selected. If Kimi CLI doesn't recognise the id
+        // it aborts with LLMNotSet; we catch that and retry once without the
+        // --model flag so the CLI can fall back to its configured default.
         let model_args = kimi_model_args(model.as_deref());
 
-        // Windows caps a command line at ~32 KB. kimi passes the composed prompt
-        // as the `--prompt` ARG, so a large agentic system prompt (rules + tools +
-        // roster + memory) overflows: "The filename or extension is too long.
-        // (os error 206)" — the "spawn kimi" crash on a full team. kimi also reads
-        // the prompt from stdin when `--prompt` is omitted (verified live: identical
-        // clean stdout, the "resume session" line goes to stderr). So for a large
-        // prompt we DROP `--prompt` and feed it on stdin (an unbounded pipe). Small
-        // prompts keep `--prompt` + null stdin — byte-identical to the proven
-        // Accounts Test path. Mirrors the claude/codex fold (MAX_PROMPT_ARG).
-        const MAX_PROMPT_ARG: usize = 4000;
-        let fold_prompt_into_stdin = composed.len() > MAX_PROMPT_ARG;
-
         // One kimi invocation. `with_mcp` controls whether the browser gateway
-        // is wired. Returns (final assistant text, whether MCP loading failed).
-        let attempt = |with_mcp: bool| -> Result<(String, bool), String> {
+        // is wired; `with_model` controls whether the --model flag is present.
+        // Returns (final assistant text, whether MCP loading failed).
+        let attempt = |with_mcp: bool, with_model: bool| -> Result<(String, bool), String> {
             let mut args: Vec<String> = vec![
                 "--print".into(),
                 // Suppress everything except the final assistant message so
@@ -3781,16 +3778,22 @@ pub async fn kimi_cli_complete(
                 "text".into(),
                 "--final-message-only".into(),
             ];
-            args.extend(model_args.iter().cloned());
+            if with_model {
+                args.extend(model_args.iter().cloned());
+            }
             if with_mcp {
                 if let Some(cfg) = mcp_config.as_ref() {
                     args.push("--mcp-config-file".into());
                     args.push(cfg.clone());
                 }
             }
-            if !fold_prompt_into_stdin {
+            if system_as_flag {
+                args.push("--system-prompt".into());
+                args.push(system_prompt.clone());
+            }
+            if user_as_flag {
                 args.push("--prompt".into());
-                args.push(composed.clone());
+                args.push(user_message.clone());
             }
 
             // WSL-isolated project → run `kimi` inside the distro; else Windows CLI.
@@ -3824,7 +3827,7 @@ pub async fn kimi_cli_complete(
             // reply ("'charmap' codec can't encode…" — reproduced live with a
             // Korean page snapshot). Force UTF-8 so Unicode output survives.
             cmd.env("PYTHONUTF8", "1");
-            cmd.stdin(if fold_prompt_into_stdin { Stdio::piped() } else { Stdio::null() });
+            cmd.stdin(if user_as_flag { Stdio::null() } else { Stdio::piped() });
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
@@ -3834,12 +3837,13 @@ pub async fn kimi_cli_complete(
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
             let pid = register_cli_child(&child);
-            if fold_prompt_into_stdin {
+            if !user_as_flag {
                 if let Some(mut stdin) = child.stdin.take() {
                     // Best-effort: on the WSL path the pipe can close early ("pipe
                     // has been ended, os error 109"); the real error still surfaces
                     // via exit status / stdout, so don't abort on the write.
-                    let _ = stdin.write_all(composed.as_bytes());
+                    let payload = if system_as_flag { user_message.clone() } else { folded_prompt.clone() };
+                    let _ = stdin.write_all(payload.as_bytes());
                 }
             }
             let output = wait_cli_child(child, pid)
@@ -3856,14 +3860,21 @@ pub async fn kimi_cli_complete(
         };
 
         let wired = mcp_config.is_some();
-        let (mut reply, mcp_failed) = attempt(wired)?;
+        let (mut reply, mcp_failed) = match attempt(wired, true) {
+            Ok(r) => r,
+            Err(e) if kimi_output_llm_unset(&e) => {
+                eprintln!("kimi: requested model not recognised ({e}); retrying with CLI default");
+                attempt(wired, false)?
+            }
+            Err(e) => return Err(e),
+        };
         if wired && mcp_failed {
             // kimi aborts the whole turn if an MCP server can't connect — retry
             // once without the browser gateway so the user gets a real answer
             // (no browser tools this run), and skip it for the rest of the session.
             KIMI_GATEWAY.store(2, std::sync::atomic::Ordering::Relaxed);
             eprintln!("kimi: browser gateway unreachable (kimi aborts on MCP-connect failure); retrying without it");
-            reply = attempt(false)?.0;
+            reply = attempt(false, true)?.0;
         } else if wired {
             KIMI_GATEWAY.store(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -3948,27 +3959,26 @@ mod tests {
             let keys = cfg.map(kimi_config_model_keys).unwrap_or_default();
             kimi_model_args_inner(req, has_default, &keys, modern)
         };
-        // Undeclared id + a config default → drop the flag (the bug fix).
-        assert!(decide(Some("kimi-latest"), Some(KIMI_CFG), false).is_empty());
-        // Declared id → pass it through.
+        // Any requested id is passed explicitly. If Kimi CLI doesn't recognise it,
+        // the LLMNotSet detector in kimi_cli_complete retries without the flag.
+        // This prevents OwLLM from silently switching to the user's unrelated CLI
+        // default (e.g. Claude) when they asked for a specific Kimi model.
+        assert_eq!(
+            decide(Some("kimi-latest"), Some(KIMI_CFG), false),
+            vec!["--model", "kimi-latest"]
+        );
+        assert_eq!(
+            decide(Some("kimi-k2.7"), None, true),
+            vec!["--model", "kimi-k2.7"]
+        );
         assert_eq!(
             decide(Some("kimi-code/kimi-for-coding"), Some(KIMI_CFG), false),
             vec!["--model", "kimi-code/kimi-for-coding"]
         );
-        // No config at all (ancient CLI) → keep the always-valid alias.
-        assert_eq!(decide(None, None, false), vec!["--model", "kimi-latest"]);
-        // Config default, no request → let the CLI use its default.
+        // No model requested → let the CLI use its configured default.
         assert!(decide(None, Some(KIMI_CFG), false).is_empty());
-        // THE ~1s CRASH: modern login (credentials json) writes NO config.toml,
-        // so has_default=false — a team asking for `kimi-k2.7` must still NOT
-        // force the flag (that id isn't declared → LLMNotSet). Drop it.
-        assert!(decide(Some("kimi-k2.7"), None, true).is_empty());
-        // Same undeclared id with neither a default nor a modern login (truly
-        // ancient) → pass it as a last resort (unchanged behaviour).
-        assert_eq!(
-            decide(Some("kimi-k2.7"), None, false),
-            vec!["--model", "kimi-k2.7"]
-        );
+        // No config at all (ancient CLI) and no request → keep the always-valid alias.
+        assert_eq!(decide(None, None, false), vec!["--model", "kimi-latest"]);
     }
 
     #[test]

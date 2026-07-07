@@ -1742,30 +1742,61 @@ type PublisherCfg = {
   signThumbprint: string; signSubject: string; signTsa: string;
 };
 
+const defaultPublisherCfg = (): PublisherCfg => ({
+  targetBranch: "main",
+  commitScope: "",
+  commitMsg: "",
+  signThumbprint: "",
+  signSubject: "",
+  signTsa: "",
+});
+
+function loadPublisherCfg(storageKey: string): PublisherCfg {
+  const base = defaultPublisherCfg();
+  try { return { ...base, ...JSON.parse(localStorage.getItem(storageKey) ?? "{}") }; }
+  catch { return base; }
+}
+
 function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
   const [checks, setChecks] = useState<PublisherReadyCheck[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [log, setLog] = useState("");
   const [setupOpen, setSetupOpen] = useState(false);
   const storageKey = `publisherCard:${cwd ?? "none"}`;
-  const [cfg, setCfg] = useState<PublisherCfg>(() => {
-    const base: PublisherCfg = { targetBranch: "main", commitScope: "", commitMsg: "", signThumbprint: "", signSubject: "", signTsa: "" };
-    try { return { ...base, ...JSON.parse(localStorage.getItem(storageKey) ?? "{}") }; }
-    catch { return base; }
-  });
+  const cwdRef = useRef(cwd);
+  const refreshSeq = useRef(0);
+  const [cfg, setCfg] = useState<PublisherCfg>(() => loadPublisherCfg(storageKey));
   const saveCfg = (next: PublisherCfg) => {
     setCfg(next);
     try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* quota — non-fatal */ }
   };
+  useEffect(() => {
+    cwdRef.current = cwd;
+    refreshSeq.current += 1;
+    setChecks(null);
+    setLog("");
+    setCfg(loadPublisherCfg(storageKey));
+  }, [cwd, storageKey]);
   const refresh = useCallback(async () => {
-    if (!cwd) {
-      setChecks([{ id: "repo", label: "Project folder", ok: false, detail: "no project open" }]);
+    const checkCwd = cwd;
+    const seq = ++refreshSeq.current;
+    if (!checkCwd) {
+      if (cwdRef.current === checkCwd && seq === refreshSeq.current) {
+        setChecks([{ id: "repo", label: "Project folder", ok: false, detail: "no project open" }]);
+      }
       return;
     }
     setBusy("check");
-    try { setChecks(await invoke<PublisherReadyCheck[]>("publish_readiness", { repoDir: cwd })); }
-    catch (e) { setChecks([{ id: "error", label: "Readiness check", ok: false, detail: String(e) }]); }
-    finally { setBusy(null); }
+    try {
+      const next = await invoke<PublisherReadyCheck[]>("publish_readiness", { repoDir: checkCwd });
+      if (cwdRef.current === checkCwd && seq === refreshSeq.current) setChecks(next);
+    } catch (e) {
+      if (cwdRef.current === checkCwd && seq === refreshSeq.current) {
+        setChecks([{ id: "error", label: "Readiness check", ok: false, detail: String(e) }]);
+      }
+    } finally {
+      if (cwdRef.current === checkCwd && seq === refreshSeq.current) setBusy(null);
+    }
   }, [cwd]);
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -12330,7 +12361,13 @@ export function AgentsPage({
             <select
               data-ui="ProjectCombo"
               value={selectedProjectId}
-              onChange={e => { setSelectedProjectId(e.target.value); setPickedTeamId(null); }}
+              onChange={e => {
+                const nextId = e.target.value;
+                const nextProject = projects.find(p => p.id === nextId) ?? null;
+                setSelectedProjectId(nextId);
+                setLocationOverride(nextProject?.location || "");
+                setPickedTeamId(null);
+              }}
               title="Switch project"
               style={{ height:38, maxWidth:190, padding:"0 10px", borderRadius:10, border:"none", background:"var(--bg-input)", color:"var(--fg-strong)", fontSize:13 }}
             >

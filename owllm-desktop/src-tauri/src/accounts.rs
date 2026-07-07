@@ -1977,8 +1977,14 @@ pub(crate) fn is_browser_role_allowlist(allowed: Option<&Vec<String>>) -> bool {
         .unwrap_or(false)
 }
 
-fn codex_should_grant_browser(browser_role: bool, full_access: bool) -> bool {
-    browser_role || full_access
+fn codex_should_grant_browser(host_run: bool, jailed: bool, browser_role: bool) -> bool {
+    // Browser tools are cross-cutting: every agent running where the transport
+    // can reach the in-app gateway gets to drive the shared browser window,
+    // not just the Browser role. Host runs and non-jailed WSL/Lima/bwrap
+    // environments can reach the gateway; the Browser role keeps an extra
+    // exception for bwrap-jailed WSL projects, where it is spawned unjailed
+    // so interop survives.
+    host_run || !jailed || browser_role
 }
 
 #[tauri::command]
@@ -2569,9 +2575,10 @@ pub async fn codex_cli_stream(
         };
 
         // ---- MCP GATEWAY (browser_* tools) — the Codex counterpart of the
-        // claude_cli_stream block. Codex configures MCP via `-c mcp_servers.*`
-        // overrides (no `--mcp-config` flag) and reads a streamable-HTTP bearer
-        // token from an env var. VERIFIED against codex 0.128.0:
+        // claude_cli_stream block. Browser tools are a CROSS-CUTTING capability:
+        // any agent running where the transport can reach the in-app gateway
+        // gets to drive the shared browser window, not just the Browser role.
+        // VERIFIED against codex 0.128.0:
         //   * HOST run  → `-c mcp_servers.owllm.url=…` + `bearer_token_env_var`
         //                 (token in OWLLM_GW_TOKEN env).
         //   * WSL run   → `-c mcp_servers.owllm.command="bash"` + args = the same
@@ -2579,17 +2586,15 @@ pub async fn codex_cli_stream(
         // CRUCIAL codex quirk (verified): `codex exec` SILENTLY CANCELS every MCP
         // tool call under `--sandbox workspace-write` — they execute only with
         // `approval_policy=never` AND `--sandbox danger-full-access`.
-        // The Browser role is host-capable by design (like Publisher): it owns
-        // the shared browser window, localhost previews, external sites and
-        // credentials. Codex only executes MCP tools when its own inner sandbox
-        // is disabled, so the escalation is scoped to that Browser role (or an
-        // explicitly full-access project). Ordinary jailed coders stay sealed;
-        // they should dispatch browser work to @browser instead of controlling
-        // the host browser themselves.
+        // Because the browser is cross-cutting, wiring the gateway on a host or
+        // unjailed run means that agent needs `danger-full-access` to actually
+        // execute MCP calls. This matches the local/API path, which already has
+        // full host access. The Browser role keeps a special WSL jail exception
+        // so interop survives in bwrap-isolated projects.
         let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
-        let full_access = crate::sandbox::is_full_access(cwd.as_deref());
-        let grant_browser = codex_should_grant_browser(browser_role, full_access);
+        let jailed = crate::sandbox::is_bwrap_jailed(cwd.as_deref());
+        let grant_browser = codex_should_grant_browser(host_run, jailed, browser_role);
         let mut gateway_err: Option<String> = None;
         let mut gw_cfg: Vec<String> = Vec::new();
         let mut token_env: Option<String> = None;
@@ -2605,10 +2610,10 @@ pub async fn codex_cli_stream(
             } else {
                 #[cfg(windows)]
                 {
-                    // Isolated run: wire the stdio relay unless this is a
-                    // bwrap-jailed NON-browser agent (jail exclusion). The
-                    // Browser role is spawned unjailed below so interop works.
-                    if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) || browser_role {
+                    // WSL isolated run: the relay works for any non-jailed
+                    // environment (full-access or no bwrap) and for the Browser
+                    // role, which is spawned unjailed below as a jail exception.
+                    if !jailed || browser_role {
                         match crate::mcp_gateway::codex_wsl_config(&app, cwd.as_deref()) {
                             Ok(cfg) => gw_cfg = cfg,
                             Err(e) => gateway_err = Some(e),
@@ -3708,30 +3713,24 @@ pub async fn kimi_cli_complete(
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
-    allowed_tools: Option<Vec<String>>,
+    _allowed_tools: Option<Vec<String>>,
 ) -> Result<String, String> {
-    // The browser gateway is wired ONLY for the Browser role, never for a plain
-    // coder/orchestrator/critic. This is load-bearing for kimi specifically:
-    // kimi-cli FATALLY aborts the whole turn if ANY configured MCP server can't
-    // connect (wait_for_background_mcp_loading -> MCPRuntimeError; exit 0, error
-    // only in stdout — verified live 2026-07-06 via ~/.kimi/logs/kimi.log),
-    // unlike Claude/Codex which just proceed. So wiring the gateway into every
-    // host Kimi agent meant the FIRST agent whose gateway wasn't reachable
-    // crashed the whole team in ~1s. Gating on the Browser role makes a normal
-    // Kimi agent's invocation byte-identical to the (proven-working) Accounts
-    // Test path — it cannot crash on a gateway it never touches. The Browser
-    // agent still gets it (verified live 2026-07-05: kimi listed all 12
-    // browser_* tools and executed browser_snapshot via --mcp-config-file), with
-    // the retry below as a safety net if that one agent's gateway is unreachable.
+    // Browser tools are a CROSS-CUTTING capability: every host-run Kimi agent
+    // gets the in-app browser gateway, not just the Browser role. Kimi-cli
+    // fatally aborts a turn if ANY configured MCP server can't connect
+    // (wait_for_background_mcp_loading -> MCPRuntimeError; exit 0, error only
+    // in stdout — verified live 2026-07-06 via ~/.kimi/logs/kimi.log), so we
+    // keep a session cache: once the gateway proves unreachable we stop wiring
+    // it for the rest of the session. The first agent that hits a broken
+    // gateway retries once without it, marks it broken, and subsequent agents
+    // run the proven-safe no-gateway path.
     // WSL-isolated runs skip it regardless: the distro kimi can't reach host
     // loopback and no relay is plumbed for this one-shot path yet.
-    // Session cache: once the Browser agent's gateway proves unreachable, stop
-    // wiring it (avoids a doubled spawn per call). 0=unknown, 1=reachable, 2=broken.
+    // Session cache: 0=unknown, 1=reachable, 2=broken.
     static KIMI_GATEWAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
-    let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
     let gw_broken = KIMI_GATEWAY.load(std::sync::atomic::Ordering::Relaxed) == 2;
-    let mcp_config: Option<String> = if host_run && browser_role && !gw_broken {
+    let mcp_config: Option<String> = if host_run && !gw_broken {
         match crate::mcp_gateway::write_cli_config(&app) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
@@ -3996,9 +3995,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_browser_grant_is_role_or_full_access_scoped() {
-        assert!(!codex_should_grant_browser(false, false));
-        assert!(codex_should_grant_browser(true, false));
-        assert!(codex_should_grant_browser(false, true));
+    fn codex_browser_grant_is_cross_cutting_except_jailed_non_browser() {
+        // Host runs and non-jailed WSL/Lima/bwrap environments get the gateway
+        // regardless of role, matching the documented cross-cutting design.
+        assert!(codex_should_grant_browser(true, false, false));
+        assert!(codex_should_grant_browser(false, false, false));
+        // Jailed WSL blocks the transport for ordinary agents.
+        assert!(!codex_should_grant_browser(false, true, false));
+        // The Browser role keeps an explicit jail exception.
+        assert!(codex_should_grant_browser(false, true, true));
     }
 }

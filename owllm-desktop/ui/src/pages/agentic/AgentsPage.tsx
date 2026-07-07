@@ -8001,6 +8001,7 @@ export function AgentsPage({
 
   const [locationOverride, setLocationOverride] = useState<string>("");
   const [locationOverrideProjectId, setLocationOverrideProjectId] = useState<string>("");
+  const [locationOverrideDirty, setLocationOverrideDirty] = useState<boolean>(false);
   // Whether the user has isolation switched on — drives the honest
   // isolation badge: host location + isolation requested = loud red
   // "HOST — NOT isolated" (P1-1), because the run would NOT be sandboxed.
@@ -8537,15 +8538,16 @@ export function AgentsPage({
     if (!selectedProjectId) return;
     try { localStorage.setItem(soloKey(selectedProjectId), v ? "1" : "0"); } catch { /* ignore */ }
   };
-  const setProjectLocationDraft = useCallback((value: string, projectId = selectedProjectId) => {
+  const setProjectLocationDraft = useCallback((value: string, projectId = selectedProjectId, dirty = false) => {
     setLocationOverrideProjectId(projectId);
     setLocationOverride(value);
+    setLocationOverrideDirty(dirty);
   }, [selectedProjectId]);
 
   async function onBrowseProjectFolder() {
     try {
       const picked = await invoke<string | null>("pick_folder", { title: "Pick a project folder" });
-      if (picked) setProjectLocationDraft(picked);
+      if (picked) setProjectLocationDraft(picked, selectedProjectId, true);
     } catch (e) {
       console.error("pick_folder failed", e);
     }
@@ -9226,6 +9228,7 @@ export function AgentsPage({
   // Persist location edits the same way.
   useEffect(() => {
     if (!selectedProject) return;
+    if (!locationOverrideDirty) return;
     if (locationOverrideProjectId !== selectedProject.id) return;
     if (locationOverride === selectedProject.location) return;
     const id = window.setTimeout(async () => {
@@ -9233,6 +9236,7 @@ export function AgentsPage({
         await invoke("update_project", {
           input: { id: selectedProject.id, location: locationOverride },
         });
+        setLocationOverrideDirty(false);
         await reloadProjects();
       } catch (e) {
         console.error("persist location failed", e);
@@ -9240,7 +9244,7 @@ export function AgentsPage({
     }, 700);
     return () => window.clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationOverride, locationOverrideProjectId, selectedProject?.id, selectedProject?.location]);
+  }, [locationOverride, locationOverrideProjectId, locationOverrideDirty, selectedProject?.id, selectedProject?.location]);
 
   // Persist the Super User chat (chat_json) + per-agent transcripts
   // (agent_logs_json). Ownership moved from two component effects into the
@@ -12354,7 +12358,7 @@ export function AgentsPage({
         project={selectedProject}
         location={locationDraft}
         effectiveCwd={runCwd}
-        onChangeLocation={setProjectLocationDraft}
+        onChangeLocation={(value) => setProjectLocationDraft(value, selectedProjectId, true)}
         trustWrites={trustWrites}
         onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
         fullAccess={fullAccess}

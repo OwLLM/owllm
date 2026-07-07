@@ -992,7 +992,14 @@ function FlowHeader({
       {/* The title IS the mode switch — Orchestrated Workflow ⟷ Solo-Loop. The
           active mode is bright gold + glow; the other stays visible but shadowed.
           This replaces the old 👥 Team / ⚡ Solo button. */}
-      <div data-ui="FlowModeSwitch" style={{ display:"flex", alignItems:"center", gap:2, height:30, fontFamily:"Segoe UI", paddingRight:6 }}>
+      <div data-ui="FlowModeSwitch" style={{
+        display:"flex", alignItems:"center", gap:0, height:36,
+        padding:4, borderRadius:12,
+        background:"linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03))",
+        border:"1px solid rgba(255,255,255,0.12)",
+        boxShadow:"0 2px 10px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.06)",
+        fontFamily:"Segoe UI", fontSize:13, fontWeight:800,
+      }}>
         {[
           { label:"Orchestrated Workflow", active:!soloMode, target:false,
             title:"Full agentic team — the orchestrator dispatches specialists" },
@@ -1000,7 +1007,14 @@ function FlowHeader({
             title:"Solo-Loop — one coder does the whole job, a single critic check, rule-based publish" },
         ].map((m, i) => (
           <React.Fragment key={m.label}>
-            {i === 1 && <span style={{ color:"#2f3850", fontSize:16, fontWeight:700, padding:"0 2px", userSelect:"none" }}>⟷</span>}
+            {i === 1 && (
+              <span style={{
+                color:"#ffd97a",
+                fontSize:18, fontWeight:700, padding:"0 5px", userSelect:"none",
+                textShadow:"0 0 16px rgba(255,217,122,0.55)",
+                opacity: 0.95,
+              }}>⟷</span>
+            )}
             <button
               data-ui={m.target ? "FlowModeSolo" : "FlowModeOrch"}
               onClick={() => { if (!!soloMode !== m.target) onToggleSolo?.(); }}
@@ -1008,13 +1022,13 @@ function FlowHeader({
               title={m.title}
               style={{
                 appearance:"none", border:0, cursor:"pointer", fontFamily:"inherit",
-                fontSize:14.5, fontWeight:800, letterSpacing:0.2, lineHeight:1, whiteSpace:"nowrap",
-                padding:"6px 11px", borderRadius:8,
-                transition:"color .25s, text-shadow .25s, background .25s, box-shadow .25s",
-                color: m.active ? "#ffd97a" : "#39435a",
-                textShadow: m.active ? "0 0 18px rgba(255,217,122,0.5)" : "0 1px 0 rgba(0,0,0,0.5)",
-                background: m.active ? "rgba(255,217,122,0.15)" : "transparent",
-                boxShadow: m.active ? "inset 0 0 0 1px rgba(255,217,122,0.42)" : "none",
+                fontSize:13, fontWeight:800, letterSpacing:0.3, lineHeight:1, whiteSpace:"nowrap",
+                padding:"7px 13px", borderRadius:9,
+                transition:"color .2s, text-shadow .2s, background .2s, box-shadow .2s",
+                color: m.active ? "#ffd97a" : "#6b758a",
+                textShadow: m.active ? "0 0 18px rgba(255,217,122,0.6)" : "none",
+                background: m.active ? "rgba(255,217,122,0.20)" : "transparent",
+                boxShadow: m.active ? "inset 0 0 0 1px rgba(255,217,122,0.55), 0 0 16px rgba(255,217,122,0.12)" : "none",
               }}
             >{m.label}</button>
           </React.Fragment>

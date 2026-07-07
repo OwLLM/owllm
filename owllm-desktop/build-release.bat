@@ -76,9 +76,12 @@ copy /Y "%RELEASE%\owllm-desktop.exe" "%cd%\OwLLM Desktop.exe" >nul
 copy /Y "%RELEASE%\owllm-desktop.exe" "%DIST%\OwLLM Desktop.exe" >nul
 rem WebView2Loader.dll MUST sit next to the exe -- without it Windows
 rem aborts startup with "WebView2Loader.dll was not found". The release
-rem build emits it into %RELEASE%; copy alongside both portable exes.
+rem build emits it into %RELEASE%; copy it to dist, and only seed the
+rem tracked root copy if it is missing. The signed release DLL gets a new
+rem timestamp each build, so overwriting the tracked copy makes git dirty
+rem after every publish.
 if exist "%RELEASE%\WebView2Loader.dll" (
-  copy /Y "%RELEASE%\WebView2Loader.dll" "%cd%\WebView2Loader.dll" >nul
+  if not exist "%cd%\WebView2Loader.dll" copy /Y "%RELEASE%\WebView2Loader.dll" "%cd%\WebView2Loader.dll" >nul
   copy /Y "%RELEASE%\WebView2Loader.dll" "%DIST%\WebView2Loader.dll" >nul
 )
 rem Pick the newest versioned NSIS installer Tauri's bundler emitted.

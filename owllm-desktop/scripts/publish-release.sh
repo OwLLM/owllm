@@ -234,7 +234,7 @@ case "$(uname -s)" in
 
       cp -f "$RELEASE_DIR/owllm-desktop.exe" "OwLLM Desktop.exe"
       cp -f "$RELEASE_DIR/owllm-desktop.exe" "dist/OwLLM Desktop.exe"
-      cp -f "$RELEASE_DIR/WebView2Loader.dll" "WebView2Loader.dll"
+      [ -f "WebView2Loader.dll" ] || cp -f "$RELEASE_DIR/WebView2Loader.dll" "WebView2Loader.dll"
       cp -f "$RELEASE_DIR/WebView2Loader.dll" "dist/WebView2Loader.dll"
 
       # Tauri's generated NSIS script reads MAINBINARYSRCPATH from RELEASE_DIR.

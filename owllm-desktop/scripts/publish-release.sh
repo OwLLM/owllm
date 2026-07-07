@@ -206,6 +206,61 @@ esac
 [ -f "$INSTALLER" ] || fail "build produced no installer at $INSTALLER (build step did not run or failed)"
 [ -f "$UPDATER_ARTIFACT" ] || fail "no updater artifact at $UPDATER_ARTIFACT"
 
+step "1a/5 windows payload signing (exe/dll before installer)"
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    if [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; then
+      SIGNTOOL="$(command -v signtool.exe 2>/dev/null || true)"
+      [ -n "$SIGNTOOL" ] || SIGNTOOL="$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64/signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+      [ -n "$SIGNTOOL" ] || fail "signtool.exe not found — install the Windows 10/11 SDK (or put signtool on PATH) to Authenticode-sign payloads"
+      if [ -n "$SIGN_THUMBPRINT" ]; then SEL=(/sha1 "$SIGN_THUMBPRINT"); else SEL=(/n "$SIGN_SUBJECT"); fi
+
+      sign_payload() {
+        local src="$1" label="$2" win_src
+        [ -f "$src" ] || fail "payload missing: $src"
+        win_src="$(cygpath -w "$src")"
+        if ! MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" verify /pa "$win_src" >/dev/null 2>&1; then
+          echo "  signing $label: $src"
+          MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" sign "${SEL[@]}" /fd sha256 /tr "$SIGN_TSA" /td sha256 /d "OwLLM Desktop" "$win_src" \
+            || fail "payload sign failed on $src"
+        fi
+        MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" verify /pa "$win_src" >/dev/null \
+          || fail "payload verify failed after signing: $src"
+      }
+
+      RELEASE_DIR="src-tauri/target/x86_64-pc-windows-gnu/release"
+      sign_payload "$RELEASE_DIR/owllm-desktop.exe" "main exe"
+      sign_payload "$RELEASE_DIR/WebView2Loader.dll" "WebView2 loader"
+
+      cp -f "$RELEASE_DIR/owllm-desktop.exe" "OwLLM Desktop.exe"
+      cp -f "$RELEASE_DIR/owllm-desktop.exe" "dist/OwLLM Desktop.exe"
+      cp -f "$RELEASE_DIR/WebView2Loader.dll" "WebView2Loader.dll"
+      cp -f "$RELEASE_DIR/WebView2Loader.dll" "dist/WebView2Loader.dll"
+
+      # Tauri's generated NSIS script reads MAINBINARYSRCPATH from RELEASE_DIR.
+      # Rebuild it after force-signing the exe so the installer payload is signed
+      # too, then let step 1b sign the outer installer.
+      NSIS_DIR="$RELEASE_DIR/nsis/x64"
+      NSIS_OUT="$NSIS_DIR/nsis-output.exe"
+      BUNDLED_INSTALLER="$RELEASE_DIR/bundle/nsis/OwLLM Desktop_${VERSION}_x64-setup.exe"
+      MAKENSIS="$(command -v makensis.exe 2>/dev/null || command -v makensis 2>/dev/null || true)"
+      [ -n "$MAKENSIS" ] || [ ! -x "$HOME/AppData/Local/tauri/NSIS/makensis.exe" ] || MAKENSIS="$HOME/AppData/Local/tauri/NSIS/makensis.exe"
+      [ -n "$MAKENSIS" ] || [ ! -x "$HOME/AppData/Local/tauri/NSIS/Bin/makensis.exe" ] || MAKENSIS="$HOME/AppData/Local/tauri/NSIS/Bin/makensis.exe"
+      [ -n "$MAKENSIS" ] || fail "makensis.exe not found — cannot rebuild installer with signed payload"
+      [ -f "$NSIS_DIR/installer.nsi" ] || fail "generated NSIS script missing: $NSIS_DIR/installer.nsi"
+      ( cd "$NSIS_DIR" && "$MAKENSIS" installer.nsi ) || fail "makensis failed while rebuilding signed installer"
+      [ -f "$NSIS_OUT" ] || fail "makensis produced no output at $NSIS_OUT"
+      mkdir -p "$(dirname "$BUNDLED_INSTALLER")"
+      cp -f "$NSIS_OUT" "$BUNDLED_INSTALLER"
+      cp -f "$BUNDLED_INSTALLER" "$INSTALLER"
+      echo "  ✓ payloads signed and NSIS installer rebuilt"
+    else
+      echo "  (skipped — no OWLLM_SIGN_THUMBPRINT / OWLLM_SIGN_SUBJECT / $THUMB_FILE; payloads may be unsigned)"
+    fi
+    ;;
+  *) echo "  (skipped — Windows-only step)" ;;
+esac
+
 step "1b/5 authenticode sign (SimplySign / Certum) — must run BEFORE minisign"
 # Windows code signing to clear SmartScreen "unknown publisher". Uses the cloud
 # cert exposed by SimplySign Desktop (log in first — the virtual card must be

@@ -2892,6 +2892,15 @@ fn kimi_output_llm_unset(out: &str) -> bool {
     out.to_ascii_lowercase().contains("llm not set")
 }
 
+/// kimi prints a 401 / unauthorized / login-expired message and exits 0 when its
+/// OAuth access token is stale or revoked. Without this check the caller would
+/// hand the error text back as the agent's answer and the retry layer would not
+/// recognize it as an auth failure.
+fn kimi_output_auth_failed(out: &str) -> bool {
+    let l = out.to_ascii_lowercase();
+    l.contains("401") || l.contains("unauthorized") || l.contains("not logged in") || l.contains("login expired") || l.contains("signed out")
+}
+
 /// `--model` args for a kimi invocation, resilient to the CLI's config:
 /// pass the requested id only when the config declares it. Forcing an
 /// undeclared id makes current kimi-cli abort with `LLMNotSet` — that was the
@@ -3724,6 +3733,9 @@ pub async fn kimi_cli_complete(
         if kimi_output_mcp_failed(&reply) {
             return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
         }
+        if kimi_output_auth_failed(&reply) {
+            return Err("kimi: authentication failed (401 / login expired / signed out)".to_string());
+        }
         Ok(reply)
     })
     .await
@@ -3734,7 +3746,7 @@ pub async fn kimi_cli_complete(
 mod tests {
     use super::{
         codex_should_grant_browser, is_browser_role_allowlist, kimi_config_has_default,
-        kimi_config_model_keys, kimi_output_llm_unset, kimi_output_mcp_failed,
+        kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset, kimi_output_mcp_failed,
     };
 
     // The exact kimi output that crashed a team run (reproduced live 2026-07-06,
@@ -3756,6 +3768,14 @@ mod tests {
         assert!(kimi_output_llm_unset("LLM not set"));
         assert!(kimi_output_llm_unset("  llm not set\n"));
         assert!(!kimi_output_llm_unset("The model is set to K2.7."));
+    }
+
+    #[test]
+    fn kimi_auth_failure_is_detected_despite_exit_0() {
+        assert!(kimi_output_auth_failed("⚠ moonshot is signed out — its login expired (401). Re-authenticate..."));
+        assert!(kimi_output_auth_failed("HTTP 401 Unauthorized"));
+        assert!(kimi_output_auth_failed("You are not logged in. Run `kimi login`."));
+        assert!(!kimi_output_auth_failed("The server responded with a 200 OK."));
     }
 
     // Reproduces the "subscription never ties after login" bug: a login-time

@@ -8374,6 +8374,9 @@ export function AgentsPage({
       // whichever is live; the dispatch's finally{} clears the busy/running flags.
       try { supSendAbortRef.current?.abort(); } catch { /* already aborted */ }
       try { abortRef.current?.abort(); } catch { /* already aborted */ }
+      // And kill any spawned CLI children — the JS abort never reaches them,
+      // so without this the agent process keeps working and Stop looks dead.
+      void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
     };
     window.addEventListener("owllm:dispatch-abort", onAbort);
     return () => window.removeEventListener("owllm:dispatch-abort", onAbort);
@@ -12082,6 +12085,12 @@ export function AgentsPage({
     // before a page change, the remounted page's `abortRef` is null but the
     // original controller is still in the registry, so Cancel can reach it.
     agentRunAborts.get(agentSessId)?.abort();
+    // KILL THE CLI CHILDREN. The JS abort above never reached a spawned
+    // claude/codex/kimi/gemini process — it ran to completion and the awaited
+    // invoke kept the run "busy" (the "Stop never works" bug). Tree-kill every
+    // live agent CLI child host-side. Global by design: Stop means stop
+    // everything, same as the dock's Stop.
+    void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
     // Kill any in-flight TTS — if the user cancelled the dispatch
     // they don't want the agent to keep talking from a queued reply.
     ttsStopAll();

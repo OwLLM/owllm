@@ -160,6 +160,11 @@ export async function refreshTeamMemorySnapshot(limit = 12): Promise<void> {
       invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: factLim, kinds: ["fact"] }),
       invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: logLim, kinds: ["worklog"] }),
     ]);
+    // STALE-SCOPE GUARD — the queries above are async; if the user switched
+    // projects while they were in flight, this result belongs to the OLD
+    // project. Writing it would inject project A's memory into project B's
+    // prompts (the "new project kept talking about the old PPT" bug). Discard.
+    if (scope !== _teamMemoryScope) return;
     const seen = new Set<number>();
     const facts: RawTeamMemEntry[] = [];
     for (const e of [...relevant, ...recent]) {

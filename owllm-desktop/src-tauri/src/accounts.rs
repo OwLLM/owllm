@@ -72,6 +72,78 @@ fn is_batch_shim(p: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+// ---- Stop support: registry of live agent-CLI children ---------------------
+// The UI's Stop button aborts the JS AbortController, but that abort never
+// reached the spawned claude/codex/kimi/gemini child — it ran to completion
+// and the awaited invoke() kept the run "busy" (the "Stop never works" bug).
+// Every agent-CLI spawn registers its PID here; `cli_cancel_all` kills them
+// all (tree-kill on Windows — the npm .cmd shims wrap a node child that must
+// die with the shim). Global on purpose: Stop means "stop everything", the
+// same semantics the dock's Stop already promises.
+fn cli_children() -> &'static std::sync::Mutex<std::collections::HashSet<u32>> {
+    static S: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<u32>>> =
+        std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+fn register_cli_child(child: &std::process::Child) -> u32 {
+    let pid = child.id();
+    if let Ok(mut s) = cli_children().lock() {
+        s.insert(pid);
+    }
+    pid
+}
+
+fn unregister_cli_child(pid: u32) {
+    if let Ok(mut s) = cli_children().lock() {
+        s.remove(&pid);
+    }
+}
+
+/// Wait for a registered CLI child and drop it from the kill registry no
+/// matter how the wait ends. Used by every one-shot `*_cli_complete` path.
+fn wait_cli_child(mut child: std::process::Child, pid: u32) -> std::io::Result<std::process::Output> {
+    let out = child.wait_with_output();
+    unregister_cli_child(pid);
+    out
+}
+
+/// Kill every live agent-CLI child. Windows needs `taskkill /T /F`: the
+/// process we spawned is often a cmd.exe batch shim whose real work happens
+/// in a node/python grandchild — killing only the shim leaves the agent
+/// running. Returns how many processes were signalled.
+#[tauri::command]
+pub fn cli_cancel_all() -> Result<u32, String> {
+    let pids: Vec<u32> = cli_children()
+        .lock()
+        .map(|s| s.iter().copied().collect())
+        .unwrap_or_default();
+    let mut killed = 0u32;
+    for pid in pids {
+        #[cfg(windows)]
+        let ok = {
+            let mut c = Command::new("taskkill");
+            c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+            c.stdout(Stdio::null());
+            c.stderr(Stdio::null());
+            use std::os::windows::process::CommandExt;
+            c.creation_flags(CREATE_NO_WINDOW);
+            c.status().map(|s| s.success()).unwrap_or(false)
+        };
+        #[cfg(not(windows))]
+        let ok = Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            killed += 1;
+        }
+        unregister_cli_child(pid);
+    }
+    Ok(killed)
+}
+
 /// Push an arg onto `cmd`, going through `raw_arg` + manual quoting
 /// when `batch` is true (Windows .cmd / .bat shim) so we bypass Rust's
 /// BatBadBut guard. Plain `arg()` is fine for .exe and for non-Windows.
@@ -1403,6 +1475,7 @@ pub async fn claude_cli_complete(
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
+            let pid = register_cli_child(&child);
             if let Some(mut stdin) = child.stdin.take() {
                 // Best-effort, like every OTHER CLI spawn here (`let _ =`). If claude
                 // exited early — a rejected --model, a bad flag, an auth failure — its
@@ -1414,8 +1487,7 @@ pub async fn claude_cli_complete(
                 let _ = stdin.write_all(stdin_payload.as_bytes());
             }
             // Wait as long as the CLI needs (agentic runs can be 15-30 min).
-            let output = child
-                .wait_with_output()
+            let output = wait_cli_child(child, pid)
                 .map_err(|e| format!("wait claude: {e}"))?;
             if !output.status.success() {
                 // Non-zero exit can still carry a 401 in stdout with empty stderr —
@@ -1582,10 +1654,11 @@ pub async fn codex_cli_complete(
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
+            let pid = register_cli_child(&child);
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(prompt.as_bytes());
             }
-            let output = child.wait_with_output().map_err(|e| format!("wait codex: {e}"))?;
+            let output = wait_cli_child(child, pid).map_err(|e| format!("wait codex: {e}"))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
@@ -1637,11 +1710,11 @@ pub async fn codex_cli_complete(
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
+        let pid = register_cli_child(&child);
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let output = child
-            .wait_with_output()
+        let output = wait_cli_child(child, pid)
             .map_err(|e| format!("wait codex: {e}"))?;
         let from_file = std::fs::read_to_string(&out_file).ok();
         let _ = std::fs::remove_file(&out_file);
@@ -2029,6 +2102,7 @@ pub async fn claude_cli_stream(
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
+        let child_pid = register_cli_child(&child);
         if let Some(mut stdin) = child.stdin.take() {
             // Best-effort: the CLI can read what it needs and exit while we're still
             // writing the (large agentic) payload → "pipe has been ended (os error
@@ -2227,7 +2301,9 @@ pub async fn claude_cli_stream(
                 _ => {}
             }
         }
-        let status = child.wait().map_err(|e| format!("wait claude: {e}"))?;
+        let wait_res = child.wait();
+        unregister_cli_child(child_pid);
+        let status = wait_res.map_err(|e| format!("wait claude: {e}"))?;
         if !status.success() {
             // Drain stderr after exit to surface the failure reason.
             let mut stderr_buf = String::new();
@@ -2516,6 +2592,7 @@ pub async fn codex_cli_stream(
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
+        let child_pid = register_cli_child(&child);
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
             // Drop closes the pipe (EOF) so the stdin-style codex proceeds.
@@ -2681,7 +2758,9 @@ pub async fn codex_cli_stream(
                 _ => {}
             }
         }
-        let status = child.wait().map_err(|e| format!("wait codex: {e}"))?;
+        let wait_res = child.wait();
+        unregister_cli_child(child_pid);
+        let status = wait_res.map_err(|e| format!("wait codex: {e}"))?;
         let asm = assembled.trim().to_string();
         if !status.success() && asm.is_empty() {
             // Only an error if we got NO usable reply — codex can exit
@@ -3379,13 +3458,26 @@ pub async fn gemini_cli_complete(
 
         // gemini-cli accepts --prompt (-p) for non-interactive output
         // (matches Claude/Kimi conventions). --model picks the variant.
+        //
+        // COMMAND-LINE LIMIT (same class as the kimi os-error-206 / claude
+        // "command line is too long" bugs): a full agentic system prompt as the
+        // --prompt ARG blows the ~8-32 KB Windows argv cap and the spawn dies
+        // before the model ever runs. gemini-cli also reads a piped-stdin
+        // prompt in non-interactive mode (`echo hi | gemini`), so for a LARGE
+        // prompt we DROP --prompt and feed it on stdin (an unbounded pipe).
+        // Small prompts keep --prompt + null stdin — byte-identical to the
+        // proven Accounts-Test path. Mirrors the kimi/codex/claude folds.
+        const MAX_PROMPT_ARG: usize = 4000;
+        let fold_prompt_into_stdin = composed.len() > MAX_PROMPT_ARG;
         let mut args: Vec<String> = Vec::new();
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             args.push("--model".into());
             args.push(m.to_string());
         }
-        args.push("--prompt".into());
-        args.push(composed);
+        if !fold_prompt_into_stdin {
+            args.push("--prompt".into());
+            args.push(composed.clone());
+        }
 
         // WSL-isolated project → run `gemini` inside the distro; else Windows CLI.
         let mut cmd = if let Some((exe, sargs)) =
@@ -3413,7 +3505,7 @@ pub async fn gemini_cli_complete(
             }
             c
         };
-        cmd.stdin(Stdio::null());
+        cmd.stdin(if fold_prompt_into_stdin { Stdio::piped() } else { Stdio::null() });
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         #[cfg(windows)]
@@ -3421,10 +3513,18 @@ pub async fn gemini_cli_complete(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let output = cmd
-            .spawn()
-            .map_err(|e| format!("spawn gemini: {e}"))?
-            .wait_with_output()
+        let mut child = cmd.spawn().map_err(|e| format!("spawn gemini: {e}"))?;
+        let pid = register_cli_child(&child);
+        if fold_prompt_into_stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                // Best-effort like the kimi/claude folds: if gemini exited early
+                // its pipe is closed and this write fails — the real error
+                // surfaces from the exit status below.
+                use std::io::Write as _;
+                let _ = stdin.write_all(composed.as_bytes());
+            }
+        }
+        let output = wait_cli_child(child, pid)
             .map_err(|e| format!("wait gemini: {e}"))?;
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -3578,6 +3678,7 @@ pub async fn kimi_cli_complete(
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
+            let pid = register_cli_child(&child);
             if fold_prompt_into_stdin {
                 if let Some(mut stdin) = child.stdin.take() {
                     // Best-effort: on the WSL path the pipe can close early ("pipe
@@ -3586,8 +3687,7 @@ pub async fn kimi_cli_complete(
                     let _ = stdin.write_all(composed.as_bytes());
                 }
             }
-            let output = child
-                .wait_with_output()
+            let output = wait_cli_child(child, pid)
                 .map_err(|e| format!("wait kimi: {e}"))?;
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();

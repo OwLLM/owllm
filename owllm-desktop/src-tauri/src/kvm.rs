@@ -56,12 +56,17 @@ pub struct KvmAuth {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct KvmTarget {
+    /// May be omitted by the caller when exactly ONE Node is configured on the
+    /// Accounts page — kvm_node_exec fills it in. (Agents kept flailing trying
+    /// to guess hosts/ports; the stored config is the source of truth.)
+    #[serde(default)]
     pub host: String,
     #[serde(default)]
     pub port: Option<u16>,
     #[serde(default)]
     pub auth: KvmAuth,
-    /// "websocket" | "ssh".
+    /// "websocket" | "ssh". Defaults to "websocket" (the NanoKVM web API).
+    #[serde(default)]
     pub transport: String,
 }
 
@@ -798,6 +803,150 @@ async fn dispatch(target: &KvmTarget, action: &str, params: &Value) -> Value {
 }
 
 // ------------------------------------------------------------------
+// Credential store — per-host {username, password, port, transport}
+// ------------------------------------------------------------------
+// Agents can't guess a NanoKVM's host/port/login, and requiring the model to
+// carry the web-UI password in every tool call is both unsafe and why "take a
+// screenshot of the KVM" kept failing to even log in. The user saves each
+// Node once on the Accounts page; kvm_node_exec autofills any field the caller
+// omitted. The password is encrypted at rest with the same DPAPI wrapper the
+// account secrets use (crypt::protect) and never returned to the UI.
+
+fn creds_path() -> Option<PathBuf> {
+    crate::paths::user_data_root().map(|r| r.join("kvm_nodes.json"))
+}
+
+fn load_nodes_doc() -> Value {
+    creds_path()
+        .and_then(|p| std::fs::read_to_string(&p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .filter(|v| v.get("nodes").map(Value::is_object).unwrap_or(false))
+        .unwrap_or_else(|| json!({ "nodes": {} }))
+}
+
+/// Decrypt a stored password blob (base64 of DPAPI ciphertext). None on any
+/// failure — the caller then reports "missing password" rather than crash.
+fn decrypt_stored_password(b64: &str) -> Option<String> {
+    use base64::Engine as _;
+    let cipher = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let plain = crate::crypt::unprotect(&cipher).ok()?;
+    String::from_utf8(plain).ok()
+}
+
+/// Fill in any target field the caller omitted from the saved node config.
+/// Host resolution: explicit host wins; else if exactly ONE node is saved, use
+/// it (the common "I only have one KVM" case that agents kept fumbling).
+fn hydrate_target_from_store(t: &mut KvmTarget) {
+    let doc = load_nodes_doc();
+    let nodes = match doc.get("nodes").and_then(Value::as_object) {
+        Some(m) if !m.is_empty() => m,
+        _ => return,
+    };
+    // Resolve which stored node this target refers to.
+    let host = t.host.trim().to_string();
+    let entry = if !host.is_empty() {
+        nodes.get(&host)
+    } else if nodes.len() == 1 {
+        let (k, v) = nodes.iter().next().unwrap();
+        t.host = k.clone();
+        Some(v)
+    } else {
+        None
+    };
+    let Some(e) = entry else { return };
+    if t.transport.trim().is_empty() {
+        t.transport = e.get("transport").and_then(Value::as_str).unwrap_or("websocket").to_string();
+    }
+    if t.port.is_none() {
+        t.port = e.get("port").and_then(Value::as_u64).map(|p| p as u16);
+    }
+    if t.auth.username.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        t.auth.username = e.get("username").and_then(Value::as_str).map(str::to_string);
+    }
+    if t.auth.token.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        t.auth.token = e.get("password").and_then(Value::as_str).and_then(decrypt_stored_password);
+    }
+    if t.auth.ssh_key_path.as_deref().map(str::trim).unwrap_or("").is_empty() {
+        t.auth.ssh_key_path = e.get("sshKeyPath").and_then(Value::as_str).map(str::to_string);
+    }
+}
+
+/// Save (or update) a Node's connection config. The password is DPAPI-encrypted
+/// then base64'd; pass an empty password to keep the existing one.
+#[tauri::command]
+pub fn kvm_node_save(
+    host: String,
+    username: Option<String>,
+    password: Option<String>,
+    port: Option<u16>,
+    transport: Option<String>,
+    ssh_key_path: Option<String>,
+) -> Result<Value, String> {
+    let host = host.trim().to_string();
+    if host.is_empty() {
+        return Err("missing field 'host' (the NanoKVM IP or hostname)".to_string());
+    }
+    let mut doc = load_nodes_doc();
+    if !doc["nodes"].get(&host).map(Value::is_object).unwrap_or(false) {
+        doc["nodes"][&host] = json!({});
+    }
+    let node = &mut doc["nodes"][&host];
+    if let Some(u) = username {
+        node["username"] = json!(u);
+    }
+    if let Some(p) = password.filter(|p| !p.is_empty()) {
+        use base64::Engine as _;
+        let cipher = crate::crypt::protect(p.as_bytes())?;
+        node["password"] = json!(base64::engine::general_purpose::STANDARD.encode(cipher));
+    }
+    if let Some(p) = port {
+        node["port"] = json!(p);
+    }
+    if let Some(tr) = transport.filter(|s| !s.trim().is_empty()) {
+        node["transport"] = json!(tr);
+    }
+    if let Some(k) = ssh_key_path {
+        node["sshKeyPath"] = json!(k);
+    }
+    let path = creds_path().ok_or_else(|| "could not resolve app data dir for kvm_nodes.json".to_string())?;
+    let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, txt).map_err(|e| format!("write kvm_nodes.json: {e}"))?;
+    Ok(json!({ "ok": true, "host": host }))
+}
+
+/// List saved Nodes (host, username, port, transport) — NEVER the password.
+#[tauri::command]
+pub fn kvm_node_list() -> Result<Value, String> {
+    let doc = load_nodes_doc();
+    let mut out = Vec::new();
+    if let Some(map) = doc.get("nodes").and_then(Value::as_object) {
+        for (host, e) in map {
+            out.push(json!({
+                "host": host,
+                "username": e.get("username").and_then(Value::as_str).unwrap_or(""),
+                "port": e.get("port").and_then(Value::as_u64),
+                "transport": e.get("transport").and_then(Value::as_str).unwrap_or("websocket"),
+                "hasPassword": e.get("password").and_then(Value::as_str).map(|s| !s.is_empty()).unwrap_or(false),
+            }));
+        }
+    }
+    Ok(json!({ "nodes": out }))
+}
+
+/// Remove a saved Node.
+#[tauri::command]
+pub fn kvm_node_delete(host: String) -> Result<Value, String> {
+    let mut doc = load_nodes_doc();
+    if let Some(map) = doc["nodes"].as_object_mut() {
+        map.remove(host.trim());
+    }
+    let path = creds_path().ok_or_else(|| "could not resolve app data dir for kvm_nodes.json".to_string())?;
+    let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, txt).map_err(|e| format!("write kvm_nodes.json: {e}"))?;
+    Ok(json!({ "ok": true, "host": host }))
+}
+
+// ------------------------------------------------------------------
 // Tauri commands
 // ------------------------------------------------------------------
 
@@ -809,7 +958,7 @@ async fn dispatch(target: &KvmTarget, action: &str, params: &Value) -> Value {
 /// flag is on — errors are carried in the envelope, not as a panic/500.
 #[tauri::command]
 pub async fn kvm_node_exec(
-    target: KvmTarget,
+    mut target: KvmTarget,
     action: String,
     params: Value,
 ) -> Result<Value, String> {
@@ -817,6 +966,18 @@ pub async fn kvm_node_exec(
         return Err(
             "OWLLM Node is disabled. Enable it on the Accounts page (OWLLM Node card) or set OWLLM_KVM_NODE=1 (default off).".to_string(),
         );
+    }
+
+    // Fill host/port/username/password/transport from the saved node config for
+    // anything the caller (an agent) left blank. Without this the model had to
+    // guess the IP, port, and web-UI password — which is why "screenshot the
+    // KVM" never even logged in.
+    hydrate_target_from_store(&mut target);
+    if target.host.trim().is_empty() {
+        return Err("no KVM host given and none saved — add a Node on the Accounts page (OWLLM Node card), or pass target.host.".to_string());
+    }
+    if target.transport.trim().is_empty() {
+        target.transport = "websocket".to_string();
     }
 
     let envelope = if consent_allowed(&action, &target.host, &load_consent()) {

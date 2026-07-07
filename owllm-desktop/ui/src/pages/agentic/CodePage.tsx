@@ -1416,7 +1416,14 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     }
   };
 
-  const stop = () => { abortRef.current?.abort(); setBusy(false); };
+  // Stop = abort the JS side AND kill any spawned CLI child — the abort alone
+  // never reached a claude/codex/kimi/gemini process, which kept running to
+  // completion while the button looked dead.
+  const stop = () => {
+    abortRef.current?.abort();
+    void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
+    setBusy(false);
+  };
   const clear = () => { if (!busy) { setMessages([]); setTasks([]); setStatus(`Workspace: ${workspace || "(none)"}`); } };
 
   // Clicking a file in the tree drops an @-reference into the composer so the
@@ -1556,7 +1563,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
               style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: 13.5, padding: "9px 12px", lineHeight: 1.5 }}
             />
             {chatBusy ? (
-              <button onClick={() => abortRef.current?.abort()} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
+              <button onClick={() => { abortRef.current?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
             ) : (
               <button onClick={sendChat} disabled={!chatDraft.trim() && chatImages.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: (chatDraft.trim() || chatImages.length) ? 1 : 0.5 }}>Send</button>
             )}

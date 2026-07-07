@@ -3601,12 +3601,17 @@ pub async fn kimi_cli_complete(
         None
     };
     tokio::task::spawn_blocking(move || {
-        // Compose system + user into a single prompt — Kimi --print
-        // mode doesn't expose a system-message flag.
+        // Compose system + user into a single prompt. Kimi --print mode has no
+        // --system-prompt flag, so we must fold the system instructions into the
+        // user payload. The old `---` separator was treated as a turn/rule boundary
+        // and ignored, letting Kimi's built-in "Hello! What would you like to work
+        // on?" greeting override the user's actual task. Use an explicit, visually
+        // strong separator and put the user's task last so it reads as the primary
+        // instruction.
         let composed = if system_prompt.trim().is_empty() {
             user_message
         } else {
-            format!("{system_prompt}\n\n---\n\n{user_message}")
+            format!("{system_prompt}\n\n===== YOUR TASK =====\n\n{user_message}")
         };
         // Config-aware model flag: forcing an id the CLI's config doesn't
         // declare aborts with LLMNotSet (see kimi_model_args).

@@ -2742,19 +2742,25 @@ async function streamMoonshot(
 ): Promise<string> {
   if (route.forceSub === true) {
     await ensureCliWarm("kimi_cli", projectCwd);
+    // Kimi --print mode has no native image flag, but it CAN read image files
+    // from the working directory when referenced by relative path in the prompt.
+    // Save pasted images into .owllm-inbox/ and reference them, like the Claude
+    // and Codex subscription paths do.
+    const kimiCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
+    const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], kimiCwd);
     const convo = (history ?? [])
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
       .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    const prompt = convo ? `${convo}\n\nUser: ${cliUserMessage}` : cliUserMessage;
     const reply = await withCliAuthRetry("kimi_cli", signal, () =>
       invoke<string>("kimi_cli_complete", {
         systemPrompt,
         userMessage: prompt,
-        cwd: projectCwd ?? null,
+        cwd: kimiCwd ?? null,
         model: modelId,
         allowedTools: allowedTools ?? null,
       }),
-      projectCwd,
+      kimiCwd,
     );
     if (reply) onDelta(reply);
     return reply;

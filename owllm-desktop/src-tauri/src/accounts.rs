@@ -308,6 +308,9 @@ pub struct AccountUsage {
     /// App-recorded traffic for this provider — present for EVERY model
     /// (local GGUF, API keys, CLIs), independent of quota availability.
     pub stats: Vec<UsageStat>,
+    /// Provider-reported account balance (e.g. "¥49.59") when available.
+    /// Independent of quota windows; rendered as plain text by the UI.
+    pub balance: Option<String>,
 }
 
 /// One aggregate row of the app's own usage tally ("Session (5h)" /
@@ -435,16 +438,104 @@ pub async fn account_usage(provider: String) -> AccountUsage {
             .await
             .unwrap_or_default()
     };
-    let unavailable = |note: &str| AccountUsage {
+    let empty = || AccountUsage {
         available: false,
         provider: provider.clone(),
-        note: note.to_string(),
+        note: String::new(),
         windows: Vec::new(),
         stats: stats.clone(),
+        balance: None,
     };
-    if !(p.contains("claude") || p.contains("anthropic")) {
-        return unavailable("no quota API for this provider — showing this app's recorded traffic");
+    let unavailable = |note: &str| AccountUsage {
+        note: note.to_string(),
+        ..empty()
+    };
+
+    // Provider-specific quota / balance APIs. Each branch is responsible
+    // for returning a fully-formed AccountUsage on success OR failure.
+    if p.contains("claude") || p.contains("anthropic") {
+        return fetch_anthropic_usage(&provider, &stats).await;
     }
+    if p.contains("moonshot") || p.contains("kimi") {
+        return fetch_moonshot_balance(&provider, &stats).await;
+    }
+
+    // Everything else (OpenAI/Codex, Gemini, DeepSeek, xAI, Groq,
+    // Perplexity, Mistral, Together, local models) has no client-readable
+    // quota/balance API we can query with an API key. Return the app's own
+    // recorded traffic plus a short note so the panel isn't blank.
+    let pretty = match p.as_str() {
+        "openai" | "codex" => "OpenAI / Codex",
+        "gemini" => "Gemini",
+        "deepseek" => "DeepSeek",
+        "xai" => "xAI",
+        "groq" => "Groq",
+        "perplexity" => "Perplexity",
+        "mistral" => "Mistral",
+        "together" => "Together",
+        "local" | "tuned" => "Local model",
+        _ => &provider,
+    };
+    unavailable(&format!(
+        "{pretty} does not expose a usage/balance API — showing this app's recorded traffic"
+    ))
+}
+
+/// Save a single API key. `name` is the env-var name
+/// (ANTHROPIC_API_KEY / OPENAI_API_KEY); `value` is the raw key.
+/// Empty value behaves like `accounts_delete_secret` for parity with
+/// the legacy Python helper.
+#[tauri::command]
+pub fn accounts_save_api_key(name: String, value: String) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return accounts_delete_secret(name);
+    }
+    let mut map = load_secrets();
+    map.insert(name, trimmed.to_string());
+    write_secrets(&map)
+}
+
+#[tauri::command]
+pub fn accounts_delete_secret(name: String) -> Result<(), String> {
+    let mut map = load_secrets();
+    map.remove(&name);
+    if map.is_empty() {
+        // Delete the file when empty so a stale {} doesn't linger.
+        if let Some(path) = secrets_path() {
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        return Ok(());
+    }
+    write_secrets(&map)
+}
+
+/// Return the secret value for `name` (or None when not set). Used by
+/// the dispatch loop on the React side to make authenticated requests
+/// to api.anthropic.com / api.openai.com. Keeping this on the Rust
+/// side means the key only crosses the IPC boundary on demand.
+#[tauri::command]
+pub fn accounts_get_secret(name: String) -> Option<String> {
+    let map = load_secrets();
+    map.get(&name).cloned().filter(|v| !v.trim().is_empty())
+}
+
+/// Fetch Claude/Anthropic OAuth usage windows.
+async fn fetch_anthropic_usage(provider: &str, stats: &[UsageStat]) -> AccountUsage {
+    let empty = || AccountUsage {
+        available: false,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows: Vec::new(),
+        stats: stats.to_vec(),
+        balance: None,
+    };
+    let unavailable = |note: &str| AccountUsage {
+        note: note.to_string(),
+        ..empty()
+    };
     // OAuth token from the Claude CLI's credential store (same file
     // claude_cli_logged_in() checks; sandbox mirroring copies this too).
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
@@ -516,48 +607,99 @@ pub async fn account_usage(provider: String) -> AccountUsage {
     for w in &mut windows {
         w.used_pct = w.used_pct.clamp(0.0, 100.0);
     }
-    AccountUsage { available: true, provider, note: String::new(), windows, stats: stats.clone() }
-}
-
-/// Save a single API key. `name` is the env-var name
-/// (ANTHROPIC_API_KEY / OPENAI_API_KEY); `value` is the raw key.
-/// Empty value behaves like `accounts_delete_secret` for parity with
-/// the legacy Python helper.
-#[tauri::command]
-pub fn accounts_save_api_key(name: String, value: String) -> Result<(), String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return accounts_delete_secret(name);
+    AccountUsage {
+        available: true,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows,
+        stats: stats.to_vec(),
+        balance: None,
     }
-    let mut map = load_secrets();
-    map.insert(name, trimmed.to_string());
-    write_secrets(&map)
 }
 
-#[tauri::command]
-pub fn accounts_delete_secret(name: String) -> Result<(), String> {
-    let mut map = load_secrets();
-    map.remove(&name);
-    if map.is_empty() {
-        // Delete the file when empty so a stale {} doesn't linger.
-        if let Some(path) = secrets_path() {
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
+/// Fetch Moonshot/Kimi account balance from the Open Platform API.
+/// Works for both the API-key route and the subscription CLI route when a
+/// MOONSHOT_API_KEY is saved. Returns stats-only when no key is saved.
+async fn fetch_moonshot_balance(provider: &str, stats: &[UsageStat]) -> AccountUsage {
+    let empty = || AccountUsage {
+        available: false,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows: Vec::new(),
+        stats: stats.to_vec(),
+        balance: None,
+    };
+    let unavailable = |note: &str| AccountUsage {
+        note: note.to_string(),
+        ..empty()
+    };
+
+    let secrets = load_secrets();
+    let Some(key) = secrets.get("MOONSHOT_API_KEY").cloned().filter(|v| !v.trim().is_empty()) else {
+        return unavailable("Moonshot API key not saved — showing this app's recorded traffic");
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return unavailable(&format!("http client: {e}")),
+    };
+
+    // Try international endpoint first, then China mainland. Both share the
+    // same response shape; only one will work for a given API key.
+    let endpoints = [
+        "https://api.moonshot.ai/v1/users/me/balance",
+        "https://api.moonshot.cn/v1/users/me/balance",
+    ];
+    let mut last_err = String::new();
+    for url in endpoints {
+        let resp = client
+            .get(url)
+            .header("Authorization", format!("Bearer {key}"))
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                last_err = format!("{url} returned {}", r.status());
+                continue;
             }
+            Err(e) => {
+                last_err = format!("{url} request failed: {e}");
+                continue;
+            }
+        };
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = format!("{url} response unreadable: {e}");
+                continue;
+            }
+        };
+        // Expected: { "code": 0, "data": { "available_balance": ..., "voucher_balance": ..., "cash_balance": ... }, ... }
+        if body.get("code").and_then(|c| c.as_i64()) != Some(0) {
+            last_err = format!("{url} returned code {:?}", body.get("code"));
+            continue;
         }
-        return Ok(());
+        let data = body.get("data").cloned().unwrap_or_default();
+        let avail = data.get("available_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let cash = data.get("cash_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let voucher = data.get("voucher_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let balance = format!(
+            "Available ¥{avail:.2} (cash ¥{cash:.2} · voucher ¥{voucher:.2})"
+        );
+        return AccountUsage {
+            available: false,
+            provider: provider.to_string(),
+            note: String::new(),
+            windows: Vec::new(),
+            stats: stats.to_vec(),
+            balance: Some(balance),
+        };
     }
-    write_secrets(&map)
-}
-
-/// Return the secret value for `name` (or None when not set). Used by
-/// the dispatch loop on the React side to make authenticated requests
-/// to api.anthropic.com / api.openai.com. Keeping this on the Rust
-/// side means the key only crosses the IPC boundary on demand.
-#[tauri::command]
-pub fn accounts_get_secret(name: String) -> Option<String> {
-    let map = load_secrets();
-    map.get(&name).cloned().filter(|v| !v.trim().is_empty())
+    unavailable(&format!("balance endpoint unreachable ({last_err})"))
 }
 
 #[derive(Serialize, Deserialize, Clone)]

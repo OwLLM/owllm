@@ -8000,6 +8000,7 @@ export function AgentsPage({
   });
 
   const [locationOverride, setLocationOverride] = useState<string>("");
+  const [locationOverrideProjectId, setLocationOverrideProjectId] = useState<string>("");
   // Whether the user has isolation switched on — drives the honest
   // isolation badge: host location + isolation requested = loud red
   // "HOST — NOT isolated" (P1-1), because the run would NOT be sandboxed.
@@ -8536,11 +8537,15 @@ export function AgentsPage({
     if (!selectedProjectId) return;
     try { localStorage.setItem(soloKey(selectedProjectId), v ? "1" : "0"); } catch { /* ignore */ }
   };
+  const setProjectLocationDraft = useCallback((value: string, projectId = selectedProjectId) => {
+    setLocationOverrideProjectId(projectId);
+    setLocationOverride(value);
+  }, [selectedProjectId]);
 
   async function onBrowseProjectFolder() {
     try {
       const picked = await invoke<string | null>("pick_folder", { title: "Pick a project folder" });
-      if (picked) setLocationOverride(picked);
+      if (picked) setProjectLocationDraft(picked);
     } catch (e) {
       console.error("pick_folder failed", e);
     }
@@ -8572,7 +8577,7 @@ export function AgentsPage({
     // returned row if list_projects raced.
     const target = rows.find(p => p.id === row.id) ?? row;
     setSelectedProjectId(target.id);
-    setLocationOverride(target.location);
+    setProjectLocationDraft(target.location, target.id);
     setPickedTeamId(null);
     setTrustWritesOverride(null);
   };
@@ -8766,7 +8771,7 @@ export function AgentsPage({
         try { stored = localStorage.getItem(pageProjKey); } catch { /* ignore */ }
         const pick = rawProjects.find(p => p.id === stored) ?? rawProjects[0];
         setSelectedProjectId(pick.id);
-        setLocationOverride(pick.location || "");
+        setProjectLocationDraft(pick.location || "", pick.id);
         setTrustWritesOverride(null);
       }
       setTeams(rawTeams.map(toTeam).sort((a, b) =>
@@ -8828,6 +8833,10 @@ export function AgentsPage({
   }, []);
 
   const selectedProject = projects.find(p => p.id === selectedProjectId) ?? null;
+  const locationDraft =
+    selectedProject && locationOverrideProjectId === selectedProject.id
+      ? locationOverride
+      : (selectedProject?.location || "");
 
   // Multi-tab bookkeeping: remember this tab's project + surface the tab
   // title (project name) and busy dot up to the AgentsPages shell.
@@ -8851,11 +8860,15 @@ export function AgentsPage({
   // is on and a distro exists; an explicit \\wsl.localhost\ path is used as-is;
   // otherwise the raw host path. So a user who picked C:\repo gets isolated
   // agents on C:\repo without ever copying it into the sandbox.
-  const rawLocation = (locationOverride || selectedProject?.location || "").trim();
+  const rawLocation = locationDraft.trim();
   const runCwd =
     isolationRequested && wslDistro && !isWslPath(rawLocation)
       ? (winToWslMountUnc(rawLocation, wslDistro) ?? rawLocation)
       : rawLocation;
+  // Publisher controls host git/release operations. Keep it tied to the
+  // selected project's actual folder draft, not the WSL-isolated execution cwd,
+  // so switching projects cannot show an old sandbox/UNC path on the release UI.
+  const publisherCwd = rawLocation || null;
 
   // Load this project's full-access state (host-side, keyed by cwd) whenever the
   // effective cwd changes. OFF unless the user explicitly granted it.
@@ -8921,7 +8934,7 @@ export function AgentsPage({
   // Sync editable fields when project selection changes.
   useEffect(() => {
     if (selectedProject) {
-      setLocationOverride(selectedProject.location || "");
+      setProjectLocationDraft(selectedProject.location || "", selectedProject.id);
       setTrustWritesOverride(null);
       setTeamModelOverride(null);
       // Restore THIS project's saved per-agent model picks. Primary source is
@@ -9213,6 +9226,7 @@ export function AgentsPage({
   // Persist location edits the same way.
   useEffect(() => {
     if (!selectedProject) return;
+    if (locationOverrideProjectId !== selectedProject.id) return;
     if (locationOverride === selectedProject.location) return;
     const id = window.setTimeout(async () => {
       try {
@@ -9226,7 +9240,7 @@ export function AgentsPage({
     }, 700);
     return () => window.clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationOverride, selectedProject?.id]);
+  }, [locationOverride, locationOverrideProjectId, selectedProject?.id, selectedProject?.location]);
 
   // Persist the Super User chat (chat_json) + per-agent transcripts
   // (agent_logs_json). Ownership moved from two component effects into the
@@ -10379,7 +10393,7 @@ export function AgentsPage({
     if (projectCwd && !isWslPath(projectCwd)) {
       const reachable = await invoke<boolean>("path_is_dir", { path: projectCwd }).catch(() => false);
       if (!reachable) {
-        const hostLoc = (locationOverride || selectedProject?.location || "").trim();
+        const hostLoc = locationDraft.trim();
         const hostOk = !!hostLoc && hostLoc !== projectCwd
           && await invoke<boolean>("path_is_dir", { path: hostLoc }).catch(() => false);
         if (hostOk) {
@@ -12338,9 +12352,9 @@ export function AgentsPage({
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
         onCreated={onProjectCreated}
         project={selectedProject}
-        location={locationOverride}
+        location={locationDraft}
         effectiveCwd={runCwd}
-        onChangeLocation={setLocationOverride}
+        onChangeLocation={setProjectLocationDraft}
         trustWrites={trustWrites}
         onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
         fullAccess={fullAccess}
@@ -12365,7 +12379,7 @@ export function AgentsPage({
                 const nextId = e.target.value;
                 const nextProject = projects.find(p => p.id === nextId) ?? null;
                 setSelectedProjectId(nextId);
-                setLocationOverride(nextProject?.location || "");
+                setProjectLocationDraft(nextProject?.location || "", nextId);
                 setPickedTeamId(null);
               }}
               title="Switch project"
@@ -12690,7 +12704,7 @@ export function AgentsPage({
                 providerFor={providerFor}
                 agentTiming={agentTiming}
                 perAgentSkills={perAgentSkills}
-                projectCwd={runCwd || null}
+                projectCwd={publisherCwd}
               />
             )}
             {/* (The bottom-left canvas voice overlay was removed — the

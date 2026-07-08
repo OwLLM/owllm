@@ -3111,8 +3111,18 @@ fn prepare_kimi_code_home(
     }
 
     if !system_prompt.trim().is_empty() {
-        let agents = base.join("AGENTS.md");
-        std::fs::write(&agents, system_prompt).map_err(|e| format!("write AGENTS.md: {e}"))?;
+        // kimi-code loads AGENTS.md from the *working directory*, not from
+        // KIMI_CODE_HOME, so writing it there is silently ignored. Use the
+        // portable --agent-file mechanism instead: agent.yaml extends the
+        // builtin default agent and points at system.md in the same temp dir.
+        let system_md = base.join("system.md");
+        std::fs::write(&system_md, system_prompt).map_err(|e| format!("write system.md: {e}"))?;
+        let agent_yaml = base.join("agent.yaml");
+        std::fs::write(
+            &agent_yaml,
+            "version: 1\nagent:\n  name: owllm\n  extend: default\n  system_prompt_path: ./system.md\n",
+        )
+        .map_err(|e| format!("write agent.yaml: {e}"))?;
     }
 
     if with_mcp {
@@ -3960,6 +3970,12 @@ pub async fn kimi_cli_complete(
                 args.push("--agent-file".into());
                 args.push(p.to_string_lossy().to_string());
             }
+            if let Some(Injection::TempHome(home)) = injection.as_ref() {
+                if !system_empty {
+                    args.push("--agent-file".into());
+                    args.push(home.join("agent.yaml").to_string_lossy().to_string());
+                }
+            }
             if use_prompt_flag {
                 args.push("--prompt".into());
                 args.push(prompt_value.clone());
@@ -3993,8 +4009,11 @@ pub async fn kimi_cli_complete(
             };
 
             // kimi-cli (legacy) is Python; force UTF-8 so non-ANSI replies don't
-            // crash the codec. New kimi-code is Node, but the variable is harmless.
+            // crash the codec. PYTHONIOENCODING is required on Windows so stdout
+            // can carry emoji; PYTHONUTF8 covers file reads. New kimi-code is Node,
+            // but the variables are harmless.
             cmd.env("PYTHONUTF8", "1");
+            cmd.env("PYTHONIOENCODING", "utf-8");
             if let Some(Injection::TempHome(home)) = injection.as_ref() {
                 cmd.env("KIMI_CODE_HOME", home);
                 if with_mcp {

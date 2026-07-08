@@ -1258,6 +1258,44 @@ export function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem
   return lines.join("\n");
 }
 
+function recentTextHistory(history: HistoryItem[] | undefined, maxTurns = 8, maxChars = 12_000): HistoryItem[] {
+  if (!history || history.length === 0) return [];
+  const out: HistoryItem[] = [];
+  let used = 0;
+  for (const h of history.slice(-maxTurns).reverse()) {
+    const content = typeof h.content === "string" ? h.content.trim() : "";
+    if (!content) continue;
+    const budget = maxChars - used;
+    if (budget <= 0) break;
+    const clipped = content.length > budget ? content.slice(content.length - budget) : content;
+    out.unshift({ role: h.role, content: clipped });
+    used += clipped.length;
+  }
+  return out;
+}
+
+function buildKimiCliPrompt(userMessage: string, history?: HistoryItem[]): string {
+  const current = userMessage.trim();
+  const prior = recentTextHistory(history);
+  if (prior.length === 0) return current;
+  const lines: string[] = [
+    "CURRENT USER REQUEST - this is the only task to answer or implement:",
+    current,
+    "",
+    "Previous conversation below is reference only. Do not continue, summarize, or report completion for an older task unless the current request explicitly asks for it.",
+    "--- Reference-only prior turns ---",
+  ];
+  for (const h of prior) {
+    lines.push(`${h.role === "assistant" ? "Assistant" : "User"}: ${h.content}`);
+    lines.push("");
+  }
+  lines.push("--- End reference-only prior turns ---");
+  lines.push("");
+  lines.push("Now answer or implement ONLY this current user request:");
+  lines.push(current);
+  return lines.join("\n");
+}
+
 // ---------- Model routing ----------
 export function stripModelPrefix(id: string): string {
   for (const p of ["sub/", "api/", "auto/"]) {
@@ -2748,10 +2786,7 @@ async function streamMoonshot(
     // and Codex subscription paths do.
     const kimiCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
     const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], kimiCwd);
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${cliUserMessage}` : cliUserMessage;
+    const prompt = buildKimiCliPrompt(cliUserMessage, history);
     const reply = await withCliAuthRetry("kimi_cli", signal, () =>
       invoke<string>("kimi_cli_complete", {
         systemPrompt,

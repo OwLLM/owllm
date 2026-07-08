@@ -38,6 +38,7 @@ mod huggingface;
 mod kvm;
 mod mcp;
 mod mcp_gateway;
+mod media_assets;
 mod memory;
 mod models;
 mod modules;
@@ -293,6 +294,7 @@ pub fn run() {
             release::finish_and_publish,
             release::publish_readiness,
             release::repo_commit,
+            release::repo_push,
             release::repo_merge,
             memory::team_memory_read,
             memory::team_memory_delete,
@@ -309,6 +311,12 @@ pub fn run() {
             skill_library::uninstall_skill,
             skill_library::list_installed_skill_folders,
             skill_library::read_skill_md,
+            media_assets::media_assets_list,
+            media_assets::media_assets_get,
+            media_assets::media_assets_update,
+            media_assets::media_assets_import,
+            media_assets::media_assets_delete,
+            media_assets::media_assets_ensure_dir,
             telegram::telegram_get_updates,
             telegram::telegram_send_message,
             telegram::telegram_download_file,

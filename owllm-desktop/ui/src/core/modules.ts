@@ -28,6 +28,7 @@ import CodePage from "../pages/agentic/CodePage";
 import AgentsPage from "../pages/agentic/AgentsPage";
 import StudioPage from "../pages/agentic/StudioPage";
 import BridgesPage from "../pages/agentic/BridgesPage";
+import AssetsPage from "../pages/agentic/AssetsPage";
 
 // Gamify mode:
 import GamifyPage from "../pages/gamify/GamifyPage";
@@ -105,8 +106,8 @@ export const FINETUNING: ModuleDef = {
   firstTab: "models",  // Qt _GROUP_FIRST_TAB["finetuning"] = "models"
 };
 
-/** Agentic Team — Code + Agents + Studio + Bridges.
- *  Qt: `_NAVBAR_GROUPS["agentic"] = ("code_btn", "agents_btn", "studio_btn", "bridges_btn")`. */
+/** Agentic Team — Code + Agents + Studio + Assets + Bridges.
+ *  Qt: `_NAVBAR_GROUPS["agentic"] = ("code_btn", "agents_btn", "studio_btn", "assets_btn", "bridges_btn")`. */
 export const AGENTIC: ModuleDef = {
   id: "agentic",
   toggleLabel: "🎭\nAgentic Team",
@@ -115,6 +116,7 @@ export const AGENTIC: ModuleDef = {
     { key: "code",    label: "💻 Code",    component: CodePage    },
     { key: "agents",  label: "🤖 Agents",  component: AgentsPage  },
     { key: "studio",  label: "🎭 Studio",  component: StudioPage  },
+    { key: "assets",  label: "🖼 Assets",  component: AssetsPage  },
     { key: "bridges", label: "📱 Bridges", component: BridgesPage },
   ],
   firstTab: "agents",  // Qt _GROUP_FIRST_TAB["agentic"] = "agents"

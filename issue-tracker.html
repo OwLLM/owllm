@@ -1,0 +1,794 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OwLLM Issue Tracker</title>
+  <style>
+    :root {
+      --bg: #0f1115;
+      --panel: #161a21;
+      --panel-2: #1e232c;
+      --text: #e8ecf1;
+      --muted: #9aa3b2;
+      --border: #2a3140;
+      --accent: #58a6ff;
+      --accent-2: #7c3aed;
+      --danger: #f85149;
+      --success: #3fb950;
+      --warning: #d29922;
+      --info: #58a6ff;
+      --radius: 10px;
+      --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.5;
+    }
+
+    body { display: flex; flex-direction: column; }
+
+    header {
+      background: linear-gradient(90deg, var(--panel), var(--panel-2));
+      border-bottom: 1px solid var(--border);
+      padding: 1.25rem 1.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 1.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    header h1 .logo {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+      display: grid;
+      place-items: center;
+      font-weight: 800;
+      font-size: 1rem;
+      color: #fff;
+    }
+
+    .header-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+
+    main {
+      flex: 1;
+      overflow: auto;
+      padding: 1.5rem;
+      max-width: 1200px;
+      width: 100%;
+      margin: 0 auto;
+    }
+
+    .toolbar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .toolbar input,
+    .toolbar select,
+    .form-row input,
+    .form-row select,
+    .form-row textarea {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0.6rem 0.8rem;
+      border-radius: var(--radius);
+      font-size: 0.95rem;
+      width: 100%;
+      transition: border-color 0.15s, box-shadow 0.15s;
+    }
+
+    .toolbar input:focus,
+    .toolbar select:focus,
+    .form-row input:focus,
+    .form-row select:focus,
+    .form-row textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+      box-shadow: 0 0 0 3px rgba(88, 166, 255, 0.15);
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.35rem;
+      background: var(--panel-2);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 0.6rem 1rem;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-size: 0.95rem;
+      font-weight: 500;
+      transition: background 0.15s, border-color 0.15s, transform 0.08s;
+      white-space: nowrap;
+    }
+
+    .btn:hover { background: #252b36; border-color: #3d4659; }
+    .btn:active { transform: translateY(1px); }
+
+    .btn-primary {
+      background: linear-gradient(90deg, var(--accent), var(--accent-2));
+      border-color: transparent;
+      color: #fff;
+    }
+    .btn-primary:hover { filter: brightness(1.08); }
+
+    .btn-danger { color: var(--danger); border-color: rgba(248, 81, 73, 0.35); }
+    .btn-danger:hover { background: rgba(248, 81, 73, 0.12); }
+
+    .btn-success { color: var(--success); border-color: rgba(63, 185, 80, 0.35); }
+    .btn-success:hover { background: rgba(63, 185, 80, 0.12); }
+
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .stat-card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.9rem 1rem;
+      text-align: center;
+    }
+
+    .stat-card .value {
+      font-size: 1.6rem;
+      font-weight: 700;
+      color: var(--accent);
+    }
+
+    .stat-card .label {
+      font-size: 0.8rem;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem;
+      margin-bottom: 1.25rem;
+      box-shadow: var(--shadow);
+    }
+
+    .panel h2 {
+      margin: 0 0 1rem;
+      font-size: 1.1rem;
+      color: var(--text);
+    }
+
+    .form-row {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 0.75rem;
+      margin-bottom: 0.75rem;
+    }
+
+    .form-row.full { grid-template-columns: 1fr; }
+
+    .form-actions {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+
+    .issue-list {
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+    }
+
+    .issue {
+      background: var(--panel-2);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1rem;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 0.75rem;
+      align-items: start;
+      transition: border-color 0.15s;
+    }
+
+    .issue:hover { border-color: #3d4659; }
+
+    .issue-title {
+      font-weight: 600;
+      font-size: 1.05rem;
+      margin-bottom: 0.25rem;
+      word-break: break-word;
+    }
+
+    .issue-meta {
+      font-size: 0.85rem;
+      color: var(--muted);
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      align-items: center;
+      margin-bottom: 0.4rem;
+    }
+
+    .issue-desc {
+      color: var(--muted);
+      font-size: 0.92rem;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .issue-tags {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin-top: 0.5rem;
+    }
+
+    .tag {
+      background: rgba(88, 166, 255, 0.12);
+      color: var(--accent);
+      padding: 0.15rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 500;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      padding: 0.25rem 0.55rem;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .badge-status-open { background: rgba(88, 166, 255, 0.15); color: var(--accent); }
+    .badge-status-in-progress { background: rgba(124, 58, 237, 0.15); color: #a78bfa; }
+    .badge-status-resolved { background: rgba(63, 185, 80, 0.15); color: var(--success); }
+    .badge-status-closed { background: rgba(154, 163, 178, 0.15); color: var(--muted); }
+
+    .badge-priority-low { background: rgba(154, 163, 178, 0.15); color: var(--muted); }
+    .badge-priority-medium { background: rgba(217, 160, 40, 0.15); color: #e3b341; }
+    .badge-priority-high { background: rgba(248, 81, 73, 0.15); color: var(--danger); }
+    .badge-priority-critical { background: var(--danger); color: #fff; }
+
+    .issue-actions {
+      display: flex;
+      gap: 0.35rem;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .empty-state {
+      text-align: center;
+      padding: 3rem 1rem;
+      color: var(--muted);
+    }
+
+    .empty-state strong {
+      display: block;
+      color: var(--text);
+      font-size: 1.1rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .hidden { display: none !important; }
+
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.7);
+      display: grid;
+      place-items: center;
+      padding: 1rem;
+      z-index: 100;
+      backdrop-filter: blur(3px);
+    }
+
+    .modal {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      width: 100%;
+      max-width: 560px;
+      max-height: 90vh;
+      overflow: auto;
+      box-shadow: var(--shadow);
+    }
+
+    .modal-header {
+      padding: 1rem 1.25rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .modal-header h3 { margin: 0; }
+
+    .modal-body { padding: 1.25rem; }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    footer {
+      text-align: center;
+      padding: 1rem;
+      color: var(--muted);
+      font-size: 0.85rem;
+      border-top: 1px solid var(--border);
+    }
+
+    @media (max-width: 640px) {
+      header { flex-direction: column; align-items: flex-start; }
+      .issue { grid-template-columns: 1fr; }
+      .issue-actions { justify-content: flex-start; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1><span class="logo">O</span> OwLLM Issue Tracker</h1>
+    <div class="header-actions">
+      <button class="btn" id="btn-export" title="Export issues as JSON">Export JSON</button>
+      <button class="btn" id="btn-import" title="Import issues from JSON">Import JSON</button>
+      <button class="btn btn-primary" id="btn-add" title="Create a new issue">+ New Issue</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="stats" aria-label="Issue statistics">
+      <div class="stat-card"><div class="value" id="stat-total">0</div><div class="label">Total</div></div>
+      <div class="stat-card"><div class="value" id="stat-open">0</div><div class="label">Open</div></div>
+      <div class="stat-card"><div class="value" id="stat-in-progress">0</div><div class="label">In Progress</div></div>
+      <div class="stat-card"><div class="value" id="stat-resolved">0</div><div class="label">Resolved</div></div>
+      <div class="stat-card"><div class="value" id="stat-closed">0</div><div class="label">Closed</div></div>
+    </section>
+
+    <section class="panel" id="form-panel" aria-labelledby="form-heading">
+      <h2 id="form-heading">New Issue</h2>
+      <form id="issue-form" autocomplete="off">
+        <input type="hidden" id="issue-id" />
+        <div class="form-row">
+          <label class="sr-only" for="issue-title">Title</label>
+          <input type="text" id="issue-title" placeholder="Issue title" required maxlength="200" />
+        </div>
+        <div class="form-row">
+          <label class="sr-only" for="issue-priority">Priority</label>
+          <select id="issue-priority" required>
+            <option value="" disabled selected>Priority</option>
+            <option value="low">Low</option>
+            <option value="medium">Medium</option>
+            <option value="high">High</option>
+            <option value="critical">Critical</option>
+          </select>
+          <label class="sr-only" for="issue-status">Status</label>
+          <select id="issue-status" required>
+            <option value="" disabled selected>Status</option>
+            <option value="open">Open</option>
+            <option value="in-progress">In Progress</option>
+            <option value="resolved">Resolved</option>
+            <option value="closed">Closed</option>
+          </select>
+        </div>
+        <div class="form-row">
+          <label class="sr-only" for="issue-tags">Tags</label>
+          <input type="text" id="issue-tags" placeholder="Tags (comma separated, e.g. bug, ui, rust)" maxlength="200" />
+        </div>
+        <div class="form-row full">
+          <label class="sr-only" for="issue-desc">Description</label>
+          <textarea id="issue-desc" rows="4" placeholder="Description"></textarea>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary" id="btn-save">Save Issue</button>
+          <button type="button" class="btn" id="btn-cancel">Cancel</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel" aria-labelledby="list-heading">
+      <div class="toolbar">
+        <input type="search" id="search" placeholder="Search issues..." aria-label="Search issues" />
+        <select id="filter-status" aria-label="Filter by status">
+          <option value="">All statuses</option>
+          <option value="open">Open</option>
+          <option value="in-progress">In Progress</option>
+          <option value="resolved">Resolved</option>
+          <option value="closed">Closed</option>
+        </select>
+        <select id="filter-priority" aria-label="Filter by priority">
+          <option value="">All priorities</option>
+          <option value="low">Low</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+          <option value="critical">Critical</option>
+        </select>
+        <select id="sort-by" aria-label="Sort by">
+          <option value="newest">Newest first</option>
+          <option value="oldest">Oldest first</option>
+          <option value="priority">Priority</option>
+          <option value="status">Status</option>
+          <option value="title">Title</option>
+        </select>
+      </div>
+
+      <h2 id="list-heading" class="sr-only">Issue list</h2>
+      <div id="issue-list" class="issue-list"></div>
+    </section>
+  </main>
+
+  <footer>LocalStorage-only. No data leaves your machine.</footer>
+
+  <input type="file" id="import-file" class="hidden" accept="application/json" />
+
+  <script>
+    (function () {
+      'use strict';
+
+      const STORAGE_KEY = 'owllm-issues';
+      const STATUS_ORDER = { open: 0, 'in-progress': 1, resolved: 2, closed: 3 };
+      const PRIORITY_ORDER = { critical: 0, high: 1, medium: 2, low: 3 };
+
+      const els = {
+        form: document.getElementById('issue-form'),
+        formPanel: document.getElementById('form-panel'),
+        formHeading: document.getElementById('form-heading'),
+        id: document.getElementById('issue-id'),
+        title: document.getElementById('issue-title'),
+        priority: document.getElementById('issue-priority'),
+        status: document.getElementById('issue-status'),
+        tags: document.getElementById('issue-tags'),
+        desc: document.getElementById('issue-desc'),
+        saveBtn: document.getElementById('btn-save'),
+        cancelBtn: document.getElementById('btn-cancel'),
+        addBtn: document.getElementById('btn-add'),
+        list: document.getElementById('issue-list'),
+        search: document.getElementById('search'),
+        filterStatus: document.getElementById('filter-status'),
+        filterPriority: document.getElementById('filter-priority'),
+        sortBy: document.getElementById('sort-by'),
+        exportBtn: document.getElementById('btn-export'),
+        importBtn: document.getElementById('btn-import'),
+        importFile: document.getElementById('import-file'),
+        stats: {
+          total: document.getElementById('stat-total'),
+          open: document.getElementById('stat-open'),
+          inProgress: document.getElementById('stat-in-progress'),
+          resolved: document.getElementById('stat-resolved'),
+          closed: document.getElementById('stat-closed'),
+        }
+      };
+
+      function loadIssues() {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          return raw ? JSON.parse(raw) : [];
+        } catch (e) {
+          console.error('Failed to load issues from LocalStorage', e);
+          return [];
+        }
+      }
+
+      function saveIssues(issues) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(issues));
+        } catch (e) {
+          alert('Could not save issues. LocalStorage may be full or disabled.');
+          console.error(e);
+        }
+      }
+
+      function generateId() {
+        return 'issue_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+      }
+
+      function normalizeTags(input) {
+        return input
+          .split(/[,;]+/)
+          .map(t => t.trim().toLowerCase())
+          .filter(Boolean);
+      }
+
+      function escapeHtml(str) {
+        return String(str)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#039;');
+      }
+
+      function formatDate(iso) {
+        const d = new Date(iso);
+        return isNaN(d) ? '' : d.toLocaleString();
+      }
+
+      function getFilteredSortedIssues() {
+        let issues = loadIssues();
+
+        const q = els.search.value.trim().toLowerCase();
+        const status = els.filterStatus.value;
+        const priority = els.filterPriority.value;
+        const sort = els.sortBy.value;
+
+        if (q) {
+          issues = issues.filter(i =>
+            i.title.toLowerCase().includes(q) ||
+            (i.description || '').toLowerCase().includes(q) ||
+            (i.tags || []).some(t => t.includes(q))
+          );
+        }
+        if (status) issues = issues.filter(i => i.status === status);
+        if (priority) issues = issues.filter(i => i.priority === priority);
+
+        issues.sort((a, b) => {
+          switch (sort) {
+            case 'oldest': return new Date(a.createdAt) - new Date(b.createdAt);
+            case 'priority':
+              const pa = PRIORITY_ORDER[a.priority] ?? 99;
+              const pb = PRIORITY_ORDER[b.priority] ?? 99;
+              if (pa !== pb) return pa - pb;
+              return new Date(b.createdAt) - new Date(a.createdAt);
+            case 'status':
+              const sa = STATUS_ORDER[a.status] ?? 99;
+              const sb = STATUS_ORDER[b.status] ?? 99;
+              if (sa !== sb) return sa - sb;
+              return new Date(b.createdAt) - new Date(a.createdAt);
+            case 'title': return a.title.localeCompare(b.title);
+            case 'newest':
+            default: return new Date(b.createdAt) - new Date(a.createdAt);
+          }
+        });
+
+        return issues;
+      }
+
+      function updateStats() {
+        const issues = loadIssues();
+        const counts = { total: issues.length, open: 0, 'in-progress': 0, resolved: 0, closed: 0 };
+        issues.forEach(i => { if (counts[i.status] !== undefined) counts[i.status]++; });
+        els.stats.total.textContent = counts.total;
+        els.stats.open.textContent = counts.open;
+        els.stats.inProgress.textContent = counts['in-progress'];
+        els.stats.resolved.textContent = counts.resolved;
+        els.stats.closed.textContent = counts.closed;
+      }
+
+      function renderBadge(kind, value, label) {
+        return `<span class="badge badge-${kind}-${value}">${escapeHtml(label)}</span>`;
+      }
+
+      function renderIssue(issue) {
+        const tagsHtml = (issue.tags || []).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('');
+        const statusLabel = issue.status.replace(/-/g, ' ');
+        const priorityLabel = issue.priority;
+
+        return `
+          <article class="issue" data-id="${escapeHtml(issue.id)}">
+            <div>
+              <div class="issue-title">${escapeHtml(issue.title)}</div>
+              <div class="issue-meta">
+                ${renderBadge('status', issue.status, statusLabel)}
+                ${renderBadge('priority', issue.priority, priorityLabel)}
+                <span>Created ${formatDate(issue.createdAt)}</span>
+                ${issue.updatedAt !== issue.createdAt ? `<span>Updated ${formatDate(issue.updatedAt)}</span>` : ''}
+              </div>
+              ${issue.description ? `<div class="issue-desc">${escapeHtml(issue.description)}</div>` : ''}
+              ${tagsHtml ? `<div class="issue-tags">${tagsHtml}</div>` : ''}
+            </div>
+            <div class="issue-actions">
+              <button class="btn btn-edit" data-id="${escapeHtml(issue.id)}" title="Edit">Edit</button>
+              <button class="btn btn-danger btn-delete" data-id="${escapeHtml(issue.id)}" title="Delete">Delete</button>
+            </div>
+          </article>
+        `;
+      }
+
+      function renderList() {
+        const issues = getFilteredSortedIssues();
+        if (issues.length === 0) {
+          els.list.innerHTML = `
+            <div class="empty-state">
+              <strong>No issues found</strong>
+              Create a new issue or adjust your filters.
+            </div>
+          `;
+          return;
+        }
+        els.list.innerHTML = issues.map(renderIssue).join('');
+      }
+
+      function resetForm() {
+        els.form.reset();
+        els.id.value = '';
+        els.formHeading.textContent = 'New Issue';
+        els.saveBtn.textContent = 'Save Issue';
+      }
+
+      function populateForm(issue) {
+        els.id.value = issue.id;
+        els.title.value = issue.title;
+        els.priority.value = issue.priority;
+        els.status.value = issue.status;
+        els.tags.value = (issue.tags || []).join(', ');
+        els.desc.value = issue.description || '';
+        els.formHeading.textContent = 'Edit Issue';
+        els.saveBtn.textContent = 'Update Issue';
+        els.formPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        els.title.focus();
+      }
+
+      function handleSave(e) {
+        e.preventDefault();
+        const issues = loadIssues();
+        const id = els.id.value.trim();
+        const now = new Date().toISOString();
+
+        const issue = {
+          id: id || generateId(),
+          title: els.title.value.trim(),
+          priority: els.priority.value,
+          status: els.status.value,
+          tags: normalizeTags(els.tags.value),
+          description: els.desc.value.trim(),
+          createdAt: id ? (issues.find(i => i.id === id)?.createdAt || now) : now,
+          updatedAt: now,
+        };
+
+        if (id) {
+          const idx = issues.findIndex(i => i.id === id);
+          if (idx !== -1) issues[idx] = issue;
+        } else {
+          issues.unshift(issue);
+        }
+
+        saveIssues(issues);
+        resetForm();
+        updateStats();
+        renderList();
+      }
+
+      function handleDelete(id) {
+        if (!confirm('Delete this issue? This cannot be undone.')) return;
+        const issues = loadIssues().filter(i => i.id !== id);
+        saveIssues(issues);
+        updateStats();
+        renderList();
+      }
+
+      function handleEdit(id) {
+        const issue = loadIssues().find(i => i.id === id);
+        if (!issue) return;
+        populateForm(issue);
+      }
+
+      function handleExport() {
+        const issues = loadIssues();
+        const blob = new Blob([JSON.stringify(issues, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `owllm-issues-${new Date().toISOString().slice(0, 10)}.json`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        URL.revokeObjectURL(url);
+      }
+
+      function handleImport(file) {
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = () => {
+          try {
+            const imported = JSON.parse(reader.result);
+            if (!Array.isArray(imported)) throw new Error('File must contain an array of issues.');
+            const normalized = imported.map(i => ({
+              id: i.id || generateId(),
+              title: String(i.title || 'Untitled'),
+              priority: PRIORITY_ORDER[i.priority] !== undefined ? i.priority : 'medium',
+              status: STATUS_ORDER[i.status] !== undefined ? i.status : 'open',
+              tags: Array.isArray(i.tags) ? i.tags.map(String).map(t => t.trim().toLowerCase()).filter(Boolean) : [],
+              description: String(i.description || ''),
+              createdAt: i.createdAt || new Date().toISOString(),
+              updatedAt: i.updatedAt || new Date().toISOString(),
+            }));
+            const existing = loadIssues();
+            const merged = [...normalized, ...existing];
+            // Deduplicate by id, keeping first occurrence (imported wins)
+            const seen = new Set();
+            const final = [];
+            for (const i of merged) {
+              if (!seen.has(i.id)) {
+                seen.add(i.id);
+                final.push(i);
+              }
+            }
+            saveIssues(final);
+            updateStats();
+            renderList();
+            alert(`Imported ${normalized.length} issue(s).`);
+          } catch (err) {
+            alert('Import failed: ' + err.message);
+          }
+        };
+        reader.readAsText(file);
+      }
+
+      function init() {
+        updateStats();
+        renderList();
+
+        els.form.addEventListener('submit', handleSave);
+        els.cancelBtn.addEventListener('click', resetForm);
+        els.addBtn.addEventListener('click', () => {
+          resetForm();
+          els.formPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          els.title.focus();
+        });
+
+        els.search.addEventListener('input', renderList);
+        els.filterStatus.addEventListener('change', renderList);
+        els.filterPriority.addEventListener('change', renderList);
+        els.sortBy.addEventListener('change', renderList);
+
+        els.list.addEventListener('click', (e) => {
+          const btn = e.target.closest('button');
+          if (!btn) return;
+          const id = btn.dataset.id;
+          if (btn.classList.contains('btn-edit')) handleEdit(id);
+          if (btn.classList.contains('btn-delete')) handleDelete(id);
+        });
+
+        els.exportBtn.addEventListener('click', handleExport);
+        els.importBtn.addEventListener('click', () => els.importFile.click());
+        els.importFile.addEventListener('change', (e) => {
+          handleImport(e.target.files[0]);
+          e.target.value = '';
+        });
+      }
+
+      init();
+    })();
+  </script>
+</body>
+</html>

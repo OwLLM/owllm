@@ -882,23 +882,35 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             "Codex", Some("ok"),
         ).await,
         "kimi_cli" => {
-            // kimi-code (new) only supports --prompt/--output-format in prompt
-            // mode. Legacy kimi-cli also supports --print/--final-message-only.
+            // Both legacy kimi-cli and current kimi-code support --print
+            // non-interactive mode. Use the same shape as the chat path so the
+            // probe is a real end-to-end check.
             // Model flag is config-aware: the CLI hard-rejects any id not
             // declared in its config (LLMNotSet), so we only force a model when
             // there is no configured default.
-            let mut args: Vec<String> = if kimi_is_new_flavor() {
-                vec!["--output-format".into(), "text".into()]
-            } else {
-                vec!["--print".into(), "--output-format".into(), "text".into(), "--final-message-only".into()]
-            };
+            let mut args: Vec<String> = vec![
+                "--print".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--final-message-only".into(),
+            ];
             args.extend(kimi_model_args(None));
             args.push("--prompt".into());
             args.push("ok".into());
             probe_cli_subscription(find_kimi_cli(), args, "Kimi", None).await
         }
         "gemini_cli" => probe_cli_subscription(
-            find_gemini_cli(), vec!["--prompt".into(), "ok".into()], "Gemini", None).await,
+            find_gemini_cli(),
+            vec![
+                "--skip-trust".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--prompt".into(),
+                "ok".into(),
+            ],
+            "Gemini",
+            None,
+        ).await,
 
         // -- API keys: HTTP GET the provider's /v1/models endpoint
         //    with the key in Authorization. 200 = valid. 401/403 =
@@ -3226,26 +3238,25 @@ fn kimi_model_args_inner(
     }
 }
 
-/// Google Gemini CLI (google-gemini/gemini-cli) caches OAuth at
-/// ~/.gemini/ after `gemini /auth` (or `gemini login`). The dir
-/// presence + at least one file inside is a reliable "logged in"
-/// signal — Google ships a few JSON files there (credentials.json,
-/// settings.json) once auth completes.
+/// Google Gemini CLI stores settings and history under ~/.gemini too, so the
+/// directory itself is not proof of auth. These are the narrow credential file
+/// names we accept and remove.
+fn gemini_credential_paths(home: &std::path::Path) -> Vec<PathBuf> {
+    let dir = home.join(".gemini");
+    vec![
+        dir.join("oauth_creds.json"),
+        dir.join("credentials.json"),
+    ]
+}
+
 fn gemini_cli_logged_in() -> bool {
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
         return false;
     };
-    let dir = PathBuf::from(home).join(".gemini");
-    if !dir.is_dir() {
-        return false;
-    }
-    // Require at least one JSON-shaped file to avoid greenlighting an
-    // empty stub directory left behind by a previous failed install.
-    std::fs::read_dir(&dir)
-        .map(|it| it.flatten().any(|e| {
-            e.path().extension().and_then(|s| s.to_str()).map(|x| x.eq_ignore_ascii_case("json")).unwrap_or(false)
-        }))
-        .unwrap_or(false)
+    let home = PathBuf::from(home);
+    gemini_credential_paths(&home)
+        .into_iter()
+        .any(|p| p.is_file() && std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false))
 }
 
 fn find_gemini_cli() -> Option<PathBuf> {
@@ -3298,9 +3309,8 @@ fn generic_api_probe(
 ///   * claude: ~/.claude/.credentials.json
 ///   * codex:  ~/.codex/auth.json + ~/.openai/auth.json (old path)
 ///   * kimi:   ~/.kimi/credentials/kimi-code.json (modern) + ~/.kimi/config.toml (old)
-///   * gemini: every *.json under ~/.gemini/ (oauth_creds.json,
-///             settings.json, etc. — the detector greenlights on any
-///             json present, so we wipe them all)
+///   * gemini: ~/.gemini/oauth_creds.json + ~/.gemini/credentials.json
+///             only. settings.json is configuration, not auth.
 ///
 /// Returns a human-readable summary of what was removed so the React
 /// log panel can confirm; never errors on a missing file (already
@@ -3338,21 +3348,8 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
             }
         }
         "gemini_cli" => {
-            let dir = home.join(".gemini");
-            if dir.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&dir) {
-                    for e in entries.flatten() {
-                        let path = e.path();
-                        let is_json = path
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .map(|x| x.eq_ignore_ascii_case("json"))
-                            .unwrap_or(false);
-                        if is_json {
-                            try_remove(&path, &mut removed);
-                        }
-                    }
-                }
+            for path in gemini_credential_paths(&home) {
+                try_remove(&path, &mut removed);
             }
         }
         other => return Err(format!("unknown subscription backend: {other}")),
@@ -3381,7 +3378,8 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
 pub fn subscription_cli_login(backend: String) -> Result<(), String> {
     // Resolve which CLI to launch + the login command. Two flavours:
     //   * codex login          — real subcommand, runs OAuth and exits
-    //   * gemini auth login    — same shape, two-word subcommand
+    //   * gemini (no args)     — REPL prompts for auth; the embedded
+    //                            terminal auto-sends /auth
     //   * claude (no args)     — REPL auto-prompts /login on first run
     //                            because there are no credentials yet
     //   * kimi (no args)       — same: kimi REPL auto-prompts for login
@@ -3395,7 +3393,7 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         "claude_cli"  => (find_claude_cli,  &[]),
         "codex_cli"   => (find_codex_cli,   &["login"]),
         "kimi_cli"    => (find_kimi_cli,    &[]),
-        "gemini_cli"  => (find_gemini_cli,  &["auth", "login"]),
+        "gemini_cli"  => (find_gemini_cli,  &[]),
         other => return Err(format!("unknown subscription backend: {other}")),
     };
     let exe = find_fn().ok_or_else(|| format!(
@@ -3751,28 +3749,29 @@ pub async fn gemini_cli_complete(
             format!("{system_prompt}\n\n---\n\n{user_message}")
         };
 
-        // gemini-cli accepts --prompt (-p) for non-interactive output
-        // (matches Claude/Kimi conventions). --model picks the variant.
+        // gemini-cli accepts --prompt (-p) for non-interactive output.
+        // Keep --output-format text explicit so stdout stays machine-friendly.
         //
         // COMMAND-LINE LIMIT (same class as the kimi os-error-206 / claude
         // "command line is too long" bugs): a full agentic system prompt as the
         // --prompt ARG blows the ~8-32 KB Windows argv cap and the spawn dies
         // before the model ever runs. gemini-cli also reads a piped-stdin
-        // prompt in non-interactive mode (`echo hi | gemini`), so for a LARGE
-        // prompt we DROP --prompt and feed it on stdin (an unbounded pipe).
+        // prompt in non-interactive mode, so for a LARGE prompt we keep
+        // `--prompt ""` for headless mode and feed the real text on stdin.
         // Small prompts keep --prompt + null stdin — byte-identical to the
         // proven Accounts-Test path. Mirrors the kimi/codex/claude folds.
         const MAX_PROMPT_ARG: usize = 4000;
         let fold_prompt_into_stdin = composed.len() > MAX_PROMPT_ARG;
         let mut args: Vec<String> = Vec::new();
+        args.push("--skip-trust".into());
+        args.push("--output-format".into());
+        args.push("text".into());
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             args.push("--model".into());
             args.push(m.to_string());
         }
-        if !fold_prompt_into_stdin {
-            args.push("--prompt".into());
-            args.push(composed.clone());
-        }
+        args.push("--prompt".into());
+        args.push(if fold_prompt_into_stdin { String::new() } else { composed.clone() });
 
         // WSL-isolated project → run `gemini` inside the distro; else Windows CLI.
         let mut cmd = if let Some((exe, sargs)) =
@@ -3837,13 +3836,14 @@ pub async fn gemini_cli_complete(
 ///
 /// Supports both the legacy `MoonshotAI/kimi-cli` and the newer
 /// `MoonshotAI/kimi-code` (the user's linked repo):
-///   * Legacy: `--print --final-message-only --output-format text` plus
-///     `--mcp-config-file` and `--agent-file` for system-prompt injection.
-///   * New (`kimi-code`): `--prompt --output-format text`. There is no
-///     `--system-prompt`, `--print`, `--final-message-only`, or
-///     `--mcp-config-file` flag, so we inject the system prompt via a temporary
-///     `KIMI_CODE_HOME` containing `AGENTS.md`, copy the user's config/credentials,
-///     and wire the browser gateway through `mcp.json` + `OWLLM_GW_TOKEN`.
+///   * Base invocation (both): `--print --final-message-only --output-format text`
+///     so the run is non-interactive and stdout is plain text.
+///   * Legacy: inject the system prompt via `--agent-file` and wire the browser
+///     gateway via `--mcp-config-file`.
+///   * New (`kimi-code`): there is no `--system-prompt` or `--mcp-config-file`
+///     flag, so we inject the system prompt via a temporary `KIMI_CODE_HOME`
+///     containing `AGENTS.md`, copy the user's config/credentials, and wire the
+///     browser gateway through `mcp.json` + `OWLLM_GW_TOKEN`.
 #[tauri::command]
 pub async fn kimi_cli_complete(
     app: tauri::AppHandle,
@@ -3939,16 +3939,14 @@ pub async fn kimi_cli_complete(
             }
             let use_prompt_flag = prompt_fits;
 
-            let mut args: Vec<String> = if new_flavor {
-                vec!["--output-format".into(), "text".into()]
-            } else {
-                vec![
-                    "--print".into(),
-                    "--output-format".into(),
-                    "text".into(),
-                    "--final-message-only".into(),
-                ]
-            };
+            // Both legacy kimi-cli and current kimi-code support --print
+            // non-interactive mode; --output-format only works in that mode.
+            let mut args: Vec<String> = vec![
+                "--print".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--final-message-only".into(),
+            ];
             if with_model {
                 args.extend(model_args.iter().cloned());
             }
@@ -4043,7 +4041,37 @@ pub async fn kimi_cli_complete(
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             if !output.status.success() {
-                return Err(cli_exit_err("kimi", output.status.code().unwrap_or(-1), &stdout, &stderr));
+                // Kimi splits its error signal: the real cause (LLMNotSet, auth,
+                // MCP failure) is usually in stdout, while stderr carries a
+                // session-resume line that confuses users. Detect the actionable
+                // failures first so the outer retry / auth handlers engage.
+                if kimi_output_llm_unset(&stdout) {
+                    return Err("kimi: LLM not set".to_string());
+                }
+                if kimi_output_auth_failed(&stdout) || kimi_output_auth_failed(&stderr) {
+                    let detail = if kimi_output_auth_failed(&stdout) {
+                        stdout.trim()
+                    } else {
+                        stderr.trim()
+                    };
+                    return Err(format!("kimi: authentication failed — {detail}"));
+                }
+                if kimi_output_mcp_failed(&stdout) || kimi_output_mcp_failed(&stderr) {
+                    return Err("kimi: browser gateway unreachable".to_string());
+                }
+                // Strip the noisy "To resume this session:" line from stderr
+                // before falling back to the generic message.
+                let clean_stderr = stderr
+                    .lines()
+                    .filter(|l| !l.to_ascii_lowercase().contains("to resume this session"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(cli_exit_err(
+                    "kimi",
+                    output.status.code().unwrap_or(-1),
+                    &stdout,
+                    &clean_stderr,
+                ));
             }
             // kimi exits 0 even on a fatal MCP-load failure; the error is only in
             // the output. Detect it so we can retry without the gateway.

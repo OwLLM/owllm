@@ -1545,7 +1545,7 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
          found=''; \
          [ -f \"$WH/.codex/auth.json\" ] && found=\"$found codex\"; \
          [ -f \"$WH/.claude/.credentials.json\" ] && found=\"$found claude\"; \
-         [ -d \"$WH/.gemini\" ] && [ -n \"$(ls -A \"$WH/.gemini\" 2>/dev/null)\" ] && found=\"$found gemini\"; \
+         {{ [ -s \"$WH/.gemini/oauth_creds.json\" ] || [ -s \"$WH/.gemini/credentials.json\" ]; }} && found=\"$found gemini\"; \
          {{ [ -f \"$WH/.kimi/credentials/kimi-code.json\" ] || [ -f \"$WH/.kimi/config.toml\" ]; }} && found=\"$found kimi\"; \
          cp -f \"$WH/.codex/auth.json\" ~/.codex/ 2>/dev/null; cp -f \"$WH/.codex/config.toml\" ~/.codex/ 2>/dev/null; \
          cp -f \"$WH/.claude/.credentials.json\" ~/.claude/.credentials.json 2>/dev/null; cp -f \"$WH/.claude.json\" ~/.claude.json 2>/dev/null; \
@@ -1556,7 +1556,7 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
          syn=''; \
          [ -f ~/.codex/auth.json ] && syn=\"$syn codex\"; \
          [ -f ~/.claude/.credentials.json ] && syn=\"$syn claude\"; \
-         [ -d ~/.gemini ] && [ -n \"$(ls -A ~/.gemini 2>/dev/null)\" ] && syn=\"$syn gemini\"; \
+         {{ [ -s ~/.gemini/oauth_creds.json ] || [ -s ~/.gemini/credentials.json ]; }} && syn=\"$syn gemini\"; \
          {{ [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }} && syn=\"$syn kimi\"; \
          [ -s ~/.owllm/agent_env.sh ] && syn=\"$syn keys\"; \
          grep -q 'owllm/agent_env.sh' ~/.profile 2>/dev/null || echo '[ -f \"$HOME/.owllm/agent_env.sh\" ] && . \"$HOME/.owllm/agent_env.sh\"' >> ~/.profile; \
@@ -1602,7 +1602,7 @@ fn login_status_impl(distro: Option<String>) -> Vec<String> {
     let script = "s=''; \
         [ -f ~/.codex/auth.json ] && s=\"$s codex\"; \
         [ -f ~/.claude/.credentials.json ] && s=\"$s claude\"; \
-        [ -d ~/.gemini ] && [ -n \"$(ls -A ~/.gemini 2>/dev/null)\" ] && s=\"$s gemini\"; \
+        { [ -s ~/.gemini/oauth_creds.json ] || [ -s ~/.gemini/credentials.json ]; } && s=\"$s gemini\"; \
         { [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; } && s=\"$s kimi\"; \
         [ -s ~/.owllm/agent_env.sh ] && s=\"$s keys\"; \
         echo \"LOGINS:$s\"";

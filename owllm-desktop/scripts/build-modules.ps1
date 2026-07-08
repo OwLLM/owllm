@@ -90,14 +90,49 @@ function Expand-Strip {
     }
 }
 
+function Expand-TarGz {
+    param([string]$tarGz, [string]$dest, [int]$strip = 0)
+    # Use Windows bsdtar (handles Windows paths and materialises symlinks).
+    $tar = Join-Path $env:SystemRoot "System32\tar.exe"
+    if (-not (Test-Path $tar)) { throw "Windows tar.exe not found at $tar" }
+    if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+    New-Item -ItemType Directory -Path $dest -Force | Out-Null
+    if ($strip -eq 0) {
+        & $tar -xzf $tarGz -C $dest
+        if ($LASTEXITCODE -ne 0) { throw "tar extraction failed (exit $LASTEXITCODE) for $tarGz" }
+    } else {
+        $tmp = Join-Path $workDir ("strip-" + [Guid]::NewGuid().ToString("N"))
+        New-Item -ItemType Directory -Path $tmp -Force | Out-Null
+        & $tar -xzf $tarGz -C $tmp
+        if ($LASTEXITCODE -ne 0) { throw "tar extraction failed (exit $LASTEXITCODE) for $tarGz" }
+        $items = Get-ChildItem $tmp
+        if ($items.Count -eq 1 -and $items[0].PSIsContainer -and $strip -eq 1) {
+            Get-ChildItem $items[0].FullName | ForEach-Object {
+                Move-Item -Force $_.FullName (Join-Path $dest $_.Name)
+            }
+        } else {
+            Get-ChildItem $tmp | ForEach-Object {
+                Move-Item -Force $_.FullName (Join-Path $dest $_.Name)
+            }
+        }
+        Remove-Item -Recurse -Force $tmp
+    }
+}
+
 function Build-Simple {
     param([string]$variantId, $cfg)
     Write-Step "building $variantId"
-    $cacheFile = Join-Path $cacheDir ($variantId + "-upstream.zip")
+    $isTarGz = $cfg.upstreamUrl -match "\.tar\.gz$"
+    $cacheExt = if ($isTarGz) { ".tar.gz" } else { ".zip" }
+    $cacheFile = Join-Path $cacheDir ($variantId + "-upstream" + $cacheExt)
     Get-Upstream -url $cfg.upstreamUrl -dest $cacheFile
     $extractDir = Join-Path $workDir $variantId
     $strip = if ($null -ne $cfg.extractStrip) { $cfg.extractStrip } else { 0 }
-    Expand-Strip -zip $cacheFile -dest $extractDir -strip $strip
+    if ($isTarGz) {
+        Expand-TarGz -tarGz $cacheFile -dest $extractDir -strip $strip
+    } else {
+        Expand-Strip -zip $cacheFile -dest $extractDir -strip $strip
+    }
 
     # Optional include filter -- drop everything not matching.
     if ($cfg.include) {

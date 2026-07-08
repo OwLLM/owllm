@@ -11,7 +11,6 @@ import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent } 
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
-import GitBar from "./GitBar";
 import PublishCards from "./PublishCards";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { getServerCtx } from "../core/serverContext";
@@ -102,21 +101,11 @@ const DEFAULT_CODE_STATE: CodeState = {
 };
 
 // Worktree command outcomes — serde-tagged "status", camelCase. Mirror of the
-// Rust enums in fleet.rs (fleet_worktree_create / _merge / _finalize), reused
-// AS-IS for the Code page (zero new Rust commands).
+// Rust enum for fleet_worktree_create, reused AS-IS for the Code page.
 type WtCreate =
   | { status: "ready"; path: string; branch: string; baseSha: string }
   | { status: "notAGitRepo" }
   | { status: "dirtyWorkingTree"; details: string }
-  | { status: "error"; message: string };
-type WtMerge =
-  | { status: "merged"; commitSha: string; filesChanged: number }
-  | { status: "conflict"; files: string[] }
-  | { status: "noChanges" }
-  | { status: "error"; message: string };
-type WtFinalize =
-  | { status: "committed"; commitSha: string; filesChanged: number; files: string[] }
-  | { status: "noChanges" }
   | { status: "error"; message: string };
 
 // ---- Multi-page shell state (the tab strip) --------------------------------
@@ -524,7 +513,6 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
-  const [mergeBusy, setMergeBusy] = useState(false);
   // Live feedback for the current run: what phase the agent is in and whether
   // the local model is still being mmap'd (cold-load banner).
   const [runPhase, setRunPhase] = useState<string | null>(null);
@@ -747,32 +735,6 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         args: { projectCwd: st.projectRoot, worktreePath: st.workspace, branch: st.branch ?? "", keep: false },
       });
     } catch { /* best-effort cleanup */ }
-  };
-
-  // Merge to main: commit whatever's pending in the worktree, then squash-merge
-  // the page's branch back into the REAL project. This is the only moment the
-  // user's actual folder changes. Conflicts abort cleanly (nothing touched).
-  const mergeToMain = async () => {
-    if (!stx.isolated || !stx.projectRoot || !stx.branch || mergeBusy || busy) return;
-    setMergeBusy(true);
-    try {
-      const fin = await invoke<WtFinalize>("fleet_worktree_finalize", {
-        worktreePath: stx.workspace, agentName: "code", summary: "Code page session",
-      });
-      if (fin.status === "error") { setStatus(`Merge aborted — commit failed: ${fin.message}`); return; }
-      const mg = await invoke<WtMerge>("fleet_worktree_merge", {
-        projectCwd: stx.projectRoot, agentName: "code", branch: stx.branch,
-      });
-      const root = stx.projectRoot.replace(/^.*[\\/]/, "");
-      if (mg.status === "merged") setStatus(`✓ Merged ${mg.filesChanged} file(s) into ${root} (commit ${mg.commitSha.slice(0, 7)}). Keep working — Merge again anytime.`);
-      else if (mg.status === "noChanges") setStatus(`Nothing new to merge — ${root} is already up to date with this page.`);
-      else if (mg.status === "conflict") setStatus(`⚠ Merge conflict in: ${mg.files.join(", ")}. Your project was NOT changed. Resolve on branch ${stx.branch} in your git tool, or adjust this page and retry.`);
-      else setStatus(`Merge failed: ${mg.message}`);
-    } catch (e: any) {
-      setStatus(`Merge failed: ${String(e?.message ?? e)}`);
-    } finally {
-      setMergeBusy(false);
-    }
   };
 
   const pickWorkspace = async () => {
@@ -1823,7 +1785,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                     ) : (
                       <button onClick={() => { setNpOpen(false); setGhOpen(true); setGhMsg(""); }} style={{ ...btn, height: 34, justifyContent: "center", color: "var(--fg-strong)" }}>🐙 Connect GitHub</button>
                     )}
-                    <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>Lets the agent clone private repos and push from inside the sandbox.</div>
+                    <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>
+                      Lets the agent clone private repos and push from inside the sandbox.
+                      <b> A GitHub repo is NOT created automatically</b> — create one yourself, then use Commit → Push in the file-tree rail.
+                    </div>
                   </div>
 
                   {/* Cloud accounts inside the sandbox — mirrored AUTOMATICALLY
@@ -1929,17 +1894,6 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             {convertBusy ? "⏳…" : isolatedNow ? "⇲ Make not-isolated" : "⇱ Make isolated"}
           </button>
         )}
-        <GitBar workspace={workspace} busy={busy} />
-        {isolated && (
-          <button
-            onClick={mergeToMain}
-            disabled={mergeBusy || busy}
-            title={`This page edits a PRIVATE git worktree on its own branch, cut from ${projectRoot}. Your real folder is untouched until you Merge — this commits the page's work and squash-merges it into ${projectRoot}. (Unrelated to the WSL "isolation" badge, which is about whether the agent's tools run inside Linux vs. on the host.)`}
-            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "#7ff0c5", fontWeight: 700, opacity: mergeBusy ? 0.6 : 1 }}
-          >
-            {mergeBusy ? "⏳ Merging…" : `⤴ Merge to ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`}
-          </button>
-        )}
         <div style={{ flex: 1 }} />
         {/* Run stopwatch — same component as the Agents-page team timer. Ticks
             green while the agent works this turn, freezes muted when it stops. */}
@@ -2036,7 +1990,15 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         {workspace && (
           <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
             <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
-            <PublishCards repoDir={projectRoot || workspace} branch={branch} disabled={busy || mergeBusy} onStatus={setStatus} />
+            <PublishCards
+              repoDir={projectRoot || workspace}
+              gitDir={workspace}
+              branch={branch}
+              projectRoot={projectRoot}
+              isolated={isolated}
+              disabled={busy}
+              onStatus={setStatus}
+            />
           </div>
         )}
       <div

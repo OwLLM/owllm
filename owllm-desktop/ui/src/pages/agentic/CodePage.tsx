@@ -2034,9 +2034,9 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       {/* Body: file-tree rail + transcript */}
       <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 8 }}>
         {workspace && (
-          <div style={{ width: 220, flexShrink: 0, overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
-            <PublishCards repoDir={projectRoot || workspace} branch={branch} disabled={busy || mergeBusy} onStatus={setStatus} />
+          <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
             <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
+            <PublishCards repoDir={projectRoot || workspace} branch={branch} disabled={busy || mergeBusy} onStatus={setStatus} />
           </div>
         )}
       <div

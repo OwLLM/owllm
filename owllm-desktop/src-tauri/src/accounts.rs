@@ -3111,17 +3111,12 @@ fn prepare_kimi_code_home(
     }
 
     if !system_prompt.trim().is_empty() {
-        // kimi-code loads AGENTS.md from the *working directory*, not from
-        // KIMI_CODE_HOME, so writing it there is silently ignored. Use the
-        // portable --agent-file mechanism instead: agent.yaml extends the
-        // builtin default agent and points at system.md in the same temp dir.
-        let system_md = base.join("system.md");
-        std::fs::write(&system_md, system_prompt).map_err(|e| format!("write system.md: {e}"))?;
+        // Do not set system_prompt_path here: Kimi treats that as replacing the
+        // builtin coding-agent prompt, which makes Code page runs act like weak
+        // generic chat. The default prompt exposes ROLE_ADDITIONAL specifically
+        // for caller guidance, so inject OWLLM's prompt through that variable.
         let agent_yaml = base.join("agent.yaml");
-        std::fs::write(
-            &agent_yaml,
-            "version: 1\nagent:\n  name: owllm\n  extend: default\n  system_prompt_path: ./system.md\n",
-        )
+        std::fs::write(&agent_yaml, kimi_agent_yaml(system_prompt))
         .map_err(|e| format!("write agent.yaml: {e}"))?;
     }
 
@@ -3167,17 +3162,23 @@ fn prepare_kimi_agent_file(system_prompt: &str) -> Result<std::path::PathBuf, St
     let base = std::env::temp_dir().join(format!("owllm-kimi-agent-{millis}"));
     std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
 
-    let system_md = base.join("system.md");
-    std::fs::write(&system_md, system_prompt).map_err(|e| format!("write system.md: {e}"))?;
-
     let agent_yaml = base.join("agent.yaml");
-    std::fs::write(
-        &agent_yaml,
-        "version: 1\nagent:\n  name: owllm\n  extend: default\n  system_prompt_path: ./system.md\n",
-    )
-    .map_err(|e| format!("write agent.yaml: {e}"))?;
+    std::fs::write(&agent_yaml, kimi_agent_yaml(system_prompt))
+        .map_err(|e| format!("write agent.yaml: {e}"))?;
 
     Ok(agent_yaml)
+}
+
+fn kimi_agent_yaml(system_prompt: &str) -> String {
+    let mut yaml =
+        "version: 1\nagent:\n  name: owllm\n  extend: default\n  system_prompt_args:\n    ROLE_ADDITIONAL: |-\n"
+            .to_string();
+    for line in system_prompt.trim().lines() {
+        yaml.push_str("      ");
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+    yaml
 }
 
 /// kimi-cli exits 0 even when its turn FAILS — the error only appears in the
@@ -4150,7 +4151,8 @@ pub async fn kimi_cli_complete(
 mod tests {
     use super::{
         codex_should_grant_browser, is_browser_role_allowlist, kimi_config_has_default,
-        kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset, kimi_output_mcp_failed,
+        kimi_agent_yaml, kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
+        kimi_output_mcp_failed,
     };
 
     // The exact kimi output that crashed a team run (reproduced live 2026-07-06,
@@ -4180,6 +4182,15 @@ mod tests {
         assert!(kimi_output_auth_failed("HTTP 401 Unauthorized"));
         assert!(kimi_output_auth_failed("You are not logged in. Run `kimi login`."));
         assert!(!kimi_output_auth_failed("The server responded with a 200 OK."));
+    }
+
+    #[test]
+    fn kimi_agent_yaml_preserves_default_coding_prompt() {
+        let yaml = kimi_agent_yaml("Stay on task.\nUse repo tools.");
+        assert!(yaml.contains("extend: default"));
+        assert!(yaml.contains("ROLE_ADDITIONAL: |-"));
+        assert!(yaml.contains("      Stay on task."));
+        assert!(!yaml.contains("system_prompt_path"));
     }
 
     // Reproduces the "subscription never ties after login" bug: a login-time

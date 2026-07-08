@@ -292,6 +292,31 @@ pub async fn repo_commit(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Push the current branch to origin. Fast-forward-only on the remote side,
+/// refusing to overwrite history. Lightweight counterpart to repo_merge for
+/// the "Push" card in the Code page rail.
+#[tauri::command]
+pub async fn repo_push(repo_dir: String) -> Result<String, String> {
+    let host = crate::agent_tools::host_cwd(&repo_dir);
+    tokio::task::spawn_blocking(move || {
+        let (cur_ok, cur) = run_git(&host, &["rev-parse", "--abbrev-ref", "HEAD"]);
+        if !cur_ok {
+            return Err(format!("not on a branch:\n{cur}"));
+        }
+        let branch = cur.trim();
+        let (p_ok, p_out) = run_git(&host, &["push", "origin", branch]);
+        if p_ok {
+            Ok(format!("Pushed {branch} to origin.\n{p_out}"))
+        } else if p_out.contains("Everything up-to-date") {
+            Ok("Everything up-to-date.".into())
+        } else {
+            Err(format!("git push failed:\n{p_out}"))
+        }
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// Fast-forward-only merge: push HEAD to the target branch on origin, refusing
 /// anything that isn't a clean fast-forward. NEVER force-pushes — if the target
 /// has diverged, it errors with the reason instead of rewriting history.

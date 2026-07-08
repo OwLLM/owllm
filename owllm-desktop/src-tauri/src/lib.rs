@@ -294,6 +294,7 @@ pub fn run() {
             release::finish_and_publish,
             release::publish_readiness,
             release::repo_commit,
+            release::repo_push,
             release::repo_merge,
             memory::team_memory_read,
             memory::team_memory_delete,

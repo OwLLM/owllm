@@ -9,6 +9,7 @@
 // its conventional location, the card flips to Connected.
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -881,16 +882,16 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             "Codex", Some("ok"),
         ).await,
         "kimi_cli" => {
-            // Model flag is config-aware: current kimi-cli hard-rejects any
-            // model id not declared in ~/.kimi/config.toml (LLMNotSet), and
-            // after login it always writes a default_model — so the probe
-            // must NOT force the old `kimi-latest` alias (that was the
-            // "subscription never ties after login" bug). kimi_model_args
-            // only adds `--model kimi-latest` for ancient CLIs with no
-            // config default.
-            let mut args: Vec<String> =
-                ["--print", "--output-format", "text", "--final-message-only"]
-                    .iter().map(|s| s.to_string()).collect();
+            // kimi-code (new) only supports --prompt/--output-format in prompt
+            // mode. Legacy kimi-cli also supports --print/--final-message-only.
+            // Model flag is config-aware: the CLI hard-rejects any id not
+            // declared in its config (LLMNotSet), so we only force a model when
+            // there is no configured default.
+            let mut args: Vec<String> = if kimi_is_new_flavor() {
+                vec!["--output-format".into(), "text".into()]
+            } else {
+                vec!["--print".into(), "--output-format".into(), "text".into(), "--final-message-only".into()]
+            };
             args.extend(kimi_model_args(None));
             args.push("--prompt".into());
             args.push("ok".into());
@@ -999,11 +1000,12 @@ fn wsl_probe(backend: &str) -> (bool, String) {
     let script = match backend {
         "claude_cli" => cli_probe("claude", "[ -f ~/.claude/.credentials.json ]"),
         "codex_cli" => cli_probe("codex", "[ -f ~/.codex/auth.json ]"),
-        // Modern kimi-cli writes ~/.kimi/credentials/kimi-code.json at login;
-        // older ones only ~/.kimi/config.toml. Accept either (mirrors the host
-        // kimi_cli_logged_in detector) — checking config.toml alone falsely
-        // reported a fresh login as NOCRED.
-        "kimi_cli" => cli_probe("kimi", "{ [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }"),
+        // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
+        // Accept a credential or config file in either home.
+        "kimi_cli" => cli_probe(
+            "kimi",
+            "{ [ -f ~/.kimi-code/credentials/kimi-code.json ] || [ -f ~/.kimi-code/config.toml ] || [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }",
+        ),
         "gemini_cli" => cli_probe("gemini", "[ -f ~/.gemini/oauth_creds.json ]"),
         other => {
             let var = match other {
@@ -2965,29 +2967,61 @@ fn codex_cli_logged_in() -> bool {
     p1.exists() || p2.exists()
 }
 
-/// Kimi Code CLI (MoonshotAI/kimi-cli) marks a login two ways depending on
-/// version: older CLIs put OAuth straight into ~/.kimi/config.toml; current
-/// ones (verified live 2026-07-05) write ~/.kimi/credentials/kimi-code.json
-/// (access_token/refresh_token) alongside a token-free config.toml. Accept
-/// either marker.
+/// The user's OS home directory.
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// Possible Kimi CLI home directories. Modern `kimi-code` uses `~/.kimi-code`;
+/// the older `MoonshotAI/kimi-cli` used `~/.kimi`. We keep both so the app
+/// works regardless of which `kimi` binary is on PATH.
+fn kimi_home_candidates() -> Vec<PathBuf> {
+    let Some(home) = user_home_dir() else { return Vec::new() };
+    vec![home.join(".kimi-code"), home.join(".kimi")]
+}
+
+/// The active Kimi home: prefer `~/.kimi-code` when it exists, otherwise
+/// `~/.kimi`. This lets us detect which flavor the user actually has installed.
+fn kimi_home_dir() -> Option<PathBuf> {
+    kimi_home_candidates().into_iter().find(|p| p.is_dir())
+}
+
+/// Best guess at whether the installed `kimi` binary is the new `kimi-code`
+/// (true) or the legacy `kimi-cli` (false). The safest signal is the home
+/// directory the CLI has already created on disk.
+fn kimi_is_new_flavor() -> bool {
+    kimi_home_dir()
+        .map(|p| p.file_name().map(|n| n == "kimi-code").unwrap_or(false))
+        .unwrap_or(true)
+}
+
+/// Kimi Code CLI marks a login in `credentials/kimi-code.json` (modern) or
+/// directly in `config.toml` (legacy). Accept either marker in either home.
 fn kimi_cli_logged_in() -> bool {
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
-        return false;
-    };
-    let kimi = PathBuf::from(home).join(".kimi");
-    kimi.join("credentials").join("kimi-code.json").is_file() || kimi.join("config.toml").exists()
+    kimi_home_candidates().iter().any(|kimi| {
+        kimi.join("credentials")
+            .join("kimi-code.json")
+            .is_file()
+            || kimi.join("config.toml").exists()
+    })
 }
 
-/// Raw text of ~/.kimi/config.toml (None when absent/unreadable).
+/// Raw text of the active Kimi config.toml (None when absent/unreadable).
 fn kimi_config_text() -> Option<String> {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    std::fs::read_to_string(PathBuf::from(home).join(".kimi").join("config.toml")).ok()
+    for kimi in kimi_home_candidates() {
+        let p = kimi.join("config.toml");
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            return Some(text);
+        }
+    }
+    None
 }
 
-/// Does the kimi config define a default model? Current kimi-cli writes
-/// `default_model = "kimi-code/kimi-for-coding"` at login; when present the
-/// CLI runs fine with NO --model flag — and rejects any model id that isn't
-/// declared in its [models] table with a hard `LLMNotSet` error.
+/// Does the kimi config define a default model? When present the CLI runs fine
+/// with NO --model flag — and rejects any model id that isn't declared in its
+/// [models] table with a hard `LLMNotSet` error.
 fn kimi_config_has_default(text: &str) -> bool {
     text.lines().any(|l| l.trim_start().starts_with("default_model"))
 }
@@ -3004,20 +3038,124 @@ fn kimi_config_model_keys(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// True when a modern kimi-code login is present (credentials/kimi-code.json).
-/// The current CLI writes this at login and resolves its own model from it —
-/// often WITHOUT writing a `config.toml` default. So the config parse alone
-/// can't tell we're safely logged in; without this check a modern-logged-in
-/// user reads as `has_default=false` and an undeclared id gets force-passed.
+/// True when a modern login is present (`credentials/kimi-code.json`). The
+/// current CLI writes this at login and resolves its own model from it — often
+/// WITHOUT writing a `config.toml` default. So the config parse alone can't tell
+/// we're safely logged in; without this check a modern-logged-in user reads as
+/// `has_default=false` and an undeclared id gets force-passed.
 fn kimi_has_modern_login() -> bool {
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
-        return false;
-    };
-    PathBuf::from(home)
-        .join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json")
-        .is_file()
+    kimi_home_candidates().iter().any(|kimi| {
+        kimi.join("credentials")
+            .join("kimi-code.json")
+            .is_file()
+    })
+}
+
+/// Recursively copy a directory, best-effort (individual file failures are
+/// ignored so one unreadable credential doesn't abort the whole temp home).
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dest = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &dest)?;
+        } else {
+            let _ = std::fs::copy(&entry.path(), &dest);
+        }
+    }
+    Ok(())
+}
+
+/// Build a temporary `KIMI_CODE_HOME` for a single `kimi-code` run.
+/// Copies the user's real config + credentials, writes our system prompt as
+/// `AGENTS.md`, and (when requested) wires the OwLLM browser gateway via
+/// `mcp.json` + the `OWLLM_GW_TOKEN` env var. Project-level files are left
+/// untouched.
+fn prepare_kimi_code_home(
+    app: &tauri::AppHandle,
+    system_prompt: &str,
+    with_mcp: bool,
+) -> Result<std::path::PathBuf, String> {
+    let real = kimi_home_dir()
+        .or_else(|| user_home_dir().map(|h| h.join(".kimi-code")))
+        .ok_or_else(|| "could not resolve home dir".to_string())?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let base = std::env::temp_dir().join(format!("owllm-kimi-code-home-{millis}"));
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
+
+    // Carry over the user's config and OAuth credentials so the temp home is
+    // still authenticated and keeps any configured default model.
+    let src_config = real.join("config.toml");
+    if src_config.is_file() {
+        let _ = std::fs::copy(&src_config, base.join("config.toml"));
+    }
+    let src_creds = real.join("credentials");
+    if src_creds.is_dir() {
+        let _ = copy_dir_all(&src_creds, &base.join("credentials"));
+    }
+
+    if !system_prompt.trim().is_empty() {
+        let agents = base.join("AGENTS.md");
+        std::fs::write(&agents, system_prompt).map_err(|e| format!("write AGENTS.md: {e}"))?;
+    }
+
+    if with_mcp {
+        let info = crate::mcp_gateway::ensure_started(app)
+            .map_err(|e| format!("browser gateway: {e}"))?;
+        let mcp = json!({
+            "mcpServers": {
+                crate::mcp_gateway::SERVER_NAME: {
+                    "url": info.url,
+                    "bearerTokenEnvVar": "OWLLM_GW_TOKEN"
+                }
+            }
+        });
+        std::fs::write(
+            base.join("mcp.json"),
+            serde_json::to_vec_pretty(&mcp).unwrap_or_default(),
+        )
+        .map_err(|e| format!("write mcp.json: {e}"))?;
+
+        // Pre-allow our own browser tools so auto-permission prompt mode doesn't
+        // stall on every mcp__owllm__* call.
+        let config = base.join("config.toml");
+        let rules = "\n[[permission.rules]]\ndecision = \"allow\"\npattern = \"mcp__owllm__*\"\n";
+        use std::io::Write;
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&config)
+            .and_then(|mut f| f.write_all(rules.as_bytes()));
+    }
+
+    Ok(base)
+}
+
+/// Build a temporary agent YAML for legacy `kimi-cli` so we can inject a system
+/// prompt via `--agent-file` without overwriting the user's project files.
+fn prepare_kimi_agent_file(system_prompt: &str) -> Result<std::path::PathBuf, String> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let base = std::env::temp_dir().join(format!("owllm-kimi-agent-{millis}"));
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
+
+    let system_md = base.join("system.md");
+    std::fs::write(&system_md, system_prompt).map_err(|e| format!("write system.md: {e}"))?;
+
+    let agent_yaml = base.join("agent.yaml");
+    std::fs::write(
+        &agent_yaml,
+        "version: 1\nagent:\n  name: owllm\n  extend: default\n  system_prompt_path: ./system.md\n",
+    )
+    .map_err(|e| format!("write agent.yaml: {e}"))?;
+
+    Ok(agent_yaml)
 }
 
 /// kimi-cli exits 0 even when its turn FAILS — the error only appears in the
@@ -3192,11 +3330,12 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
             try_remove(&home.join(".openai").join("auth.json"), &mut removed);
         }
         "kimi_cli" => {
-            // Modern kimi-cli keeps its OAuth in ~/.kimi/credentials/kimi-code.json;
-            // config.toml alone is the OLD marker. Remove BOTH or Disconnect leaves
-            // the real token behind and the card still reports "logged in".
-            try_remove(&home.join(".kimi").join("credentials").join("kimi-code.json"), &mut removed);
-            try_remove(&home.join(".kimi").join("config.toml"), &mut removed);
+            // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
+            // Remove from BOTH so Disconnect actually clears the real token.
+            for kimi in kimi_home_candidates() {
+                try_remove(&kimi.join("credentials").join("kimi-code.json"), &mut removed);
+                try_remove(&kimi.join("config.toml"), &mut removed);
+            }
         }
         "gemini_cli" => {
             let dir = home.join(".gemini");
@@ -3694,18 +3833,17 @@ pub async fn gemini_cli_complete(
     .map_err(|e| format!("join error: {e}"))?
 }
 
-/// One-shot completion via `kimi --print --prompt`. Mirrors the
-/// shape of claude_cli_complete but uses Kimi Code CLI's actual flag
-/// surface: `--print` (alias `-q` for quiet/final-only when paired
-/// with `--final-message-only`), `--prompt` (`-p`) for the user text,
-/// `--model` (`-m`) for the model id. We use `--print
-/// --final-message-only --output-format text` so the CLI emits ONLY
-/// the assistant's final reply on stdout — no streaming preamble for
-/// us to strip on this side.
+/// One-shot completion via the `kimi` CLI.
 ///
-/// System prompt: the CLI has no `--append-system-prompt` (that's a
-/// Claude-CLI-specific flag); we fold it into the prompt with a clear
-/// separator instead.
+/// Supports both the legacy `MoonshotAI/kimi-cli` and the newer
+/// `MoonshotAI/kimi-code` (the user's linked repo):
+///   * Legacy: `--print --final-message-only --output-format text` plus
+///     `--mcp-config-file` and `--agent-file` for system-prompt injection.
+///   * New (`kimi-code`): `--prompt --output-format text`. There is no
+///     `--system-prompt`, `--print`, `--final-message-only`, or
+///     `--mcp-config-file` flag, so we inject the system prompt via a temporary
+///     `KIMI_CODE_HOME` containing `AGENTS.md`, copy the user's config/credentials,
+///     and wire the browser gateway through `mcp.json` + `OWLLM_GW_TOKEN`.
 #[tauri::command]
 pub async fn kimi_cli_complete(
     app: tauri::AppHandle,
@@ -3716,21 +3854,23 @@ pub async fn kimi_cli_complete(
     _allowed_tools: Option<Vec<String>>,
 ) -> Result<String, String> {
     // Browser tools are a CROSS-CUTTING capability: every host-run Kimi agent
-    // gets the in-app browser gateway, not just the Browser role. Kimi-cli
+    // gets the in-app browser gateway, not just the Browser role. kimi-cli
     // fatally aborts a turn if ANY configured MCP server can't connect
     // (wait_for_background_mcp_loading -> MCPRuntimeError; exit 0, error only
-    // in stdout — verified live 2026-07-06 via ~/.kimi/logs/kimi.log), so we
-    // keep a session cache: once the gateway proves unreachable we stop wiring
-    // it for the rest of the session. The first agent that hits a broken
-    // gateway retries once without it, marks it broken, and subsequent agents
-    // run the proven-safe no-gateway path.
+    // in stdout), so we keep a session cache: once the gateway proves
+    // unreachable we stop wiring it for the rest of the session.
     // WSL-isolated runs skip it regardless: the distro kimi can't reach host
     // loopback and no relay is plumbed for this one-shot path yet.
     // Session cache: 0=unknown, 1=reachable, 2=broken.
     static KIMI_GATEWAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
     let gw_broken = KIMI_GATEWAY.load(std::sync::atomic::Ordering::Relaxed) == 2;
-    let mcp_config: Option<String> = if host_run && !gw_broken {
+    let new_flavor = kimi_is_new_flavor();
+
+    // Legacy CLI needs a JSON `--mcp-config-file`; new kimi-code reads
+    // `mcp.json` from `KIMI_CODE_HOME`, so the MCP wiring is done inside the
+    // temporary home in the spawn-blocking closure below.
+    let old_mcp_config: Option<String> = if !new_flavor && host_run && !gw_broken {
         match crate::mcp_gateway::write_cli_config(&app) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
@@ -3741,21 +3881,10 @@ pub async fn kimi_cli_complete(
     } else {
         None
     };
+
     tokio::task::spawn_blocking(move || {
-        // Kimi --print mode supports a separate --system-prompt startup flag.
-        // Keeping system and user roles separated stops Kimi's agent loop from
-        // treating the system instructions as just another user turn, which was
-        // causing it to ignore the actual request and hallucinate unrelated
-        // answers (e.g. answering a Claude context-window query instead of the
-        // UI task in the attached screenshot).
-        // If the system prompt is unreasonably large we fall back to folding it
-        // into the user payload via stdin, because --system-prompt is an argv
-        // argument and shares the same ~32 KB Windows command-line budget.
-        const MAX_ARGV: usize = 24_000;
-        const MAX_PROMPT_ARG: usize = 4000;
-        let system_as_flag = !system_prompt.trim().is_empty() && system_prompt.len() <= MAX_ARGV;
-        let user_as_flag = system_as_flag && user_message.len() <= MAX_PROMPT_ARG;
-        let folded_prompt = if system_prompt.trim().is_empty() {
+        let system_empty = system_prompt.trim().is_empty();
+        let folded_prompt = if system_empty {
             user_message.clone()
         } else {
             format!("{system_prompt}\n\n===== YOUR TASK =====\n\n{user_message}")
@@ -3766,37 +3895,79 @@ pub async fn kimi_cli_complete(
         // --model flag so the CLI can fall back to its configured default.
         let model_args = kimi_model_args(model.as_deref());
 
+        enum Injection {
+            TempHome(std::path::PathBuf),
+            AgentFile(std::path::PathBuf),
+        }
+
         // One kimi invocation. `with_mcp` controls whether the browser gateway
         // is wired; `with_model` controls whether the --model flag is present.
         // Returns (final assistant text, whether MCP loading failed).
         let attempt = |with_mcp: bool, with_model: bool| -> Result<(String, bool), String> {
-            let mut args: Vec<String> = vec![
-                "--print".into(),
-                // Suppress everything except the final assistant message so
-                // the React side gets a clean blob, not a streaming preamble.
-                "--output-format".into(),
-                "text".into(),
-                "--final-message-only".into(),
-            ];
+            // We can only safely inject AGENTS.md / mcp.json when the child is
+            // spawned directly on the host. The WSL route is a `wsl.exe bash -lc`
+            // wrapper; environment variables don't propagate, so fall back to
+            // folding the system prompt into the user prompt there.
+            let will_use_wsl = crate::sandbox::program_argv(cwd.as_deref(), "kimi", &[]).is_some();
+            let injection: Option<Injection> = if will_use_wsl {
+                None
+            } else if new_flavor && (with_mcp || !system_empty) {
+                Some(Injection::TempHome(prepare_kimi_code_home(
+                    &app,
+                    &system_prompt,
+                    with_mcp,
+                )?))
+            } else if !new_flavor && !system_empty {
+                Some(Injection::AgentFile(prepare_kimi_agent_file(&system_prompt)?))
+            } else {
+                None
+            };
+
+            // When we couldn't inject the system prompt separately, fold it.
+            let prompt_value = if injection.is_none() && !system_empty {
+                folded_prompt.clone()
+            } else {
+                user_message.clone()
+            };
+
+            // New kimi-code has no stdin prompt path; legacy does. Keep a safe
+            // argv budget on Windows to avoid CreateProcess ENAMETOOLONG.
+            const ARGV_BUDGET: usize = 28_000;
+            let prompt_fits = prompt_value.len() <= ARGV_BUDGET;
+            if new_flavor && !prompt_fits {
+                return Err("kimi prompt exceeds the safe Windows argv budget; shorten the request".to_string());
+            }
+            let use_prompt_flag = prompt_fits;
+
+            let mut args: Vec<String> = if new_flavor {
+                vec!["--output-format".into(), "text".into()]
+            } else {
+                vec![
+                    "--print".into(),
+                    "--output-format".into(),
+                    "text".into(),
+                    "--final-message-only".into(),
+                ]
+            };
             if with_model {
                 args.extend(model_args.iter().cloned());
             }
-            if with_mcp {
-                if let Some(cfg) = mcp_config.as_ref() {
+            if !new_flavor && with_mcp {
+                if let Some(cfg) = old_mcp_config.as_ref() {
                     args.push("--mcp-config-file".into());
                     args.push(cfg.clone());
                 }
             }
-            if system_as_flag {
-                args.push("--system-prompt".into());
-                args.push(system_prompt.clone());
+            if let Some(Injection::AgentFile(p)) = injection.as_ref() {
+                args.push("--agent-file".into());
+                args.push(p.to_string_lossy().to_string());
             }
-            if user_as_flag {
+            if use_prompt_flag {
                 args.push("--prompt".into());
-                args.push(user_message.clone());
+                args.push(prompt_value.clone());
             }
 
-            // WSL-isolated project → run `kimi` inside the distro; else Windows CLI.
+            // WSL-isolated project → run `kimi` inside the distro; else host CLI.
             let mut cmd = if let Some((exe, sargs)) =
                 crate::sandbox::program_argv(cwd.as_deref(), "kimi", &args)
             {
@@ -3805,7 +3976,7 @@ pub async fn kimi_cli_complete(
                 c
             } else {
                 let exe = find_kimi_cli()
-                    .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-cli) first".to_string())?;
+                    .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-code) first".to_string())?;
                 #[cfg(windows)]
                 let batch = is_batch_shim(&exe);
                 #[cfg(not(windows))]
@@ -3822,12 +3993,20 @@ pub async fn kimi_cli_complete(
                 }
                 c
             };
-            // kimi-cli is Python: on Windows its piped stdout defaults to the
-            // legacy charmap codec and CRASHES on any non-ANSI character in the
-            // reply ("'charmap' codec can't encode…" — reproduced live with a
-            // Korean page snapshot). Force UTF-8 so Unicode output survives.
+
+            // kimi-cli (legacy) is Python; force UTF-8 so non-ANSI replies don't
+            // crash the codec. New kimi-code is Node, but the variable is harmless.
             cmd.env("PYTHONUTF8", "1");
-            cmd.stdin(if user_as_flag { Stdio::null() } else { Stdio::piped() });
+            if let Some(Injection::TempHome(home)) = injection.as_ref() {
+                cmd.env("KIMI_CODE_HOME", home);
+                if with_mcp {
+                    if let Ok(info) = crate::mcp_gateway::ensure_started(&app) {
+                        cmd.env("OWLLM_GW_TOKEN", &info.token);
+                    }
+                }
+            }
+
+            cmd.stdin(if use_prompt_flag { Stdio::null() } else { Stdio::piped() });
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
@@ -3837,17 +4016,30 @@ pub async fn kimi_cli_complete(
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
             let pid = register_cli_child(&child);
-            if !user_as_flag {
+            if !use_prompt_flag {
                 if let Some(mut stdin) = child.stdin.take() {
                     // Best-effort: on the WSL path the pipe can close early ("pipe
                     // has been ended, os error 109"); the real error still surfaces
                     // via exit status / stdout, so don't abort on the write.
-                    let payload = if system_as_flag { user_message.clone() } else { folded_prompt.clone() };
-                    let _ = stdin.write_all(payload.as_bytes());
+                    let _ = stdin.write_all(prompt_value.as_bytes());
                 }
             }
             let output = wait_cli_child(child, pid)
                 .map_err(|e| format!("wait kimi: {e}"))?;
+
+            // Clean up the temporary injection files now that the child is done.
+            match injection {
+                Some(Injection::TempHome(home)) => {
+                    let _ = std::fs::remove_dir_all(&home);
+                }
+                Some(Injection::AgentFile(path)) => {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::remove_dir_all(parent);
+                    }
+                }
+                None => {}
+            }
+
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             if !output.status.success() {
@@ -3859,7 +4051,8 @@ pub async fn kimi_cli_complete(
             Ok((stdout.trim().to_string(), mcp_failed))
         };
 
-        let wired = mcp_config.is_some();
+        let wired = old_mcp_config.is_some()
+            || (new_flavor && host_run && !gw_broken);
         let (mut reply, mcp_failed) = match attempt(wired, true) {
             Ok(r) => r,
             Err(e) if kimi_output_llm_unset(&e) => {
@@ -3885,7 +4078,7 @@ pub async fn kimi_cli_complete(
             return Err("kimi returned an empty reply".to_string());
         }
         if kimi_output_llm_unset(&reply) {
-            return Err("kimi: no model resolved (LLMNotSet) — run `kimi login`, or set a default model in ~/.kimi/config.toml".to_string());
+            return Err("kimi: no model resolved (LLMNotSet) — run `kimi login`, or set a default model in ~/.kimi-code/config.toml (or ~/.kimi/config.toml for legacy CLI)".to_string());
         }
         if kimi_output_mcp_failed(&reply) {
             return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
@@ -3893,6 +4086,13 @@ pub async fn kimi_cli_complete(
         if kimi_output_auth_failed(&reply) {
             return Err("kimi: authentication failed (401 / login expired / signed out)".to_string());
         }
+
+        // New kimi-code text mode prefixes each assistant block with "• ";
+        // strip the leading bullet so the React side receives clean text.
+        if new_flavor {
+            reply = reply.trim_start_matches("• ").trim().to_string();
+        }
+
         Ok(reply)
     })
     .await

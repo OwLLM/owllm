@@ -9,6 +9,7 @@
 // diffs, task Kanban); Phase 1 is the working agent core.
 import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import GitBar from "./GitBar";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
@@ -44,6 +45,10 @@ type Msg = {
   kind?: "tool" | "terminal";
   title?: string;
   status?: "ok" | "error" | "running";
+  /// Transient bubble shown immediately when a run starts so the user sees
+  /// activity before the first token/tool arrives. Removed once real output
+  /// begins or the turn ends.
+  placeholder?: boolean;
   ts: number;
 };
 
@@ -519,6 +524,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     window.addEventListener("mouseup", up);
   };
   const [mergeBusy, setMergeBusy] = useState(false);
+  // Live feedback for the current run: what phase the agent is in and whether
+  // the local model is still being mmap'd (cold-load banner).
+  const [runPhase, setRunPhase] = useState<string | null>(null);
+  const [llamaLoading, setLlamaLoading] = useState<{ sec: number; reason: string } | null>(null);
   busySendRef.current = busy;
   // Resolve the rules/notebook scope whenever the folder changes: prefer the
   // matching AGENTIC project id (shared rule set + notebook with the team),
@@ -634,6 +643,27 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       dead = true;
       window.removeEventListener("focus", onRefresh);
       window.removeEventListener("owllm:models:refresh", onRefresh as EventListener);
+    };
+  }, []);
+
+  // Live cold-load status. dispatch.ts fires owllm:llama:loading while the
+  // local server is still mmap'ing the GGUF; AgentsPage already surfaces this
+  // banner, and CodePage was missing it — leaving only the header timer.
+  useEffect(() => {
+    const onLoading = (e: Event) => {
+      const detail = (e as CustomEvent<{ elapsedSec: number; reason?: string }>).detail;
+      if (!detail) return;
+      setLlamaLoading({ sec: detail.elapsedSec, reason: detail.reason || "loading model" });
+      setRunPhase("warming up model");
+    };
+    window.addEventListener("owllm:llama:loading", onLoading as EventListener);
+    let unlistenReady: (() => void) | null = null;
+    listen<{ model_id: string; port: number; elapsed_ms: number }>("llama-ready", () => {
+      setLlamaLoading(null);
+    }).then((u) => { unlistenReady = u; });
+    return () => {
+      window.removeEventListener("owllm:llama:loading", onLoading as EventListener);
+      unlistenReady?.();
     };
   }, []);
 
@@ -1107,17 +1137,24 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   }
 
   // ----- streaming sinks (newline-safe append; same lesson as ChatPage) -----
-  const onDelta = (d: string) =>
+  const onDelta = (d: string) => {
+    setRunPhase("thinking");
     setMessages((msgs) => {
       const out = msgs.slice();
       const last = out[out.length - 1];
       if (last && last.role === "assistant" && !last.kind) {
-        out[out.length - 1] = { ...last, content: last.content + d };
+        // Replace the transient "Starting…" placeholder with real output.
+        if (last.placeholder) {
+          out[out.length - 1] = { ...last, content: d, placeholder: false };
+        } else {
+          out[out.length - 1] = { ...last, content: last.content + d };
+        }
       } else {
         out.push({ role: "assistant", content: d, ts: Date.now() });
       }
       return out;
     });
+  };
 
   const onThought = (channel: string, _role: string, delta: string) => {
     if (channel !== "thinking") return;
@@ -1125,7 +1162,11 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       const out = msgs.slice();
       const last = out[out.length - 1];
       if (last && last.role === "assistant" && !last.kind) {
-        out[out.length - 1] = { ...last, thinking: (last.thinking ?? "") + delta };
+        if (last.placeholder) {
+          out[out.length - 1] = { ...last, thinking: delta, placeholder: false };
+        } else {
+          out[out.length - 1] = { ...last, thinking: (last.thinking ?? "") + delta };
+        }
       } else {
         out.push({ role: "assistant", content: "", thinking: delta, ts: Date.now() });
       }
@@ -1134,6 +1175,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   };
 
   const onToolCall = (call: ToolCall) => {
+    setRunPhase(`running ${call.name}`);
     const firstArg = Object.values(call.args)[0] ?? "";
     setMessages((msgs) => [
       ...msgs,
@@ -1236,11 +1278,15 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const history: HistoryItem[] = messages
-      .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && m.content.trim()))
+      .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
     // The bubble shows a 🖼 marker; the actual images ride to the model via runTurn.
     const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
     setMessages((msgs) => [...msgs, { role: "user", content: label, ts: Date.now() }]);
+    // Immediately show the user that something is happening, so the timer is not
+    // the only visible change. The placeholder is replaced by real tokens/tools.
+    setMessages((msgs) => [...msgs, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
+    setRunPhase("starting");
     let ok = false;
     let aborted = false;
     try {
@@ -1251,9 +1297,22 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       const err = e as { name?: string; message?: string };
       aborted = err.name === "AbortError";
       if (!aborted) {
-        setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }]);
+        setMessages((msgs) => {
+          const out = msgs.slice();
+          const last = out[out.length - 1];
+          if (last && last.role === "assistant" && last.placeholder) out.pop();
+          return [...out, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }];
+        });
       }
     } finally {
+      setRunPhase(null);
+      setLlamaLoading(null);
+      // Drop any leftover placeholder so it doesn't persist after the run stops.
+      setMessages((msgs) => {
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant" && last.placeholder) return msgs.slice(0, -1);
+        return msgs;
+      });
       setBusy(false);
       abortRef.current = null;
       // After state settles: steers queued on a path that can't inject
@@ -1374,11 +1433,22 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     setMessages((m) => [...m, { role: "user", content: `📋 Plan & build: ${goal}`, ts: Date.now() }]);
+    // Show immediate feedback; planning is silent so the placeholder stays until
+    // the plan is parsed and the Kanban board appears.
+    setMessages((m) => [...m, { role: "assistant", content: "⏳ Planning…", placeholder: true, ts: Date.now() }]);
+    setRunPhase("planning");
     try {
       // 1) PLAN — ordered step list (silent; no tool execution / streaming).
       setStatus("Planning…");
       const planReply = await runTurn(PLAN_SYSTEM(workspace, goal), "Return the JSON array of steps now.", [], ctrl.signal, { silent: true });
       const steps = parseSteps(planReply);
+      // Remove the planning placeholder now that real state exists.
+      setMessages((msgs) => {
+        const out = msgs.slice();
+        const last = out[out.length - 1];
+        if (last && last.role === "assistant" && last.placeholder) out.pop();
+        return out;
+      });
       if (steps.length === 0) {
         setMessages((m) => [...m, { role: "assistant", content: "Couldn't produce a plan — try rephrasing the goal, or use Send for a one-shot.", ts: Date.now() }]);
         return;
@@ -1411,6 +1481,13 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       const err = e as { name?: string; message?: string };
       if (err.name !== "AbortError") setMessages((m) => [...m, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }]);
     } finally {
+      setRunPhase(null);
+      setLlamaLoading(null);
+      setMessages((msgs) => {
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant" && last.placeholder) return msgs.slice(0, -1);
+        return msgs;
+      });
       setBusy(false);
       abortRef.current = null;
     }
@@ -1422,6 +1499,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const stop = () => {
     abortRef.current?.abort();
     void invoke("cli_cancel_all").catch(() => { /* best-effort */ });
+    setRunPhase(null);
+    setLlamaLoading(null);
     setBusy(false);
   };
   const clear = () => { if (!busy) { setMessages([]); setTasks([]); setStatus(`Workspace: ${workspace || "(none)"}`); } };
@@ -1869,6 +1948,21 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           active={busy}
           title={busy ? "The agent is working — elapsed time" : "How long the last turn took"}
         />
+        {busy && runPhase && (
+          <div
+            data-ui="run-phase"
+            style={{
+              display: "flex", alignItems: "center", gap: 6, height: 24, padding: "0 10px",
+              borderRadius: 999, fontSize: 11, fontWeight: 700, color: "#ffd97a",
+              background: "rgba(255,217,122,0.12)", border: "1px solid rgba(255,217,122,0.35)",
+            }}
+          >
+            <span className="owl-pulse-dot" style={{ width: 7, height: 7, borderRadius: 4, background: "#ffd97a", display: "inline-block" }} />
+            {runPhase === "warming up model" && llamaLoading
+              ? `⏳ Warming up model · ${llamaLoading.sec}s`
+              : runPhase}
+          </div>
+        )}
         <div style={{ flex: 1 }} />
         <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
         <div style={{ minWidth: 260, maxWidth: 360 }}>
@@ -1910,6 +2004,29 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
               </div>
             );
           })}
+        </div>
+      )}
+
+      {/* Cold-load banner — mirrors AgentsPage so the user can see WHY the
+          run is taking time before any tokens appear. */}
+      {llamaLoading && (
+        <div
+          style={{
+            flexShrink: 0, display: "flex", alignItems: "center", gap: 10,
+            padding: "8px 12px", borderRadius: 8, fontSize: 12,
+            background: "rgba(255,217,122,0.12)", border: "1px solid rgba(255,217,122,0.35)",
+            color: "#ffd97a",
+          }}
+        >
+          <span style={{ fontSize: 14 }}>⏳</span>
+          <span>
+            <b>Local model is still warming up</b> · {llamaLoading.sec}s elapsed
+            {llamaLoading.reason && (
+              <> · last: <code style={{ background: "rgba(0,0,0,0.25)", padding: "1px 4px", borderRadius: 4 }}>{llamaLoading.reason}</code></>
+            )}
+          </span>
+          <span style={{ flex: 1 }} />
+          <span style={{ fontSize: 11, opacity: 0.85 }}>Press Stop to abort.</span>
         </div>
       )}
 

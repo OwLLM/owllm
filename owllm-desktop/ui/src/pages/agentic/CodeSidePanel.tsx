@@ -76,7 +76,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
       const saved = parseInt(localStorage.getItem(WIDTH_KEY) || "", 10);
       if (Number.isFinite(saved) && saved >= MIN_W) return saved;
     } catch { /* default below */ }
-    return Math.max(MIN_W, Math.round(window.innerWidth * 0.15));
+    return Math.max(MIN_W, Math.round(window.innerWidth * 0.20));
   });
   const dragRef = useRef<{ startX: number; startW: number } | null>(null);
   const onDragStart = (e: React.MouseEvent) => {

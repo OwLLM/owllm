@@ -95,6 +95,12 @@ type CodeState = {
   // Mirrors the Agents-page team timer; rendered as the header RunTimerChip.
   runStartedAt?: number;
   runEndedAt?: number;
+  // Second-agent chat pane (layout scaffolding — not yet wired to a real
+  // agent). When open it renders beside the primary chat; its own local
+  // messages/draft, no dispatch/backend call yet.
+  secondaryOpen?: boolean;
+  secondaryMessages?: Msg[];
+  secondaryDraft?: string;
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
@@ -479,6 +485,9 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
   const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing, runStartedAt, runEndedAt } = stx;
   const agentMode: CodeAgentMode = stx.agentMode ?? "auto";
+  const secondaryOpen: boolean = stx.secondaryOpen ?? false;
+  const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
+  const secondaryDraft: string = stx.secondaryDraft ?? "";
   // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
   const [termOpen, setTermOpen] = useState(false);
   // Terminal popup chrome: hide (— keeps the shell alive, just display:none)
@@ -519,6 +528,16 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [runPhase, setRunPhase] = useState<string | null>(null);
   const [llamaLoading, setLlamaLoading] = useState<{ sec: number; reason: string } | null>(null);
   busySendRef.current = busy;
+  // Wide enough to sit the second-agent pane beside the primary chat (row);
+  // below the breakpoint they stack (column). matchMedia, listener cleaned up.
+  const [wideView, setWideView] = useState<boolean>(() =>
+    typeof window !== "undefined" && window.matchMedia("(min-width:1000px)").matches);
+  useEffect(() => {
+    const mq = window.matchMedia("(min-width:1000px)");
+    const onChange = (e: MediaQueryListEvent) => setWideView(e.matches);
+    mq.addEventListener("change", onChange);
+    return () => mq.removeEventListener("change", onChange);
+  }, []);
   // Resolve the rules/notebook scope whenever the folder changes: prefer the
   // matching AGENTIC project id (shared rule set + notebook with the team),
   // fall back to a stable per-folder key.
@@ -606,6 +625,9 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   };
   const setStatus = (v: string) => setField("status", v);
   const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
+  const setSecondaryOpen = (v: boolean) => setField("secondaryOpen", v);
+  const setSecondaryMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) => setField("secondaryMessages", v as CodeState["secondaryMessages"]);
+  const setSecondaryDraft = (v: string | ((s: string) => string)) => setField("secondaryDraft", v as CodeState["secondaryDraft"]);
 
   // SAME model source as every other page — the full list_models result fed
   // to the shared ModelPicker (localOnly does the filtering). Refresh on focus
@@ -1513,7 +1535,9 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     if (busy) return;
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
-      return { ...cur, messages: [], tasks: [], draft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
+      // The second-agent pane shares this project/session, so clearing the
+      // conversation clears its transcript + draft too (keeping the panel open).
+      return { ...cur, messages: [], tasks: [], draft: "", secondaryMessages: [], secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
     });
   };
   const clearChatHistory = () => {
@@ -2022,6 +2046,18 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         </div>
       )}
 
+      {/* Second-agent pane toggle — scaffolding for a parallel/hand-off chat
+          beside the primary one. Shown once a workspace is open. */}
+      {workspace && (
+        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+          <button
+            onClick={() => setSecondaryOpen(!secondaryOpen)}
+            title="Show a second, independent chat pane beside this one. Empty scaffolding — a later step wires the real second agent."
+            style={{ ...btn, height: 26 }}
+          >{secondaryOpen ? "◧ Hide 2nd agent" : "◨ Show 2nd agent"}</button>
+        </div>
+      )}
+
       {/* Cold-load banner — mirrors AgentsPage so the user can see WHY the
           run is taking time before any tokens appear. */}
       {llamaLoading && (
@@ -2061,6 +2097,11 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             />
           </div>
         )}
+      {/* Chat panes: the primary chat + an optional second-agent pane. Side by
+          side when the viewport is wide (≥1000px), stacked when narrow; each
+          pane owns its own scroll. With the second pane closed this wrapper has
+          a single child, so the primary fills the width exactly as before. */}
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: wideView ? "row" : "column", gap: 8 }}>
       <div
         ref={transcriptSticky.ref}
         onScroll={transcriptSticky.onScroll}
@@ -2106,6 +2147,74 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           })
         )}
         </div>
+        {/* Second-agent chat pane — layout scaffolding only. Mirrors the primary
+            pane's chrome; hosts a parallel/hand-off agent's stream in a later
+            Notebook step. Rendered only when the user opens it. */}
+        {secondaryOpen && (
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+              <span style={{ fontSize: 12.5, color: "var(--fg-muted)" }}>Second agent</span>
+              <span style={{ flex: 1 }} />
+              <button onClick={() => setSecondaryOpen(false)} title="Close the second-agent pane" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>✕ Close</button>
+            </div>
+            {secondaryMessages.length === 0 ? (
+              <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
+                Second agent pane — will host a parallel or hand-off agent's stream. Not yet wired.
+              </div>
+            ) : (
+              secondaryMessages.map((m, i) => {
+                if (m.role === "tool") {
+                  return <ToolEventCard key={i} kind={m.kind ?? "tool"} title={m.title ?? "tool"} status={m.status} content={m.content} />;
+                }
+                const isUser = m.role === "user";
+                return (
+                  <ChatBubble
+                    key={i}
+                    avatar={isUser ? "U" : "C2"}
+                    sender={isUser ? "You" : "Coder 2"}
+                    accent={isUser ? "#7aa2ff" : "#c7a8ff"}
+                    isUser={isUser}
+                    isStreaming={false}
+                    content={m.content}
+                    thinking={m.thinking}
+                    ts={m.ts}
+                  />
+                );
+              })
+            )}
+            {/* Compact composer. Scaffolding only — a later Notebook step will wire the actual second-agent send. */}
+            <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
+              <textarea
+                value={secondaryDraft}
+                onChange={(e) => setSecondaryDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    const text = secondaryDraft.trim();
+                    if (!text) return;
+                    setSecondaryMessages((m) => [...(m ?? []), { role: "user", content: text, ts: Date.now() }]);
+                    setSecondaryDraft("");
+                  }
+                }}
+                placeholder="Message the second agent… (scaffolding — not yet wired)"
+                rows={2}
+                style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
+              />
+              <button
+                onClick={() => {
+                  const text = secondaryDraft.trim();
+                  if (!text) return;
+                  setSecondaryMessages((m) => [...(m ?? []), { role: "user", content: text, ts: Date.now() }]);
+                  setSecondaryDraft("");
+                }}
+                disabled={!secondaryDraft.trim()}
+                title="Append to the second-agent transcript (no agent runs yet)"
+                style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
+              >Send</button>
+            </div>
+          </div>
+        )}
+      </div>
         {/* Right column (resizable): utility header (mode / terminal / usage)
             + two PAGES on a tab strip — ⚡ Super User (project rules, shared
             with the team) and 📓 Notebook (the shared RunNotebook, inline).

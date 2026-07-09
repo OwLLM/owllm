@@ -228,10 +228,10 @@ check("oneLine collapses whitespace/newlines", oneLine("a\n  b   c") === "a b c"
 const relBlock = renderRelevantWork([
   { content: "@backend_coder — TASK: add /login endpoint. DID: POST /login in auth.py returns JWT.", author: "backend_coder", tags: "worklog" },
 ]);
-check("relevant-work block has a sync header", /RELEVANT TEAM WORK/.test(relBlock) && /auth\.py/.test(relBlock));
+check("relevant-work block has the Memory Curator context-pack header", /MEMORY CURATOR CONTEXT PACK/.test(relBlock) && /auth\.py/.test(relBlock));
 check("empty entries → empty block", renderRelevantWork([]) === "");
 const enriched = enrichInstructionWithMemory(relBlock, "wire the frontend login form to the API");
-check("enriched instruction fences the task after the memory", enriched.includes("--- YOUR TASK ---") && enriched.endsWith("wire the frontend login form to the API") && enriched.startsWith("RELEVANT TEAM WORK"));
+check("enriched instruction fences the task after the memory", enriched.includes("--- YOUR TASK ---") && enriched.endsWith("wire the frontend login form to the API") && enriched.startsWith("MEMORY CURATOR CONTEXT PACK"));
 check("no memory → instruction unchanged", enrichInstructionWithMemory("", "just do X") === "just do X");
 
 // 8) Verification Gate (slice 1) — the source-of-truth check. PASS/FAIL/UNVERIFIED

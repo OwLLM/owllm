@@ -46,6 +46,14 @@ Tool-calling uses the model's **own chat template** (`llama-server --jinja` → 
 ### ☁️ Cloud models as first-class peers — with live streaming
 Mix local and cloud freely in one team: Anthropic/OpenAI/Gemini **APIs** (just add a key) or **subscription CLIs** (Claude Code, Codex, Gemini) — all routed by the same dispatcher, all running wherever the agent backend runs. Subscription agents **stream their activity live** (reasoning, commands, tool calls, web searches) instead of going dark until the end.
 
+### 🧠 Memory that stays useful instead of becoming stale context
+Agentic teams have two memory layers: per-agent episodic history and shared
+project memory for facts, decisions, and worklog. Retrieval is scoped to the
+current project and framed as a **current-task context pack**, so old completed
+work is reference material, not something the model should continue or report as
+today's result. The memory roadmap is tracked in
+[`owllm-desktop/docs/MEMORY_RAG_DESIGN.md`](owllm-desktop/docs/MEMORY_RAG_DESIGN.md).
+
 ### 🎛 The full local-AI workstation
 - **Code page** — your local model codes directly in a folder, with **per-project persistence**: the conversation, plan, and model come back when you reopen the project (or relaunch). Open it isolated (WSL) or as a plain folder.
 - **Fine-tuning** (LoRA), **GGUF conversion**, model onboarding — all on your hardware.

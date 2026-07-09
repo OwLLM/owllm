@@ -84,6 +84,24 @@ Any `<tool_call>` XML / `parse_tool_calls` / `format_for_prompt` you find is
 
 ---
 
+## 3b. Memory and RAG
+
+Agentic teams use two memory layers:
+
+- **Per-agent episodic memory**: recent instruction/reply turns for each
+  specialist, char-budgeted before they are folded back into that agent's
+  context.
+- **Shared team memory**: project-scoped facts and worklog in SQLite, retrieved
+  with BM25-lite keyword ranking. Durable facts can sync through the GitHub
+  vault; auto-captured worklog stays local.
+
+Retrieved memory is injected as a current-task context pack, not raw history:
+old completed work is reference material, while the current request and live
+files/tools remain authoritative. The design note and roadmap live in
+[`owllm-desktop/docs/MEMORY_RAG_DESIGN.md`](../owllm-desktop/docs/MEMORY_RAG_DESIGN.md).
+
+---
+
 ## 4. Safety: guard rails, isolation, and tiers
 
 ### Guard rails (shipped, default-on) — `src-tauri/src/agent_tools.rs`

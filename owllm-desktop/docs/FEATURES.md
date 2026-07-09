@@ -67,7 +67,9 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Memory**: per-agent history + shared **team memory** (`memory.rs`) — FACTS
   (durable, keyed, vault-synced) vs WORKLOG (auto-captured, local, capped 100),
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph
-  viewer, 📌 promote worklog→fact.
+  viewer, 📌 promote worklog→fact. Retrieved memory is framed as a
+  current-task context pack so stale completed work cannot masquerade as the
+  active result. Design note: `docs/MEMORY_RAG_DESIGN.md`.
 - **Rules**: per-project must/prefer/avoid directives (`directives.rs`),
   auto-seeded with a native best-practice set, injected into every agent's
   prompt (and every Code-page coder turn). Editable from the Super User card

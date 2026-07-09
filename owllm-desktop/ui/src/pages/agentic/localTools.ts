@@ -126,14 +126,15 @@ export function renderTeamMemorySnapshot(facts: RawTeamMemEntry[], worklog: RawT
   const out: string[] = [];
   if (facts.length) {
     out.push(
-      "TEAM MEMORY — durable shared knowledge (most relevant first), injected so you can",
-      "read it WITHOUT any tool call. Consult it before re-deriving or asking:",
+      "TEAM MEMORY SNAPSHOT — durable shared knowledge, injected for reference only.",
+      "Use it to avoid re-deriving facts, but the CURRENT user request and live files/tools",
+      "win over stale memory. Do not treat old completed work as today's result:",
       ...facts.map((e) => line(e, 400)),
     );
   }
   if (worklog.length) {
     out.push(
-      "LATEST TEAM ACTIVITY (newest first — what teammates just did):",
+      "LATEST TEAM ACTIVITY (newest first — reference-only; may be stale):",
       ...worklog.map((e) => line(e, 300)),
     );
   }

@@ -65,7 +65,7 @@ export default function PublishCards({
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [pubNotes, setPubNotes] = useState("");
-  const [pubMode, setPubMode] = useState<PublishMode>("dry-run");
+  const [pubMode, setPubMode] = useState<PublishMode>("publish");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
@@ -157,63 +157,66 @@ export default function PublishCards({
             borderRadius: 8,
             padding: 6,
             display: "flex",
-            alignItems: "center",
+            flexDirection: "column",
             gap: 6,
-            flexWrap: "wrap",
           }}
         >
-          {showCommit && (
-            <button
-              onClick={() => setCommitOpen(true)}
-              disabled={disabled || loading}
-              title="Commit all changes in this workspace"
-              style={{ ...chipBtn }}
-            >
-              {loading ? "⏳" : "●"} Commit
-            </button>
-          )}
-          {showPush && (
-            <button
-              onClick={doPush}
-              disabled={disabled || loading}
-              title={`Push ${branch || "current"} to origin`}
-              style={{ ...chipBtn }}
-            >
-              {loading ? "⏳" : "↑"} Push
-            </button>
-          )}
-          {showMerge && (
-            <button
-              onClick={doMerge}
-              disabled={disabled || loading}
-              title={isolated
-                ? `Merge this page's worktree back into ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`
-                : `Fast-forward ${mergeTarget} to HEAD on origin`}
-              style={{ ...chipBtn, color: "#7ff0c5" }}
-            >
-              {loading ? "⏳" : "⤴"} Merge
-            </button>
-          )}
-          {showPublish && (
-            <button
-              onClick={doPublish}
-              disabled={disabled || loading}
-              title={`${modeLabel} release (${pubMode})`}
-              style={{ ...chipBtn, background: modeColor, color: "#06080d", border: "none" }}
-            >
-              {loading ? "⏳" : "🚀"} {modeLabel}
-            </button>
-          )}
-          {showPublish && (
-            <button
-              onClick={() => setSettingsOpen((v) => !v)}
-              title="Publish settings"
-              disabled={disabled || loading}
-              style={{ ...chipBtn, width: 26, padding: 0, color: "var(--fg-muted)", marginLeft: "auto" }}
-            >
-              ⚙
-            </button>
-          )}
+          <div style={{ display: "flex", gap: 6, width: "100%" }}>
+            {showCommit && (
+              <button
+                onClick={() => setCommitOpen(true)}
+                disabled={disabled || loading}
+                title="Commit all changes in this workspace"
+                style={{ ...chipBtn, flex: 1 }}
+              >
+                {loading ? "⏳" : "●"} Commit
+              </button>
+            )}
+            {showMerge && (
+              <button
+                onClick={doMerge}
+                disabled={disabled || loading}
+                title={isolated
+                  ? `Merge this page's worktree back into ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`
+                  : `Fast-forward ${mergeTarget} to HEAD on origin`}
+                style={{ ...chipBtn, flex: 1, color: "#7ff0c5" }}
+              >
+                {loading ? "⏳" : "⤴"} Merge
+              </button>
+            )}
+          </div>
+          <div style={{ display: "flex", gap: 6, width: "100%" }}>
+            {showPush && (
+              <button
+                onClick={doPush}
+                disabled={disabled || loading}
+                title={`Push ${branch || "current"} to origin`}
+                style={{ ...chipBtn, flex: 1 }}
+              >
+                {loading ? "⏳" : "↑"} Push
+              </button>
+            )}
+            {showPublish && (
+              <button
+                onClick={doPublish}
+                disabled={disabled || loading}
+                title={`${modeLabel} release (${pubMode})`}
+                style={{ ...chipBtn, flex: 1, background: modeColor, color: "#06080d", border: "none" }}
+              >
+                {loading ? "⏳" : "🚀"} {modeLabel}
+              </button>
+            )}
+            {showPublish && (
+              <button
+                onClick={() => setSettingsOpen((v) => !v)}
+                title="Publish settings"
+                disabled={disabled || loading}
+                style={{ ...chipBtn, width: 26, padding: 0, color: "var(--fg-muted)" }}
+              >
+                ⚙
+              </button>
+            )}
+          </div>
         </div>
       </div>
 

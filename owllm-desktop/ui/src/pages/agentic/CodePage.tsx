@@ -2356,18 +2356,39 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                   return <ToolEventCard key={i} kind={m.kind ?? "tool"} title={m.title ?? "tool"} status={m.status} content={m.content} />;
                 }
                 const isUser = m.role === "user";
+                const isSecondaryStreaming = secondaryBusy && i === secondaryMessages.length - 1 && !isUser;
+                const canForwardToPrimary = !isUser && !isSecondaryStreaming && m.content && m.content.trim().length > 0;
                 return (
-                  <ChatBubble
-                    key={i}
-                    avatar={isUser ? "U" : "C2"}
-                    sender={isUser ? "You" : "Coder 2"}
-                    accent={isUser ? "#7aa2ff" : "#c7a8ff"}
-                    isUser={isUser}
-                    isStreaming={secondaryBusy && i === secondaryMessages.length - 1 && !isUser}
-                    content={m.content}
-                    thinking={m.thinking}
-                    ts={m.ts}
-                  />
+                  <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <ChatBubble
+                      avatar={isUser ? "U" : "C2"}
+                      sender={isUser ? "You" : "Coder 2"}
+                      accent={isUser ? "#7aa2ff" : "#c7a8ff"}
+                      isUser={isUser}
+                      isStreaming={isSecondaryStreaming}
+                      content={m.content}
+                      thinking={m.thinking}
+                      ts={m.ts}
+                    />
+                    {canForwardToPrimary && (
+                      <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
+                        <button
+                          onClick={() => {
+                            const forwarded: Msg = {
+                              role: "user",
+                              content: `Forwarded from second agent:\n\n${m.content}`,
+                              ts: Date.now(),
+                            };
+                            setMessages((prev) => [...prev, forwarded]);
+                          }}
+                          title="Forward this reply to the primary agent"
+                          style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}
+                        >
+                          ← Forward to primary agent
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 );
               })
             )}

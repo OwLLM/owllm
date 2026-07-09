@@ -371,9 +371,10 @@ type GoalMsg = {
   /// shared ChatBubble. Stamped at creation; deltas don't re-stamp.
   ts?: number;
   /// Optional inline recovery action rendered as a one-click button under the
-  /// bubble. "wsl-restart" → "⟳ Restart WSL networking" (fires owllm:wsl-restart).
-  /// Set on network-failure system messages so users never type a terminal cmd.
-  action?: "wsl-restart";
+  /// bubble. "wsl-restart" → "⟳ Restart WSL networking" (fires owllm:wsl-restart);
+  /// "retry-goal" → "⟳ Retry" (fires owllm:retry-goal, re-runs the last goal).
+  /// Set on failure messages so users never type a terminal cmd / retype a goal.
+  action?: "wsl-restart" | "retry-goal";
   /// For a paired tool entry (kind "tool", role "🛠 <name>"): the matching tool
   /// RESULT text + its status. Set only by pairToolEntries at render time so a
   /// call+result render as ONE collapsed input|output line. Never persisted.
@@ -4683,6 +4684,22 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
           ⟳ Restart WSL networking
         </button>
       ) : null}
+      {m.action === "retry-goal" ? (
+        // One-click re-run for a failed second-agent / forwarded send — fires
+        // owllm:retry-goal (handled by the listener that re-dispatches the last
+        // goal) so the user recovers without retyping the whole request.
+        <button
+          data-ui="RetryGoalBtn"
+          onClick={() => window.dispatchEvent(new CustomEvent("owllm:retry-goal"))}
+          style={{
+            marginLeft: 28, marginTop: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700,
+            borderRadius: 6, border: "1px solid var(--accent)", background: "rgba(var(--accent-rgb),0.16)",
+            color: "var(--accent)", cursor: "pointer",
+          }}
+        >
+          ⟳ Retry
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -8290,6 +8307,10 @@ export function AgentsPage({
   // onSupSend is declared later in this component — reach it via a ref so the
   // notebook helpers above (defined early, next to the steer queue) can call it.
   const onSupSendRef = useRef<((text: string, images?: Attachment[]) => Promise<void>) | null>(null);
+  // Last real goal the user (or the notebook) sent, so the "⟳ Retry" button under
+  // a failed second-agent / forwarded send can re-run it without retyping. Only
+  // stamped for genuine goals — mid-run steers return before this is set.
+  const lastGoalRef = useRef<string>("");
   // Synchronous reentrancy guard for dispatchGoal. The busy/running flags it
   // already checks are React/store state set only AFTER an async preflight, so
   // two rapid dispatches both passed the guard and ran concurrently — two
@@ -8361,6 +8382,20 @@ export function AgentsPage({
     };
     window.addEventListener("owllm:wsl-restart", onRestart);
     return () => window.removeEventListener("owllm:wsl-restart", onRestart);
+  }, [setSupChat]);
+  // One-click retry — fired by the "⟳ Retry" button under a failed second-agent
+  // or forwarded send. Re-runs the last goal through onSupSend (which queues it
+  // as a steer if a run is somehow still active, so it's never dropped).
+  useEffect(() => {
+    const onRetryGoal = () => {
+      if (!isActiveRef.current) return; // the button lives in the visible tab
+      const goal = lastGoalRef.current.trim();
+      if (!goal) return;
+      setSupChat(prev => [...prev, { role: "system", color: "#9ad9ff", text: "⟳ Retrying the last goal…", ts: Date.now(), seq: nextSeq() }]);
+      void onSupSendRef.current?.(goal);
+    };
+    window.addEventListener("owllm:retry-goal", onRetryGoal);
+    return () => window.removeEventListener("owllm:retry-goal", onRetryGoal);
   }, [setSupChat]);
   // Live cold-load status. dispatch.ts fires owllm:llama:loading on
   // every retry attempt while llama-server is still mmap'ing the
@@ -9556,6 +9591,10 @@ export function AgentsPage({
       }
       return;
     }
+    // Remember this goal so a failed second-agent / forwarded send can offer a
+    // one-click "⟳ Retry" (re-runs it via onSupSend). Steers returned above, so
+    // only genuine goals land here.
+    if (text.trim()) lastGoalRef.current = text;
     // A chat to a TEAM must orchestrate, not answer solo. When the active
     // team has specialists, route the message through the real team-dispatch
     // flow (dispatchGoal): the read-only orchestrator emits @agent: lines,
@@ -11404,6 +11443,17 @@ export function AgentsPage({
             } catch (e: any) {
               specText = `(error: ${cleanAgentError(e)})`;
               streamLog(spec.name, "\n\n" + specText);
+              // Surface the failed second-agent / forwarded send in the main chat
+              // pane with a one-click "⟳ Retry" so it isn't buried as an inline
+              // (error:) line the user can only recover from by retyping the goal.
+              // Skip when the user cancelled (abort) — that's not a send failure.
+              if (!ctrl.signal.aborted) {
+                setSupChat(prev => [...prev, {
+                  role: "system", color: "#ff8c8c",
+                  text: `⚠ Send to @${displayLabel(spec.name)} failed: ${cleanAgentError(e)}`,
+                  action: "retry-goal", ts: Date.now(), seq: nextSeq(),
+                }]);
+              }
               break; // a thrown error isn't a verify failure — stop the loop
             }
             if (!isCoder) break;                         // only coders loop on the gate

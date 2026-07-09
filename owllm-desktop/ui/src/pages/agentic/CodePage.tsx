@@ -1733,9 +1733,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     if (busy) return;
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
-      // The second-agent pane shares this project/session, so clearing the
-      // conversation clears its transcript + draft too (keeping the panel open).
-      return { ...cur, messages: [], tasks: [], draft: "", secondaryMessages: [], secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
+      // Clear = RUN STATE only (tasks, streaming drafts, run timestamps).
+      // BOTH chat transcripts — primary and the second-agent pane — survive;
+      // wiping conversations is "Clear history"'s explicitly-confirmed job.
+      return { ...cur, tasks: [], draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
     });
   };
   const clearChatHistory = () => {
@@ -2215,7 +2216,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             fallbackLabel="(pick a model)"
           />
         </div>
-        <button onClick={clearWorkspace} disabled={busy || (messages.length === 0 && tasks.length === 0)} title="Clear the current run (messages and tasks) but keep the chat history" style={btn}>Clear</button>
+        <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
         <button onClick={clearChatHistory} disabled={chats.length === 0} title="Clear all chat history" style={btn}>Clear history</button>
       </div>
 

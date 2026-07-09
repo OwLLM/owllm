@@ -245,8 +245,6 @@ export default function BrainstormPanel(props: Props) {
     if (running) return;
     setConvHistory([]);
     setLines([]);
-    setDone(false);
-    setBriefText("");
     setProposedTeam(null);
     setTeamApplied(false);
     setError(null);

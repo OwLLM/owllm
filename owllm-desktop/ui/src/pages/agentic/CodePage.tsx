@@ -339,6 +339,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [accountsStatus, setAccountsStatus] = useState<AccountsStatusLite | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const secondaryAbortRef = useRef<AbortController | null>(null);
 
   // ---- Right column: Super User (rules + notebook) — user spec 2026-07-04 ----
   // Rules/notebook scope: reuse the AGENTIC project's id when this folder is
@@ -488,6 +489,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const secondaryOpen: boolean = stx.secondaryOpen ?? false;
   const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
   const secondaryDraft: string = stx.secondaryDraft ?? "";
+  const [secondaryBusy, setSecondaryBusy] = useState(false);
   // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
   const [termOpen, setTermOpen] = useState(false);
   // Terminal popup chrome: hide (— keeps the shell alive, just display:none)
@@ -496,6 +498,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [termPos, setTermPos] = useState<{ x: number; y: number } | null>(null);
   // Agent Browser popup (right-column 🌐 button) — viewer for the shared daemon.
   const [browserOpen, setBrowserOpen] = useState(false);
+  useEffect(() => () => { secondaryAbortRef.current?.abort(); }, []);
   const termBoxRef = useRef<HTMLDivElement>(null);
   const termDragRef = useRef<{ dx: number; dy: number } | null>(null);
   const onTermDragStart = (e: React.MouseEvent) => {
@@ -1195,6 +1198,99 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       return out;
     });
 
+  const onSecondaryDelta = (d: string) => {
+    setSecondaryMessages((msgs) => {
+      const out = msgs.slice();
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant" && !last.kind) {
+        if (last.placeholder) {
+          out[out.length - 1] = { ...last, content: d, placeholder: false };
+        } else {
+          out[out.length - 1] = { ...last, content: last.content + d };
+        }
+      } else {
+        out.push({ role: "assistant", content: d, ts: Date.now() });
+      }
+      return out;
+    });
+  };
+
+  const onSecondaryThought = (channel: string, _role: string, delta: string) => {
+    if (channel !== "thinking") return;
+    setSecondaryMessages((msgs) => {
+      const out = msgs.slice();
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant" && !last.kind) {
+        if (last.placeholder) {
+          out[out.length - 1] = { ...last, thinking: delta, placeholder: false };
+        } else {
+          out[out.length - 1] = { ...last, thinking: (last.thinking ?? "") + delta };
+        }
+      } else {
+        out.push({ role: "assistant", content: "", thinking: delta, ts: Date.now() });
+      }
+      return out;
+    });
+  };
+
+  const onSecondaryToolCall = (call: ToolCall) => {
+    const firstArg = Object.values(call.args)[0] ?? "";
+    setSecondaryMessages((msgs) => [
+      ...msgs,
+      {
+        role: "tool",
+        kind: call.name === "shell" ? "terminal" : "tool",
+        title: `${call.name}${firstArg ? `(${String(firstArg)})` : ""}`.slice(0, 100),
+        content: "",
+        status: "running",
+        ts: Date.now(),
+      },
+    ]);
+  };
+
+  const onSecondaryToolResult = (call: ToolCall, result: ToolExecResult) =>
+    setSecondaryMessages((msgs) => {
+      const out = msgs.slice();
+      const content =
+        result.ok && call.name === "edit_file"
+          ? formatEditDiff(call.args.old_string ?? "", call.args.new_string ?? "")
+          : result.output;
+      for (let i = out.length - 1; i >= 0; i--) {
+        if (out[i].role === "tool" && out[i].status === "running") {
+          out[i] = { ...out[i], status: result.ok ? "ok" : "error", content };
+          break;
+        }
+      }
+      return out;
+    });
+
+  const showSecondaryMemoryPack = (pack: TeamMemoryPack) => {
+    if (pack.total <= 0) return;
+    setSecondaryMessages((msgs) => {
+      const card: Msg = {
+        role: "tool",
+        kind: "tool",
+        title: `memory_context(${memoryLabel(pack)})`,
+        content: pack.block,
+        status: "ok",
+        ts: Date.now(),
+      };
+      const out = msgs.slice();
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant" && last.placeholder) out.splice(out.length - 1, 0, card);
+      else out.push(card);
+      return out;
+    });
+  };
+
+  const enrichSecondaryCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
+    const scope = memoryScope();
+    const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
+    if (!scope || !user.trim()) return { text: user, pack: empty };
+    const pack = await retrieveScopedTeamMemoryPack(scope, user, 8, false);
+    return { text: enrichInstructionWithMemory(pack.block, user), pack };
+  };
+
   const memoryScope = () => ruleScopeRef.current.id || projectRoot || workspace || "";
 
   const memoryLabel = (pack: TeamMemoryPack): string =>
@@ -1278,6 +1374,37 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     return streamChatCompletion(0, modelId, provider, sys, enrichedUser, 0.3, signal, dDelta, workspace, history, true, dThought, chatOnly ? roTools : undefined, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
   };
 
+  // Second-agent turn: same backend as the primary chat, but streams into the
+  // secondary transcript and uses its own abort controller.
+  const runSecondaryTurn = async (
+    system: string,
+    user: string,
+    history: HistoryItem[],
+    signal: AbortSignal,
+    opts?: { withEvents?: boolean },
+  ): Promise<string> => {
+    const provider = providerFor(modelId, availableModels);
+    const isLocal = provider === "local" || provider === "tuned";
+    await refreshBrowserState();
+    const browserLine = getBrowserStateLine();
+    const sys = system + formatDirectivesBlock(directivesRef.current)
+      + (browserLine ? `\n\n${browserLine}` : "");
+    const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(user);
+    showSecondaryMemoryPack(pack);
+    if (isLocal) {
+      const port = await ensureServer(modelId);
+      if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
+      return streamLocalChat({
+        port, modelId, systemPrompt: sys,
+        userContent: enrichedUser, temperature: 0.3,
+        signal, onDelta: onSecondaryDelta, onThought: onSecondaryThought, projectCwd: workspace,
+        history, events: opts?.withEvents ? { onToolCall: onSecondaryToolCall, onToolResult: onSecondaryToolResult } : undefined,
+        getSteer: () => "",
+      });
+    }
+    return streamChatCompletion(0, modelId, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, undefined, undefined, undefined, undefined, undefined, () => "");
+  };
+
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
   // bypassing the composer draft. Composer sends pass nothing.
   const send = async (textOverride?: string) => {
@@ -1359,6 +1486,48 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // Ref-dispatch so follow-ups (steers / auto-feed / notebook) always hit the
   // CURRENT closure — fresh messages history, fresh busy state.
   sendRef.current = send;
+
+  // Send from the second-agent pane. Runs independently of the primary chat,
+  // shares the workspace/model, and keeps its own transcript + abort controller.
+  const sendSecondary = async () => {
+    const text = secondaryDraft.trim();
+    if (!text) return;
+    if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { setStatus("No model selected — pick one above."); return; }
+    setSecondaryDraft("");
+    setSecondaryBusy(true);
+    const ctrl = new AbortController();
+    secondaryAbortRef.current = ctrl;
+    const history: HistoryItem[] = secondaryMessages
+      .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+    setSecondaryMessages((m) => [...m, { role: "user", content: text, ts: Date.now() }]);
+    setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
+    let aborted = false;
+    try {
+      setStatus(`Second agent working in ${workspace}`);
+      await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
+    } catch (e) {
+      const err = e as { name?: string; message?: string };
+      aborted = err.name === "AbortError";
+      if (!aborted) {
+        setSecondaryMessages((msgs) => {
+          const out = msgs.slice();
+          const last = out[out.length - 1];
+          if (last && last.role === "assistant" && last.placeholder) out.pop();
+          return [...out, { role: "assistant", content: `⚠ ${err.message ?? e}`, ts: Date.now() }];
+        });
+      }
+    } finally {
+      setSecondaryMessages((msgs) => {
+        const last = msgs[msgs.length - 1];
+        if (last && last.role === "assistant" && last.placeholder) return msgs.slice(0, -1);
+        return msgs;
+      });
+      setSecondaryBusy(false);
+      secondaryAbortRef.current = null;
+    }
+  };
 
   // Notebook → coder: idle = dispatch now; busy = mid-run steer (drained
   // between tool calls on local models, at turn end otherwise).
@@ -2147,9 +2316,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           })
         )}
         </div>
-        {/* Second-agent chat pane — layout scaffolding only. Mirrors the primary
-            pane's chrome; hosts a parallel/hand-off agent's stream in a later
-            Notebook step. Rendered only when the user opens it. */}
+        {/* Second-agent chat pane — parallel/hand-off coder using the same
+            workspace and model as the primary chat, with its own transcript. */}
         {secondaryOpen && (
           <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
@@ -2159,7 +2327,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             </div>
             {secondaryMessages.length === 0 ? (
               <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
-                Second agent pane — will host a parallel or hand-off agent's stream. Not yet wired.
+                Second agent — a parallel coder using the same workspace and model as the primary chat.
               </div>
             ) : (
               secondaryMessages.map((m, i) => {
@@ -2174,7 +2342,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                     sender={isUser ? "You" : "Coder 2"}
                     accent={isUser ? "#7aa2ff" : "#c7a8ff"}
                     isUser={isUser}
-                    isStreaming={false}
+                    isStreaming={secondaryBusy && i === secondaryMessages.length - 1 && !isUser}
                     content={m.content}
                     thinking={m.thinking}
                     ts={m.ts}
@@ -2182,35 +2350,32 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                 );
               })
             )}
-            {/* Compact composer. Scaffolding only — a later Notebook step will wire the actual second-agent send. */}
+            {/* Composer: sends to the same local/cloud backend as the primary chat,
+                keeping its own transcript and abort controller. */}
             <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
               <textarea
                 value={secondaryDraft}
                 onChange={(e) => setSecondaryDraft(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    const text = secondaryDraft.trim();
-                    if (!text) return;
-                    setSecondaryMessages((m) => [...(m ?? []), { role: "user", content: text, ts: Date.now() }]);
-                    setSecondaryDraft("");
-                  }
-                }}
-                placeholder="Message the second agent… (scaffolding — not yet wired)"
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
+                placeholder="Message the second agent… (same workspace/model as primary)"
                 rows={2}
-                style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
+                disabled={secondaryBusy}
+                style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
               />
-              <button
-                onClick={() => {
-                  const text = secondaryDraft.trim();
-                  if (!text) return;
-                  setSecondaryMessages((m) => [...(m ?? []), { role: "user", content: text, ts: Date.now() }]);
-                  setSecondaryDraft("");
-                }}
-                disabled={!secondaryDraft.trim()}
-                title="Append to the second-agent transcript (no agent runs yet)"
-                style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
-              >Send</button>
+              {secondaryBusy ? (
+                <button
+                  onClick={() => { secondaryAbortRef.current?.abort(); }}
+                  title="Stop the second agent"
+                  style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
+                >Stop</button>
+              ) : (
+                <button
+                  onClick={() => { void sendSecondary(); }}
+                  disabled={!secondaryDraft.trim()}
+                  title="Send to the second agent"
+                  style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
+                >Send</button>
+              )}
             </div>
           </div>
         )}

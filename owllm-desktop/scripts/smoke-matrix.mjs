@@ -67,7 +67,7 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/dispatch.ts", /deepseek/, "shared dispatch routes OpenAI-compatible providers (v0.7.89)"],
   ["ui/src/pages/agentic/dispatch.ts", /streamOpenAiApiWithTools\(\{[\s\S]*allowedTools: args\.allowedTools[\s\S]*apiUrl: args\.url/, "OpenAI-compatible API providers use the host tool loop, not plain chat (v0.8.20)"],
   ["ui/src/pages/agentic/AgentsPage.tsx", /streamOpenAiApiWithTools\(\{[\s\S]*allowedTools: args\.allowedTools[\s\S]*apiUrl: args\.url/, "Agentic teams give OpenAI-compatible API providers browser/local tools (v0.8.20)"],
-  ["ui/src/pages/agentic/RunNotebook.tsx", /^(?![\s\S]*digestInput)[\s\S]*Working notes[\s\S]*Digest notes/s, "Notebook has one working-notes input; no duplicate digest textbox (v0.8.22)"],
+  ["ui/src/pages/agentic/RunNotebook.tsx", /^(?![\s\S]*digestInput)(?=[\s\S]*Working notes)(?=[\s\S]*Plan board)(?=[\s\S]*Save plan \+ clear notes)(?=[\s\S]*Do NOT create tiny painful micro-steps)[\s\S]*$/s, "Notebook has one notes input, Kanban plan, clears consumed notes, avoids micro-steps (v0.8.23)"],
   ["ui/src/pages/agentic/localTools.ts", /MEMORY_INVOKE_TIMEOUT_MS/, "memory context is bounded and cannot stall agent startup for minutes (v0.8.20)"],
   ["ui/src/pages/agentic/localTools.ts", /NO ToolSearch/i, "codex chased Claude-only ToolSearch → 'Found 0 tools' (v0.7.74)"],
   ["resources/agents/roles/browser.yaml", /browser_snapshot/, "Browser role allowlist keys the jail exception (v0.7.69)"],

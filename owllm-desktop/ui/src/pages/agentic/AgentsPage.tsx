@@ -1077,7 +1077,7 @@ function FlowHeader({
         data-ui="FlowNotebookBtn"
         className="ghost-btn"
         onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-run-notebook"))}
-        title="Notebook — write working notes while agents run, digest them into a plan and feedable next steps, then feed steps to the team or auto-feed them run after run."
+        title="Notebook — write working notes while agents run, digest them into a Kanban plan board and larger feedable steps, then feed steps to the team or auto-feed them run after run."
         style={{ height:28, padding:"0 8px", fontSize:11 }}
       >📓 Notebook</button>
       <button

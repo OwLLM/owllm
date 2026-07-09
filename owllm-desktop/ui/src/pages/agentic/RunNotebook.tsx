@@ -467,6 +467,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   {digestLogOpen ? "Hide log" : "Show log"}
                 </button>
               )}
+              {nb.text.trim() && (
+                <button className="ghost-btn" onClick={() => update({ text: "" })} title="Clear working notes and start a fresh note" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>
+                  Clear notes
+                </button>
+              )}
               <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--fg-muted)" }}>
                 {digestBusy ? "reading notebook..." : "Ctrl+Enter digests"}
               </span>
@@ -496,9 +501,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   <div style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)" }}>{proposedPlan}</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
-                      onClick={() => { update({ plan: proposedPlan }); setProposedPlan(""); }}
+                      onClick={() => { update({ plan: normalizeKanbanPlan(proposedPlan), text: "" }); setProposedPlan(""); }}
                       style={{ height: 26, padding: "0 12px", border: "1px solid rgba(154,217,255,0.45)", borderRadius: 6, background: "rgba(14,28,40,0.7)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                    >Apply plan</button>
+                    >Save plan + clear notes</button>
                     <button className="ghost-btn" onClick={() => setProposedPlan("")} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
                   </div>
                 </div>
@@ -520,9 +525,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
-                      onClick={() => { addSteps(proposed); setProposed([]); }}
+                      onClick={() => { addSteps(proposed); setProposed([]); if (!proposedPlan) update({ text: "" }); }}
                       style={{ height: 28, padding: "0 12px", border: "none", borderRadius: 7, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                    >Add all steps</button>
+                    >Add all + clear notes</button>
                     <button className="ghost-btn" onClick={() => setProposed([])} title="Discard proposed steps" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>Discard steps</button>
                   </div>
                 </div>
@@ -530,20 +535,34 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             </div>
           )}
 
-          {/* Plan */}
+          {/* Kanban plan */}
           <div style={card}>
             <div style={sectionHeader}>
               <span>📋</span>
-              <span>Plan</span>
-              <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>living document</span>
+              <span>Plan board</span>
+              <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>Kanban</span>
             </div>
-            <textarea
-              ref={planRef}
-              value={nb.plan}
-              onChange={(e) => update({ plan: e.target.value })}
-              placeholder="The implementation plan — 🪄 Digest drafts it from your brainstorm (objective, approach, milestones); edit it freely."
-              style={textareaBase}
-            />
+            <div style={{ display: "grid", gridTemplateColumns: inline ? "1fr" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+              {KANBAN_COLUMNS.map((col) => {
+                const ref = col.key === "now" ? nowPlanRef : col.key === "next" ? nextPlanRef : laterPlanRef;
+                return (
+                  <div key={col.key} style={{ display: "flex", flexDirection: "column", gap: 7, minWidth: 0, background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8, padding: 9 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ width: 7, height: 7, borderRadius: 999, background: col.color, flexShrink: 0 }} />
+                      <span style={{ fontSize: 11, fontWeight: 800, color: "var(--fg-strong)", textTransform: "uppercase" }}>{col.label}</span>
+                      <span style={{ marginLeft: "auto", fontSize: 10, color: "var(--fg-muted)" }}>{col.hint}</span>
+                    </div>
+                    <textarea
+                      ref={ref}
+                      value={kanbanPlan[col.key]}
+                      onChange={(e) => updateKanbanLane(col.key, e.target.value)}
+                      placeholder={col.key === "now" ? "- Ship the coherent first batch..." : col.key === "next" ? "- Follow-up batch..." : "- Optional or parked work..."}
+                      style={{ ...textareaBase, minHeight: 92, fontSize: 12, background: "var(--bg-input)" }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
           </div>
 
           {/* Next steps */}

@@ -164,7 +164,7 @@ export default function PublishCards({
           <div style={{ display: "flex", gap: 6, width: "100%" }}>
             {showCommit && (
               <button
-                onClick={() => setCommitOpen(true)}
+                onClick={() => { setCommitMsg(commitMsg.trim() || "Checkpoint from Publisher card"); setCommitOpen(true); }}
                 disabled={disabled || loading}
                 title="Commit all changes in this workspace"
                 style={{ ...chipBtn, flex: 1 }}

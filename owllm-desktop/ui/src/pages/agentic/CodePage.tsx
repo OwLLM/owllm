@@ -1466,7 +1466,23 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     setLlamaLoading(null);
     setBusy(false);
   };
-  const clear = () => { if (!busy) { setMessages([]); setTasks([]); setStatus(`Workspace: ${workspace || "(none)"}`); } };
+  const clearWorkspace = () => {
+    if (busy) return;
+    chatRuntime.setPayload(SID, (prev) => {
+      const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
+      return { ...cur, messages: [], tasks: [], draft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
+    });
+  };
+  const clearChatHistory = () => {
+    if (chats.length === 0) return;
+    if (window.confirm("Clear all chat history? This cannot be undone.")) {
+      setChats([]);
+      setChatId("");
+      setChatDraft("");
+      setChatImages([]);
+      setShowHistory(false);
+    }
+  };
 
   // Clicking a file in the tree drops an @-reference into the composer so the
   // user can point the agent at it ("fix the bug in @src/foo.ts").
@@ -1934,7 +1950,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             fallbackLabel="(pick a model)"
           />
         </div>
-        <button onClick={clear} disabled={busy || (messages.length === 0 && tasks.length === 0)} style={btn}>Clear</button>
+        <button onClick={clearWorkspace} disabled={busy || (messages.length === 0 && tasks.length === 0)} title="Clear the current run (messages and tasks) but keep the chat history" style={btn}>Clear</button>
+        <button onClick={clearChatHistory} disabled={chats.length === 0} title="Clear all chat history" style={btn}>Clear history</button>
       </div>
 
       {/* Phase 3: Kanban plan/act board (only while a plan is active) */}

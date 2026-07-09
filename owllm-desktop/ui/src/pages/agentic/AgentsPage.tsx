@@ -68,6 +68,9 @@ import {
   runCodexCliStream,
   ensureCliWarm,
   clearCliWarm,
+  withCliAuthRetry,
+  setCliAuthWaitHandler,
+  type AuthWaitInfo,
   parseDispatchesDetailed,
   unresolvedCorrectionMessage,
   resolveAutoModel,
@@ -989,7 +992,14 @@ function FlowHeader({
       {/* The title IS the mode switch — Orchestrated Workflow ⟷ Solo-Loop. The
           active mode is bright gold + glow; the other stays visible but shadowed.
           This replaces the old 👥 Team / ⚡ Solo button. */}
-      <div data-ui="FlowModeSwitch" style={{ display:"flex", alignItems:"center", gap:2, height:30, fontFamily:"Segoe UI", paddingRight:6 }}>
+      <div data-ui="FlowModeSwitch" style={{
+        display:"flex", alignItems:"center", gap:0, height:36,
+        padding:4, borderRadius:12,
+        background:"linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03))",
+        border:"1px solid rgba(255,255,255,0.12)",
+        boxShadow:"0 2px 10px rgba(0,0,0,0.28), inset 0 1px 0 rgba(255,255,255,0.06)",
+        fontFamily:"Segoe UI", fontSize:13, fontWeight:800,
+      }}>
         {[
           { label:"Orchestrated Workflow", active:!soloMode, target:false,
             title:"Full agentic team — the orchestrator dispatches specialists" },
@@ -997,7 +1007,14 @@ function FlowHeader({
             title:"Solo-Loop — one coder does the whole job, a single critic check, rule-based publish" },
         ].map((m, i) => (
           <React.Fragment key={m.label}>
-            {i === 1 && <span style={{ color:"#2f3850", fontSize:16, fontWeight:700, padding:"0 2px", userSelect:"none" }}>⟷</span>}
+            {i === 1 && (
+              <span style={{
+                color:"#ffd97a",
+                fontSize:18, fontWeight:700, padding:"0 5px", userSelect:"none",
+                textShadow:"0 0 16px rgba(255,217,122,0.55)",
+                opacity: 0.95,
+              }}>⟷</span>
+            )}
             <button
               data-ui={m.target ? "FlowModeSolo" : "FlowModeOrch"}
               onClick={() => { if (!!soloMode !== m.target) onToggleSolo?.(); }}
@@ -1005,13 +1022,13 @@ function FlowHeader({
               title={m.title}
               style={{
                 appearance:"none", border:0, cursor:"pointer", fontFamily:"inherit",
-                fontSize:14.5, fontWeight:800, letterSpacing:0.2, lineHeight:1, whiteSpace:"nowrap",
-                padding:"6px 11px", borderRadius:8,
-                transition:"color .25s, text-shadow .25s, background .25s, box-shadow .25s",
-                color: m.active ? "#ffd97a" : "#39435a",
-                textShadow: m.active ? "0 0 18px rgba(255,217,122,0.5)" : "0 1px 0 rgba(0,0,0,0.5)",
-                background: m.active ? "rgba(255,217,122,0.15)" : "transparent",
-                boxShadow: m.active ? "inset 0 0 0 1px rgba(255,217,122,0.42)" : "none",
+                fontSize:13, fontWeight:800, letterSpacing:0.3, lineHeight:1, whiteSpace:"nowrap",
+                padding:"7px 13px", borderRadius:9,
+                transition:"color .2s, text-shadow .2s, background .2s, box-shadow .2s",
+                color: m.active ? "#ffd97a" : "#6b758a",
+                textShadow: m.active ? "0 0 18px rgba(255,217,122,0.6)" : "none",
+                background: m.active ? "rgba(255,217,122,0.20)" : "transparent",
+                boxShadow: m.active ? "inset 0 0 0 1px rgba(255,217,122,0.55), 0 0 16px rgba(255,217,122,0.12)" : "none",
               }}
             >{m.label}</button>
           </React.Fragment>
@@ -1739,30 +1756,61 @@ type PublisherCfg = {
   signThumbprint: string; signSubject: string; signTsa: string;
 };
 
+const defaultPublisherCfg = (): PublisherCfg => ({
+  targetBranch: "main",
+  commitScope: "",
+  commitMsg: "",
+  signThumbprint: "",
+  signSubject: "",
+  signTsa: "",
+});
+
+function loadPublisherCfg(storageKey: string): PublisherCfg {
+  const base = defaultPublisherCfg();
+  try { return { ...base, ...JSON.parse(localStorage.getItem(storageKey) ?? "{}") }; }
+  catch { return base; }
+}
+
 function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
   const [checks, setChecks] = useState<PublisherReadyCheck[] | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [log, setLog] = useState("");
   const [setupOpen, setSetupOpen] = useState(false);
   const storageKey = `publisherCard:${cwd ?? "none"}`;
-  const [cfg, setCfg] = useState<PublisherCfg>(() => {
-    const base: PublisherCfg = { targetBranch: "main", commitScope: "", commitMsg: "", signThumbprint: "", signSubject: "", signTsa: "" };
-    try { return { ...base, ...JSON.parse(localStorage.getItem(storageKey) ?? "{}") }; }
-    catch { return base; }
-  });
+  const cwdRef = useRef(cwd);
+  const refreshSeq = useRef(0);
+  const [cfg, setCfg] = useState<PublisherCfg>(() => loadPublisherCfg(storageKey));
   const saveCfg = (next: PublisherCfg) => {
     setCfg(next);
     try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* quota — non-fatal */ }
   };
+  useEffect(() => {
+    cwdRef.current = cwd;
+    refreshSeq.current += 1;
+    setChecks(null);
+    setLog("");
+    setCfg(loadPublisherCfg(storageKey));
+  }, [cwd, storageKey]);
   const refresh = useCallback(async () => {
-    if (!cwd) {
-      setChecks([{ id: "repo", label: "Project folder", ok: false, detail: "no project open" }]);
+    const checkCwd = cwd;
+    const seq = ++refreshSeq.current;
+    if (!checkCwd) {
+      if (cwdRef.current === checkCwd && seq === refreshSeq.current) {
+        setChecks([{ id: "repo", label: "Project folder", ok: false, detail: "no project open" }]);
+      }
       return;
     }
     setBusy("check");
-    try { setChecks(await invoke<PublisherReadyCheck[]>("publish_readiness", { repoDir: cwd })); }
-    catch (e) { setChecks([{ id: "error", label: "Readiness check", ok: false, detail: String(e) }]); }
-    finally { setBusy(null); }
+    try {
+      const next = await invoke<PublisherReadyCheck[]>("publish_readiness", { repoDir: checkCwd });
+      if (cwdRef.current === checkCwd && seq === refreshSeq.current) setChecks(next);
+    } catch (e) {
+      if (cwdRef.current === checkCwd && seq === refreshSeq.current) {
+        setChecks([{ id: "error", label: "Readiness check", ok: false, detail: String(e) }]);
+      }
+    } finally {
+      if (cwdRef.current === checkCwd && seq === refreshSeq.current) setBusy(null);
+    }
   }, [cwd]);
   useEffect(() => { void refresh(); }, [refresh]);
 
@@ -7152,90 +7200,6 @@ function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem[]): st
 
 // ── Claude CLI auth-retry (mid-run 401 resilience) ─────────────────────────
 // The Claude Code CLI's OAuth access token has a TTL. A long agentic run can
-// outlive it, so a specialist's CLI call 401s ("Invalid authentication
-// credentials") even though sign-in is fine — and ensureCliWarm only refreshes
-// ONCE per session, so nothing recovers. On a 401 we: force a fresh token
-// refresh (clearCliWarm + ensureCliWarm), PAUSE the team, and retry on a
-// backoff (10s → 30s → 2min). After the schedule is exhausted the error
-// propagates (and the Critical-Thinker-style advisory handling still applies).
-const CLI_AUTH_BACKOFFS_MS = [10_000, 30_000, 120_000]; // 10s, 30s, 2min
-
-function isCliAuthError(msg: string): boolean {
-  return /\b401\b|invalid authentication|failed to authenticate|authentication_error|not logged in|unauthorized/i.test(msg);
-}
-
-// Transient NETWORK failures the subscription CLI surfaces ("Failed to fetch"
-// from its own internal API call, DNS/connection blips) — NOT auth. These clear
-// on a quick retry, so the subscription path now retries them too (the API path
-// already did). Without this, ONE network hiccup mid-run killed the whole team
-// with a raw "failed to fetch" — the exact recurring "works and doesn't work".
-const CLI_NET_BACKOFFS_MS = [1500, 4000, 8000]; // fast — a blip clears in seconds
-function isTransientNetError(msg: string): boolean {
-  // Network blips AND transient SERVER-side errors that clear on a retry: an
-  // Anthropic 529 "Overloaded", 503/502 service-unavailable, and 429 rate limits
-  // are all "try again in a moment" — not a real failure of the agent's work.
-  return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
-}
-
-/// Sleep that rejects immediately if the run is cancelled mid-wait.
-function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    if (signal.aborted) { reject(new DOMException("aborted", "AbortError")); return; }
-    const onAbort = () => { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); };
-    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
-    signal.addEventListener("abort", onAbort, { once: true });
-  });
-}
-
-/// Set by the AgentsPage component so the retry can surface a "team paused /
-/// retrying" notice (and a "recovered" notice) in the user-facing thread.
-/// Module-level to avoid threading a callback through every call site.
-type AuthWaitInfo =
-  | { kind: "wait"; attempt: number; total: number; waitMs: number; backend: string; reason: "auth" | "network" }
-  | { kind: "recovered"; backend: string };
-let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;
-
-/// Run a subscription-CLI call (Claude OR Codex), retrying on auth (401)
-/// failures with backoff. Forces a token refresh before each retry. Non-auth
-/// errors are NOT retried here (they bubble straight up). Honors the run's
-/// AbortSignal during the wait. The token-expiry failure mode is identical for
-/// both CLIs, so this is deliberately backend-agnostic.
-async function withCliAuthRetry<T>(
-  backend: "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli",
-  signal: AbortSignal,
-  fn: () => Promise<T>,
-  /// The cwd the CLI runs in. When the project is isolated, the re-warm also
-  /// re-mirrors the refreshed Windows creds INTO the sandbox (the agentic-team
-  /// 401 fix) — otherwise the host re-warm never reaches the in-distro copy.
-  cwd?: string | null,
-): Promise<T> {
-  for (let attempt = 0; ; attempt++) {
-    try {
-      const result = await fn();
-      if (attempt > 0) _authWaitHandler?.({ kind: "recovered", backend }); // we recovered after a 401
-      return result;
-    } catch (e: any) {
-      const msg = e?.message ?? String(e);
-      if (signal.aborted) throw e;
-      // Retry on auth (token expired) OR a transient network blip. Different
-      // schedules: auth refresh is slow (10s/30s/2min); a network blip clears
-      // fast (1.5s/4s/8s).
-      const isAuth = isCliAuthError(msg);
-      const isNet = !isAuth && isTransientNetError(msg);
-      const schedule = isAuth ? CLI_AUTH_BACKOFFS_MS : CLI_NET_BACKOFFS_MS;
-      if ((!isAuth && !isNet) || attempt >= schedule.length) throw e;
-      const waitMs = schedule[attempt];
-      // Auth → the one-time warm went stale; drop it + re-warm so the CLI
-      // refreshes its OAuth token before we retry. Network → just wait + retry;
-      // the CLI's own API call hit a transient blip that clears on its own.
-      if (isAuth) { try { clearCliWarm(backend); await ensureCliWarm(backend, cwd); } catch { /* retry regardless */ } }
-      _authWaitHandler?.({ kind: "wait", attempt: attempt + 1, total: schedule.length, waitMs, backend, reason: isAuth ? "auth" : "network" });
-      try { await sleepAbortable(waitMs, signal); }
-      catch { throw e; } // run cancelled during the wait → surface original error
-    }
-  }
-}
-
 async function streamAnthropic(
   modelId: string,
   route: CloudRoute,
@@ -8050,6 +8014,8 @@ export function AgentsPage({
   });
 
   const [locationOverride, setLocationOverride] = useState<string>("");
+  const [locationOverrideProjectId, setLocationOverrideProjectId] = useState<string>("");
+  const [locationOverrideDirty, setLocationOverrideDirty] = useState<boolean>(false);
   // Whether the user has isolation switched on — drives the honest
   // isolation badge: host location + isolation requested = loud red
   // "HOST — NOT isolated" (P1-1), because the run would NOT be sandboxed.
@@ -8586,11 +8552,16 @@ export function AgentsPage({
     if (!selectedProjectId) return;
     try { localStorage.setItem(soloKey(selectedProjectId), v ? "1" : "0"); } catch { /* ignore */ }
   };
+  const setProjectLocationDraft = useCallback((value: string, projectId = selectedProjectId, dirty = false) => {
+    setLocationOverrideProjectId(projectId);
+    setLocationOverride(value);
+    setLocationOverrideDirty(dirty);
+  }, [selectedProjectId]);
 
   async function onBrowseProjectFolder() {
     try {
       const picked = await invoke<string | null>("pick_folder", { title: "Pick a project folder" });
-      if (picked) setLocationOverride(picked);
+      if (picked) setProjectLocationDraft(picked, selectedProjectId, true);
     } catch (e) {
       console.error("pick_folder failed", e);
     }
@@ -8622,7 +8593,7 @@ export function AgentsPage({
     // returned row if list_projects raced.
     const target = rows.find(p => p.id === row.id) ?? row;
     setSelectedProjectId(target.id);
-    setLocationOverride(target.location);
+    setProjectLocationDraft(target.location, target.id);
     setPickedTeamId(null);
     setTrustWritesOverride(null);
   };
@@ -8721,12 +8692,12 @@ export function AgentsPage({
     return () => window.removeEventListener("owllm:open-browser-panel", onOpen as EventListener);
   }, []);
 
-  // Register the subscription-CLI auth-retry notifier so a mid-run 401 (Claude
-  // OR Codex) surfaces a visible "team paused / retrying" notice in the user
-  // thread while the token refreshes and the call backs off (10s → 30s → 2min).
-  // See withCliAuthRetry.
+  // Register the subscription-CLI auth-retry notifier so a mid-run 401 (Claude,
+  // Codex, Gemini, or Kimi) surfaces a visible "team paused / retrying" notice
+  // in the user thread while the token refreshes and the call backs off
+  // (10s → 30s → 2min). See withCliAuthRetry.
   useEffect(() => {
-    _authWaitHandler = (info) => {
+    setCliAuthWaitHandler((info: AuthWaitInfo) => {
       const cli = info.backend === "codex_cli" ? "Codex"
         : info.backend === "gemini_cli" ? "Gemini"
         : info.backend === "kimi_cli" ? "Kimi"
@@ -8750,8 +8721,8 @@ export function AgentsPage({
         text: `⏸ ${cli} ${why} — ${action} in ${human} (attempt ${info.attempt}/${info.total}). The team is paused, not stopped.`,
         ts: Date.now(), seq: nextSeq(),
       }]);
-    };
-    return () => { _authWaitHandler = null; };
+    });
+    return () => { setCliAuthWaitHandler(null); };
   }, [setSupChat]);
 
   // Re-fetch team templates + role defs and refresh derived state. Called
@@ -8816,7 +8787,7 @@ export function AgentsPage({
         try { stored = localStorage.getItem(pageProjKey); } catch { /* ignore */ }
         const pick = rawProjects.find(p => p.id === stored) ?? rawProjects[0];
         setSelectedProjectId(pick.id);
-        setLocationOverride(pick.location || "");
+        setProjectLocationDraft(pick.location || "", pick.id);
         setTrustWritesOverride(null);
       }
       setTeams(rawTeams.map(toTeam).sort((a, b) =>
@@ -8878,6 +8849,10 @@ export function AgentsPage({
   }, []);
 
   const selectedProject = projects.find(p => p.id === selectedProjectId) ?? null;
+  const locationDraft =
+    selectedProject && locationOverrideProjectId === selectedProject.id
+      ? locationOverride
+      : (selectedProject?.location || "");
 
   // Multi-tab bookkeeping: remember this tab's project + surface the tab
   // title (project name) and busy dot up to the AgentsPages shell.
@@ -8901,11 +8876,15 @@ export function AgentsPage({
   // is on and a distro exists; an explicit \\wsl.localhost\ path is used as-is;
   // otherwise the raw host path. So a user who picked C:\repo gets isolated
   // agents on C:\repo without ever copying it into the sandbox.
-  const rawLocation = (locationOverride || selectedProject?.location || "").trim();
+  const rawLocation = locationDraft.trim();
   const runCwd =
     isolationRequested && wslDistro && !isWslPath(rawLocation)
       ? (winToWslMountUnc(rawLocation, wslDistro) ?? rawLocation)
       : rawLocation;
+  // Publisher controls host git/release operations. Keep it tied to the
+  // selected project's actual folder draft, not the WSL-isolated execution cwd,
+  // so switching projects cannot show an old sandbox/UNC path on the release UI.
+  const publisherCwd = rawLocation || null;
 
   // Load this project's full-access state (host-side, keyed by cwd) whenever the
   // effective cwd changes. OFF unless the user explicitly granted it.
@@ -8971,7 +8950,7 @@ export function AgentsPage({
   // Sync editable fields when project selection changes.
   useEffect(() => {
     if (selectedProject) {
-      setLocationOverride(selectedProject.location || "");
+      setProjectLocationDraft(selectedProject.location || "", selectedProject.id);
       setTrustWritesOverride(null);
       setTeamModelOverride(null);
       // Restore THIS project's saved per-agent model picks. Primary source is
@@ -9263,12 +9242,15 @@ export function AgentsPage({
   // Persist location edits the same way.
   useEffect(() => {
     if (!selectedProject) return;
+    if (!locationOverrideDirty) return;
+    if (locationOverrideProjectId !== selectedProject.id) return;
     if (locationOverride === selectedProject.location) return;
     const id = window.setTimeout(async () => {
       try {
         await invoke("update_project", {
           input: { id: selectedProject.id, location: locationOverride },
         });
+        setLocationOverrideDirty(false);
         await reloadProjects();
       } catch (e) {
         console.error("persist location failed", e);
@@ -9276,7 +9258,7 @@ export function AgentsPage({
     }, 700);
     return () => window.clearTimeout(id);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [locationOverride, selectedProject?.id]);
+  }, [locationOverride, locationOverrideProjectId, locationOverrideDirty, selectedProject?.id, selectedProject?.location]);
 
   // Persist the Super User chat (chat_json) + per-agent transcripts
   // (agent_logs_json). Ownership moved from two component effects into the
@@ -10429,7 +10411,7 @@ export function AgentsPage({
     if (projectCwd && !isWslPath(projectCwd)) {
       const reachable = await invoke<boolean>("path_is_dir", { path: projectCwd }).catch(() => false);
       if (!reachable) {
-        const hostLoc = (locationOverride || selectedProject?.location || "").trim();
+        const hostLoc = locationDraft.trim();
         const hostOk = !!hostLoc && hostLoc !== projectCwd
           && await invoke<boolean>("path_is_dir", { path: hostLoc }).catch(() => false);
         if (hostOk) {
@@ -12388,9 +12370,9 @@ export function AgentsPage({
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
         onCreated={onProjectCreated}
         project={selectedProject}
-        location={locationOverride}
+        location={locationDraft}
         effectiveCwd={runCwd}
-        onChangeLocation={setLocationOverride}
+        onChangeLocation={(value) => setProjectLocationDraft(value, selectedProjectId, true)}
         trustWrites={trustWrites}
         onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
         fullAccess={fullAccess}
@@ -12411,7 +12393,13 @@ export function AgentsPage({
             <select
               data-ui="ProjectCombo"
               value={selectedProjectId}
-              onChange={e => { setSelectedProjectId(e.target.value); setPickedTeamId(null); }}
+              onChange={e => {
+                const nextId = e.target.value;
+                const nextProject = projects.find(p => p.id === nextId) ?? null;
+                setSelectedProjectId(nextId);
+                setProjectLocationDraft(nextProject?.location || "", nextId);
+                setPickedTeamId(null);
+              }}
               title="Switch project"
               style={{ height:38, maxWidth:190, padding:"0 10px", borderRadius:10, border:"none", background:"var(--bg-input)", color:"var(--fg-strong)", fontSize:13 }}
             >
@@ -12734,7 +12722,7 @@ export function AgentsPage({
                 providerFor={providerFor}
                 agentTiming={agentTiming}
                 perAgentSkills={perAgentSkills}
-                projectCwd={runCwd || null}
+                projectCwd={publisherCwd}
               />
             )}
             {/* (The bottom-left canvas voice overlay was removed — the

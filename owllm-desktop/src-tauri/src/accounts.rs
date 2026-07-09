@@ -9,6 +9,7 @@
 // its conventional location, the card flips to Connected.
 
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
@@ -308,6 +309,9 @@ pub struct AccountUsage {
     /// App-recorded traffic for this provider — present for EVERY model
     /// (local GGUF, API keys, CLIs), independent of quota availability.
     pub stats: Vec<UsageStat>,
+    /// Provider-reported account balance (e.g. "¥49.59") when available.
+    /// Independent of quota windows; rendered as plain text by the UI.
+    pub balance: Option<String>,
 }
 
 /// One aggregate row of the app's own usage tally ("Session (5h)" /
@@ -435,16 +439,104 @@ pub async fn account_usage(provider: String) -> AccountUsage {
             .await
             .unwrap_or_default()
     };
-    let unavailable = |note: &str| AccountUsage {
+    let empty = || AccountUsage {
         available: false,
         provider: provider.clone(),
-        note: note.to_string(),
+        note: String::new(),
         windows: Vec::new(),
         stats: stats.clone(),
+        balance: None,
     };
-    if !(p.contains("claude") || p.contains("anthropic")) {
-        return unavailable("no quota API for this provider — showing this app's recorded traffic");
+    let unavailable = |note: &str| AccountUsage {
+        note: note.to_string(),
+        ..empty()
+    };
+
+    // Provider-specific quota / balance APIs. Each branch is responsible
+    // for returning a fully-formed AccountUsage on success OR failure.
+    if p.contains("claude") || p.contains("anthropic") {
+        return fetch_anthropic_usage(&provider, &stats).await;
     }
+    if p.contains("moonshot") || p.contains("kimi") {
+        return fetch_moonshot_balance(&provider, &stats).await;
+    }
+
+    // Everything else (OpenAI/Codex, Gemini, DeepSeek, xAI, Groq,
+    // Perplexity, Mistral, Together, local models) has no client-readable
+    // quota/balance API we can query with an API key. Return the app's own
+    // recorded traffic plus a short note so the panel isn't blank.
+    let pretty = match p.as_str() {
+        "openai" | "codex" => "OpenAI / Codex",
+        "gemini" => "Gemini",
+        "deepseek" => "DeepSeek",
+        "xai" => "xAI",
+        "groq" => "Groq",
+        "perplexity" => "Perplexity",
+        "mistral" => "Mistral",
+        "together" => "Together",
+        "local" | "tuned" => "Local model",
+        _ => &provider,
+    };
+    unavailable(&format!(
+        "{pretty} does not expose a usage/balance API — showing this app's recorded traffic"
+    ))
+}
+
+/// Save a single API key. `name` is the env-var name
+/// (ANTHROPIC_API_KEY / OPENAI_API_KEY); `value` is the raw key.
+/// Empty value behaves like `accounts_delete_secret` for parity with
+/// the legacy Python helper.
+#[tauri::command]
+pub fn accounts_save_api_key(name: String, value: String) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return accounts_delete_secret(name);
+    }
+    let mut map = load_secrets();
+    map.insert(name, trimmed.to_string());
+    write_secrets(&map)
+}
+
+#[tauri::command]
+pub fn accounts_delete_secret(name: String) -> Result<(), String> {
+    let mut map = load_secrets();
+    map.remove(&name);
+    if map.is_empty() {
+        // Delete the file when empty so a stale {} doesn't linger.
+        if let Some(path) = secrets_path() {
+            if path.exists() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+        return Ok(());
+    }
+    write_secrets(&map)
+}
+
+/// Return the secret value for `name` (or None when not set). Used by
+/// the dispatch loop on the React side to make authenticated requests
+/// to api.anthropic.com / api.openai.com. Keeping this on the Rust
+/// side means the key only crosses the IPC boundary on demand.
+#[tauri::command]
+pub fn accounts_get_secret(name: String) -> Option<String> {
+    let map = load_secrets();
+    map.get(&name).cloned().filter(|v| !v.trim().is_empty())
+}
+
+/// Fetch Claude/Anthropic OAuth usage windows.
+async fn fetch_anthropic_usage(provider: &str, stats: &[UsageStat]) -> AccountUsage {
+    let empty = || AccountUsage {
+        available: false,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows: Vec::new(),
+        stats: stats.to_vec(),
+        balance: None,
+    };
+    let unavailable = |note: &str| AccountUsage {
+        note: note.to_string(),
+        ..empty()
+    };
     // OAuth token from the Claude CLI's credential store (same file
     // claude_cli_logged_in() checks; sandbox mirroring copies this too).
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
@@ -516,48 +608,99 @@ pub async fn account_usage(provider: String) -> AccountUsage {
     for w in &mut windows {
         w.used_pct = w.used_pct.clamp(0.0, 100.0);
     }
-    AccountUsage { available: true, provider, note: String::new(), windows, stats: stats.clone() }
-}
-
-/// Save a single API key. `name` is the env-var name
-/// (ANTHROPIC_API_KEY / OPENAI_API_KEY); `value` is the raw key.
-/// Empty value behaves like `accounts_delete_secret` for parity with
-/// the legacy Python helper.
-#[tauri::command]
-pub fn accounts_save_api_key(name: String, value: String) -> Result<(), String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return accounts_delete_secret(name);
+    AccountUsage {
+        available: true,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows,
+        stats: stats.to_vec(),
+        balance: None,
     }
-    let mut map = load_secrets();
-    map.insert(name, trimmed.to_string());
-    write_secrets(&map)
 }
 
-#[tauri::command]
-pub fn accounts_delete_secret(name: String) -> Result<(), String> {
-    let mut map = load_secrets();
-    map.remove(&name);
-    if map.is_empty() {
-        // Delete the file when empty so a stale {} doesn't linger.
-        if let Some(path) = secrets_path() {
-            if path.exists() {
-                let _ = std::fs::remove_file(&path);
+/// Fetch Moonshot/Kimi account balance from the Open Platform API.
+/// Works for both the API-key route and the subscription CLI route when a
+/// MOONSHOT_API_KEY is saved. Returns stats-only when no key is saved.
+async fn fetch_moonshot_balance(provider: &str, stats: &[UsageStat]) -> AccountUsage {
+    let empty = || AccountUsage {
+        available: false,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows: Vec::new(),
+        stats: stats.to_vec(),
+        balance: None,
+    };
+    let unavailable = |note: &str| AccountUsage {
+        note: note.to_string(),
+        ..empty()
+    };
+
+    let secrets = load_secrets();
+    let Some(key) = secrets.get("MOONSHOT_API_KEY").cloned().filter(|v| !v.trim().is_empty()) else {
+        return unavailable("Moonshot API key not saved — showing this app's recorded traffic");
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return unavailable(&format!("http client: {e}")),
+    };
+
+    // Try international endpoint first, then China mainland. Both share the
+    // same response shape; only one will work for a given API key.
+    let endpoints = [
+        "https://api.moonshot.ai/v1/users/me/balance",
+        "https://api.moonshot.cn/v1/users/me/balance",
+    ];
+    let mut last_err = String::new();
+    for url in endpoints {
+        let resp = client
+            .get(url)
+            .header("Authorization", format!("Bearer {key}"))
+            .send()
+            .await;
+        let resp = match resp {
+            Ok(r) if r.status().is_success() => r,
+            Ok(r) => {
+                last_err = format!("{url} returned {}", r.status());
+                continue;
             }
+            Err(e) => {
+                last_err = format!("{url} request failed: {e}");
+                continue;
+            }
+        };
+        let body: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                last_err = format!("{url} response unreadable: {e}");
+                continue;
+            }
+        };
+        // Expected: { "code": 0, "data": { "available_balance": ..., "voucher_balance": ..., "cash_balance": ... }, ... }
+        if body.get("code").and_then(|c| c.as_i64()) != Some(0) {
+            last_err = format!("{url} returned code {:?}", body.get("code"));
+            continue;
         }
-        return Ok(());
+        let data = body.get("data").cloned().unwrap_or_default();
+        let avail = data.get("available_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let cash = data.get("cash_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let voucher = data.get("voucher_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let balance = format!(
+            "Available ¥{avail:.2} (cash ¥{cash:.2} · voucher ¥{voucher:.2})"
+        );
+        return AccountUsage {
+            available: false,
+            provider: provider.to_string(),
+            note: String::new(),
+            windows: Vec::new(),
+            stats: stats.to_vec(),
+            balance: Some(balance),
+        };
     }
-    write_secrets(&map)
-}
-
-/// Return the secret value for `name` (or None when not set). Used by
-/// the dispatch loop on the React side to make authenticated requests
-/// to api.anthropic.com / api.openai.com. Keeping this on the Rust
-/// side means the key only crosses the IPC boundary on demand.
-#[tauri::command]
-pub fn accounts_get_secret(name: String) -> Option<String> {
-    let map = load_secrets();
-    map.get(&name).cloned().filter(|v| !v.trim().is_empty())
+    unavailable(&format!("balance endpoint unreachable ({last_err})"))
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -739,23 +882,35 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             "Codex", Some("ok"),
         ).await,
         "kimi_cli" => {
-            // Model flag is config-aware: current kimi-cli hard-rejects any
-            // model id not declared in ~/.kimi/config.toml (LLMNotSet), and
-            // after login it always writes a default_model — so the probe
-            // must NOT force the old `kimi-latest` alias (that was the
-            // "subscription never ties after login" bug). kimi_model_args
-            // only adds `--model kimi-latest` for ancient CLIs with no
-            // config default.
-            let mut args: Vec<String> =
-                ["--print", "--output-format", "text", "--final-message-only"]
-                    .iter().map(|s| s.to_string()).collect();
+            // Both legacy kimi-cli and current kimi-code support --print
+            // non-interactive mode. Use the same shape as the chat path so the
+            // probe is a real end-to-end check.
+            // Model flag is config-aware: the CLI hard-rejects any id not
+            // declared in its config (LLMNotSet), so we only force a model when
+            // there is no configured default.
+            let mut args: Vec<String> = vec![
+                "--print".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--final-message-only".into(),
+            ];
             args.extend(kimi_model_args(None));
             args.push("--prompt".into());
             args.push("ok".into());
             probe_cli_subscription(find_kimi_cli(), args, "Kimi", None).await
         }
         "gemini_cli" => probe_cli_subscription(
-            find_gemini_cli(), vec!["--prompt".into(), "ok".into()], "Gemini", None).await,
+            find_gemini_cli(),
+            vec![
+                "--skip-trust".into(),
+                "--output-format".into(),
+                "text".into(),
+                "--prompt".into(),
+                "ok".into(),
+            ],
+            "Gemini",
+            None,
+        ).await,
 
         // -- API keys: HTTP GET the provider's /v1/models endpoint
         //    with the key in Authorization. 200 = valid. 401/403 =
@@ -857,11 +1012,12 @@ fn wsl_probe(backend: &str) -> (bool, String) {
     let script = match backend {
         "claude_cli" => cli_probe("claude", "[ -f ~/.claude/.credentials.json ]"),
         "codex_cli" => cli_probe("codex", "[ -f ~/.codex/auth.json ]"),
-        // Modern kimi-cli writes ~/.kimi/credentials/kimi-code.json at login;
-        // older ones only ~/.kimi/config.toml. Accept either (mirrors the host
-        // kimi_cli_logged_in detector) — checking config.toml alone falsely
-        // reported a fresh login as NOCRED.
-        "kimi_cli" => cli_probe("kimi", "{ [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }"),
+        // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
+        // Accept a credential or config file in either home.
+        "kimi_cli" => cli_probe(
+            "kimi",
+            "{ [ -f ~/.kimi-code/credentials/kimi-code.json ] || [ -f ~/.kimi-code/config.toml ] || [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }",
+        ),
         "gemini_cli" => cli_probe("gemini", "[ -f ~/.gemini/oauth_creds.json ]"),
         other => {
             let var = match other {
@@ -1835,8 +1991,14 @@ pub(crate) fn is_browser_role_allowlist(allowed: Option<&Vec<String>>) -> bool {
         .unwrap_or(false)
 }
 
-fn codex_should_grant_browser(browser_role: bool, full_access: bool) -> bool {
-    browser_role || full_access
+fn codex_should_grant_browser(host_run: bool, jailed: bool, browser_role: bool) -> bool {
+    // Browser tools are cross-cutting: every agent running where the transport
+    // can reach the in-app gateway gets to drive the shared browser window,
+    // not just the Browser role. Host runs and non-jailed WSL/Lima/bwrap
+    // environments can reach the gateway; the Browser role keeps an extra
+    // exception for bwrap-jailed WSL projects, where it is spawned unjailed
+    // so interop survives.
+    host_run || !jailed || browser_role
 }
 
 #[tauri::command]
@@ -2427,9 +2589,10 @@ pub async fn codex_cli_stream(
         };
 
         // ---- MCP GATEWAY (browser_* tools) — the Codex counterpart of the
-        // claude_cli_stream block. Codex configures MCP via `-c mcp_servers.*`
-        // overrides (no `--mcp-config` flag) and reads a streamable-HTTP bearer
-        // token from an env var. VERIFIED against codex 0.128.0:
+        // claude_cli_stream block. Browser tools are a CROSS-CUTTING capability:
+        // any agent running where the transport can reach the in-app gateway
+        // gets to drive the shared browser window, not just the Browser role.
+        // VERIFIED against codex 0.128.0:
         //   * HOST run  → `-c mcp_servers.owllm.url=…` + `bearer_token_env_var`
         //                 (token in OWLLM_GW_TOKEN env).
         //   * WSL run   → `-c mcp_servers.owllm.command="bash"` + args = the same
@@ -2437,17 +2600,15 @@ pub async fn codex_cli_stream(
         // CRUCIAL codex quirk (verified): `codex exec` SILENTLY CANCELS every MCP
         // tool call under `--sandbox workspace-write` — they execute only with
         // `approval_policy=never` AND `--sandbox danger-full-access`.
-        // The Browser role is host-capable by design (like Publisher): it owns
-        // the shared browser window, localhost previews, external sites and
-        // credentials. Codex only executes MCP tools when its own inner sandbox
-        // is disabled, so the escalation is scoped to that Browser role (or an
-        // explicitly full-access project). Ordinary jailed coders stay sealed;
-        // they should dispatch browser work to @browser instead of controlling
-        // the host browser themselves.
+        // Because the browser is cross-cutting, wiring the gateway on a host or
+        // unjailed run means that agent needs `danger-full-access` to actually
+        // execute MCP calls. This matches the local/API path, which already has
+        // full host access. The Browser role keeps a special WSL jail exception
+        // so interop survives in bwrap-isolated projects.
         let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
         let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
-        let full_access = crate::sandbox::is_full_access(cwd.as_deref());
-        let grant_browser = codex_should_grant_browser(browser_role, full_access);
+        let jailed = crate::sandbox::is_bwrap_jailed(cwd.as_deref());
+        let grant_browser = codex_should_grant_browser(host_run, jailed, browser_role);
         let mut gateway_err: Option<String> = None;
         let mut gw_cfg: Vec<String> = Vec::new();
         let mut token_env: Option<String> = None;
@@ -2463,10 +2624,10 @@ pub async fn codex_cli_stream(
             } else {
                 #[cfg(windows)]
                 {
-                    // Isolated run: wire the stdio relay unless this is a
-                    // bwrap-jailed NON-browser agent (jail exclusion). The
-                    // Browser role is spawned unjailed below so interop works.
-                    if !crate::sandbox::is_bwrap_jailed(cwd.as_deref()) || browser_role {
+                    // WSL isolated run: the relay works for any non-jailed
+                    // environment (full-access or no bwrap) and for the Browser
+                    // role, which is spawned unjailed below as a jail exception.
+                    if !jailed || browser_role {
                         match crate::mcp_gateway::codex_wsl_config(&app, cwd.as_deref()) {
                             Ok(cfg) => gw_cfg = cfg,
                             Err(e) => gateway_err = Some(e),
@@ -2818,29 +2979,61 @@ fn codex_cli_logged_in() -> bool {
     p1.exists() || p2.exists()
 }
 
-/// Kimi Code CLI (MoonshotAI/kimi-cli) marks a login two ways depending on
-/// version: older CLIs put OAuth straight into ~/.kimi/config.toml; current
-/// ones (verified live 2026-07-05) write ~/.kimi/credentials/kimi-code.json
-/// (access_token/refresh_token) alongside a token-free config.toml. Accept
-/// either marker.
+/// The user's OS home directory.
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// Possible Kimi CLI home directories. Modern `kimi-code` uses `~/.kimi-code`;
+/// the older `MoonshotAI/kimi-cli` used `~/.kimi`. We keep both so the app
+/// works regardless of which `kimi` binary is on PATH.
+fn kimi_home_candidates() -> Vec<PathBuf> {
+    let Some(home) = user_home_dir() else { return Vec::new() };
+    vec![home.join(".kimi-code"), home.join(".kimi")]
+}
+
+/// The active Kimi home: prefer `~/.kimi-code` when it exists, otherwise
+/// `~/.kimi`. This lets us detect which flavor the user actually has installed.
+fn kimi_home_dir() -> Option<PathBuf> {
+    kimi_home_candidates().into_iter().find(|p| p.is_dir())
+}
+
+/// Best guess at whether the installed `kimi` binary is the new `kimi-code`
+/// (true) or the legacy `kimi-cli` (false). The safest signal is the home
+/// directory the CLI has already created on disk.
+fn kimi_is_new_flavor() -> bool {
+    kimi_home_dir()
+        .map(|p| p.file_name().map(|n| n == "kimi-code").unwrap_or(false))
+        .unwrap_or(true)
+}
+
+/// Kimi Code CLI marks a login in `credentials/kimi-code.json` (modern) or
+/// directly in `config.toml` (legacy). Accept either marker in either home.
 fn kimi_cli_logged_in() -> bool {
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
-        return false;
-    };
-    let kimi = PathBuf::from(home).join(".kimi");
-    kimi.join("credentials").join("kimi-code.json").is_file() || kimi.join("config.toml").exists()
+    kimi_home_candidates().iter().any(|kimi| {
+        kimi.join("credentials")
+            .join("kimi-code.json")
+            .is_file()
+            || kimi.join("config.toml").exists()
+    })
 }
 
-/// Raw text of ~/.kimi/config.toml (None when absent/unreadable).
+/// Raw text of the active Kimi config.toml (None when absent/unreadable).
 fn kimi_config_text() -> Option<String> {
-    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    std::fs::read_to_string(PathBuf::from(home).join(".kimi").join("config.toml")).ok()
+    for kimi in kimi_home_candidates() {
+        let p = kimi.join("config.toml");
+        if let Ok(text) = std::fs::read_to_string(&p) {
+            return Some(text);
+        }
+    }
+    None
 }
 
-/// Does the kimi config define a default model? Current kimi-cli writes
-/// `default_model = "kimi-code/kimi-for-coding"` at login; when present the
-/// CLI runs fine with NO --model flag — and rejects any model id that isn't
-/// declared in its [models] table with a hard `LLMNotSet` error.
+/// Does the kimi config define a default model? When present the CLI runs fine
+/// with NO --model flag — and rejects any model id that isn't declared in its
+/// [models] table with a hard `LLMNotSet` error.
 fn kimi_config_has_default(text: &str) -> bool {
     text.lines().any(|l| l.trim_start().starts_with("default_model"))
 }
@@ -2857,20 +3050,135 @@ fn kimi_config_model_keys(text: &str) -> Vec<String> {
         .collect()
 }
 
-/// True when a modern kimi-code login is present (credentials/kimi-code.json).
-/// The current CLI writes this at login and resolves its own model from it —
-/// often WITHOUT writing a `config.toml` default. So the config parse alone
-/// can't tell we're safely logged in; without this check a modern-logged-in
-/// user reads as `has_default=false` and an undeclared id gets force-passed.
+/// True when a modern login is present (`credentials/kimi-code.json`). The
+/// current CLI writes this at login and resolves its own model from it — often
+/// WITHOUT writing a `config.toml` default. So the config parse alone can't tell
+/// we're safely logged in; without this check a modern-logged-in user reads as
+/// `has_default=false` and an undeclared id gets force-passed.
 fn kimi_has_modern_login() -> bool {
-    let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
-        return false;
-    };
-    PathBuf::from(home)
-        .join(".kimi")
-        .join("credentials")
-        .join("kimi-code.json")
-        .is_file()
+    kimi_home_candidates().iter().any(|kimi| {
+        kimi.join("credentials")
+            .join("kimi-code.json")
+            .is_file()
+    })
+}
+
+/// Recursively copy a directory, best-effort (individual file failures are
+/// ignored so one unreadable credential doesn't abort the whole temp home).
+fn copy_dir_all(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dest = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &dest)?;
+        } else {
+            let _ = std::fs::copy(&entry.path(), &dest);
+        }
+    }
+    Ok(())
+}
+
+/// Build a temporary `KIMI_CODE_HOME` for a single `kimi-code` run.
+/// Copies the user's real config + credentials, writes our system prompt as
+/// `AGENTS.md`, and (when requested) wires the OwLLM browser gateway via
+/// `mcp.json` + the `OWLLM_GW_TOKEN` env var. Project-level files are left
+/// untouched.
+fn prepare_kimi_code_home(
+    app: &tauri::AppHandle,
+    system_prompt: &str,
+    with_mcp: bool,
+) -> Result<std::path::PathBuf, String> {
+    let real = kimi_home_dir()
+        .or_else(|| user_home_dir().map(|h| h.join(".kimi-code")))
+        .ok_or_else(|| "could not resolve home dir".to_string())?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let base = std::env::temp_dir().join(format!("owllm-kimi-code-home-{millis}"));
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
+
+    // Carry over the user's config and OAuth credentials so the temp home is
+    // still authenticated and keeps any configured default model.
+    let src_config = real.join("config.toml");
+    if src_config.is_file() {
+        let _ = std::fs::copy(&src_config, base.join("config.toml"));
+    }
+    let src_creds = real.join("credentials");
+    if src_creds.is_dir() {
+        let _ = copy_dir_all(&src_creds, &base.join("credentials"));
+    }
+
+    if !system_prompt.trim().is_empty() {
+        // Do not set system_prompt_path here: Kimi treats that as replacing the
+        // builtin coding-agent prompt, which makes Code page runs act like weak
+        // generic chat. The default prompt exposes ROLE_ADDITIONAL specifically
+        // for caller guidance, so inject OWLLM's prompt through that variable.
+        let agent_yaml = base.join("agent.yaml");
+        std::fs::write(&agent_yaml, kimi_agent_yaml(system_prompt))
+        .map_err(|e| format!("write agent.yaml: {e}"))?;
+    }
+
+    if with_mcp {
+        let info = crate::mcp_gateway::ensure_started(app)
+            .map_err(|e| format!("browser gateway: {e}"))?;
+        let mcp = json!({
+            "mcpServers": {
+                crate::mcp_gateway::SERVER_NAME: {
+                    "url": info.url,
+                    "bearerTokenEnvVar": "OWLLM_GW_TOKEN"
+                }
+            }
+        });
+        std::fs::write(
+            base.join("mcp.json"),
+            serde_json::to_vec_pretty(&mcp).unwrap_or_default(),
+        )
+        .map_err(|e| format!("write mcp.json: {e}"))?;
+
+        // Pre-allow our own browser tools so auto-permission prompt mode doesn't
+        // stall on every mcp__owllm__* call.
+        let config = base.join("config.toml");
+        let rules = "\n[[permission.rules]]\ndecision = \"allow\"\npattern = \"mcp__owllm__*\"\n";
+        use std::io::Write;
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&config)
+            .and_then(|mut f| f.write_all(rules.as_bytes()));
+    }
+
+    Ok(base)
+}
+
+/// Build a temporary agent YAML for legacy `kimi-cli` so we can inject a system
+/// prompt via `--agent-file` without overwriting the user's project files.
+fn prepare_kimi_agent_file(system_prompt: &str) -> Result<std::path::PathBuf, String> {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let base = std::env::temp_dir().join(format!("owllm-kimi-agent-{millis}"));
+    std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
+
+    let agent_yaml = base.join("agent.yaml");
+    std::fs::write(&agent_yaml, kimi_agent_yaml(system_prompt))
+        .map_err(|e| format!("write agent.yaml: {e}"))?;
+
+    Ok(agent_yaml)
+}
+
+fn kimi_agent_yaml(system_prompt: &str) -> String {
+    let mut yaml =
+        "version: 1\nagent:\n  name: owllm\n  extend: default\n  system_prompt_args:\n    ROLE_ADDITIONAL: |-\n"
+            .to_string();
+    for line in system_prompt.trim().lines() {
+        yaml.push_str("      ");
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+    yaml
 }
 
 /// kimi-cli exits 0 even when its turn FAILS — the error only appears in the
@@ -2890,6 +3198,15 @@ fn kimi_output_mcp_failed(out: &str) -> bool {
 /// kimi prints `LLM not set` and exits 0 when no model resolves (LLMNotSet).
 fn kimi_output_llm_unset(out: &str) -> bool {
     out.to_ascii_lowercase().contains("llm not set")
+}
+
+/// kimi prints a 401 / unauthorized / login-expired message and exits 0 when its
+/// OAuth access token is stale or revoked. Without this check the caller would
+/// hand the error text back as the agent's answer and the retry layer would not
+/// recognize it as an auth failure.
+fn kimi_output_auth_failed(out: &str) -> bool {
+    let l = out.to_ascii_lowercase();
+    l.contains("401") || l.contains("unauthorized") || l.contains("not logged in") || l.contains("login expired") || l.contains("signed out")
 }
 
 /// `--model` args for a kimi invocation, resilient to the CLI's config:
@@ -2916,42 +3233,41 @@ fn kimi_model_args_inner(
     keys: &[String],
     modern_login: bool,
 ) -> Vec<String> {
+    let _ = keys;
     let self_sufficient = has_default || modern_login;
     match requested.map(str::trim).filter(|s| !s.is_empty()) {
-        // Declared in the config's [models] table → safe to pass explicitly.
-        Some(req) if keys.iter().any(|k| k == req) => vec!["--model".into(), req.to_string()],
-        // Undeclared id but the CLI can resolve its own model → drop the flag.
-        // Forcing an undeclared id here is exactly the LLMNotSet ~1s crash.
-        Some(_) if self_sufficient => Vec::new(),
-        // Genuinely ancient CLI (no default, no modern creds): it needs an
-        // explicit model, so pass the request as a last resort.
+        // Always pass the model the user actually selected. Silently dropping
+        // an undeclared id was making OwLLM use the user's unrelated CLI
+        // default (e.g. Claude) instead of the requested Kimi model. If the
+        // id is invalid, Kimi prints LLMNotSet and kimi_cli_complete retries
+        // once without the flag.
         Some(req) => vec!["--model".into(), req.to_string()],
         None if self_sufficient => Vec::new(),
-        // No config default and no modern login: keep the always-valid alias.
+        // No config default, no modern login, and no request: ancient CLI needs
+        // the always-valid alias.
         None => vec!["--model".into(), "kimi-latest".into()],
     }
 }
 
-/// Google Gemini CLI (google-gemini/gemini-cli) caches OAuth at
-/// ~/.gemini/ after `gemini /auth` (or `gemini login`). The dir
-/// presence + at least one file inside is a reliable "logged in"
-/// signal — Google ships a few JSON files there (credentials.json,
-/// settings.json) once auth completes.
+/// Google Gemini CLI stores settings and history under ~/.gemini too, so the
+/// directory itself is not proof of auth. These are the narrow credential file
+/// names we accept and remove.
+fn gemini_credential_paths(home: &std::path::Path) -> Vec<PathBuf> {
+    let dir = home.join(".gemini");
+    vec![
+        dir.join("oauth_creds.json"),
+        dir.join("credentials.json"),
+    ]
+}
+
 fn gemini_cli_logged_in() -> bool {
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
         return false;
     };
-    let dir = PathBuf::from(home).join(".gemini");
-    if !dir.is_dir() {
-        return false;
-    }
-    // Require at least one JSON-shaped file to avoid greenlighting an
-    // empty stub directory left behind by a previous failed install.
-    std::fs::read_dir(&dir)
-        .map(|it| it.flatten().any(|e| {
-            e.path().extension().and_then(|s| s.to_str()).map(|x| x.eq_ignore_ascii_case("json")).unwrap_or(false)
-        }))
-        .unwrap_or(false)
+    let home = PathBuf::from(home);
+    gemini_credential_paths(&home)
+        .into_iter()
+        .any(|p| p.is_file() && std::fs::metadata(p).map(|m| m.len() > 0).unwrap_or(false))
 }
 
 fn find_gemini_cli() -> Option<PathBuf> {
@@ -3004,9 +3320,8 @@ fn generic_api_probe(
 ///   * claude: ~/.claude/.credentials.json
 ///   * codex:  ~/.codex/auth.json + ~/.openai/auth.json (old path)
 ///   * kimi:   ~/.kimi/credentials/kimi-code.json (modern) + ~/.kimi/config.toml (old)
-///   * gemini: every *.json under ~/.gemini/ (oauth_creds.json,
-///             settings.json, etc. — the detector greenlights on any
-///             json present, so we wipe them all)
+///   * gemini: ~/.gemini/oauth_creds.json + ~/.gemini/credentials.json
+///             only. settings.json is configuration, not auth.
 ///
 /// Returns a human-readable summary of what was removed so the React
 /// log panel can confirm; never errors on a missing file (already
@@ -3036,28 +3351,16 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
             try_remove(&home.join(".openai").join("auth.json"), &mut removed);
         }
         "kimi_cli" => {
-            // Modern kimi-cli keeps its OAuth in ~/.kimi/credentials/kimi-code.json;
-            // config.toml alone is the OLD marker. Remove BOTH or Disconnect leaves
-            // the real token behind and the card still reports "logged in".
-            try_remove(&home.join(".kimi").join("credentials").join("kimi-code.json"), &mut removed);
-            try_remove(&home.join(".kimi").join("config.toml"), &mut removed);
+            // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
+            // Remove from BOTH so Disconnect actually clears the real token.
+            for kimi in kimi_home_candidates() {
+                try_remove(&kimi.join("credentials").join("kimi-code.json"), &mut removed);
+                try_remove(&kimi.join("config.toml"), &mut removed);
+            }
         }
         "gemini_cli" => {
-            let dir = home.join(".gemini");
-            if dir.is_dir() {
-                if let Ok(entries) = std::fs::read_dir(&dir) {
-                    for e in entries.flatten() {
-                        let path = e.path();
-                        let is_json = path
-                            .extension()
-                            .and_then(|s| s.to_str())
-                            .map(|x| x.eq_ignore_ascii_case("json"))
-                            .unwrap_or(false);
-                        if is_json {
-                            try_remove(&path, &mut removed);
-                        }
-                    }
-                }
+            for path in gemini_credential_paths(&home) {
+                try_remove(&path, &mut removed);
             }
         }
         other => return Err(format!("unknown subscription backend: {other}")),
@@ -3086,7 +3389,8 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
 pub fn subscription_cli_login(backend: String) -> Result<(), String> {
     // Resolve which CLI to launch + the login command. Two flavours:
     //   * codex login          — real subcommand, runs OAuth and exits
-    //   * gemini auth login    — same shape, two-word subcommand
+    //   * gemini (no args)     — REPL prompts for auth; the embedded
+    //                            terminal auto-sends /auth
     //   * claude (no args)     — REPL auto-prompts /login on first run
     //                            because there are no credentials yet
     //   * kimi (no args)       — same: kimi REPL auto-prompts for login
@@ -3100,7 +3404,7 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         "claude_cli"  => (find_claude_cli,  &[]),
         "codex_cli"   => (find_codex_cli,   &["login"]),
         "kimi_cli"    => (find_kimi_cli,    &[]),
-        "gemini_cli"  => (find_gemini_cli,  &["auth", "login"]),
+        "gemini_cli"  => (find_gemini_cli,  &[]),
         other => return Err(format!("unknown subscription backend: {other}")),
     };
     let exe = find_fn().ok_or_else(|| format!(
@@ -3456,28 +3760,29 @@ pub async fn gemini_cli_complete(
             format!("{system_prompt}\n\n---\n\n{user_message}")
         };
 
-        // gemini-cli accepts --prompt (-p) for non-interactive output
-        // (matches Claude/Kimi conventions). --model picks the variant.
+        // gemini-cli accepts --prompt (-p) for non-interactive output.
+        // Keep --output-format text explicit so stdout stays machine-friendly.
         //
         // COMMAND-LINE LIMIT (same class as the kimi os-error-206 / claude
         // "command line is too long" bugs): a full agentic system prompt as the
         // --prompt ARG blows the ~8-32 KB Windows argv cap and the spawn dies
         // before the model ever runs. gemini-cli also reads a piped-stdin
-        // prompt in non-interactive mode (`echo hi | gemini`), so for a LARGE
-        // prompt we DROP --prompt and feed it on stdin (an unbounded pipe).
+        // prompt in non-interactive mode, so for a LARGE prompt we keep
+        // `--prompt ""` for headless mode and feed the real text on stdin.
         // Small prompts keep --prompt + null stdin — byte-identical to the
         // proven Accounts-Test path. Mirrors the kimi/codex/claude folds.
         const MAX_PROMPT_ARG: usize = 4000;
         let fold_prompt_into_stdin = composed.len() > MAX_PROMPT_ARG;
         let mut args: Vec<String> = Vec::new();
+        args.push("--skip-trust".into());
+        args.push("--output-format".into());
+        args.push("text".into());
         if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             args.push("--model".into());
             args.push(m.to_string());
         }
-        if !fold_prompt_into_stdin {
-            args.push("--prompt".into());
-            args.push(composed.clone());
-        }
+        args.push("--prompt".into());
+        args.push(if fold_prompt_into_stdin { String::new() } else { composed.clone() });
 
         // WSL-isolated project → run `gemini` inside the distro; else Windows CLI.
         let mut cmd = if let Some((exe, sargs)) =
@@ -3538,18 +3843,18 @@ pub async fn gemini_cli_complete(
     .map_err(|e| format!("join error: {e}"))?
 }
 
-/// One-shot completion via `kimi --print --prompt`. Mirrors the
-/// shape of claude_cli_complete but uses Kimi Code CLI's actual flag
-/// surface: `--print` (alias `-q` for quiet/final-only when paired
-/// with `--final-message-only`), `--prompt` (`-p`) for the user text,
-/// `--model` (`-m`) for the model id. We use `--print
-/// --final-message-only --output-format text` so the CLI emits ONLY
-/// the assistant's final reply on stdout — no streaming preamble for
-/// us to strip on this side.
+/// One-shot completion via the `kimi` CLI.
 ///
-/// System prompt: the CLI has no `--append-system-prompt` (that's a
-/// Claude-CLI-specific flag); we fold it into the prompt with a clear
-/// separator instead.
+/// Supports both the legacy `MoonshotAI/kimi-cli` and the newer
+/// `MoonshotAI/kimi-code` (the user's linked repo):
+///   * Base invocation (both): `--print --final-message-only --output-format text`
+///     so the run is non-interactive and stdout is plain text.
+///   * Legacy: inject the system prompt via `--agent-file` and wire the browser
+///     gateway via `--mcp-config-file`.
+///   * New (`kimi-code`): there is no `--system-prompt` or `--mcp-config-file`
+///     flag, so we inject the system prompt via a temporary `KIMI_CODE_HOME`
+///     containing `AGENTS.md`, copy the user's config/credentials, and wire the
+///     browser gateway through `mcp.json` + `OWLLM_GW_TOKEN`.
 #[tauri::command]
 pub async fn kimi_cli_complete(
     app: tauri::AppHandle,
@@ -3557,30 +3862,26 @@ pub async fn kimi_cli_complete(
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
-    allowed_tools: Option<Vec<String>>,
+    _allowed_tools: Option<Vec<String>>,
 ) -> Result<String, String> {
-    // The browser gateway is wired ONLY for the Browser role, never for a plain
-    // coder/orchestrator/critic. This is load-bearing for kimi specifically:
-    // kimi-cli FATALLY aborts the whole turn if ANY configured MCP server can't
-    // connect (wait_for_background_mcp_loading -> MCPRuntimeError; exit 0, error
-    // only in stdout — verified live 2026-07-06 via ~/.kimi/logs/kimi.log),
-    // unlike Claude/Codex which just proceed. So wiring the gateway into every
-    // host Kimi agent meant the FIRST agent whose gateway wasn't reachable
-    // crashed the whole team in ~1s. Gating on the Browser role makes a normal
-    // Kimi agent's invocation byte-identical to the (proven-working) Accounts
-    // Test path — it cannot crash on a gateway it never touches. The Browser
-    // agent still gets it (verified live 2026-07-05: kimi listed all 12
-    // browser_* tools and executed browser_snapshot via --mcp-config-file), with
-    // the retry below as a safety net if that one agent's gateway is unreachable.
+    // Browser tools are a CROSS-CUTTING capability: every host-run Kimi agent
+    // gets the in-app browser gateway, not just the Browser role. kimi-cli
+    // fatally aborts a turn if ANY configured MCP server can't connect
+    // (wait_for_background_mcp_loading -> MCPRuntimeError; exit 0, error only
+    // in stdout), so we keep a session cache: once the gateway proves
+    // unreachable we stop wiring it for the rest of the session.
     // WSL-isolated runs skip it regardless: the distro kimi can't reach host
     // loopback and no relay is plumbed for this one-shot path yet.
-    // Session cache: once the Browser agent's gateway proves unreachable, stop
-    // wiring it (avoids a doubled spawn per call). 0=unknown, 1=reachable, 2=broken.
+    // Session cache: 0=unknown, 1=reachable, 2=broken.
     static KIMI_GATEWAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
-    let browser_role = is_browser_role_allowlist(allowed_tools.as_ref());
     let gw_broken = KIMI_GATEWAY.load(std::sync::atomic::Ordering::Relaxed) == 2;
-    let mcp_config: Option<String> = if host_run && browser_role && !gw_broken {
+    let new_flavor = kimi_is_new_flavor();
+
+    // Legacy CLI needs a JSON `--mcp-config-file`; new kimi-code reads
+    // `mcp.json` from `KIMI_CODE_HOME`, so the MCP wiring is done inside the
+    // temporary home in the spawn-blocking closure below.
+    let old_mcp_config: Option<String> = if !new_flavor && host_run && !gw_broken {
         match crate::mcp_gateway::write_cli_config(&app) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
@@ -3591,54 +3892,97 @@ pub async fn kimi_cli_complete(
     } else {
         None
     };
+
     tokio::task::spawn_blocking(move || {
-        // Compose system + user into a single prompt — Kimi --print
-        // mode doesn't expose a system-message flag.
-        let composed = if system_prompt.trim().is_empty() {
-            user_message
+        let system_empty = system_prompt.trim().is_empty();
+        let folded_prompt = if system_empty {
+            user_message.clone()
         } else {
-            format!("{system_prompt}\n\n---\n\n{user_message}")
+            format!("{system_prompt}\n\n===== YOUR TASK =====\n\n{user_message}")
         };
-        // Config-aware model flag: forcing an id the CLI's config doesn't
-        // declare aborts with LLMNotSet (see kimi_model_args).
+
+        // Pass the model the user selected. If Kimi CLI doesn't recognise the id
+        // it aborts with LLMNotSet; we catch that and retry once without the
+        // --model flag so the CLI can fall back to its configured default.
         let model_args = kimi_model_args(model.as_deref());
 
-        // Windows caps a command line at ~32 KB. kimi passes the composed prompt
-        // as the `--prompt` ARG, so a large agentic system prompt (rules + tools +
-        // roster + memory) overflows: "The filename or extension is too long.
-        // (os error 206)" — the "spawn kimi" crash on a full team. kimi also reads
-        // the prompt from stdin when `--prompt` is omitted (verified live: identical
-        // clean stdout, the "resume session" line goes to stderr). So for a large
-        // prompt we DROP `--prompt` and feed it on stdin (an unbounded pipe). Small
-        // prompts keep `--prompt` + null stdin — byte-identical to the proven
-        // Accounts Test path. Mirrors the claude/codex fold (MAX_PROMPT_ARG).
-        const MAX_PROMPT_ARG: usize = 4000;
-        let fold_prompt_into_stdin = composed.len() > MAX_PROMPT_ARG;
+        enum Injection {
+            TempHome(std::path::PathBuf),
+            AgentFile(std::path::PathBuf),
+        }
 
         // One kimi invocation. `with_mcp` controls whether the browser gateway
-        // is wired. Returns (final assistant text, whether MCP loading failed).
-        let attempt = |with_mcp: bool| -> Result<(String, bool), String> {
+        // is wired; `with_model` controls whether the --model flag is present.
+        // Returns (final assistant text, whether MCP loading failed).
+        let attempt = |with_mcp: bool, with_model: bool| -> Result<(String, bool), String> {
+            // We can only safely inject AGENTS.md / mcp.json when the child is
+            // spawned directly on the host. The WSL route is a `wsl.exe bash -lc`
+            // wrapper; environment variables don't propagate, so fall back to
+            // folding the system prompt into the user prompt there.
+            let will_use_wsl = crate::sandbox::program_argv(cwd.as_deref(), "kimi", &[]).is_some();
+            let injection: Option<Injection> = if will_use_wsl {
+                None
+            } else if new_flavor && (with_mcp || !system_empty) {
+                Some(Injection::TempHome(prepare_kimi_code_home(
+                    &app,
+                    &system_prompt,
+                    with_mcp,
+                )?))
+            } else if !new_flavor && !system_empty {
+                Some(Injection::AgentFile(prepare_kimi_agent_file(&system_prompt)?))
+            } else {
+                None
+            };
+
+            // When we couldn't inject the system prompt separately, fold it.
+            let prompt_value = if injection.is_none() && !system_empty {
+                folded_prompt.clone()
+            } else {
+                user_message.clone()
+            };
+
+            // New kimi-code has no stdin prompt path; legacy does. Keep a safe
+            // argv budget on Windows to avoid CreateProcess ENAMETOOLONG.
+            const ARGV_BUDGET: usize = 28_000;
+            let prompt_fits = prompt_value.len() <= ARGV_BUDGET;
+            if new_flavor && !prompt_fits {
+                return Err("kimi prompt exceeds the safe Windows argv budget; shorten the request".to_string());
+            }
+            let use_prompt_flag = prompt_fits;
+
+            // Both legacy kimi-cli and current kimi-code support --print
+            // non-interactive mode; --output-format only works in that mode.
             let mut args: Vec<String> = vec![
                 "--print".into(),
-                // Suppress everything except the final assistant message so
-                // the React side gets a clean blob, not a streaming preamble.
                 "--output-format".into(),
                 "text".into(),
                 "--final-message-only".into(),
             ];
-            args.extend(model_args.iter().cloned());
-            if with_mcp {
-                if let Some(cfg) = mcp_config.as_ref() {
+            if with_model {
+                args.extend(model_args.iter().cloned());
+            }
+            if !new_flavor && with_mcp {
+                if let Some(cfg) = old_mcp_config.as_ref() {
                     args.push("--mcp-config-file".into());
                     args.push(cfg.clone());
                 }
             }
-            if !fold_prompt_into_stdin {
+            if let Some(Injection::AgentFile(p)) = injection.as_ref() {
+                args.push("--agent-file".into());
+                args.push(p.to_string_lossy().to_string());
+            }
+            if let Some(Injection::TempHome(home)) = injection.as_ref() {
+                if !system_empty {
+                    args.push("--agent-file".into());
+                    args.push(home.join("agent.yaml").to_string_lossy().to_string());
+                }
+            }
+            if use_prompt_flag {
                 args.push("--prompt".into());
-                args.push(composed.clone());
+                args.push(prompt_value.clone());
             }
 
-            // WSL-isolated project → run `kimi` inside the distro; else Windows CLI.
+            // WSL-isolated project → run `kimi` inside the distro; else host CLI.
             let mut cmd = if let Some((exe, sargs)) =
                 crate::sandbox::program_argv(cwd.as_deref(), "kimi", &args)
             {
@@ -3647,7 +3991,7 @@ pub async fn kimi_cli_complete(
                 c
             } else {
                 let exe = find_kimi_cli()
-                    .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-cli) first".to_string())?;
+                    .ok_or_else(|| "kimi CLI not found on PATH — install Kimi Code (https://github.com/MoonshotAI/kimi-code) first".to_string())?;
                 #[cfg(windows)]
                 let batch = is_batch_shim(&exe);
                 #[cfg(not(windows))]
@@ -3664,12 +4008,23 @@ pub async fn kimi_cli_complete(
                 }
                 c
             };
-            // kimi-cli is Python: on Windows its piped stdout defaults to the
-            // legacy charmap codec and CRASHES on any non-ANSI character in the
-            // reply ("'charmap' codec can't encode…" — reproduced live with a
-            // Korean page snapshot). Force UTF-8 so Unicode output survives.
+
+            // kimi-cli (legacy) is Python; force UTF-8 so non-ANSI replies don't
+            // crash the codec. PYTHONIOENCODING is required on Windows so stdout
+            // can carry emoji; PYTHONUTF8 covers file reads. New kimi-code is Node,
+            // but the variables are harmless.
             cmd.env("PYTHONUTF8", "1");
-            cmd.stdin(if fold_prompt_into_stdin { Stdio::piped() } else { Stdio::null() });
+            cmd.env("PYTHONIOENCODING", "utf-8");
+            if let Some(Injection::TempHome(home)) = injection.as_ref() {
+                cmd.env("KIMI_CODE_HOME", home);
+                if with_mcp {
+                    if let Ok(info) = crate::mcp_gateway::ensure_started(&app) {
+                        cmd.env("OWLLM_GW_TOKEN", &info.token);
+                    }
+                }
+            }
+
+            cmd.stdin(if use_prompt_flag { Stdio::null() } else { Stdio::piped() });
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
@@ -3679,20 +4034,64 @@ pub async fn kimi_cli_complete(
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
             let pid = register_cli_child(&child);
-            if fold_prompt_into_stdin {
+            if !use_prompt_flag {
                 if let Some(mut stdin) = child.stdin.take() {
                     // Best-effort: on the WSL path the pipe can close early ("pipe
                     // has been ended, os error 109"); the real error still surfaces
                     // via exit status / stdout, so don't abort on the write.
-                    let _ = stdin.write_all(composed.as_bytes());
+                    let _ = stdin.write_all(prompt_value.as_bytes());
                 }
             }
             let output = wait_cli_child(child, pid)
                 .map_err(|e| format!("wait kimi: {e}"))?;
+
+            // Clean up the temporary injection files now that the child is done.
+            match injection {
+                Some(Injection::TempHome(home)) => {
+                    let _ = std::fs::remove_dir_all(&home);
+                }
+                Some(Injection::AgentFile(path)) => {
+                    if let Some(parent) = path.parent() {
+                        let _ = std::fs::remove_dir_all(parent);
+                    }
+                }
+                None => {}
+            }
+
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             if !output.status.success() {
-                return Err(cli_exit_err("kimi", output.status.code().unwrap_or(-1), &stdout, &stderr));
+                // Kimi splits its error signal: the real cause (LLMNotSet, auth,
+                // MCP failure) is usually in stdout, while stderr carries a
+                // session-resume line that confuses users. Detect the actionable
+                // failures first so the outer retry / auth handlers engage.
+                if kimi_output_llm_unset(&stdout) {
+                    return Err("kimi: LLM not set".to_string());
+                }
+                if kimi_output_auth_failed(&stdout) || kimi_output_auth_failed(&stderr) {
+                    let detail = if kimi_output_auth_failed(&stdout) {
+                        stdout.trim()
+                    } else {
+                        stderr.trim()
+                    };
+                    return Err(format!("kimi: authentication failed — {detail}"));
+                }
+                if kimi_output_mcp_failed(&stdout) || kimi_output_mcp_failed(&stderr) {
+                    return Err("kimi: browser gateway unreachable".to_string());
+                }
+                // Strip the noisy "To resume this session:" line from stderr
+                // before falling back to the generic message.
+                let clean_stderr = stderr
+                    .lines()
+                    .filter(|l| !l.to_ascii_lowercase().contains("to resume this session"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Err(cli_exit_err(
+                    "kimi",
+                    output.status.code().unwrap_or(-1),
+                    &stdout,
+                    &clean_stderr,
+                ));
             }
             // kimi exits 0 even on a fatal MCP-load failure; the error is only in
             // the output. Detect it so we can retry without the gateway.
@@ -3700,15 +4099,23 @@ pub async fn kimi_cli_complete(
             Ok((stdout.trim().to_string(), mcp_failed))
         };
 
-        let wired = mcp_config.is_some();
-        let (mut reply, mcp_failed) = attempt(wired)?;
+        let wired = old_mcp_config.is_some()
+            || (new_flavor && host_run && !gw_broken);
+        let (mut reply, mcp_failed) = match attempt(wired, true) {
+            Ok(r) => r,
+            Err(e) if kimi_output_llm_unset(&e) => {
+                eprintln!("kimi: requested model not recognised ({e}); retrying with CLI default");
+                attempt(wired, false)?
+            }
+            Err(e) => return Err(e),
+        };
         if wired && mcp_failed {
             // kimi aborts the whole turn if an MCP server can't connect — retry
             // once without the browser gateway so the user gets a real answer
             // (no browser tools this run), and skip it for the rest of the session.
             KIMI_GATEWAY.store(2, std::sync::atomic::Ordering::Relaxed);
             eprintln!("kimi: browser gateway unreachable (kimi aborts on MCP-connect failure); retrying without it");
-            reply = attempt(false)?.0;
+            reply = attempt(false, true)?.0;
         } else if wired {
             KIMI_GATEWAY.store(1, std::sync::atomic::Ordering::Relaxed);
         }
@@ -3719,11 +4126,21 @@ pub async fn kimi_cli_complete(
             return Err("kimi returned an empty reply".to_string());
         }
         if kimi_output_llm_unset(&reply) {
-            return Err("kimi: no model resolved (LLMNotSet) — run `kimi login`, or set a default model in ~/.kimi/config.toml".to_string());
+            return Err("kimi: no model resolved (LLMNotSet) — run `kimi login`, or set a default model in ~/.kimi-code/config.toml (or ~/.kimi/config.toml for legacy CLI)".to_string());
         }
         if kimi_output_mcp_failed(&reply) {
             return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
         }
+        if kimi_output_auth_failed(&reply) {
+            return Err("kimi: authentication failed (401 / login expired / signed out)".to_string());
+        }
+
+        // New kimi-code text mode prefixes each assistant block with "• ";
+        // strip the leading bullet so the React side receives clean text.
+        if new_flavor {
+            reply = reply.trim_start_matches("• ").trim().to_string();
+        }
+
         Ok(reply)
     })
     .await
@@ -3734,7 +4151,8 @@ pub async fn kimi_cli_complete(
 mod tests {
     use super::{
         codex_should_grant_browser, is_browser_role_allowlist, kimi_config_has_default,
-        kimi_config_model_keys, kimi_output_llm_unset, kimi_output_mcp_failed,
+        kimi_agent_yaml, kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
+        kimi_output_mcp_failed,
     };
 
     // The exact kimi output that crashed a team run (reproduced live 2026-07-06,
@@ -3756,6 +4174,23 @@ mod tests {
         assert!(kimi_output_llm_unset("LLM not set"));
         assert!(kimi_output_llm_unset("  llm not set\n"));
         assert!(!kimi_output_llm_unset("The model is set to K2.7."));
+    }
+
+    #[test]
+    fn kimi_auth_failure_is_detected_despite_exit_0() {
+        assert!(kimi_output_auth_failed("⚠ moonshot is signed out — its login expired (401). Re-authenticate..."));
+        assert!(kimi_output_auth_failed("HTTP 401 Unauthorized"));
+        assert!(kimi_output_auth_failed("You are not logged in. Run `kimi login`."));
+        assert!(!kimi_output_auth_failed("The server responded with a 200 OK."));
+    }
+
+    #[test]
+    fn kimi_agent_yaml_preserves_default_coding_prompt() {
+        let yaml = kimi_agent_yaml("Stay on task.\nUse repo tools.");
+        assert!(yaml.contains("extend: default"));
+        assert!(yaml.contains("ROLE_ADDITIONAL: |-"));
+        assert!(yaml.contains("      Stay on task."));
+        assert!(!yaml.contains("system_prompt_path"));
     }
 
     // Reproduces the "subscription never ties after login" bug: a login-time
@@ -3782,27 +4217,26 @@ mod tests {
             let keys = cfg.map(kimi_config_model_keys).unwrap_or_default();
             kimi_model_args_inner(req, has_default, &keys, modern)
         };
-        // Undeclared id + a config default → drop the flag (the bug fix).
-        assert!(decide(Some("kimi-latest"), Some(KIMI_CFG), false).is_empty());
-        // Declared id → pass it through.
+        // Any requested id is passed explicitly. If Kimi CLI doesn't recognise it,
+        // the LLMNotSet detector in kimi_cli_complete retries without the flag.
+        // This prevents OwLLM from silently switching to the user's unrelated CLI
+        // default (e.g. Claude) when they asked for a specific Kimi model.
+        assert_eq!(
+            decide(Some("kimi-latest"), Some(KIMI_CFG), false),
+            vec!["--model", "kimi-latest"]
+        );
+        assert_eq!(
+            decide(Some("kimi-k2.7"), None, true),
+            vec!["--model", "kimi-k2.7"]
+        );
         assert_eq!(
             decide(Some("kimi-code/kimi-for-coding"), Some(KIMI_CFG), false),
             vec!["--model", "kimi-code/kimi-for-coding"]
         );
-        // No config at all (ancient CLI) → keep the always-valid alias.
-        assert_eq!(decide(None, None, false), vec!["--model", "kimi-latest"]);
-        // Config default, no request → let the CLI use its default.
+        // No model requested → let the CLI use its configured default.
         assert!(decide(None, Some(KIMI_CFG), false).is_empty());
-        // THE ~1s CRASH: modern login (credentials json) writes NO config.toml,
-        // so has_default=false — a team asking for `kimi-k2.7` must still NOT
-        // force the flag (that id isn't declared → LLMNotSet). Drop it.
-        assert!(decide(Some("kimi-k2.7"), None, true).is_empty());
-        // Same undeclared id with neither a default nor a modern login (truly
-        // ancient) → pass it as a last resort (unchanged behaviour).
-        assert_eq!(
-            decide(Some("kimi-k2.7"), None, false),
-            vec!["--model", "kimi-k2.7"]
-        );
+        // No config at all (ancient CLI) and no request → keep the always-valid alias.
+        assert_eq!(decide(None, None, false), vec!["--model", "kimi-latest"]);
     }
 
     #[test]
@@ -3829,9 +4263,14 @@ mod tests {
     }
 
     #[test]
-    fn codex_browser_grant_is_role_or_full_access_scoped() {
-        assert!(!codex_should_grant_browser(false, false));
-        assert!(codex_should_grant_browser(true, false));
-        assert!(codex_should_grant_browser(false, true));
+    fn codex_browser_grant_is_cross_cutting_except_jailed_non_browser() {
+        // Host runs and non-jailed WSL/Lima/bwrap environments get the gateway
+        // regardless of role, matching the documented cross-cutting design.
+        assert!(codex_should_grant_browser(true, false, false));
+        assert!(codex_should_grant_browser(false, false, false));
+        // Jailed WSL blocks the transport for ordinary agents.
+        assert!(!codex_should_grant_browser(false, true, false));
+        // The Browser role keeps an explicit jail exception.
+        assert!(codex_should_grant_browser(false, true, true));
     }
 }

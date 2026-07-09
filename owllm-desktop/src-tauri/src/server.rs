@@ -490,6 +490,16 @@ pub async fn server_start(
         stream: "stdout".into(),
         line: format!("[supervisor] context window = {ctx_size} tokens (KV cache sized to this; raise it on the Server page if your GPU has room)."),
     });
+    // Let llama.cpp pick the slot count for concurrent local requests and keep
+    // continuous batching enabled. OWLLM can fan out local agents in parallel;
+    // this makes the server-side concurrency policy explicit instead of relying
+    // on a hidden llama-server default.
+    cmd.arg("--parallel").arg("-1");
+    cmd.arg("--cont-batching");
+    let _ = app.emit("server-log", ServerLogEvent {
+        stream: "stdout".into(),
+        line: "[supervisor] local parallelism = auto slots (llama.cpp --parallel -1, continuous batching on).".into(),
+    });
     // --jinja activates llama.cpp's jinja chat-template engine. WITHOUT
     // this flag, llama-server uses its built-in template fallback which
     // SILENTLY ignores `tools=[…]` on the request body AND can't parse

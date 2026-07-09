@@ -1258,6 +1258,44 @@ export function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem
   return lines.join("\n");
 }
 
+function recentTextHistory(history: HistoryItem[] | undefined, maxTurns = 8, maxChars = 12_000): HistoryItem[] {
+  if (!history || history.length === 0) return [];
+  const out: HistoryItem[] = [];
+  let used = 0;
+  for (const h of history.slice(-maxTurns).reverse()) {
+    const content = typeof h.content === "string" ? h.content.trim() : "";
+    if (!content) continue;
+    const budget = maxChars - used;
+    if (budget <= 0) break;
+    const clipped = content.length > budget ? content.slice(content.length - budget) : content;
+    out.unshift({ role: h.role, content: clipped });
+    used += clipped.length;
+  }
+  return out;
+}
+
+function buildKimiCliPrompt(userMessage: string, history?: HistoryItem[]): string {
+  const current = userMessage.trim();
+  const prior = recentTextHistory(history);
+  if (prior.length === 0) return current;
+  const lines: string[] = [
+    "CURRENT USER REQUEST - this is the only task to answer or implement:",
+    current,
+    "",
+    "Previous conversation below is reference only. Do not continue, summarize, or report completion for an older task unless the current request explicitly asks for it.",
+    "--- Reference-only prior turns ---",
+  ];
+  for (const h of prior) {
+    lines.push(`${h.role === "assistant" ? "Assistant" : "User"}: ${h.content}`);
+    lines.push("");
+  }
+  lines.push("--- End reference-only prior turns ---");
+  lines.push("");
+  lines.push("Now answer or implement ONLY this current user request:");
+  lines.push(current);
+  return lines.join("\n");
+}
+
 // ---------- Model routing ----------
 export function stripModelPrefix(id: string): string {
   for (const p of ["sub/", "api/", "auto/"]) {
@@ -1333,27 +1371,26 @@ const _warmCli = new Map<string, WarmEntry>();
 const WARM_TTL_MS = 25 * 60 * 1000; // 25 min — comfortably under the ~1h token TTL
 export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli";
 export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): Promise<void> {
-  // Only Claude/Codex expose the `accounts_test_probe_live` warm round-trip that
-  // refreshes an OAuth token as a side effect. Gemini/Kimi have no such probe, so
-  // warming them would just fire a guaranteed-failing invoke on every retry —
-  // skip it. Their retry path still gets the backoff+retry (covers the common
-  // transient-network case); a hard auth failure surfaces after the retries.
-  if (backend !== "claude_cli" && backend !== "codex_cli") return;
   const now = Date.now();
   let entry = _warmCli.get(backend);
   // Re-warm when there's no entry OR the cached warm has aged past the TTL.
   if (!entry || now - entry.at > WARM_TTL_MS) {
-    // Same minimal CLI round-trip the Accounts "Test" button runs; it refreshes
-    // the token as a side effect. Best-effort — a failure still lets the real
-    // call proceed (it may succeed or surface a clearer error).
     const p = (async () => {
-      try { await invoke("accounts_test_probe_live", { backend }); }
-      catch { /* ignore — warm-up is best-effort */ }
+      // Only Claude/Codex expose the `accounts_test_probe_live` warm round-trip
+      // that refreshes an OAuth token as a side effect. For them, run the probe.
+      if (backend === "claude_cli" || backend === "codex_cli") {
+        try { await invoke("accounts_test_probe_live", { backend }); }
+        catch { /* ignore — warm-up is best-effort */ }
+      }
       // THE AGENTIC-TEAM 401 FIX: a sandboxed project runs the CLI inside WSL
       // against a COPY of the Windows credentials; warming only refreshes the
       // Windows token, so the in-sandbox copy goes stale → persistent 401. After
       // the warm refreshes the Windows token, re-mirror it into the sandbox so the
       // in-distro CLI reads a valid token. No-op (Rust-side) when not isolated.
+      //
+      // We run this for ALL subscription backends (including Kimi/Gemini), because
+      // they all share the same stale-sandbox-copy failure mode even though they
+      // lack a live probe.
       try { await invoke("accounts_refresh_sandbox_creds", { cwd: cwd ?? null }); }
       catch { /* best-effort — never block the dispatch */ }
     })();
@@ -1369,6 +1406,92 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
 // retrying (the reactive complement to the proactive WARM_TTL_MS re-warm above).
 export function clearCliWarm(backend: CliBackend): void {
   _warmCli.delete(backend);
+}
+
+// outlive it, so a specialist's CLI call 401s ("Invalid authentication
+// credentials") even though sign-in is fine — and ensureCliWarm only refreshes
+// ONCE per session, so nothing recovers. On a 401 we: force a fresh token
+// refresh (clearCliWarm + ensureCliWarm), PAUSE the team, and retry on a
+// backoff (10s → 30s → 2min). After the schedule is exhausted the error
+// propagates (and the Critical-Thinker-style advisory handling still applies).
+export const CLI_AUTH_BACKOFFS_MS = [10_000, 30_000, 120_000]; // 10s, 30s, 2min
+
+export function isCliAuthError(msg: string): boolean {
+  return /\b401\b|invalid authentication|failed to authenticate|authentication_error|not logged in|unauthorized/i.test(msg);
+}
+
+// Transient NETWORK failures the subscription CLI surfaces ("Failed to fetch"
+// from its own internal API call, DNS/connection blips) — NOT auth. These clear
+// on a quick retry, so the subscription path now retries them too (the API path
+// already did). Without this, ONE network hiccup mid-run killed the whole team
+// with a raw "failed to fetch" — the exact recurring "works and doesn't work".
+export const CLI_NET_BACKOFFS_MS = [1500, 4000, 8000]; // fast — a blip clears in seconds
+export function isTransientNetError(msg: string): boolean {
+  // Network blips AND transient SERVER-side errors that clear on a retry: an
+  // Anthropic 529 "Overloaded", 503/502 service-unavailable, and 429 rate limits
+  // are all "try again in a moment" — not a real failure of the agent's work.
+  return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
+}
+
+/// Sleep that rejects immediately if the run is cancelled mid-wait.
+export function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(new DOMException("aborted", "AbortError")); return; }
+    const onAbort = () => { clearTimeout(timer); reject(new DOMException("aborted", "AbortError")); };
+    const timer = setTimeout(() => { signal.removeEventListener("abort", onAbort); resolve(); }, ms);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+/// Set by the AgentsPage component so the retry can surface a "team paused /
+/// retrying" notice (and a "recovered" notice) in the user-facing thread.
+/// Module-level to avoid threading a callback through every call site.
+export type AuthWaitInfo =
+  | { kind: "wait"; attempt: number; total: number; waitMs: number; backend: string; reason: "auth" | "network" }
+  | { kind: "recovered"; backend: string };
+let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;
+export function setCliAuthWaitHandler(handler: ((info: AuthWaitInfo) => void) | null): void {
+  _authWaitHandler = handler;
+}
+
+/// Run a subscription-CLI call (Claude, Codex, Gemini, or Kimi), retrying on auth
+/// (401) failures with backoff. Forces a token refresh before each retry. Non-auth
+/// errors are NOT retried here (they bubble straight up). Honors the run's
+/// AbortSignal during the wait.
+export async function withCliAuthRetry<T>(
+  backend: "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli",
+  signal: AbortSignal,
+  fn: () => Promise<T>,
+  /// The cwd the CLI runs in. When the project is isolated, the re-warm also
+  /// re-mirrors the refreshed Windows creds INTO the sandbox (the agentic-team
+  /// 401 fix) — otherwise the host re-warm never reaches the in-distro copy.
+  cwd?: string | null,
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const result = await fn();
+      if (attempt > 0) _authWaitHandler?.({ kind: "recovered", backend }); // we recovered after a 401
+      return result;
+    } catch (e: any) {
+      const msg = e?.message ?? String(e);
+      if (signal.aborted) throw e;
+      // Retry on auth (token expired) OR a transient network blip. Different
+      // schedules: auth refresh is slow (10s/30s/2min); a network blip clears
+      // fast (1.5s/4s/8s).
+      const isAuth = isCliAuthError(msg);
+      const isNet = !isAuth && isTransientNetError(msg);
+      const schedule = isAuth ? CLI_AUTH_BACKOFFS_MS : CLI_NET_BACKOFFS_MS;
+      if ((!isAuth && !isNet) || attempt >= schedule.length) throw e;
+      const waitMs = schedule[attempt];
+      // Auth → the one-time warm went stale; drop it + re-warm so the CLI
+      // refreshes its OAuth token before we retry. Network → just wait + retry;
+      // the CLI's own API call hit a transient blip that clears on its own.
+      if (isAuth) { try { clearCliWarm(backend); await ensureCliWarm(backend, cwd); } catch { /* retry regardless */ } }
+      _authWaitHandler?.({ kind: "wait", attempt: attempt + 1, total: schedule.length, waitMs, backend, reason: isAuth ? "auth" : "network" });
+      try { await sleepAbortable(waitMs, signal); }
+      catch { throw e; } // run cancelled during the wait → surface original error
+    }
+  }
 }
 
 // ---------- Attachment helpers ----------
@@ -2656,18 +2779,24 @@ async function streamMoonshot(
   allowedTools?: string[],
 ): Promise<string> {
   if (route.forceSub === true) {
-    await ensureCliWarm("kimi_cli");
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
-    const reply = await invoke<string>("kimi_cli_complete", {
-      systemPrompt,
-      userMessage: prompt,
-      cwd: projectCwd ?? null,
-      model: modelId,
-      allowedTools: allowedTools ?? null,
-    });
+    await ensureCliWarm("kimi_cli", projectCwd);
+    // Kimi --print mode has no native image flag, but it CAN read image files
+    // from the working directory when referenced by relative path in the prompt.
+    // Save pasted images into .owllm-inbox/ and reference them, like the Claude
+    // and Codex subscription paths do.
+    const kimiCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
+    const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], kimiCwd);
+    const prompt = buildKimiCliPrompt(cliUserMessage, history);
+    const reply = await withCliAuthRetry("kimi_cli", signal, () =>
+      invoke<string>("kimi_cli_complete", {
+        systemPrompt,
+        userMessage: prompt,
+        cwd: kimiCwd ?? null,
+        model: modelId,
+        allowedTools: allowedTools ?? null,
+      }),
+      kimiCwd,
+    );
     if (reply) onDelta(reply);
     return reply;
   }
@@ -2742,17 +2871,20 @@ async function streamGemini(
   history?: HistoryItem[],
 ): Promise<string> {
   if (route.forceSub === true) {
-    await ensureCliWarm("gemini_cli");
+    await ensureCliWarm("gemini_cli", projectCwd);
     const convo = (history ?? [])
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
       .join("\n\n");
     const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
-    const reply = await invoke<string>("gemini_cli_complete", {
-      systemPrompt,
-      userMessage: prompt,
-      cwd: projectCwd ?? null,
-      model: modelId,
-    });
+    const reply = await withCliAuthRetry("gemini_cli", signal, () =>
+      invoke<string>("gemini_cli_complete", {
+        systemPrompt,
+        userMessage: prompt,
+        cwd: projectCwd ?? null,
+        model: modelId,
+      }),
+      projectCwd,
+    );
     if (reply) onDelta(reply);
     return reply;
   }

@@ -210,12 +210,12 @@ function VoiceRuntimePanel() {
 ///   * claude/kimi: bare REPL — we auto-type `send` once it boots so
 ///     Connect logs you in without you typing /login yourself.
 ///   * codex: `login` subcommand (one-shot OAuth) — no REPL command.
-///   * gemini: `auth login` subcommand pair — no REPL command.
+///   * gemini: bare REPL + `/auth`, matching the official CLI flow.
 const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } | undefined> = {
   claude_cli: { cli: "claude", args: [], send: "/login\r" },
   codex_cli:  { cli: "codex",  args: ["login"] },
   kimi_cli:   { cli: "kimi",   args: [], send: "/login\r" },
-  gemini_cli: { cli: "gemini", args: ["auth", "login"] },
+  gemini_cli: { cli: "gemini", args: [], send: "/auth\r" },
 };
 
 const PAGE_BG = "var(--bg-panel)";
@@ -1017,7 +1017,7 @@ export default function AccountsPage() {
         claude_cli: "auto-running /login — complete the browser sign-in.",
         codex_cli:  "follow the OAuth URL that appears.",
         kimi_cli:   "auto-running /login — complete the browser sign-in.",
-        gemini_cli: "follow the OAuth URL that appears.",
+        gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",
       };
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
       setActiveTerm({

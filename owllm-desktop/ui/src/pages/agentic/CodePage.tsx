@@ -2330,7 +2330,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             }
             const isUser = m.role === "user";
             const isStreaming = busy && i === messages.length - 1 && m.role === "assistant";
-            const canForward = !isUser && !isStreaming && m.content && m.content.trim().length > 0;
+            const canForward = m.role === "assistant" && i === messages.length - 1 && !isStreaming && !!m.content?.trim();
             return (
               <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <ChatBubble

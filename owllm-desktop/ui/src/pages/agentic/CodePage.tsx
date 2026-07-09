@@ -2300,18 +2300,39 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             }
             const isUser = m.role === "user";
             const isStreaming = busy && i === messages.length - 1 && m.role === "assistant";
+            const canForward = !isUser && !isStreaming && m.content && m.content.trim().length > 0;
             return (
-              <ChatBubble
-                key={i}
-                avatar={isUser ? "U" : "C"}
-                sender={isUser ? "You" : "Coder"}
-                accent={isUser ? "#7aa2ff" : "#7ff0c5"}
-                isUser={isUser}
-                isStreaming={isStreaming}
-                content={m.content}
-                thinking={m.thinking}
-                ts={m.ts}
-              />
+              <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <ChatBubble
+                  avatar={isUser ? "U" : "C"}
+                  sender={isUser ? "You" : "Coder"}
+                  accent={isUser ? "#7aa2ff" : "#7ff0c5"}
+                  isUser={isUser}
+                  isStreaming={isStreaming}
+                  content={m.content}
+                  thinking={m.thinking}
+                  ts={m.ts}
+                />
+                {canForward && (
+                  <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
+                    <button
+                      onClick={() => {
+                        const forwarded: Msg = {
+                          role: "user",
+                          content: `Forwarded from primary agent:\n\n${m.content}`,
+                          ts: Date.now(),
+                        };
+                        setSecondaryMessages((prev) => [...((prev as Msg[] | undefined) ?? []), forwarded]);
+                        setSecondaryOpen(true);
+                      }}
+                      title="Forward this reply to the second agent"
+                      style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}
+                    >
+                      → Forward to second agent
+                    </button>
+                  </div>
+                )}
+              </div>
             );
           })
         )}

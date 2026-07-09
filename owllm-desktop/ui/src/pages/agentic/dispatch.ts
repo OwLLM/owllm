@@ -27,7 +27,7 @@ import {
   renderValidationErrorsForModel,
   validateCall,
   firstRequiredArg,
-  retrieveTeamMemory,
+  retrieveTeamMemoryPack,
   logTeamWork,
   type ToolCall,
   type ToolExecResult,
@@ -3781,7 +3781,15 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     // Shared work-state (RAG): prepend the work teammates already did that's
     // relevant to THIS task, so the bridge path is synchronized too (parity with
     // the desktop runAgent). Rides the instruction → works on every model path.
-    const enriched = enrichInstructionWithMemory(await retrieveTeamMemory(instruction), instruction);
+    const pack = await retrieveTeamMemoryPack(instruction);
+    if (pack.total > 0) {
+      hooks.onThought(spec.name, {
+        role: "memory",
+        color: "#9ad9ff",
+        text: `🧠 Memory context: ${pack.factCount} facts · ${pack.worklogCount} worklog rows`,
+      });
+    }
+    const enriched = enrichInstructionWithMemory(pack.block, instruction);
     try {
       const specText = await streamChatCompletion(
         port, specModel, specProvider,

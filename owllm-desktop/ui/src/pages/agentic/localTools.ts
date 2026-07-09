@@ -109,7 +109,15 @@ export function isLeanRun(): boolean {
   return _leanRun;
 }
 
-type RawTeamMemEntry = { id: number; key: string; content: string; tags: string; author: string; ts: number; kind: string };
+export type RawTeamMemEntry = { id: number; key: string; content: string; tags: string; author: string; ts: number; kind: string };
+export type TeamMemoryPack = {
+  scope: string;
+  query: string;
+  block: string;
+  total: number;
+  factCount: number;
+  worklogCount: number;
+};
 
 /// Render the two-section snapshot the model reads directly — the READ half of
 /// "memory usable on every model path". Facts are the curated knowledge base
@@ -247,16 +255,38 @@ export function getBrowserStateLine(): string {
 /// teammates already did on this exact thing. Rows already carried by the injected
 /// snapshot are excluded (no double token spend). Empty/failed → "". The dispatch
 /// loops prepend this to each specialist's instruction (enrichInstructionWithMemory).
-export async function retrieveTeamMemory(task: string, limit = 8): Promise<string> {
-  const scope = _teamMemoryScope || "";
+export async function retrieveScopedTeamMemoryPack(
+  scope: string,
+  task: string,
+  limit = 8,
+  excludeSnapshot = true,
+): Promise<TeamMemoryPack> {
   // Lean runs halve the per-task RAG budget (see setLeanRun).
   const eff = _leanRun ? Math.min(limit, 4) : limit;
   try {
     // Overfetch: up to `eff` of the top hits may already sit in the snapshot.
     const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit: eff + 12 });
-    const fresh = entries.filter((e) => !_snapshotIds.has(e.id)).slice(0, eff);
-    return renderRelevantWork(fresh);
-  } catch { return ""; /* memory must never break a run */ }
+    const fresh = entries.filter((e) => !excludeSnapshot || !_snapshotIds.has(e.id)).slice(0, eff);
+    const worklogCount = fresh.filter((e) => e.tags === "worklog").length;
+    return {
+      scope,
+      query: task,
+      block: renderRelevantWork(fresh),
+      total: fresh.length,
+      factCount: fresh.length - worklogCount,
+      worklogCount,
+    };
+  } catch {
+    return { scope, query: task, block: "", total: 0, factCount: 0, worklogCount: 0 };
+  }
+}
+
+export async function retrieveTeamMemoryPack(task: string, limit = 8): Promise<TeamMemoryPack> {
+  return retrieveScopedTeamMemoryPack(_teamMemoryScope || "", task, limit, true);
+}
+
+export async function retrieveTeamMemory(task: string, limit = 8): Promise<string> {
+  return (await retrieveTeamMemoryPack(task, limit)).block;
 }
 
 /// Auto-capture what an agent just did as shared work-state (the WRITE path done
@@ -264,6 +294,10 @@ export async function retrieveTeamMemory(task: string, limit = 8): Promise<strin
 /// synchronized on it. Bounded server-side (team_memory_log prunes old worklog
 /// rows). Best-effort, never throws.
 export async function logTeamWork(agent: string, instruction: string, result: string): Promise<void> {
+  await logScopedTeamWork(_teamMemoryScope || "", agent, instruction, result);
+}
+
+export async function logScopedTeamWork(scope: string, agent: string, instruction: string, result: string): Promise<void> {
   if (!result || !result.trim()) return;
   // Don't record FAILED turns into the shared work-state. The loop research is
   // clear that an agent re-conditions on its own errors when they accumulate in
@@ -271,10 +305,9 @@ export async function logTeamWork(agent: string, instruction: string, result: st
   // re-injected into the next agent's instruction. Errors surface in the live log,
   // not the durable memory.
   if (/^\(error:/i.test(result.trim())) return;
-  const scope = _teamMemoryScope || "";
   try {
     await invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) });
-    await refreshTeamMemorySnapshot();
+    if (scope === (_teamMemoryScope || "")) await refreshTeamMemorySnapshot();
   } catch { /* memory must never break a run */ }
 }
 

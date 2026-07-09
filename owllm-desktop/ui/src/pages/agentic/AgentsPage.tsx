@@ -93,7 +93,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemory, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemoryPack, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -10561,6 +10561,15 @@ export function AgentsPage({
         // fallback for Run-button dispatches with no chat context.
         const sHist = priorHistory && priorHistory.length > 0 ? priorHistory
           : (sMem.length > 0 ? sMem : undefined);
+        const soloMemoryPack = await retrieveTeamMemoryPack(text);
+        if (soloMemoryPack.total > 0) {
+          appendThought(coder.name, {
+            role: "memory",
+            color: "#9ad9ff",
+            text: `🧠 Memory context: ${soloMemoryPack.factCount} facts · ${soloMemoryPack.worklogCount} worklog rows`,
+          });
+        }
+        const soloTask = enrichInstructionWithMemory(soloMemoryPack.block, text);
         // Scope the gate to the coder's domain (mirrors the team path) so the card's
         // frontend/backend lanes apply — a UI edit runs the fast frontend check, a
         // backend edit runs the heavier backend one, not always "full".
@@ -10572,7 +10581,7 @@ export function AgentsPage({
           // worked into this attempt's turn (like Claude Code reading it mid-flight).
           const sSteer = drainSteers();
           if (sSteer) appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteer}` });
-          const sBase = attempt === 1 ? text
+          const sBase = attempt === 1 ? soloTask
             : `Your previous change did NOT pass the project's verification:\n${renderGateLine(sGate!)}\n\nFix it so the check passes. Original task:\n${text}`;
           const turn = sSteer ? `${sBase}\n\n⚡ The user sent this WHILE you were working — address it too:\n${sSteer}` : sBase;
           try {
@@ -11342,8 +11351,15 @@ export function AgentsPage({
           // this task (term-hit ranked) and prepend it to the instruction, so the
           // specialist is synchronized on the team's actual work instead of acting
           // on a context-free sticky note. Model-agnostic (rides the instruction).
-          const taskMem = await retrieveTeamMemory(instruction);
-          const enrichedInstruction = enrichInstructionWithMemory(taskMem, instruction);
+          const taskMem = await retrieveTeamMemoryPack(instruction);
+          if (taskMem.total > 0) {
+            appendThought(spec.name, {
+              role: "memory",
+              color: "#9ad9ff",
+              text: `🧠 Memory context: ${taskMem.factCount} facts · ${taskMem.worklogCount} worklog rows`,
+            });
+          }
+          const enrichedInstruction = enrichInstructionWithMemory(taskMem.block, instruction);
           const sysPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd, activeTeam.agents.length <= 3);
           // PER-AGENT VERIFY-FIX LOOP (Build Shape slice 1, step 5+6): a coder does
           // not return one-shot. After it edits, the GATE runs the project's check

@@ -19,8 +19,8 @@ import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
-import { getBrowserStateLine, refreshBrowserState } from "./localTools";
-import { enrichInstructionWithMemory, formatWorkLogEntry, renderRelevantWork, type WorkEntry } from "./teamMemoryFormat";
+import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
+import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
 import { RunTimerChip } from "./RunTimer";
@@ -65,7 +65,6 @@ const CODING_SYSTEM = (ws: string) =>
 // (cards), then the agent executes each step in turn, moving its card across
 // the board. Inspired by Cline's task UX, built on OWLLM's own engine.
 type Task = { id: number; title: string; status: "pending" | "running" | "done" | "failed" };
-type RawTeamMemEntry = WorkEntry & { id?: number; created_at?: number };
 
 // Each open Code PAGE has its own chatRuntime session, keyed by the page id, so
 // pages are fully INDEPENDENT — separate conversation, workspace, and (when the
@@ -1176,33 +1175,39 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
 
   const memoryScope = () => ruleScopeRef.current.id || projectRoot || workspace || "";
 
-  const enrichCodePromptWithMemory = async (user: string): Promise<string> => {
+  const memoryLabel = (pack: TeamMemoryPack): string =>
+    pack.total > 0 ? `${pack.factCount} fact${pack.factCount === 1 ? "" : "s"} · ${pack.worklogCount} worklog` : "no hits";
+
+  const showMemoryPack = (pack: TeamMemoryPack) => {
+    if (pack.total <= 0) return;
+    setMessages((msgs) => {
+      const card: Msg = {
+        role: "tool",
+        kind: "tool",
+        title: `memory_context(${memoryLabel(pack)})`,
+        content: pack.block,
+        status: "ok",
+        ts: Date.now(),
+      };
+      const out = msgs.slice();
+      const last = out[out.length - 1];
+      if (last && last.role === "assistant" && last.placeholder) out.splice(out.length - 1, 0, card);
+      else out.push(card);
+      return out;
+    });
+  };
+
+  const enrichCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
     const scope = memoryScope();
-    if (!scope || !user.trim()) return user;
-    try {
-      const rows = await invoke<RawTeamMemEntry[]>("team_memory_search", {
-        scope,
-        query: user,
-        limit: 8,
-      });
-      return enrichInstructionWithMemory(renderRelevantWork(rows), user);
-    } catch {
-      return user;
-    }
+    const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
+    if (!scope || !user.trim()) return { text: user, pack: empty };
+    const pack = await retrieveScopedTeamMemoryPack(scope, user, 8, false);
+    return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
   const logCodeWork = async (instruction: string, result: string) => {
     const scope = memoryScope();
-    if (!scope || !instruction.trim() || !result.trim() || /^\(error:/i.test(result.trim())) return;
-    try {
-      await invoke<number>("team_memory_log", {
-        scope,
-        agent: "code",
-        content: formatWorkLogEntry("code", instruction, result),
-      });
-    } catch {
-      // Memory is helpful context, never a reason for a Code page run to fail.
-    }
+    await logScopedTeamWork(scope, "code", instruction, result);
   };
 
   // One agent turn against the SELECTED model. Routes by provider exactly like
@@ -1234,7 +1239,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const sys = system + formatDirectivesBlock(directivesRef.current)
       + (browserLine ? `\n\n${browserLine}` : "")
       + (chatOnly ? "\n\nMODE: CHAT — discuss, review, plan and answer questions ONLY. Do NOT edit or create files, and do NOT run commands that change any state. You may read files and search to ground your answers." : "");
-    const enrichedUser = await enrichCodePromptWithMemory(user);
+    const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(user);
+    if (!opts?.silent) showMemoryPack(pack);
     if (isLocal) {
       const port = await ensureServer(modelId);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
@@ -1397,7 +1403,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     });
     try {
       const provider = providerFor(modelId, availableModels);
-      const enrichedText = await enrichCodePromptWithMemory(text);
+      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(text);
+      showMemoryPack(pack);
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");

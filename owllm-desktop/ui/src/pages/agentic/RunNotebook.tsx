@@ -1,16 +1,18 @@
 // RunNotebook — the user's live scratchpad WHILE agents work.
 //
 // Three jobs in one surface:
-//   1. Brainstorm — a freeform notes pane the user writes in during a run
+//   1. Working notes — one freeform place the user writes in during a run
 //      (ideas, refactors, feature thoughts). Autosaved per project.
-//   2. Next steps — an ordered to-do list. Each step can be fed to the
-//      team: mid-run it becomes a ⚡ steer; when idle it dispatches as a
-//      new goal. With AUTO-FEED on, a cleanly finished run pushes the next
+//   2. Plan — a living document distilled from the notes and edited freely.
+//   3. Next steps — an ordered to-do list. Each step can be fed to the
+//      team: mid-run it becomes a steer; when idle it dispatches as a new
+//      goal. With AUTO-FEED on, a cleanly finished run pushes the next
 //      pending step automatically.
-//   3. Digest agent — a small chat that rewrites raw notes into clear,
-//      self-contained, implementable steps. ADDITIVE by design: it only
-//      proposes NEW steps (never rewrites the list); the user adds the ones
-//      they like with one click.
+//
+// The digest agent is intentionally not a second chat box. It reads the
+// working notes + current plan + existing steps, then proposes plan/step
+// changes for one-click apply/add. The raw digest transcript is retained as
+// a collapsible log for debugging only.
 //
 // The component renders inline in the Code page's right column and as a
 // modal from the Agents page. Both modes share the same vertical,
@@ -158,8 +160,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const [open, setOpen] = useState(false);
   const [nb, setNb] = useState<NotebookState>(() => loadNotebook(projectId));
   const [newStep, setNewStep] = useState("");
-  const [digestInput, setDigestInput] = useState("");
   const [digestBusy, setDigestBusy] = useState(false);
+  const [digestLogOpen, setDigestLogOpen] = useState(false);
+  const [digestError, setDigestError] = useState("");
   const [proposed, setProposed] = useState<string[]>([]);
   /// Digest-drafted plan awaiting the user's one-click apply (mirrors the
   /// propose→add pattern steps use — the digest never overwrites silently).
@@ -175,7 +178,6 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const brainstormRef = useAutoResize<HTMLTextAreaElement>(nb.text, { minRows: 4, maxRows: 16 });
   const planRef = useAutoResize<HTMLTextAreaElement>(nb.plan, { minRows: 3, maxRows: 14 });
   const newStepRef = useAutoResize<HTMLTextAreaElement>(newStep, { minRows: 1, maxRows: 6 });
-  const digestInputRef = useAutoResize<HTMLTextAreaElement>(digestInput, { minRows: 1, maxRows: 5 });
   const editStepRef = useAutoResize<HTMLTextAreaElement>(editingText, { minRows: 1, maxRows: 8 });
 
   useEffect(() => {
@@ -194,31 +196,56 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     return () => window.removeEventListener(NOTEBOOK_EVENT, onChanged as EventListener);
   }, []);
   // Project switch → swap to that project's notebook.
-  useEffect(() => { setNb(loadNotebook(projectId)); setProposed([]); setProposedPlan(""); setEditingStepId(null); }, [projectId]);
+  useEffect(() => {
+    setNb(loadNotebook(projectId));
+    setProposed([]);
+    setProposedPlan("");
+    setDigestError("");
+    setEditingStepId(null);
+  }, [projectId]);
 
-  const update = (patch: Partial<NotebookState>) => {
+  const updateNotebook = (makeNext: (prev: NotebookState) => NotebookState) => {
     setNb((prev) => {
-      const next = { ...prev, ...patch };
+      const next = makeNext(prev);
       saveNotebook(projRef.current, next);
       return next;
     });
   };
 
+  const update = (patch: Partial<NotebookState>) => {
+    updateNotebook((prev) => ({ ...prev, ...patch }));
+  };
+
   const addStep = (text: string) => {
     const t = text.trim();
     if (!t) return;
-    update({ steps: [...nb.steps, { id: newStepId(), text: t, status: "pending", ts: Date.now() }] });
+    updateNotebook((prev) => ({
+      ...prev,
+      steps: [...prev.steps, { id: newStepId(), text: t, status: "pending", ts: Date.now() }],
+    }));
+  };
+  const addSteps = (texts: string[]) => {
+    const clean = texts.map((t) => t.trim()).filter(Boolean);
+    if (!clean.length) return;
+    const now = Date.now();
+    updateNotebook((prev) => ({
+      ...prev,
+      steps: [
+        ...prev.steps,
+        ...clean.map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i })),
+      ],
+    }));
   };
   const setStep = (id: string, patch: Partial<NotebookStep>) =>
-    update({ steps: nb.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) });
-  const removeStep = (id: string) => update({ steps: nb.steps.filter((s) => s.id !== id) });
+    updateNotebook((prev) => ({ ...prev, steps: prev.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
+  const removeStep = (id: string) => updateNotebook((prev) => ({ ...prev, steps: prev.steps.filter((s) => s.id !== id) }));
   const moveStep = (id: string, dir: -1 | 1) => {
     const i = nb.steps.findIndex((s) => s.id === id);
     const j = i + dir;
     if (i < 0 || j < 0 || j >= nb.steps.length) return;
     const steps = [...nb.steps];
     [steps[i], steps[j]] = [steps[j], steps[i]];
-    update({ steps });
+    updateNotebook((prev) => ({ ...prev, steps }));
   };
   const feedStep = (s: NotebookStep) => {
     const res = onFeed(s.text);
@@ -238,27 +265,31 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const cancelEdit = () => { setEditingStepId(null); setEditingText(""); };
 
   const runDigest = async () => {
-    const ask = digestInput.trim();
     const notes = nb.text.trim();
-    if ((!ask && !notes) || digestBusy) return;
+    const currentPlan = nb.plan.trim();
+    if (digestBusy) return;
+    if (!notes && !currentPlan && nb.steps.length === 0) {
+      setDigestError("Write working notes first, or add an existing plan/step for the digest to refine.");
+      return;
+    }
     setDigestBusy(true);
+    setDigestError("");
     setProposed([]);
     setProposedPlan("");
-    const youText = ask || "(digest my notebook notes into a plan + next steps)";
+    const youText = "Digest the current notebook into a clearer plan and new feedable steps.";
     const history = [...nb.digest, { role: "you" as const, text: youText }];
     update({ digest: history });
-    setDigestInput("");
     try {
       const user = [
-        nb.plan.trim() ? `CURRENT PLAN (extend/refine additively):\n${nb.plan.trim()}` : "",
+        currentPlan ? `CURRENT PLAN (extend/refine additively):\n${currentPlan}` : "",
         nb.steps.length ? `EXISTING STEPS (do not repeat or rewrite):\n${nb.steps.map((s) => `- ${s.text}`).join("\n")}` : "",
         notes ? `NOTEBOOK NOTES:\n${notes}` : "",
-        ask ? `USER REQUEST:\n${ask}` : "",
       ].filter(Boolean).join("\n\n");
       let reply = "";
       const ctrl = new AbortController();
       // User override (persisted per project) wins; else the inherited default.
       const dm = nb.digestModel || modelId;
+      if (!dm.trim()) throw new Error("No digest model is selected or loaded.");
       await streamChatCompletion(
         port, dm, providerFor(dm, models),
         DIGEST_SYSTEM, user, 0.3, ctrl.signal,
@@ -267,9 +298,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       const parsed = parseDigestReply(reply);
       update({ digest: [...history, { role: "digest", text: reply.trim() || "(no reply)" }] });
       setProposed(parsed.steps);
-      if (parsed.plan && parsed.plan !== nb.plan.trim()) setProposedPlan(parsed.plan);
+      if (parsed.plan && parsed.plan !== currentPlan) setProposedPlan(parsed.plan);
     } catch (e: any) {
-      update({ digest: [...history, { role: "digest", text: `(error: ${String(e?.message ?? e)})` }] });
+      const msg = String(e?.message ?? e);
+      setDigestError(msg);
+      setDigestLogOpen(true);
+      update({ digest: [...history, { role: "digest", text: `(error: ${msg})` }] });
     } finally {
       setDigestBusy(false);
     }
@@ -330,21 +364,117 @@ export default function RunNotebook({ projectId, projectName, active = true, run
 
         {/* Body: scrollable column of cards */}
         <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 12, padding: "12px 14px" }}>
-          {/* Brainstorm notes */}
+          {/* Working notes and digest controls */}
           <div style={card}>
             <div style={sectionHeader}>
               <span>💡</span>
-              <span>Brainstorm</span>
-              <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>freeform notes</span>
+              <span>Working notes</span>
+              <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>single source for digest</span>
             </div>
             <textarea
               ref={brainstormRef}
               value={nb.text}
               onChange={(e) => update({ text: e.target.value })}
-              placeholder={"Think out loud while the agents work — ideas, refactors, features…\nThen 🪄 Digest drafts the plan + feedable steps."}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key === "Enter" && !digestBusy) {
+                  e.preventDefault();
+                  void runDigest();
+                }
+              }}
+              placeholder={"Think out loud here while the agents work: decisions, bugs, UI ideas, files to touch.\nPress Ctrl+Enter or use Digest notes to turn this into a plan and feedable steps."}
               style={textareaBase}
             />
+            {digestError && (
+              <div style={{ padding: "8px 10px", border: "1px solid rgba(255,140,140,0.45)", borderRadius: 8, background: "rgba(70,20,28,0.35)", color: "#ffb4b4", fontSize: 12, lineHeight: 1.4 }}>
+                {digestError}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <div title="Digest agent model. Default: the team's model (pending override -> project's team model -> loaded server model)." style={{ width: inline ? 170 : 220, flexShrink: 0 }}>
+                <ModelPicker
+                  value={nb.digestModel || ""}
+                  onChange={(id) => update({ digestModel: id })}
+                  models={models}
+                  status={accountsStatus}
+                  fallbackLabel={`🪄 ${digestModelLabel}`}
+                />
+              </div>
+              {nb.digestModel && (
+                <button className="ghost-btn" onClick={() => update({ digestModel: undefined })} title="Back to the default team model" style={{ height: 28, width: 28, padding: 0, fontSize: 11, flexShrink: 0 }}>✕</button>
+              )}
+              <button
+                onClick={() => void runDigest()}
+                disabled={digestBusy}
+                title="Digest the working notes, current plan, and existing steps"
+                style={{ height: 32, padding: "0 14px", border: "none", borderRadius: 7, background: digestBusy ? "var(--bg-surface)" : "rgba(var(--accent-rgb),0.2)", color: digestBusy ? "var(--fg-muted)" : "var(--accent)", fontSize: 12, fontWeight: 700, cursor: digestBusy ? "wait" : "pointer", flexShrink: 0 }}
+              >{digestBusy ? "Digesting..." : "🪄 Digest notes"}</button>
+              {nb.digest.length > 0 && (
+                <button className="ghost-btn" onClick={() => setDigestLogOpen((v) => !v)} title="Show or hide the raw digest transcript" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>
+                  {digestLogOpen ? "Hide log" : "Show log"}
+                </button>
+              )}
+              <span style={{ marginLeft: "auto", fontSize: 11, color: "var(--fg-muted)" }}>
+                {digestBusy ? "reading notebook..." : "Ctrl+Enter digests"}
+              </span>
+            </div>
+            {digestLogOpen && (nb.digest.length > 0 || digestBusy) && (
+              <div ref={digestScroll.ref} onScroll={digestScroll.onScroll} style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 180, overflowY: "auto", padding: 10, background: "var(--bg-input)", borderRadius: 8, border: "1px solid var(--border)" }}>
+                {nb.digest.map((m, i) => (
+                  <div key={i} style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: m.role === "you" ? "#9ad9ff" : "var(--fg)" }}>
+                    <b style={{ fontSize: 10, opacity: 0.8 }}>{m.role === "you" ? "REQUEST" : "DIGEST"}</b> {m.text}
+                  </div>
+                ))}
+                {digestBusy && <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>Digesting...</div>}
+              </div>
+            )}
           </div>
+
+          {(proposedPlan || proposed.length > 0) && (
+            <div style={{ ...card, borderColor: "rgba(127,240,197,0.35)" }}>
+              <div style={sectionHeader}>
+                <span>🪄</span>
+                <span>Proposed update</span>
+                <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>review before applying</span>
+              </div>
+              {proposedPlan && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, background: "rgba(14,28,40,0.5)", border: "1px solid rgba(154,217,255,0.35)", borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: "#9ad9ff", fontWeight: 700 }}>Proposed plan</div>
+                  <div style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)" }}>{proposedPlan}</div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      onClick={() => { update({ plan: proposedPlan }); setProposedPlan(""); }}
+                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(154,217,255,0.45)", borderRadius: 6, background: "rgba(14,28,40,0.7)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                    >Apply plan</button>
+                    <button className="ghost-btn" onClick={() => setProposedPlan("")} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
+                  </div>
+                </div>
+              )}
+              {proposed.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ fontSize: 11, color: "#7ff0c5", fontWeight: 700 }}>Proposed steps</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {proposed.map((t, i) => (
+                      <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 8, background: "rgba(16,36,28,0.45)", border: "1px solid rgba(127,240,197,0.28)", borderRadius: 8 }}>
+                        <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{t}</div>
+                        <button
+                          onClick={() => setProposed((ps) => { addStep(t); return ps.filter((_, j) => j !== i); })}
+                          title="Add this step to the list"
+                          style={{ height: 26, padding: "0 10px", border: "1px solid rgba(127,240,197,0.45)", borderRadius: 6, background: "rgba(16,36,28,0.7)", color: "#7ff0c5", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+                        >Add</button>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button
+                      onClick={() => { addSteps(proposed); setProposed([]); }}
+                      style={{ height: 28, padding: "0 12px", border: "none", borderRadius: 7, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                    >Add all steps</button>
+                    <button className="ghost-btn" onClick={() => setProposed([])} title="Discard proposed steps" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>Discard steps</button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Plan */}
           <div style={card}>
@@ -445,90 +575,6 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             </div>
           </div>
 
-          {/* Digest agent */}
-          <div style={card}>
-            <div style={sectionHeader}>
-              <span>🪄</span>
-              <span>Digest</span>
-              <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>notes → plan + steps</span>
-            </div>
-
-            {(nb.digest.length > 0 || digestBusy) && (
-              <div ref={digestScroll.ref} onScroll={digestScroll.onScroll} style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto", padding: 10, background: "var(--bg-input)", borderRadius: 8, border: "1px solid var(--border)" }}>
-                {nb.digest.map((m, i) => (
-                  <div key={i} style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: m.role === "you" ? "#9ad9ff" : "var(--fg)" }}>
-                    <b style={{ fontSize: 10, opacity: 0.8 }}>{m.role === "you" ? "YOU" : "🪄 DIGEST"}</b> {m.text}
-                  </div>
-                ))}
-                {digestBusy && <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>🪄 digesting…</div>}
-              </div>
-            )}
-
-            {proposedPlan && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, background: "rgba(14,28,40,0.5)", border: "1px solid rgba(154,217,255,0.35)", borderRadius: 8 }}>
-                <div style={{ fontSize: 11, color: "#9ad9ff", fontWeight: 700 }}>📋 Proposed plan update</div>
-                <div style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)" }}>{proposedPlan}</div>
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button
-                    onClick={() => { update({ plan: proposedPlan }); setProposedPlan(""); }}
-                    style={{ height: 26, padding: "0 12px", border: "1px solid rgba(154,217,255,0.45)", borderRadius: 6, background: "rgba(14,28,40,0.7)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                  >Apply updated plan</button>
-                  <button className="ghost-btn" onClick={() => setProposedPlan("")} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
-                </div>
-              </div>
-            )}
-
-            {proposed.length > 0 && (
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                <div style={{ fontSize: 11, color: "#7ff0c5", fontWeight: 700 }}>＋ Proposed steps</div>
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center" }}>
-                  {proposed.map((t, i) => (
-                    <button
-                      key={i}
-                      onClick={() => setProposed((ps) => { addStep(t); return ps.filter((_, j) => j !== i); })}
-                      title="Add this step to the list"
-                      style={{ maxWidth: "100%", textAlign: "left", padding: "6px 12px", border: "1px solid rgba(127,240,197,0.45)", borderRadius: 999, background: "rgba(16,36,28,0.7)", color: "#7ff0c5", fontSize: 11, cursor: "pointer", whiteSpace: "normal", wordBreak: "break-word", lineHeight: 1.4 }}
-                    >＋ {t}</button>
-                  ))}
-                  <button
-                    onClick={() => { proposed.forEach(addStep); setProposed([]); }}
-                    style={{ height: 28, padding: "0 12px", border: "none", borderRadius: 999, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                  >Add all</button>
-                </div>
-              </div>
-            )}
-
-            <div style={{ display: "flex", gap: 8, alignItems: "flex-start", flexWrap: inline ? "wrap" : undefined }}>
-              {/* Digest model — the SAME shared ModelPicker as every other model
-                  dropdown. Empty value = inherit the default (team model rule);
-                  a pick is persisted per project; ✕ returns to inherit. */}
-              <div title="Digest agent model. Default: the team's model (pending override → project's team model → loaded server model)." style={{ flexShrink: 0, width: inline ? 170 : 220, paddingTop: 4 }}>
-                <ModelPicker
-                  value={nb.digestModel || ""}
-                  onChange={(id) => update({ digestModel: id })}
-                  models={models}
-                  status={accountsStatus}
-                  fallbackLabel={`🪄 ${digestModelLabel}`}
-                />
-              </div>
-              {nb.digestModel && (
-                <button className="ghost-btn" onClick={() => update({ digestModel: undefined })} title="Back to the default (team model)" style={{ height: 24, width: 24, padding: 0, fontSize: 11, flexShrink: 0, marginTop: 4 }}>✕</button>
-              )}
-              <textarea
-                ref={digestInputRef}
-                value={digestInput}
-                onChange={(e) => setDigestInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey && !digestBusy) { e.preventDefault(); void runDigest(); } }}
-                placeholder="🪄 Digest — describe what you want (or leave empty to digest the notes) and press Enter…"
-                style={{ ...textareaBase, flex: 1, minHeight: 32 }}
-              />
-              <button
-                onClick={() => void runDigest()}
-                disabled={digestBusy}
-                style={{ height: 32, padding: "0 14px", border: "none", borderRadius: 7, background: digestBusy ? "var(--bg-surface)" : "rgba(var(--accent-rgb),0.2)", color: digestBusy ? "var(--fg-muted)" : "var(--accent)", fontSize: 12, fontWeight: 700, cursor: digestBusy ? "wait" : "pointer", flexShrink: 0 }}
-              >🪄 Digest</button>
-            </div>
-          </div>
         </div>
       </div>
   );

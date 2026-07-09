@@ -2215,13 +2215,14 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         </div>
       )}
 
-      {/* Second-agent pane toggle — scaffolding for a parallel/hand-off chat
-          beside the primary one. Shown once a workspace is open. */}
+      {/* Second-agent pane toggle — a parallel/hand-off agent chat beside the
+          primary one, with its own transcript and its own input area. Shown
+          once a workspace is open. */}
       {workspace && (
         <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
           <button
             onClick={() => setSecondaryOpen(!secondaryOpen)}
-            title="Show a second, independent chat pane beside this one. Empty scaffolding — a later step wires the real second agent."
+            title="Show a second, independent agent chat pane beside this one — its own transcript and input, same workspace and model."
             style={{ ...btn, height: 26 }}
           >{secondaryOpen ? "◧ Hide 2nd agent" : "◨ Show 2nd agent"}</button>
         </div>
@@ -2340,12 +2341,15 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         {/* Second-agent chat pane — parallel/hand-off coder using the same
             workspace and model as the primary chat, with its own transcript. */}
         {secondaryOpen && (
-          <div style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-              <span style={{ fontSize: 12.5, color: "var(--fg-muted)" }}>Second agent</span>
+              <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>
               <span style={{ flex: 1 }} />
               <button onClick={() => setSecondaryOpen(false)} title="Close the second-agent pane" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>✕ Close</button>
             </div>
+            {/* Transcript — its own scroll column, mirrors the primary chat so the
+                input never scrolls away with the messages. */}
+            <div className="selectable-chat" data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
             {secondaryMessages.length === 0 ? (
               <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
                 Second agent — a parallel coder using the same workspace and model as the primary chat.
@@ -2392,8 +2396,9 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                 );
               })
             )}
-            {/* Composer: sends to the same local/cloud backend as the primary chat,
-                keeping its own transcript and abort controller. */}
+            </div>
+            {/* Composer — its own distinct input area, fixed beneath the transcript
+                (mirrors the primary chat) so it never scrolls away with messages. */}
             <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
               <textarea
                 value={secondaryDraft}

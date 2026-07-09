@@ -14,13 +14,18 @@ use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
 
 /// Windows: prevent a flashing console window when we shell out to
 /// the claude / codex CLIs. 0x08000000 = CREATE_NO_WINDOW.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// One-shot subscription CLI calls must eventually return a final blob. If they
+/// loop internally (Kimi can repeatedly call Shell in --print mode without ever
+/// producing a final answer), the UI otherwise stays "working" forever.
+const CLI_CHILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 
 /// Quote an argument for cmd.exe so it round-trips through a .cmd /
 /// .bat shim to the underlying program (npm installs Claude Code as
@@ -104,9 +109,27 @@ fn unregister_cli_child(pid: u32) {
 /// Wait for a registered CLI child and drop it from the kill registry no
 /// matter how the wait ends. Used by every one-shot `*_cli_complete` path.
 fn wait_cli_child(mut child: std::process::Child, pid: u32) -> std::io::Result<std::process::Output> {
-    let out = child.wait_with_output();
-    unregister_cli_child(pid);
-    out
+    let started = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            let out = child.wait_with_output();
+            unregister_cli_child(pid);
+            return out;
+        }
+        if started.elapsed() >= CLI_CHILD_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            unregister_cli_child(pid);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "CLI child timed out after {}s and was killed",
+                    CLI_CHILD_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 /// Kill every live agent-CLI child. Windows needs `taskkill /T /F`: the

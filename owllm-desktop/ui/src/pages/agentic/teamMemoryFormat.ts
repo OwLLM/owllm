@@ -21,7 +21,7 @@ export function formatWorkLogEntry(agent: string, instruction: string, result: s
   return `@${agent} — TASK: ${clip(instruction, 240)}\nDID: ${clip(result, 700)}`;
 }
 
-type WorkEntry = { content: string; author?: string; tags?: string; key?: string };
+export type WorkEntry = { content: string; author?: string; tags?: string; key?: string };
 
 /// Render retrieved work entries into a compact context pack prepended to a
 /// specialist's task. This is the deterministic Memory Curator layer: retrieved

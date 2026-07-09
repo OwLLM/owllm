@@ -20,6 +20,7 @@ import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState } from "./localTools";
+import { enrichInstructionWithMemory, formatWorkLogEntry, renderRelevantWork, type WorkEntry } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
 import { RunTimerChip } from "./RunTimer";
@@ -64,6 +65,7 @@ const CODING_SYSTEM = (ws: string) =>
 // (cards), then the agent executes each step in turn, moving its card across
 // the board. Inspired by Cline's task UX, built on OWLLM's own engine.
 type Task = { id: number; title: string; status: "pending" | "running" | "done" | "failed" };
+type RawTeamMemEntry = WorkEntry & { id?: number; created_at?: number };
 
 // Each open Code PAGE has its own chatRuntime session, keyed by the page id, so
 // pages are fully INDEPENDENT — separate conversation, workspace, and (when the
@@ -1172,6 +1174,37 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       return out;
     });
 
+  const memoryScope = () => ruleScopeRef.current.id || projectRoot || workspace || "";
+
+  const enrichCodePromptWithMemory = async (user: string): Promise<string> => {
+    const scope = memoryScope();
+    if (!scope || !user.trim()) return user;
+    try {
+      const rows = await invoke<RawTeamMemEntry[]>("team_memory_search", {
+        scope,
+        query: user,
+        limit: 8,
+      });
+      return enrichInstructionWithMemory(renderRelevantWork(rows), user);
+    } catch {
+      return user;
+    }
+  };
+
+  const logCodeWork = async (instruction: string, result: string) => {
+    const scope = memoryScope();
+    if (!scope || !instruction.trim() || !result.trim() || /^\(error:/i.test(result.trim())) return;
+    try {
+      await invoke<number>("team_memory_log", {
+        scope,
+        agent: "code",
+        content: formatWorkLogEntry("code", instruction, result),
+      });
+    } catch {
+      // Memory is helpful context, never a reason for a Code page run to fail.
+    }
+  };
+
   // One agent turn against the SELECTED model. Routes by provider exactly like
   // ChatPage/AgentsPage: local/tuned → streamLocalChat (renders tool cards);
   // cloud/subscription → the shared streamChatCompletion. `silent` suppresses
@@ -1201,19 +1234,20 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const sys = system + formatDirectivesBlock(directivesRef.current)
       + (browserLine ? `\n\n${browserLine}` : "")
       + (chatOnly ? "\n\nMODE: CHAT — discuss, review, plan and answer questions ONLY. Do NOT edit or create files, and do NOT run commands that change any state. You may read files and search to ground your answers." : "");
+    const enrichedUser = await enrichCodePromptWithMemory(user);
     if (isLocal) {
       const port = await ensureServer(modelId);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
         port, modelId, systemPrompt: sys,
-        userContent: imgs.length ? openaiUserContent(user, imgs) : user, temperature: 0.3,
+        userContent: imgs.length ? openaiUserContent(enrichedUser, imgs) : enrichedUser, temperature: 0.3,
         signal, onDelta: dDelta, onThought: dThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall, onToolResult } : undefined,
         allowedTools: chatOnly ? roTools : undefined,
         getSteer: drainSteer,
       });
     }
-    return streamChatCompletion(0, modelId, provider, sys, user, 0.3, signal, dDelta, workspace, history, true, dThought, chatOnly ? roTools : undefined, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
+    return streamChatCompletion(0, modelId, provider, sys, enrichedUser, 0.3, signal, dDelta, workspace, history, true, dThought, chatOnly ? roTools : undefined, imgs.length ? imgs : undefined, undefined, undefined, undefined, drainSteer);
   };
 
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
@@ -1254,7 +1288,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     let aborted = false;
     try {
       setStatus(`Coding in ${workspace}`);
-      await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
+      const reply = await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
+      await logCodeWork(text || "(see attached image)", reply);
       ok = true;
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -1362,17 +1397,18 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     });
     try {
       const provider = providerFor(modelId, availableModels);
+      const enrichedText = await enrichCodePromptWithMemory(text);
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
-        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(text, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: () => {}, history });
+        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: () => {}, history });
       } else {
         // Pass a working dir so pasted images can be saved into it for the model
         // to read (codex -i / claude file-ref). Use the workspace if one is
         // selected, else the WSL scratch — without ANY cwd the image is dropped
         // ("I can't inspect the image"), which is the bug on a no-folder chat.
         const chatCwd = workspace || chatScratchRef.current || undefined;
-        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", text, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
+        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };

@@ -3872,10 +3872,15 @@ pub async fn kimi_cli_complete(
     // unreachable we stop wiring it for the rest of the session.
     // WSL-isolated runs skip it regardless: the distro kimi can't reach host
     // loopback and no relay is plumbed for this one-shot path yet.
-    // Session cache: 0=unknown, 1=reachable, 2=broken.
+    // Session cache: 0=unknown, 1=reachable, 2=last attempt failed.
+    // Do not use the failure state to suppress future wiring: the gateway is
+    // ephemeral and a transient MCP-load failure otherwise makes every later
+    // Kimi run "tool blind" until the app restarts. We still retry without MCP
+    // for the current run when Kimi aborts, but the next run gets a fresh shot.
     static KIMI_GATEWAY: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
     let host_run = !crate::sandbox::is_isolated(cwd.as_deref());
-    let gw_broken = KIMI_GATEWAY.load(std::sync::atomic::Ordering::Relaxed) == 2;
+    let _last_gateway_state = KIMI_GATEWAY.load(std::sync::atomic::Ordering::Relaxed);
+    let gw_broken = false;
     let new_flavor = kimi_is_new_flavor();
 
     // Legacy CLI needs a JSON `--mcp-config-file`; new kimi-code reads

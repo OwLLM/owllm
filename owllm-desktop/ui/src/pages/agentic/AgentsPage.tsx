@@ -7096,7 +7096,7 @@ async function streamChatCompletion(
       keyName: "DEEPSEEK_API_KEY",
       modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
       signal, onDelta, history, onThought, images,
-      providerLabel: "DeepSeek",
+      providerLabel: "DeepSeek", projectCwd, allowedTools,
     });
   }
   if (provider === "xai") {
@@ -7105,7 +7105,7 @@ async function streamChatCompletion(
       keyName: "XAI_API_KEY",
       modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
       signal, onDelta, history, onThought, images,
-      providerLabel: "xAI Grok",
+      providerLabel: "xAI Grok", projectCwd, allowedTools,
     });
   }
   if (provider === "groq") {
@@ -7114,7 +7114,7 @@ async function streamChatCompletion(
       keyName: "GROQ_API_KEY",
       modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
       signal, onDelta, history, onThought, images,
-      providerLabel: "Groq",
+      providerLabel: "Groq", projectCwd, allowedTools,
     });
   }
   if (provider === "perplexity") {
@@ -7123,7 +7123,7 @@ async function streamChatCompletion(
       keyName: "PERPLEXITY_API_KEY",
       modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
       signal, onDelta, history, onThought, images,
-      providerLabel: "Perplexity",
+      providerLabel: "Perplexity", projectCwd, allowedTools,
     });
   }
   if (provider === "mistral") {
@@ -7132,7 +7132,7 @@ async function streamChatCompletion(
       keyName: "MISTRAL_API_KEY",
       modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
       signal, onDelta, history, onThought, images,
-      providerLabel: "Mistral",
+      providerLabel: "Mistral", projectCwd, allowedTools,
     });
   }
   if (provider === "together") {
@@ -7141,7 +7141,7 @@ async function streamChatCompletion(
       keyName: "TOGETHER_API_KEY",
       modelId: bareId, systemPrompt, userMessage: effectiveText, temperature,
       signal, onDelta, history, onThought, images,
-      providerLabel: "Together AI",
+      providerLabel: "Together AI", projectCwd, allowedTools,
     });
   }
   if (provider === "gemini") {
@@ -7562,27 +7562,22 @@ async function streamMoonshot(
     return reply;
   }
   // API path — OpenAI-compatible streaming.
-  const key = await invoke<string | null>("accounts_get_secret", { name: "MOONSHOT_API_KEY" });
-  if (!key) throw new Error("No MOONSHOT_API_KEY saved — set it on the Accounts page.");
-  const resp = await fetchNetRetry(() => fetch("https://api.moonshot.ai/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${key}`,
-    },
-    body: JSON.stringify({
-      model: modelId,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...(history ?? []),
-        { role: "user", content: openaiUserContent(userMessage, images ?? []) },
-      ],
-      stream: true,
-      temperature,
-    }),
+  return streamOpenAiApiWithTools({
+    modelId,
+    systemPrompt,
+    userMessage,
+    temperature,
     signal,
-  }), signal);
-  return consumeOpenAISse(resp, onDelta, onThought);
+    onDelta,
+    history,
+    onThought,
+    images,
+    projectCwd,
+    allowedTools,
+    apiUrl: "https://api.moonshot.ai/v1/chat/completions",
+    keyName: "MOONSHOT_API_KEY",
+    providerLabel: "Moonshot",
+  });
 }
 
 /// Generic OpenAI-compatible streamer. DeepSeek, xAI Grok, Groq,
@@ -7602,28 +7597,25 @@ async function streamOpenAICompatible(args: {
   onThought?: ThoughtHandler;
   images?: Attachment[];
   providerLabel: string;
+  projectCwd?: string;
+  allowedTools?: AllowedTools;
 }): Promise<string> {
-  const key = await invoke<string | null>("accounts_get_secret", { name: args.keyName });
-  if (!key) throw new Error(`No ${args.keyName} saved — set it on the Accounts page (${args.providerLabel}).`);
-  const resp = await fetchNetRetry(() => fetch(args.url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${key}`,
-    },
-    body: JSON.stringify({
-      model: args.modelId,
-      messages: [
-        { role: "system", content: args.systemPrompt },
-        ...(args.history ?? []),
-        { role: "user", content: openaiUserContent(args.userMessage, args.images ?? []) },
-      ],
-      stream: true,
-      temperature: args.temperature,
-    }),
+  return streamOpenAiApiWithTools({
+    modelId: args.modelId,
+    systemPrompt: args.systemPrompt,
+    userMessage: args.userMessage,
+    temperature: args.temperature,
     signal: args.signal,
-  }), args.signal);
-  return consumeOpenAISse(resp, args.onDelta, args.onThought);
+    onDelta: args.onDelta,
+    history: args.history,
+    onThought: args.onThought,
+    images: args.images,
+    projectCwd: args.projectCwd,
+    allowedTools: args.allowedTools,
+    apiUrl: args.url,
+    keyName: args.keyName,
+    providerLabel: args.providerLabel,
+  });
 }
 
 /// Google Gemini streaming via generativelanguage.googleapis.com.

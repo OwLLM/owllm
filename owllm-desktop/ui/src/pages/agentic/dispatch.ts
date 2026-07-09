@@ -1998,6 +1998,7 @@ export async function streamChatCompletion(
       url: cfg.url, keyName: cfg.keyName, modelId: bareId,
       systemPrompt, userMessage: effectiveText, temperature,
       signal, onDelta, history, onThought, images, providerLabel: cfg.label,
+      projectCwd, allowedTools,
     });
   } else {
     // ---- Local llama-server path (GGUF) ----
@@ -2330,12 +2331,18 @@ export async function streamOpenAiApiWithTools(args: {
   images?: Attachment[];
   projectCwd?: string;
   allowedTools?: string[];
+  apiUrl?: string;
+  keyName?: string;
+  providerLabel?: string;
 }): Promise<string> {
   const sep = args.modelId.indexOf(":");
   const wireModel = sep === -1 ? args.modelId : args.modelId.slice(0, sep);
   const effort = sep === -1 ? null : args.modelId.slice(sep + 1);
-  const key = await invoke<string | null>("accounts_get_secret", { name: "OPENAI_API_KEY" });
-  if (!key) throw new Error("No OPENAI_API_KEY saved — set it on the Accounts page.");
+  const apiUrl = args.apiUrl ?? "https://api.openai.com/v1/chat/completions";
+  const keyName = args.keyName ?? "OPENAI_API_KEY";
+  const providerLabel = args.providerLabel ?? "OpenAI";
+  const key = await invoke<string | null>("accounts_get_secret", { name: keyName });
+  if (!key) throw new Error(`No ${keyName} saved — set it on the Accounts page (${providerLabel}).`);
   const openaiTools = await formatToolsForOpenAI(args.allowedTools);
   const headers = {
     "Content-Type": "application/json",
@@ -2352,7 +2359,7 @@ export async function streamOpenAiApiWithTools(args: {
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
     const nativeCalls: RawNativeCall[] = [];
-    const resp = await fetchNetRetry(() => fetch("https://api.openai.com/v1/chat/completions", {
+    const resp = await fetchNetRetry(() => fetch(apiUrl, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -2397,7 +2404,7 @@ export async function streamOpenAiApiWithTools(args: {
         "You have reached your tool-call limit — do NOT request any more tools. " +
         "Using only the tool results already gathered above, write the final answer for the user now.",
     });
-    const resp = await fetchNetRetry(() => fetch("https://api.openai.com/v1/chat/completions", {
+    const resp = await fetchNetRetry(() => fetch(apiUrl, {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -2800,24 +2807,22 @@ async function streamMoonshot(
     if (reply) onDelta(reply);
     return reply;
   }
-  const key = await invoke<string | null>("accounts_get_secret", { name: "MOONSHOT_API_KEY" });
-  if (!key) throw new Error("No MOONSHOT_API_KEY saved — set it on the Accounts page.");
-  const resp = await fetchNetRetry(() => fetch("https://api.moonshot.ai/v1/chat/completions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-    body: JSON.stringify({
-      model: modelId,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...(history ?? []),
-        { role: "user", content: openaiUserContent(userMessage, images ?? []) },
-      ],
-      stream: true,
-      temperature,
-    }),
+  return streamOpenAiApiWithTools({
+    modelId,
+    systemPrompt,
+    userMessage,
+    temperature,
     signal,
-  }), signal);
-  return consumeOpenAISse(resp, onDelta, onThought);
+    onDelta,
+    history,
+    onThought,
+    images,
+    projectCwd,
+    allowedTools,
+    apiUrl: "https://api.moonshot.ai/v1/chat/completions",
+    keyName: "MOONSHOT_API_KEY",
+    providerLabel: "Moonshot",
+  });
 }
 
 /// Generic OpenAI-compatible streamer — DeepSeek, xAI, Groq, Perplexity,
@@ -2835,25 +2840,25 @@ async function streamOpenAICompatible(args: {
   onThought?: ThoughtHandler;
   images?: Attachment[];
   providerLabel: string;
+  projectCwd?: string;
+  allowedTools?: string[];
 }): Promise<string> {
-  const key = await invoke<string | null>("accounts_get_secret", { name: args.keyName });
-  if (!key) throw new Error(`No ${args.keyName} saved — set it on the Accounts page (${args.providerLabel}).`);
-  const resp = await fetchNetRetry(() => fetch(args.url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
-    body: JSON.stringify({
-      model: args.modelId,
-      messages: [
-        { role: "system", content: args.systemPrompt },
-        ...(args.history ?? []),
-        { role: "user", content: openaiUserContent(args.userMessage, args.images ?? []) },
-      ],
-      stream: true,
-      temperature: args.temperature,
-    }),
+  return streamOpenAiApiWithTools({
+    modelId: args.modelId,
+    systemPrompt: args.systemPrompt,
+    userMessage: args.userMessage,
+    temperature: args.temperature,
     signal: args.signal,
-  }), args.signal);
-  return consumeOpenAISse(resp, args.onDelta, args.onThought);
+    onDelta: args.onDelta,
+    history: args.history,
+    onThought: args.onThought,
+    images: args.images,
+    projectCwd: args.projectCwd,
+    allowedTools: args.allowedTools,
+    apiUrl: args.url,
+    keyName: args.keyName,
+    providerLabel: args.providerLabel,
+  });
 }
 
 /// Google Gemini. Subscription → gemini-cli --print via ensureCliWarm +

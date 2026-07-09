@@ -119,6 +119,18 @@ export type TeamMemoryPack = {
   worklogCount: number;
 };
 
+const MEMORY_INVOKE_TIMEOUT_MS = 2500;
+
+function withMemoryTimeout<T>(p: Promise<T>, fallback: T): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<T>((resolve) => {
+    timer = setTimeout(() => resolve(fallback), MEMORY_INVOKE_TIMEOUT_MS);
+  });
+  return Promise.race([p, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
 /// Render the two-section snapshot the model reads directly — the READ half of
 /// "memory usable on every model path". Facts are the curated knowledge base
 /// (goal-relevant first); the activity tail is the newest worklog so intra-run
@@ -162,12 +174,13 @@ export async function refreshTeamMemorySnapshot(limit = 12): Promise<void> {
   const factLim = Math.max(4, Math.round((eff * 2) / 3));
   const logLim = Math.max(2, eff - factLim);
   try {
+    const empty: RawTeamMemEntry[] = [];
     const [relevant, recent, worklog] = await Promise.all([
       _teamMemoryGoal
-        ? invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: _teamMemoryGoal, limit: factLim, kinds: ["fact"] })
+        ? withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: _teamMemoryGoal, limit: factLim, kinds: ["fact"] }), empty)
         : Promise.resolve([] as RawTeamMemEntry[]),
-      invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: factLim, kinds: ["fact"] }),
-      invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: logLim, kinds: ["worklog"] }),
+      withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: factLim, kinds: ["fact"] }), empty),
+      withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: logLim, kinds: ["worklog"] }), empty),
     ]);
     // STALE-SCOPE GUARD — the queries above are async; if the user switched
     // projects while they were in flight, this result belongs to the OLD
@@ -266,7 +279,10 @@ export async function retrieveScopedTeamMemoryPack(
   const eff = _leanRun ? Math.min(limit, 4) : limit;
   try {
     // Overfetch: up to `eff` of the top hits may already sit in the snapshot.
-    const entries = await invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit: eff + 12 });
+    const entries = await withMemoryTimeout(
+      invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit: eff + 12 }),
+      [] as RawTeamMemEntry[],
+    );
     const fresh = entries.filter((e) => !excludeSnapshot || !_snapshotIds.has(e.id)).slice(0, eff);
     const worklogCount = fresh.filter((e) => e.tags === "worklog").length;
     return {
@@ -307,7 +323,10 @@ export async function logScopedTeamWork(scope: string, agent: string, instructio
   // not the durable memory.
   if (/^\(error:/i.test(result.trim())) return;
   try {
-    await invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) });
+    await withMemoryTimeout(
+      invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) }),
+      0,
+    );
     if (scope === (_teamMemoryScope || "")) await refreshTeamMemorySnapshot();
   } catch { /* memory must never break a run */ }
 }

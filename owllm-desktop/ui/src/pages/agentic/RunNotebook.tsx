@@ -3,7 +3,7 @@
 // Three jobs in one surface:
 //   1. Working notes — one freeform place the user writes in during a run
 //      (ideas, refactors, feature thoughts). Autosaved per project.
-//   2. Plan — a living document distilled from the notes and edited freely.
+//   2. Plan — a small Kanban board distilled from the notes and edited freely.
 //   3. Next steps — an ordered to-do list. Each step can be fed to the
 //      team: mid-run it becomes a steer; when idle it dispatches as a new
 //      goal. With AUTO-FEED on, a cleanly finished run pushes the next
@@ -96,6 +96,44 @@ export function takeNextAutoStep(projectId: string | null | undefined): Notebook
 
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
+type KanbanPlan = { now: string; next: string; later: string };
+const EMPTY_KANBAN: KanbanPlan = { now: "", next: "", later: "" };
+const KANBAN_COLUMNS: Array<{ key: keyof KanbanPlan; label: string; hint: string; color: string }> = [
+  { key: "now", label: "Now", hint: "active implementation batch", color: "#9ad9ff" },
+  { key: "next", label: "Next", hint: "queued after Now", color: "#7ff0c5" },
+  { key: "later", label: "Later", hint: "parked / optional", color: "#ffd97a" },
+];
+
+function parseKanbanPlan(plan: string): KanbanPlan {
+  const out: KanbanPlan = { ...EMPTY_KANBAN };
+  let current: keyof KanbanPlan | null = null;
+  let sawHeading = false;
+  for (const line of plan.split(/\r?\n/)) {
+    const heading = line.trim().match(/^(?:#{1,3}\s*)?(now|doing|current|next|later|backlog)\s*:?\s*$/i);
+    if (heading) {
+      sawHeading = true;
+      const h = heading[1].toLowerCase();
+      current = h === "now" || h === "doing" || h === "current" ? "now" : h === "next" ? "next" : "later";
+      continue;
+    }
+    if (current) out[current] = `${out[current]}${out[current] ? "\n" : ""}${line}`.trimEnd();
+  }
+  if (!sawHeading && plan.trim()) out.now = plan.trim();
+  return out;
+}
+
+function formatKanbanPlan(plan: KanbanPlan): string {
+  return [
+    `NOW:\n${plan.now.trim()}`,
+    `NEXT:\n${plan.next.trim()}`,
+    `LATER:\n${plan.later.trim()}`,
+  ].join("\n\n").trim();
+}
+
+function normalizeKanbanPlan(plan: string): string {
+  return formatKanbanPlan(parseKanbanPlan(plan));
+}
+
 /// Split a digest reply into the updated PLAN block (between "PLAN:" and
 /// "STEPS:") and the proposed "- step" lines. Replies without a PLAN:
 /// header keep the old shape — steps only.
@@ -117,19 +155,27 @@ function parseDigestReply(reply: string): { plan: string; steps: string[] } {
 const DIGEST_SYSTEM = [
   "You are the Notebook Digest agent inside OWLLM. An agent team is working on the user's project;",
   "the user brainstorms alongside it. Your job: turn their raw notes/requests into (1) an updated",
-  "implementation PLAN and (2) clear, self-contained, implementable NEXT STEPS for that team.",
+  "Kanban PLAN and (2) clear, self-contained, implementable NEXT STEPS for that team.",
   "Rules:",
-  "- PLAN: a short living document — objective, approach, ordered milestones. You are shown the",
-  "  CURRENT PLAN; extend and refine it ADDITIVELY (keep what still holds, never silently drop the",
-  "  user's decisions). If the notes add nothing plan-worthy, omit the PLAN section entirely.",
+  "- PLAN is a Kanban board, not prose. Use exactly these lanes inside PLAN: NOW, NEXT, LATER.",
+  "- NOW = the coherent implementation batch that should happen first. NEXT = follow-up batch.",
+  "  LATER = optional/parked work. Keep only useful cards; remove duplication and stale wording.",
+  "- You are shown the CURRENT PLAN; refine it (keep what still holds, never silently drop the user's decisions).",
+  "  If the notes add nothing plan-worthy, omit the PLAN section entirely.",
   "- STEPS are ADDITIVE: never rewrite, merge or remove the existing steps you are shown — only propose NEW ones.",
   "- Each step must stand alone: an agent receives it with no other context, so name the feature/file/behavior explicitly.",
-  "- Small and actionable beats big and vague; split compound ideas into separate steps.",
+  "- Do NOT create tiny painful micro-steps. Prefer 1-4 larger implementation chunks that a good agent can complete in one run.",
+  "- Merge related UI/code/test work into one step when it belongs together. Split only when the work truly needs separate runs.",
   "- Output format, nothing else:",
   "  PLAN:",
-  "  <the full updated plan, a few short lines>",
+  "  NOW:",
+  "  - <card>",
+  "  NEXT:",
+  "  - <card>",
+  "  LATER:",
+  "  - <card>",
   "  STEPS:",
-  "  - <each proposed step on its own line starting with '- '>",
+  "  - <each proposed larger implementation chunk on its own line starting with '- '>",
 ].join("\n");
 
 type Props = {
@@ -175,8 +221,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const projRef = useRef(projectId);
   projRef.current = projectId;
 
+  const kanbanPlan = useMemo(() => parseKanbanPlan(nb.plan), [nb.plan]);
   const brainstormRef = useAutoResize<HTMLTextAreaElement>(nb.text, { minRows: 4, maxRows: 16 });
-  const planRef = useAutoResize<HTMLTextAreaElement>(nb.plan, { minRows: 3, maxRows: 14 });
+  const nowPlanRef = useAutoResize<HTMLTextAreaElement>(kanbanPlan.now, { minRows: 3, maxRows: 10 });
+  const nextPlanRef = useAutoResize<HTMLTextAreaElement>(kanbanPlan.next, { minRows: 3, maxRows: 10 });
+  const laterPlanRef = useAutoResize<HTMLTextAreaElement>(kanbanPlan.later, { minRows: 3, maxRows: 10 });
   const newStepRef = useAutoResize<HTMLTextAreaElement>(newStep, { minRows: 1, maxRows: 6 });
   const editStepRef = useAutoResize<HTMLTextAreaElement>(editingText, { minRows: 1, maxRows: 8 });
 
@@ -214,6 +263,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
 
   const update = (patch: Partial<NotebookState>) => {
     updateNotebook((prev) => ({ ...prev, ...patch }));
+  };
+  const updateKanbanLane = (key: keyof KanbanPlan, value: string) => {
+    update({ plan: formatKanbanPlan({ ...kanbanPlan, [key]: value }) });
   };
 
   const addStep = (text: string) => {
@@ -298,7 +350,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       const parsed = parseDigestReply(reply);
       update({ digest: [...history, { role: "digest", text: reply.trim() || "(no reply)" }] });
       setProposed(parsed.steps);
-      if (parsed.plan && parsed.plan !== currentPlan) setProposedPlan(parsed.plan);
+      if (parsed.plan && normalizeKanbanPlan(parsed.plan) !== normalizeKanbanPlan(currentPlan)) {
+        setProposedPlan(normalizeKanbanPlan(parsed.plan));
+      }
     } catch (e: any) {
       const msg = String(e?.message ?? e);
       setDigestError(msg);

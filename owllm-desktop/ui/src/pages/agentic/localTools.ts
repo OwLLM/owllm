@@ -227,6 +227,7 @@ export async function refreshBrowserState(): Promise<void> {
     "or any other CLI there is NO ToolSearch tool: do not hunt for one — the mcp__owllm__browser_* tools are " +
     "already callable, so just call them. DISREGARD any team-memory note claiming browser tools are unavailable " +
     "from the CLI/team — that is STALE and false; the tools are wired. Never claim you cannot see the browser — " +
+    "If you need to open or test a URL, call browser_open first. If the user already opened a page, " +
     "call browser_snapshot (or mcp__owllm__browser_snapshot) first, then report what you actually see.";
   try {
     const st = await invoke<{ running: boolean; url: string; device: string }>("browser_status");

@@ -56,6 +56,7 @@ const TRIPWIRES = [
   ["src-tauri/src/accounts.rs", /kimi_model_args/, "kimi LLMNotSet on undeclared --model id (v0.7.82)"],
   ["src-tauri/src/accounts.rs", /kimi_output_mcp_failed/, "kimi fatal abort on MCP connect failure → retry (v0.7.83)"],
   ["src-tauri/src/accounts.rs", /is_browser_role_allowlist/, "browser gateway gated to Browser role, not every agent (v0.7.84)"],
+  ["src-tauri/src/browser.rs", /browser_start\(app\.clone\(\)\)\?/, "browser tool first-call auto-start — snapshot/get_text no longer fail on closed window (v0.8.18)"],
   ["src-tauri/src/mcp_gateway.rs", /cli_safe_path/, "spaced 'OwLLM Desktop' --mcp-config path split → 8.3 short path (v0.7.62)"],
   ["src-tauri/src/mcp_gateway.rs", /bearer_token_env_var/, "codex MCP wiring via -c overrides + env token (v0.7.72)"],
   ["src-tauri/src/directives.rs", /directives_seed_marks/, "project rules re-seeded 11x into every prompt (v0.7.91)"],

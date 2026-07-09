@@ -531,7 +531,10 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
 /// eval __owllmRun directly. Read-back is via the sentinel title channel.
 #[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
-    let win = get_window(&app).ok_or_else(|| "browser is not running — call browser_start first".to_string())?;
+    if get_window(&app).is_none() {
+        browser_start(app.clone())?;
+    }
+    let win = get_window(&app).ok_or_else(|| "browser did not start".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
 
     match action.as_str() {

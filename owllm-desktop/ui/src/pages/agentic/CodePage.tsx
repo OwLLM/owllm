@@ -46,6 +46,12 @@ type Msg = {
   kind?: "tool" | "terminal";
   title?: string;
   status?: "ok" | "error" | "running";
+  /// Which agent conversation owns this message. Stamped automatically at the
+  /// setMessages / setSecondaryMessages choke points, so EVERY message carries
+  /// its owner regardless of where it was created (send, tool card, forward,
+  /// memory pack). The two conversations share the same project/session but keep
+  /// fully independent, owner-tagged histories.
+  owner?: "primary" | "secondary";
   /// Transient bubble shown immediately when a run starts so the user sees
   /// activity before the first token/tool arrives. Removed once real output
   /// begins or the turn ends.
@@ -95,12 +101,16 @@ type CodeState = {
   // Mirrors the Agents-page team timer; rendered as the header RunTimerChip.
   runStartedAt?: number;
   runEndedAt?: number;
-  // Second-agent chat pane (layout scaffolding — not yet wired to a real
-  // agent). When open it renders beside the primary chat; its own local
-  // messages/draft, no dispatch/backend call yet.
+  // Second-agent chat pane — a parallel coder sharing the SAME project/session
+  // (workspace, worktree, page id) as the primary chat, but with its OWN
+  // independent, owner-tagged message history, draft, and model selection.
   secondaryOpen?: boolean;
   secondaryMessages?: Msg[];
   secondaryDraft?: string;
+  // The second agent's own model. Empty = inherit the primary chat's model, so
+  // by default both agents run the same model until the user picks a different
+  // one for the second pane.
+  secondaryModelId?: string;
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
@@ -489,6 +499,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const secondaryOpen: boolean = stx.secondaryOpen ?? false;
   const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
   const secondaryDraft: string = stx.secondaryDraft ?? "";
+  const secondaryModelId: string = stx.secondaryModelId ?? "";
+  // The model the second agent actually runs — its own pick, or the primary
+  // model when it hasn't chosen one (empty = "same as 1st agent").
+  const secondaryModelEffective = secondaryModelId || modelId;
   const [secondaryBusy, setSecondaryBusy] = useState(false);
   // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
   const [termOpen, setTermOpen] = useState(false);
@@ -610,7 +624,13 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       return { ...cur, [k]: nv };
     });
   }
-  const setMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) => setField("messages", v);
+  // Ownership choke point: every message written into a conversation is tagged
+  // with its owner (unless it already carries one — e.g. a forwarded message
+  // that should keep provenance-agnostic "user" ownership of the target pane).
+  const stampOwner = (list: Msg[], owner: "primary" | "secondary"): Msg[] =>
+    list.map((m) => (m.owner ? m : { ...m, owner }));
+  const setMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) =>
+    setField("messages", (prev) => stampOwner(typeof v === "function" ? v(prev) : v, "primary"));
   const setTasks = (v: Task[] | ((t: Task[]) => Task[])) => setField("tasks", v);
   const setWorkspace = (v: string) => setField("workspace", v);
   const setModelId = (v: string | ((s: string) => string)) => setField("modelId", v);
@@ -629,8 +649,14 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const setStatus = (v: string) => setField("status", v);
   const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
   const setSecondaryOpen = (v: boolean) => setField("secondaryOpen", v);
-  const setSecondaryMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) => setField("secondaryMessages", v as CodeState["secondaryMessages"]);
+  const setSecondaryMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) =>
+    setField("secondaryMessages", (prev) => {
+      const base = (prev as Msg[] | undefined) ?? [];
+      const next = typeof v === "function" ? (v as (m: Msg[]) => Msg[])(base) : v;
+      return stampOwner(next, "secondary") as CodeState["secondaryMessages"];
+    });
   const setSecondaryDraft = (v: string | ((s: string) => string)) => setField("secondaryDraft", v as CodeState["secondaryDraft"]);
+  const setSecondaryModelId = (v: string | ((s: string) => string)) => setField("secondaryModelId", v as CodeState["secondaryModelId"]);
 
   // SAME model source as every other page — the full list_models result fed
   // to the shared ModelPicker (localOnly does the filtering). Refresh on focus
@@ -1383,7 +1409,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     signal: AbortSignal,
     opts?: { withEvents?: boolean },
   ): Promise<string> => {
-    const provider = providerFor(modelId, availableModels);
+    // The second agent runs its OWN model (falling back to the primary's when
+    // it hasn't picked one), independent of the primary chat.
+    const secModel = secondaryModelEffective;
+    const provider = providerFor(secModel, availableModels);
     const isLocal = provider === "local" || provider === "tuned";
     await refreshBrowserState();
     const browserLine = getBrowserStateLine();
@@ -1392,17 +1421,17 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const { text: enrichedUser, pack } = await enrichSecondaryCodePromptWithMemory(user);
     showSecondaryMemoryPack(pack);
     if (isLocal) {
-      const port = await ensureServer(modelId);
+      const port = await ensureServer(secModel);
       if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
       return streamLocalChat({
-        port, modelId, systemPrompt: sys,
+        port, modelId: secModel, systemPrompt: sys,
         userContent: enrichedUser, temperature: 0.3,
         signal, onDelta: onSecondaryDelta, onThought: onSecondaryThought, projectCwd: workspace,
         history, events: opts?.withEvents ? { onToolCall: onSecondaryToolCall, onToolResult: onSecondaryToolResult } : undefined,
         getSteer: () => "",
       });
     }
-    return streamChatCompletion(0, modelId, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, undefined, undefined, undefined, undefined, undefined, () => "");
+    return streamChatCompletion(0, secModel, provider, sys, enrichedUser, 0.3, signal, onSecondaryDelta, workspace, history, true, onSecondaryThought, undefined, undefined, undefined, undefined, undefined, () => "");
   };
 
   // `textOverride` = a notebook step (or leftover steer) dispatched directly,
@@ -1493,7 +1522,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     const text = secondaryDraft.trim();
     if (!text) return;
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { setStatus("No model selected — pick one above."); return; }
+    if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
     setSecondaryDraft("");
     setSecondaryBusy(true);
     const ctrl = new AbortController();
@@ -2344,6 +2373,15 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>
+              {/* The second agent's OWN model — independent of the primary chat.
+                  Empty falls back to the primary model ("Same as 1st agent"). */}
+              <ModelPicker
+                value={secondaryModelId}
+                onChange={setSecondaryModelId}
+                models={availableModels}
+                status={accountsStatus}
+                fallbackLabel="Same as 1st agent"
+              />
               <span style={{ flex: 1 }} />
               <button onClick={() => setSecondaryOpen(false)} title="Close the second-agent pane" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>✕ Close</button>
             </div>
@@ -2352,7 +2390,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             <div className="selectable-chat" data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
             {secondaryMessages.length === 0 ? (
               <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 460, lineHeight: 1.6 }}>
-                Second agent — a parallel coder using the same workspace and model as the primary chat.
+                Second agent — a parallel coder on the same workspace, with its own conversation and its own model (pick one above, or it uses the primary chat's model).
               </div>
             ) : (
               secondaryMessages.map((m, i) => {
@@ -2404,7 +2442,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                 value={secondaryDraft}
                 onChange={(e) => setSecondaryDraft(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
-                placeholder="Message the second agent… (same workspace/model as primary)"
+                placeholder="Message the second agent… (same workspace, its own conversation & model)"
                 rows={2}
                 disabled={secondaryBusy}
                 style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}

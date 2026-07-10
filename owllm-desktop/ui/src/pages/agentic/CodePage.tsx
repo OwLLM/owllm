@@ -1082,11 +1082,16 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [npFolder, setNpFolder] = useState("");
   const [npBusy, setNpBusy] = useState(false);
   const [npLogins, setNpLogins] = useState<string[]>([]); // providers present in the sandbox
+  // Create a private GitHub repo for the new project (origin wired + pushed).
+  // The dialog used to just SAY "a repo is not created automatically — create
+  // one yourself"; now it's a choice right in the onboarding.
+  const [npCreateRepo, setNpCreateRepo] = useState(false);
 
   const openNewProject = () => {
     setNpName("");
     setNpFolder("");
     setNpIsolate(!!sbox?.available); // default isolated whenever an engine exists
+    setNpCreateRepo(false);
     setNpBusy(false);
     setNpOpen(true);
     // Mirror Accounts logins into the sandbox, THEN show what's available —
@@ -1111,16 +1116,34 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     if (npBusy) return;
     setNpBusy(true);
     try {
+      let createdPath = "";
       if (npIsolate && sbox?.available) {
         const p = await sandboxCreateProject(npName.trim() || "project");
+        createdPath = p.path;
         setNpOpen(false);
         openWorkspace(p.path);
       } else if (npFolder.trim()) {
+        createdPath = npFolder.trim();
         setNpOpen(false);
         openWorkspace(npFolder.trim());
       } else {
         setNpBusy(false);
         return;
+      }
+      // Opt-in GitHub repo creation — after the workspace exists, so a repo
+      // failure never blocks the project itself. Best-effort with a loud
+      // status either way (the repo-setup popup can retry: same command).
+      if (npCreateRepo && createdPath) {
+        try {
+          const msg = await invoke<string>("github_create_repo", {
+            cwd: createdPath,
+            name: npName.trim() || null,
+            private: true,
+          });
+          setStatus(`🐙 ${msg}`);
+        } catch (e) {
+          setStatus(`🐙 Project created, but the GitHub repo could not be set up: ${String((e as Error)?.message ?? e)} — retry from the Publisher card's ⚙ Set up repo.`);
+        }
       }
     } catch (e) {
       setStatus(`Couldn't create project: ${e}`);
@@ -2153,10 +2176,19 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
                     ) : (
                       <button onClick={() => { setNpOpen(false); setGhOpen(true); setGhMsg(""); }} style={{ ...btn, height: 34, justifyContent: "center", color: "var(--fg-strong)" }}>🐙 Connect GitHub</button>
                     )}
-                    <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>
-                      Lets the agent clone private repos and push from inside the sandbox.
-                      <b> A GitHub repo is NOT created automatically</b> — create one yourself, then use Commit → Push in the file-tree rail.
-                    </div>
+                    {gh?.connected ? (
+                      <label title="Creates a PRIVATE repository on your GitHub account named after the project, wires it as origin, and pushes the initial branch — nothing else to set up. You can also do this later from the Publisher card's ⚙ Set up repo." style={{ display: "flex", alignItems: "flex-start", gap: 8, fontSize: 12, color: npCreateRepo ? "#7ff0c5" : "var(--fg)", cursor: "pointer", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px" }}>
+                        <input type="checkbox" checked={npCreateRepo} onChange={(e) => setNpCreateRepo(e.target.checked)} style={{ marginTop: 2 }} />
+                        <span>
+                          <b>Create a private GitHub repo</b> for this project
+                          <br /><span style={{ fontSize: 11, color: "var(--fg-muted)" }}>named after the project · origin wired · first branch pushed</span>
+                        </span>
+                      </label>
+                    ) : (
+                      <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.5 }}>
+                        Connect GitHub to clone private repos, push from the sandbox — and have a repo <b>created for you</b> when the project is born.
+                      </div>
+                    )}
                   </div>
 
                   {/* Cloud accounts inside the sandbox — mirrored AUTOMATICALLY

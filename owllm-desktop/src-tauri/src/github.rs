@@ -387,6 +387,142 @@ pub async fn github_device_poll(
     })
 }
 
+/// Create a GitHub repository for the project at `cwd` and wire it as
+/// `origin` (+ initial push). This is the missing "make me a repo" step the
+/// New-project dialog used to punt on ("create one yourself"). Steps:
+///   1. POST /user/repos with the stored GITHUB_TOKEN (name-exists → reuse,
+///      so the command is idempotent-ish for retries)
+///   2. `git init` + initial commit when the folder isn't a repo yet
+///   3. `git remote add origin` (an origin pointing ELSEWHERE is an error —
+///      never silently repoint a project at a different repo)
+///   4. `git push -u origin HEAD`
+#[tauri::command]
+pub async fn github_create_repo(
+    cwd: String,
+    name: Option<String>,
+    private: Option<bool>,
+) -> Result<String, String> {
+    let token = crate::accounts::accounts_get_secret("GITHUB_TOKEN".to_string())
+        .ok_or_else(|| "No GitHub account connected — connect one on the Accounts page (or the New-project dialog) first.".to_string())?;
+    let login = crate::accounts::accounts_get_secret("GITHUB_LOGIN".to_string())
+        .ok_or_else(|| "GitHub login unknown — reconnect the GitHub account.".to_string())?;
+    let host = crate::agent_tools::host_cwd(&cwd);
+    let private = private.unwrap_or(true);
+
+    tokio::task::spawn_blocking(move || -> Result<String, String> {
+        // Repo name: explicit > folder basename, sanitized to GitHub's charset.
+        let raw = name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| {
+                std::path::Path::new(&host)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "owllm-project".to_string())
+            });
+        let repo_name: String = raw
+            .trim()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' })
+            .collect();
+        if repo_name.is_empty() {
+            return Err("couldn't derive a repo name from the folder — pass one explicitly".into());
+        }
+
+        // 1. Create via the API (curl — same pattern as the rest of this module).
+        let payload = serde_json::json!({ "name": repo_name, "private": private }).to_string();
+        let mut cmd = std::process::Command::new("curl");
+        cmd.args([
+            "-s",
+            "-X", "POST",
+            "-H", &format!("Authorization: Bearer {token}"),
+            "-H", "User-Agent: owllm-desktop",
+            "-H", "X-GitHub-Api-Version: 2022-11-28",
+            "-H", "Accept: application/vnd.github+json",
+            "-d", &payload,
+            "https://api.github.com/user/repos",
+        ]);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd.output().map_err(|e| format!("couldn't run curl to reach GitHub: {e}"))?;
+        let body = String::from_utf8_lossy(&out.stdout);
+        let v: serde_json::Value = serde_json::from_str(body.trim())
+            .map_err(|_| format!("GitHub returned a non-JSON response (offline?): {}", body.chars().take(160).collect::<String>()))?;
+        let mut created = true;
+        let full_name = if let Some(f) = v.get("full_name").and_then(|x| x.as_str()) {
+            f.to_string()
+        } else {
+            let msg = v.get("message").and_then(|x| x.as_str()).unwrap_or("");
+            let name_exists = v
+                .pointer("/errors/0/message")
+                .and_then(|x| x.as_str())
+                .map(|m| m.contains("already exists"))
+                .unwrap_or(false)
+                || msg.contains("already exists");
+            if name_exists {
+                created = false; // reuse — retrying after a partial run is fine
+                format!("{login}/{repo_name}")
+            } else {
+                return Err(format!("GitHub couldn't create the repo: {}", if msg.is_empty() { body.chars().take(200).collect() } else { msg.to_string() }));
+            }
+        };
+        let url = format!("https://github.com/{full_name}.git");
+
+        // 2-4. Local git wiring, in the project folder.
+        let git = |args: &[&str]| -> (bool, String) {
+            let mut c = std::process::Command::new("git");
+            c.arg("-C").arg(&host).args(args);
+            c.stdout(Stdio::piped()).stderr(Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                c.creation_flags(CREATE_NO_WINDOW);
+            }
+            match c.output() {
+                Ok(o) => (
+                    o.status.success(),
+                    format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr)).trim().to_string(),
+                ),
+                Err(e) => (false, format!("spawn git: {e}")),
+            }
+        };
+        if !git(&["rev-parse", "--is-inside-work-tree"]).0 {
+            let (ok, err) = git(&["init", "-q"]);
+            if !ok {
+                return Err(format!("git init failed: {err}"));
+            }
+            let _ = git(&["add", "-A"]);
+            let _ = git(&["commit", "-q", "-m", "init"]); // empty tree → harmless failure
+        }
+        let (has_origin, cur_url) = git(&["remote", "get-url", "origin"]);
+        if has_origin {
+            let same = cur_url.trim_end_matches(".git") == url.trim_end_matches(".git");
+            if !same {
+                return Err(format!("origin already points at {cur_url} — not repointing it. Remove the remote first if you really want {full_name}."));
+            }
+        } else {
+            let (ok, err) = git(&["remote", "add", "origin", &url]);
+            if !ok {
+                return Err(format!("git remote add failed: {err}"));
+            }
+        }
+        let (pushed, push_out) = git(&["push", "-u", "origin", "HEAD"]);
+        if !pushed {
+            return Err(format!("repo {} at github.com/{full_name}, origin wired — but the initial push failed: {push_out}", if created { "created" } else { "reused" }));
+        }
+        Ok(format!(
+            "✓ {} github.com/{full_name} ({}) — origin wired, branch pushed.",
+            if created { "Created" } else { "Reused existing" },
+            if private { "private" } else { "public" },
+        ))
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// Disconnect: forget the token and scrub credentials from the sandbox and
 /// host. Best effort — always clears the stored token even if scrubbing fails.
 #[tauri::command]

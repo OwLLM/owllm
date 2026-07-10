@@ -1783,6 +1783,10 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
   const cwdRef = useRef(cwd);
   const refreshSeq = useRef(0);
   const [cfg, setCfg] = useState<PublisherCfg>(() => loadPublisherCfg(storageKey));
+  // Release target repo — lives on the COMMITTED Project Card (travels with the
+  // repo), edited right here so a red "target" check is fixable in place.
+  const [cardRepo, setCardRepo] = useState("");
+  const [cardRepoSaved, setCardRepoSaved] = useState("");
   const saveCfg = (next: PublisherCfg) => {
     setCfg(next);
     try { localStorage.setItem(storageKey, JSON.stringify(next)); } catch { /* quota — non-fatal */ }
@@ -1886,6 +1890,36 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
       void refresh();
     }
   };
+
+  // Load the card's release.repo when the setup popup opens (edited in place —
+  // the checks used to be read-only lights with nothing actionable under them).
+  useEffect(() => {
+    if (!setupOpen || !cwd) return;
+    let live = true;
+    (async () => {
+      try {
+        const txt = await invoke<string>("tool_read_file", { path: ".owllm/project.json", cwd });
+        const repo = (JSON.parse(txt)?.release?.repo as string | undefined) ?? "";
+        if (live) { setCardRepo(repo); setCardRepoSaved(repo); }
+      } catch { if (live) { setCardRepo(""); setCardRepoSaved(""); } }
+    })();
+    return () => { live = false; };
+  }, [setupOpen, cwd]);
+
+  const saveCardRepo = () => run("save release repo", async () => {
+    if (!cwd) throw new Error("no project open");
+    let card: Record<string, any> = {};
+    try { card = JSON.parse(await invoke<string>("tool_read_file", { path: ".owllm/project.json", cwd })) ?? {}; }
+    catch { /* no card yet — create one */ }
+    const repo = cardRepo.trim();
+    if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) throw new Error(`"${repo}" is not an owner/name GitHub repo`);
+    card.release = { ...(card.release ?? {}) };
+    if (repo) card.release.repo = repo; else delete card.release.repo;
+    if (!Object.keys(card.release).length) delete card.release;
+    await invoke("tool_write_file", { path: ".owllm/project.json", content: JSON.stringify(card, null, 2) + "\n", cwd });
+    setCardRepoSaved(repo);
+    return `release.repo ${repo ? `set to ${repo}` : "cleared"} on the Project Card (committed with the repo)`;
+  });
 
   const bigBtn = (label: string, glyph: string, enabled: boolean, title: string, onGo: () => void) => (
     <button
@@ -2022,8 +2056,10 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
             <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginBottom: 10, wordBreak: "break-all" }}>
               Repo: {cwd ?? "(no project open)"}
             </div>
-            {/* Readiness checks — each is a real probe result */}
-            <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 14 }}>
+            {/* Readiness checks — each is a real probe result, and the fixable
+                ones get their fix RIGHT HERE (create-repo button, target-repo
+                field below) instead of being read-only warning lights. */}
+            <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 10 }}>
               {(checks ?? []).map(c => (
                 <div key={c.id} style={{
                   display: "flex", gap: 8, alignItems: "baseline",
@@ -2035,6 +2071,48 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
                 </div>
               ))}
             </div>
+            {/* No origin remote → fix it in place: create the GitHub repo and
+                wire+push origin (uses the connected GitHub account). */}
+            {cwd && (checks ?? []).some(c => (c.id === "remote" || c.id === "repo") && !c.ok) && (
+              <button
+                disabled={busy != null}
+                onClick={() => void run("create GitHub repo", () => invoke<string>("github_create_repo", { cwd, name: null, private: true }))}
+                title="Create a private GitHub repository for this project, set it as origin, and push the current branch. Needs a connected GitHub account (Accounts page)."
+                style={{
+                  width: "100%", padding: "7px 0", marginBottom: 12,
+                  background: "rgba(60,242,107,0.12)", border: "1px solid rgba(60,242,107,0.5)",
+                  borderRadius: 7, color: "#3cf26b", fontSize: 12, fontWeight: 700, cursor: "pointer",
+                }}
+              >🐙 Create GitHub repo + wire origin</button>
+            )}
+            {/* Release target repo — a CARD field (committed, travels with the
+                repo), not a per-machine setting. Backs the "target" check above. */}
+            <label style={{ display: "block", marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, color: "var(--fg-muted)", marginBottom: 3 }}>Release target repo (Project Card)</div>
+              <div style={{ display: "flex", gap: 6 }}>
+                <input
+                  value={cardRepo}
+                  placeholder="owner/name — empty = publish script's default"
+                  title="The GitHub repo releases publish TO (gh release). May differ from origin — OwLLM's source is private while its releases repo is public. Saved on the committed .owllm/project.json."
+                  onChange={(e) => setCardRepo(e.target.value)}
+                  style={{
+                    flex: 1, minWidth: 0, boxSizing: "border-box", padding: "6px 8px",
+                    background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: 6, color: "var(--fg)", fontSize: 12,
+                  }}
+                />
+                <button
+                  disabled={busy != null || cardRepo.trim() === cardRepoSaved.trim()}
+                  onClick={() => void saveCardRepo()}
+                  style={{
+                    padding: "0 12px", borderRadius: 6, fontSize: 11, fontWeight: 700, cursor: "pointer",
+                    background: cardRepo.trim() === cardRepoSaved.trim() ? "rgba(255,255,255,0.06)" : `rgba(${rgb},0.18)`,
+                    border: `1px solid ${cardRepo.trim() === cardRepoSaved.trim() ? "rgba(255,255,255,0.12)" : `rgba(${rgb},0.6)`}`,
+                    color: cardRepo.trim() === cardRepoSaved.trim() ? "var(--fg-subtle)" : "var(--fg-strong)",
+                  }}
+                >Save</button>
+              </div>
+            </label>
             {([
               ["Merge target branch", "targetBranch", "main", "The branch Merge fast-forwards and pushes"],
               ["Commit scope (pathspec)", "commitScope", "empty = whole tree", "Limit Commit to a sub-path, e.g. owllm-desktop/ — keeps unrelated clutter out"],

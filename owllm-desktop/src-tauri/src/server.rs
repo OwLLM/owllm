@@ -136,6 +136,51 @@ async fn server_present(port: u16) -> bool {
     }
 }
 
+/// Port of any llama-server that is live RIGHT NOW from this app's point of
+/// view: the child we own (if still alive), an adopted server (re-verified),
+/// or one answering /health on a configured model port — covering a server
+/// started by another OwLLM instance or by hand outside the app entirely.
+/// Used by the Home readiness panel so a running engine never reads as
+/// "Not installed". Dead ports refuse instantly, so the scan stays cheap.
+pub async fn any_live_server_port(app: &AppHandle) -> Option<u16> {
+    let state = app.state::<ServerState>();
+    {
+        let mut inner = state.inner.lock().await;
+        let owned_alive = match inner.child.as_mut() {
+            Some(c) => matches!(c.try_wait(), Ok(None)),
+            None => false,
+        };
+        if owned_alive {
+            if let Some(p) = inner.port {
+                return Some(p);
+            }
+        }
+        if inner.child.is_none() && inner.adopted {
+            if let Some(p) = inner.port {
+                if server_present(p).await {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    // Neither owned nor adopted — knock on every configured model port in
+    // case a server is running that this instance never started.
+    let mut ports: Vec<u16> = models::list_models()
+        .await
+        .ok()?
+        .into_iter()
+        .filter_map(|m| m.port)
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    for p in ports {
+        if server_present(p).await {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// Classify a llama-server crash from its stderr tail. Returns the named
 /// cause + remediation, or None when the output matches nothing known.
 /// Patterns gathered from real llama.cpp failures (CUDA + Vulkan builds).

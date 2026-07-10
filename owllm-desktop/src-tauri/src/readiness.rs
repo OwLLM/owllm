@@ -11,7 +11,7 @@
 //   1. WSL / Ubuntu        → wsl::wsl_status()        (fine-tune + tool sandbox)
 //   2. GPU & CUDA driver   → hardware probe + nvidia-smi banner
 //   3. Fine-tuning env     → env_manager default profile status
-//   4. Local LLM runtime   → paths::llama_server_exe()
+//   4. Local LLM runtime   → live server probe + paths::llama_server_exe()
 //
 // Each row carries ok / warn so the UI can show ✅ / ⚠️ / ❌ exactly
 // like System Status does.
@@ -39,14 +39,14 @@ pub struct AppReadiness {
 }
 
 #[tauri::command]
-pub async fn app_readiness() -> Result<AppReadiness, String> {
+pub async fn app_readiness(app: tauri::AppHandle) -> Result<AppReadiness, String> {
     // The four probes are independent but used to run SERIALLY — and probe_wsl
     // (5-6 wsl.exe login-shell spawns, seconds on a cold WSL service) ran
     // synchronously ON an async worker, stalling every other invoke with it.
     // Run all four concurrently on their own threads; total cost is now the
     // slowest single probe instead of the sum of all of them.
     let wsl = tokio::task::spawn_blocking(probe_wsl);
-    let runtime = tokio::task::spawn_blocking(probe_runtime);
+    let runtime = tokio::spawn(probe_runtime(app));
     let gpu = tokio::spawn(probe_gpu());
     let env = tokio::spawn(probe_env());
     Ok(AppReadiness {
@@ -211,7 +211,19 @@ async fn probe_env() -> ReadinessRow {
     }
 }
 
-fn probe_runtime() -> ReadinessRow {
+async fn probe_runtime(app: tauri::AppHandle) -> ReadinessRow {
+    // A live, answering llama-server is the strongest proof of the engine —
+    // it must show as installed AND running no matter where the binary lives
+    // (module dir, PATH, or a hand-built copy the path probe can't see).
+    // The path check alone called a running server "Not installed" on any
+    // box whose engine wasn't installed through the module system.
+    if let Some(port) = crate::server::any_live_server_port(&app).await {
+        return ReadinessRow {
+            ok: true,
+            warn: false,
+            detail: format!("llama.cpp server running on :{port}"),
+        };
+    }
     match paths::llama_server_exe() {
         Some(_) => ReadinessRow {
             ok: true,

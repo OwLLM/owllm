@@ -139,6 +139,10 @@ pub const fn llama_server_filename() -> &'static str {
 ///      (new path; populated by the wizard's module installer)
 ///   3. Legacy `%LOCALAPPDATA%\OwLLM Desktop\runtime\llama.cpp\`
 ///   4. Repo `runtime-data\runtime\llama.cpp\` (dev fallback)
+///   5. Anywhere on PATH — a system/hand-built install (brew, apt, a
+///      self-compiled build on an ARM SoC) that never went through the
+///      module system. Without this the app called such an engine
+///      "not installed" even while it was serving requests.
 pub fn llama_server_exe() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_LLAMA_SERVER") {
         let pb = PathBuf::from(p);
@@ -157,12 +161,17 @@ pub fn llama_server_exe() -> Option<PathBuf> {
             return Some(exe);
         }
     }
-    let exe = llm_root()?.join("runtime").join("llama.cpp").join(exe_name);
-    if exe.is_file() {
-        Some(exe)
-    } else {
-        None
+    if let Some(root) = llm_root() {
+        let exe = root.join("runtime").join("llama.cpp").join(exe_name);
+        if exe.is_file() {
+            return Some(exe);
+        }
     }
+    // App-managed locations exhausted — accept a binary on PATH.
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(exe_name))
+        .find(|cand| cand.is_file())
 }
 
 /// Look for `<binary>` under `app_data_dir/modules/<variant-prefix>*\`.

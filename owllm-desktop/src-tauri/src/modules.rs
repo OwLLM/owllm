@@ -96,8 +96,17 @@ pub enum Platform {
     WindowsX86_64,
     #[serde(rename = "linux-x86_64")]
     LinuxX86_64,
+    #[serde(rename = "linux-aarch64")]
+    LinuxAarch64,
     #[serde(rename = "macos-aarch64")]
     MacOsAarch64,
+    /// Forward-compat catch-all: a platform string this build doesn't know
+    /// yet (the registry is fetched live from main, so it can gain new
+    /// platforms before every installed app updates). Deserializing it must
+    /// not fail the WHOLE registry parse — the unknown variant simply never
+    /// matches the host, so it's skipped by the resolver.
+    #[serde(other, rename = "unknown")]
+    Unknown,
 }
 
 impl Platform {
@@ -110,17 +119,26 @@ impl Platform {
         {
             Platform::LinuxX86_64
         }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            Platform::LinuxAarch64
+        }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             Platform::MacOsAarch64
         }
+        // Anything else (Intel Mac, Windows-on-ARM…): report Unknown so the
+        // resolver honestly says "no variant for this OS". The old fallback
+        // claimed windows-x86_64, which made ARM64 Linux builds resolve —
+        // and install — Windows zips.
         #[cfg(not(any(
             all(target_os = "windows", target_arch = "x86_64"),
             all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
             all(target_os = "macos", target_arch = "aarch64"),
         )))]
         {
-            Platform::WindowsX86_64
+            Platform::Unknown
         }
     }
 }
@@ -1029,6 +1047,44 @@ mod tests {
             .unwrap();
         let (v, _) = resolve_variant(m, &linux_headless(), Channel::Stable).unwrap();
         assert_eq!(v.id, "local-inference-linux-cpu");
+    }
+
+    #[test]
+    fn unknown_registry_platform_does_not_break_parsing() {
+        // The registry is fetched live from main, so it can gain platforms
+        // (e.g. linux-aarch64 module builds) before every installed app
+        // updates. An unknown platform string must parse as Unknown and be
+        // skipped — never fail the whole registry.
+        let raw = r#"{
+            "id": "x", "displayName": "x", "platform": "linux-riscv64",
+            "sizeBytes": 1, "channels": {}
+        }"#;
+        let v: Variant = serde_json::from_str(raw).expect("unknown platform parses");
+        assert_eq!(v.platform, Platform::Unknown);
+        assert_ne!(v.platform, Platform::host());
+    }
+
+    #[test]
+    fn linux_aarch64_is_unsupported_not_windows() {
+        // An ARM64 Linux host must NOT resolve (and install) Windows zips —
+        // the old Platform::host() fallback claimed windows-x86_64 there.
+        // Until arm64 module builds are listed in the registry, the honest
+        // answer is NoMatchingPlatform.
+        let hw = HardwareSnapshot {
+            platform: Platform::LinuxAarch64,
+            gpu_vendor: Some(GpuVendor::Nvidia), // Jetson-class unified SoC
+            vram_gb: 48,
+            ram_gb: 64,
+            free_disk_gb: 100,
+        };
+        let r = parse_registry();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
+        let err = resolve_variant(m, &hw, Channel::Stable).unwrap_err();
+        assert_eq!(err, ResolveError::NoMatchingPlatform);
     }
 
     #[test]

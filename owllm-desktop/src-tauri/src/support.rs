@@ -374,7 +374,9 @@ async fn gh_create_issue(
 
 #[tauri::command]
 pub async fn support_snapshot(app: tauri::AppHandle) -> Result<SupportSnapshot, String> {
-    let readiness = crate::readiness::app_readiness().await.unwrap_or_default();
+    let readiness = crate::readiness::app_readiness(app.clone())
+        .await
+        .unwrap_or_default();
     let hw = crate::hardware::hardware_info().await.unwrap_or_default();
     let server = {
         let st = app.state::<crate::server::ServerState>();

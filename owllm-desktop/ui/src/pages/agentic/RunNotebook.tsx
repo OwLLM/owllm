@@ -46,6 +46,12 @@ export type NotebookState = {
   plan: string;
   steps: NotebookStep[];
   autoFeed: boolean;
+  /// Which surface DRIVES auto-feed — the notebook blob is shared per project,
+  /// so without an owner every open page on the project popped the queue at
+  /// its own run end (a second page opened "to do something else" started
+  /// feeding notebook steps). The surface whose toggle turned auto-feed on
+  /// owns it; unchecking from ANY page stops it everywhere.
+  autoFeedOwner?: string;
   digest: Array<{ role: "you" | "digest"; text: string }>;
   /// User-picked digest model (per project). Empty/undefined = inherit the
   /// surface's default (team model → server model), same rule as before.
@@ -71,6 +77,7 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       plan: typeof p.plan === "string" ? p.plan : "",
       steps: Array.isArray(p.steps) ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string") : [],
       autoFeed: p.autoFeed === true,
+      autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
       digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
@@ -87,17 +94,31 @@ export function saveNotebook(projectId: string | null | undefined, nb: NotebookS
   } catch { /* best effort */ }
 }
 
-/// Run-end auto-feed helper (used by AgentsPage): pop the first pending step
-/// — marks it "sent" and persists — or null when auto-feed is off / nothing
-/// is pending.
-export function takeNextAutoStep(projectId: string | null | undefined): NotebookStep | null {
+/// Run-end auto-feed helper (used by AgentsPage / CodePage): pop the first
+/// pending step — marks it "sent" and persists — or null when auto-feed is
+/// off / nothing is pending / auto-feed is driven by a DIFFERENT surface.
+/// Legacy blobs saved before ownership existed have no owner: the first
+/// surface to feed adopts them, so the queue converges to a single driver.
+export function takeNextAutoStep(projectId: string | null | undefined, surfaceId: string): NotebookStep | null {
   const nb = loadNotebook(projectId);
   if (!nb.autoFeed) return null;
+  if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return null;
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
   next.status = "sent";
+  if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
   saveNotebook(projectId, nb);
   return next;
+}
+
+/// True when auto-feed is on with pending steps and THIS surface may drive it
+/// — the run-end paths use it to say "auto-feed paused" instead of stalling
+/// silently when a run doesn't finish cleanly.
+export function autoFeedWouldRun(projectId: string | null | undefined, surfaceId: string): boolean {
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeed) return false;
+  if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return false;
+  return nb.steps.some((s) => s.status === "pending");
 }
 
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -206,9 +227,14 @@ type Props = {
   /// Render the notebook INLINE (fills its parent, stacked vertically) instead
   /// of as a modal — used by the Code page's right-column Notebook tab.
   inline?: boolean;
+  /// Stable identity of the page hosting this notebook (e.g. "agents:main",
+  /// "code:<pageId>"). Turning auto-feed ON records it as the owner so only
+  /// this page walks the queue at run end; other pages on the same project
+  /// see the toggle as "driven elsewhere" and can only switch it off.
+  surfaceId?: string;
 };
 
-export default function RunNotebook({ projectId, projectName, active = true, running, onFeed, modelId, port, models, openEvent = "owllm:open-run-notebook", accountsStatus = null, inline = false }: Props) {
+export default function RunNotebook({ projectId, projectName, active = true, running, onFeed, modelId, port, models, openEvent = "owllm:open-run-notebook", accountsStatus = null, inline = false, surfaceId = "main" }: Props) {
   const [open, setOpen] = useState(false);
   const [nb, setNb] = useState<NotebookState>(() => loadNotebook(projectId));
   const [newStep, setNewStep] = useState("");
@@ -453,10 +479,24 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             {running ? (inline ? "run live — steps steer it" : "team is running — fed steps steer it live") : (inline ? "idle — steps start a run" : "team idle — fed steps start a run")}
           </span>
           <div style={{ flex: 1 }} />
-          <label title="When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it." style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: nb.autoFeed ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}>
-            <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked })} />
-            Auto-feed next step
-          </label>
+          {(() => {
+            // Ownership-aware toggle: ON from here claims the queue for THIS
+            // page; OFF from anywhere stops it everywhere. When another page
+            // owns it, this page shows it amber — uncheck to stop, re-check
+            // to take over driving from here.
+            const ownedElsewhere = nb.autoFeed && !!nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId;
+            return (
+              <label
+                title={ownedElsewhere
+                  ? "Auto-feed is driven by another page on this project. Uncheck to stop it everywhere; check again afterwards to drive it from this page."
+                  : "When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it. Only the page that turns this on feeds the queue."}
+                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: ownedElsewhere ? "#ffd97a" : nb.autoFeed ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}
+              >
+                <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked, autoFeedOwner: e.target.checked ? surfaceId : undefined })} />
+                {ownedElsewhere ? "Auto-feed (another page drives)" : "Auto-feed next step"}
+              </label>
+            );
+          })()}
           {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} style={{ height: 26, width: 28, padding: 0, fontSize: 13 }}>✕</button>}
         </div>
 

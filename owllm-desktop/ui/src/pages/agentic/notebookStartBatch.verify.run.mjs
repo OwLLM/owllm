@@ -202,5 +202,49 @@ console.log("case 5: Start queue hides with nothing pending");
   act(() => root.unmount());
 }
 
+// ---- 6. auto-feed ownership: only the owning surface pops the queue ----
+console.log("case 6: takeNextAutoStep is gated per surface");
+{
+  seed(); // autoFeed on, NO owner (legacy blob)
+  const { takeNextAutoStep } = NB;
+  const first = takeNextAutoStep(PID, "agents:main");
+  check("legacy blob feeds and is adopted", first?.id === "s1" && blob().autoFeedOwner === "agents:main");
+  const stolen = takeNextAutoStep(PID, "code:other-page");
+  check("a different page gets NOTHING", stolen === null);
+  check("its step is still pending", blob().steps.find((s) => s.id === "s2")?.status === "pending");
+  const second = takeNextAutoStep(PID, "agents:main");
+  check("the owner keeps walking the queue", second?.id === "s2");
+}
+
+// ---- 7. autoFeedWouldRun mirrors the same gate ----
+console.log("case 7: autoFeedWouldRun respects owner + pending");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "agents:main" }));
+  const { autoFeedWouldRun } = NB;
+  check("true for the owning surface", autoFeedWouldRun(PID, "agents:main") === true);
+  check("false for another surface", autoFeedWouldRun(PID, "code:p2") === false);
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: false }));
+  check("false when the toggle is off", autoFeedWouldRun(PID, "agents:main") === false);
+}
+
+// ---- 8. the toggle claims ownership; OFF from ANY page removes it ----
+console.log("case 8: toggle claims / releases ownership across pages");
+{
+  localStorage.setItem(KEY, JSON.stringify({ text: "", plan: PLAN, steps: [{ id: "s1", text: "step", status: "pending", ts: 1 }], autoFeed: false, digest: [] }));
+  const m1 = mount({ surfaceId: "code:p1" });
+  clickEl(document.querySelector("input[type=checkbox]"));
+  check("checking ON records this page as owner", blob().autoFeed === true && blob().autoFeedOwner === "code:p1");
+  act(() => m1.root.unmount());
+  const m2 = mount({ surfaceId: "code:p2" });
+  check("another page shows it as driven elsewhere", textOf(document.body).includes("another page drives"));
+  check("that page cannot pop the queue", NB.takeNextAutoStep(PID, "code:p2") === null);
+  clickEl(document.querySelector("input[type=checkbox]"));
+  check("unchecking from the OTHER page stops it everywhere", blob().autoFeed === false && blob().autoFeedOwner === undefined);
+  clickEl(document.querySelector("input[type=checkbox]"));
+  check("re-checking hands the queue to this page", blob().autoFeed === true && blob().autoFeedOwner === "code:p2");
+  act(() => m2.root.unmount());
+}
+
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

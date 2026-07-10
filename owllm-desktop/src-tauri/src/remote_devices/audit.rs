@@ -118,6 +118,7 @@ mod tests {
             error: None,
             decision: "allowed".into(),
             duration_ms: 5,
+            ..Default::default()
         }
     }
 

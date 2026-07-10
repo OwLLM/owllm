@@ -228,6 +228,15 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   banner + emergency Stop. Persistent replay cache. Redacted JSONL audit on both
   ends (output stored only as length + digest). Ships DISABLED
   (`OWLLM_REMOTE_DEVICES=1` or the page toggle). Design: `docs/REMOTE_DEVICES.md`.
+- **Interactive shell (SSH-like)**: an `🖥 Open shell` in the Devices console
+  spawns a real PTY on the target (`session.rs`, portable-pty) and streams it into
+  an xterm terminal over the sealed transport — installers that prompt, REPLs,
+  `sudo` flows, log tails, dev work. Session ops are the `shell` tier, bound to
+  the controller that opened them; the target shows the banner for the whole session.
+- **Agent remote access**: a `device_exec` agent tool (distinct from `ssh_exec` —
+  no SSH keys, works over the sealed device channel) lets the team run commands on
+  a paired device for tech support / installs / dev. Gated by a **"Let agents use
+  remote devices"** switch (off by default; free once on, admin still target-approved).
 
 ## USB-portable mode — "OwLLM Go" (`paths.rs::init_portable_mode`)
 

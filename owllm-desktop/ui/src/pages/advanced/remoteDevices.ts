@@ -37,6 +37,7 @@ export type DeviceIdentity = {
   relay_url: string | null;
   relay_client: boolean;
   relay_serving: boolean;
+  agents_allowed: boolean;
 };
 
 export type DeviceRecord = {
@@ -87,6 +88,9 @@ export type CommandResult = {
   error: string | null;
   decision: string;
   duration_ms: number;
+  session?: string | null;
+  data?: string | null;
+  exited?: boolean;
 };
 
 export type ControlSession = {
@@ -153,6 +157,22 @@ export const controlState = () => invoke<ControlState>("device_control_state");
 export const stopRemoteControl = () => invoke<{ cancelled: number }>("device_stop_remote_control");
 export const auditTail = (limit?: number) => invoke<unknown[]>("device_audit_tail", { limit: limit ?? 200 });
 export const selfTest = () => invoke<SelfTestResult>("device_selftest");
+
+// ---- Interactive remote shell sessions ----
+export const sessionOpen = (toDevice: string, shell?: string | null, cols?: number, rows?: number) =>
+  invoke<CommandResult>("device_session_open", { toDevice, shell: shell ?? null, cols: cols ?? null, rows: rows ?? null });
+export const sessionWrite = (toDevice: string, session: string, dataB64: string) =>
+  invoke<CommandResult>("device_session_write", { toDevice, session, data: dataB64 });
+export const sessionRead = (toDevice: string, session: string) =>
+  invoke<CommandResult>("device_session_read", { toDevice, session });
+export const sessionResize = (toDevice: string, session: string, cols: number, rows: number) =>
+  invoke<CommandResult>("device_session_resize", { toDevice, session, cols, rows });
+export const sessionClose = (toDevice: string, session: string) =>
+  invoke<CommandResult>("device_session_close", { toDevice, session });
+
+// ---- Agent remote access ----
+export const agentsAllowedGet = () => invoke<boolean>("device_agents_allowed_get");
+export const setAgentsAllowed = (allowed: boolean) => invoke<void>("device_set_agents_allowed", { allowed });
 
 // ---- Dangerous-action approval (target side) ----
 export const pendingApprovals = () => invoke<{ pending: PendingApproval[] }>("device_pending_approvals");

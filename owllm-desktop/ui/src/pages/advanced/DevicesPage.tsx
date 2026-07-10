@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import LogBox from "../../components/LogBox";
+import RemoteTerminal from "./RemoteTerminal";
 import * as rd from "./remoteDevices";
 import type {
   CommandKind,
@@ -85,6 +86,7 @@ export default function DevicesPage() {
   const [discoverMsg, setDiscoverMsg] = useState("");
   const [publicEpDraft, setPublicEpDraft] = useState("");
   const [relayUrlDraft, setRelayUrlDraft] = useState("");
+  const [shellDevice, setShellDevice] = useState<string | null>(null);
 
   const guard = useCallback(async (fn: () => Promise<void>) => {
     try {
@@ -197,6 +199,7 @@ export default function DevicesPage() {
   const savePublicEndpoint = () => guard(async () => { await rd.setPublicEndpoint(publicEpDraft.trim() || null); setPublicEpDraft(""); await reload(); });
   const saveRelay = () => guard(async () => { await rd.setRelay(relayUrlDraft.trim() || null); setRelayUrlDraft(""); await reload(); });
   const toggleRelayServer = (on: boolean) => guard(async () => { if (on) await rd.relayServe(); else await rd.relayStop(); await reload(); });
+  const toggleAgents = (on: boolean) => guard(async () => { await rd.setAgentsAllowed(on); await reload(); });
 
   const stopAll = () =>
     guard(async () => {
@@ -307,6 +310,7 @@ export default function DevicesPage() {
           setRelayUrlDraft={setRelayUrlDraft}
           onSaveRelay={saveRelay}
           onToggleServer={toggleRelayServer}
+          onToggleAgents={toggleAgents}
         />
       )}
 
@@ -338,7 +342,17 @@ export default function DevicesPage() {
         lines={consoleLines}
         onClear={() => setConsoleLines([])}
         wslDisabled={wslDisabled}
+        onOpenShell={() => setShellDevice(target)}
       />
+
+      {/* Live interactive remote shell (SSH-like) */}
+      {shellDevice && (
+        <RemoteTerminal
+          toDevice={shellDevice}
+          deviceName={devices.find((d) => d.device_id === shellDevice)?.name ?? shortId(shellDevice)}
+          onClose={() => setShellDevice(null)}
+        />
+      )}
 
       {/* Audit trail */}
       <AuditView rows={audit} />
@@ -459,7 +473,7 @@ function MyDeviceCard({
 }
 
 function NetworkPanel({
-  identity, publicEpDraft, setPublicEpDraft, onSavePublic, relayUrlDraft, setRelayUrlDraft, onSaveRelay, onToggleServer,
+  identity, publicEpDraft, setPublicEpDraft, onSavePublic, relayUrlDraft, setRelayUrlDraft, onSaveRelay, onToggleServer, onToggleAgents,
 }: {
   identity: DeviceIdentity;
   publicEpDraft: string;
@@ -469,6 +483,7 @@ function NetworkPanel({
   setRelayUrlDraft: (s: string) => void;
   onSaveRelay: () => void;
   onToggleServer: (on: boolean) => void;
+  onToggleAgents: (on: boolean) => void;
 }) {
   return (
     <section style={{ ...cardStyle, border: "1px solid rgba(var(--accent-rgb),0.45)" }}>
@@ -514,6 +529,20 @@ function NetworkPanel({
           Host a relay on this machine (bind 0.0.0.0:47772) — for an always-on box with a public URL/tunnel
           {identity.relay_serving && <span style={badge("var(--ok)")}>serving</span>}
         </label>
+      </div>
+
+      {/* Agent remote access */}
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: identity.agents_allowed ? "var(--accent)" : "var(--fg)" }}>
+          <input type="checkbox" checked={identity.agents_allowed} onChange={(e) => onToggleAgents(e.target.checked)} />
+          <b>Let agents use remote devices</b>
+          {identity.agents_allowed && <span style={badge("var(--ok)")}>on</span>}
+        </label>
+        <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+          When on, your agents (Agentic team / Code) get a <code>remote_shell</code> tool for any device you've paired and been
+          granted <b>shell</b> on — for tech support, installing software, and development on the other machine. Admin/elevation
+          on the target still needs its approval. Off by default.
+        </span>
       </div>
     </section>
   );
@@ -644,7 +673,7 @@ function TrustedControllers({
 }
 
 function RemoteConsole({
-  devices, target, setTarget, kind, setKind, command, setCommand, fileContent, setFileContent, running, onRun, onStop, lines, onClear, wslDisabled,
+  devices, target, setTarget, kind, setKind, command, setCommand, fileContent, setFileContent, running, onRun, onStop, lines, onClear, wslDisabled, onOpenShell,
 }: {
   devices: DeviceRecord[];
   target: string;
@@ -661,6 +690,7 @@ function RemoteConsole({
   lines: string[];
   onClear: () => void;
   wslDisabled: boolean;
+  onOpenShell: () => void;
 }) {
   const needsCommand = kind === "shell" || kind === "wsl";
   const isFileWrite = kind === "file_write";
@@ -697,7 +727,10 @@ function RemoteConsole({
         <button className="btn" onClick={onRun} disabled={runDisabled} style={{ padding: "3px 14px", fontWeight: 700 }}>
           {running ? "Running…" : "▶ Run"}
         </button>
-        <button className="ghost-btn" onClick={onStop} title="Emergency stop — cancel every in-flight remote command" style={{ padding: "3px 10px", color: "var(--error)" }}>
+        <button className="btn" onClick={onOpenShell} title="Open a live interactive shell on the target (SSH-like)" style={{ padding: "3px 12px", background: "#c04bd6", color: "#fff", fontWeight: 700 }}>
+          🖥 Open shell
+        </button>
+        <button className="ghost-btn" onClick={onStop} title="Emergency stop — cancel every in-flight remote command + session" style={{ padding: "3px 10px", color: "var(--error)" }}>
           ⛔ Stop
         </button>
         <button className="ghost-btn" onClick={onClear} style={{ padding: "3px 8px", fontSize: 11 }}>clear</button>

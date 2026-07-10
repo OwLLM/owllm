@@ -88,10 +88,11 @@ pub struct PermissionPolicy {
 /// The kinds of command a controller can ask a target to run. New dangerous
 /// kinds MUST be added to `policy::authorize` (which is exhaustive-matched) or
 /// the build fails — you cannot forget to gate one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandKind {
     /// Read-only device diagnostics. Always allowed. No side effects.
+    #[default]
     Diagnostics,
     /// Run a shell command on the host. Gated by `allow_shell`.
     Shell,
@@ -101,6 +102,16 @@ pub enum CommandKind {
     FileWrite,
     /// Admin / system change. Gated by `allow_admin` AND per-action approval.
     Admin,
+    /// Open an interactive PTY shell session (SSH-like). Gated by `allow_shell`.
+    SessionOpen,
+    /// Send keystrokes to an open session. Gated by `allow_shell`.
+    SessionWrite,
+    /// Drain buffered output from an open session. Gated by `allow_shell`.
+    SessionRead,
+    /// Resize an open session's PTY. Gated by `allow_shell`.
+    SessionResize,
+    /// Close an open session. Gated by `allow_shell`.
+    SessionClose,
 }
 
 /// The decision `authorize()` returns. `RequiresApproval` means the policy
@@ -119,7 +130,7 @@ pub enum Authorization {
 
 /// The plaintext a controller seals inside an envelope. `request_id` is echoed
 /// in the result and used as the cancellation handle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandRequest {
     pub request_id: String,
     pub kind: CommandKind,
@@ -127,9 +138,18 @@ pub struct CommandRequest {
     /// a plain diagnostics sweep.
     #[serde(default)]
     pub command: String,
-    /// base64 file content for `FileWrite` (ignored by other kinds).
+    /// base64 file content for `FileWrite`, or base64 keystrokes for
+    /// `SessionWrite` (ignored by other kinds).
     #[serde(default)]
     pub payload: Option<String>,
+    /// Session id for `SessionWrite`/`SessionRead`/`SessionResize`/`SessionClose`.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// PTY size for `SessionOpen`/`SessionResize`.
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
     /// Hard execution deadline in milliseconds (clamped by the executor).
     #[serde(default)]
     pub timeout_ms: u64,
@@ -137,7 +157,7 @@ pub struct CommandRequest {
 
 /// What the target returns to the controller (also sealed on the way back, in
 /// the network transport; loopback returns it in-process).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandResult {
     pub request_id: String,
     pub ok: bool,
@@ -152,6 +172,15 @@ pub struct CommandResult {
     /// The authorization decision the target reached (for the controller's log).
     pub decision: String,
     pub duration_ms: u64,
+    /// Session id returned by `SessionOpen`.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// base64 PTY output returned by `SessionRead`.
+    #[serde(default)]
+    pub data: Option<String>,
+    /// True when a session's shell has exited (from `SessionRead`/`SessionOpen`).
+    #[serde(default)]
+    pub exited: bool,
 }
 
 // ------------------------------------------------------------------

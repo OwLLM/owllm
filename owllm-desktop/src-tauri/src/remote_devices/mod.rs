@@ -28,6 +28,7 @@ mod lan;
 mod policy;
 mod registry;
 mod relay;
+mod session;
 mod transport;
 mod trust;
 
@@ -69,6 +70,11 @@ fn kind_str(k: CommandKind) -> &'static str {
         CommandKind::Wsl => "wsl",
         CommandKind::FileWrite => "file_write",
         CommandKind::Admin => "admin",
+        CommandKind::SessionOpen => "session_open",
+        CommandKind::SessionWrite => "session_write",
+        CommandKind::SessionRead => "session_read",
+        CommandKind::SessionResize => "session_resize",
+        CommandKind::SessionClose => "session_close",
     }
 }
 
@@ -135,6 +141,22 @@ fn begin_control(frame: &SignedEnvelope, req: &CommandRequest) {
         controller_name: name,
         request_id: req.request_id.clone(),
         kind: kind_str(req.kind).to_string(),
+        started_at: now_rfc3339(),
+    });
+    emit_control();
+}
+
+/// Persistent banner entry for an interactive session (keyed by session id, so
+/// it stays up for the whole session instead of flickering per keystroke).
+fn begin_session_control(frame: &SignedEnvelope, session_id: &str) {
+    let name = trust::find(&frame.from_device)
+        .map(|c| c.name)
+        .unwrap_or_else(|| frame.from_device.clone());
+    CONTROL.lock().unwrap().push(ControlSession {
+        controller_id: frame.from_device.clone(),
+        controller_name: name,
+        request_id: session_id.to_string(),
+        kind: "shell session".into(),
         started_at: now_rfc3339(),
     });
     emit_control();
@@ -212,6 +234,22 @@ fn public_endpoint() -> Option<String> {
 /// The shared relay URL both devices dial out to (WAN, pure-NAT fallback).
 fn relay_url() -> Option<String> {
     cfg_string("relay_url")
+}
+
+/// Whether agents may drive remote devices (default OFF).
+fn agents_allowed() -> bool {
+    load_config().get("agents_allowed").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn set_agents_allowed_cfg(v: bool) -> Result<(), String> {
+    let path = config_path().ok_or_else(|| "could not resolve app data dir".to_string())?;
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let mut doc = load_config();
+    doc["agents_allowed"] = json!(v);
+    let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, txt).map_err(|e| format!("write remote-devices config: {e}"))
 }
 
 fn write_config(key: &str, value: Option<String>) -> Result<(), String> {
@@ -297,6 +335,7 @@ fn deny(request_id: &str, msg: &str) -> CommandResult {
         error: Some(msg.to_string()),
         decision: "denied".into(),
         duration_ms: 0,
+        ..Default::default()
     }
 }
 
@@ -335,6 +374,7 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
             command: String::new(),
             payload: None,
             timeout_ms: 0,
+            ..Default::default()
         };
         audit_inbound(&frame, &placeholder, &r);
         return Ok(r);
@@ -373,6 +413,37 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
         }
     };
 
+    // Interactive session ops route to the session manager. They keep their own
+    // persistent "being controlled" banner (per-op begin/end would flicker on
+    // every read poll) and skip the high-frequency keystroke/poll audit.
+    if is_session_kind(req.kind) {
+        let result = match policy::authorize(req.kind, &policy) {
+            Authorization::Allowed => {
+                let r = session::handle(&frame.from_device, &req);
+                match req.kind {
+                    CommandKind::SessionOpen => {
+                        if let Some(sid) = &r.session {
+                            begin_session_control(&frame, sid);
+                        }
+                    }
+                    CommandKind::SessionClose => {
+                        if let Some(sid) = &req.session {
+                            end_control(sid);
+                        }
+                    }
+                    _ => {}
+                }
+                r
+            }
+            _ => deny(&req.request_id, "shell permission required for interactive sessions"),
+        };
+        let _ = registry::touch_last_seen(&frame.from_device);
+        if matches!(req.kind, CommandKind::SessionOpen | CommandKind::SessionClose) {
+            audit_inbound(&frame, &req, &result);
+        }
+        return Ok(result);
+    }
+
     // Authorized surface — show the banner while it runs, then execute. Dangerous
     // kinds (FileWrite/Admin) additionally require a LIVE per-action approval on
     // this machine, even when the policy toggle is on.
@@ -396,6 +467,17 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
     let _ = registry::touch_last_seen(&frame.from_device);
     audit_inbound(&frame, &req, &result);
     Ok(result)
+}
+
+fn is_session_kind(k: CommandKind) -> bool {
+    matches!(
+        k,
+        CommandKind::SessionOpen
+            | CommandKind::SessionWrite
+            | CommandKind::SessionRead
+            | CommandKind::SessionResize
+            | CommandKind::SessionClose
+    )
 }
 
 fn recipient_x_pub(to_device: &str) -> Result<[u8; 32], String> {
@@ -677,6 +759,7 @@ pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
         "relay_url": relay_url(),
         "relay_client": relay::client_running(),
         "relay_serving": relay::serving(),
+        "agents_allowed": agents_allowed(),
     }))
 }
 
@@ -848,40 +931,117 @@ pub async fn device_send(
     timeout_ms: Option<u64>,
 ) -> Result<CommandResult, String> {
     store_app(&app);
-    let me = identity::load_or_create()?;
-    let recipient_pub = recipient_x_pub(&to_device)?;
-
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind,
         command: command.unwrap_or_default(),
         payload,
         timeout_ms: timeout_ms.unwrap_or(0),
+        ..Default::default()
     };
-    let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+    send_request(&to_device, req).await
+}
 
+/// Seal `req`, route it (loopback/LAN/relay), and return the target's result.
+/// High-frequency session ops (write/read/resize) skip the audit; lifecycle +
+/// one-shot commands are audited.
+async fn send_request(to_device: &str, req: CommandRequest) -> Result<CommandResult, String> {
+    let me = identity::load_or_create()?;
+    let recipient_pub = recipient_x_pub(to_device)?;
+    let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
-    let env = crypto::seal(
-        &me.secrets,
-        &to_device,
-        &recipient_pub,
-        &plaintext,
-        now_unix(),
-        &nonce,
-    )?;
+    let env = crypto::seal(&me.secrets, to_device, &recipient_pub, &plaintext, now_unix(), &nonce)?;
+    let result = route_command(env, to_device).await?;
 
-    let result = route_command(env, &to_device).await?;
-    audit::write(&audit::record(
-        "outbound",
-        &me.secrets.device_id(),
-        &to_device,
-        kind_str(req.kind),
-        &req.command,
-        &result.decision,
-        &result,
-    ));
+    let noisy = matches!(
+        req.kind,
+        CommandKind::SessionWrite | CommandKind::SessionRead | CommandKind::SessionResize
+    );
+    if !noisy {
+        audit::write(&audit::record(
+            "outbound",
+            &me.secrets.device_id(),
+            to_device,
+            kind_str(req.kind),
+            &req.command,
+            &result.decision,
+            &result,
+        ));
+    }
     Ok(result)
+}
+
+/// Open an interactive remote shell (SSH-like). Returns the session id.
+#[tauri::command]
+pub async fn device_session_open(
+    app: AppHandle,
+    to_device: String,
+    shell: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<CommandResult, String> {
+    store_app(&app);
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionOpen,
+        command: shell.unwrap_or_default(),
+        cols,
+        rows,
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
+}
+
+/// Send keystrokes (base64) to an open remote session.
+#[tauri::command]
+pub async fn device_session_write(to_device: String, session: String, data: String) -> Result<CommandResult, String> {
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionWrite,
+        session: Some(session),
+        payload: Some(data),
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
+}
+
+/// Drain buffered output from an open remote session (base64 in `data`).
+#[tauri::command]
+pub async fn device_session_read(to_device: String, session: String) -> Result<CommandResult, String> {
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionRead,
+        session: Some(session),
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
+}
+
+/// Resize an open remote session's PTY.
+#[tauri::command]
+pub async fn device_session_resize(to_device: String, session: String, cols: u16, rows: u16) -> Result<CommandResult, String> {
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionResize,
+        session: Some(session),
+        cols: Some(cols),
+        rows: Some(rows),
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
+}
+
+/// Close an open remote session.
+#[tauri::command]
+pub async fn device_session_close(to_device: String, session: String) -> Result<CommandResult, String> {
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionClose,
+        session: Some(session),
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
 }
 
 /// Pending dangerous-action approvals awaiting a decision on THIS machine.
@@ -920,14 +1080,30 @@ pub fn device_control_state() -> Value {
     control_state_value()
 }
 
-/// EMERGENCY STOP — cancel every in-flight remote command and clear the state.
+/// EMERGENCY STOP — cancel every in-flight command AND kill every interactive
+/// session, then clear the state.
 #[tauri::command]
 pub fn device_stop_remote_control(app: AppHandle) -> Value {
     store_app(&app);
     let cancelled = executor::cancel_all();
+    let sessions = session::kill_all();
     CONTROL.lock().unwrap().clear();
     emit_control();
-    json!({ "cancelled": cancelled })
+    json!({ "cancelled": cancelled, "sessions_killed": sessions })
+}
+
+/// Whether agents may drive paired+shell-granted remote devices (default OFF).
+#[tauri::command]
+pub fn device_agents_allowed_get() -> bool {
+    agents_allowed()
+}
+
+/// Flip the "let agents use remote devices" switch. Once on, agents get a
+/// remote_shell tool for any paired device your machine has been granted shell
+/// on — no per-call prompt (admin/elevation on the target is still gated).
+#[tauri::command]
+pub fn device_set_agents_allowed(allowed: bool) -> Result<(), String> {
+    set_agents_allowed_cfg(allowed)
 }
 
 /// The last `limit` audit lines (redacted), newest last.
@@ -949,6 +1125,7 @@ pub async fn device_selftest(app: AppHandle) -> Result<Value, String> {
         command: String::new(),
         payload: None,
         timeout_ms: 10_000,
+        ..Default::default()
     };
     let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
     let mut nonce = [0u8; 24];
@@ -1000,6 +1177,7 @@ mod tests {
             command: command.into(),
             payload: None,
             timeout_ms: 5000,
+            ..Default::default()
         };
         let pt = serde_json::to_vec(&req).unwrap();
         let mut nonce = [0u8; 24];

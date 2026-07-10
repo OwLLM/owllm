@@ -87,7 +87,7 @@ fn refused(req: &CommandRequest, decision: Authorization, msg: &str, started: In
         exit_code: None,
         error: Some(msg.to_string()),
         decision: decision_label(decision).to_string(),
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
     }
 }
 
@@ -119,6 +119,14 @@ pub async fn execute(req: &CommandRequest, policy: &PermissionPolicy) -> Command
         // Unreachable: authorize() only returns Allowed for the three above.
         CommandKind::FileWrite | CommandKind::Admin => {
             refused(req, Authorization::Denied, "not executable", started)
+        }
+        // Session ops are routed to session.rs by handle_incoming, never here.
+        CommandKind::SessionOpen
+        | CommandKind::SessionWrite
+        | CommandKind::SessionRead
+        | CommandKind::SessionResize
+        | CommandKind::SessionClose => {
+            refused(req, Authorization::Denied, "session op mis-routed to executor", started)
         }
     }
 }
@@ -163,7 +171,7 @@ fn run_file_write(req: &CommandRequest, started: Instant) -> CommandResult {
             exit_code: Some(0),
             error: None,
             decision: "approved".into(),
-            duration_ms: started.elapsed().as_millis() as u64,
+            duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
         },
         Err(e) => finish_err(req, started, &format!("write failed: {e}")),
     }
@@ -201,7 +209,7 @@ fn diagnostics(req: &CommandRequest, started: Instant) -> CommandResult {
         exit_code: Some(0),
         error: None,
         decision: "allowed".into(),
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
     }
 }
 
@@ -313,7 +321,7 @@ async fn run_process(
         exit_code,
         error,
         decision: "allowed".into(),
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
     }
 }
 
@@ -334,7 +342,7 @@ fn finish_err(req: &CommandRequest, started: Instant, msg: &str) -> CommandResul
         exit_code: None,
         error: Some(msg.to_string()),
         decision: "allowed".into(),
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
     }
 }
 
@@ -373,7 +381,7 @@ async fn run_wsl(req: &CommandRequest, timeout_ms: u64, started: Instant) -> Com
                 exit_code: Some(0),
                 error: None,
                 decision: "allowed".into(),
-                duration_ms: started.elapsed().as_millis() as u64,
+                duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
             },
             Ok(Ok(Err(e))) => CommandResult {
                 request_id: req.request_id.clone(),
@@ -383,7 +391,7 @@ async fn run_wsl(req: &CommandRequest, timeout_ms: u64, started: Instant) -> Com
                 exit_code: None,
                 error: Some("WSL command failed".to_string()),
                 decision: "allowed".into(),
-                duration_ms: started.elapsed().as_millis() as u64,
+                duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
             },
         }
     }

@@ -107,6 +107,11 @@ type CodeState = {
   secondaryOpen?: boolean;
   secondaryMessages?: Msg[];
   secondaryDraft?: string;
+  /// Selectable last-reply auto-feed between the two panes (per direction):
+  /// when on, an agent's finished reply is fed to the OTHER agent as its next
+  /// user turn (labelled ⇄). Both on = agent-to-agent conversation, capped.
+  feedPrimaryToSecondary?: boolean;
+  feedSecondaryToPrimary?: boolean;
   // The second agent's own model. Empty = inherit the primary chat's model, so
   // by default both agents run the same model until the user picks a different
   // one for the second pane.
@@ -500,6 +505,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
   const secondaryDraft: string = stx.secondaryDraft ?? "";
   const secondaryModelId: string = stx.secondaryModelId ?? "";
+  const feedPrimaryToSecondary: boolean = stx.feedPrimaryToSecondary ?? false;
+  const feedSecondaryToPrimary: boolean = stx.feedSecondaryToPrimary ?? false;
   // The model the second agent actually runs — its own pick, or the primary
   // model when it hasn't chosen one (empty = "same as 1st agent").
   const secondaryModelEffective = secondaryModelId || modelId;
@@ -513,6 +520,12 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   // Agent Browser popup (right-column 🌐 button) — viewer for the shared daemon.
   const [browserOpen, setBrowserOpen] = useState(false);
   useEffect(() => () => { secondaryAbortRef.current?.abort(); }, []);
+  // Consecutive AUTOMATIC exchanges between the two panes (⇄ auto-feed).
+  // Any manual send resets it; the cap stops a both-directions-on ping-pong
+  // from looping forever (the user un-pauses by just sending a message).
+  const autoFeedHopsRef = useRef(0);
+  const AUTO_FEED_MAX_HOPS = 6;
+  const sendSecondaryRef = useRef<((textOverride?: string) => Promise<void>) | null>(null);
   const termBoxRef = useRef<HTMLDivElement>(null);
   const termDragRef = useRef<{ dx: number; dy: number } | null>(null);
   const onTermDragStart = (e: React.MouseEvent) => {
@@ -657,6 +670,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     });
   const setSecondaryDraft = (v: string | ((s: string) => string)) => setField("secondaryDraft", v as CodeState["secondaryDraft"]);
   const setSecondaryModelId = (v: string | ((s: string) => string)) => setField("secondaryModelId", v as CodeState["secondaryModelId"]);
+  const setFeedPrimaryToSecondary = (v: boolean) => setField("feedPrimaryToSecondary", v);
+  const setFeedSecondaryToPrimary = (v: boolean) => setField("feedSecondaryToPrimary", v);
 
   // SAME model source as every other page — the full list_models result fed
   // to the shared ModelPicker (localOnly does the filtering). Refresh on focus
@@ -1454,7 +1469,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     }
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { setStatus("No model selected — pick one above."); return; }
-    if (fromComposer) { setDraft(""); setCodeImages([]); }
+    if (fromComposer) { setDraft(""); setCodeImages([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
@@ -1470,10 +1485,12 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     setRunPhase("starting");
     let ok = false;
     let aborted = false;
+    let replyText = "";
     try {
       setStatus(`Coding in ${workspace}`);
       const reply = await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
       await logCodeWork(text || "(see attached image)", reply);
+      replyText = reply;
       ok = true;
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -1511,19 +1528,52 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         }
       }, 80);
     }
+    // ⇄ Selectable auto-feed: hand this finished reply to the SECOND agent as
+    // its next user turn. Independent of the primary's own follow-up chain
+    // (the second pane has its own busy/abort), so it runs in parallel.
+    if (ok && replyText.trim() && feedPrimaryToSecondary) feedAcross("secondary", replyText);
   };
   // Ref-dispatch so follow-ups (steers / auto-feed / notebook) always hit the
   // CURRENT closure — fresh messages history, fresh busy state.
   sendRef.current = send;
 
+  // ⇄ Last-reply auto-feed between the panes, selectable per direction. The
+  // receiving agent gets the reply as a labelled user turn and RUNS — that's
+  // what makes it a two-agent conversation rather than a paste. The hop cap
+  // (reset by any manual send) keeps both-directions-on from looping forever.
+  const feedAcross = (to: "primary" | "secondary", reply: string) => {
+    if (autoFeedHopsRef.current >= AUTO_FEED_MAX_HOPS) {
+      const notice: Msg = { role: "assistant", content: `⏸ Auto-feed paused after ${AUTO_FEED_MAX_HOPS} automatic exchanges — send a message in either pane to continue.`, ts: Date.now() };
+      if (to === "secondary") setSecondaryMessages((m) => [...m, notice]); else setMessages((m) => [...m, notice]);
+      return;
+    }
+    autoFeedHopsRef.current += 1;
+    const labeled = `⇄ From the ${to === "secondary" ? "1st" : "2nd"} agent:\n\n${reply}`;
+    if (to === "secondary") {
+      setSecondaryOpen(true);
+      void sendSecondaryRef.current?.(labeled);
+    } else {
+      // send() steers if the primary is mid-turn — the feed is never dropped.
+      void sendRef.current?.(labeled);
+    }
+  };
+
   // Send from the second-agent pane. Runs independently of the primary chat,
   // shares the workspace/model, and keeps its own transcript + abort controller.
-  const sendSecondary = async () => {
-    const text = secondaryDraft.trim();
+  // `textOverride` = an ⇄ auto-fed reply from the primary; composer sends pass
+  // nothing (and reset the auto-feed hop counter — a human is in the loop).
+  const sendSecondary = async (textOverride?: string) => {
+    const fromComposer = textOverride === undefined;
+    const text = (textOverride ?? secondaryDraft).trim();
     if (!text) return;
+    if (secondaryBusy) {
+      // No steer queue on the second pane (yet) — say so instead of dropping.
+      setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏸ Second agent is mid-turn — this message was not delivered. Wait or press Stop, then resend.", ts: Date.now() }]);
+      return;
+    }
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
-    setSecondaryDraft("");
+    if (fromComposer) { setSecondaryDraft(""); autoFeedHopsRef.current = 0; }
     setSecondaryBusy(true);
     const ctrl = new AbortController();
     secondaryAbortRef.current = ctrl;
@@ -1533,9 +1583,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     setSecondaryMessages((m) => [...m, { role: "user", content: text, ts: Date.now() }]);
     setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
     let aborted = false;
+    let replyText = "";
     try {
       setStatus(`Second agent working in ${workspace}`);
-      await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
+      replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
     } catch (e) {
       const err = e as { name?: string; message?: string };
       aborted = err.name === "AbortError";
@@ -1556,7 +1607,42 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       setSecondaryBusy(false);
       secondaryAbortRef.current = null;
     }
+    // ⇄ Selectable auto-feed back to the primary (send() steers if it's busy).
+    if (!aborted && replyText.trim() && feedSecondaryToPrimary) feedAcross("primary", replyText);
   };
+  sendSecondaryRef.current = sendSecondary;
+
+  // The second agent's composer — ONE definition, rendered in two homes:
+  // inside the pane when the panes are STACKED (narrow), or in the divided
+  // bottom composer row aligned under its pane when side-by-side (wide) —
+  // the fine-tuning-chat layout: columns above, inputs divided below.
+  const renderSecondaryComposer = () => (
+    <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
+      <textarea
+        value={secondaryDraft}
+        onChange={(e) => setSecondaryDraft(e.target.value)}
+        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
+        placeholder="Message the second agent… (same workspace, its own conversation & model)"
+        rows={2}
+        disabled={secondaryBusy}
+        style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
+      />
+      {secondaryBusy ? (
+        <button
+          onClick={() => { secondaryAbortRef.current?.abort(); }}
+          title="Stop the second agent"
+          style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
+        >Stop</button>
+      ) : (
+        <button
+          onClick={() => { void sendSecondary(); }}
+          disabled={!secondaryDraft.trim()}
+          title="Send to the second agent"
+          style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
+        >Send</button>
+      )}
+    </div>
+  );
 
   // Notebook → coder: idle = dispatch now; busy = mid-run steer (drained
   // between tool calls on local models, at turn end otherwise).
@@ -2249,12 +2335,31 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           primary one, with its own transcript and its own input area. Shown
           once a workspace is open. */}
       {workspace && (
-        <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
           <button
             onClick={() => setSecondaryOpen(!secondaryOpen)}
             title="Show a second, independent agent chat pane beside this one — its own transcript and input, same workspace and model."
             style={{ ...btn, height: 26 }}
           >{secondaryOpen ? "◧ Hide 2nd agent" : "◨ Show 2nd agent"}</button>
+          {/* ⇄ selectable last-reply auto-feed, PER DIRECTION. On = the finished
+              reply is handed to the other agent as its next turn (labelled ⇄).
+              Both on = agent-to-agent conversation, capped at 6 automatic
+              exchanges (any manual send resets the cap). */}
+          {secondaryOpen && (
+            <>
+              <label title="When the 1st agent finishes a reply, automatically feed it to the 2nd agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: feedPrimaryToSecondary ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}>
+                <input type="checkbox" checked={feedPrimaryToSecondary} onChange={(e) => setFeedPrimaryToSecondary(e.target.checked)} />
+                ⇄ 1st → 2nd
+              </label>
+              <label title="When the 2nd agent finishes a reply, automatically feed it to the 1st agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: feedSecondaryToPrimary ? "#c7a8ff" : "var(--fg-muted)", cursor: "pointer" }}>
+                <input type="checkbox" checked={feedSecondaryToPrimary} onChange={(e) => setFeedSecondaryToPrimary(e.target.checked)} />
+                ⇄ 2nd → 1st
+              </label>
+              {feedPrimaryToSecondary && feedSecondaryToPrimary && (
+                <span style={{ fontSize: 10.5, color: "#ffd97a" }}>agent↔agent conversation — pauses after {6} automatic exchanges</span>
+              )}
+            </>
+          )}
         </div>
       )}
 
@@ -2436,33 +2541,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
               })
             )}
             </div>
-            {/* Composer — its own distinct input area, fixed beneath the transcript
-                (mirrors the primary chat) so it never scrolls away with messages. */}
-            <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
-              <textarea
-                value={secondaryDraft}
-                onChange={(e) => setSecondaryDraft(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
-                placeholder="Message the second agent… (same workspace, its own conversation & model)"
-                rows={2}
-                disabled={secondaryBusy}
-                style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
-              />
-              {secondaryBusy ? (
-                <button
-                  onClick={() => { secondaryAbortRef.current?.abort(); }}
-                  title="Stop the second agent"
-                  style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
-                >Stop</button>
-              ) : (
-                <button
-                  onClick={() => { void sendSecondary(); }}
-                  disabled={!secondaryDraft.trim()}
-                  title="Send to the second agent"
-                  style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
-                >Send</button>
-              )}
-            </div>
+            {/* Composer — in-pane only when the panes are STACKED (narrow view).
+                Side-by-side, it moves to the divided bottom composer row so the
+                two inputs sit aligned under their panes (fine-tune-chat style). */}
+            {!wideView && renderSecondaryComposer()}
           </div>
         )}
       </div>
@@ -2548,12 +2630,17 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
         ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
         : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
 
-      {/* Composer — supports image paste / drag-drop / 📎 picker, like every
-          other chat in the app. Drop target wraps the whole row. */}
+      {/* Composer row — DIVIDED under the two panes (fine-tune-chat style) when
+          the second agent is open side-by-side: primary composer left, second-
+          agent composer right. Single full-width composer otherwise. The left
+          offset skips the file-tree rail so the split lines up with the panes. */}
+      <div style={secondaryOpen && wideView
+        ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignItems: "end", marginLeft: workspace ? 228 : 0 }
+        : undefined}>
       <div
         onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) { e.preventDefault(); } }}
         onDrop={(e) => { const f = Array.from(e.dataTransfer?.files ?? []).filter((x) => x.type.startsWith("image/")); if (f.length) { e.preventDefault(); void addCodeFiles(f); } }}
-        style={{ display: "flex", flexDirection: "column", gap: 6 }}
+        style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
       >
         {codeImages.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
@@ -2594,6 +2681,12 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
           )}
         </div>
+      </div>
+      {/* Right cell of the divided composer row — the second agent's input,
+          aligned under its pane. (In narrow view it lives inside the pane.) */}
+      {secondaryOpen && wideView && (
+        <div style={{ minWidth: 0 }}>{renderSecondaryComposer()}</div>
+      )}
       </div>
 
       {/* File viewer — opening a file in the tree shows its real contents, and

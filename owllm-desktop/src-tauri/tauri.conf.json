@@ -65,6 +65,7 @@
     "active": true,
     "targets": "all",
     "resources": [
+      "../scripts/finish-and-publish.sh",
       "../resources/runtime/whisper.cpp/*",
       "../resources/agents/roles/*",
       "../resources/agents/teams/*",

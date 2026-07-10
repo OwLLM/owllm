@@ -197,6 +197,27 @@ pub async fn publish_release(
 /// to CI (`ci`). Host mode requires the local build toolchain + signing cert;
 /// CI mode only bumps/commits/tags/pushes and lets the repo's GitHub Actions
 /// workflow finish the release.
+/// Resolve which finish-and-publish.sh runs for `repo_dir`, and whether it
+/// needs the repo passed explicitly (--repo-dir):
+///   1. `<repo>/owllm-desktop/scripts/…` — OwLLM's own layout; the script
+///      derives the repo from its location, and OLD copies don't know
+///      --repo-dir, so none is passed (backward compatible).
+///   2. `<repo>/scripts/…` — a repo carrying its own copy (new convention).
+///   3. the app's BUNDLED copy — what makes publishing work for any repo.
+/// Returns (script path for bash, pass --repo-dir?).
+fn resolve_finish_script(repo_dir: &str, posix: &str) -> Option<(String, bool)> {
+    let host = crate::agent_tools::host_cwd(repo_dir);
+    let own = "owllm-desktop/scripts/finish-and-publish.sh";
+    if std::path::Path::new(&host).join(own).is_file() {
+        return Some((format!("{posix}/{own}"), false));
+    }
+    let generic = "scripts/finish-and-publish.sh";
+    if std::path::Path::new(&host).join(generic).is_file() {
+        return Some((format!("{posix}/{generic}"), true));
+    }
+    crate::paths::publish_finish_script().map(|p| (to_gitbash_path(&p.to_string_lossy()), true))
+}
+
 #[tauri::command]
 pub async fn finish_and_publish(
     repo_dir: String,
@@ -205,8 +226,16 @@ pub async fn finish_and_publish(
     sign: Option<SignCfg>,
 ) -> Result<String, String> {
     let posix = to_gitbash_path(&repo_dir);
-    let script = format!("{posix}/owllm-desktop/scripts/finish-and-publish.sh");
+    // Script resolution — this is what makes publishing work for ANY repo:
+    // a repo-local copy wins (OwLLM itself / power users), else the app's
+    // BUNDLED copy runs against the repo via --repo-dir.
+    let (script, needs_repo_arg) = resolve_finish_script(&repo_dir, &posix)
+        .ok_or_else(|| "finish-and-publish.sh not found (repo-local or bundled)".to_string())?;
     let mut args: Vec<String> = vec![script, "--notes".into(), notes.unwrap_or_default()];
+    if needs_repo_arg {
+        args.push("--repo-dir".into());
+        args.push(posix.clone());
+    }
     // Forward --mode whenever the CALLER made a choice — including "host".
     // The old code dropped "host", making an explicit host pick identical to
     // "unset"; now that the script falls back to the Project Card's
@@ -431,34 +460,64 @@ pub async fn publish_readiness(
                 },
             });
         }
-        let ver = [
-            "owllm-desktop/src-tauri/tauri.conf.json",
-            "src-tauri/tauri.conf.json",
-            "tauri.conf.json",
-            "package.json",
-        ]
-        .iter()
-        .find(|p| std::path::Path::new(&host).join(p).is_file());
+        // Version file: the card's release.versionFile wins (any layout), then
+        // the conventional candidates — previously only the hardcoded list was
+        // probed, so a correctly-configured card still showed "not found".
+        let card_version_file = std::fs::read_to_string(std::path::Path::new(&host).join(".owllm/project.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.pointer("/release/versionFile").and_then(|r| r.as_str().map(String::from)))
+            .filter(|r| !r.trim().is_empty());
+        let ver: Option<String> = card_version_file
+            .clone()
+            .filter(|p| std::path::Path::new(&host).join(p).is_file())
+            .or_else(|| {
+                [
+                    "owllm-desktop/src-tauri/tauri.conf.json",
+                    "src-tauri/tauri.conf.json",
+                    "tauri.conf.json",
+                    "package.json",
+                ]
+                .iter()
+                .find(|p| std::path::Path::new(&host).join(p).is_file())
+                .map(|p| p.to_string())
+            });
         checks.push(ReadyCheck {
             id: "version".into(),
             label: "Version file found".into(),
             ok: ver.is_some(),
-            detail: ver
-                .map(|p| p.to_string())
-                .unwrap_or_else(|| "no tauri.conf.json / package.json".into()),
+            detail: ver.unwrap_or_else(|| match card_version_file {
+                Some(cf) => format!("card release.versionFile \"{cf}\" does not exist"),
+                None => "no tauri.conf.json / package.json — set release.versionFile on the Project Card".into(),
+            }),
         });
-        let script =
-            std::path::Path::new(&host).join("owllm-desktop/scripts/finish-and-publish.sh");
+        // Publish script: same resolution order finish_and_publish uses —
+        // repo-local copy (OwLLM layout, then scripts/), else the app's BUNDLED
+        // copy (which works for ANY repo). The old repo-local-only probe greyed
+        // out Publish for every non-OwLLM project.
+        let script_detail = if std::path::Path::new(&host)
+            .join("owllm-desktop/scripts/finish-and-publish.sh")
+            .is_file()
+        {
+            Some("owllm-desktop/scripts/finish-and-publish.sh".to_string())
+        } else if std::path::Path::new(&host)
+            .join("scripts/finish-and-publish.sh")
+            .is_file()
+        {
+            Some("scripts/finish-and-publish.sh".to_string())
+        } else if crate::paths::publish_finish_script().is_some() {
+            Some("app-bundled finish-and-publish.sh (runs against this repo)".to_string())
+        } else {
+            None
+        };
         checks.push(ReadyCheck {
             id: "script".into(),
-            label: "Publish script present".into(),
-            ok: script.is_file(),
-            detail: if script.is_file() {
-                "owllm-desktop/scripts/finish-and-publish.sh".into()
-            } else {
-                "finish-and-publish.sh not found — Publish disabled (Commit/Merge still work)"
+            label: "Publish script available".into(),
+            ok: script_detail.is_some(),
+            detail: script_detail.unwrap_or_else(|| {
+                "finish-and-publish.sh not found (repo or bundle) — Publish disabled (Commit/Merge still work)"
                     .into()
-            },
+            }),
         });
 
         // Host-mode specific build / publish tooling probes.

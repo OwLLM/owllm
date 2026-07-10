@@ -409,6 +409,35 @@ pub fn finetune_script() -> Option<PathBuf> {
     }
 }
 
+/// Bundled copy of finish-and-publish.sh — the rule-based release pipeline the
+/// app runs against ANY open repo (with --repo-dir), so publishing doesn't
+/// require the target repo to carry the script itself. Bundled from
+/// `../scripts/` (tauri.conf.json), which the installer lands at `_up_/scripts/`
+/// next to the exe; the dev fallback is the source checkout's scripts dir.
+pub fn publish_finish_script() -> Option<PathBuf> {
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            for cand in [
+                parent.join("_up_").join("scripts").join("finish-and-publish.sh"),
+                parent.join("scripts").join("finish-and-publish.sh"),
+            ] {
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("scripts")
+        .join("finish-and-publish.sh");
+    if dev.is_file() {
+        Some(dev)
+    } else {
+        None
+    }
+}
+
 /// Path to the abliterate.py CLI — the FailSpy-recipe refusal-direction
 /// stripper invoked by the Train page's '🚫 Abliterate' action.
 pub fn abliterate_script() -> Option<PathBuf> {

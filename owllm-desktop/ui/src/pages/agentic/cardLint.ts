@@ -121,7 +121,7 @@ export function lintProjectCard(card: ProjectCard | null | undefined, facts: Car
       out.push({ severity: "error", field: "release.stagePath", problem: `release.stagePath "${rel.stagePath}" does not exist — there is nothing to stage/commit for the release.`, fix: "Fix stagePath to the directory the release should commit." });
     }
     if (!rel.command || !rel.command.trim()) {
-      out.push({ severity: "warn", field: "release.command", problem: "release.command is empty — there is no command to actually build/publish.", fix: "Set release.command to your build+publish script." });
+      out.push({ severity: "warn", field: "release.command", problem: "release.command is empty — the publish falls back to a generic gh release (source + notes, no built artifacts).", fix: "Set release.command to your build+publish script to attach real artifacts." });
     }
     // Target repo: without it, `gh release` falls back to the publish script's
     // built-in default — correct only for OwLLM itself. Malformed ⇒ error.

@@ -13,6 +13,7 @@
     "versionFile": "owllm-desktop/src-tauri/tauri.conf.json",
     "versionScheme": "odometer-100",
     "stagePath": "owllm-desktop",
+    "mode": "host",
     "command": "bash \"owllm-desktop/scripts/publish-release.sh\" --notes \"$OWLLM_RELEASE_NOTES\""
   },
   "_note": "THE PROJECT CARD — per-project rules / goal / release / verify, committed so it travels with the repo. release{} is read by the rule-based publish (finish-and-publish.sh); defaults preserve OwLLM behaviour so this is non-breaking. Next: fold in verify + rules + mode + a UI to edit it, then a Steward agent that reviews this card for incongruences (user-approved fixes)."

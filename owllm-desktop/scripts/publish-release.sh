@@ -125,6 +125,26 @@ if [ -z "$SIGN_THUMBPRINT" ] && [ -z "$SIGN_SUBJECT" ] && [ -f "$THUMB_FILE" ]; 
   SIGN_THUMBPRINT="$(tr -d ' \r\n\t' < "$THUMB_FILE")"
 fi
 
+# Optional: auto-establish the SimplySign session so the ~2h Certum session re-auth
+# doesn't need a phone. The QR you enrolled with is a standard otpauth:// TOTP seed;
+# Connect-SimplySign.ps1 generates the current OTP from it, logs in, and waits until
+# the cloud cert actually appears in the store (real readiness signal, not a sleep).
+# OPT-IN via OWLLM_AUTO_SIMPLYSIGN=1 so the default flow is unchanged; the seed comes
+# from $CERTUM_OTP_URI (never committed). No-op if the cert is already mounted (still
+# inside the 2h window). Security note: this stores your 2FA seed on the build box.
+if [ "${OWLLM_AUTO_SIMPLYSIGN:-}" = "1" ] && { [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; }; then
+  case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+      echo "  auto-connecting SimplySign (OWLLM_AUTO_SIMPLYSIGN=1)…"
+      powershell.exe -NoProfile -ExecutionPolicy Bypass \
+        -File "$(cygpath -w "$APP/scripts/Connect-SimplySign.ps1")" \
+        ${SIGN_THUMBPRINT:+-Thumbprint "$SIGN_THUMBPRINT"} \
+        || fail "SimplySign auto-connect failed — verify the seed with 'powershell -File scripts/Connect-SimplySign.ps1 -CodeOnly' (must match your phone), or log in manually"
+      ;;
+    *) echo "  (OWLLM_AUTO_SIMPLYSIGN set but SimplySign auto-connect is Windows-only — skipping)" ;;
+  esac
+fi
+
 step "0b/5 payload sign — every exe/dll bundled under resources/ must be signed"
 # Unsigned binaries INSIDE an EV-signed installer are a classic SmartScreen /
 # Defender heuristic trigger (bit us with the whisper.cpp runtime). Sign any

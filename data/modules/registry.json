@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "registryVersion": "2026.07.04",
-  "publishedAt": "2026-07-04T00:00:00Z",
+  "registryVersion": "2026.07.11",
+  "publishedAt": "2026-07-11T00:00:00Z",
   "channels": [
     "stable",
     "beta",
@@ -134,6 +134,25 @@
               "releasedAt": "2026-07-04T00:00:00Z",
               "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-cpu-b9488.zip",
               "sha256": "179c9e227fc17bf3333ee535698dc07b33185e9063df0b66f2dc2b2f01025b40",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "local-inference-linux-arm64-cpu",
+          "displayName": "Linux ARM64 CPU build (Jetson / Raspberry Pi / ARM servers)",
+          "platform": "linux-aarch64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 3979341,
+          "channels": {
+            "stable": {
+              "version": "b9488-cpu",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-arm64-cpu-b9488.zip",
+              "sha256": "ee5dd2e72430b72c68a212ad63a41eebc1186d6780c76bd173b145b67199ebd0",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -295,7 +314,7 @@
     ]
   },
   "futureModules": {
-    "_comment": "Features the user has mentioned as roadmap items. NOT shipped yet — listed here so the registry shape is forward-compatible. Add to `modules[]` when implemented.",
+    "_comment": "Features the user has mentioned as roadmap items. NOT shipped yet \u2014 listed here so the registry shape is forward-compatible. Add to `modules[]` when implemented.",
     "items": [
       "audio-tts-piper",
       "vision-inference-llava",
@@ -419,7 +438,7 @@
     {
       "id": "tools-python",
       "displayName": "Python Tools (Screenshot)",
-      "description": "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight — under 50 MB on top of python-runtime.",
+      "description": "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight \u2014 under 50 MB on top of python-runtime.",
       "category": "content",
       "required": false,
       "uiSlots": [

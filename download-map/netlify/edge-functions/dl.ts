@@ -18,7 +18,11 @@ import { getStore } from "@netlify/blobs";
 const TARGETS: Record<string, string> = {
   win: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe",
   mac: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg",
+  // Linux ships two stable-named assets (uploaded per release): the universal
+  // AppImage (no install, webkit bundled — the default) and a Debian/Ubuntu
+  // .deb. Both must exist under these EXACT names or /dl 404s.
   linux: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage",
+  deb: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.deb",
 };
 const DEFAULT_PLATFORM = "win";
 

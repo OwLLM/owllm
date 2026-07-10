@@ -145,7 +145,7 @@ pub fn public_record(github_login: Option<String>) -> Result<DevicePublic, Strin
         x25519_pub: b64(&id.secrets.x25519_public()),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: crate::APP_VERSION.clone(),
         github_login,
         capabilities: capabilities(),
         // All addresses peers can dial (LAN + overlay). mod::self_public_record

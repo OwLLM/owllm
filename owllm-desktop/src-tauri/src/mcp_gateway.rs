@@ -546,7 +546,7 @@ fn dispatch_rpc(app: &AppHandle, req: &Value) -> Option<Value> {
                 json!({
                     "protocolVersion": proto,
                     "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": SERVER_NAME, "version": crate::APP_VERSION.as_str() }
                 }),
             )
         }

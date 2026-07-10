@@ -217,7 +217,10 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   ciphertext-only — run it via `device_relay_serve` on any always-on box).
 - **Discovery**: `vault_sync_devices` (a 4th vault channel) publishes each
   device's public record + all endpoints and pulls peers into the registry; or
-  **pair by IP** directly with no vault.
+  **pair by IP** directly with no vault. Self-maintaining: the listener starts at
+  app launch (when enabled) so the launch sync always publishes dialable
+  endpoints, toggling remote control republishes immediately, and Pair pulls the
+  vault once before reporting a peer has no address.
 - **Trust + policy**: pairing request (over the wire / by IP) → unmistakable
   target-side approval → per-controller `PermissionPolicy` (Shell / WSL / File
   writes / Admin), default read-only diagnostics. `authorize()` is a unit-tested

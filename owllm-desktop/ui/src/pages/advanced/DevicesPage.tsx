@@ -285,6 +285,7 @@ export default function DevicesPage() {
           onRename={() => guard(async () => { await rd.setDeviceName(nameDraft); await reload(); })}
           onSelfTest={runSelfTest}
           selftestMsg={selftestMsg}
+          onToggle={(on) => guard(async () => { await rd.setEnabled(on); await reload(); })}
         />
         <DeviceList
           devices={devices}
@@ -373,7 +374,7 @@ function Header({ identity, onToggle }: { identity: DeviceIdentity | null; onTog
       <span style={{ flex: 1 }} />
       <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: identity?.env_override ? "default" : "pointer", color: enabled ? "var(--accent)" : "var(--fg-muted)" }}>
         <input type="checkbox" checked={enabled} disabled={identity?.env_override} onChange={(e) => onToggle(e.target.checked)} />
-        {enabled ? "enabled" : "disabled"}
+        {enabled ? "remote control enabled" : "remote control disabled"}
         {identity?.env_override && <span title="Forced on by OWLLM_REMOTE_DEVICES."> (env)</span>}
       </label>
     </div>
@@ -432,7 +433,7 @@ function ApprovalBanner({
 }
 
 function MyDeviceCard({
-  identity, nameDraft, setNameDraft, onRename, onSelfTest, selftestMsg,
+  identity, nameDraft, setNameDraft, onRename, onSelfTest, selftestMsg, onToggle,
 }: {
   identity: DeviceIdentity | null;
   nameDraft: string;
@@ -440,6 +441,7 @@ function MyDeviceCard({
   onRename: () => void;
   onSelfTest: () => void;
   selftestMsg: string;
+  onToggle: (on: boolean) => void;
 }) {
   if (!identity) return <div style={cardStyle}>loading…</div>;
   return (
@@ -458,10 +460,29 @@ function MyDeviceCard({
       <Row k="WSL" v={identity.capabilities.wsl ? "available" : "n/a"} />
       <Row
         k="Listening"
-        v={identity.listening ? `yes · ${identity.endpoint ?? "?"}` : identity.enabled ? "starting…" : "off (enable first)"}
+        v={identity.listening ? `yes · ${identity.endpoint ?? "?"}` : identity.enabled ? "starting…" : "off"}
         mono={identity.listening}
       />
       <Row k="Signing key" v={shortId(identity.ed25519_pub)} mono />
+      {/* THE master switch — a real button, not a hunt-for-the-checkbox. */}
+      {!identity.enabled && !identity.env_override && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+          <button className="btn" onClick={() => onToggle(true)}
+            style={{ background: "var(--accent)", color: "#fff", fontWeight: 700, padding: "7px 14px", alignSelf: "flex-start" }}>
+            ▶ Enable remote control on this PC
+          </button>
+          <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>
+            Lets your other OwLLM machines pair with this one. Its address is shared to them
+            automatically through your GitHub vault — nothing to type.
+          </span>
+        </div>
+      )}
+      {identity.enabled && !identity.env_override && (
+        <button className="ghost-btn" onClick={() => onToggle(false)}
+          style={{ fontSize: 10.5, padding: "2px 8px", alignSelf: "flex-start", color: "var(--fg-muted)" }}>
+          disable remote control
+        </button>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
         <button className="ghost-btn" onClick={onSelfTest} style={{ fontSize: 11.5, padding: "3px 10px" }}>
           🔬 Run secure self-test
@@ -575,6 +596,7 @@ function DeviceList({
       {devices.map((d) => {
         const online = isOnline(d);
         const ts = trustState(d.device_id);
+        const noAddress = !d.is_self && !(d.endpoints?.length || d.endpoint);
         return (
           <div key={d.device_id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-card)" }}>
             <span className="status-dot" style={{ background: online ? "var(--ok)" : "var(--fg-subtle)", width: 8, height: 8, borderRadius: 4 }} />
@@ -585,6 +607,12 @@ function DeviceList({
             {ts === "revoked" && <span style={badge("var(--error)")}>revoked</span>}
             <span style={{ color: "var(--fg-muted)" }}>{d.os}</span>
             <span style={{ color: "var(--fg-subtle)" }}>v{d.app_version}</span>
+            {noAddress && (
+              <span title="That machine hasn't published a dialable address yet. Open its Devices page and enable remote control — the address syncs here via your vault."
+                style={{ fontSize: 10.5, color: "var(--warn)" }}>
+                no address yet — enable remote control on it
+              </span>
+            )}
             <span style={{ flex: 1 }} />
             <span style={{ fontSize: 10.5, color: "var(--fg-subtle)" }}>{online ? "online" : relativeSeen(d.last_seen)}</span>
             {d.is_self ? (

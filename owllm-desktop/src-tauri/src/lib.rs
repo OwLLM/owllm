@@ -13,6 +13,16 @@
 
 use tauri::Emitter;
 
+/// The app's REAL version. Releases bump tauri.conf.json only (Cargo.toml sat
+/// at 0.4.7 for ~40 releases), so anything user-visible must read the config —
+/// env!("CARGO_PKG_VERSION") is the stale fallback.
+pub static APP_VERSION: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| {
+    serde_json::from_str::<serde_json::Value>(include_str!("../tauri.conf.json"))
+        .ok()
+        .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(str::to_string))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+});
+
 mod accounts;
 mod agent_tools;
 mod agents;
@@ -122,6 +132,10 @@ pub fn run() {
             // just kicks off the install.
             server::install(app);
             overlay_frame::install(app);
+            // Remote Devices: bring the LAN listener up now (if enabled) so the
+            // launch-time vault sync publishes this device's record WITH its
+            // dialable endpoints — lazy start left peers endpoint-less records.
+            remote_devices::init(&app.handle());
             // Module system (registry + per-user installed.json under
             // app_data_dir/modules/). Wizard reads from this; Server /
             // Train pages resolve binaries through it.

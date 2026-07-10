@@ -112,7 +112,13 @@ channel, built on the `vault_sync_projects` template) publishes each device's
 **public-only** record — including its LAN endpoint — to
 `state/devices/<device_id>.json` and pulls peers' records into the local
 registry. It runs at launch and on tab-hide (wired in `vaultSync.ts`), and the
-Devices page has a manual **🔄 Discover** button. **The vault is metadata-only
+Devices page has a manual **🔄 Discover** button. Three things keep published
+endpoints fresh (their staleness was the "no known LAN endpoint" pair failure):
+the listener starts at app **launch** when the feature is enabled
+(`remote_devices::init` in lib.rs setup), so the launch-time publish carries
+dialable addresses; toggling remote control **republishes immediately**; and
+`device_request_pairing` **re-pulls the vault once** before reporting that a
+peer has no address. **The vault is metadata-only
 and is never a command queue** — control never flows through git. Records are
 rejected on ingest unless their id matches their Ed25519 key.
 

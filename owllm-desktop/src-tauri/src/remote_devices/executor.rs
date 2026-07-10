@@ -196,7 +196,7 @@ fn diagnostics(req: &CommandRequest, started: Instant) -> CommandResult {
         std::env::consts::OS,
         std::env::consts::FAMILY,
         std::env::consts::ARCH,
-        env!("CARGO_PKG_VERSION"),
+        crate::APP_VERSION.as_str(),
         hostname(),
         cpus,
         wsl,

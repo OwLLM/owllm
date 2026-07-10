@@ -490,7 +490,7 @@ async fn mcp_initialize(session: &McpSession) -> Result<(), String> {
         "capabilities": {},
         "clientInfo": {
             "name": "owllm-desktop",
-            "version": env!("CARGO_PKG_VERSION"),
+            "version": crate::APP_VERSION.as_str(),
         }
     });
     let _ = send_request(session, "initialize", init_params).await?;

@@ -51,6 +51,9 @@ export type DeviceRecord = {
   github_login: string | null;
   capabilities: Capabilities;
   endpoint: string | null;
+  /// All dialable addresses (public → overlay → LAN). Empty = the device has
+  /// never published while its listener was up → Pair can't dial it yet.
+  endpoints?: string[];
   last_seen: string | null;
   is_self: boolean;
 };

@@ -729,6 +729,19 @@ fn resolve_approval(request_id: &str, approved: bool) -> bool {
     }
 }
 
+/// Wire the module at app launch: store the handle and, when the user has the
+/// feature enabled, bring the LAN listener up IMMEDIATELY. The vault device
+/// sync that runs right after the UI loads publishes this device's record, and
+/// the endpoints it advertises are whatever the listener exposes at that
+/// moment — starting lazily (first Devices-page visit) published endpoint-less
+/// records, which made every peer's "Pair" fail with "no known LAN endpoint".
+pub fn init(app: &AppHandle) {
+    store_app(app);
+    tauri::async_runtime::spawn(async {
+        ensure_listener_started(tokio::runtime::Handle::current());
+    });
+}
+
 // ==================================================================
 // Tauri commands
 // ==================================================================
@@ -782,6 +795,12 @@ pub async fn device_remote_enabled_set(app: AppHandle, enabled: bool) -> Result<
     store_app(&app);
     set_enabled(enabled)?;
     ensure_listener_started(tokio::runtime::Handle::current());
+    // Republish our vault record right away so peers see the new endpoints
+    // (or their removal) without a manual Discover. Fire-and-forget — the git
+    // round-trip can take seconds and must not stall the toggle.
+    tauri::async_runtime::spawn(async {
+        let _ = crate::vault::vault_sync_devices().await;
+    });
     Ok(())
 }
 
@@ -871,8 +890,17 @@ pub async fn device_request_pairing(to_device: String) -> Result<(), String> {
             &me.x25519_pub,
         );
     }
-    let endpoint = lookup_endpoint(&to_device)
-        .ok_or_else(|| "target device has no known LAN endpoint (discover it or pair by IP)".to_string())?;
+    let endpoint = match lookup_endpoint(&to_device) {
+        Some(ep) => ep,
+        None => {
+            // The registry copy may be stale (published before the peer enabled
+            // remote control). Pull the vault once before giving up.
+            let _ = crate::vault::vault_sync_devices().await;
+            lookup_endpoint(&to_device).ok_or_else(|| {
+                "that device hasn't published an address yet — on it, open Devices and enable remote control (its address then syncs here through your GitHub vault), or pair by ip:port".to_string()
+            })?
+        }
+    };
     pair_with_endpoint(&endpoint).await.map(|_| ())
 }
 

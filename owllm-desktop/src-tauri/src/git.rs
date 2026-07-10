@@ -10,8 +10,7 @@ use std::process::Command;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Run a git command in `dir`, capturing stdout/stderr/success.
-fn git(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
+fn git_once(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(Path::new(dir));
     #[cfg(windows)]
@@ -27,6 +26,18 @@ fn git(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+/// Run a git command in `dir`, capturing stdout/stderr/success. Self-heals a
+/// corrupt `.git/index` (rebuild from HEAD, retry once) so the Code page's git
+/// panel doesn't stay stuck on "index file corrupt" — shares the vault.rs helper.
+fn git(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
+    let r = git_once(dir, args)?;
+    if !r.0 && crate::vault::is_corrupt_index(&r.2) {
+        crate::vault::repair_index(Some(Path::new(dir)));
+        return git_once(dir, args);
+    }
+    Ok(r)
 }
 
 #[derive(Serialize)]

@@ -76,7 +76,9 @@ mod wsl_setup;
 /// windows-subsystem app stderr is invisible and a panic that unwinds out of
 /// the event loop leaves NO trace (no WER entry, no dialog) — the window just
 /// disappears. That exact "silent crash" was reported and was undiagnosable.
-/// Mirrors the paths_debug fallback chain: %TEMP%, then %USERPROFILE%.
+/// Mirrors the paths_debug fallback chain: %TEMP%, then %USERPROFILE%
+/// (with $HOME and /tmp so the chain also resolves on Linux/macOS,
+/// where TEMP and USERPROFILE don't exist and panics logged nothing).
 fn install_crash_log_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -87,9 +89,14 @@ fn install_crash_log_hook() {
             info,
             std::backtrace::Backtrace::force_capture(),
         );
-        for base in [std::env::var_os("TEMP"), std::env::var_os("USERPROFILE")]
-            .into_iter()
-            .flatten()
+        for base in [
+            std::env::var_os("TEMP"),
+            std::env::var_os("USERPROFILE"),
+            std::env::var_os("HOME"),
+            Some(std::ffi::OsString::from("/tmp")),
+        ]
+        .into_iter()
+        .flatten()
         {
             let path = std::path::PathBuf::from(base).join("owllm-crash.log");
             use std::io::Write;

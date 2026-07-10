@@ -250,11 +250,42 @@ pub fn module_node_dir() -> Option<PathBuf> {
 }
 
 fn appdata_root() -> Option<PathBuf> {
-    // %APPDATA%\com.localllm.owllm-desktop  matches Tauri's
-    // app_data_dir() for our identifier without needing the AppHandle
-    // (paths.rs is called from places that don't have one).
-    let appdata = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(appdata).join("com.localllm.owllm-desktop"))
+    // Mirrors Tauri's app_data_dir() for our identifier without needing
+    // the AppHandle (paths.rs is called from places that don't have one).
+    // Must match per-OS, or module lookups miss what ModuleManager
+    // installed: %APPDATA% only exists on Windows, so resolving it
+    // unconditionally made every installed module invisible on Linux.
+    const IDENTIFIER: &str = "com.localllm.owllm-desktop";
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        Some(PathBuf::from(appdata).join(IDENTIFIER))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(IDENTIFIER),
+        )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            if !xdg.is_empty() {
+                return Some(PathBuf::from(xdg).join(IDENTIFIER));
+            }
+        }
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join(IDENTIFIER),
+        )
+    }
 }
 
 /// The OwLLM config + credentials home ON THE HOST. Normally

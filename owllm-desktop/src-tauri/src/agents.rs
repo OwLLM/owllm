@@ -173,6 +173,11 @@ pub async fn sync_project_skills(cwd: String) -> Result<SkillSyncResult, String>
     std::fs::create_dir_all(&base).map_err(|e| format!("mkdir {}: {e}", base.display()))?;
     // Never commit the mirror — it's a per-run cache, not project content.
     let _ = std::fs::write(base.join(".gitignore"), "*\n");
+    // Prune packs uninstalled since the last sync — the mirror used to only
+    // ever copy, so stale entries lingered forever and INDEX.md drifted from
+    // the real library.
+    let keep: std::collections::HashSet<&str> = packs.iter().map(|p| p.id.as_str()).collect();
+    prune_stale_skill_mirror(&base, &keep);
     let mut index = String::from(
         "# Skill library — your self-load catalog\n\nRead `<id>/SKILL.md` (relative to this folder) to load a skill's full instructions on demand.\n\n",
     );
@@ -207,6 +212,26 @@ pub async fn sync_project_skills(cwd: String) -> Result<SkillSyncResult, String>
         count,
         index_rel: ".owllm/skills/INDEX.md".into(),
     })
+}
+
+/// Remove mirror subdirectories whose pack id is no longer installed.
+/// Only touches directories directly under `base` (`INDEX.md` and
+/// `.gitignore` are files and are left alone).
+fn prune_stale_skill_mirror(base: &Path, keep: &std::collections::HashSet<&str>) {
+    let Ok(read) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in read.flatten() {
+        let p = entry.path();
+        if !p.is_dir() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if !keep.contains(name) {
+            let _ = std::fs::remove_dir_all(&p);
+        }
+    }
 }
 
 /// Split a SKILL.md document into its YAML frontmatter (as JSON) and
@@ -517,8 +542,9 @@ fn parse_yaml_to_json(path: &Path) -> Option<JsonValue> {
 
 /// Minimal YAML→JSON conversion for the role definitions. Supports:
 ///   key: scalar
-///   key: |    (folded block scalar, preserved verbatim, terminates
-///             at the next zero-indent key or EOF)
+///   key: |    (block scalar — also `|-` `|+` `>` `>-` `>+`; literal
+///             forms keep newlines, folded (`>`) forms join lines with
+///             spaces; terminates at the next zero-indent key or EOF)
 ///   key:
 ///     - item
 ///     - item
@@ -541,8 +567,13 @@ fn yaml_lite_to_json(raw: &str) -> JsonValue {
             let (k, rest) = line.split_once(':').unwrap();
             let key = k.trim().to_string();
             let v = rest.trim();
-            if v == "|" {
-                // Block scalar: gather lines until indentation collapses.
+            // Block scalar: `|` literal / `>` folded, with an optional
+            // chomping indicator (`|-`, `|+`, `>-`, `>+`). Matching only a
+            // bare `|` made `description: |-` fall through to the plain-
+            // scalar branch, so the literal text "|-" became the value.
+            if matches!(v, "|" | "|-" | "|+" | ">" | ">-" | ">+") {
+                let folded = v.starts_with('>');
+                // Gather lines until indentation collapses.
                 let mut buf = String::new();
                 i += 1;
                 while i < lines.len() {
@@ -558,8 +589,13 @@ fn yaml_lite_to_json(raw: &str) -> JsonValue {
                     // Strip the common indent (2 spaces is the convention
                     // in these YAMLs).
                     let stripped = l.strip_prefix("  ").unwrap_or(l);
+                    if folded && !buf.is_empty() && !buf.ends_with('\n') {
+                        buf.push(' ');
+                    }
                     buf.push_str(stripped);
-                    buf.push('\n');
+                    if !folded {
+                        buf.push('\n');
+                    }
                     i += 1;
                 }
                 map.insert(key, Value::String(buf.trim_end().to_string()));
@@ -643,6 +679,36 @@ system_prompt: |
         assert_eq!(list.len(), 3);
         assert_eq!(list[0], "read_file");
         assert!(v["system_prompt"].as_str().unwrap().contains("Be precise."));
+    }
+
+    #[test]
+    fn yaml_lite_parses_block_scalar_variants() {
+        // `|-` is what Anthropic skill packs use for multi-line descriptions
+        // (e.g. claude-api) — it used to parse as the literal string "|-".
+        let yaml = "name: claude-api\ndescription: |-\n  First line of the description.\n  Second line with detail.\nfolded: >-\n  joined into\n  one line\n";
+        let v = yaml_lite_to_json(yaml);
+        let desc = v["description"].as_str().unwrap();
+        assert!(desc.starts_with("First line of the description."));
+        assert!(desc.contains("\nSecond line with detail."));
+        assert_eq!(v["folded"], "joined into one line");
+    }
+
+    #[test]
+    fn prune_stale_skill_mirror_removes_only_stale_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        for d in ["keep_me", "stale_pack"] {
+            std::fs::create_dir_all(base.join(d)).unwrap();
+            std::fs::write(base.join(d).join("SKILL.md"), "x").unwrap();
+        }
+        std::fs::write(base.join("INDEX.md"), "index").unwrap();
+        std::fs::write(base.join(".gitignore"), "*\n").unwrap();
+        let keep: std::collections::HashSet<&str> = ["keep_me"].into_iter().collect();
+        prune_stale_skill_mirror(base, &keep);
+        assert!(base.join("keep_me").join("SKILL.md").is_file());
+        assert!(!base.join("stale_pack").exists());
+        assert!(base.join("INDEX.md").is_file(), "top-level files untouched");
+        assert!(base.join(".gitignore").is_file());
     }
 
     fn dummy_paths() -> (PathBuf, tempfile::TempDir) {

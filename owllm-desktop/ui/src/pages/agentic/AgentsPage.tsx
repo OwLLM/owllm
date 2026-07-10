@@ -9943,7 +9943,7 @@ export function AgentsPage({
             "",
             "Review what the orchestrator should not miss before it answers.",
           ].join("\n"),
-          0.3,
+          roleByName.get("critic")?.defaultTemperature ?? 0.3,
           supSendAbort.signal,
           (delta) => { criticReview += delta; streamLog(CRITIC_NAME, delta); },
           runCwd,
@@ -10614,6 +10614,10 @@ export function AgentsPage({
     // vary (coder=0.2, critic=0.2, researcher=0.3, …).
     const tempFor = (spec: AgentSpec, fallback: number) =>
       roleByName.get(spec.base)?.defaultTemperature ?? fallback;
+    // The synthetic critical_thinker has no AgentSpec on the roster, so its
+    // invocations below honour the critic role's default_temperature
+    // (critic.yaml ships 0.2) the same way instead of a hardcoded 0.3.
+    const criticTemp = roleByName.get("critic")?.defaultTemperature ?? 0.3;
 
     // Project location feeds the Claude CLI's --cwd so the bot runs
     // against the directory the user picked in the LocationRow, not
@@ -10882,7 +10886,7 @@ export function AgentsPage({
                 "You are ADVISORY — the work ships regardless. If it's solid, say 'no concerns'.",
                 "ONLY if it needs a decision the USER must make, say so on a line prefixed 'NEEDS USER:'.",
               ].join("\n"),
-              0.3, ctrl.signal,
+              criticTemp, ctrl.signal,
               (d) => streamLog(CRITIC_NAME, d), projectCwd,
               undefined, undefined,
               (c, r, d) => streamThought(CRITIC_NAME, c, r, d),
@@ -11050,7 +11054,7 @@ export function AgentsPage({
             const criticSys = buildCriticPrompt(activeTeam, directives);
             criticReply = await streamChatCompletion(
               port, orchModel, providerFor(orchModel),
-              criticSys, question, 0.3, ctrl.signal,
+              criticSys, question, criticTemp, ctrl.signal,
               (delta) => { criticReply += delta; streamLog(CRITIC_NAME, delta); },
               projectCwd,
               undefined, undefined,
@@ -11135,7 +11139,7 @@ export function AgentsPage({
                   ? "You are the Super User — the user delegated this decision to you. Approve the plan, or list the concrete changes you require. If it is ready, say 'no concerns' plainly."
                   : "Brainstorm with the orchestrator before implementation. Challenge architecture decisions, missing specialists, hidden assumptions, and safer alternatives. If you have no remaining concerns, say 'no concerns'.",
               ].join("\n"),
-              0.3, ctrl.signal,
+              criticTemp, ctrl.signal,
               (delta) => { criticReview += delta; streamLog(CRITIC_NAME, delta); },
               projectCwd,
               undefined, undefined,
@@ -11965,7 +11969,7 @@ export function AgentsPage({
                   ? "You are the Super User. Approve this answer, or list the concrete fixes it needs before it ships. If it is solid, say 'no concerns'."
                   : "Review the FINAL answer for correctness, gaps, unsupported claims, and anything that would mislead the user. If it is solid, say 'no concerns'. Otherwise give concrete fixes — advisory only; the answer ships regardless.",
               ].join("\n"),
-              0.3, ctrl.signal,
+              criticTemp, ctrl.signal,
               (delta) => { postReview += delta; streamLog(CRITIC_NAME, delta); },
               projectCwd,
               undefined, undefined,

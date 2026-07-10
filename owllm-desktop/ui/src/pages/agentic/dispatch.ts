@@ -35,6 +35,10 @@ import {
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import { canonicalizeNativeCalls, type RawNativeCall } from "./toolNormalizer";
 import { samplingFor } from "./modelProfiles";
+// Per-agent SKILL injection — the SAME builder the desktop path (AgentsPage)
+// uses, so bridge runs (Telegram/WhatsApp/…) get equipped-skill bodies and the
+// .owllm/skills self-load guidance too, not just the mirrored files on disk.
+import { buildAgentSkillBlock } from "./skillRuntime";
 import { resolveInferenceBase } from "./inferenceEndpoint";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
@@ -927,6 +931,10 @@ export function buildOrchestratorPrompt(
   /// Absolute project root — so the orchestrator (and the instructions it gives
   /// specialists) reference the real folder, not OwLLM's internal dirs.
   projectCwd?: string | null,
+  /// Pre-built SKILL block (skillRuntime.buildAgentSkillBlock) for the skills
+  /// equipped ON THE ORCHESTRATOR — same mechanism specialists use. Resolved
+  /// async by the caller.
+  skillBlock?: string,
 ): string {
   // Edge-seeded roster (P0-2): when the team has a graph, the orchestrator
   // only SEES the specialists its outgoing edges reach — the drawn graph
@@ -1008,6 +1016,7 @@ export function buildOrchestratorPrompt(
     briefBlock,
     directivesBlock,
     directorBlock,
+    (skillBlock && skillBlock.trim()) ? `\n${skillBlock.trim()}` : "",
     "",
     `YOUR SPECIALISTS (use their EXACT names when dispatching — copy/paste from this list):`,
     roster || "  (none — solo)",
@@ -3360,8 +3369,12 @@ export async function runCriticDispatch(opts: {
   autoApprove: boolean;
   signal: AbortSignal;
   onDelta?: (delta: string) => void;
+  /// When provided, the critic role's default_temperature is honoured
+  /// (critic.yaml ships 0.2) instead of the 0.3 fallback.
+  roleByName?: Map<string, RoleData>;
 }): Promise<string> {
   const sys = buildCriticPrompt(opts.team, opts.directives);
+  const criticTemp = opts.roleByName?.get("critic")?.defaultTemperature ?? 0.3;
   // Use the same model the orchestrator uses so the critic's voice
   // stays consistent in tone. (Could be made user-configurable later.)
   const orch = findOrchestratorSpec(opts.team);
@@ -3370,7 +3383,7 @@ export async function runCriticDispatch(opts: {
   try {
     const reply = await streamChatCompletion(
       opts.port, modelId, provider,
-      sys, opts.question, 0.3, opts.signal,
+      sys, opts.question, criticTemp, opts.signal,
       opts.onDelta ?? (() => {}),
       opts.projectCwd, opts.history, opts.autoApprove,
       () => {},
@@ -3440,7 +3453,14 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     } catch { /* no brief yet — proceed without */ }
   }
 
-  const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode, briefText, projectCwd);
+  // The orchestrator consumes its OWN equipped skills exactly like specialists
+  // do (role allowlist + team extras — the bridge has no per-project graph
+  // grant), mirroring the desktop path in AgentsPage.
+  const orchSkillBlock = await buildAgentSkillBlock([
+    ...(roleByName.get(orch.base)?.skillAllowlist ?? []),
+    ...(orch.extraSkills ?? []),
+  ]);
+  const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode, briefText, projectCwd, orchSkillBlock);
   const orchModel = modelFor(orch.name);
   const orchProvider = providerFor(orchModel, models);
   let orchReply: string;
@@ -3506,6 +3526,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         team, question, history: liveHistory, directives,
         modelFor, models, port, projectCwd, autoApprove, signal,
         onDelta: (d) => hooks.onLogDelta(CRITIC_NAME, d),
+        roleByName,
       });
       hooks.onAgentEnd(CRITIC_NAME);
       hooks.onAgentReply(CRITIC_NAME, criticReply);
@@ -3791,7 +3812,14 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     hooks.onAgentStart(spec.name);
     hooks.onThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
     hooks.onLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
-    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives, undefined, projectCwd, team.agents.length <= 3);
+    // Resolve this agent's equipped skills (role allowlist + team template
+    // extras) and inject them — parity with the desktop runAgent, which was
+    // passing a built skill block here while this path hardcoded undefined.
+    const skillBlock = await buildAgentSkillBlock([
+      ...(roleByName.get(spec.base)?.skillAllowlist ?? []),
+      ...(spec.extraSkills ?? []),
+    ]);
+    const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives, skillBlock, projectCwd, team.agents.length <= 3);
     const specModel = modelFor(spec.name);
     const specProvider = providerFor(specModel, models);
     // Per-agent memory: fold this agent's own prior turns in so the bridge path

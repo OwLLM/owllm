@@ -972,6 +972,33 @@ async fn send_request(to_device: &str, req: CommandRequest) -> Result<CommandRes
     Ok(result)
 }
 
+/// Agent entry point: run a shell command on a paired device by NAME or id.
+/// Gated by the agents-allowed switch; the target still enforces pairing + the
+/// shell policy. Used by both the local tool loop and the MCP gateway (so
+/// subscription-CLI agents get the same capability).
+pub async fn agent_device_exec(device_name_or_id: &str, command: &str) -> Result<CommandResult, String> {
+    if !agents_allowed() {
+        return Err("remote device access is disabled — enable 'Let agents use remote devices' on the Devices page".into());
+    }
+    let want = device_name_or_id.trim();
+    if want.is_empty() {
+        return Err("device is required (a paired device name or id)".into());
+    }
+    let self_pub = self_public_record()?;
+    let target = registry::list(&self_pub)
+        .into_iter()
+        .find(|d| !d.is_self && (d.public.device_id == want || d.public.name.eq_ignore_ascii_case(want)))
+        .ok_or_else(|| format!("no paired device '{want}' — pair it on the Devices page first"))?;
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::Shell,
+        command: command.to_string(),
+        timeout_ms: 60_000,
+        ..Default::default()
+    };
+    send_request(&target.public.device_id, req).await
+}
+
 /// Open an interactive remote shell (SSH-like). Returns the session id.
 #[tauri::command]
 pub async fn device_session_open(

@@ -659,6 +659,16 @@ fn tool_specs() -> Vec<Value> {
                 "target": { "type": "object", "description": "KVM node: { host, port?, auth: { sshKeyPath? | token? }, transport: 'ssh'|'http' }." },
                 "params": { "type": "object", "description": "Action params: type={text} keys={combo} mouse={x?,y?,button?,op?} boot_key={key} mount_iso={isoPath} power={line}." }
             }, "required": ["action", "target"] } }),
+        // Remote OwLLM device control — mirrors the device_exec local tool so CLI
+        // agents can run commands on a PAIRED device (no SSH keys; over the
+        // end-to-end-sealed device channel). Gated by the agents-allowed switch +
+        // the target's pairing/shell policy, so exposure here is safe.
+        json!({ "name": "device_exec",
+            "description": "Run a shell command on a PAIRED OwLLM device (another PC running OwLLM you've paired + granted shell to). No SSH keys; works across networks (LAN, Tailscale overlay, or relay) over the encrypted device channel. Use for tech support, installing software, or development on another machine. Requires 'Let agents use remote devices' enabled.",
+            "inputSchema": { "type": "object", "properties": {
+                "device": { "type": "string", "description": "Target device NAME or id from the user's OwLLM Devices list." },
+                "command": { "type": "string", "description": "The shell command to run on the remote device." }
+            }, "required": ["device", "command"] } }),
     ]
 }
 
@@ -755,6 +765,37 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
                 params,
             ))
             .map(|v| v.to_string())
+        }
+        "device_exec" | "owllm_device" | "device_run" => {
+            let device = as_str(args, "device");
+            let command = as_str(args, "command");
+            // Runs on the tiny_http thread, so block_on the async send is safe.
+            let res = tauri::async_runtime::block_on(crate::remote_devices::agent_device_exec(
+                &device, &command,
+            ))?;
+            let mut out = String::new();
+            let clip = |s: &str, n: usize| {
+                if s.chars().count() > n {
+                    format!("{}…[truncated]", s.chars().take(n).collect::<String>())
+                } else {
+                    s.to_string()
+                }
+            };
+            if !res.stdout.trim().is_empty() {
+                out.push_str(&format!("stdout:\n{}\n\n", clip(&res.stdout, 4000)));
+            }
+            if !res.stderr.trim().is_empty() {
+                out.push_str(&format!("stderr:\n{}\n\n", clip(&res.stderr, 2000)));
+            }
+            if let Some(e) = &res.error {
+                out.push_str(&format!("error: {e}\n"));
+            }
+            out.push_str(&format!(
+                "device: {device} · decision: {} · exit_code: {}",
+                res.decision,
+                res.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "n/a".into())
+            ));
+            Ok(out)
         }
         other => Err(format!("unknown tool: {other}")),
     }

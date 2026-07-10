@@ -270,6 +270,23 @@ export async function refreshBrowserState(): Promise<void> {
         "via the kvm_node tool (or mcp__owllm__kvm_node). CALL IT DIRECTLY, same rules as the browser tools." + hosts;
     }
   } catch { /* feature absent/off — say nothing */ }
+  // Remote Devices capability — announced only when the user enabled agent
+  // remote access (default off), naming paired devices so the agent can act
+  // without asking for connection details. Same "tools alone don't announce the
+  // live capability" lesson as the browser/KVM lines above.
+  try {
+    const on = await invoke<boolean>("device_agents_allowed_get");
+    if (on) {
+      const devs = await invoke<Array<{ name: string; is_self: boolean }>>("devices_list").catch(() => []);
+      const peers = devs.filter((d) => !d.is_self).map((d) => d.name);
+      _browserStateLine +=
+        " REMOTE DEVICES — you CAN run shell commands on the user's OTHER paired machines with the device_exec tool " +
+        "(or mcp__owllm__device_exec): device_exec({ device: '<name>', command: '<shell>' }). Use it for tech support, " +
+        "installing software, and development on another PC — it works over the encrypted device channel (no SSH). " +
+        "CALL IT DIRECTLY, same rules as the browser tools." +
+        (peers.length ? ` Paired devices: ${peers.join(", ")}.` : " No devices paired yet — the user pairs them on the Devices page.");
+    }
+  } catch { /* feature off — say nothing */ }
 }
 
 /// SYNC accessor for the (sync) prompt builders, same pattern as

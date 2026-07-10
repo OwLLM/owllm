@@ -15,7 +15,16 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const REPO = path.resolve(HERE, "../../../..");
 const req = createRequire(path.join(REPO, "package.json"));
 const ts = (await import(pathToFileURL(path.join(REPO, "node_modules/typescript/lib/typescript.js")).href)).default;
-const { JSDOM } = req("jsdom");
+// jsdom is an optional test-only dep (npm i --no-save jsdom). If it isn't
+// present, SKIP cleanly rather than hard-crashing — a ship gate must never be a
+// landmine on a box that doesn't have this local install.
+let JSDOM;
+try {
+  ({ JSDOM } = req("jsdom"));
+} catch {
+  console.log("SKIP modelPickerCollapse: jsdom not installed (run `npm i --no-save jsdom` to exercise this harness).");
+  process.exit(0);
+}
 
 // ---- DOM environment (react-dom needs window/document globals) ----
 const dom = new JSDOM("<!doctype html><html><body><div id='root'></div></body></html>", { pretendToBeVisual: true });

@@ -115,7 +115,6 @@ pub async fn support_capture_window(app: tauri::AppHandle) -> Result<WindowCaptu
 /// us nothing (e.g. the window is unmapped) instead of a black image.
 #[cfg(target_os = "linux")]
 fn capture_gtk_window_png(win: &tauri::WebviewWindow) -> Result<(Vec<u8>, u32, u32), String> {
-    use gtk::gdk;
     use gtk::prelude::*;
     let gtk_win = win.gtk_window().map_err(|e| format!("gtk window: {e}"))?;
     let gdk_win = gtk_win
@@ -123,7 +122,8 @@ fn capture_gtk_window_png(win: &tauri::WebviewWindow) -> Result<(Vec<u8>, u32, u
         .ok_or_else(|| "window is not realized yet".to_string())?;
     let w = gdk_win.width();
     let h = gdk_win.height();
-    let pixbuf = gdk::pixbuf_get_from_window(&gdk_win, 0, 0, w, h).ok_or_else(|| {
+    // gdk_pixbuf_get_from_window — bound as WindowExtManual::pixbuf().
+    let pixbuf = gdk_win.pixbuf(0, 0, w, h).ok_or_else(|| {
         "the compositor refused the readback — attach a regular OS screenshot instead".to_string()
     })?;
     let png = pixbuf

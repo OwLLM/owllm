@@ -400,24 +400,56 @@ pub fn bundled_python_exe() -> Option<PathBuf> {
             return Some(pb);
         }
     }
-    if let Some(rt) = runtime_root() {
-        let candidate = rt
-            .join("python_runtime")
-            .join("python3.11")
-            .join("python.exe");
-        if candidate.is_file() {
-            return Some(candidate);
+    // The bundled runtime's interpreter layout differs per OS: the Windows
+    // embeddable build ships python.exe at the top, a Linux/macOS runtime
+    // ships bin/python3. Probing only python.exe made this None on every
+    // non-Windows install, which killed venv creation (finetuning env
+    // Install/Repair) and the screenshot tool there.
+    let rel_candidates: &[&[&str]] = if cfg!(windows) {
+        &[&["python3.11", "python.exe"]]
+    } else {
+        &[
+            &["python3.11", "bin", "python3"],
+            &["python3.11", "bin", "python3.11"],
+            &["bin", "python3"],
+        ]
+    };
+    let roots = [
+        runtime_root().map(|r| r.join("python_runtime")),
+        llm_root().map(|r| r.join("python_runtime")),
+    ];
+    for root in roots.iter().flatten() {
+        for rel in rel_candidates {
+            let mut candidate = root.clone();
+            for part in *rel {
+                candidate = candidate.join(part);
+            }
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
-    let candidate = llm_root()?
-        .join("python_runtime")
-        .join("python3.11")
-        .join("python.exe");
-    if candidate.is_file() {
-        Some(candidate)
-    } else {
-        None
+    // No bundled runtime → fall back to a system interpreter (Unix only;
+    // on Windows the bundled runtime is the supported path). `python3` on
+    // PATH is the norm on Linux and covers the ARM64 builds, where no
+    // python-runtime module exists yet.
+    #[cfg(not(windows))]
+    {
+        for name in ["python3", "python"] {
+            if let Ok(out) = std::process::Command::new("which").arg(name).output() {
+                if out.status.success() {
+                    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !p.is_empty() {
+                        let pb = PathBuf::from(p);
+                        if pb.is_file() {
+                            return Some(pb);
+                        }
+                    }
+                }
+            }
+        }
     }
+    None
 }
 
 /// Path to the finetune.py training entrypoint. Lives at the legacy

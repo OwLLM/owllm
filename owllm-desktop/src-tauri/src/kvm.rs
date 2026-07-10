@@ -978,8 +978,10 @@ async fn dispatch(target: &KvmTarget, action: &str, params: &Value) -> Value {
 // carry the web-UI password in every tool call is both unsafe and why "take a
 // screenshot of the KVM" kept failing to even log in. The user saves each
 // Node once on the Accounts page; kvm_node_exec autofills any field the caller
-// omitted. The password is encrypted at rest with the same DPAPI wrapper the
-// account secrets use (crypt::protect) and never returned to the UI.
+// omitted. The password goes through the same at-rest wrapper the account
+// secrets use (crypt::protect — DPAPI-encrypted on Windows; on other OSes
+// that wrapper is currently base64 passthrough, see crypt.rs) and is never
+// returned to the UI.
 
 fn creds_path() -> Option<PathBuf> {
     crate::paths::user_data_root().map(|r| r.join("kvm_nodes.json"))

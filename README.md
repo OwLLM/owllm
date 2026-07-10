@@ -2,13 +2,16 @@
 
 <img src="assets/OWLLM_Hero.png" alt="OwLLM" width="600">
 
-# ⬇ [Download OwLLM for Windows](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)
+# ⬇ Download OwLLM
 
-### One file · ~30 MB · No admin required · Windows 10 / 11 x64
+### Windows 10 / 11 (x64) · Linux (x86_64) · one file, no admin required
 
-[![installer](https://img.shields.io/badge/installer-OwLLM.Desktop.Setup.exe-3ec5d8?style=for-the-badge&logo=windows)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)
-[![portable](https://img.shields.io/badge/portable_(zip)-no_install-7e8aa0?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM-Desktop-Portable.zip)
-[![signed](https://img.shields.io/badge/EV--signed-binary_%2B_installer-3ec58a?style=for-the-badge&logo=gnuprivacyguard&logoColor=white)](https://github.com/OwLLM/owllm/releases/latest)
+[![Windows installer](https://img.shields.io/badge/Windows-OwLLM.Desktop.Setup.exe-3ec5d8?style=for-the-badge&logo=windows)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)
+[![Linux AppImage](https://img.shields.io/badge/Linux-AppImage-e95420?style=for-the-badge&logo=linux&logoColor=white)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage)
+[![Linux .deb](https://img.shields.io/badge/Debian%2FUbuntu-.deb-a80030?style=for-the-badge&logo=debian&logoColor=white)](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.deb)
+[![signed](https://img.shields.io/badge/EV--signed-Windows_binary_%2B_installer-3ec58a?style=for-the-badge&logo=gnuprivacyguard&logoColor=white)](https://github.com/OwLLM/owllm/releases/latest)
+
+**Linux:** the AppImage needs no install (`chmod +x` and run — WebKit bundled); the `.deb` pulls `libwebkit2gtk-4.1` + `libgtk-3` from your distro (`sudo apt install ./OwLLM.Desktop.deb`).
 
 ---
 
@@ -24,7 +27,7 @@
 </p>
 
 > [!IMPORTANT]
-> **OwLLM Desktop currently ships for Windows 10/11 (x64) only.** macOS (Apple Silicon + Intel) and Linux (x86_64) builds are coming via the already-configured cross-platform CI. Watch the repo for release notifications.
+> **OwLLM Desktop ships for Windows 10/11 (x64) and Linux (x86_64)** (AppImage + Debian/Ubuntu `.deb`). macOS (Apple Silicon + Intel) is next via the already-configured cross-platform CI. Watch the repo for release notifications.
 
 </div>
 
@@ -200,7 +203,8 @@ Same teams. Same agent definitions. Same UI. The model layer is just plumbing.
 | Mode | Status | Use case |
 |---|:---:|---|
 | **Desktop (Windows)** | ✅ shipped | Daily-driver AI workstation on your laptop |
-| **Desktop (macOS / Linux)** | 🔜 Q3 2026 | Mac / Ubuntu users |
+| **Desktop (Linux x86_64)** | ✅ shipped | AppImage + Debian/Ubuntu `.deb` |
+| **Desktop (macOS)** | 🔜 next | Apple Silicon + Intel via cross-platform CI |
 | **Headless on VPS (24/7)** | 🔜 Q4 2026 | Run your custom teams on a $5/mo box. Reach them via Telegram, web, API. Always-on agentic services. |
 | **Containerised / VM** | 🔜 Q4 2026 | Drop OwLLM into your existing infra. |
 | **🔑 OwLLM Go (USB)** | 🧪 in design | Your entire AI workforce **on a hardware key** — see below. |
@@ -241,10 +245,13 @@ A palm-sized KVM device (HDMI in, USB-HID out) that gives an agent team **eyes a
 - **🎓 The intern that actually learns** — your corrections don't evaporate: the Dataset Builder turns your documents and feedback into training JSONL, and this weekend's fine-tune is next week's smarter local agent. A workforce with a *growth curve* — try that with a SaaS chatbot.
 - **📟 The personal firm** — secretary, finance, research, health-coach teams, all reachable from the messenger already in your pocket. Not "an assistant app": a staff.
 
-## Install (Windows only — for now)
+## Install
 
-1. **[Download `OwLLM.Desktop.Setup.exe`](https://github.com/OwLLM/owllm/releases/latest)** (~30 MB — one file, that's it)
+**Windows**
+1. **[Download `OwLLM.Desktop.Setup.exe`](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe)** (~30 MB — one file, that's it)
 2. Run it. The installer **and** the app binary are **EV code-signed** (Certum EV certificate). If SmartScreen still shows a prompt while the certificate's reputation builds, click "More info" → "Run anyway" — the publisher name confirms the signature.
+
+**Linux (x86_64)** — [AppImage](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage) (`chmod +x` and run, nothing to install) or [`.deb`](https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.deb) (`sudo apt install ./OwLLM.Desktop.deb`). Then:
 3. On first launch, a **hardware-aware wizard** opens. It detects your hardware and offers the modules that fit:
    - **Local Inference** (~33 MB CPU / ~32 MB Vulkan / ~285 MB CUDA) — only needed if you want local models
    - **Audio / Speech-to-Text** (~148 MB) — for voice messages, mic input
@@ -477,7 +484,8 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - [x] **Convert projects** isolated↔not from the header; **Accounts tests host + sandbox**
 - [~] **Mac/Linux isolation (beta)** — Lima VM (macOS) + bubblewrap (Linux), same model as WSL
 - [ ] **Visual team builder** — Q3 2026
-- [ ] **macOS + Linux desktop** — Q3 2026
+- [x] **Linux desktop** — AppImage + `.deb` (x86_64)
+- [ ] **macOS desktop** — Apple Silicon + Intel
 - [ ] **24/7 headless / VPS mode** — Q4 2026
 - [ ] **Container / VM deployment** — Q4 2026
 - [x] **Local vision models** — image-capable GGUFs work out of the box (projectors auto-fetched)

@@ -9,7 +9,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type GitFile = { code: string; path: string };
-type GitStatus = { isRepo: boolean; branch: string; ahead: number; behind: number; files: GitFile[] };
+type GitStatus = { isRepo: boolean; branch: string; ahead: number; behind: number; files: GitFile[]; total: number };
 type GitBranches = { current: string; branches: string[] };
 
 const chip: React.CSSProperties = {
@@ -55,7 +55,8 @@ export default function GitBar({ workspace, busy }: { workspace: string; busy: b
 
   if (!st || !st.isRepo) return null;
 
-  const dirty = st.files.length;
+  // `files` is capped Rust-side on pathological repos — `total` is the real count.
+  const dirty = st.total ?? st.files.length;
   const openPopover = () => {
     setErr("");
     setOpen((v) => !v);

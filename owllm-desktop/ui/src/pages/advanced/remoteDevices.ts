@@ -31,7 +31,13 @@ export type DeviceIdentity = {
   enabled: boolean;
   env_override: boolean;
   endpoint: string | null;
+  endpoints: string[];
   listening: boolean;
+  public_endpoint: string | null;
+  relay_url: string | null;
+  relay_client: boolean;
+  relay_serving: boolean;
+  agents_allowed: boolean;
 };
 
 export type DeviceRecord = {
@@ -45,6 +51,9 @@ export type DeviceRecord = {
   github_login: string | null;
   capabilities: Capabilities;
   endpoint: string | null;
+  /// All dialable addresses (public → overlay → LAN). Empty = the device has
+  /// never published while its listener was up → Pair can't dial it yet.
+  endpoints?: string[];
   last_seen: string | null;
   is_self: boolean;
 };
@@ -82,6 +91,9 @@ export type CommandResult = {
   error: string | null;
   decision: string;
   duration_ms: number;
+  session?: string | null;
+  data?: string | null;
+  exited?: boolean;
 };
 
 export type ControlSession = {
@@ -115,9 +127,14 @@ export const setEnabled = (enabled: boolean) => invoke<void>("device_remote_enab
 export const listDevices = () => invoke<DeviceRecord[]>("devices_list");
 export const forgetDevice = (deviceId: string) => invoke<void>("device_forget", { deviceId });
 
-// ---- Listener / discovery ----
-export const listenerStatus = () => invoke<{ listening: boolean; endpoint: string | null }>("device_listener_status");
+// ---- Listener / discovery / WAN ----
+export const listenerStatus = () => invoke<{ listening: boolean; endpoint: string | null; endpoints: string[] }>("device_listener_status");
 export const syncDiscovery = () => invoke<boolean>("device_sync_discovery");
+export const setPublicEndpoint = (endpoint: string | null) => invoke<void>("device_set_public_endpoint", { endpoint });
+export const setRelay = (url: string | null) => invoke<void>("device_set_relay", { url });
+export const relayServe = (bind?: string | null) => invoke<{ serving: boolean; bind: string }>("device_relay_serve", { bind: bind ?? null });
+export const relayStop = () => invoke<{ serving: boolean }>("device_relay_stop");
+export const relayStatus = () => invoke<{ url: string | null; client: boolean; serving: boolean }>("device_relay_status");
 
 // ---- Trust / pairing ----
 export const listTrusted = () => invoke<TrustedController[]>("device_trust_list");
@@ -143,6 +160,22 @@ export const controlState = () => invoke<ControlState>("device_control_state");
 export const stopRemoteControl = () => invoke<{ cancelled: number }>("device_stop_remote_control");
 export const auditTail = (limit?: number) => invoke<unknown[]>("device_audit_tail", { limit: limit ?? 200 });
 export const selfTest = () => invoke<SelfTestResult>("device_selftest");
+
+// ---- Interactive remote shell sessions ----
+export const sessionOpen = (toDevice: string, shell?: string | null, cols?: number, rows?: number) =>
+  invoke<CommandResult>("device_session_open", { toDevice, shell: shell ?? null, cols: cols ?? null, rows: rows ?? null });
+export const sessionWrite = (toDevice: string, session: string, dataB64: string) =>
+  invoke<CommandResult>("device_session_write", { toDevice, session, data: dataB64 });
+export const sessionRead = (toDevice: string, session: string) =>
+  invoke<CommandResult>("device_session_read", { toDevice, session });
+export const sessionResize = (toDevice: string, session: string, cols: number, rows: number) =>
+  invoke<CommandResult>("device_session_resize", { toDevice, session, cols, rows });
+export const sessionClose = (toDevice: string, session: string) =>
+  invoke<CommandResult>("device_session_close", { toDevice, session });
+
+// ---- Agent remote access ----
+export const agentsAllowedGet = () => invoke<boolean>("device_agents_allowed_get");
+export const setAgentsAllowed = (allowed: boolean) => invoke<void>("device_set_agents_allowed", { allowed });
 
 // ---- Dangerous-action approval (target side) ----
 export const pendingApprovals = () => invoke<{ pending: PendingApproval[] }>("device_pending_approvals");

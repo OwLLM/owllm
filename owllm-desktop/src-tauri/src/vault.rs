@@ -167,7 +167,14 @@ fn is_cloned(dir: &std::path::Path) -> bool {
     dir.join(".git").is_dir()
 }
 
-fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
+// Serialize ALL app git operations on the vault clone. The sync engine fires on
+// a 5s poll, on tab-hide, on close, and across every window, and three channels
+// (projects/teams/devices) can run at once — concurrent git on one repo races on
+// `.git/index` (and its `.lock`), which is a corruption + contention vector.
+// One process-wide lock means our git never runs two-at-once on the vault.
+static VAULT_GIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn run_git_once(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
     let mut cmd = std::process::Command::new("git");
     cmd.args(args);
     if let Some(d) = cwd {
@@ -184,6 +191,52 @@ fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, Strin
         Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
         Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+    }
+}
+
+/// A corrupt/truncated `.git/index` — "bad signature 0x00000000", a partial
+/// write (app killed mid-sync), AV interference, etc. Recognized so we can heal
+/// instead of failing every subsequent sync forever ("nothing happening").
+pub(crate) fn is_corrupt_index(err: &str) -> bool {
+    let l = err.to_lowercase();
+    l.contains("index file corrupt")
+        || l.contains("bad signature")
+        || l.contains("bad index file")
+        || l.contains("index file smaller than expected")
+        || l.contains("unknown index entry format")
+        || l.contains("resolve-undo")
+}
+
+/// Drop a corrupt index and rebuild it from HEAD. Working-tree files are NEVER
+/// touched — the index is only the staging area, so a following `add`/`commit`/
+/// `reset` re-stages cleanly. Best-effort; safe to call spuriously. Shared with
+/// git.rs (the Code-page git) so a corrupt project index self-heals too.
+pub(crate) fn repair_index(cwd: Option<&std::path::Path>) {
+    if let Ok(p) = run_git_once(&["rev-parse", "--git-path", "index"], cwd) {
+        let rel = p.trim();
+        if !rel.is_empty() {
+            let full = match cwd {
+                Some(d) => d.join(rel),
+                None => std::path::PathBuf::from(rel),
+            };
+            let _ = std::fs::remove_file(&full);
+            let _ = std::fs::remove_file(full.with_extension("lock")); // stale index.lock too
+        }
+    }
+    // Rebuild the index to match HEAD so the retried op has a valid base.
+    let _ = run_git_once(&["read-tree", "HEAD"], cwd);
+    eprintln!("vault: rebuilt a corrupt git index");
+}
+
+fn run_git(args: &[&str], cwd: Option<&std::path::Path>) -> Result<String, String> {
+    // Poisoned lock (a prior panic) must not wedge sync — recover the guard.
+    let _guard = VAULT_GIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    match run_git_once(args, cwd) {
+        Err(e) if is_corrupt_index(&e) => {
+            repair_index(cwd);
+            run_git_once(args, cwd) // retry once, now with a clean index
+        }
+        other => other,
     }
 }
 

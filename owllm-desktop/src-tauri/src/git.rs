@@ -10,8 +10,7 @@ use std::process::Command;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-/// Run a git command in `dir`, capturing stdout/stderr/success.
-fn git(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
+fn git_once(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
     let mut cmd = Command::new("git");
     cmd.args(args).current_dir(Path::new(dir));
     #[cfg(windows)]
@@ -27,6 +26,18 @@ fn git(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
         String::from_utf8_lossy(&out.stdout).into_owned(),
         String::from_utf8_lossy(&out.stderr).into_owned(),
     ))
+}
+
+/// Run a git command in `dir`, capturing stdout/stderr/success. Self-heals a
+/// corrupt `.git/index` (rebuild from HEAD, retry once) so the Code page's git
+/// panel doesn't stay stuck on "index file corrupt" — shares the vault.rs helper.
+fn git(dir: &str, args: &[&str]) -> Result<(bool, String, String), String> {
+    let r = git_once(dir, args)?;
+    if !r.0 && crate::vault::is_corrupt_index(&r.2) {
+        crate::vault::repair_index(Some(Path::new(dir)));
+        return git_once(dir, args);
+    }
+    Ok(r)
 }
 
 #[derive(Serialize)]
@@ -45,7 +56,15 @@ pub struct GitStatus {
     pub ahead: i64,
     pub behind: i64,
     pub files: Vec<GitFile>,
+    /// Total changed paths, even when `files` is capped. The Code page polls
+    /// this every few seconds; a repo with an un-ignored node_modules has
+    /// 100k+ untracked entries, and shipping them all over IPC each poll is
+    /// what melts the webview — so `files` carries at most MAX_STATUS_FILES.
+    pub total: u64,
 }
+
+/// Cap on the per-poll `files` payload (see GitStatus::total).
+const MAX_STATUS_FILES: usize = 2000;
 
 /// `git status --porcelain=v1 -b` parsed into a compact summary.
 #[tauri::command]
@@ -57,6 +76,7 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
             ahead: 0,
             behind: 0,
             files: Vec::new(),
+            total: 0,
         };
         // Cheap repo check first — non-repos return is_repo:false (not an error).
         match git(&dir, &["rev-parse", "--is-inside-work-tree"]) {
@@ -71,6 +91,7 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
         let mut ahead = 0i64;
         let mut behind = 0i64;
         let mut files = Vec::new();
+        let mut total = 0u64;
         for line in out.lines() {
             if let Some(rest) = line.strip_prefix("## ") {
                 // "## main...origin/main [ahead 1, behind 2]" or "## main"
@@ -89,10 +110,13 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
                     }
                 }
             } else if line.len() > 3 {
-                files.push(GitFile {
-                    code: line[..2].to_string(),
-                    path: line[3..].to_string(),
-                });
+                total += 1;
+                if files.len() < MAX_STATUS_FILES {
+                    files.push(GitFile {
+                        code: line[..2].to_string(),
+                        path: line[3..].to_string(),
+                    });
+                }
             }
         }
         Ok(GitStatus {
@@ -101,10 +125,31 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
             ahead,
             behind,
             files,
+            total,
         })
     })
     .await
     .map_err(|e| format!("join: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate_on_char_boundary;
+
+    #[test]
+    fn truncation_backs_off_to_a_char_boundary() {
+        // "é" is 2 bytes — cutting at byte 1 lands mid-char and must back off.
+        assert_eq!(truncate_on_char_boundary("é", 1), "");
+        assert_eq!(truncate_on_char_boundary("aé", 2), "a");
+        assert_eq!(truncate_on_char_boundary("aé", 3), "aé");
+        // ASCII and short strings pass through untouched.
+        assert_eq!(truncate_on_char_boundary("abc", 10), "abc");
+        assert_eq!(truncate_on_char_boundary("abc", 2), "ab");
+        // The exact shape that used to panic: a multibyte char straddling MAX.
+        let s = format!("{}💥", "x".repeat(199_999));
+        let t = truncate_on_char_boundary(&s, 200_000);
+        assert_eq!(t.len(), 199_999); // backed off past the 4-byte emoji start
+    }
 }
 
 #[derive(Serialize)]
@@ -180,6 +225,17 @@ pub async fn git_commit(dir: String, message: String, all: bool) -> Result<Strin
     .map_err(|e| format!("join: {e}"))?
 }
 
+/// First `max` bytes of `s`, backed off to a char boundary — slicing a
+/// multibyte string at a raw byte offset panics ("not a char boundary"),
+/// which used to kill git_diff on large diffs with non-ASCII content.
+fn truncate_on_char_boundary(s: &str, max: usize) -> &str {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Uncommitted changes vs HEAD (staged + unstaged). Capped so a huge diff
 /// can't blow up the IPC payload.
 #[tauri::command]
@@ -191,7 +247,7 @@ pub async fn git_diff(dir: String) -> Result<String, String> {
             return Err(err.trim().to_string());
         }
         if out.len() > MAX {
-            let mut s = out[..MAX].to_string();
+            let mut s = truncate_on_char_boundary(&out, MAX).to_string();
             s.push_str("\n\n… (diff truncated)");
             Ok(s)
         } else {

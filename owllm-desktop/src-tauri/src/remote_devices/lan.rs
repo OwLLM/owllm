@@ -21,36 +21,83 @@ use super::protocol::{PairRequest, SignedEnvelope, WireMessage, WireReply};
 const DEFAULT_PORT: u16 = 47771;
 const WIRE_PATH: &str = "/owllm-remote/v1";
 
-/// Primary LAN IPv4 via the UDP "connect to a public addr, read local_addr"
-/// trick (no packets sent; resolves the default-route source address). Same
-/// approach as vault.rs.
-pub fn local_lan_ip() -> Option<String> {
+/// Resolve the local source IPv4 the OS would use to reach `target`, via the UDP
+/// "connect + read local_addr" trick (no packets sent). Different targets surface
+/// different interfaces: a public IP → the LAN/default-route address; a Tailscale
+/// CGNAT address → the overlay (100.x) address when the tailnet is up.
+fn source_ip_for(target: &str) -> Option<String> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    sock.connect("8.8.8.8:80").ok()?;
-    sock.local_addr().ok().map(|a| a.ip().to_string())
+    sock.connect(target).ok()?;
+    let ip = sock.local_addr().ok()?.ip();
+    if ip.is_unspecified() || ip.is_loopback() {
+        return None;
+    }
+    Some(ip.to_string())
+}
+
+/// The primary LAN IPv4 (default-route source). Kept for callers that want one.
+pub fn local_lan_ip() -> Option<String> {
+    source_ip_for("8.8.8.8:80")
+}
+
+/// ALL addresses a peer could dial to reach us, most WAN-reachable first:
+/// the Tailscale/overlay IP (routing to the CGNAT range only resolves to a 100.x
+/// source when the tailnet is up), then the LAN IP. Deduped. This is what makes
+/// off-LAN control work over a Tailscale/WireGuard overlay with no relay.
+pub fn candidate_ips() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    // Tailscale MagicDNS anycast address — routes over tailscale0 when present.
+    if let Some(ip) = source_ip_for("100.100.100.100:80") {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    if let Some(ip) = local_lan_ip() {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
+    }
+    out
+}
+
+/// Candidate "ip:port" endpoints for THIS device's listener (empty if not up).
+pub fn candidate_endpoints() -> Vec<String> {
+    match current_port() {
+        Some(port) => candidate_ips().into_iter().map(|ip| format!("{ip}:{port}")).collect(),
+        None => Vec::new(),
+    }
 }
 
 struct ListenerState {
-    endpoint: Option<String>,
+    port: Option<u16>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
 static LISTENER: Lazy<Mutex<ListenerState>> = Lazy::new(|| {
-    Mutex::new(ListenerState { endpoint: None, stop: Arc::new(AtomicBool::new(false)), thread: None })
+    Mutex::new(ListenerState { port: None, stop: Arc::new(AtomicBool::new(false)), thread: None })
 });
 
-/// The endpoint ("ip:port") this device is currently listening on, if any.
+/// The port this device's listener is bound to, if running.
+pub fn current_port() -> Option<u16> {
+    LISTENER.lock().unwrap().port
+}
+
+/// The PRIMARY ("ip:port") endpoint — the first (most WAN-reachable) candidate.
+/// None if the listener isn't running.
 pub fn current_endpoint() -> Option<String> {
-    LISTENER.lock().unwrap().endpoint.clone()
+    candidate_endpoints().into_iter().next()
 }
 
 /// Start the listener (idempotent). Binds the default port, falling back to an
-/// ephemeral one if taken, and returns the published "ip:port" endpoint.
+/// ephemeral one if taken, and returns the primary "ip:port" endpoint.
 pub fn start(rt: tokio::runtime::Handle) -> Result<String, String> {
-    let mut st = LISTENER.lock().unwrap();
-    if let Some(ep) = &st.endpoint {
-        return Ok(ep.clone());
+    {
+        let st = LISTENER.lock().unwrap();
+        if st.port.is_some() {
+            drop(st);
+            return current_endpoint().ok_or_else(|| "listener up but no address".to_string());
+        }
     }
     let server = tiny_http::Server::http(("0.0.0.0", DEFAULT_PORT))
         .or_else(|_| tiny_http::Server::http(("0.0.0.0", 0)))
@@ -60,8 +107,6 @@ pub fn start(rt: tokio::runtime::Handle) -> Result<String, String> {
         .to_ip()
         .map(|a| a.port())
         .ok_or_else(|| "listener has no IP addr".to_string())?;
-    let ip = local_lan_ip().unwrap_or_else(|| "127.0.0.1".to_string());
-    let endpoint = format!("{ip}:{port}");
 
     let stop = Arc::new(AtomicBool::new(false));
     let stop_thread = stop.clone();
@@ -70,17 +115,20 @@ pub fn start(rt: tokio::runtime::Handle) -> Result<String, String> {
         .spawn(move || serve_loop(server, stop_thread, rt))
         .map_err(|e| format!("spawn listener thread: {e}"))?;
 
-    st.endpoint = Some(endpoint.clone());
-    st.stop = stop;
-    st.thread = Some(thread);
-    Ok(endpoint)
+    {
+        let mut st = LISTENER.lock().unwrap();
+        st.port = Some(port);
+        st.stop = stop;
+        st.thread = Some(thread);
+    }
+    current_endpoint().ok_or_else(|| format!("listener bound :{port} but no routable IP"))
 }
 
 /// Stop the listener (idempotent). Signals the loop and joins it.
 pub fn stop() {
     let (stop, thread) = {
         let mut st = LISTENER.lock().unwrap();
-        st.endpoint = None;
+        st.port = None;
         (st.stop.clone(), st.thread.take())
     };
     stop.store(true, Ordering::SeqCst);
@@ -192,9 +240,13 @@ fn handle_command(frame: SignedEnvelope, rt: &tokio::runtime::Handle) -> WireRep
 }
 
 /// Controller-side: POST a wire message to a peer endpoint and read the reply.
+/// A short connect timeout means an unreachable candidate fails fast (so the
+/// controller can try the next address), while the overall timeout still allows
+/// a slow command to finish.
 pub async fn post_wire(endpoint: &str, msg: &WireMessage) -> Result<WireReply, String> {
     let url = format!("http://{endpoint}{WIRE_PATH}");
     let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
@@ -221,5 +273,9 @@ pub async fn send_pair(endpoint: &str, pr: PairRequest) -> Result<super::protoco
 
 /// Listener status for the UI.
 pub fn status_json() -> serde_json::Value {
-    json!({ "listening": current_endpoint().is_some(), "endpoint": current_endpoint() })
+    json!({
+        "listening": current_port().is_some(),
+        "endpoint": current_endpoint(),
+        "endpoints": candidate_endpoints(),
+    })
 }

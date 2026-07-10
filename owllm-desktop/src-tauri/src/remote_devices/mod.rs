@@ -27,6 +27,8 @@ mod identity;
 mod lan;
 mod policy;
 mod registry;
+mod relay;
+mod session;
 mod transport;
 mod trust;
 
@@ -68,6 +70,11 @@ fn kind_str(k: CommandKind) -> &'static str {
         CommandKind::Wsl => "wsl",
         CommandKind::FileWrite => "file_write",
         CommandKind::Admin => "admin",
+        CommandKind::SessionOpen => "session_open",
+        CommandKind::SessionWrite => "session_write",
+        CommandKind::SessionRead => "session_read",
+        CommandKind::SessionResize => "session_resize",
+        CommandKind::SessionClose => "session_close",
     }
 }
 
@@ -139,6 +146,22 @@ fn begin_control(frame: &SignedEnvelope, req: &CommandRequest) {
     emit_control();
 }
 
+/// Persistent banner entry for an interactive session (keyed by session id, so
+/// it stays up for the whole session instead of flickering per keystroke).
+fn begin_session_control(frame: &SignedEnvelope, session_id: &str) {
+    let name = trust::find(&frame.from_device)
+        .map(|c| c.name)
+        .unwrap_or_else(|| frame.from_device.clone());
+    CONTROL.lock().unwrap().push(ControlSession {
+        controller_id: frame.from_device.clone(),
+        controller_name: name,
+        request_id: session_id.to_string(),
+        kind: "shell session".into(),
+        started_at: now_rfc3339(),
+    });
+    emit_control();
+}
+
 fn end_control(request_id: &str) {
     CONTROL.lock().unwrap().retain(|s| s.request_id != request_id);
     emit_control();
@@ -177,6 +200,74 @@ fn set_enabled(enabled: bool) -> Result<(), String> {
     }
     let txt = serde_json::to_string_pretty(&json!({ "enabled": enabled })).unwrap();
     std::fs::write(&path, txt).map_err(|e| format!("write enable flag: {e}"))
+}
+
+// ------------------------------------------------------------------
+// WAN config: user-set public endpoint + relay URL
+// ------------------------------------------------------------------
+
+fn config_path() -> Option<PathBuf> {
+    crate::paths::user_data_root().map(|r| r.join("remote_devices_config.json"))
+}
+
+fn load_config() -> Value {
+    config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn cfg_string(key: &str) -> Option<String> {
+    load_config()
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// A user-set public host:port for THIS device (port-forward / DDNS / MagicDNS),
+/// published as the most WAN-reachable candidate.
+fn public_endpoint() -> Option<String> {
+    cfg_string("public_endpoint")
+}
+
+/// The shared relay URL both devices dial out to (WAN, pure-NAT fallback).
+fn relay_url() -> Option<String> {
+    cfg_string("relay_url")
+}
+
+/// Whether agents may drive remote devices (default OFF).
+fn agents_allowed() -> bool {
+    load_config().get("agents_allowed").and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn set_agents_allowed_cfg(v: bool) -> Result<(), String> {
+    let path = config_path().ok_or_else(|| "could not resolve app data dir".to_string())?;
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let mut doc = load_config();
+    doc["agents_allowed"] = json!(v);
+    let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, txt).map_err(|e| format!("write remote-devices config: {e}"))
+}
+
+fn write_config(key: &str, value: Option<String>) -> Result<(), String> {
+    let path = config_path().ok_or_else(|| "could not resolve app data dir".to_string())?;
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let mut doc = load_config();
+    match value {
+        Some(v) if !v.trim().is_empty() => doc[key] = json!(v.trim()),
+        _ => {
+            if let Some(obj) = doc.as_object_mut() {
+                obj.remove(key);
+            }
+        }
+    }
+    let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, txt).map_err(|e| format!("write remote-devices config: {e}"))
 }
 
 // ------------------------------------------------------------------
@@ -244,6 +335,7 @@ fn deny(request_id: &str, msg: &str) -> CommandResult {
         error: Some(msg.to_string()),
         decision: "denied".into(),
         duration_ms: 0,
+        ..Default::default()
     }
 }
 
@@ -282,6 +374,7 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
             command: String::new(),
             payload: None,
             timeout_ms: 0,
+            ..Default::default()
         };
         audit_inbound(&frame, &placeholder, &r);
         return Ok(r);
@@ -320,6 +413,37 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
         }
     };
 
+    // Interactive session ops route to the session manager. They keep their own
+    // persistent "being controlled" banner (per-op begin/end would flicker on
+    // every read poll) and skip the high-frequency keystroke/poll audit.
+    if is_session_kind(req.kind) {
+        let result = match policy::authorize(req.kind, &policy) {
+            Authorization::Allowed => {
+                let r = session::handle(&frame.from_device, &req);
+                match req.kind {
+                    CommandKind::SessionOpen => {
+                        if let Some(sid) = &r.session {
+                            begin_session_control(&frame, sid);
+                        }
+                    }
+                    CommandKind::SessionClose => {
+                        if let Some(sid) = &req.session {
+                            end_control(sid);
+                        }
+                    }
+                    _ => {}
+                }
+                r
+            }
+            _ => deny(&req.request_id, "shell permission required for interactive sessions"),
+        };
+        let _ = registry::touch_last_seen(&frame.from_device);
+        if matches!(req.kind, CommandKind::SessionOpen | CommandKind::SessionClose) {
+            audit_inbound(&frame, &req, &result);
+        }
+        return Ok(result);
+    }
+
     // Authorized surface — show the banner while it runs, then execute. Dangerous
     // kinds (FileWrite/Admin) additionally require a LIVE per-action approval on
     // this machine, even when the policy toggle is on.
@@ -345,6 +469,17 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
     Ok(result)
 }
 
+fn is_session_kind(k: CommandKind) -> bool {
+    matches!(
+        k,
+        CommandKind::SessionOpen
+            | CommandKind::SessionWrite
+            | CommandKind::SessionRead
+            | CommandKind::SessionResize
+            | CommandKind::SessionClose
+    )
+}
+
 fn recipient_x_pub(to_device: &str) -> Result<[u8; 32], String> {
     let me = identity::load_or_create()?;
     if to_device == me.secrets.device_id() {
@@ -363,18 +498,49 @@ fn recipient_x_pub(to_device: &str) -> Result<[u8; 32], String> {
 // Listener lifecycle + public-record helpers
 // ------------------------------------------------------------------
 
-/// Start the LAN listener if the feature is on and it isn't already running.
+/// Start the LAN listener + relay client to match the current config, if the
+/// feature is on. Idempotent — safe to call from any command entry point.
 fn ensure_listener_started(rt: tokio::runtime::Handle) {
-    if feature_enabled() && lan::current_endpoint().is_none() {
-        if let Err(e) = lan::start(rt) {
-            eprintln!("remote_devices: listener start failed: {e}");
+    if feature_enabled() {
+        if lan::current_port().is_none() {
+            if let Err(e) = lan::start(rt.clone()) {
+                eprintln!("remote_devices: listener start failed: {e}");
+            }
         }
+        ensure_relay_client(rt);
+    } else {
+        lan::stop();
+        relay::stop_client();
     }
 }
 
-/// This device's public record (with the current LAN endpoint).
+/// Run the relay client loop iff the feature is on AND a relay URL is configured,
+/// so this device stays reachable via the relay. Stops it otherwise.
+fn ensure_relay_client(rt: tokio::runtime::Handle) {
+    match (feature_enabled(), relay_url()) {
+        (true, Some(url)) => {
+            if !relay::client_running() {
+                if let Ok(me) = identity::load_or_create() {
+                    relay::start_client(rt, url, me.secrets.device_id());
+                }
+            }
+        }
+        _ => relay::stop_client(),
+    }
+}
+
+/// This device's public record, decorated with the user-set public endpoint
+/// (most WAN-reachable) and the relay-reachability flag.
 pub fn self_public_record() -> Result<DevicePublic, String> {
-    identity::public_record(github_login())
+    let mut rec = identity::public_record(github_login())?;
+    if let Some(pe) = public_endpoint() {
+        if !rec.endpoints.contains(&pe) {
+            rec.endpoints.insert(0, pe);
+        }
+    }
+    rec.endpoint = rec.endpoints.first().cloned();
+    rec.relay = relay::client_running();
+    Ok(rec)
 }
 
 /// (device_id, pretty-JSON) of this device's public record — for the vault.
@@ -424,15 +590,32 @@ pub fn seal_result_for(
 }
 
 // ------------------------------------------------------------------
-// Command routing: loopback (self) vs LAN-direct (peer)
+// Command routing: loopback (self) → direct candidates (LAN/overlay/public)
+// → relay fallback
 // ------------------------------------------------------------------
 
+/// All direct-dial endpoints known for a target: its full candidate list
+/// (public + overlay + LAN), falling back to the legacy single `endpoint`.
+fn target_endpoints(to_device: &str) -> Vec<String> {
+    let Ok(self_pub) = self_public_record() else {
+        return vec![];
+    };
+    let Some(rec) = registry::list(&self_pub).into_iter().find(|d| d.public.device_id == to_device)
+    else {
+        return vec![];
+    };
+    let mut eps = rec.public.endpoints.clone();
+    if eps.is_empty() {
+        if let Some(e) = rec.public.endpoint {
+            eps.push(e);
+        }
+    }
+    eps
+}
+
+/// A single known endpoint for a target (first candidate) — for pairing dials.
 fn lookup_endpoint(to_device: &str) -> Option<String> {
-    let self_pub = identity::public_record(github_login()).ok()?;
-    registry::list(&self_pub)
-        .into_iter()
-        .find(|d| d.public.device_id == to_device)
-        .and_then(|d| d.public.endpoint)
+    target_endpoints(to_device).into_iter().next()
 }
 
 async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandResult, String> {
@@ -440,10 +623,28 @@ async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandRe
     if to_device == me.secrets.device_id() {
         return LoopbackTransport.deliver(env).await;
     }
-    let endpoint = lookup_endpoint(to_device).ok_or_else(|| {
-        "target device has no known LAN endpoint (is it online + discovered?)".to_string()
-    })?;
-    LanDirectTransport { endpoint }.deliver(env).await
+
+    // 1) Try every direct candidate in order (public host → overlay → LAN). A
+    //    dead address fails fast on the connect timeout, so we fall through.
+    let cands = target_endpoints(to_device);
+    let mut last_err = String::new();
+    for ep in &cands {
+        match (LanDirectTransport { endpoint: ep.clone() }).deliver(env.clone()).await {
+            Ok(r) => return Ok(r),
+            Err(e) => last_err = e,
+        }
+    }
+
+    // 2) Relay fallback (works behind any NAT — both peers dial the relay out).
+    if let Some(url) = relay_url() {
+        return (relay::RelayTransport { url }).deliver(env).await;
+    }
+
+    if cands.is_empty() {
+        Err("target device has no known endpoint and no relay is configured (discover it, pair by IP, or set a relay)".into())
+    } else {
+        Err(format!("no direct endpoint reachable (tried {}); last error: {last_err}. Configure a relay for off-LAN control.", cands.len()))
+    }
 }
 
 /// Build a signed pairing request for THIS device, POST it to a peer endpoint,
@@ -528,6 +729,19 @@ fn resolve_approval(request_id: &str, approved: bool) -> bool {
     }
 }
 
+/// Wire the module at app launch: store the handle and, when the user has the
+/// feature enabled, bring the LAN listener up IMMEDIATELY. The vault device
+/// sync that runs right after the UI loads publishes this device's record, and
+/// the endpoints it advertises are whatever the listener exposes at that
+/// moment — starting lazily (first Devices-page visit) published endpoint-less
+/// records, which made every peer's "Pair" fail with "no known LAN endpoint".
+pub fn init(app: &AppHandle) {
+    store_app(app);
+    tauri::async_runtime::spawn(async {
+        ensure_listener_started(tokio::runtime::Handle::current());
+    });
+}
+
 // ==================================================================
 // Tauri commands
 // ==================================================================
@@ -538,7 +752,7 @@ fn resolve_approval(request_id: &str, approved: bool) -> bool {
 pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
     store_app(&app);
     ensure_listener_started(tokio::runtime::Handle::current());
-    let rec = identity::public_record(github_login())?;
+    let rec = self_public_record()?;
     Ok(json!({
         "device_id": rec.device_id,
         "name": rec.name,
@@ -552,7 +766,13 @@ pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
         "enabled": feature_enabled(),
         "env_override": env_override(),
         "endpoint": rec.endpoint,
-        "listening": lan::current_endpoint().is_some(),
+        "endpoints": rec.endpoints,
+        "listening": lan::current_port().is_some(),
+        "public_endpoint": public_endpoint(),
+        "relay_url": relay_url(),
+        "relay_client": relay::client_running(),
+        "relay_serving": relay::serving(),
+        "agents_allowed": agents_allowed(),
     }))
 }
 
@@ -569,17 +789,65 @@ pub fn device_remote_enabled_get() -> bool {
 }
 
 /// Flip the master opt-in. The env override, if set, cannot be turned off here.
-/// Starts/stops the LAN listener to match.
+/// Starts/stops the LAN listener + relay client to match.
 #[tauri::command]
 pub async fn device_remote_enabled_set(app: AppHandle, enabled: bool) -> Result<(), String> {
     store_app(&app);
     set_enabled(enabled)?;
-    if feature_enabled() {
-        ensure_listener_started(tokio::runtime::Handle::current());
-    } else {
-        lan::stop();
-    }
+    ensure_listener_started(tokio::runtime::Handle::current());
+    // Republish our vault record right away so peers see the new endpoints
+    // (or their removal) without a manual Discover. Fire-and-forget — the git
+    // round-trip can take seconds and must not stall the toggle.
+    tauri::async_runtime::spawn(async {
+        let _ = crate::vault::vault_sync_devices().await;
+    });
     Ok(())
+}
+
+/// Set (or clear, with null) this device's public host:port — for reaching it
+/// off-LAN via a port-forward / DDNS / Tailscale MagicDNS name.
+#[tauri::command]
+pub fn device_set_public_endpoint(endpoint: Option<String>) -> Result<(), String> {
+    write_config("public_endpoint", endpoint)
+}
+
+/// Set (or clear, with null) the shared relay URL and (re)start the relay client
+/// so this device becomes reachable via the relay.
+#[tauri::command]
+pub async fn device_set_relay(app: AppHandle, url: Option<String>) -> Result<(), String> {
+    store_app(&app);
+    write_config("relay_url", url)?;
+    // Re-evaluate the client loop against the new URL.
+    relay::stop_client();
+    ensure_relay_client(tokio::runtime::Handle::current());
+    Ok(())
+}
+
+/// Run a relay server on this machine (e.g. an always-on box with a public URL /
+/// tunnel). Any device that points its relay URL here can be reached through it.
+/// The relay only ever forwards ciphertext.
+#[tauri::command]
+pub fn device_relay_serve(bind: Option<String>) -> Result<Value, String> {
+    let bind = bind.unwrap_or_else(|| "0.0.0.0:47772".to_string());
+    relay::serve(&bind)?;
+    Ok(json!({ "serving": true, "bind": bind }))
+}
+
+/// Stop the relay server running on this machine.
+#[tauri::command]
+pub fn device_relay_stop() -> Value {
+    relay::stop_serving();
+    json!({ "serving": false })
+}
+
+/// Relay status ({ url, client, serving }).
+#[tauri::command]
+pub fn device_relay_status() -> Value {
+    json!({
+        "url": relay_url(),
+        "client": relay::client_running(),
+        "serving": relay::serving(),
+    })
 }
 
 /// LAN listener status ({ listening, endpoint }).
@@ -622,8 +890,17 @@ pub async fn device_request_pairing(to_device: String) -> Result<(), String> {
             &me.x25519_pub,
         );
     }
-    let endpoint = lookup_endpoint(&to_device)
-        .ok_or_else(|| "target device has no known LAN endpoint (discover it or pair by IP)".to_string())?;
+    let endpoint = match lookup_endpoint(&to_device) {
+        Some(ep) => ep,
+        None => {
+            // The registry copy may be stale (published before the peer enabled
+            // remote control). Pull the vault once before giving up.
+            let _ = crate::vault::vault_sync_devices().await;
+            lookup_endpoint(&to_device).ok_or_else(|| {
+                "that device hasn't published an address yet — on it, open Devices and enable remote control (its address then syncs here through your GitHub vault), or pair by ip:port".to_string()
+            })?
+        }
+    };
     pair_with_endpoint(&endpoint).await.map(|_| ())
 }
 
@@ -682,40 +959,144 @@ pub async fn device_send(
     timeout_ms: Option<u64>,
 ) -> Result<CommandResult, String> {
     store_app(&app);
-    let me = identity::load_or_create()?;
-    let recipient_pub = recipient_x_pub(&to_device)?;
-
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind,
         command: command.unwrap_or_default(),
         payload,
         timeout_ms: timeout_ms.unwrap_or(0),
+        ..Default::default()
     };
-    let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
+    send_request(&to_device, req).await
+}
 
+/// Seal `req`, route it (loopback/LAN/relay), and return the target's result.
+/// High-frequency session ops (write/read/resize) skip the audit; lifecycle +
+/// one-shot commands are audited.
+async fn send_request(to_device: &str, req: CommandRequest) -> Result<CommandResult, String> {
+    let me = identity::load_or_create()?;
+    let recipient_pub = recipient_x_pub(to_device)?;
+    let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
-    let env = crypto::seal(
-        &me.secrets,
-        &to_device,
-        &recipient_pub,
-        &plaintext,
-        now_unix(),
-        &nonce,
-    )?;
+    let env = crypto::seal(&me.secrets, to_device, &recipient_pub, &plaintext, now_unix(), &nonce)?;
+    let result = route_command(env, to_device).await?;
 
-    let result = route_command(env, &to_device).await?;
-    audit::write(&audit::record(
-        "outbound",
-        &me.secrets.device_id(),
-        &to_device,
-        kind_str(req.kind),
-        &req.command,
-        &result.decision,
-        &result,
-    ));
+    let noisy = matches!(
+        req.kind,
+        CommandKind::SessionWrite | CommandKind::SessionRead | CommandKind::SessionResize
+    );
+    if !noisy {
+        audit::write(&audit::record(
+            "outbound",
+            &me.secrets.device_id(),
+            to_device,
+            kind_str(req.kind),
+            &req.command,
+            &result.decision,
+            &result,
+        ));
+    }
     Ok(result)
+}
+
+/// Agent entry point: run a shell command on a paired device by NAME or id.
+/// Gated by the agents-allowed switch; the target still enforces pairing + the
+/// shell policy. Used by both the local tool loop and the MCP gateway (so
+/// subscription-CLI agents get the same capability).
+pub async fn agent_device_exec(device_name_or_id: &str, command: &str) -> Result<CommandResult, String> {
+    if !agents_allowed() {
+        return Err("remote device access is disabled — enable 'Let agents use remote devices' on the Devices page".into());
+    }
+    let want = device_name_or_id.trim();
+    if want.is_empty() {
+        return Err("device is required (a paired device name or id)".into());
+    }
+    let self_pub = self_public_record()?;
+    let target = registry::list(&self_pub)
+        .into_iter()
+        .find(|d| !d.is_self && (d.public.device_id == want || d.public.name.eq_ignore_ascii_case(want)))
+        .ok_or_else(|| format!("no paired device '{want}' — pair it on the Devices page first"))?;
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::Shell,
+        command: command.to_string(),
+        timeout_ms: 60_000,
+        ..Default::default()
+    };
+    send_request(&target.public.device_id, req).await
+}
+
+/// Open an interactive remote shell (SSH-like). Returns the session id.
+#[tauri::command]
+pub async fn device_session_open(
+    app: AppHandle,
+    to_device: String,
+    shell: Option<String>,
+    cols: Option<u16>,
+    rows: Option<u16>,
+) -> Result<CommandResult, String> {
+    store_app(&app);
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionOpen,
+        command: shell.unwrap_or_default(),
+        cols,
+        rows,
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
+}
+
+/// Send keystrokes (base64) to an open remote session.
+#[tauri::command]
+pub async fn device_session_write(to_device: String, session: String, data: String) -> Result<CommandResult, String> {
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionWrite,
+        session: Some(session),
+        payload: Some(data),
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
+}
+
+/// Drain buffered output from an open remote session (base64 in `data`).
+#[tauri::command]
+pub async fn device_session_read(to_device: String, session: String) -> Result<CommandResult, String> {
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionRead,
+        session: Some(session),
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
+}
+
+/// Resize an open remote session's PTY.
+#[tauri::command]
+pub async fn device_session_resize(to_device: String, session: String, cols: u16, rows: u16) -> Result<CommandResult, String> {
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionResize,
+        session: Some(session),
+        cols: Some(cols),
+        rows: Some(rows),
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
+}
+
+/// Close an open remote session.
+#[tauri::command]
+pub async fn device_session_close(to_device: String, session: String) -> Result<CommandResult, String> {
+    let req = CommandRequest {
+        request_id: uuid::Uuid::new_v4().to_string(),
+        kind: CommandKind::SessionClose,
+        session: Some(session),
+        ..Default::default()
+    };
+    send_request(&to_device, req).await
 }
 
 /// Pending dangerous-action approvals awaiting a decision on THIS machine.
@@ -754,14 +1135,30 @@ pub fn device_control_state() -> Value {
     control_state_value()
 }
 
-/// EMERGENCY STOP — cancel every in-flight remote command and clear the state.
+/// EMERGENCY STOP — cancel every in-flight command AND kill every interactive
+/// session, then clear the state.
 #[tauri::command]
 pub fn device_stop_remote_control(app: AppHandle) -> Value {
     store_app(&app);
     let cancelled = executor::cancel_all();
+    let sessions = session::kill_all();
     CONTROL.lock().unwrap().clear();
     emit_control();
-    json!({ "cancelled": cancelled })
+    json!({ "cancelled": cancelled, "sessions_killed": sessions })
+}
+
+/// Whether agents may drive paired+shell-granted remote devices (default OFF).
+#[tauri::command]
+pub fn device_agents_allowed_get() -> bool {
+    agents_allowed()
+}
+
+/// Flip the "let agents use remote devices" switch. Once on, agents get a
+/// remote_shell tool for any paired device your machine has been granted shell
+/// on — no per-call prompt (admin/elevation on the target is still gated).
+#[tauri::command]
+pub fn device_set_agents_allowed(allowed: bool) -> Result<(), String> {
+    set_agents_allowed_cfg(allowed)
 }
 
 /// The last `limit` audit lines (redacted), newest last.
@@ -783,6 +1180,7 @@ pub async fn device_selftest(app: AppHandle) -> Result<Value, String> {
         command: String::new(),
         payload: None,
         timeout_ms: 10_000,
+        ..Default::default()
     };
     let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
     let mut nonce = [0u8; 24];
@@ -834,6 +1232,7 @@ mod tests {
             command: command.into(),
             payload: None,
             timeout_ms: 5000,
+            ..Default::default()
         };
         let pt = serde_json::to_vec(&req).unwrap();
         let mut nonce = [0u8; 24];

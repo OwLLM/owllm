@@ -145,10 +145,13 @@ pub fn public_record(github_login: Option<String>) -> Result<DevicePublic, Strin
         x25519_pub: b64(&id.secrets.x25519_public()),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        app_version: crate::APP_VERSION.clone(),
         github_login,
         capabilities: capabilities(),
-        // Advertised only while the LAN listener is up (so peers can dial us).
+        // All addresses peers can dial (LAN + overlay). mod::self_public_record
+        // decorates this with the user-set public endpoint + relay flag.
         endpoint: super::lan::current_endpoint(),
+        endpoints: super::lan::candidate_endpoints(),
+        relay: false,
     })
 }

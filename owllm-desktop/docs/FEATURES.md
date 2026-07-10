@@ -84,6 +84,11 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 Single coding agent in one folder. Multi-page tab strip; each page = its own
 chat + Kanban plan + **private git worktree** on its own branch (merge from the
 header). Plan/Act phases; live diffs; editable file viewer; image paste.
+Optional **second agent pane** (own transcript/model, ⇄ auto-feed both ways,
+divided composer). The chat pane carries its own header — model picker +
+`Clear` (run state) + `Clear history` (chat window **and** saved threads) —
+and the composer lives in the same column as the chat, so input and window
+stay width-aligned beside the full-height file rail and right column.
 Right column = ⚡ Super User: project **rules** (same directives as the team;
 shared scope when the folder is a team project) + **Notebook** with auto-feed;
 mid-run chat becomes a steer. "Just chat" mode with persisted threads.
@@ -207,14 +212,20 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   Node above, which drives external KVM hardware; this controls OwLLM *devices*.)
 - **Identity**: per-install Ed25519 (sign/id) + X25519 (seal) keypair, DPAPI-
   wrapped at rest, never synced. `device_id = hex(SHA-256(ed_pub))`. Editable name.
-- **Sealed transport**: every command (and its reply) is an end-to-end
-  AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries ciphertext.
-  `Transport` seam with `LoopbackTransport` (self) and **`LanDirectTransport`**
-  (`lan.rs` — a `tiny_http` listener + `reqwest` client for real cross-machine
-  control on a LAN); a WAN `RelayTransport` is the one deferred piece.
+- **Sealed transport (WAN-capable)**: every command AND its reply is an
+  end-to-end AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries
+  ciphertext. `Transport` seam with `LoopbackTransport` (self), `LanDirectTransport`
+  (`lan.rs` — `tiny_http` listener + `reqwest`), and `RelayTransport` (`relay.rs`).
+  Devices need NOT be on the same network: each publishes all its addresses
+  (overlay/Tailscale + public host:port + LAN), the controller tries each, then
+  falls back to a **self-hostable relay** (store-and-forward, both peers dial out,
+  ciphertext-only — run it via `device_relay_serve` on any always-on box).
 - **Discovery**: `vault_sync_devices` (a 4th vault channel) publishes each
-  device's public record + LAN endpoint and pulls peers into the registry; or
-  **pair by IP** directly with no vault.
+  device's public record + all endpoints and pulls peers into the registry; or
+  **pair by IP** directly with no vault. Self-maintaining: the listener starts at
+  app launch (when enabled) so the launch sync always publishes dialable
+  endpoints, toggling remote control republishes immediately, and Pair pulls the
+  vault once before reporting a peer has no address.
 - **Trust + policy**: pairing request (over the wire / by IP) → unmistakable
   target-side approval → per-controller `PermissionPolicy` (Shell / WSL / File
   writes / Admin), default read-only diagnostics. `authorize()` is a unit-tested
@@ -225,6 +236,15 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   banner + emergency Stop. Persistent replay cache. Redacted JSONL audit on both
   ends (output stored only as length + digest). Ships DISABLED
   (`OWLLM_REMOTE_DEVICES=1` or the page toggle). Design: `docs/REMOTE_DEVICES.md`.
+- **Interactive shell (SSH-like)**: an `🖥 Open shell` in the Devices console
+  spawns a real PTY on the target (`session.rs`, portable-pty) and streams it into
+  an xterm terminal over the sealed transport — installers that prompt, REPLs,
+  `sudo` flows, log tails, dev work. Session ops are the `shell` tier, bound to
+  the controller that opened them; the target shows the banner for the whole session.
+- **Agent remote access**: a `device_exec` agent tool (distinct from `ssh_exec` —
+  no SSH keys, works over the sealed device channel) lets the team run commands on
+  a paired device for tech support / installs / dev. Gated by a **"Let agents use
+  remote devices"** switch (off by default; free once on, admin still target-approved).
 
 ## USB-portable mode — "OwLLM Go" (`paths.rs::init_portable_mode`)
 

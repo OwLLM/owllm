@@ -13,6 +13,16 @@
 
 use tauri::Emitter;
 
+/// The app's REAL version. Releases bump tauri.conf.json only (Cargo.toml sat
+/// at 0.4.7 for ~40 releases), so anything user-visible must read the config —
+/// env!("CARGO_PKG_VERSION") is the stale fallback.
+pub static APP_VERSION: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| {
+    serde_json::from_str::<serde_json::Value>(include_str!("../tauri.conf.json"))
+        .ok()
+        .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(str::to_string))
+        .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
+});
+
 mod accounts;
 mod agent_tools;
 mod agents;
@@ -62,8 +72,43 @@ mod webhook;
 mod wsl;
 mod wsl_setup;
 
+/// Log every panic to a crash file before it takes the process down. In a
+/// windows-subsystem app stderr is invisible and a panic that unwinds out of
+/// the event loop leaves NO trace (no WER entry, no dialog) — the window just
+/// disappears. That exact "silent crash" was reported and was undiagnosable.
+/// Mirrors the paths_debug fallback chain: %TEMP%, then %USERPROFILE%.
+fn install_crash_log_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let entry = format!(
+            "[{}] panic on thread '{}': {}\nbacktrace:\n{}\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            std::thread::current().name().unwrap_or("<unnamed>"),
+            info,
+            std::backtrace::Backtrace::force_capture(),
+        );
+        for base in [std::env::var_os("TEMP"), std::env::var_os("USERPROFILE")]
+            .into_iter()
+            .flatten()
+        {
+            let path = std::path::PathBuf::from(base).join("owllm-crash.log");
+            use std::io::Write;
+            let ok = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut f| f.write_all(entry.as_bytes()));
+            if ok.is_ok() {
+                break;
+            }
+        }
+        default(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_crash_log_hook();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.
@@ -122,6 +167,10 @@ pub fn run() {
             // just kicks off the install.
             server::install(app);
             overlay_frame::install(app);
+            // Remote Devices: bring the LAN listener up now (if enabled) so the
+            // launch-time vault sync publishes this device's record WITH its
+            // dialable endpoints — lazy start left peers endpoint-less records.
+            remote_devices::init(&app.handle());
             // Module system (registry + per-user installed.json under
             // app_data_dir/modules/). Wizard reads from this; Server /
             // Train pages resolve binaries through it.
@@ -155,8 +204,11 @@ pub fn run() {
                     overlay_frame::wait_until_ready(std::time::Duration::from_millis(700));
                     let dispatch_window = show_window.clone();
                     let _ = show_window.run_on_main_thread(move || {
-                        let _ = overlay_frame::prepare_and_show_for_main(&dispatch_window);
+                        // Main FIRST, overlay second: the frame arriving a
+                        // beat late is invisible; the overlay arriving early
+                        // (or unpainted) is the startup white flash.
                         let _ = dispatch_window.show();
+                        let _ = overlay_frame::prepare_and_show_for_main(&dispatch_window);
                         let _ = dispatch_window.emit("owllm:shown", ());
                     });
                 });
@@ -254,10 +306,22 @@ pub fn run() {
             remote_devices::device_trust_remove,
             remote_devices::device_trust_set_policy,
             remote_devices::device_send,
+            remote_devices::device_session_open,
+            remote_devices::device_session_write,
+            remote_devices::device_session_read,
+            remote_devices::device_session_resize,
+            remote_devices::device_session_close,
+            remote_devices::device_agents_allowed_get,
+            remote_devices::device_set_agents_allowed,
             remote_devices::device_pending_approvals,
             remote_devices::device_approve_action,
             remote_devices::device_deny_action,
             remote_devices::device_sync_discovery,
+            remote_devices::device_set_public_endpoint,
+            remote_devices::device_set_relay,
+            remote_devices::device_relay_serve,
+            remote_devices::device_relay_stop,
+            remote_devices::device_relay_status,
             remote_devices::device_cancel,
             remote_devices::device_control_state,
             remote_devices::device_stop_remote_control,

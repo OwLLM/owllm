@@ -130,8 +130,7 @@ fn is_git_repo(dir: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// Run a git command in `dir`, capture stdout+stderr+status.
-fn git(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
+fn git_once(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
     let out = git_cmd(dir)
         .args(args)
         .output()
@@ -139,6 +138,18 @@ fn git(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
     Ok((out.status.success(), stdout, stderr))
+}
+
+/// Run a git command in `dir`, capture stdout+stderr+status. Self-heals a
+/// corrupt `.git/index` (rebuild from HEAD, retry once) so a per-agent worktree
+/// isn't wedged by a partial index write — shares the vault.rs helper.
+fn git(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
+    let r = git_once(dir, args)?;
+    if !r.0 && crate::vault::is_corrupt_index(&r.2) {
+        crate::vault::repair_index(Some(dir));
+        return git_once(dir, args);
+    }
+    Ok(r)
 }
 
 // ------------------------------------------------------------------

@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import LogBox from "../../components/LogBox";
+import RemoteTerminal from "./RemoteTerminal";
 import * as rd from "./remoteDevices";
 import type {
   CommandKind,
@@ -83,6 +84,9 @@ export default function DevicesPage() {
   const [selftestMsg, setSelftestMsg] = useState("");
   const [manualAddr, setManualAddr] = useState("");
   const [discoverMsg, setDiscoverMsg] = useState("");
+  const [publicEpDraft, setPublicEpDraft] = useState("");
+  const [relayUrlDraft, setRelayUrlDraft] = useState("");
+  const [shellDevice, setShellDevice] = useState<string | null>(null);
 
   const guard = useCallback(async (fn: () => Promise<void>) => {
     try {
@@ -192,6 +196,11 @@ export default function DevicesPage() {
   const approveAction = (id: string) => guard(async () => { await rd.approveAction(id); });
   const denyAction = (id: string) => guard(async () => { await rd.denyAction(id); });
 
+  const savePublicEndpoint = () => guard(async () => { await rd.setPublicEndpoint(publicEpDraft.trim() || null); setPublicEpDraft(""); await reload(); });
+  const saveRelay = () => guard(async () => { await rd.setRelay(relayUrlDraft.trim() || null); setRelayUrlDraft(""); await reload(); });
+  const toggleRelayServer = (on: boolean) => guard(async () => { if (on) await rd.relayServe(); else await rd.relayStop(); await reload(); });
+  const toggleAgents = (on: boolean) => guard(async () => { await rd.setAgentsAllowed(on); await reload(); });
+
   const stopAll = () =>
     guard(async () => {
       const r = await rd.stopRemoteControl();
@@ -276,6 +285,7 @@ export default function DevicesPage() {
           onRename={() => guard(async () => { await rd.setDeviceName(nameDraft); await reload(); })}
           onSelfTest={runSelfTest}
           selftestMsg={selftestMsg}
+          onToggle={(on) => guard(async () => { await rd.setEnabled(on); await reload(); })}
         />
         <DeviceList
           devices={devices}
@@ -289,6 +299,21 @@ export default function DevicesPage() {
           discoverMsg={discoverMsg}
         />
       </section>
+
+      {/* Network / WAN reachability */}
+      {identity && (
+        <NetworkPanel
+          identity={identity}
+          publicEpDraft={publicEpDraft}
+          setPublicEpDraft={setPublicEpDraft}
+          onSavePublic={savePublicEndpoint}
+          relayUrlDraft={relayUrlDraft}
+          setRelayUrlDraft={setRelayUrlDraft}
+          onSaveRelay={saveRelay}
+          onToggleServer={toggleRelayServer}
+          onToggleAgents={toggleAgents}
+        />
+      )}
 
       {/* Trusted controllers + permission toggles */}
       {(trustedActive.length > 0 || revoked.length > 0) && (
@@ -318,7 +343,17 @@ export default function DevicesPage() {
         lines={consoleLines}
         onClear={() => setConsoleLines([])}
         wslDisabled={wslDisabled}
+        onOpenShell={() => setShellDevice(target)}
       />
+
+      {/* Live interactive remote shell (SSH-like) */}
+      {shellDevice && (
+        <RemoteTerminal
+          toDevice={shellDevice}
+          deviceName={devices.find((d) => d.device_id === shellDevice)?.name ?? shortId(shellDevice)}
+          onClose={() => setShellDevice(null)}
+        />
+      )}
 
       {/* Audit trail */}
       <AuditView rows={audit} />
@@ -339,7 +374,7 @@ function Header({ identity, onToggle }: { identity: DeviceIdentity | null; onTog
       <span style={{ flex: 1 }} />
       <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: identity?.env_override ? "default" : "pointer", color: enabled ? "var(--accent)" : "var(--fg-muted)" }}>
         <input type="checkbox" checked={enabled} disabled={identity?.env_override} onChange={(e) => onToggle(e.target.checked)} />
-        {enabled ? "enabled" : "disabled"}
+        {enabled ? "remote control enabled" : "remote control disabled"}
         {identity?.env_override && <span title="Forced on by OWLLM_REMOTE_DEVICES."> (env)</span>}
       </label>
     </div>
@@ -398,7 +433,7 @@ function ApprovalBanner({
 }
 
 function MyDeviceCard({
-  identity, nameDraft, setNameDraft, onRename, onSelfTest, selftestMsg,
+  identity, nameDraft, setNameDraft, onRename, onSelfTest, selftestMsg, onToggle,
 }: {
   identity: DeviceIdentity | null;
   nameDraft: string;
@@ -406,6 +441,7 @@ function MyDeviceCard({
   onRename: () => void;
   onSelfTest: () => void;
   selftestMsg: string;
+  onToggle: (on: boolean) => void;
 }) {
   if (!identity) return <div style={cardStyle}>loading…</div>;
   return (
@@ -424,10 +460,29 @@ function MyDeviceCard({
       <Row k="WSL" v={identity.capabilities.wsl ? "available" : "n/a"} />
       <Row
         k="Listening"
-        v={identity.listening ? `yes · ${identity.endpoint ?? "?"}` : identity.enabled ? "starting…" : "off (enable first)"}
+        v={identity.listening ? `yes · ${identity.endpoint ?? "?"}` : identity.enabled ? "starting…" : "off"}
         mono={identity.listening}
       />
       <Row k="Signing key" v={shortId(identity.ed25519_pub)} mono />
+      {/* THE master switch — a real button, not a hunt-for-the-checkbox. */}
+      {!identity.enabled && !identity.env_override && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+          <button className="btn" onClick={() => onToggle(true)}
+            style={{ background: "var(--accent)", color: "#fff", fontWeight: 700, padding: "7px 14px", alignSelf: "flex-start" }}>
+            ▶ Enable remote control on this PC
+          </button>
+          <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>
+            Lets your other OwLLM machines pair with this one. Its address is shared to them
+            automatically through your GitHub vault — nothing to type.
+          </span>
+        </div>
+      )}
+      {identity.enabled && !identity.env_override && (
+        <button className="ghost-btn" onClick={() => onToggle(false)}
+          style={{ fontSize: 10.5, padding: "2px 8px", alignSelf: "flex-start", color: "var(--fg-muted)" }}>
+          disable remote control
+        </button>
+      )}
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
         <button className="ghost-btn" onClick={onSelfTest} style={{ fontSize: 11.5, padding: "3px 10px" }}>
           🔬 Run secure self-test
@@ -435,6 +490,82 @@ function MyDeviceCard({
         {selftestMsg && <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{selftestMsg}</span>}
       </div>
     </div>
+  );
+}
+
+function NetworkPanel({
+  identity, publicEpDraft, setPublicEpDraft, onSavePublic, relayUrlDraft, setRelayUrlDraft, onSaveRelay, onToggleServer, onToggleAgents,
+}: {
+  identity: DeviceIdentity;
+  publicEpDraft: string;
+  setPublicEpDraft: (s: string) => void;
+  onSavePublic: () => void;
+  relayUrlDraft: string;
+  setRelayUrlDraft: (s: string) => void;
+  onSaveRelay: () => void;
+  onToggleServer: (on: boolean) => void;
+  onToggleAgents: (on: boolean) => void;
+}) {
+  return (
+    <section style={{ ...cardStyle, border: "1px solid rgba(var(--accent-rgb),0.45)" }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>Network &amp; reachability (WAN)</div>
+      <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+        Controlling a device works across <b>any network the two machines can route to each other on</b> — same LAN, a
+        Tailscale/WireGuard/VPN overlay (recommended for off-LAN, no setup here — your overlay IP is published
+        automatically), a public host you set below, or a relay you host.
+      </span>
+
+      <Row k="Listening on" v={identity.endpoints.length ? identity.endpoints.join("  ·  ") : (identity.enabled ? "starting…" : "off")} mono />
+
+      {/* Public endpoint */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+        <span style={{ fontSize: 11.5, color: "var(--fg)" }}>
+          Public endpoint <span style={{ color: "var(--fg-muted)" }}>(port-forward / DDNS / Tailscale MagicDNS host:port)</span>
+          {identity.public_endpoint && <span style={{ ...badge("var(--ok)"), marginLeft: 6 }}>{identity.public_endpoint}</span>}
+        </span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input value={publicEpDraft} onChange={(e) => setPublicEpDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onSavePublic(); }}
+            placeholder={identity.public_endpoint ?? "myhost.example.com:47771  (blank = clear)"}
+            style={{ ...inputStyle, flex: 1, fontFamily: "monospace" }} />
+          <button className="ghost-btn" onClick={onSavePublic} style={{ fontSize: 11, padding: "2px 10px" }}>Save</button>
+        </div>
+      </div>
+
+      {/* Relay */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+        <span style={{ fontSize: 11.5, color: "var(--fg)" }}>
+          Relay <span style={{ color: "var(--fg-muted)" }}>(pure-NAT fallback — both devices dial out; it only sees ciphertext)</span>
+          {identity.relay_url && <span style={{ ...badge(identity.relay_client ? "var(--ok)" : "var(--warn)"), marginLeft: 6 }}>{identity.relay_client ? "connected" : "set"}</span>}
+        </span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input value={relayUrlDraft} onChange={(e) => setRelayUrlDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onSaveRelay(); }}
+            placeholder={identity.relay_url ?? "https://relay.example.com  (blank = clear)"}
+            style={{ ...inputStyle, flex: 1, fontFamily: "monospace" }} />
+          <button className="ghost-btn" onClick={onSaveRelay} style={{ fontSize: 11, padding: "2px 10px" }}>Save</button>
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, cursor: "pointer", color: identity.relay_serving ? "var(--accent)" : "var(--fg-muted)", marginTop: 2 }}>
+          <input type="checkbox" checked={identity.relay_serving} onChange={(e) => onToggleServer(e.target.checked)} />
+          Host a relay on this machine (bind 0.0.0.0:47772) — for an always-on box with a public URL/tunnel
+          {identity.relay_serving && <span style={badge("var(--ok)")}>serving</span>}
+        </label>
+      </div>
+
+      {/* Agent remote access */}
+      <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: identity.agents_allowed ? "var(--accent)" : "var(--fg)" }}>
+          <input type="checkbox" checked={identity.agents_allowed} onChange={(e) => onToggleAgents(e.target.checked)} />
+          <b>Let agents use remote devices</b>
+          {identity.agents_allowed && <span style={badge("var(--ok)")}>on</span>}
+        </label>
+        <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+          When on, your agents (Agentic team / Code) get a <code>remote_shell</code> tool for any device you've paired and been
+          granted <b>shell</b> on — for tech support, installing software, and development on the other machine. Admin/elevation
+          on the target still needs its approval. Off by default.
+        </span>
+      </div>
+    </section>
   );
 }
 
@@ -465,6 +596,7 @@ function DeviceList({
       {devices.map((d) => {
         const online = isOnline(d);
         const ts = trustState(d.device_id);
+        const noAddress = !d.is_self && !(d.endpoints?.length || d.endpoint);
         return (
           <div key={d.device_id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-card)" }}>
             <span className="status-dot" style={{ background: online ? "var(--ok)" : "var(--fg-subtle)", width: 8, height: 8, borderRadius: 4 }} />
@@ -475,6 +607,12 @@ function DeviceList({
             {ts === "revoked" && <span style={badge("var(--error)")}>revoked</span>}
             <span style={{ color: "var(--fg-muted)" }}>{d.os}</span>
             <span style={{ color: "var(--fg-subtle)" }}>v{d.app_version}</span>
+            {noAddress && (
+              <span title="That machine hasn't published a dialable address yet. Open its Devices page and enable remote control — the address syncs here via your vault."
+                style={{ fontSize: 10.5, color: "var(--warn)" }}>
+                no address yet — enable remote control on it
+              </span>
+            )}
             <span style={{ flex: 1 }} />
             <span style={{ fontSize: 10.5, color: "var(--fg-subtle)" }}>{online ? "online" : relativeSeen(d.last_seen)}</span>
             {d.is_self ? (
@@ -563,7 +701,7 @@ function TrustedControllers({
 }
 
 function RemoteConsole({
-  devices, target, setTarget, kind, setKind, command, setCommand, fileContent, setFileContent, running, onRun, onStop, lines, onClear, wslDisabled,
+  devices, target, setTarget, kind, setKind, command, setCommand, fileContent, setFileContent, running, onRun, onStop, lines, onClear, wslDisabled, onOpenShell,
 }: {
   devices: DeviceRecord[];
   target: string;
@@ -580,6 +718,7 @@ function RemoteConsole({
   lines: string[];
   onClear: () => void;
   wslDisabled: boolean;
+  onOpenShell: () => void;
 }) {
   const needsCommand = kind === "shell" || kind === "wsl";
   const isFileWrite = kind === "file_write";
@@ -616,7 +755,10 @@ function RemoteConsole({
         <button className="btn" onClick={onRun} disabled={runDisabled} style={{ padding: "3px 14px", fontWeight: 700 }}>
           {running ? "Running…" : "▶ Run"}
         </button>
-        <button className="ghost-btn" onClick={onStop} title="Emergency stop — cancel every in-flight remote command" style={{ padding: "3px 10px", color: "var(--error)" }}>
+        <button className="btn" onClick={onOpenShell} title="Open a live interactive shell on the target (SSH-like)" style={{ padding: "3px 12px", background: "#c04bd6", color: "#fff", fontWeight: 700 }}>
+          🖥 Open shell
+        </button>
+        <button className="ghost-btn" onClick={onStop} title="Emergency stop — cancel every in-flight remote command + session" style={{ padding: "3px 10px", color: "var(--error)" }}>
           ⛔ Stop
         </button>
         <button className="ghost-btn" onClick={onClear} style={{ padding: "3px 8px", fontSize: 11 }}>clear</button>

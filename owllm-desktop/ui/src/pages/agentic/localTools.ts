@@ -270,6 +270,23 @@ export async function refreshBrowserState(): Promise<void> {
         "via the kvm_node tool (or mcp__owllm__kvm_node). CALL IT DIRECTLY, same rules as the browser tools." + hosts;
     }
   } catch { /* feature absent/off — say nothing */ }
+  // Remote Devices capability — announced only when the user enabled agent
+  // remote access (default off), naming paired devices so the agent can act
+  // without asking for connection details. Same "tools alone don't announce the
+  // live capability" lesson as the browser/KVM lines above.
+  try {
+    const on = await invoke<boolean>("device_agents_allowed_get");
+    if (on) {
+      const devs = await invoke<Array<{ name: string; is_self: boolean }>>("devices_list").catch(() => []);
+      const peers = devs.filter((d) => !d.is_self).map((d) => d.name);
+      _browserStateLine +=
+        " REMOTE DEVICES — you CAN run shell commands on the user's OTHER paired machines with the device_exec tool " +
+        "(or mcp__owllm__device_exec): device_exec({ device: '<name>', command: '<shell>' }). Use it for tech support, " +
+        "installing software, and development on another PC — it works over the encrypted device channel (no SSH). " +
+        "CALL IT DIRECTLY, same rules as the browser tools." +
+        (peers.length ? ` Paired devices: ${peers.join(", ")}.` : " No devices paired yet — the user pairs them on the Devices page.");
+    }
+  } catch { /* feature off — say nothing */ }
 }
 
 /// SYNC accessor for the (sync) prompt builders, same pattern as
@@ -1126,6 +1143,21 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     ],
   },
   {
+    name: "device_exec",
+    aliases: ["owllm_device", "owllm_remote", "fleet_exec", "paired_device", "remote_device_shell", "device_shell", "device_run"],
+    description:
+      "Run a shell command on a PAIRED OwLLM device — another PC running OwLLM that " +
+      "you've paired and granted shell to. Unlike ssh_exec this needs NO SSH keys/config " +
+      "and works across networks (same LAN, a Tailscale/VPN overlay, or a relay) over the " +
+      "app's end-to-end-encrypted device channel. Use for tech support, installing software, " +
+      "or development on another of your machines. Returns stdout/stderr/exit_code. Requires " +
+      "'Let agents use remote devices' to be enabled on the Devices page.",
+    args: [
+      { name: "device", required: true, description: "Target device NAME or id (from your OwLLM Devices list).", aliases: ["target", "machine", "pc", "device_id", "name", "host"] },
+      { name: "command", required: true, description: "The shell command to run on the remote device.", aliases: ["cmd", "script", "run", "command_line"] },
+    ],
+  },
+  {
     name: "ssh_upload",
     aliases: ["scp_upload", "upload_file", "ssh_put", "scp_put", "send_file", "scp"],
     description: "Copy a LOCAL file to a REMOTE host over SSH/SCP using the user's SSH keys.",
@@ -1674,6 +1706,36 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         if (r.stderr.trim()) parts.push(`stderr:\n${truncate(r.stderr, 2000)}`);
         parts.push(`exit_code: ${r.exitCode}`);
         return { ok: r.exitCode === 0, output: parts.join("\n\n") };
+      }
+      case "device_exec":
+      case "owllm_device":
+      case "device_run": {
+        // Run a shell command on a PAIRED OwLLM device over the sealed transport
+        // (not SSH). Gated by the "let agents use remote devices" switch; the
+        // backend still enforces pairing + the shell permission on the target.
+        const allowed = await invoke<boolean>("device_agents_allowed_get").catch(() => false);
+        if (!allowed) {
+          return { ok: false, output: "remote device access is disabled — turn on 'Let agents use remote devices' on the Devices page." };
+        }
+        const wanted = String(call.args.device ?? "").trim();
+        if (!wanted) return { ok: false, output: "device_exec: 'device' (target name or id) is required" };
+        const command = String(call.args.command ?? "").trim();
+        if (!command) return { ok: false, output: "device_exec: 'command' is required" };
+        const devices = await invoke<Array<{ device_id: string; name: string; is_self: boolean }>>("devices_list").catch(() => []);
+        const match = devices.find((d) => !d.is_self && (d.device_id === wanted || d.name.toLowerCase() === wanted.toLowerCase()));
+        if (!match) {
+          const names = devices.filter((d) => !d.is_self).map((d) => d.name).join(", ") || "(none paired)";
+          return { ok: false, output: `device_exec: no paired device '${wanted}'. Known devices: ${names}. Pair it on the Devices page first.` };
+        }
+        const res = await invoke<{ ok: boolean; stdout: string; stderr: string; exit_code: number | null; decision: string; error: string | null }>(
+          "device_send", { toDevice: match.device_id, kind: "shell", command, payload: null, timeoutMs: 60000 },
+        ).catch((e) => ({ ok: false, stdout: "", stderr: "", exit_code: null, decision: "error", error: String(e) }));
+        const parts: string[] = [];
+        if (res.stdout?.trim()) parts.push(`stdout:\n${truncate(res.stdout, 4000)}`);
+        if (res.stderr?.trim()) parts.push(`stderr:\n${truncate(res.stderr, 2000)}`);
+        if (res.error) parts.push(`error: ${res.error}`);
+        parts.push(`device: ${match.name} · decision: ${res.decision} · exit_code: ${res.exit_code ?? "n/a"}`);
+        return { ok: !!res.ok, output: parts.join("\n\n") };
       }
       case "publish_release": {
         // Host-side build+sign+publish. cwd is the project root (the repo to ship).

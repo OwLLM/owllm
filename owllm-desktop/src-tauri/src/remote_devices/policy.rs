@@ -35,6 +35,14 @@ pub fn authorize(kind: CommandKind, policy: &PermissionPolicy) -> Authorization 
                 Denied
             }
         }
+        // Interactive PTY shell session = the shell tier.
+        SessionOpen | SessionWrite | SessionRead | SessionResize | SessionClose => {
+            if policy.allow_shell {
+                Allowed
+            } else {
+                Denied
+            }
+        }
         FileWrite => {
             if policy.allow_file_writes {
                 RequiresApproval

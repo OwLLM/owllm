@@ -27,11 +27,21 @@ pub struct DevicePublic {
     pub github_login: Option<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
-    /// LAN endpoint this device listens on ("ip:port"), when the remote-control
-    /// listener is running. Peers dial this directly (LAN-direct transport).
-    /// Metadata only — control still needs a paired key + policy.
+    /// Primary listen endpoint ("ip:port") — kept for back-compat. `endpoints`
+    /// is the full candidate list; this mirrors its first entry.
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// ALL addresses a peer can dial to reach this device's listener, most
+    /// WAN-reachable first: a user-set public host, then overlay (Tailscale/VPN)
+    /// IPs, then LAN IPs. The controller tries each until one connects — this is
+    /// what makes control work off-LAN (over a Tailscale/WireGuard overlay or a
+    /// port-forwarded/DDNS host). Metadata only; control still needs a paired key.
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    /// True if this device is reachable via a shared relay (for pure-NAT peers
+    /// with no overlay/port-forward). The relay only ever forwards ciphertext.
+    #[serde(default)]
+    pub relay: bool,
 }
 
 /// What a device can do — advertised to peers, informational (the real gate is
@@ -78,10 +88,11 @@ pub struct PermissionPolicy {
 /// The kinds of command a controller can ask a target to run. New dangerous
 /// kinds MUST be added to `policy::authorize` (which is exhaustive-matched) or
 /// the build fails — you cannot forget to gate one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandKind {
     /// Read-only device diagnostics. Always allowed. No side effects.
+    #[default]
     Diagnostics,
     /// Run a shell command on the host. Gated by `allow_shell`.
     Shell,
@@ -91,6 +102,16 @@ pub enum CommandKind {
     FileWrite,
     /// Admin / system change. Gated by `allow_admin` AND per-action approval.
     Admin,
+    /// Open an interactive PTY shell session (SSH-like). Gated by `allow_shell`.
+    SessionOpen,
+    /// Send keystrokes to an open session. Gated by `allow_shell`.
+    SessionWrite,
+    /// Drain buffered output from an open session. Gated by `allow_shell`.
+    SessionRead,
+    /// Resize an open session's PTY. Gated by `allow_shell`.
+    SessionResize,
+    /// Close an open session. Gated by `allow_shell`.
+    SessionClose,
 }
 
 /// The decision `authorize()` returns. `RequiresApproval` means the policy
@@ -109,7 +130,7 @@ pub enum Authorization {
 
 /// The plaintext a controller seals inside an envelope. `request_id` is echoed
 /// in the result and used as the cancellation handle.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandRequest {
     pub request_id: String,
     pub kind: CommandKind,
@@ -117,9 +138,18 @@ pub struct CommandRequest {
     /// a plain diagnostics sweep.
     #[serde(default)]
     pub command: String,
-    /// base64 file content for `FileWrite` (ignored by other kinds).
+    /// base64 file content for `FileWrite`, or base64 keystrokes for
+    /// `SessionWrite` (ignored by other kinds).
     #[serde(default)]
     pub payload: Option<String>,
+    /// Session id for `SessionWrite`/`SessionRead`/`SessionResize`/`SessionClose`.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// PTY size for `SessionOpen`/`SessionResize`.
+    #[serde(default)]
+    pub cols: Option<u16>,
+    #[serde(default)]
+    pub rows: Option<u16>,
     /// Hard execution deadline in milliseconds (clamped by the executor).
     #[serde(default)]
     pub timeout_ms: u64,
@@ -127,7 +157,7 @@ pub struct CommandRequest {
 
 /// What the target returns to the controller (also sealed on the way back, in
 /// the network transport; loopback returns it in-process).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CommandResult {
     pub request_id: String,
     pub ok: bool,
@@ -142,6 +172,15 @@ pub struct CommandResult {
     /// The authorization decision the target reached (for the controller's log).
     pub decision: String,
     pub duration_ms: u64,
+    /// Session id returned by `SessionOpen`.
+    #[serde(default)]
+    pub session: Option<String>,
+    /// base64 PTY output returned by `SessionRead`.
+    #[serde(default)]
+    pub data: Option<String>,
+    /// True when a session's shell has exited (from `SessionRead`/`SessionOpen`).
+    #[serde(default)]
+    pub exited: bool,
 }
 
 // ------------------------------------------------------------------
@@ -281,4 +320,26 @@ pub enum WireReply {
     Paired { device: DevicePublic },
     Result(SignedEnvelope),
     Error { message: String },
+}
+
+// ------------------------------------------------------------------
+// Relay protocol (WAN store-and-forward — the relay sees only ciphertext)
+// ------------------------------------------------------------------
+
+/// A wire message dropped at the relay by a controller. `to` routes it to the
+/// target's mailbox; `corr` lets the relay hand the reply back to this sender.
+/// `frame` is the opaque sealed envelope — the relay cannot read it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayPacket {
+    pub to: String,
+    pub corr: String,
+    pub frame: SignedEnvelope,
+}
+
+/// A target's reply flowing back through the relay, matched to the waiting
+/// sender by `corr`. `frame` is the sealed CommandResult envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayReply {
+    pub corr: String,
+    pub frame: SignedEnvelope,
 }

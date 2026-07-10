@@ -173,6 +173,16 @@ async fn probe() -> HardwareInfo {
         if let Some(cpu) = sys.cpus().first() {
             info.cpu_name = cpu.brand().to_string();
         }
+        // ARM Linux: /proc/cpuinfo has no "model name", so sysinfo's brand
+        // comes back empty and the UI shows "CPU: —". The device-tree model
+        // ("NVIDIA Jetson AGX Thor Developer Kit", "Raspberry Pi 5", …) is
+        // the best human-readable name those boards have.
+        #[cfg(target_os = "linux")]
+        if info.cpu_name.trim().is_empty() {
+            if let Ok(model) = std::fs::read_to_string("/proc/device-tree/model") {
+                info.cpu_name = model.trim_end_matches('\0').trim().to_string();
+            }
+        }
         info.cpu_cores = sys.physical_core_count().unwrap_or(0) as u32;
         info.cpu_threads = sys.cpus().len() as u32;
         info.ram_total_gb = bytes_to_gb(sys.total_memory());

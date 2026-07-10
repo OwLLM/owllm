@@ -84,6 +84,11 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 Single coding agent in one folder. Multi-page tab strip; each page = its own
 chat + Kanban plan + **private git worktree** on its own branch (merge from the
 header). Plan/Act phases; live diffs; editable file viewer; image paste.
+Optional **second agent pane** (own transcript/model, ⇄ auto-feed both ways,
+divided composer). The chat pane carries its own header — model picker +
+`Clear` (run state) + `Clear history` (chat window **and** saved threads) —
+and the composer lives in the same column as the chat, so input and window
+stay width-aligned beside the full-height file rail and right column.
 Right column = ⚡ Super User: project **rules** (same directives as the team;
 shared scope when the folder is a team project) + **Notebook** with auto-feed;
 mid-run chat becomes a steer. "Just chat" mode with persisted threads.

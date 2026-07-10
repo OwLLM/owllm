@@ -1849,8 +1849,13 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     });
   };
   const clearChatHistory = () => {
-    if (chats.length === 0) return;
-    if (window.confirm("Clear all chat history? This cannot be undone.")) {
+    if (busy || secondaryBusy) return;
+    if (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0) return;
+    if (window.confirm("Clear the chat window and all saved chat history? This cannot be undone.")) {
+      // The visible workspace transcripts — this is what the button promises.
+      setMessages([]);
+      setSecondaryMessages([]);
+      // …and the saved just-chat threads.
       setChats([]);
       setChatId("");
       setChatDraft("");
@@ -2319,23 +2324,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           </div>
         )}
         <div style={{ flex: 1 }} />
-        <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
-        <div style={{ minWidth: 260, maxWidth: 360 }}>
-          {/* THE shared model picker — same component, same list_models source,
-              and the SAME full set (local + cloud + subscriptions) as AgentsPage.
-              No localOnly: the agentic Code page offers every model the other
-              agentic surfaces do; execution routes by provider below. */}
-          <ModelPicker
-            value={modelId}
-            onChange={setModelId}
-            models={availableModels}
-            status={accountsStatus}
-            disabled={busy}
-            fallbackLabel="(pick a model)"
-          />
-        </div>
-        <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
-        <button onClick={clearChatHistory} disabled={chats.length === 0} title="Clear all chat history" style={btn}>Clear history</button>
+        {/* Model picker + Clear buttons live in the chat pane's own header
+            below, aligned with the chat window (user spec 2026-07-10). */}
       </div>
 
       {/* Phase 3: Kanban plan/act board (only while a plan is active) */}
@@ -2434,17 +2424,46 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             />
           </div>
         )}
+      {/* Center column: chat panes on top, status + composer at the bottom of
+          the SAME column — so the input box is exactly as wide as the chat
+          window (the rail and the right panel run the full height beside it). */}
+      <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8 }}>
       {/* Chat panes: the primary chat + an optional second-agent pane. Side by
           side when the viewport is wide (≥1000px), stacked when narrow; each
           pane owns its own scroll. With the second pane closed this wrapper has
           a single child, so the primary fills the width exactly as before. */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: wideView ? "row" : "column", gap: 8 }}>
+        {/* Primary pane — same box anatomy as the second-agent pane: a slim
+            header (model picker + Clear buttons, top-right of the chat window)
+            over its own scrolling transcript. */}
+        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
+            <span style={{ flex: 1 }} />
+            <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
+            <div style={{ minWidth: 220, maxWidth: 320 }}>
+              {/* THE shared model picker — same component, same list_models source,
+                  and the SAME full set (local + cloud + subscriptions) as AgentsPage.
+                  No localOnly: the agentic Code page offers every model the other
+                  agentic surfaces do; execution routes by provider below. */}
+              <ModelPicker
+                value={modelId}
+                onChange={setModelId}
+                models={availableModels}
+                status={accountsStatus}
+                disabled={busy}
+                fallbackLabel="(pick a model)"
+              />
+            </div>
+            <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={{ ...btn, height: 26 }}>Clear</button>
+            <button onClick={clearChatHistory} disabled={busy || secondaryBusy || (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0)} title="Clear the chat window and all saved chat history" style={{ ...btn, height: 26 }}>Clear history</button>
+          </div>
       <div
         ref={transcriptSticky.ref}
         onScroll={transcriptSticky.onScroll}
         className="selectable-chat"
         data-selectall-scope
-        style={{ flex: 1, minWidth: 0, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}
+        style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}
       >
         {messages.length === 0 ? (
           preparing ? (
@@ -2504,6 +2523,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
             );
           })
         )}
+        </div>
         </div>
         {/* Second-agent chat pane — parallel/hand-off coder using the same
             workspace and model as the primary chat, with its own transcript. */}
@@ -2580,6 +2600,73 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           </div>
         )}
       </div>
+
+      {/* Status line — expands to multiple lines for the per-credential
+          sync report (P1-2); stays a single ellipsized line otherwise. */}
+      <div style={status.includes("\n")
+        ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6, flexShrink: 0 }
+        : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>{status}</div>
+
+      {/* Composer row — lives in the SAME column as the chat panes, so it is
+          always exactly as wide as the chat window. DIVIDED (fine-tune-chat
+          style) when the second agent is open side-by-side: primary composer
+          left, second-agent composer right — same 1fr/1fr + gap as the panes
+          above, so each input lines up under its pane. */}
+      <div style={secondaryOpen && wideView
+        ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignItems: "end", flexShrink: 0 }
+        : { flexShrink: 0 }}>
+      <div
+        onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) { e.preventDefault(); } }}
+        onDrop={(e) => { const f = Array.from(e.dataTransfer?.files ?? []).filter((x) => x.type.startsWith("image/")); if (f.length) { e.preventDefault(); void addCodeFiles(f); } }}
+        style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
+      >
+        {codeImages.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {codeImages.map((img, i) => (
+              <div key={i} style={{ position: "relative", width: 48, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)" }}>
+                <img src={`data:${img.mime};base64,${img.data_b64}`} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+                <button onClick={() => setCodeImages((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+          <input ref={codeFileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+                 onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
+          <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
+            placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
+            rows={3}
+            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
+          />
+          {busy ? (
+            <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
+          ) : (
+            /* One primary button — what it does follows the right-column MODE:
+               plan → Kanban plan/act, auto → act directly, chat → discuss only. */
+            <button
+              onClick={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
+              disabled={(!draft.trim() && (agentMode === "plan" || codeImages.length === 0)) || preparing}
+              title={preparing ? "Preparing the workspace — unlocks in a moment"
+                : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
+                : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
+                : "Act directly — read, edit and run in the workspace"}
+              style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeImages.length)) && !preparing) ? 1 : 0.5 }}
+            >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
+          )}
+        </div>
+      </div>
+      {/* Right cell of the divided composer row — the second agent's input,
+          aligned under its pane. (In narrow view it lives inside the pane.) */}
+      {secondaryOpen && wideView && (
+        <div style={{ minWidth: 0 }}>{renderSecondaryComposer()}</div>
+      )}
+      </div>
+      </div>
         {/* Right column (resizable): utility header (mode / terminal / usage)
             + two PAGES on a tab strip — ⚡ Super User (project rules, shared
             with the team) and 📓 Notebook (the shared RunNotebook, inline).
@@ -2655,71 +2742,6 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           (a real OwLLM WebviewWindow) the agents drive with the browser_* tools.
           Shared component; also handles the password vault + browser import. */}
       <BrowserPanel open={browserOpen} onClose={() => setBrowserOpen(false)} />
-
-      {/* Status line — expands to multiple lines for the per-credential
-          sync report (P1-2); stays a single ellipsized line otherwise. */}
-      <div style={status.includes("\n")
-        ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
-        : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
-
-      {/* Composer row — DIVIDED under the two panes (fine-tune-chat style) when
-          the second agent is open side-by-side: primary composer left, second-
-          agent composer right. Single full-width composer otherwise. The left
-          offset skips the file-tree rail so the split lines up with the panes. */}
-      <div style={secondaryOpen && wideView
-        ? { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, alignItems: "end", marginLeft: workspace ? 228 : 0 }
-        : undefined}>
-      <div
-        onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) { e.preventDefault(); } }}
-        onDrop={(e) => { const f = Array.from(e.dataTransfer?.files ?? []).filter((x) => x.type.startsWith("image/")); if (f.length) { e.preventDefault(); void addCodeFiles(f); } }}
-        style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
-      >
-        {codeImages.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {codeImages.map((img, i) => (
-              <div key={i} style={{ position: "relative", width: 48, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)" }}>
-                <img src={`data:${img.mime};base64,${img.data_b64}`} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                <button onClick={() => setCodeImages((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
-              </div>
-            ))}
-          </div>
-        )}
-        <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <input ref={codeFileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
-                 onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
-          <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
-          <textarea
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
-            placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
-            rows={3}
-            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
-          />
-          {busy ? (
-            <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
-          ) : (
-            /* One primary button — what it does follows the right-column MODE:
-               plan → Kanban plan/act, auto → act directly, chat → discuss only. */
-            <button
-              onClick={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
-              disabled={(!draft.trim() && (agentMode === "plan" || codeImages.length === 0)) || preparing}
-              title={preparing ? "Preparing the workspace — unlocks in a moment"
-                : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
-                : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
-                : "Act directly — read, edit and run in the workspace"}
-              style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeImages.length)) && !preparing) ? 1 : 0.5 }}
-            >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
-          )}
-        </div>
-      </div>
-      {/* Right cell of the divided composer row — the second agent's input,
-          aligned under its pane. (In narrow view it lives inside the pane.) */}
-      {secondaryOpen && wideView && (
-        <div style={{ minWidth: 0 }}>{renderSecondaryComposer()}</div>
-      )}
-      </div>
 
       {/* File viewer — opening a file in the tree shows its real contents, and
           (via ✎ Edit → 💾 Save) lets you edit and write it back to disk. */}

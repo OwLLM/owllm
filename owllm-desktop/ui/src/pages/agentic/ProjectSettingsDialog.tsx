@@ -492,6 +492,29 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                   );
                 })}
               </div>
+              {/* Direct path — the classic flow the cards replaced: open a local
+                  folder (e.g. a repo already tied to GitHub) without picking a
+                  card first. Continue jumps straight to the details form with
+                  the folder filled in and all templates available. */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                <label style={LBL}>Or start from a local folder <span style={{ opacity: 0.6, textTransform: "none", letterSpacing: 0 }}>— any project folder, e.g. a repo on GitHub</span></label>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input value={newLocation} onChange={e => setNewLocation(e.target.value)} placeholder="/path/to/repo · github.com/me/x" style={{ ...INPUT, flex: 1 }} />
+                  <button onClick={() => browse(setNewLocation)} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
+                  <button
+                    type="button"
+                    disabled={!newLocation.trim()}
+                    title={newLocation.trim() ? "Continue with this folder — pick the team on the next step" : "Pick or type a folder first"}
+                    onClick={() => {
+                      setKindKey("custom");
+                      setShowAdvanced(true);
+                      if (!name.trim()) setName(newLocation.trim().replace(/[\\/]+$/, "").replace(/^.*[\\/]/, ""));
+                      setStep("form");
+                    }}
+                    style={{ height: 38, padding: "0 14px", borderRadius: 8, border: "none", background: "var(--accent)", color: "#06080d", fontSize: 12.5, fontWeight: 700, cursor: newLocation.trim() ? "pointer" : "not-allowed", opacity: newLocation.trim() ? 1 : 0.5 }}
+                  >Continue →</button>
+                </div>
+              </div>
             </>
           ) : (
             <>

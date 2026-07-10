@@ -72,8 +72,43 @@ mod webhook;
 mod wsl;
 mod wsl_setup;
 
+/// Log every panic to a crash file before it takes the process down. In a
+/// windows-subsystem app stderr is invisible and a panic that unwinds out of
+/// the event loop leaves NO trace (no WER entry, no dialog) — the window just
+/// disappears. That exact "silent crash" was reported and was undiagnosable.
+/// Mirrors the paths_debug fallback chain: %TEMP%, then %USERPROFILE%.
+fn install_crash_log_hook() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let entry = format!(
+            "[{}] panic on thread '{}': {}\nbacktrace:\n{}\n\n",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+            std::thread::current().name().unwrap_or("<unnamed>"),
+            info,
+            std::backtrace::Backtrace::force_capture(),
+        );
+        for base in [std::env::var_os("TEMP"), std::env::var_os("USERPROFILE")]
+            .into_iter()
+            .flatten()
+        {
+            let path = std::path::PathBuf::from(base).join("owllm-crash.log");
+            use std::io::Write;
+            let ok = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .and_then(|mut f| f.write_all(entry.as_bytes()));
+            if ok.is_ok() {
+                break;
+            }
+        }
+        default(info);
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    install_crash_log_hook();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.
@@ -169,8 +204,11 @@ pub fn run() {
                     overlay_frame::wait_until_ready(std::time::Duration::from_millis(700));
                     let dispatch_window = show_window.clone();
                     let _ = show_window.run_on_main_thread(move || {
-                        let _ = overlay_frame::prepare_and_show_for_main(&dispatch_window);
+                        // Main FIRST, overlay second: the frame arriving a
+                        // beat late is invisible; the overlay arriving early
+                        // (or unpainted) is the startup white flash.
                         let _ = dispatch_window.show();
+                        let _ = overlay_frame::prepare_and_show_for_main(&dispatch_window);
                         let _ = dispatch_window.emit("owllm:shown", ());
                     });
                 });

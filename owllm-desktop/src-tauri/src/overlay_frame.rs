@@ -1,12 +1,12 @@
-//! Optional decorative overlay frame.
+//! Decorative overlay frame — ON by default (opt out with
+//! `OWLLM_OVERLAY_FRAME=0`). PySide-style split: the main WebView is a
+//! normal rectangular content window, while this second transparent,
+//! click-through window carries only the frame art.
 //!
-//! This module is intentionally dormant unless `OWLLM_OVERLAY_FRAME=1`
-//! is present in the environment. It prototypes the PySide-style split:
-//! the main WebView can become a normal rectangular content window, while
-//! a second transparent, click-through window carries only the frame art.
-//!
-//! Nothing in the current app depends on this yet. It exists so we can
-//! test the approach later without touching the production chrome.
+//! Startup rule: the overlay is only ever shown AFTER its page has
+//! painted (`OVERLAY_READY`). Showing an unpainted transparent WebView2
+//! window flashes white over the whole app — the startup-flash
+//! regression. The 33ms sync loop picks it up as soon as it's ready.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -188,7 +188,12 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
         return Ok(());
     };
     sync_geometry(main.outer_position()?, main.outer_size()?, &overlay)?;
-    overlay.show()?;
+    // Never show the overlay before its page painted — a not-yet-ready
+    // transparent WebView2 window flashes WHITE over the app. If the 700ms
+    // startup wait timed out, the sync loop shows it once mark_ready fires.
+    if OVERLAY_READY.load(Ordering::Acquire) {
+        overlay.show()?;
+    }
     Ok(())
 }
 
@@ -213,7 +218,9 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
 
     if !main.is_visible()? {
         let _ = overlay.hide();
-    } else if !main.is_minimized()? {
+    } else if !main.is_minimized()? && OVERLAY_READY.load(Ordering::Acquire) {
+        // Ready-gated for the same reason as prepare_and_show_for_main:
+        // an unpainted transparent webview shows as a white sheet.
         let _ = overlay.show();
     }
 

@@ -26,7 +26,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { useAutoResize } from "../../hooks/useAutoResize";
-import { useStickyScroll } from "../../hooks/useStickyScroll";
+import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 
@@ -50,6 +50,10 @@ export type NotebookState = {
   /// User-picked digest model (per project). Empty/undefined = inherit the
   /// surface's default (team model → server model), same rule as before.
   digestModel?: string;
+  /// Digest output awaiting one-click apply/add. PERSISTED (not component
+  /// state) so a tab switch or modal close mid-review never loses proposals.
+  proposed?: string[];
+  proposedPlan?: string;
 };
 
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
@@ -69,6 +73,8 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       autoFeed: p.autoFeed === true,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
       digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
+      proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
+      proposedPlan: typeof p.proposedPlan === "string" ? p.proposedPlan : "",
     };
   } catch { return { ...EMPTY }; }
 }
@@ -209,13 +215,16 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const [digestBusy, setDigestBusy] = useState(false);
   const [digestLogOpen, setDigestLogOpen] = useState(false);
   const [digestError, setDigestError] = useState("");
-  const [proposed, setProposed] = useState<string[]>([]);
-  /// Digest-drafted plan awaiting the user's one-click apply (mirrors the
-  /// propose→add pattern steps use — the digest never overwrites silently).
-  const [proposedPlan, setProposedPlan] = useState<string>("");
+  /// Transient per-step outcome of the last Feed click — the onFeed result
+  /// ("queued" into a live run vs "dispatched" as a new goal vs "no-team")
+  /// was previously computed and thrown away, leaving the user guessing.
+  const [feedNotice, setFeedNotice] = useState<{ id: string; kind: "queued" | "dispatched" | "no-team" } | null>(null);
   const [editingStepId, setEditingStepId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
-  const digestScroll = useStickyScroll<HTMLDivElement>([nb.digest, proposed, digestBusy]);
+  // Digest proposals live IN the notebook blob (nb.proposed / nb.proposedPlan)
+  // so they survive tab switches, modal close, and project swaps.
+  const proposed = nb.proposed ?? [];
+  const proposedPlan = nb.proposedPlan ?? "";
   const activeRef = useRef(active);
   activeRef.current = active;
   const projRef = useRef(projectId);
@@ -244,13 +253,13 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     window.addEventListener(NOTEBOOK_EVENT, onChanged as EventListener);
     return () => window.removeEventListener(NOTEBOOK_EVENT, onChanged as EventListener);
   }, []);
-  // Project switch → swap to that project's notebook.
+  // Project switch → swap to that project's notebook (proposals travel with
+  // the blob, so nothing to reset there).
   useEffect(() => {
     setNb(loadNotebook(projectId));
-    setProposed([]);
-    setProposedPlan("");
     setDigestError("");
     setEditingStepId(null);
+    setFeedNotice(null);
   }, [projectId]);
 
   const updateNotebook = (makeNext: (prev: NotebookState) => NotebookState) => {
@@ -291,16 +300,19 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const setStep = (id: string, patch: Partial<NotebookStep>) =>
     updateNotebook((prev) => ({ ...prev, steps: prev.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
   const removeStep = (id: string) => updateNotebook((prev) => ({ ...prev, steps: prev.steps.filter((s) => s.id !== id) }));
-  const moveStep = (id: string, dir: -1 | 1) => {
-    const i = nb.steps.findIndex((s) => s.id === id);
-    const j = i + dir;
-    if (i < 0 || j < 0 || j >= nb.steps.length) return;
-    const steps = [...nb.steps];
-    [steps[i], steps[j]] = [steps[j], steps[i]];
-    updateNotebook((prev) => ({ ...prev, steps }));
-  };
+  const moveStep = (id: string, dir: -1 | 1) =>
+    updateNotebook((prev) => {
+      const i = prev.steps.findIndex((s) => s.id === id);
+      const j = i + dir;
+      if (i < 0 || j < 0 || j >= prev.steps.length) return prev;
+      const steps = [...prev.steps];
+      [steps[i], steps[j]] = [steps[j], steps[i]];
+      return { ...prev, steps };
+    });
   const feedStep = (s: NotebookStep) => {
     const res = onFeed(s.text);
+    setFeedNotice({ id: s.id, kind: res });
+    window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
     setStep(s.id, { status: "sent" });
   };
@@ -326,11 +338,16 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     }
     setDigestBusy(true);
     setDigestError("");
-    setProposed([]);
-    setProposedPlan("");
+    update({ proposed: [], proposedPlan: "" });
     const youText = "Digest the current notebook into a clearer plan and new feedable steps.";
     const history = [...nb.digest, { role: "you" as const, text: youText }];
     update({ digest: history });
+    // Capture the project at digest START: results are written straight to
+    // THAT project's blob (not through setState), so a page switch or project
+    // swap mid-stream can no longer orphan the digest — mounted surfaces pick
+    // the result up via NOTEBOOK_EVENT, and setNb below only syncs the local
+    // mirror when we're still on the same project.
+    const pid = projRef.current;
     try {
       const user = [
         currentPlan ? `CURRENT PLAN (extend/refine additively):\n${currentPlan}` : "",
@@ -348,16 +365,23 @@ export default function RunNotebook({ projectId, projectName, active = true, run
         (d) => { reply += d; },
       );
       const parsed = parseDigestReply(reply);
-      update({ digest: [...history, { role: "digest", text: reply.trim() || "(no reply)" }] });
-      setProposed(parsed.steps);
-      if (parsed.plan && normalizeKanbanPlan(parsed.plan) !== normalizeKanbanPlan(currentPlan)) {
-        setProposedPlan(normalizeKanbanPlan(parsed.plan));
-      }
+      const fresh = loadNotebook(pid);
+      fresh.digest = [...fresh.digest, { role: "digest", text: reply.trim() || "(no reply)" }];
+      fresh.proposed = parsed.steps;
+      fresh.proposedPlan =
+        parsed.plan && normalizeKanbanPlan(parsed.plan) !== normalizeKanbanPlan(fresh.plan.trim())
+          ? normalizeKanbanPlan(parsed.plan)
+          : "";
+      saveNotebook(pid, fresh);
+      if (pid === projRef.current) setNb(fresh);
     } catch (e: any) {
       const msg = String(e?.message ?? e);
+      const fresh = loadNotebook(pid);
+      fresh.digest = [...fresh.digest, { role: "digest", text: `(error: ${msg})` }];
+      saveNotebook(pid, fresh);
+      if (pid === projRef.current) setNb(fresh);
       setDigestError(msg);
       setDigestLogOpen(true);
-      update({ digest: [...history, { role: "digest", text: `(error: ${msg})` }] });
     } finally {
       setDigestBusy(false);
     }
@@ -477,14 +501,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               </span>
             </div>
             {digestLogOpen && (nb.digest.length > 0 || digestBusy) && (
-              <div ref={digestScroll.ref} onScroll={digestScroll.onScroll} style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 180, overflowY: "auto", padding: 10, background: "var(--bg-input)", borderRadius: 8, border: "1px solid var(--border)" }}>
-                {nb.digest.map((m, i) => (
-                  <div key={i} style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: m.role === "you" ? "#9ad9ff" : "var(--fg)" }}>
-                    <b style={{ fontSize: 10, opacity: 0.8 }}>{m.role === "you" ? "REQUEST" : "DIGEST"}</b> {m.text}
-                  </div>
-                ))}
-                {digestBusy && <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>Digesting...</div>}
-              </div>
+              <LogBox
+                title="Digest transcript"
+                height={180}
+                placeholder="(no digest yet)"
+                text={
+                  nb.digest.map((m) => `${m.role === "you" ? "REQUEST" : "DIGEST"}: ${m.text}`).join("\n\n")
+                  + (digestBusy ? "\n\nDigesting..." : "")
+                }
+              />
             )}
           </div>
 
@@ -501,10 +526,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   <div style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)" }}>{proposedPlan}</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
-                      onClick={() => { update({ plan: normalizeKanbanPlan(proposedPlan), text: "" }); setProposedPlan(""); }}
+                      onClick={() => update({ plan: normalizeKanbanPlan(proposedPlan), text: "", proposedPlan: "" })}
                       style={{ height: 26, padding: "0 12px", border: "1px solid rgba(154,217,255,0.45)", borderRadius: 6, background: "rgba(14,28,40,0.7)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                     >Save plan + clear notes</button>
-                    <button className="ghost-btn" onClick={() => setProposedPlan("")} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
+                    <button className="ghost-btn" onClick={() => update({ proposedPlan: "" })} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
                   </div>
                 </div>
               )}
@@ -516,7 +541,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 8, background: "rgba(16,36,28,0.45)", border: "1px solid rgba(127,240,197,0.28)", borderRadius: 8 }}>
                         <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{t}</div>
                         <button
-                          onClick={() => setProposed((ps) => { addStep(t); return ps.filter((_, j) => j !== i); })}
+                          onClick={() => updateNotebook((prev) => ({
+                            ...prev,
+                            steps: [...prev.steps, { id: newStepId(), text: t, status: "pending" as const, ts: Date.now() }],
+                            proposed: (prev.proposed ?? []).filter((_, j) => j !== i),
+                          }))}
                           title="Add this step to the list"
                           style={{ height: 26, padding: "0 10px", border: "1px solid rgba(127,240,197,0.45)", borderRadius: 6, background: "rgba(16,36,28,0.7)", color: "#7ff0c5", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
                         >Add</button>
@@ -525,10 +554,22 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   </div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
-                      onClick={() => { addSteps(proposed); setProposed([]); if (!proposedPlan) update({ text: "" }); }}
+                      onClick={() => {
+                        const now = Date.now();
+                        updateNotebook((prev) => ({
+                          ...prev,
+                          steps: [
+                            ...prev.steps,
+                            ...(prev.proposed ?? []).map((t) => t.trim()).filter(Boolean)
+                              .map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i })),
+                          ],
+                          proposed: [],
+                          text: prev.proposedPlan ? prev.text : "",
+                        }));
+                      }}
                       style={{ height: 28, padding: "0 12px", border: "none", borderRadius: 7, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                     >Add all + clear notes</button>
-                    <button className="ghost-btn" onClick={() => setProposed([])} title="Discard proposed steps" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>Discard steps</button>
+                    <button className="ghost-btn" onClick={() => update({ proposed: [] })} title="Discard proposed steps" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>Discard steps</button>
                   </div>
                 </div>
               )}
@@ -542,7 +583,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               <span>Plan board</span>
               <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>Kanban</span>
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: inline ? "1fr" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
+            {/* auto-fit: uses whatever width the host gives it — 3 columns in the
+                modal, 1-2 in the narrow Code side panel instead of a tall stack */}
+            <div style={{ display: "grid", gridTemplateColumns: inline ? "repeat(auto-fit, minmax(170px, 1fr))" : "repeat(3, minmax(0, 1fr))", gap: 8 }}>
               {KANBAN_COLUMNS.map((col) => {
                 const ref = col.key === "now" ? nowPlanRef : col.key === "next" ? nextPlanRef : laterPlanRef;
                 return (
@@ -557,7 +600,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       value={kanbanPlan[col.key]}
                       onChange={(e) => updateKanbanLane(col.key, e.target.value)}
                       placeholder={col.key === "now" ? "- Ship the coherent first batch..." : col.key === "next" ? "- Follow-up batch..." : "- Optional or parked work..."}
-                      style={{ ...textareaBase, minHeight: 92, fontSize: 12, background: "var(--bg-input)" }}
+                      style={{ ...textareaBase, minHeight: inline ? 64 : 92, fontSize: 12, background: "var(--bg-input)" }}
                     />
                   </div>
                 );
@@ -630,12 +673,21 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     </div>
 
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", paddingLeft: 28 }}>
-                      {s.status === "pending" && (
+                      {s.status !== "done" && (
                         <button
                           onClick={() => feedStep(s)}
                           title={running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
                           style={{ height: 24, padding: "0 10px", border: "1px solid rgba(255,217,122,0.5)", borderRadius: 6, background: "rgba(38,30,10,0.6)", color: "#ffd97a", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                        >⚡ Feed</button>
+                        >{s.status === "sent" ? "⚡ Re-feed" : "⚡ Feed"}</button>
+                      )}
+                      {feedNotice?.id === s.id && (
+                        <span style={{
+                          fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px",
+                          color: feedNotice.kind === "no-team" ? "#ffb4b4" : feedNotice.kind === "queued" ? "#ffd97a" : "#7ff0c5",
+                          border: `1px solid ${feedNotice.kind === "no-team" ? "rgba(255,140,140,0.45)" : feedNotice.kind === "queued" ? "rgba(255,217,122,0.45)" : "rgba(127,240,197,0.45)"}`,
+                        }}>
+                          {feedNotice.kind === "queued" ? "queued — steers the live run" : feedNotice.kind === "dispatched" ? "dispatched as a new goal" : "no team ready — pick a project & model"}
+                        </span>
                       )}
                       <button className="ghost-btn" onClick={() => moveStep(s.id, -1)} title="Move up" style={{ height: 24, width: 24, padding: 0, fontSize: 10 }}>▲</button>
                       <button className="ghost-btn" onClick={() => moveStep(s.id, 1)} title="Move down" style={{ height: 24, width: 24, padding: 0, fontSize: 10 }}>▼</button>

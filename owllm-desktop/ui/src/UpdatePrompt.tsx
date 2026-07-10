@@ -77,6 +77,12 @@ export default function UpdateController() {
         const { check } = await import("@tauri-apps/plugin-updater");
         const u = await check();
         if (u && (u as any).available !== false) {
+          // Remount resilience: a webview reload (vault sync adoption) re-runs
+          // this check — don't re-nag about a version the user already
+          // dismissed this session (sessionStorage survives reloads).
+          try {
+            if (sessionStorage.getItem("owllm:update:dismissed") === (u as any).version) return;
+          } catch { /* storage blocked — show as normal */ }
           setUpdate(u as unknown as Update);
           setPhase("prompt");
         }
@@ -87,6 +93,11 @@ export default function UpdateController() {
     }, 2500);
     return () => window.clearTimeout(t);
   }, []);
+
+  const dismiss = () => {
+    setPhase("hidden");
+    try { sessionStorage.setItem("owllm:update:dismissed", update?.version ?? ""); } catch { /* best effort */ }
+  };
 
   const onInstall = async () => {
     if (!update) return;
@@ -225,7 +236,7 @@ export default function UpdateController() {
         {phase === "prompt" && (
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
             <button
-              onClick={() => setPhase("hidden")}
+              onClick={dismiss}
               style={{
                 background: "transparent",
                 border: "1px solid rgba(255,255,255,0.18)",

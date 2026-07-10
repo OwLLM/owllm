@@ -155,6 +155,22 @@ export async function syncProjectsNow(): Promise<boolean> {
   }
 }
 
+/// A vault adoption rewrites localStorage/SQLite under every store's feet, so
+/// a full reload is the blunt-but-reliable repaint. But each reload re-runs
+/// main.tsx — including the update prompt's fresh check() — and two devices
+/// converging can report "changed" for SEVERAL successive sync cycles, so the
+/// update dialog flashed in and out 3-4 times at launch. Allow ONE reload per
+/// launch (sessionStorage survives reloads); after that, repaint in place via
+/// the refresh event and let the next launch pick up any residual diff.
+function reloadOnce(): boolean {
+  try {
+    if (sessionStorage.getItem("owllm:vault:reloaded")) return false;
+    sessionStorage.setItem("owllm:vault:reloaded", "1");
+  } catch { return false; /* storage blocked → never risk a reload loop */ }
+  location.reload();
+  return true;
+}
+
 /// Start the sync engine once at app launch. Safe to call when logged out /
 /// no vault — it just no-ops. Wired from ChatRuntimeProvider.
 export async function startVaultSync(): Promise<void> {
@@ -165,10 +181,11 @@ export async function startVaultSync(): Promise<void> {
   if (!st?.cloned) return; // not connected / vault not set up → local-only
   _enabled = true;
 
-  // 1) Adopt newer remote state, then reload so every store repaints.
+  // 1) Adopt newer remote state, then reload (once) so every store repaints.
   if (await pullAndAdopt()) {
-    location.reload();
-    return;
+    if (reloadOnce()) return;
+    // Already reloaded this launch — repaint what we can in place and carry on.
+    try { window.dispatchEvent(new CustomEvent("owllm:projects:refresh")); } catch { /* non-browser */ }
   }
   // 2) Seed/refresh the vault with our current state (covers a fresh device
   //    that has nothing remote yet).
@@ -180,9 +197,11 @@ export async function startVaultSync(): Promise<void> {
   invoke("vault_sync_teams").catch(() => {});
 
   // 2c) Sync projects + chats (SQLite rows) so conversations follow the user.
-  //     If we pulled in newer projects/chats from another device, reload so
-  //     the whole UI repaints from the freshly-synced database.
-  if (await syncProjectsNow()) { location.reload(); return; }
+  //     If we pulled in newer projects/chats from another device, reload (once)
+  //     so the whole UI repaints from the freshly-synced database.
+  //     syncProjectsNow already fired owllm:projects:refresh as the in-place
+  //     fallback when the reload budget is spent.
+  if (await syncProjectsNow() && reloadOnce()) return;
 
   // 3) Keep pushing on the moments that matter.
   wireListeners();
@@ -198,7 +217,7 @@ export async function onVaultConnected(): Promise<void> {
   _lastSnapshotJson = JSON.stringify(snapshot());
   await pushNow(true);
   invoke("vault_sync_teams").catch(() => {});
-  if (await syncProjectsNow()) location.reload();
+  if (await syncProjectsNow()) reloadOnce();
 }
 
 /// Push on tab-hidden, app-close, and a debounced diff poll (localStorage's

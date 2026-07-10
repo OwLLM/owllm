@@ -163,7 +163,6 @@
   "plugins": {
     "updater": {
       "active": true,
-      "dialog": true,
       "endpoints": [
         "https://github.com/OwLLM/owllm/releases/latest/download/latest.json"
       ],

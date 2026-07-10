@@ -40,11 +40,20 @@ pub struct AppReadiness {
 
 #[tauri::command]
 pub async fn app_readiness() -> Result<AppReadiness, String> {
+    // The four probes are independent but used to run SERIALLY — and probe_wsl
+    // (5-6 wsl.exe login-shell spawns, seconds on a cold WSL service) ran
+    // synchronously ON an async worker, stalling every other invoke with it.
+    // Run all four concurrently on their own threads; total cost is now the
+    // slowest single probe instead of the sum of all of them.
+    let wsl = tokio::task::spawn_blocking(probe_wsl);
+    let runtime = tokio::task::spawn_blocking(probe_runtime);
+    let gpu = tokio::spawn(probe_gpu());
+    let env = tokio::spawn(probe_env());
     Ok(AppReadiness {
-        wsl: probe_wsl(),
-        gpu: probe_gpu().await,
-        env: probe_env().await,
-        runtime: probe_runtime(),
+        wsl: wsl.await.unwrap_or_default(),
+        gpu: gpu.await.unwrap_or_default(),
+        env: env.await.unwrap_or_default(),
+        runtime: runtime.await.unwrap_or_default(),
     })
 }
 

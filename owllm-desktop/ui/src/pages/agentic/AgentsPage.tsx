@@ -1794,9 +1794,9 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
     setLog("");
     setCfg(loadPublisherCfg(storageKey));
   }, [cwd, storageKey]);
-  // Seed the Publisher card's mode from the committed Project Card when there is
-  // NO per-cwd localStorage override. This keeps the project's default in sync
-  // across machines/teammates, while still letting the user override it locally.
+  // Seed the Publisher card's mode + signing config from the committed Project Card
+  // when there is NO per-cwd localStorage override. This keeps the project's release
+  // rules in sync across machines/teammates, while still letting the user override locally.
   useEffect(() => {
     if (!cwd) return;
     let live = true;
@@ -1805,10 +1805,27 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
       if (hasLocal) return;
       try {
         const txt = await invoke<string>("tool_read_file", { path: ".owllm/project.json", cwd });
-        const card = JSON.parse(txt) as { release?: { mode?: string } } | null;
+        const card = JSON.parse(txt) as {
+          release?: {
+            mode?: string;
+            sign?: { thumbprint?: string; subject?: string; tsa?: string };
+          };
+        } | null;
         const cardMode = card?.release?.mode;
-        if (live && (cardMode === "host" || cardMode === "ci")) {
-          setCfg(prev => prev.mode === cardMode ? prev : { ...prev, mode: cardMode });
+        const sign = card?.release?.sign;
+        if (live && (cardMode === "host" || cardMode === "ci" || sign)) {
+          setCfg(prev => {
+            const next = { ...prev };
+            if (cardMode === "host" || cardMode === "ci") next.mode = cardMode;
+            if (sign) {
+              if (sign.thumbprint !== undefined) next.signThumbprint = sign.thumbprint;
+              if (sign.subject !== undefined) next.signSubject = sign.subject;
+              if (sign.tsa !== undefined) next.signTsa = sign.tsa;
+            }
+            // Avoid a no-op re-render when nothing changed.
+            if (JSON.stringify(next) === JSON.stringify(prev)) return prev;
+            return next;
+          });
         }
       } catch { /* no card or malformed — keep default */ }
     })();

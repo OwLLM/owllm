@@ -149,6 +149,9 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [relStagePath, setRelStagePath] = useState("");
   const [relCommand, setRelCommand] = useState("");
   const [relMode, setRelMode] = useState<"host" | "ci">("host");
+  const [relSignThumb, setRelSignThumb] = useState("");
+  const [relSignSubject, setRelSignSubject] = useState("");
+  const [relSignTsa, setRelSignTsa] = useState("http://time.certum.pl");
   const [showRelease, setShowRelease] = useState(false);
   const [legacyVerifyJson, setLegacyVerifyJson] = useState(false);   // a separate .owllm/verify.json exists (takes precedence)
   const [cardBusy, setCardBusy] = useState<string | null>(null);
@@ -188,6 +191,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     const cwd = effectiveCwd || location;
     setCardRaw(null); setCardExists(false); setCardGoal(""); setCardVerify("");
     setCardMode(""); setRelVersionFile(""); setRelStagePath(""); setRelCommand(""); setRelMode("host");
+    setRelSignThumb(""); setRelSignSubject(""); setRelSignTsa("http://time.certum.pl");
     setShowRelease(false); setLegacyVerifyJson(false); setCardMsg(null); setFindings(null);
     if (!cwd) return;
     let live = true;
@@ -212,7 +216,10 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
         setRelStagePath(card.release?.stagePath ?? "");
         setRelCommand(card.release?.command ?? "");
         setRelMode(card.release?.mode === "ci" ? "ci" : "host");
-        if (card.release && (card.release.versionFile || card.release.command || card.release.mode)) setShowRelease(true);
+        setRelSignThumb(card.release?.sign?.thumbprint ?? "");
+        setRelSignSubject(card.release?.sign?.subject ?? "");
+        setRelSignTsa(card.release?.sign?.tsa ?? "http://time.certum.pl");
+        if (card.release && (card.release.versionFile || card.release.command || card.release.mode || card.release.sign)) setShowRelease(true);
       } else {
         setCardVerify(legacyCmd);
       }
@@ -295,12 +302,23 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
       else if (card.verify) { delete card.verify.command; if (!card.verify.lanes || !Object.keys(card.verify.lanes).length) delete card.verify; }
 
       const vf = relVersionFile.trim(), sp = relStagePath.trim(), rc = relCommand.trim();
-      if (vf || sp || rc || relMode !== "host") {
+      const st = relSignThumb.trim(), ss = relSignSubject.trim(), stsa = relSignTsa.trim();
+      const hasSign = st || ss;
+      if (vf || sp || rc || relMode !== "host" || hasSign) {
         card.release = { ...(card.release ?? {}) };
         if (vf) card.release.versionFile = vf; else delete card.release.versionFile;
         if (sp) card.release.stagePath = sp; else delete card.release.stagePath;
         if (rc) card.release.command = rc; else delete card.release.command;
         if (relMode === "ci") card.release.mode = "ci"; else delete card.release.mode;
+        if (hasSign) {
+          card.release.sign = {
+            ...(st ? { thumbprint: st } : {}),
+            ...(ss ? { subject: ss } : {}),
+            ...(stsa ? { tsa: stsa } : {}),
+          };
+        } else {
+          delete card.release.sign;
+        }
         if (!Object.keys(card.release).length) delete card.release;
       } else { delete card.release; }
 
@@ -642,6 +660,21 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                     <div style={{ fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                       Host needs the build toolchain and signing cert on this computer. CI needs a working GitHub Actions workflow and billing.
                     </div>
+                  </div>
+
+                  <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+                  <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-strong)" }}>Code signing (Windows)</div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={LBL}>Cert thumbprint (SHA-1)</label>
+                    <input value={relSignThumb} onChange={e => setRelSignThumb(e.target.value)} placeholder="empty = unsigned" style={INPUT} />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={LBL}>…or cert subject (CN)</label>
+                    <input value={relSignSubject} onChange={e => setRelSignSubject(e.target.value)} placeholder="e.g. Your Company Ltd" style={INPUT} />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={LBL}>Timestamp URL (RFC3161)</label>
+                    <input value={relSignTsa} onChange={e => setRelSignTsa(e.target.value)} placeholder="http://time.certum.pl" style={INPUT} />
                   </div>
                 </div>
               )}

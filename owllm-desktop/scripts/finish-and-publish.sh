@@ -58,10 +58,16 @@ PUBLISH_CMD='bash "owllm-desktop/scripts/publish-release.sh" --notes "$OWLLM_REL
 [ "$MODE" = "ci" ] && PUBLISH_CMD=""
 if [ -f "$CARD" ]; then
   _rd() { CARD="$CARD" K="$1" node -e 'try{const r=(require(process.env.CARD).release)||{};process.stdout.write(String(r[process.env.K]||""))}catch{}'; }
+  _rds() { CARD="$CARD" K="$1" node -e 'try{const s=((require(process.env.CARD).release)||{}).sign||{};process.stdout.write(String(s[process.env.K]||""))}catch{}'; }
   vf="$(_rd versionFile)"; sp="$(_rd stagePath)"; pc="$(_rd command)"
   [ -n "$vf" ] && VERSION_FILE="$vf"
   [ -n "$sp" ] && STAGE_PATH="$sp"
   [ -n "$pc" ] && PUBLISH_CMD="$pc"
+  # Project Card can also commit the signing cert selector so teammates/machines share it.
+  # Env vars from the caller (release.rs) take precedence.
+  [ -z "${OWLLM_SIGN_THUMBPRINT:-}" ] && OWLLM_SIGN_THUMBPRINT="$(_rds thumbprint)"
+  [ -z "${OWLLM_SIGN_SUBJECT:-}" ] && OWLLM_SIGN_SUBJECT="$(_rds subject)"
+  [ -z "${OWLLM_SIGN_TSA:-}" ] && OWLLM_SIGN_TSA="$(_rds tsa)"
 fi
 # Forward the pre-release channel to the publish command (the canonical
 # publish-release.sh understands --prerelease; a card override that doesn't will
@@ -156,4 +162,5 @@ if [ "$MODE" = "ci" ]; then
 fi
 
 export OWLLM_RELEASE_NOTES="$NOTES_BODY"
+export OWLLM_SIGN_THUMBPRINT OWLLM_SIGN_SUBJECT OWLLM_SIGN_TSA
 ( cd "$REPO" && bash -c "$PUBLISH_CMD" ) || fail "publish command failed: $PUBLISH_CMD"

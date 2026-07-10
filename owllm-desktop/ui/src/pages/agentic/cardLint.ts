@@ -21,6 +21,12 @@ export type ProjectCard = {
     command?: string;
     /** "host" builds and signs on the local machine; "ci" only tags/pushes and lets GitHub Actions build. */
     mode?: "host" | "ci";
+    /** Windows Authenticode signing config. Empty/missing = unsigned. */
+    sign?: {
+      thumbprint?: string;
+      subject?: string;
+      tsa?: string;
+    };
   };
   [k: string]: any;
 };

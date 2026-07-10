@@ -3,6 +3,7 @@
 // stays clean. Backed by host-side release.rs / fleet.rs commands.
 import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { parseProjectCard, type ProjectCard } from "./cardLint";
 
 type ReadyCheck = { id: string; label: string; ok: boolean; detail: string };
 type ReleaseVisibility = "publish" | "draft" | "dry-run";
@@ -58,6 +59,28 @@ const loadSettings = (): PublishSettings => {
 const saveSettings = (s: PublishSettings) => {
   try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* quota — non-fatal */ }
 };
+
+const hasLocalSettings = () => {
+  try { return !!localStorage.getItem(SETTINGS_KEY); }
+  catch { return false; }
+};
+
+/** Merge project-card release defaults into local settings. Card values are used only
+ *  when the user has NOT saved a local override (so per-machine certs can still differ). */
+function mergeCardDefaults(base: PublishSettings, card: ProjectCard | null): PublishSettings {
+  if (!card?.release) return base;
+  const next = { ...base };
+  if (!hasLocalSettings()) {
+    if (card.release.mode === "host" || card.release.mode === "ci") next.mode = card.release.mode;
+    if (card.release.sign) {
+      const s = card.release.sign;
+      if (s.thumbprint !== undefined) next.sign = { ...next.sign, thumbprint: s.thumbprint };
+      if (s.subject !== undefined) next.sign = { ...next.sign, subject: s.subject };
+      if (s.tsa !== undefined) next.sign = { ...next.sign, tsa: s.tsa };
+    }
+  }
+  return next;
+}
 
 const chipBtn: React.CSSProperties = {
   height: 26,
@@ -134,6 +157,23 @@ export default function PublishCards({
     const id = window.setInterval(refresh, 8000);
     return () => { mounted.current = false; window.clearInterval(id); };
   }, [refresh]);
+
+  // Seed mode + signing from the committed Project Card when there is no local override.
+  // This keeps the project's release rules in sync across machines and teammates.
+  useEffect(() => {
+    if (!repoDir || hasLocalSettings()) return;
+    let live = true;
+    (async () => {
+      try {
+        const txt = await invoke<string>("tool_read_file", { path: ".owllm/project.json", cwd: repoDir });
+        const card = parseProjectCard(txt);
+        if (live && card?.release) {
+          setSettings(prev => mergeCardDefaults(prev, card));
+        }
+      } catch { /* no card or malformed — keep defaults */ }
+    })();
+    return () => { live = false; };
+  }, [repoDir]);
 
   const status = (msg: string) => { if (onStatus) onStatus(msg); };
 

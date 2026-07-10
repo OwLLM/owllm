@@ -219,6 +219,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   /// ("queued" into a live run vs "dispatched" as a new goal vs "no-team")
   /// was previously computed and thrown away, leaving the user guessing.
   const [feedNotice, setFeedNotice] = useState<{ id: string; kind: "queued" | "dispatched" | "no-team" } | null>(null);
+  /// Same transient outcome for the Kanban NOW-batch button (keyed separately —
+  /// lanes have no step id).
+  const [laneNotice, setLaneNotice] = useState<{ key: keyof KanbanPlan; kind: "queued" | "dispatched" | "no-team" } | null>(null);
   const [editingStepId, setEditingStepId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   // Digest proposals live IN the notebook blob (nb.proposed / nb.proposedPlan)
@@ -315,6 +318,23 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
     setStep(s.id, { status: "sent" });
+  };
+  /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
+  /// the lane content is NEVER cleared or consumed — only read.
+  const feedLane = (key: keyof KanbanPlan) => {
+    const body = kanbanPlan[key].trim();
+    if (!body) return;
+    const label = KANBAN_COLUMNS.find((c) => c.key === key)!.label.toUpperCase();
+    const res = onFeed(`Implement the ${label} batch from the Notebook plan board — work through every card, in order:\n${body}`);
+    setLaneNotice({ key, kind: res });
+    window.setTimeout(() => setLaneNotice((n) => (n && n.key === key ? null : n)), 6000);
+  };
+  /// The missing "start" for the step queue: feed the FIRST pending step now.
+  /// With auto-feed on, each clean run end pulls the next one — this button is
+  /// what kicks the chain off while the team is idle.
+  const startQueue = () => {
+    const first = nb.steps.find((s) => s.status === "pending");
+    if (first) feedStep(first);
   };
 
   const startEdit = (s: NotebookStep) => { setEditingStepId(s.id); setEditingText(s.text); };
@@ -602,6 +622,25 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       placeholder={col.key === "now" ? "- Ship the coherent first batch..." : col.key === "next" ? "- Follow-up batch..." : "- Optional or parked work..."}
                       style={{ ...textareaBase, minHeight: inline ? 64 : 92, fontSize: 12, background: "var(--bg-input)" }}
                     />
+                    {col.key === "now" && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <button
+                          onClick={() => feedLane("now")}
+                          disabled={!kanbanPlan.now.trim()}
+                          title={running ? "Feed the whole NOW batch — steers the running team at its next boundary. The board keeps its cards." : "Start the whole NOW batch as a new goal. The board keeps its cards."}
+                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(154,217,255,0.5)", borderRadius: 6, background: "rgba(14,28,40,0.6)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
+                        >⚡ Start batch</button>
+                        {laneNotice?.key === "now" && (
+                          <span style={{
+                            fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px",
+                            color: laneNotice.kind === "no-team" ? "#ffb4b4" : laneNotice.kind === "queued" ? "#ffd97a" : "#7ff0c5",
+                            border: `1px solid ${laneNotice.kind === "no-team" ? "rgba(255,140,140,0.45)" : laneNotice.kind === "queued" ? "rgba(255,217,122,0.45)" : "rgba(127,240,197,0.45)"}`,
+                          }}>
+                            {laneNotice.kind === "queued" ? "queued — steers the live run" : laneNotice.kind === "dispatched" ? "dispatched as a new goal" : "no team ready — pick a project & model"}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -614,6 +653,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               <span>🎯</span>
               <span>Next steps</span>
               <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: pendingCount ? "#7ff0c5" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
+              {pendingCount > 0 && (
+                <button
+                  onClick={startQueue}
+                  title={nb.autoFeed
+                    ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
+                    : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
+                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
+                >▶ Start queue</button>
+              )}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>

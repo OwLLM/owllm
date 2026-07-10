@@ -30,13 +30,13 @@
             "vramGb": 4,
             "diskGb": 1
           },
-          "sizeBytes": 396872488,
+          "sizeBytes": 285212672,
           "channels": {
             "stable": {
               "version": "b3850-cuda12.4",
-              "releasedAt": "2026-06-03T20:35:26Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.06.03/local-inference-cuda.zip",
-              "sha256": "1637f1eff5f86a1585cbc284f6e111e6126fae9fb004227b6601d801cd791018",
+              "releasedAt": "2026-05-28T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-cuda-b3850.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -50,13 +50,13 @@
             "vramGb": 4,
             "diskGb": 1
           },
-          "sizeBytes": 33558567,
+          "sizeBytes": 67108864,
           "channels": {
             "stable": {
               "version": "b3850-vulkan",
-              "releasedAt": "2026-06-03T20:35:26Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.06.03/local-inference-vulkan.zip",
-              "sha256": "1637f1eff5f86a1585cbc284f6e111e6126fae9fb004227b6601d801cd791018",
+              "releasedAt": "2026-05-28T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-vulkan-b3850.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -69,13 +69,13 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 16106082,
+          "sizeBytes": 33554432,
           "channels": {
             "stable": {
               "version": "b3850-cpu",
-              "releasedAt": "2026-06-03T20:35:26Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.06.03/local-inference-cpu.zip",
-              "sha256": "61a035c798e42de6ae3424d07c652db2fabcfc781f0470373329fb9537cd8acf",
+              "releasedAt": "2026-05-28T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/local-inference-cpu-b3850.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -140,6 +140,28 @@
           }
         },
         {
+          "id": "local-inference-linux-arm64-cuda",
+          "displayName": "Linux ARM64 CUDA build (NVIDIA Jetson, JetPack 7 / CUDA 13+)",
+          "platform": "linux-aarch64",
+          "requires": {
+            "gpu": "nvidia",
+            "vramGb": 4,
+            "diskGb": 2,
+            "cudaMajorMin": 13
+          },
+          "sizeBytes": 637984830,
+          "channels": {
+            "stable": {
+              "version": "b9488-cuda13.2",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-arm64-cuda-b9488.zip",
+              "sha256": "b576c9e7f181d8df72a25aa9f257ec1df8c696d8eafc3a2a3cfbc25fdab53cc5",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
           "id": "local-inference-linux-arm64-cpu",
           "displayName": "Linux ARM64 CPU build (Jetson / Raspberry Pi / ARM servers)",
           "platform": "linux-aarch64",
@@ -180,13 +202,52 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 137386050,
+          "sizeBytes": 155189248,
           "channels": {
             "stable": {
               "version": "v1.8.4-base",
-              "releasedAt": "2026-06-03T20:35:26Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.06.03/audio-stt-whisper-base.zip",
-              "sha256": "f11d5246db757ad036736aa90a96b2abdfd29ee115f1200bdb9b61ca423bb65c",
+              "releasedAt": "2026-05-15T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/audio-stt-whisper-base-v1.8.4.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "audio-stt-whisper-large",
+          "displayName": "Whisper large-v3 (highest accuracy)",
+          "platform": "windows-x86_64",
+          "requires": {
+            "diskGb": 4,
+            "ramGb": 8
+          },
+          "sizeBytes": 3173552128,
+          "channels": {
+            "stable": {
+              "version": "v1.8.4-large-v3",
+              "releasedAt": "2026-05-15T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/audio-stt-whisper-large-v3.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "audio-stt-whisper-cli-linux-arm64",
+          "displayName": "whisper-cli ARM64 build (binary only — the model downloads on first use)",
+          "platform": "linux-aarch64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 1090931,
+          "channels": {
+            "stable": {
+              "version": "v1.8.4-cli",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/audio-stt-whisper-cli-linux-arm64-v1.8.4.zip",
+              "sha256": "c9d3de9506f6f69fc8dbae6ef34dd326308ea7b58202f9e66abe8d0d92a3b64d",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -210,146 +271,38 @@
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 11249023,
+          "sizeBytes": 157286400,
           "channels": {
             "stable": {
               "version": "3.11.9",
-              "releasedAt": "2026-06-03T20:35:26Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.06.03/python-3.11-embed-win.zip",
-              "sha256": "d416766b722dfb511c0e14974baa4af8370308319c379aacad56c34f4f8fd5c6",
+              "releasedAt": "2026-04-02T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/python-3.11.9-embed-win-x64.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
               "minShellVersion": "0.1.0",
               "signature": null
             }
           }
-        }
-      ]
-    },
-    {
-      "id": "mcp-toolchain",
-      "displayName": "MCP Server Toolchain",
-      "description": "Node.js + uv. Required to spawn npx-based MCP servers (filesystem, git, github, brave-search, postgres, puppeteer, sequential-thinking) and uvx-based Python MCP servers. Without this, the MCP runtime can only invoke binary servers.",
-      "category": "runtime",
-      "required": false,
-      "uiSlots": [
-        "mcp-page-full",
-        "mcp-pack-install",
-        "team-mcp-autoinstall"
-      ],
-      "dependsOn": [
-        "python-runtime"
-      ],
-      "variants": [
+        },
         {
-          "id": "mcp-toolchain-node-uv",
-          "displayName": "Node.js 20 LTS + uv",
-          "platform": "windows-x86_64",
+          "id": "python-3.11-embed-linux-arm64",
+          "displayName": "Python 3.11 standalone (Linux ARM64)",
+          "platform": "linux-aarch64",
           "requires": {
             "diskGb": 1
           },
-          "sizeBytes": 46596242,
+          "sizeBytes": 101560698,
           "channels": {
             "stable": {
-              "version": "node20.18.0-uv0.5.4",
-              "releasedAt": "2026-06-03T20:35:26Z",
-              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.06.03/mcp-toolchain-node-uv.zip",
-              "sha256": "753b5f7f702471041c02f3549bfafad6afcd166674a1501332c15584cc54a5ba",
+              "version": "3.11.15",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/python-3.11-embed-linux-arm64.zip",
+              "sha256": "9d531a0a50303d89f728fe2384727b49c5bd2babc46972608cfb3fcf3cd96a7d",
               "minShellVersion": "0.1.0",
               "signature": null
             }
           }
         }
       ]
-    }
-  ],
-  "shellEmbedded": {
-    "_comment": "Features that ship inside the Tauri exe and are always available. Not modules. Listed here for completeness and for the wizard to know what NOT to offer as installable.",
-    "items": [
-      "cloud-connectors-anthropic",
-      "cloud-connectors-openai",
-      "cloud-connectors-moonshot",
-      "telegram-bridge",
-      "audio-codecs-symphonia",
-      "agent-runtime-orchestrator",
-      "agent-runtime-critic",
-      "agent-runtime-dispatch",
-      "fleet-worktree-substrate",
-      "mcp-runtime-spawner",
-      "pty-terminal",
-      "hardware-probe",
-      "huggingface-browser",
-      "accounts-secrets",
-      "ui-all-pages"
-    ]
-  },
-  "dataLayer": {
-    "_comment": "Files pulled from raw.githubusercontent on launch with local cache fallback. Hot-reloadable without restart. NOT modules; updated by committing to main.",
-    "paths": [
-      "data/teams/*.json",
-      "data/roles/*.yaml",
-      "data/skills/*.md",
-      "data/model-profiles/*.json",
-      "data/mcp-recommendations/*.json",
-      "data/abliteration-corpus/*.md"
-    ]
-  },
-  "systemPrerequisites": {
-    "_comment": "External installs the user must have on PATH. Not modules; the wizard checks for them and surfaces install instructions if missing.",
-    "items": [
-      {
-        "id": "git",
-        "displayName": "Git",
-        "required": true,
-        "reason": "Fleet worktree isolation (per-agent git worktrees) requires git on PATH.",
-        "checkCommand": "git --version",
-        "installHint": "https://git-scm.com/download/win"
-      },
-      {
-        "id": "vscodium-or-cursor-or-vscode",
-        "displayName": "External code editor",
-        "required": false,
-        "reason": "Code page launches your preferred editor. Detection order: VSCodium > Cursor > VS Code on PATH.",
-        "checkCommand": "codium --version || cursor --version || code --version",
-        "installHint": "https://vscodium.com/ or https://cursor.com/ or https://code.visualstudio.com/"
-      }
-    ]
-  },
-  "futureModules": {
-    "_comment": "Features the user has mentioned as roadmap items. NOT shipped yet \u2014 listed here so the registry shape is forward-compatible. Add to `modules[]` when implemented.",
-    "items": [
-      "audio-tts-piper",
-      "vision-inference-llava",
-      "image-generation-sdxl",
-      "image-generation-flux",
-      "music-generation",
-      "video-generation",
-      "whatsapp-bridge",
-      "kanban-cards-ui-pack",
-      "director-mode-approval-gates"
-    ]
-  },
-  "comingSoonModules": [
-    {
-      "moduleId": "audio-stt",
-      "variant": {
-        "id": "audio-stt-whisper-large",
-        "displayName": "Whisper large-v3 (highest accuracy)",
-        "platform": "windows-x86_64",
-        "requires": {
-          "diskGb": 4,
-          "ramGb": 8
-        },
-        "sizeBytes": 3173552128,
-        "channels": {
-          "stable": {
-            "version": "v1.8.4-large-v3",
-            "releasedAt": "2026-05-15T00:00:00Z",
-            "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/audio-stt-whisper-large-v3.zip",
-            "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
-            "minShellVersion": "0.1.0",
-            "signature": null
-          }
-        }
-      }
     },
     {
       "id": "finetune",
@@ -436,9 +389,64 @@
       ]
     },
     {
+      "id": "mcp-toolchain",
+      "displayName": "MCP Server Toolchain",
+      "description": "Node.js + uv. Required to spawn npx-based MCP servers (filesystem, git, github, brave-search, postgres, puppeteer, sequential-thinking) and uvx-based Python MCP servers. Without this, the MCP runtime can only invoke binary servers.",
+      "category": "runtime",
+      "required": false,
+      "uiSlots": [
+        "mcp-page-full",
+        "mcp-pack-install",
+        "team-mcp-autoinstall"
+      ],
+      "dependsOn": [
+        "python-runtime"
+      ],
+      "variants": [
+        {
+          "id": "mcp-toolchain-node-uv",
+          "displayName": "Node.js 20 LTS + uv",
+          "platform": "windows-x86_64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 272629760,
+          "channels": {
+            "stable": {
+              "version": "node20.18.0-uv0.5.4",
+              "releasedAt": "2026-05-10T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/mcp-toolchain-node20-uv0.5.zip",
+              "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "mcp-toolchain-node-uv-linux-arm64",
+          "displayName": "Node.js 20 LTS + uv (Linux ARM64)",
+          "platform": "linux-aarch64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 74553318,
+          "channels": {
+            "stable": {
+              "version": "node20.20.2-uv0.11.28",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/mcp-toolchain-node-uv-linux-arm64.zip",
+              "sha256": "665cd0129a064e86df5e8862de82c702b7f174d6b9fa2e07f0098d87a40fb20e",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        }
+      ]
+    },
+    {
       "id": "tools-python",
       "displayName": "Python Tools (Screenshot)",
-      "description": "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight \u2014 under 50 MB on top of python-runtime.",
+      "description": "Small Python utilities the agents call: web-page screenshot (Pillow), abliteration corpus prep. Lightweight \u00e2\u20ac\u201d under 50 MB on top of python-runtime.",
       "category": "content",
       "required": false,
       "uiSlots": [
@@ -469,5 +477,71 @@
         }
       ]
     }
-  ]
+  ],
+  "shellEmbedded": {
+    "_comment": "Features that ship inside the Tauri exe and are always available. Not modules. Listed here for completeness and for the wizard to know what NOT to offer as installable.",
+    "items": [
+      "cloud-connectors-anthropic",
+      "cloud-connectors-openai",
+      "cloud-connectors-moonshot",
+      "telegram-bridge",
+      "audio-codecs-symphonia",
+      "agent-runtime-orchestrator",
+      "agent-runtime-critic",
+      "agent-runtime-dispatch",
+      "fleet-worktree-substrate",
+      "mcp-runtime-spawner",
+      "pty-terminal",
+      "hardware-probe",
+      "huggingface-browser",
+      "accounts-secrets",
+      "ui-all-pages"
+    ]
+  },
+  "dataLayer": {
+    "_comment": "Files pulled from raw.githubusercontent on launch with local cache fallback. Hot-reloadable without restart. NOT modules; updated by committing to main.",
+    "paths": [
+      "data/teams/*.json",
+      "data/roles/*.yaml",
+      "data/skills/*.md",
+      "data/model-profiles/*.json",
+      "data/mcp-recommendations/*.json",
+      "data/abliteration-corpus/*.md"
+    ]
+  },
+  "systemPrerequisites": {
+    "_comment": "External installs the user must have on PATH. Not modules; the wizard checks for them and surfaces install instructions if missing.",
+    "items": [
+      {
+        "id": "git",
+        "displayName": "Git",
+        "required": true,
+        "reason": "Fleet worktree isolation (per-agent git worktrees) requires git on PATH.",
+        "checkCommand": "git --version",
+        "installHint": "https://git-scm.com/download/win"
+      },
+      {
+        "id": "vscodium-or-cursor-or-vscode",
+        "displayName": "External code editor",
+        "required": false,
+        "reason": "Code page launches your preferred editor. Detection order: VSCodium > Cursor > VS Code on PATH.",
+        "checkCommand": "codium --version || cursor --version || code --version",
+        "installHint": "https://vscodium.com/ or https://cursor.com/ or https://code.visualstudio.com/"
+      }
+    ]
+  },
+  "futureModules": {
+    "_comment": "Features the user has mentioned as roadmap items. NOT shipped yet \u00e2\u20ac\u201d listed here so the registry shape is forward-compatible. Add to `modules[]` when implemented.",
+    "items": [
+      "audio-tts-piper",
+      "vision-inference-llava",
+      "image-generation-sdxl",
+      "image-generation-flux",
+      "music-generation",
+      "video-generation",
+      "whatsapp-bridge",
+      "kanban-cards-ui-pack",
+      "director-mode-approval-gates"
+    ]
+  }
 }

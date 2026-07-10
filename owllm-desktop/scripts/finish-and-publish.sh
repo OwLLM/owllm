@@ -43,6 +43,14 @@ APP="$(cd "$HERE/.." && pwd)"        # owllm-desktop/
 REPO="$(cd "$APP/.." && pwd)"        # repo root
 cd "$REPO"
 
+# Stream a verbatim copy of this run to .cache so a failure can be diagnosed
+# without relying on the app's log view (which truncates or may be closed).
+mkdir -p "$APP/.cache"
+LIVE_LOG="$APP/.cache/publish-latest.log"
+: > "$LIVE_LOG"
+exec > >(tee -a "$LIVE_LOG") 2>&1
+trap 'cp -f "$LIVE_LOG" "$APP/.cache/publish-v${NEW:-unknown}.log" 2>/dev/null || true' EXIT
+
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
 
 # --- Project Card (.owllm/project.json): per-project release config so this works
@@ -51,7 +59,7 @@ fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
 CARD="$REPO/.owllm/project.json"
 VERSION_FILE="owllm-desktop/src-tauri/tauri.conf.json"
 STAGE_PATH="owllm-desktop"
-PUBLISH_CMD='bash "owllm-desktop/scripts/publish-release.sh" --notes "$OWLLM_RELEASE_NOTES"'
+PUBLISH_CMD='bash "owllm-desktop/scripts/publish-release.sh"'
 # In CI mode the release is built by GitHub Actions, so we never run the local
 # publish command. The signing env vars are still meaningful in host mode: they
 # are inherited by publish-release.sh which reads OWLLM_SIGN_THUMBPRINT etc.

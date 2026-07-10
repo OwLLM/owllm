@@ -11,9 +11,9 @@
 // whenever a secret is configured — without it, anyone who finds the tunnel URL
 // could drive the tool-executing agent.
 
-use std::io::Read;
 use base64::Engine as _;
 use sha2::{Digest, Sha256};
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -89,19 +89,21 @@ pub fn webhook_start(
     let app2 = app.clone();
     let vtoken = whatsapp_verify_token;
     let lsecret = line_channel_secret;
-    let handle = std::thread::spawn(move || {
-        loop {
-            if stop_loop.load(Ordering::SeqCst) {
-                break;
-            }
-            match server.recv_timeout(std::time::Duration::from_millis(500)) {
-                Ok(Some(req)) => handle_request(req, &app2, &vtoken, &lsecret),
-                Ok(None) => continue,
-                Err(_) => break,
-            }
+    let handle = std::thread::spawn(move || loop {
+        if stop_loop.load(Ordering::SeqCst) {
+            break;
+        }
+        match server.recv_timeout(std::time::Duration::from_millis(500)) {
+            Ok(Some(req)) => handle_request(req, &app2, &vtoken, &lsecret),
+            Ok(None) => continue,
+            Err(_) => break,
         }
     });
-    *guard = Some(WebhookServer { stop, _handle: handle, port });
+    *guard = Some(WebhookServer {
+        stop,
+        _handle: handle,
+        port,
+    });
     Ok(())
 }
 
@@ -121,8 +123,12 @@ fn parse_query(url: &str) -> std::collections::HashMap<String, String> {
             let mut it = pair.splitn(2, '=');
             if let (Some(k), Some(v)) = (it.next(), it.next()) {
                 map.insert(
-                    urlencoding::decode(k).map(|c| c.into_owned()).unwrap_or_else(|_| k.to_string()),
-                    urlencoding::decode(v).map(|c| c.into_owned()).unwrap_or_else(|_| v.to_string()),
+                    urlencoding::decode(k)
+                        .map(|c| c.into_owned())
+                        .unwrap_or_else(|_| k.to_string()),
+                    urlencoding::decode(v)
+                        .map(|c| c.into_owned())
+                        .unwrap_or_else(|_| v.to_string()),
                 );
             }
         }
@@ -144,7 +150,12 @@ fn emit(app: &AppHandle, platform: &str, from: &str, text: &str) {
     );
 }
 
-fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &str, line_secret: &str) {
+fn handle_request(
+    mut req: tiny_http::Request,
+    app: &AppHandle,
+    verify_token: &str,
+    line_secret: &str,
+) {
     let method = req.method().as_str().to_uppercase();
     let url = req.url().to_string();
     let path = url.split('?').next().unwrap_or("").to_string();
@@ -173,10 +184,14 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &s
             for e in entries {
                 if let Some(changes) = e.get("changes").and_then(|c| c.as_array()) {
                     for c in changes {
-                        if let Some(msgs) = c.pointer("/value/messages").and_then(|m| m.as_array()) {
+                        if let Some(msgs) = c.pointer("/value/messages").and_then(|m| m.as_array())
+                        {
                             for m in msgs {
                                 let from = m.get("from").and_then(|x| x.as_str()).unwrap_or("");
-                                let text = m.pointer("/text/body").and_then(|x| x.as_str()).unwrap_or("");
+                                let text = m
+                                    .pointer("/text/body")
+                                    .and_then(|x| x.as_str())
+                                    .unwrap_or("");
                                 emit(app, "whatsapp", from, text);
                             }
                         }
@@ -202,9 +217,15 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &s
             let expected = hmac_sha256_base64(line_secret.as_bytes(), body.as_bytes());
             // Constant-time-ish: lengths then bytes. Reject on mismatch.
             if provided.as_bytes().len() != expected.as_bytes().len()
-                || provided.bytes().zip(expected.bytes()).fold(0u8, |a, (x, y)| a | (x ^ y)) != 0
+                || provided
+                    .bytes()
+                    .zip(expected.bytes())
+                    .fold(0u8, |a, (x, y)| a | (x ^ y))
+                    != 0
             {
-                let _ = req.respond(tiny_http::Response::from_string("bad signature").with_status_code(403));
+                let _ = req.respond(
+                    tiny_http::Response::from_string("bad signature").with_status_code(403),
+                );
                 return;
             }
         }
@@ -214,8 +235,14 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, verify_token: &s
                 if ev.get("type").and_then(|t| t.as_str()) == Some("message")
                     && ev.pointer("/message/type").and_then(|t| t.as_str()) == Some("text")
                 {
-                    let from = ev.pointer("/source/userId").and_then(|x| x.as_str()).unwrap_or("");
-                    let text = ev.pointer("/message/text").and_then(|x| x.as_str()).unwrap_or("");
+                    let from = ev
+                        .pointer("/source/userId")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
+                    let text = ev
+                        .pointer("/message/text")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("");
                     emit(app, "line", from, text);
                 }
             }
@@ -245,13 +272,21 @@ pub async fn whatsapp_send(
         .await
         .map_err(|e| format!("whatsapp send: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("whatsapp send HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+        return Err(format!(
+            "whatsapp send HTTP {}: {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        ));
     }
     Ok(())
 }
 
 #[tauri::command]
-pub async fn line_push(channel_access_token: String, to: String, text: String) -> Result<(), String> {
+pub async fn line_push(
+    channel_access_token: String,
+    to: String,
+    text: String,
+) -> Result<(), String> {
     let resp = reqwest::Client::new()
         .post("https://api.line.me/v2/bot/message/push")
         .bearer_auth(&channel_access_token)
@@ -260,7 +295,11 @@ pub async fn line_push(channel_access_token: String, to: String, text: String) -
         .await
         .map_err(|e| format!("line push: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("line push HTTP {}: {}", resp.status(), resp.text().await.unwrap_or_default()));
+        return Err(format!(
+            "line push HTTP {}: {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        ));
     }
     Ok(())
 }

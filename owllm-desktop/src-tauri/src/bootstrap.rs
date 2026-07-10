@@ -62,8 +62,12 @@ pub fn migrate_user_state_if_needed() {
     for sub in ["agent_definitions", "teams", "skills"] {
         let s = legacy_root.join(sub);
         let d = new_root.join(sub);
-        if !s.is_dir() { continue; }
-        if d.exists() { continue; } // user already has something there — don't merge over it
+        if !s.is_dir() {
+            continue;
+        }
+        if d.exists() {
+            continue;
+        } // user already has something there — don't merge over it
         match copy_dir_recursive(&s, &d) {
             Ok(n) => copied.push(format!("{sub}/ ({n} files)")),
             Err(e) => failed.push(format!("{sub}/: {e}")),
@@ -105,8 +109,11 @@ pub fn migrate_user_state_if_needed() {
         copied.join(", "),
     );
     if !failed.is_empty() {
-        eprintln!("[bootstrap] migration finished with {} failure(s): {}",
-            failed.len(), failed.join(" | "));
+        eprintln!(
+            "[bootstrap] migration finished with {} failure(s): {}",
+            failed.len(),
+            failed.join(" | ")
+        );
     } else {
         eprintln!("[bootstrap] {summary}");
     }
@@ -116,12 +123,10 @@ pub fn migrate_user_state_if_needed() {
 /// One built-in skill pack embedded in the binary. `(dir_name, SKILL.md)`.
 /// Seeded into the user skills dir so it's listed by `list_skill_packs`,
 /// editable in Studio, and equippable — exactly like a downloaded pack.
-const BUILTIN_SKILLS: &[(&str, &str)] = &[
-    (
-        "owllm__parallel-dispatch",
-        include_str!("../seed/owllm__parallel-dispatch.SKILL.md"),
-    ),
-];
+const BUILTIN_SKILLS: &[(&str, &str)] = &[(
+    "owllm__parallel-dispatch",
+    include_str!("../seed/owllm__parallel-dispatch.SKILL.md"),
+)];
 
 /// Write OWLLM's built-in skill packs into the user skills dir if they're not
 /// already there. Idempotent and NON-destructive: an existing SKILL.md (possibly
@@ -162,8 +167,8 @@ pub fn provision_curated_skills_first_run() {
     if sentinel.is_file() {
         return; // already provisioned
     }
-    std::thread::spawn(move || {
-        match crate::skill_library::provision_all_curated_skills() {
+    std::thread::spawn(
+        move || match crate::skill_library::provision_all_curated_skills() {
             Ok(n) if n > 0 => {
                 let _ = std::fs::create_dir_all(&skills_root);
                 let _ = std::fs::write(
@@ -173,13 +178,17 @@ pub fn provision_curated_skills_first_run() {
                 eprintln!("[bootstrap] auto-provisioned {n} curated skill(s)");
             }
             Ok(_) => {
-                eprintln!("[bootstrap] curated skill provision installed 0 — will retry next launch");
+                eprintln!(
+                    "[bootstrap] curated skill provision installed 0 — will retry next launch"
+                );
             }
             Err(e) => {
-                eprintln!("[bootstrap] curated skill provision skipped: {e} — will retry next launch");
+                eprintln!(
+                    "[bootstrap] curated skill provision skipped: {e} — will retry next launch"
+                );
             }
-        }
-    });
+        },
+    );
 }
 
 fn write_sentinel(path: &Path, summary: &str) -> std::io::Result<()> {

@@ -72,7 +72,11 @@ pub enum SetupEvent {
 /// password (base64). Matches the `.owllm` convention used by wsl.rs.
 fn user_cfg_path() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(std::path::PathBuf::from(home).join(".owllm").join("wsl_user.json"))
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".owllm")
+            .join("wsl_user.json"),
+    )
 }
 
 /// Marker file: set when we launch `wsl --install`, cleared once a usable
@@ -81,7 +85,11 @@ fn user_cfg_path() -> Option<std::path::PathBuf> {
 /// installed WSL.
 fn install_marker_path() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
-    Some(std::path::PathBuf::from(home).join(".owllm").join("wsl_install_pending"))
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".owllm")
+            .join("wsl_install_pending"),
+    )
 }
 
 fn set_install_marker() {
@@ -118,7 +126,10 @@ fn save_account(username: &str, password: &str) -> Result<(), String> {
         let cipher = crate::crypt::protect(password.as_bytes())?;
         base64::engine::general_purpose::STANDARD.encode(cipher)
     };
-    let rec = StoredAccount { username: username.to_string(), password_enc: enc };
+    let rec = StoredAccount {
+        username: username.to_string(),
+        password_enc: enc,
+    };
     let p = user_cfg_path().ok_or_else(|| "no home directory".to_string())?;
     if let Some(parent) = p.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir: {e}"))?;
@@ -189,7 +200,13 @@ mod imp {
     fn default_user_name(distro: &str) -> Option<String> {
         crate::wsl::run_in_distro(distro, "id -un")
             .ok()
-            .and_then(|o| o.lines().rev().map(str::trim).find(|l| !l.is_empty()).map(String::from))
+            .and_then(|o| {
+                o.lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .map(String::from)
+            })
             .filter(|s| s != "root")
     }
 
@@ -210,7 +227,12 @@ mod imp {
             .default_distro
             .clone()
             .filter(|d| !crate::wsl::is_system_distro(d))
-            .or_else(|| ws.distros.iter().find(|d| !crate::wsl::is_system_distro(d)).cloned());
+            .or_else(|| {
+                ws.distros
+                    .iter()
+                    .find(|d| !crate::wsl::is_system_distro(d))
+                    .cloned()
+            });
         let distro_installed = default_distro.is_some();
         // WSL itself is present (it lists distros) but every one of them is a
         // system distro (docker-desktop/rancher/podman) — a stripped busybox
@@ -244,7 +266,13 @@ mod imp {
         let python_ready = if distro_runnable {
             default_distro
                 .as_deref()
-                .and_then(|d| crate::wsl::run_in_distro(d, "command -v python3 >/dev/null 2>&1 && echo OK || true").ok())
+                .and_then(|d| {
+                    crate::wsl::run_in_distro(
+                        d,
+                        "command -v python3 >/dev/null 2>&1 && echo OK || true",
+                    )
+                    .ok()
+                })
                 .map(|o| o.contains("OK"))
                 .unwrap_or(false)
         } else {
@@ -296,7 +324,10 @@ mod imp {
                 "needsPython",
                 format!(
                     "Ubuntu is ready{} — just needs Python.",
-                    default_user.as_deref().map(|u| format!(" (user {u})")).unwrap_or_default()
+                    default_user
+                        .as_deref()
+                        .map(|u| format!(" (user {u})"))
+                        .unwrap_or_default()
                 ),
             )
         } else {
@@ -304,7 +335,10 @@ mod imp {
                 "ready",
                 format!(
                     "WSL is ready{}.",
-                    default_distro.as_deref().map(|d| format!(" ({d})")).unwrap_or_default()
+                    default_distro
+                        .as_deref()
+                        .map(|d| format!(" ({d})"))
+                        .unwrap_or_default()
                 ),
             )
         };
@@ -435,8 +469,16 @@ pip3 --version || true
 "#;
 
         let mut cmd = std::process::Command::new("wsl.exe");
-        cmd.arg("-d").arg(distro).arg("-u").arg("root").arg("--").arg("bash").arg("-ls");
-        cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.arg("-d")
+            .arg(distro)
+            .arg("-u")
+            .arg("root")
+            .arg("--")
+            .arg("bash")
+            .arg("-ls");
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         cmd.creation_flags(CREATE_NO_WINDOW);
         let mut child = cmd.spawn().map_err(|e| format!("spawn wsl: {e}"))?;
         {
@@ -536,7 +578,10 @@ fn sanitize_username(raw: &str) -> String {
 /// Create (or repair) the Linux user, set its password, make it the distro
 /// default, and remember the credentials (password encrypted via DPAPI).
 #[tauri::command]
-pub async fn wsl_setup_ensure_user(username: String, password: String) -> Result<WslAccount, String> {
+pub async fn wsl_setup_ensure_user(
+    username: String,
+    password: String,
+) -> Result<WslAccount, String> {
     #[cfg(windows)]
     {
         let distro = crate::wsl::best_linux_distro()
@@ -552,7 +597,10 @@ pub async fn wsl_setup_ensure_user(username: String, password: String) -> Result
             .await
             .map_err(|e| format!("join error: {e}"))??;
         save_account(&user, &password)?;
-        Ok(WslAccount { username: Some(user), has_password: true })
+        Ok(WslAccount {
+            username: Some(user),
+            has_password: true,
+        })
     }
     #[cfg(not(windows))]
     {
@@ -567,7 +615,11 @@ pub async fn wsl_setup_ensure_user(username: String, password: String) -> Result
 pub fn wsl_setup_get_account() -> WslAccount {
     match load_account() {
         Some(a) => WslAccount {
-            username: if a.username.is_empty() { None } else { Some(a.username) },
+            username: if a.username.is_empty() {
+                None
+            } else {
+                Some(a.username)
+            },
             has_password: !a.password_enc.is_empty(),
         },
         None => WslAccount::default(),

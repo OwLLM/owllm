@@ -106,7 +106,9 @@ fn normalize_lexical(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
         match comp {
-            Component::ParentDir => { out.pop(); }
+            Component::ParentDir => {
+                out.pop();
+            }
             Component::CurDir => {}
             other => out.push(other.as_os_str()),
         }
@@ -117,7 +119,11 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 /// Component key for prefix comparison — case-insensitive on Windows.
 fn comp_key(c: std::path::Component) -> String {
     let s = c.as_os_str().to_string_lossy().to_string();
-    if cfg!(windows) { s.to_lowercase() } else { s }
+    if cfg!(windows) {
+        s.to_lowercase()
+    } else {
+        s
+    }
 }
 
 /// Is `path` the same as, or nested inside, `root`? Compared component-wise
@@ -125,7 +131,9 @@ fn comp_key(c: std::path::Component) -> String {
 fn is_within(root: &Path, path: &Path) -> bool {
     let root_c: Vec<String> = normalize_lexical(root).components().map(comp_key).collect();
     let path_c: Vec<String> = normalize_lexical(path).components().map(comp_key).collect();
-    if root_c.is_empty() { return false; }
+    if root_c.is_empty() {
+        return false;
+    }
     path_c.len() >= root_c.len() && root_c.iter().zip(path_c.iter()).all(|(a, b)| a == b)
 }
 
@@ -151,7 +159,10 @@ fn write_allowed_roots(cwd: &Option<String>) -> Vec<PathBuf> {
 /// roots. Error text is model-readable so the agent self-corrects.
 fn write_jail(path: &str, cwd: &Option<String>) -> Result<PathBuf, String> {
     let resolved = normalize_lexical(&resolve(path, cwd));
-    if write_allowed_roots(cwd).iter().any(|r| is_within(r, &resolved)) {
+    if write_allowed_roots(cwd)
+        .iter()
+        .any(|r| is_within(r, &resolved))
+    {
         Ok(resolved)
     } else {
         Err(format!(
@@ -171,25 +182,52 @@ fn dangerous_shell_command(cmd: &str) -> Option<&'static str> {
     let flat = c.replace(['\t', '\n', '\r'], " ");
     // Whole-root / home recursive wipes.
     let trimmed = flat.trim_start();
-    if trimmed.starts_with("rm -rf /") || trimmed.starts_with("rm -fr /")
-        || trimmed.starts_with("rm -rf ~") || flat.contains(" rm -rf /") || flat.contains(" rm -rf ~") {
+    if trimmed.starts_with("rm -rf /")
+        || trimmed.starts_with("rm -fr /")
+        || trimmed.starts_with("rm -rf ~")
+        || flat.contains(" rm -rf /")
+        || flat.contains(" rm -rf ~")
+    {
         return Some("recursive delete of filesystem root or home");
     }
     // Disk format / partition / raw-device write.
-    for pat in ["mkfs", "diskpart", "format c:", "format /", "dd if=", "cipher /w", "> /dev/sd", "of=/dev/"] {
-        if c.contains(pat) { return Some("disk format / partition / raw-device write"); }
+    for pat in [
+        "mkfs",
+        "diskpart",
+        "format c:",
+        "format /",
+        "dd if=",
+        "cipher /w",
+        "> /dev/sd",
+        "of=/dev/",
+    ] {
+        if c.contains(pat) {
+            return Some("disk format / partition / raw-device write");
+        }
     }
     // System control.
     if c.contains("shutdown") || c.contains("reg delete hklm") || c.contains("reg delete \"hklm") {
         return Some("system shutdown or HKLM registry delete");
     }
     // Fork bomb.
-    if flat.replace(' ', "").contains(":(){:|:&};:") { return Some("fork bomb"); }
+    if flat.replace(' ', "").contains(":(){:|:&};:") {
+        return Some("fork bomb");
+    }
     // Remote download piped straight into a shell / eval.
-    let dl = c.contains("curl ") || c.contains("wget ") || c.contains("iwr ") || c.contains("invoke-webrequest");
-    let exec = flat.contains("| sh") || flat.contains("|sh") || flat.contains("| bash") || flat.contains("|bash")
-        || flat.contains("| iex") || flat.contains("|iex") || c.contains("invoke-expression");
-    if dl && exec { return Some("remote download piped directly into a shell"); }
+    let dl = c.contains("curl ")
+        || c.contains("wget ")
+        || c.contains("iwr ")
+        || c.contains("invoke-webrequest");
+    let exec = flat.contains("| sh")
+        || flat.contains("|sh")
+        || flat.contains("| bash")
+        || flat.contains("|bash")
+        || flat.contains("| iex")
+        || flat.contains("|iex")
+        || c.contains("invoke-expression");
+    if dl && exec {
+        return Some("remote download piped directly into a shell");
+    }
     None
 }
 
@@ -245,9 +283,9 @@ pub async fn tool_read_file(path: String, cwd: Option<String>) -> Result<String,
 /// so it resolves correctly whatever namespace the agent's CLI runs in.
 #[tauri::command]
 pub async fn copy_into_workspace(src: String, cwd: Option<String>) -> Result<String, String> {
-    let cwd = cwd.filter(|s| !s.is_empty()).ok_or_else(|| {
-        "no workspace open — cannot copy a file into the project".to_string()
-    })?;
+    let cwd = cwd
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "no workspace open — cannot copy a file into the project".to_string())?;
     let source = resolve(&src, &Some(cwd.clone()));
     if !source.is_file() {
         return Err(format!("not a file: {}", source.display()));
@@ -289,7 +327,11 @@ pub async fn tool_list_dir(path: String, cwd: Option<String>) -> Result<Vec<DirE
             Some(m) => ("file", Some(m.len())),
             None => ("file", None),
         };
-        out.push(DirEntry { name, kind: kind.to_string(), size });
+        out.push(DirEntry {
+            name,
+            kind: kind.to_string(),
+            size,
+        });
     }
     out.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(out)
@@ -323,7 +365,9 @@ fn host_python_path_dirs() -> Vec<std::path::PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
 
     fn add_python_dir(out: &mut Vec<PathBuf>, python_exe: PathBuf) {
-        let Some(dir) = python_exe.parent().map(|p| p.to_path_buf()) else { return };
+        let Some(dir) = python_exe.parent().map(|p| p.to_path_buf()) else {
+            return;
+        };
         if !dir.join("python.exe").is_file() || out.contains(&dir) {
             return;
         }
@@ -381,10 +425,7 @@ fn host_python_path_dirs() -> Vec<std::path::PathBuf> {
 }
 
 #[tauri::command]
-pub async fn tool_shell_exec(
-    command: String,
-    cwd: Option<String>,
-) -> Result<ShellResult, String> {
+pub async fn tool_shell_exec(command: String, cwd: Option<String>) -> Result<ShellResult, String> {
     use tokio::process::Command;
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -423,10 +464,7 @@ pub async fn tool_shell_exec(
         });
     }
 
-    let cwd_path = cwd
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from);
+    let cwd_path = cwd.as_deref().filter(|s| !s.is_empty()).map(PathBuf::from);
 
     let mut cmd = if cfg!(windows) {
         let mut c = Command::new("cmd");
@@ -489,9 +527,12 @@ pub async fn tool_shell_exec(
 
 /// Common ssh/scp hardening options.
 fn ssh_base_opts(cmd: &mut tokio::process::Command) {
-    cmd.arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("StrictHostKeyChecking=accept-new")
-        .arg("-o").arg("ConnectTimeout=15");
+    cmd.arg("-o")
+        .arg("BatchMode=yes")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=accept-new")
+        .arg("-o")
+        .arg("ConnectTimeout=15");
 }
 
 fn ssh_target(host: &str, user: &Option<String>) -> String {
@@ -513,8 +554,12 @@ pub async fn tool_ssh_exec(
     use tokio::process::Command;
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    if host.trim().is_empty() { return Err("ssh_exec: host is required".to_string()); }
-    if command.trim().is_empty() { return Err("ssh_exec: command is required".to_string()); }
+    if host.trim().is_empty() {
+        return Err("ssh_exec: host is required".to_string());
+    }
+    if command.trim().is_empty() {
+        return Err("ssh_exec: command is required".to_string());
+    }
     if let Some(reason) = dangerous_shell_command(&command) {
         return Err(format!(
             "blocked dangerous remote command ({reason}). Run it yourself over ssh if you truly need it."
@@ -522,7 +567,9 @@ pub async fn tool_ssh_exec(
     }
     let mut cmd = Command::new("ssh");
     ssh_base_opts(&mut cmd);
-    if let Some(p) = port { cmd.arg("-p").arg(p.to_string()); }
+    if let Some(p) = port {
+        cmd.arg("-p").arg(p.to_string());
+    }
     if let Some(id) = identity.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         cmd.arg("-i").arg(id);
     }
@@ -548,10 +595,17 @@ pub async fn tool_ssh_exec(
 /// Build an scp command shared by upload/download (scp uses -P for the port,
 /// not ssh's -p). `a`/`b` are the source then destination, already in scp's
 /// `[target:]path` form.
-fn scp_command(a: &str, b: &str, port: Option<u16>, identity: &Option<String>) -> tokio::process::Command {
+fn scp_command(
+    a: &str,
+    b: &str,
+    port: Option<u16>,
+    identity: &Option<String>,
+) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new("scp");
     ssh_base_opts(&mut cmd);
-    if let Some(p) = port { cmd.arg("-P").arg(p.to_string()); }
+    if let Some(p) = port {
+        cmd.arg("-P").arg(p.to_string());
+    }
     if let Some(id) = identity.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         cmd.arg("-i").arg(id);
     }
@@ -647,11 +701,19 @@ pub async fn tool_grep(
     let root = resolve(path.as_deref().unwrap_or("."), &cwd);
     let glob_re: Option<regex::Regex> = match glob.as_deref() {
         None | Some("") => None,
-        Some(g) => Some(regex::Regex::new(&glob_to_regex(g))
-            .map_err(|e| format!("bad glob: {e}"))?),
+        Some(g) => {
+            Some(regex::Regex::new(&glob_to_regex(g)).map_err(|e| format!("bad glob: {e}"))?)
+        }
     };
     let mut out: Vec<GrepHit> = Vec::new();
-    walk_grep(&root, &re, glob_re.as_ref(), MAX_FILE_BYTES, MAX_HITS, &mut out);
+    walk_grep(
+        &root,
+        &re,
+        glob_re.as_ref(),
+        MAX_FILE_BYTES,
+        MAX_HITS,
+        &mut out,
+    );
     Ok(out)
 }
 
@@ -663,15 +725,31 @@ fn walk_grep(
     max_hits: usize,
     out: &mut Vec<GrepHit>,
 ) {
-    if out.len() >= max_hits { return; }
-    let Ok(read) = std::fs::read_dir(dir) else { return };
+    if out.len() >= max_hits {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in read.flatten() {
-        if out.len() >= max_hits { return; }
+        if out.len() >= max_hits {
+            return;
+        }
         let p = entry.path();
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
         // Skip the usual noise so the agent isn't drowned in vendor code.
-        if matches!(name, ".git" | "node_modules" | "target" | "dist"
-            | "__pycache__" | ".venv" | "venv" | ".envs" | "python_runtime") {
+        if matches!(
+            name,
+            ".git"
+                | "node_modules"
+                | "target"
+                | "dist"
+                | "__pycache__"
+                | ".venv"
+                | "venv"
+                | ".envs"
+                | "python_runtime"
+        ) {
             continue;
         }
         let meta = match entry.metadata() {
@@ -682,13 +760,21 @@ fn walk_grep(
             walk_grep(&p, re, glob_re, max_file_bytes, max_hits, out);
             continue;
         }
-        if meta.len() > max_file_bytes { continue; }
-        if let Some(g) = glob_re {
-            if !g.is_match(name) { continue; }
+        if meta.len() > max_file_bytes {
+            continue;
         }
-        let Ok(content) = std::fs::read_to_string(&p) else { continue }; // skip binaries / non-utf8
+        if let Some(g) = glob_re {
+            if !g.is_match(name) {
+                continue;
+            }
+        }
+        let Ok(content) = std::fs::read_to_string(&p) else {
+            continue;
+        }; // skip binaries / non-utf8
         for (i, line) in content.lines().enumerate() {
-            if out.len() >= max_hits { return; }
+            if out.len() >= max_hits {
+                return;
+            }
             if re.is_match(line) {
                 out.push(GrepHit {
                     path: p.to_string_lossy().into_owned(),
@@ -714,8 +800,8 @@ pub async fn tool_glob(
     let root = resolve(path.as_deref().unwrap_or("."), &cwd);
     // Glob is matched against the path RELATIVE TO `root`, normalised
     // with forward slashes so patterns work cross-platform.
-    let re = regex::Regex::new(&glob_to_regex(&pattern))
-        .map_err(|e| format!("bad pattern: {e}"))?;
+    let re =
+        regex::Regex::new(&glob_to_regex(&pattern)).map_err(|e| format!("bad pattern: {e}"))?;
     let mut out: Vec<String> = Vec::new();
     walk_glob(&root, &root, &re, MAX_RESULTS, &mut out);
     out.sort();
@@ -729,18 +815,41 @@ fn walk_glob(
     max_results: usize,
     out: &mut Vec<String>,
 ) {
-    if out.len() >= max_results { return; }
-    let Ok(read) = std::fs::read_dir(dir) else { return };
+    if out.len() >= max_results {
+        return;
+    }
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in read.flatten() {
-        if out.len() >= max_results { return; }
+        if out.len() >= max_results {
+            return;
+        }
         let p = entry.path();
         let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        if matches!(name, ".git" | "node_modules" | "target" | "dist"
-            | "__pycache__" | ".venv" | "venv" | ".envs" | "python_runtime") {
+        if matches!(
+            name,
+            ".git"
+                | "node_modules"
+                | "target"
+                | "dist"
+                | "__pycache__"
+                | ".venv"
+                | "venv"
+                | ".envs"
+                | "python_runtime"
+        ) {
             continue;
         }
-        let rel = p.strip_prefix(root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
-        let meta = match entry.metadata() { Ok(m) => m, Err(_) => continue };
+        let rel = p
+            .strip_prefix(root)
+            .unwrap_or(&p)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
         if meta.is_dir() {
             walk_glob(root, &p, re, max_results, out);
             continue;
@@ -821,8 +930,8 @@ pub async fn tool_web_search(
     if !status.is_success() {
         return Err(format!("brave search HTTP {status}: {body}"));
     }
-    let parsed: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("brave parse: {e}"))?;
+    let parsed: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("brave parse: {e}"))?;
     let results = parsed
         .get("web")
         .and_then(|w| w.get("results"))
@@ -839,7 +948,11 @@ pub async fn tool_web_search(
                 .and_then(|d| d.as_str())
                 .unwrap_or("")
                 .to_string();
-            Some(SearchHit { title, url, description })
+            Some(SearchHit {
+                title,
+                url,
+                description,
+            })
         })
         .collect();
     Ok(hits)
@@ -862,7 +975,11 @@ pub async fn fetch_remote_text(url: String) -> Result<String, String> {
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = cli.get(&url).send().await.map_err(|e| format!("fetch: {e}"))?;
+    let resp = cli
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("fetch HTTP {status}"));
@@ -883,7 +1000,11 @@ pub async fn tool_web_fetch(url: String) -> Result<String, String> {
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = cli.get(&url).send().await.map_err(|e| format!("fetch: {e}"))?;
+    let resp = cli
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch: {e}"))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(format!("fetch HTTP {status}"));
@@ -892,7 +1013,10 @@ pub async fn tool_web_fetch(url: String) -> Result<String, String> {
     let cleaned = strip_html(&html);
     let truncated = if cleaned.len() > MAX_BYTES {
         let mut s = cleaned[..MAX_BYTES].to_string();
-        s.push_str(&format!("\n…[truncated, {} more chars]", cleaned.len() - MAX_BYTES));
+        s.push_str(&format!(
+            "\n…[truncated, {} more chars]",
+            cleaned.len() - MAX_BYTES
+        ));
         s
     } else {
         cleaned
@@ -911,8 +1035,12 @@ fn strip_html(html: &str) -> String {
         let open = format!("<{tag}");
         let close = format!("</{tag}>");
         loop {
-            let Some(start) = s.to_lowercase().find(&open) else { break };
-            let Some(end_rel) = s[start..].to_lowercase().find(&close) else { break };
+            let Some(start) = s.to_lowercase().find(&open) else {
+                break;
+            };
+            let Some(end_rel) = s[start..].to_lowercase().find(&close) else {
+                break;
+            };
             let end = start + end_rel + close.len();
             s.replace_range(start..end, " ");
         }
@@ -938,10 +1066,7 @@ fn strip_html(html: &str) -> String {
 /// landing pages for the GUI direction synthesis. Output PNG path is
 /// returned on success; spawn errors propagate as Err.
 #[tauri::command]
-pub async fn tool_screenshot_url(
-    url: String,
-    out_png: String,
-) -> Result<String, String> {
+pub async fn tool_screenshot_url(url: String, out_png: String) -> Result<String, String> {
     use tokio::process::Command;
     #[cfg(windows)]
     const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -960,23 +1085,30 @@ pub async fn tool_screenshot_url(
 
     // Ensure parent dir for the output PNG exists.
     if let Some(parent) = Path::new(&out_png).parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir parent of {out_png}: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir parent of {out_png}: {e}"))?;
     }
 
     let mut cmd = Command::new(&python);
     cmd.arg(&script)
-        .arg("--url").arg(&url)
-        .arg("--out-png").arg(&out_png);
+        .arg("--url")
+        .arg(&url)
+        .arg("--out-png")
+        .arg(&out_png);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = cmd.output().await.map_err(|e| format!("spawn python: {e}"))?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("spawn python: {e}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("screenshot failed (exit {}): {stderr}", output.status.code().unwrap_or(-1)));
+        return Err(format!(
+            "screenshot failed (exit {}): {stderr}",
+            output.status.code().unwrap_or(-1)
+        ));
     }
     Ok(out_png)
 }

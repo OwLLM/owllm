@@ -53,7 +53,11 @@ pub fn shell_open_url(url: String) -> Result<(), String> {
     #[cfg(not(windows))]
     {
         // Best-effort cross-platform fallback.
-        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else {
+            "xdg-open"
+        };
         std::process::Command::new(opener)
             .arg(&url)
             .spawn()
@@ -149,12 +153,11 @@ pub fn llama_server_exe() -> Option<PathBuf> {
     // Phase 3: prefer %LOCALAPPDATA%\OwLLM Desktop\runtime\llama.cpp\.
     if let Some(rt) = runtime_root() {
         let exe = rt.join("llama.cpp").join(exe_name);
-        if exe.is_file() { return Some(exe); }
+        if exe.is_file() {
+            return Some(exe);
+        }
     }
-    let exe = llm_root()?
-        .join("runtime")
-        .join("llama.cpp")
-        .join(exe_name);
+    let exe = llm_root()?.join("runtime").join("llama.cpp").join(exe_name);
     if exe.is_file() {
         Some(exe)
     } else {
@@ -207,13 +210,21 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
 /// when the python-runtime module is installed. Used by env_manager to
 /// build venvs without depending on a system Python.
 pub fn module_python_exe() -> Option<PathBuf> {
-    let name = if cfg!(target_os = "windows") { "python.exe" } else { "python3" };
+    let name = if cfg!(target_os = "windows") {
+        "python.exe"
+    } else {
+        "python3"
+    };
     module_binary("python-3.11-embed-", name)
 }
 
 /// Repointed for MCP toolchain: returns `app_data_dir/modules/mcp-toolchain-*/uv/uv.exe`.
 pub fn module_uv_exe() -> Option<PathBuf> {
-    let name = if cfg!(target_os = "windows") { "uv.exe" } else { "uv" };
+    let name = if cfg!(target_os = "windows") {
+        "uv.exe"
+    } else {
+        "uv"
+    };
     module_binary("mcp-toolchain-", name)
 }
 
@@ -222,7 +233,11 @@ pub fn module_uv_exe() -> Option<PathBuf> {
 /// MCP runtime, etc. all use this); falls back to the legacy
 /// `mcp-toolchain-` family for users who still have that module.
 pub fn module_node_exe() -> Option<PathBuf> {
-    let name = if cfg!(target_os = "windows") { "node.exe" } else { "node" };
+    let name = if cfg!(target_os = "windows") {
+        "node.exe"
+    } else {
+        "node"
+    };
     module_binary("nodejs-runtime-", name).or_else(|| module_binary("mcp-toolchain-", name))
 }
 
@@ -290,7 +305,10 @@ pub fn init_portable_mode() {
     };
     let Some(root) = root else { return };
     let seed = |key: &str, val: PathBuf| {
-        if std::env::var_os(key).map(|v| !v.is_empty()).unwrap_or(false) {
+        if std::env::var_os(key)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             return; // explicit user override wins
         }
         let _ = std::fs::create_dir_all(&val);
@@ -301,7 +319,10 @@ pub fn init_portable_mode() {
     std::env::set_var("OWLLM_PORTABLE_ROOT", &root);
     seed("OWLLM_USER_DATA", root.join(".owllm").join("user-data"));
     seed("OWLLM_LLM_ROOT", root.join("runtime-data"));
-    seed("WEBVIEW2_USER_DATA_FOLDER", root.join(".owllm").join("webview2"));
+    seed(
+        "WEBVIEW2_USER_DATA_FOLDER",
+        root.join(".owllm").join("webview2"),
+    );
 }
 
 /// Path to `llama-quantize.exe` — used by the GGUF export pipeline to
@@ -319,7 +340,9 @@ pub fn llama_quantize_exe() -> Option<PathBuf> {
     }
     if let Some(rt) = runtime_root() {
         let exe = rt.join("llama.cpp").join("llama-quantize.exe");
-        if exe.is_file() { return Some(exe); }
+        if exe.is_file() {
+            return Some(exe);
+        }
     }
     let exe = llm_root()?
         .join("runtime")
@@ -347,8 +370,13 @@ pub fn bundled_python_exe() -> Option<PathBuf> {
         }
     }
     if let Some(rt) = runtime_root() {
-        let candidate = rt.join("python_runtime").join("python3.11").join("python.exe");
-        if candidate.is_file() { return Some(candidate); }
+        let candidate = rt
+            .join("python_runtime")
+            .join("python3.11")
+            .join("python.exe");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
     }
     let candidate = llm_root()?
         .join("python_runtime")
@@ -369,10 +397,16 @@ pub fn finetune_script() -> Option<PathBuf> {
     // Prefer the in-app resources copy; fall back to the legacy LLM/ root.
     if let Some(root) = resources_root() {
         let p = root.join("finetune.py");
-        if p.is_file() { return Some(p); }
+        if p.is_file() {
+            return Some(p);
+        }
     }
     let p = llm_root()?.join("finetune.py");
-    if p.is_file() { Some(p) } else { None }
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Path to the abliterate.py CLI — the FailSpy-recipe refusal-direction
@@ -380,10 +414,16 @@ pub fn finetune_script() -> Option<PathBuf> {
 pub fn abliterate_script() -> Option<PathBuf> {
     if let Some(root) = resources_root() {
         let p = root.join("tools").join("abliterate.py");
-        if p.is_file() { return Some(p); }
+        if p.is_file() {
+            return Some(p);
+        }
     }
     let p = llm_root()?.join("tools").join("abliterate.py");
-    if p.is_file() { Some(p) } else { None }
+    if p.is_file() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 // =====================================================================
@@ -447,10 +487,7 @@ pub fn resources_root() -> Option<PathBuf> {
             }
             // Legacy apps/ wrapper layout — kept as a fallback so an
             // older checkout still resolves until it's restructured.
-            let legacy = dir
-                .join("apps")
-                .join("owllm-desktop")
-                .join("resources");
+            let legacy = dir.join("apps").join("owllm-desktop").join("resources");
             if legacy.join("agents").join("roles").is_dir() {
                 return Some(legacy);
             }
@@ -463,20 +500,32 @@ pub fn resources_root() -> Option<PathBuf> {
 pub fn roles_dir() -> Option<PathBuf> {
     if let Some(r) = resources_root() {
         let p = r.join("agents").join("roles");
-        if p.is_dir() { return Some(p); }
+        if p.is_dir() {
+            return Some(p);
+        }
     }
     let p = llm_root()?.join("core").join("agents").join("roles");
-    if p.is_dir() { Some(p) } else { None }
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Built-in team template JSONs.
 pub fn teams_dir() -> Option<PathBuf> {
     if let Some(r) = resources_root() {
         let p = r.join("agents").join("teams");
-        if p.is_dir() { return Some(p); }
+        if p.is_dir() {
+            return Some(p);
+        }
     }
     let p = llm_root()?.join("core").join("agents").join("teams");
-    if p.is_dir() { Some(p) } else { None }
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Backend / inference config YAMLs (`llm_backends.yaml`, etc.).
@@ -484,10 +533,16 @@ pub fn teams_dir() -> Option<PathBuf> {
 pub fn configs_dir() -> Option<PathBuf> {
     if let Some(r) = resources_root() {
         let p = r.join("configs");
-        if p.is_dir() { return Some(p); }
+        if p.is_dir() {
+            return Some(p);
+        }
     }
     let p = llm_root()?.join("configs");
-    if p.is_dir() { Some(p) } else { None }
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Per-GPU environment profile bundle (`env_profiles.yaml` + the
@@ -495,10 +550,16 @@ pub fn configs_dir() -> Option<PathBuf> {
 pub fn profiles_dir() -> Option<PathBuf> {
     if let Some(r) = resources_root() {
         let p = r.join("profiles");
-        if p.is_dir() { return Some(p); }
+        if p.is_dir() {
+            return Some(p);
+        }
     }
     let p = llm_root()?.join("profiles");
-    if p.is_dir() { Some(p) } else { None }
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// Python helper scripts shipped with the app (`screenshot_url.py`,
@@ -507,10 +568,16 @@ pub fn profiles_dir() -> Option<PathBuf> {
 pub fn tools_dir() -> Option<PathBuf> {
     if let Some(r) = resources_root() {
         let p = r.join("tools");
-        if p.is_dir() { return Some(p); }
+        if p.is_dir() {
+            return Some(p);
+        }
     }
     let p = llm_root()?.join("tools");
-    if p.is_dir() { Some(p) } else { None }
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 // =====================================================================
@@ -568,7 +635,10 @@ pub fn user_data_root() -> Option<PathBuf> {
             return Some(pb);
         }
         if let Ok(home) = std::env::var("HOME") {
-            let pb = PathBuf::from(home).join(".local").join("share").join(APP_DIR_NAME);
+            let pb = PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join(APP_DIR_NAME);
             let _ = std::fs::create_dir_all(&pb);
             return Some(pb);
         }
@@ -582,7 +652,11 @@ pub fn user_data_root() -> Option<PathBuf> {
 /// files into the new home so this fallback only matters once.
 pub fn legacy_user_data_root() -> Option<PathBuf> {
     let p = llm_root()?.join("data");
-    if p.is_dir() { Some(p) } else { None }
+    if p.is_dir() {
+        Some(p)
+    } else {
+        None
+    }
 }
 
 /// SQLite state DB (`owllm_state.db`). Tries the new user-data root
@@ -590,11 +664,15 @@ pub fn legacy_user_data_root() -> Option<PathBuf> {
 pub fn state_db_path() -> Option<PathBuf> {
     if let Some(root) = user_data_root() {
         let p = root.join("owllm_state.db");
-        if p.is_file() { return Some(p); }
+        if p.is_file() {
+            return Some(p);
+        }
     }
     if let Some(root) = legacy_user_data_root() {
         let p = root.join("owllm_state.db");
-        if p.is_file() { return Some(p); }
+        if p.is_file() {
+            return Some(p);
+        }
     }
     // Neither exists yet — return the WRITE target (new root) so the
     // SQLite connection creates the file there.
@@ -611,11 +689,15 @@ pub fn custom_agents_dir() -> Option<PathBuf> {
 pub fn custom_agents_dirs_read() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(p) = custom_agents_dir() {
-        if p.is_dir() { out.push(p); }
+        if p.is_dir() {
+            out.push(p);
+        }
     }
     if let Some(legacy) = legacy_user_data_root() {
         let p = legacy.join("agent_definitions");
-        if p.is_dir() && !out.contains(&p) { out.push(p); }
+        if p.is_dir() && !out.contains(&p) {
+            out.push(p);
+        }
     }
     out
 }
@@ -628,11 +710,15 @@ pub fn custom_teams_dir() -> Option<PathBuf> {
 pub fn custom_teams_dirs_read() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(p) = custom_teams_dir() {
-        if p.is_dir() { out.push(p); }
+        if p.is_dir() {
+            out.push(p);
+        }
     }
     if let Some(legacy) = legacy_user_data_root() {
         let p = legacy.join("teams");
-        if p.is_dir() && !out.contains(&p) { out.push(p); }
+        if p.is_dir() && !out.contains(&p) {
+            out.push(p);
+        }
     }
     out
 }
@@ -651,14 +737,20 @@ pub fn skills_dirs_read() -> Vec<PathBuf> {
     // so roles can auto-equip them by id out of the box.
     if let Some(root) = resources_root() {
         let p = root.join("agents").join("skills");
-        if p.is_dir() { out.push(p); }
+        if p.is_dir() {
+            out.push(p);
+        }
     }
     if let Some(p) = skills_dir() {
-        if p.is_dir() && !out.contains(&p) { out.push(p); }
+        if p.is_dir() && !out.contains(&p) {
+            out.push(p);
+        }
     }
     if let Some(legacy) = legacy_user_data_root() {
         let p = legacy.join("skills");
-        if p.is_dir() && !out.contains(&p) { out.push(p); }
+        if p.is_dir() && !out.contains(&p) {
+            out.push(p);
+        }
     }
     out
 }
@@ -714,9 +806,13 @@ pub fn paths_debug() -> PathsDebug {
         runtime_root: s(runtime_root()),
         models_root_new: s(models_root_new()),
         models_dirs_read: models_dirs_read()
-            .into_iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
         fine_tuned_dirs_read: fine_tuned_dirs_read()
-            .into_iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            .into_iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect(),
         roles_dir: s(roles_dir()),
         teams_dir: s(teams_dir()),
     }
@@ -813,10 +909,16 @@ pub fn runtime_root() -> Option<PathBuf> {
 /// current user can write to it — otherwise downloads must land in the
 /// per-user location.
 pub fn shared_models_root() -> Option<PathBuf> {
-    if !cfg!(target_os = "windows") { return None; }
+    if !cfg!(target_os = "windows") {
+        return None;
+    }
     let programdata = std::env::var_os("PROGRAMDATA")?;
-    let dir = PathBuf::from(programdata).join("OwLLM Desktop").join("models");
-    if !dir.is_dir() { return None; }
+    let dir = PathBuf::from(programdata)
+        .join("OwLLM Desktop")
+        .join("models");
+    if !dir.is_dir() {
+        return None;
+    }
     // Write-probe: create + remove a marker. Avoids returning a path
     // that's read-only for this user (which would surface as a
     // confusing "download failed" later).
@@ -850,11 +952,15 @@ pub fn models_dirs_read() -> Vec<PathBuf> {
     }
     if let Some(r) = runtime_cache_root() {
         let p = r.join("models");
-        if p.is_dir() && !out.contains(&p) { out.push(p); }
+        if p.is_dir() && !out.contains(&p) {
+            out.push(p);
+        }
     }
     if let Some(r) = llm_root() {
         let legacy = r.join("models");
-        if legacy.is_dir() && !out.contains(&legacy) { out.push(legacy); }
+        if legacy.is_dir() && !out.contains(&legacy) {
+            out.push(legacy);
+        }
     }
     out
 }
@@ -865,11 +971,15 @@ pub fn fine_tuned_dirs_read() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(r) = runtime_cache_root() {
         let p = r.join("fine_tuned");
-        if p.is_dir() { out.push(p); }
+        if p.is_dir() {
+            out.push(p);
+        }
     }
     if let Some(r) = llm_root() {
         let legacy = r.join("fine_tuned");
-        if legacy.is_dir() && !out.contains(&legacy) { out.push(legacy); }
+        if legacy.is_dir() && !out.contains(&legacy) {
+            out.push(legacy);
+        }
     }
     out
 }

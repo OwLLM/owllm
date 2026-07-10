@@ -214,17 +214,18 @@ impl HardwareSnapshot {
             .max_by_key(|g| g.vram_gb as u64)
             .map(|g| {
                 let name = g.name.to_lowercase();
-                let vendor = if name.contains("nvidia") || name.contains("rtx") || name.contains("gtx") {
-                    Some(GpuVendor::Nvidia)
-                } else if name.contains("apple") {
-                    Some(GpuVendor::Apple)
-                } else if name.contains("amd") || name.contains("radeon") {
-                    Some(GpuVendor::Amd)
-                } else if name.contains("intel") || name.contains("arc") {
-                    Some(GpuVendor::Intel)
-                } else {
-                    None
-                };
+                let vendor =
+                    if name.contains("nvidia") || name.contains("rtx") || name.contains("gtx") {
+                        Some(GpuVendor::Nvidia)
+                    } else if name.contains("apple") {
+                        Some(GpuVendor::Apple)
+                    } else if name.contains("amd") || name.contains("radeon") {
+                        Some(GpuVendor::Amd)
+                    } else if name.contains("intel") || name.contains("arc") {
+                        Some(GpuVendor::Intel)
+                    } else {
+                        None
+                    };
                 (vendor, g.vram_gb as u32)
             })
             .unwrap_or((None, 0));
@@ -306,7 +307,10 @@ fn check_requirements(req: &Requirements, hw: &HardwareSnapshot) -> Result<(), S
     }
     if let Some(min) = req.disk_gb {
         if hw.free_disk_gb < min {
-            return Err(format!("requires {min} GB free disk, has {}", hw.free_disk_gb));
+            return Err(format!(
+                "requires {min} GB free disk, has {}",
+                hw.free_disk_gb
+            ));
         }
     }
     Ok(())
@@ -329,7 +333,11 @@ pub fn topo_install_order<'r>(
     registry: &'r Registry,
     target: &str,
 ) -> Result<Vec<&'r Module>, String> {
-    let by_id: BTreeMap<&str, &Module> = registry.modules.iter().map(|m| (m.id.as_str(), m)).collect();
+    let by_id: BTreeMap<&str, &Module> = registry
+        .modules
+        .iter()
+        .map(|m| (m.id.as_str(), m))
+        .collect();
     let mut visited: std::collections::BTreeSet<String> = Default::default();
     let mut visiting: std::collections::BTreeSet<String> = Default::default();
     let mut out: Vec<&Module> = Vec::new();
@@ -447,8 +455,8 @@ impl ModuleManager {
         match client.get(REGISTRY_URL).send().await {
             Ok(resp) if resp.status().is_success() => {
                 let text = resp.text().await.map_err(|e| format!("read body: {e}"))?;
-                let reg: Registry = serde_json::from_str(&text)
-                    .map_err(|e| format!("parse registry: {e}"))?;
+                let reg: Registry =
+                    serde_json::from_str(&text).map_err(|e| format!("parse registry: {e}"))?;
                 // Cache to disk.
                 let cache_path = self.root.join("registry.cache.json");
                 let _ = fs::write(&cache_path, &text);
@@ -465,8 +473,7 @@ impl ModuleManager {
                 }
                 // Last-ditch: bundled fallback embedded at compile time.
                 let bundled = include_str!("../../../data/modules/registry.json");
-                serde_json::from_str(bundled)
-                    .map_err(|e| format!("bundled registry parse: {e}"))
+                serde_json::from_str(bundled).map_err(|e| format!("bundled registry parse: {e}"))
             }
         }
     }
@@ -502,13 +509,9 @@ impl ModuleManager {
                         Some(r.version.clone()),
                         vec![],
                     ),
-                    (Err(ResolveError::NoSatisfiableVariant { failed }), _) => (
-                        ModuleState::NotSupported,
-                        None,
-                        None,
-                        None,
-                        failed.clone(),
-                    ),
+                    (Err(ResolveError::NoSatisfiableVariant { failed }), _) => {
+                        (ModuleState::NotSupported, None, None, None, failed.clone())
+                    }
                     (Err(_), _) => (
                         ModuleState::NotSupported,
                         None,
@@ -555,24 +558,41 @@ impl ModuleManager {
                 if let Some(im) = installed.modules.get(&m.id) {
                     if im.version == release.version {
                         last = Some(im.clone());
-                        emit_progress(app, &m.id, ProgressEvent::Skipped { reason: "already at target version".into() });
+                        emit_progress(
+                            app,
+                            &m.id,
+                            ProgressEvent::Skipped {
+                                reason: "already at target version".into(),
+                            },
+                        );
                         continue;
                     }
                 }
             }
 
-            emit_progress(app, &m.id, ProgressEvent::Started {
-                variant: variant.id.clone(),
-                version: release.version.clone(),
-                size_bytes: variant.size_bytes,
-            });
+            emit_progress(
+                app,
+                &m.id,
+                ProgressEvent::Started {
+                    variant: variant.id.clone(),
+                    version: release.version.clone(),
+                    size_bytes: variant.size_bytes,
+                },
+            );
 
             // Download to staging.
-            let staging = self.root.join(".staging").join(format!(
-                "{}-{}.zip",
-                variant.id, release.version
-            ));
-            download_with_progress(app, &m.id, &release.download_url, &staging, variant.size_bytes).await?;
+            let staging = self
+                .root
+                .join(".staging")
+                .join(format!("{}-{}.zip", variant.id, release.version));
+            download_with_progress(
+                app,
+                &m.id,
+                &release.download_url,
+                &staging,
+                variant.size_bytes,
+            )
+            .await?;
 
             // Verify hash.
             emit_progress(app, &m.id, ProgressEvent::Verifying);
@@ -743,10 +763,7 @@ fn verify_sha256(path: &Path, expected_hex: &str) -> Result<(), String> {
     let mut h = Sha256::new();
     h.update(&bytes);
     let got = h.finalize();
-    let got_hex = got
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>();
+    let got_hex = got.iter().map(|b| format!("{b:02x}")).collect::<String>();
     if got_hex.eq_ignore_ascii_case(expected_hex) {
         Ok(())
     } else {
@@ -761,7 +778,9 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
     let file = fs::File::open(zip_path).map_err(|e| format!("open {}: {e}", zip_path.display()))?;
     let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("zip open: {e}"))?;
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry {i}: {e}"))?;
         let rel = entry
             .enclosed_name()
             .ok_or_else(|| format!("unsafe zip entry: {}", entry.name()))?
@@ -955,7 +974,11 @@ mod tests {
     #[test]
     fn rtx_3090_gets_cuda_inference() {
         let r = parse_registry();
-        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
         let (v, _) = resolve_variant(m, &rtx_3090(), Channel::Stable).unwrap();
         assert_eq!(v.id, "local-inference-cuda");
     }
@@ -963,7 +986,11 @@ mod tests {
     #[test]
     fn cpu_laptop_gets_cpu_inference_not_cuda() {
         let r = parse_registry();
-        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
         let (v, _) = resolve_variant(m, &cpu_only_laptop(), Channel::Stable).unwrap();
         assert_eq!(v.id, "local-inference-cpu");
     }
@@ -971,7 +998,11 @@ mod tests {
     #[test]
     fn apple_silicon_gets_metal_inference() {
         let r = parse_registry();
-        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
         let (v, _) = resolve_variant(m, &apple_silicon(), Channel::Stable).unwrap();
         assert_eq!(v.id, "local-inference-metal");
     }
@@ -979,7 +1010,11 @@ mod tests {
     #[test]
     fn linux_gpu_gets_vulkan_inference() {
         let r = parse_registry();
-        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
         let (v, _) = resolve_variant(m, &linux_nvidia(), Channel::Stable).unwrap();
         assert_eq!(v.id, "local-inference-linux-vulkan");
     }
@@ -987,7 +1022,11 @@ mod tests {
     #[test]
     fn linux_headless_gets_cpu_inference() {
         let r = parse_registry();
-        let m = r.modules.iter().find(|m| m.id == "local-inference").unwrap();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
         let (v, _) = resolve_variant(m, &linux_headless(), Channel::Stable).unwrap();
         assert_eq!(v.id, "local-inference-linux-cpu");
     }
@@ -999,7 +1038,9 @@ mod tests {
         let err = resolve_variant(m, &cpu_only_laptop(), Channel::Stable).unwrap_err();
         match err {
             ResolveError::NoSatisfiableVariant { failed } => {
-                assert!(failed.iter().any(|(_, why)| why.contains("Nvidia") || why.contains("GPU")));
+                assert!(failed
+                    .iter()
+                    .any(|(_, why)| why.contains("Nvidia") || why.contains("GPU")));
             }
             other => panic!("expected NoSatisfiableVariant, got {other:?}"),
         }

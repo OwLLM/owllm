@@ -20,7 +20,9 @@ pub struct SignCfg {
 impl SignCfg {
     /// True if any selector that would trigger Authenticode signing is present.
     pub fn has_signing(&self) -> bool {
-        self.thumbprint.as_ref().is_some_and(|s| !s.trim().is_empty())
+        self.thumbprint
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
             || self.subject.as_ref().is_some_and(|s| !s.trim().is_empty())
     }
 
@@ -28,11 +30,20 @@ impl SignCfg {
     /// publish scripts. Empty values are still exported (scripts treat empty as
     /// "not configured"), and TSA falls back to Certum's RFC3161 server.
     pub fn apply_to(&self, cmd: &mut Command) {
-        cmd.env("OWLLM_SIGN_THUMBPRINT", self.thumbprint.clone().unwrap_or_default());
-        cmd.env("OWLLM_SIGN_SUBJECT", self.subject.clone().unwrap_or_default());
+        cmd.env(
+            "OWLLM_SIGN_THUMBPRINT",
+            self.thumbprint.clone().unwrap_or_default(),
+        );
+        cmd.env(
+            "OWLLM_SIGN_SUBJECT",
+            self.subject.clone().unwrap_or_default(),
+        );
         cmd.env(
             "OWLLM_SIGN_TSA",
-            self.tsa.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "http://time.certum.pl".into()),
+            self.tsa
+                .clone()
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| "http://time.certum.pl".into()),
         );
     }
 }
@@ -145,7 +156,8 @@ pub async fn publish_release(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
-        cmd.output().map_err(|e| format!("spawn bash ({bash}): {e}"))
+        cmd.output()
+            .map_err(|e| format!("spawn bash ({bash}): {e}"))
     })
     .await
     .map_err(|e| format!("join error: {e}"))??;
@@ -163,7 +175,14 @@ pub async fn publish_release(
         Ok(combined)
     } else {
         // Tail so the agent sees the real failure, not a truncated head.
-        let tail: String = combined.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = combined
+            .chars()
+            .rev()
+            .take(2000)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         Err(format!("publish did not complete:\n{tail}"))
     }
 }
@@ -188,7 +207,10 @@ pub async fn finish_and_publish(
     let posix = to_gitbash_path(&repo_dir);
     let script = format!("{posix}/owllm-desktop/scripts/finish-and-publish.sh");
     let mut args: Vec<String> = vec![script, "--notes".into(), notes.unwrap_or_default()];
-    let host_mode = mode.as_deref().unwrap_or("host").eq_ignore_ascii_case("host");
+    let host_mode = mode
+        .as_deref()
+        .unwrap_or("host")
+        .eq_ignore_ascii_case("host");
     if !host_mode {
         args.push("--mode".into());
         args.push(mode.unwrap_or_else(|| "ci".into()));
@@ -209,7 +231,8 @@ pub async fn finish_and_publish(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
-        cmd.output().map_err(|e| format!("spawn bash ({bash}): {e}"))
+        cmd.output()
+            .map_err(|e| format!("spawn bash ({bash}): {e}"))
     })
     .await
     .map_err(|e| format!("join error: {e}"))??;
@@ -226,8 +249,101 @@ pub async fn finish_and_publish(
     if ok {
         Ok(combined)
     } else {
-        let tail: String = combined.chars().rev().take(2000).collect::<Vec<_>>().into_iter().rev().collect();
+        let tail: String = combined
+            .chars()
+            .rev()
+            .take(2000)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
         Err(format!("finish_and_publish did not complete:\n{tail}"))
+    }
+}
+
+/// Run an arbitrary host command and return (success, combined output).
+/// Used by readiness probes for node/cargo/gh/signtool.
+fn run_probe(name: &str, args: &[&str]) -> (bool, String) {
+    let mut cmd = Command::new(name);
+    cmd.args(args);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    match cmd.output() {
+        Ok(out) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            (out.status.success(), combined.trim().to_string())
+        }
+        Err(e) => (false, format!("spawn {name}: {e}")),
+    }
+}
+
+/// True if a configured Authenticode cert is currently mounted in the Windows
+/// certificate store. On non-Windows this always returns false when signing is
+/// requested, because Authenticode signing is Windows-only.
+fn cert_mounted(sign: &SignCfg) -> (bool, String) {
+    if !sign.has_signing() {
+        return (true, "no signing config — unsigned release".into());
+    }
+    #[cfg(not(windows))]
+    {
+        return (
+            false,
+            "Authenticode signing is Windows-only; run Publish on the Windows host".into(),
+        );
+    }
+    #[cfg(windows)]
+    {
+        let (script, matcher_desc) = if let Some(tp) =
+            sign.thumbprint.as_ref().filter(|s| !s.trim().is_empty())
+        {
+            let tp = tp.trim().to_uppercase();
+            (
+                format!(
+                    "$tp = '{}'; Get-ChildItem Cert:\\CurrentUser\\My -ErrorAction SilentlyContinue | Where-Object {{ $_.Thumbprint -eq $tp }} | Select-Object -First 1 Thumbprint,Subject",
+                    tp.replace('\'', "''")
+                ),
+                format!("thumbprint {tp}"),
+            )
+        } else if let Some(subj) = sign.subject.as_ref().filter(|s| !s.trim().is_empty()) {
+            let subj = subj.trim();
+            (
+                format!(
+                    "$subj = '{}'; Get-ChildItem Cert:\\CurrentUser\\My -ErrorAction SilentlyContinue | Where-Object {{ $_.Subject -like \"*${{subj}}*\" }} | Select-Object -First 1 Thumbprint,Subject",
+                    subj.replace('\\', "\\\\").replace('\'', "''")
+                ),
+                format!("subject {subj}"),
+            )
+        } else {
+            return (
+                false,
+                "signing config present but neither thumbprint nor subject set".into(),
+            );
+        };
+        let (ok, out) = run_probe(
+            "powershell.exe",
+            &[
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                &script,
+            ],
+        );
+        if ok && !out.is_empty() && out.contains("Thumbprint") {
+            (
+                true,
+                format!("cert mounted in CurrentUser\\My ({matcher_desc})"),
+            )
+        } else {
+            (false, format!("cert NOT mounted ({matcher_desc}) — log into SimplySign Desktop or insert your signing key"))
+        }
     }
 }
 
@@ -237,10 +353,21 @@ pub async fn finish_and_publish(
 /// "could not read Username"). Returns every check so the setup popup can show
 /// pass/fail per line.
 #[tauri::command]
-pub async fn publish_readiness(repo_dir: String) -> Result<Vec<ReadyCheck>, String> {
+pub async fn publish_readiness(
+    repo_dir: String,
+    mode: Option<String>,
+    sign: Option<SignCfg>,
+) -> Result<Vec<ReadyCheck>, String> {
     let host = crate::agent_tools::host_cwd(&repo_dir);
     tokio::task::spawn_blocking(move || {
         let mut checks: Vec<ReadyCheck> = Vec::new();
+        let host_mode = mode
+            .as_deref()
+            .unwrap_or("host")
+            .eq_ignore_ascii_case("host");
+        let sign_cfg = sign.unwrap_or_default();
+        let wants_sign = host_mode && sign_cfg.has_signing();
+
         let (repo_ok, repo_out) = run_git(&host, &["rev-parse", "--is-inside-work-tree"]);
         checks.push(ReadyCheck {
             id: "repo".into(),
@@ -271,7 +398,14 @@ pub async fn publish_readiness(repo_dir: String) -> Result<Vec<ReadyCheck>, Stri
             detail: if auth_ok {
                 "authenticated OK".into()
             } else {
-                auth_out.chars().rev().take(300).collect::<Vec<_>>().into_iter().rev().collect()
+                auth_out
+                    .chars()
+                    .rev()
+                    .take(300)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
             },
         });
         let ver = [
@@ -286,9 +420,12 @@ pub async fn publish_readiness(repo_dir: String) -> Result<Vec<ReadyCheck>, Stri
             id: "version".into(),
             label: "Version file found".into(),
             ok: ver.is_some(),
-            detail: ver.map(|p| p.to_string()).unwrap_or_else(|| "no tauri.conf.json / package.json".into()),
+            detail: ver
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "no tauri.conf.json / package.json".into()),
         });
-        let script = std::path::Path::new(&host).join("owllm-desktop/scripts/finish-and-publish.sh");
+        let script =
+            std::path::Path::new(&host).join("owllm-desktop/scripts/finish-and-publish.sh");
         checks.push(ReadyCheck {
             id: "script".into(),
             label: "Publish script present".into(),
@@ -296,9 +433,68 @@ pub async fn publish_readiness(repo_dir: String) -> Result<Vec<ReadyCheck>, Stri
             detail: if script.is_file() {
                 "owllm-desktop/scripts/finish-and-publish.sh".into()
             } else {
-                "finish-and-publish.sh not found — Publish disabled (Commit/Merge still work)".into()
+                "finish-and-publish.sh not found — Publish disabled (Commit/Merge still work)"
+                    .into()
             },
         });
+
+        // Host-mode specific build / publish tooling probes.
+        if host_mode {
+            let (node_ok, node_out) = run_probe("node", &["--version"]);
+            checks.push(ReadyCheck {
+                id: "node".into(),
+                label: "Node.js (build + smoke)".into(),
+                ok: node_ok,
+                detail: if node_ok {
+                    node_out
+                } else {
+                    format!("{node_out} — install Node and put it on PATH")
+                },
+            });
+            let (cargo_ok, cargo_out) = run_probe("cargo", &["--version"]);
+            checks.push(ReadyCheck {
+                id: "cargo".into(),
+                label: "Rust / cargo (Tauri build)".into(),
+                ok: cargo_ok,
+                detail: if cargo_ok {
+                    cargo_out
+                } else {
+                    format!("{cargo_out} — install Rust and put cargo on PATH")
+                },
+            });
+            let (gh_ok, gh_out) = run_probe("gh", &["auth", "status"]);
+            checks.push(ReadyCheck {
+                id: "gh".into(),
+                label: "GitHub CLI authenticated".into(),
+                ok: gh_ok,
+                detail: if gh_ok {
+                    "gh auth OK".into()
+                } else {
+                    format!("{gh_out} — run 'gh auth login' on this host")
+                },
+            });
+            if wants_sign {
+                let (signtool_ok, signtool_out) = run_probe("signtool.exe", &["/?"]);
+                checks.push(ReadyCheck {
+                    id: "signtool".into(),
+                    label: "Windows SDK signtool".into(),
+                    ok: signtool_ok,
+                    detail: if signtool_ok {
+                        "signtool.exe on PATH".into()
+                    } else {
+                        format!("{signtool_out} — install Windows SDK or put signtool on PATH")
+                    },
+                });
+                let (cert_ok, cert_out) = cert_mounted(&sign_cfg);
+                checks.push(ReadyCheck {
+                    id: "cert".into(),
+                    label: "Signing cert mounted".into(),
+                    ok: cert_ok,
+                    detail: cert_out,
+                });
+            }
+        }
+
         Ok(checks)
     })
     .await
@@ -385,7 +581,12 @@ pub async fn repo_merge(repo_dir: String, target: Option<String>) -> Result<Stri
         }
         let (anc_ok, _) = run_git(
             &host,
-            &["merge-base", "--is-ancestor", &format!("origin/{target}"), "HEAD"],
+            &[
+                "merge-base",
+                "--is-ancestor",
+                &format!("origin/{target}"),
+                "HEAD",
+            ],
         );
         if !anc_ok {
             return Err(format!(
@@ -393,7 +594,10 @@ pub async fn repo_merge(repo_dir: String, target: Option<String>) -> Result<Stri
                  Rebase or merge {target} into your branch first; this button never force-pushes."
             ));
         }
-        let (p_ok, p_out) = run_git(&host, &["push", "origin", &format!("HEAD:refs/heads/{target}")]);
+        let (p_ok, p_out) = run_git(
+            &host,
+            &["push", "origin", &format!("HEAD:refs/heads/{target}")],
+        );
         if !p_ok {
             return Err(format!("git push failed:\n{p_out}"));
         }
@@ -403,7 +607,9 @@ pub async fn repo_merge(repo_dir: String, target: Option<String>) -> Result<Stri
         if cur_ok && cur != target {
             let _ = run_git(&host, &["branch", "-f", &target, "HEAD"]);
         }
-        Ok(format!("Fast-forwarded '{target}' to HEAD and pushed.\n{p_out}"))
+        Ok(format!(
+            "Fast-forwarded '{target}' to HEAD and pushed.\n{p_out}"
+        ))
     })
     .await
     .map_err(|e| format!("join error: {e}"))?

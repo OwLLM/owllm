@@ -81,12 +81,15 @@ fn new_token() -> String {
 pub fn ensure_started(app: &AppHandle) -> Result<GatewayInfo, String> {
     let mut guard = GATEWAY.lock().map_err(|_| "gateway lock".to_string())?;
     if let Some(g) = guard.as_ref() {
-        return Ok(GatewayInfo { url: g.url.clone(), token: g.token.clone() });
+        return Ok(GatewayInfo {
+            url: g.url.clone(),
+            token: g.token.clone(),
+        });
     }
     // Bind loopback + ephemeral port. Loopback is the security boundary: no
     // non-local host can reach it; the bearer token gates local processes.
-    let server = tiny_http::Server::http(("127.0.0.1", 0))
-        .map_err(|e| format!("bind 127.0.0.1: {e}"))?;
+    let server =
+        tiny_http::Server::http(("127.0.0.1", 0)).map_err(|e| format!("bind 127.0.0.1: {e}"))?;
     let port = server
         .server_addr()
         .to_ip()
@@ -109,7 +112,12 @@ pub fn ensure_started(app: &AppHandle) -> Result<GatewayInfo, String> {
             Err(_) => break,
         }
     });
-    *guard = Some(Gateway { url: url.clone(), token: token.clone(), stop, _handle: handle });
+    *guard = Some(Gateway {
+        url: url.clone(),
+        token: token.clone(),
+        stop,
+        _handle: handle,
+    });
     Ok(GatewayInfo { url, token })
 }
 
@@ -120,7 +128,11 @@ pub fn ensure_started(app: &AppHandle) -> Result<GatewayInfo, String> {
 fn short_path(p: &std::path::Path) -> Option<String> {
     use std::os::windows::ffi::{OsStrExt, OsStringExt};
     use windows_sys::Win32::Storage::FileSystem::GetShortPathNameW;
-    let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let wide: Vec<u16> = p
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     unsafe {
         let len = GetShortPathNameW(wide.as_ptr(), std::ptr::null_mut(), 0);
         if len == 0 {
@@ -131,7 +143,11 @@ fn short_path(p: &std::path::Path) -> Option<String> {
         if got == 0 || got >= len {
             return None;
         }
-        Some(std::ffi::OsString::from_wide(&buf[..got as usize]).to_string_lossy().into_owned())
+        Some(
+            std::ffi::OsString::from_wide(&buf[..got as usize])
+                .to_string_lossy()
+                .into_owned(),
+        )
     }
 }
 
@@ -291,7 +307,11 @@ fn interop_cache() -> &'static Mutex<std::collections::HashMap<String, bool>> {
 /// user-visible error instead. Cached per distro.
 #[cfg(windows)]
 fn wsl_interop_ok(distro: &str, curl_mnt: &str) -> bool {
-    if let Some(v) = interop_cache().lock().ok().and_then(|m| m.get(distro).copied()) {
+    if let Some(v) = interop_cache()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(distro).copied())
+    {
         return v;
     }
     use std::os::windows::process::CommandExt;
@@ -334,8 +354,11 @@ pub fn write_cli_config_wsl(app: &AppHandle, cwd: Option<&str>) -> Result<String
         }
     });
     let cfg_win = dir.join("mcp-gateway-wsl.json");
-    std::fs::write(&cfg_win, serde_json::to_vec_pretty(&cfg).unwrap_or_default())
-        .map_err(|e| format!("write {}: {e}", cfg_win.display()))?;
+    std::fs::write(
+        &cfg_win,
+        serde_json::to_vec_pretty(&cfg).unwrap_or_default(),
+    )
+    .map_err(|e| format!("write {}: {e}", cfg_win.display()))?;
     crate::sandbox::win_to_mnt(&cfg_win.to_string_lossy())
 }
 
@@ -450,7 +473,8 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, token: &str) {
     // We only serve POST for JSON-RPC. A GET (client opening an SSE stream) gets
     // 405 per the Streamable-HTTP spec — we push nothing server-initiated.
     if req.method() != &tiny_http::Method::Post {
-        let _ = req.respond(tiny_http::Response::from_string("method not allowed").with_status_code(405));
+        let _ = req
+            .respond(tiny_http::Response::from_string("method not allowed").with_status_code(405));
         return;
     }
     // Bearer auth on EVERY request. Constant-length-ish compare.
@@ -477,7 +501,11 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, token: &str) {
                 .into_iter()
                 .filter_map(|it| dispatch_rpc(app, &it))
                 .collect();
-            if replies.is_empty() { None } else { Some(Value::Array(replies)) }
+            if replies.is_empty() {
+                None
+            } else {
+                Some(Value::Array(replies))
+            }
         }
         v => dispatch_rpc(app, &v),
     };
@@ -486,7 +514,8 @@ fn handle_request(mut req: tiny_http::Request, app: &AppHandle, token: &str) {
         Some(body) => {
             let data = serde_json::to_vec(&body).unwrap_or_default();
             let resp = tiny_http::Response::from_data(data).with_header(
-                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap(),
+                tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..])
+                    .unwrap(),
             );
             let _ = req.respond(resp);
         }
@@ -512,11 +541,14 @@ fn dispatch_rpc(app: &AppHandle, req: &Value) -> Option<Value> {
                 .and_then(Value::as_str)
                 .unwrap_or("2024-11-05")
                 .to_string();
-            reply(id, json!({
-                "protocolVersion": proto,
-                "capabilities": { "tools": { "listChanged": false } },
-                "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") }
-            }))
+            reply(
+                id,
+                json!({
+                    "protocolVersion": proto,
+                    "capabilities": { "tools": { "listChanged": false } },
+                    "serverInfo": { "name": SERVER_NAME, "version": env!("CARGO_PKG_VERSION") }
+                }),
+            )
         }
         "notifications/initialized" | "notifications/cancelled" => None,
         "ping" => reply(id, json!({})),
@@ -525,7 +557,10 @@ fn dispatch_rpc(app: &AppHandle, req: &Value) -> Option<Value> {
             if is_notification {
                 return None;
             }
-            let name = req.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+            let name = req
+                .pointer("/params/name")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             let args = req
                 .pointer("/params/arguments")
                 .cloned()
@@ -560,7 +595,11 @@ fn tool_content(text: &str, is_error: bool) -> Value {
 /// Constant-time-ish byte compare (length then XOR-fold), same shape webhook.rs
 /// uses for the LINE signature — avoids leaking the token via early return.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    a.len() == b.len() && a.iter().zip(b.iter()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+            == 0
 }
 
 // ----- Tool catalogue + dispatch --------------------------------------------
@@ -620,7 +659,10 @@ fn as_index(args: &Value, key: &str) -> Value {
 }
 
 fn as_str(args: &Value, key: &str) -> String {
-    args.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+    args.get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Route an MCP tool call to the native browser commands. Everything funnels
@@ -630,18 +672,30 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
     match name {
         "browser_open" => {
             let _ = crate::browser::browser_start(app.clone());
-            crate::browser::browser_cmd(app.clone(), "navigate".into(), json!({ "url": as_str(args, "url") }))
+            crate::browser::browser_cmd(
+                app.clone(),
+                "navigate".into(),
+                json!({ "url": as_str(args, "url") }),
+            )
         }
-        "browser_navigate" => {
-            crate::browser::browser_cmd(app.clone(), "navigate".into(), json!({ "url": as_str(args, "url") }))
+        "browser_navigate" => crate::browser::browser_cmd(
+            app.clone(),
+            "navigate".into(),
+            json!({ "url": as_str(args, "url") }),
+        ),
+        "browser_snapshot" => {
+            crate::browser::browser_cmd(app.clone(), "snapshot".into(), json!({}))
         }
-        "browser_snapshot" => crate::browser::browser_cmd(app.clone(), "snapshot".into(), json!({})),
-        "browser_get_text" => crate::browser::browser_cmd(app.clone(), "get_text".into(), json!({})),
+        "browser_get_text" => {
+            crate::browser::browser_cmd(app.clone(), "get_text".into(), json!({}))
+        }
         "browser_back" => crate::browser::browser_cmd(app.clone(), "back".into(), json!({})),
         "browser_reload" => crate::browser::browser_cmd(app.clone(), "reload".into(), json!({})),
-        "browser_click" => {
-            crate::browser::browser_cmd(app.clone(), "click".into(), json!({ "index": as_index(args, "index") }))
-        }
+        "browser_click" => crate::browser::browser_cmd(
+            app.clone(),
+            "click".into(),
+            json!({ "index": as_index(args, "index") }),
+        ),
         "browser_fill" => crate::browser::browser_cmd(
             app.clone(),
             "fill".into(),
@@ -652,9 +706,11 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
             "select".into(),
             json!({ "index": as_index(args, "index"), "value": as_str(args, "value") }),
         ),
-        "browser_press" => {
-            crate::browser::browser_cmd(app.clone(), "press".into(), json!({ "key": as_str(args, "key") }))
-        }
+        "browser_press" => crate::browser::browser_cmd(
+            app.clone(),
+            "press".into(),
+            json!({ "key": as_str(args, "key") }),
+        ),
         "browser_device" => crate::browser::browser_set_device(app.clone(), as_str(args, "device")),
         "browser_close" => crate::browser::browser_stop(app.clone()),
         other => Err(format!("unknown tool: {other}")),
@@ -693,7 +749,10 @@ mod tests {
         std::fs::write(&f, b"{}").unwrap();
         let safe = cli_safe_path(&f);
         assert!(!safe.contains(' '), "expected space-free path, got: {safe}");
-        assert!(std::fs::read(&safe).is_ok(), "safe path not readable: {safe}");
+        assert!(
+            std::fs::read(&safe).is_ok(),
+            "safe path not readable: {safe}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -724,7 +783,9 @@ mod tests {
         // and content helpers that initialize/list depend on instead.
         let _ = req;
         let specs = tool_specs();
-        assert!(specs.iter().all(|t| t.get("name").is_some() && t.get("inputSchema").is_some()));
+        assert!(specs
+            .iter()
+            .all(|t| t.get("name").is_some() && t.get("inputSchema").is_some()));
         let c = tool_content("hello", false);
         assert_eq!(c["content"][0]["text"], "hello");
         assert_eq!(c["isError"], false);

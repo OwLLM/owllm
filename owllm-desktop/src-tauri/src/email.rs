@@ -77,8 +77,12 @@ pub async fn email_poll(
         let mut session = client
             .login(&username, &password)
             .map_err(|e| format!("imap login: {}", e.0))?;
-        session.select("INBOX").map_err(|e| format!("select INBOX: {e}"))?;
-        let unseen = session.search("UNSEEN").map_err(|e| format!("search UNSEEN: {e}"))?;
+        session
+            .select("INBOX")
+            .map_err(|e| format!("select INBOX: {e}"))?;
+        let unseen = session
+            .search("UNSEEN")
+            .map_err(|e| format!("search UNSEEN: {e}"))?;
         let mut seqs: Vec<u32> = unseen.into_iter().collect();
         seqs.sort_unstable();
         if max > 0 && seqs.len() > max as usize {
@@ -130,9 +134,17 @@ pub async fn email_send(
         use lettre::transport::smtp::authentication::Credentials;
         use lettre::{Message, SmtpTransport, Transport};
 
-        let from_addr = if from.trim().is_empty() { username.clone() } else { from };
+        let from_addr = if from.trim().is_empty() {
+            username.clone()
+        } else {
+            from
+        };
         let email = Message::builder()
-            .from(from_addr.parse().map_err(|e| format!("from address '{from_addr}': {e}"))?)
+            .from(
+                from_addr
+                    .parse()
+                    .map_err(|e| format!("from address '{from_addr}': {e}"))?,
+            )
             .to(to.parse().map_err(|e| format!("to address '{to}': {e}"))?)
             .subject(subject)
             .body(body)
@@ -142,7 +154,8 @@ pub async fn email_send(
         let builder = if smtp_port == 465 {
             SmtpTransport::relay(&smtp_host).map_err(|e| format!("relay {smtp_host}: {e}"))?
         } else {
-            SmtpTransport::starttls_relay(&smtp_host).map_err(|e| format!("starttls {smtp_host}: {e}"))?
+            SmtpTransport::starttls_relay(&smtp_host)
+                .map_err(|e| format!("starttls {smtp_host}: {e}"))?
         };
         let mailer = builder.port(smtp_port).credentials(creds).build();
         mailer.send(&email).map_err(|e| format!("smtp send: {e}"))?;

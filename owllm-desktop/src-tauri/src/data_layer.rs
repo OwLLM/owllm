@@ -67,10 +67,7 @@ async fn fetch_text<R: Runtime>(app: &AppHandle<R>, rel: &str) -> Result<String,
 /// Returns the parsed JSON value. The React side can hold it in state
 /// and re-fetch on a timer / on user action for hot updates.
 #[tauri::command]
-pub async fn data_fetch_json<R: Runtime>(
-    app: AppHandle<R>,
-    path: String,
-) -> Result<Value, String> {
+pub async fn data_fetch_json<R: Runtime>(app: AppHandle<R>, path: String) -> Result<Value, String> {
     let text = fetch_text(&app, &path).await?;
     serde_json::from_str(&text).map_err(|e| format!("parse JSON {path}: {e}"))
 }
@@ -78,10 +75,7 @@ pub async fn data_fetch_json<R: Runtime>(
 /// Tauri command: fetch a YAML data file (e.g. role definitions). Parses
 /// to JSON value for uniformity with the JSON path.
 #[tauri::command]
-pub async fn data_fetch_yaml<R: Runtime>(
-    app: AppHandle<R>,
-    path: String,
-) -> Result<Value, String> {
+pub async fn data_fetch_yaml<R: Runtime>(app: AppHandle<R>, path: String) -> Result<Value, String> {
     let text = fetch_text(&app, &path).await?;
     serde_yaml::from_str(&text).map_err(|e| format!("parse YAML {path}: {e}"))
 }

@@ -13,14 +13,17 @@
 /// Encrypt bytes for the current user. Returns opaque ciphertext.
 #[cfg(windows)]
 pub fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
-    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
     use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CryptProtectData, CRYPT_INTEGER_BLOB};
     unsafe {
         let in_blob = CRYPT_INTEGER_BLOB {
             cbData: plain.len() as u32,
             pbData: plain.as_ptr() as *mut u8,
         };
-        let mut out_blob = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        let mut out_blob = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
         let ok = CryptProtectData(
             &in_blob,
             std::ptr::null(),
@@ -43,14 +46,17 @@ pub fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
 /// Decrypt bytes previously produced by `protect` on this machine/account.
 #[cfg(windows)]
 pub fn unprotect(cipher: &[u8]) -> Result<Vec<u8>, String> {
-    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
     use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CryptUnprotectData, CRYPT_INTEGER_BLOB};
     unsafe {
         let in_blob = CRYPT_INTEGER_BLOB {
             cbData: cipher.len() as u32,
             pbData: cipher.as_ptr() as *mut u8,
         };
-        let mut out_blob = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        let mut out_blob = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
         let ok = CryptUnprotectData(
             &in_blob,
             std::ptr::null_mut(),

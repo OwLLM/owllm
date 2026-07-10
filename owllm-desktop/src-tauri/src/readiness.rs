@@ -56,12 +56,18 @@ fn probe_wsl() -> ReadinessRow {
     // their account. Now a missing user / Python / pending reboot shows as a
     // warn so the button appears and routes straight to the right step.
     let st = crate::wsl_setup::wsl_setup_status();
-    let distro = st.default_distro.clone().unwrap_or_else(|| "Ubuntu".to_string());
+    let distro = st
+        .default_distro
+        .clone()
+        .unwrap_or_else(|| "Ubuntu".to_string());
     match st.stage.as_str() {
         "ready" => ReadinessRow {
             ok: true,
             warn: false,
-            detail: st.default_user.map(|u| format!("{distro} · {u}")).unwrap_or(distro),
+            detail: st
+                .default_user
+                .map(|u| format!("{distro} · {u}"))
+                .unwrap_or(distro),
         },
         "needsUser" => ReadinessRow {
             ok: false,
@@ -131,7 +137,11 @@ async fn probe_gpu() -> ReadinessRow {
         None if unified => {}
         None => detail = format!("{detail} · driver CUDA n/a"),
     }
-    ReadinessRow { ok: true, warn: false, detail }
+    ReadinessRow {
+        ok: true,
+        warn: false,
+        detail,
+    }
 }
 
 async fn probe_env() -> ReadinessRow {
@@ -170,8 +180,12 @@ async fn probe_env() -> ReadinessRow {
                 }
             }
             Ok(env_manager::EnvProfileState::Installing) => (0u8, format!("{label} · installing…")),
-            Ok(env_manager::EnvProfileState::Stale { .. }) => (1, format!("{label} · update available")),
-            Ok(env_manager::EnvProfileState::Broken { .. }) => (2, format!("{label} · needs repair")),
+            Ok(env_manager::EnvProfileState::Stale { .. }) => {
+                (1, format!("{label} · update available"))
+            }
+            Ok(env_manager::EnvProfileState::Broken { .. }) => {
+                (2, format!("{label} · needs repair"))
+            }
             Ok(env_manager::EnvProfileState::NotInstalled) => continue,
             Err(e) => (3, format!("env check failed: {e}")),
         };

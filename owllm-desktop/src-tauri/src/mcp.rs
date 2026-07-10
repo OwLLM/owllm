@@ -62,7 +62,9 @@ pub struct McpServerConfig {
     pub enabled: bool,
 }
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
 #[derive(Serialize, Deserialize, Default, Clone, Debug)]
 pub struct McpConfig {
@@ -86,33 +88,40 @@ fn config_path() -> Option<PathBuf> {
 
 #[tauri::command]
 pub fn mcp_load_config() -> Result<McpConfig, String> {
-    let Some(path) = config_path() else { return Ok(McpConfig::default()) };
-    if !path.is_file() { return Ok(McpConfig::default()) }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let Some(path) = config_path() else {
+        return Ok(McpConfig::default());
+    };
+    if !path.is_file() {
+        return Ok(McpConfig::default());
+    }
+    let raw =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
 
 #[tauri::command]
 pub fn mcp_save_config(config: McpConfig) -> Result<(), String> {
-    let Some(path) = config_path() else { return Err("no home directory".to_string()) };
+    let Some(path) = config_path() else {
+        return Err("no home directory".to_string());
+    };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("write {}: {e}", path.display()))
+    let json = serde_json::to_string_pretty(&config).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))
 }
 
 #[tauri::command]
-pub async fn mcp_install_pack(servers: Vec<McpServerConfig>) -> Result<McpPackInstallResult, String> {
+pub async fn mcp_install_pack(
+    servers: Vec<McpServerConfig>,
+) -> Result<McpPackInstallResult, String> {
     if servers.is_empty() {
         return Err("MCP pack has no servers".to_string());
     }
 
-    let needs_uv = servers.iter().any(|s| matches!(s.command.as_str(), "uv" | "uvx"));
+    let needs_uv = servers
+        .iter()
+        .any(|s| matches!(s.command.as_str(), "uv" | "uvx"));
     let mut uv_installed = false;
     if needs_uv {
         install_uv().await?;
@@ -236,12 +245,19 @@ fn resolve_command(command: &str, args: &[String]) -> (PathBuf, Vec<String>) {
             let dir = rt.join(sub);
             for cand in &candidates {
                 let p = dir.join(cand);
-                if p.is_file() { resolved = Some(p); break 'outer; }
+                if p.is_file() {
+                    resolved = Some(p);
+                    break 'outer;
+                }
             }
         }
     }
     let resolved = resolved
-        .or_else(|| candidates.iter().find_map(|n| crate::accounts::which_extended(n)))
+        .or_else(|| {
+            candidates
+                .iter()
+                .find_map(|n| crate::accounts::which_extended(n))
+        })
         .unwrap_or_else(|| PathBuf::from(command));
 
     let is_batch = resolved
@@ -254,7 +270,8 @@ fn resolve_command(command: &str, args: &[String]) -> (PathBuf, Vec<String>) {
         .unwrap_or(false);
 
     if is_batch && cfg!(windows) {
-        let mut wrapped: Vec<String> = vec!["/c".to_string(), resolved.to_string_lossy().to_string()];
+        let mut wrapped: Vec<String> =
+            vec!["/c".to_string(), resolved.to_string_lossy().to_string()];
         wrapped.extend(args.iter().cloned());
         (PathBuf::from("cmd.exe"), wrapped)
     } else {
@@ -334,7 +351,9 @@ async fn spawn_session(cfg: &McpServerConfig) -> Result<Arc<McpSession>, String>
                     }
                 }
                 let trimmed = line.trim();
-                if trimmed.is_empty() { continue }
+                if trimmed.is_empty() {
+                    continue;
+                }
                 let parsed: Value = match serde_json::from_str(trimmed) {
                     Ok(v) => v,
                     Err(_) => continue, // ignore garbage / partial frames
@@ -360,7 +379,9 @@ async fn spawn_session(cfg: &McpServerConfig) -> Result<Arc<McpSession>, String>
             let mut buf = String::new();
             loop {
                 line.clear();
-                if reader.read_line(&mut line).await.unwrap_or(0) == 0 { break }
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
                 buf.push_str(&line);
                 if buf.len() > 4096 {
                     let drop = buf.len() - 4096;
@@ -415,8 +436,14 @@ async fn send_request(session: &McpSession, method: &str, params: Value) -> Resu
     let line = format!("{}\n", payload.to_string());
     {
         let mut stdin = session.stdin.lock().await;
-        stdin.write_all(line.as_bytes()).await.map_err(|e| format!("stdin write: {e}"))?;
-        stdin.flush().await.map_err(|e| format!("stdin flush: {e}"))?;
+        stdin
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("stdin write: {e}"))?;
+        stdin
+            .flush()
+            .await
+            .map_err(|e| format!("stdin flush: {e}"))?;
     }
     // 180s ceiling. First-run npx -y @modelcontextprotocol/server-X
     // downloads the package from npm (can be 30-60s on slow networks).
@@ -433,7 +460,11 @@ async fn send_request(session: &McpSession, method: &str, params: Value) -> Resu
     Ok(resp.get("result").cloned().unwrap_or(Value::Null))
 }
 
-async fn send_notification(session: &McpSession, method: &str, params: Value) -> Result<(), String> {
+async fn send_notification(
+    session: &McpSession,
+    method: &str,
+    params: Value,
+) -> Result<(), String> {
     let payload = json!({
         "jsonrpc": "2.0",
         "method": method,
@@ -441,8 +472,14 @@ async fn send_notification(session: &McpSession, method: &str, params: Value) ->
     });
     let line = format!("{}\n", payload.to_string());
     let mut stdin = session.stdin.lock().await;
-    stdin.write_all(line.as_bytes()).await.map_err(|e| format!("stdin write: {e}"))?;
-    stdin.flush().await.map_err(|e| format!("stdin flush: {e}"))?;
+    stdin
+        .write_all(line.as_bytes())
+        .await
+        .map_err(|e| format!("stdin write: {e}"))?;
+    stdin
+        .flush()
+        .await
+        .map_err(|e| format!("stdin flush: {e}"))?;
     Ok(())
 }
 
@@ -477,11 +514,12 @@ async fn mcp_fetch_tools(session: &McpSession) -> Result<(), String> {
                 .and_then(|d| d.as_str())
                 .unwrap_or("")
                 .to_string();
-            let input_schema = item
-                .get("inputSchema")
-                .cloned()
-                .unwrap_or(json!({}));
-            Some(McpToolSpec { name, description, input_schema })
+            let input_schema = item.get("inputSchema").cloned().unwrap_or(json!({}));
+            Some(McpToolSpec {
+                name,
+                description,
+                input_schema,
+            })
         })
         .collect();
     *session.tools.lock().unwrap() = parsed;
@@ -600,18 +638,34 @@ pub async fn mcp_call_tool(
         &session,
         "tools/call",
         json!({"name": tool, "arguments": arguments}),
-    ).await?;
+    )
+    .await?;
     // Standard MCP response shape: {content: [{type, text}], isError?}
-    let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
-    let content = result.get("content").and_then(|c| c.as_array()).cloned().unwrap_or_default();
+    let is_error = result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let content = result
+        .get("content")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
     let parts: Vec<String> = content
         .iter()
         .filter_map(|c| {
             let kind = c.get("type").and_then(|v| v.as_str()).unwrap_or("");
             match kind {
-                "text" => c.get("text").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                "image" => Some(format!("[image: {} bytes]",
-                    c.get("data").and_then(|v| v.as_str()).map(|s| s.len()).unwrap_or(0))),
+                "text" => c
+                    .get("text")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                "image" => Some(format!(
+                    "[image: {} bytes]",
+                    c.get("data")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.len())
+                        .unwrap_or(0)
+                )),
                 _ => Some(format!("[unsupported MCP content type: {kind}]")),
             }
         })
@@ -631,7 +685,9 @@ pub async fn mcp_autostart_all() -> Result<Vec<McpServerStatus>, String> {
     let config = mcp_load_config()?;
     let mut out: Vec<McpServerStatus> = Vec::new();
     for cfg in &config.servers {
-        if !cfg.enabled { continue }
+        if !cfg.enabled {
+            continue;
+        }
         match mcp_start_server(cfg.name.clone()).await {
             Ok(s) => out.push(s),
             Err(e) => out.push(McpServerStatus {
@@ -698,17 +754,20 @@ fn runtime_dir(name: &str) -> Option<PathBuf> {
 pub fn runtime_status(name: String) -> RuntimeStatus {
     let path = runtime_dir(&name);
     let exe_name = if cfg!(windows) {
-        format!("{name}x.exe")  // uvx.exe (uv ships `uv.exe` + `uvx.exe` in the same zip)
+        format!("{name}x.exe") // uvx.exe (uv ships `uv.exe` + `uvx.exe` in the same zip)
     } else {
         format!("{name}x")
     };
-    let installed = path.as_ref()
+    let installed = path
+        .as_ref()
         .map(|p| p.join(&exe_name).is_file())
         .unwrap_or(false);
     RuntimeStatus {
         name,
         installed,
-        path: path.map(|p| p.to_string_lossy().into_owned()).unwrap_or_default(),
+        path: path
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
     }
 }
 
@@ -720,13 +779,17 @@ pub fn runtime_status(name: String) -> RuntimeStatus {
 /// We extract only the uv/uvx launchers from the host archive.
 #[tauri::command]
 pub async fn install_uv() -> Result<String, String> {
-    let dir = runtime_dir("uv").ok_or_else(|| "no LLM root — repo layout unexpected".to_string())?;
-    let uvx_exe = if cfg!(windows) { dir.join("uvx.exe") } else { dir.join("uvx") };
+    let dir =
+        runtime_dir("uv").ok_or_else(|| "no LLM root — repo layout unexpected".to_string())?;
+    let uvx_exe = if cfg!(windows) {
+        dir.join("uvx.exe")
+    } else {
+        dir.join("uvx")
+    };
     if uvx_exe.is_file() {
         return Ok(dir.to_string_lossy().into_owned());
     }
-    std::fs::create_dir_all(&dir)
-        .map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
 
     // Pick the right release asset for the host. Currently only
     // Windows x64 is wired — the other targets would just need their
@@ -748,22 +811,24 @@ pub async fn install_uv() -> Result<String, String> {
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
-    let resp = cli.get(&url).send().await
+    let resp = cli
+        .get(&url)
+        .send()
+        .await
         .map_err(|e| format!("download {url}: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("download HTTP {} from {url}", resp.status()));
     }
-    let bytes = resp.bytes().await
-        .map_err(|e| format!("read bytes: {e}"))?;
+    let bytes = resp.bytes().await.map_err(|e| format!("read bytes: {e}"))?;
 
     // Windows ships a zip; macOS/Linux ship tar.gz archives. Both have
     // a top-level folder, so match on the file name suffix.
     if asset.ends_with(".zip") {
         let cursor = std::io::Cursor::new(bytes);
-        let mut archive = zip::ZipArchive::new(cursor)
-            .map_err(|e| format!("zip open: {e}"))?;
+        let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("zip open: {e}"))?;
         for i in 0..archive.len() {
-            let mut entry = archive.by_index(i)
+            let mut entry = archive
+                .by_index(i)
                 .map_err(|e| format!("zip entry {i}: {e}"))?;
             // The zip stores files like "uv-x86_64-pc-windows-msvc/uv.exe"
             // OR plain "uv.exe" depending on release version — handle both
@@ -774,7 +839,9 @@ pub async fn install_uv() -> Result<String, String> {
                 .and_then(|s| s.to_str())
                 .unwrap_or(&entry_name)
                 .to_string();
-            if !matches!(basename.as_str(), "uv.exe" | "uvx.exe") { continue }
+            if !matches!(basename.as_str(), "uv.exe" | "uvx.exe") {
+                continue;
+            }
             let out_path = dir.join(&basename);
             let mut out_file = std::fs::File::create(&out_path)
                 .map_err(|e| format!("create {}: {e}", out_path.display()))?;
@@ -785,15 +852,19 @@ pub async fn install_uv() -> Result<String, String> {
         let cursor = std::io::Cursor::new(bytes);
         let decoder = flate2::read::GzDecoder::new(cursor);
         let mut archive = tar::Archive::new(decoder);
-        let entries = archive.entries()
-            .map_err(|e| format!("tar entries: {e}"))?;
+        let entries = archive.entries().map_err(|e| format!("tar entries: {e}"))?;
         for entry in entries {
             let mut entry = entry.map_err(|e| format!("tar entry: {e}"))?;
-            let path = entry.path()
+            let path = entry
+                .path()
                 .map_err(|e| format!("tar path: {e}"))?
                 .into_owned();
-            let Some(basename) = path.file_name().and_then(|s| s.to_str()) else { continue };
-            if !matches!(basename, "uv" | "uvx") { continue }
+            let Some(basename) = path.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if !matches!(basename, "uv" | "uvx") {
+                continue;
+            }
             let out_path = dir.join(basename);
             let mut out_file = std::fs::File::create(&out_path)
                 .map_err(|e| format!("create {}: {e}", out_path.display()))?;

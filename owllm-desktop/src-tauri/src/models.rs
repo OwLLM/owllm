@@ -47,8 +47,7 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
     // ships today. Walks BOTH the new %LOCALAPPDATA% models tree and
     // the legacy LLM/models/ tree so users keep seeing existing weights.
     let mut all_found: Vec<PathBuf> = Vec::new();
-    let mut all_gguf_parents: std::collections::HashSet<PathBuf> =
-        std::collections::HashSet::new();
+    let mut all_gguf_parents: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for models_dir in paths::models_dirs_read() {
         walk_gguf(&models_dir, &mut all_found, 0);
     }
@@ -61,9 +60,7 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
             .and_then(|s| s.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let size_mib = std::fs::metadata(&path)
-            .ok()
-            .map(|m| m.len() / 1024 / 1024);
+        let size_mib = std::fs::metadata(&path).ok().map(|m| m.len() / 1024 / 1024);
         if let Some(parent) = path.parent() {
             all_gguf_parents.insert(parent.to_path_buf());
         }
@@ -87,7 +84,9 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
                 .unwrap_or("unknown")
                 .to_string();
             // Skip duplicates that surface from both roots.
-            if out.iter().any(|m| m.model_id == id) { continue; }
+            if out.iter().any(|m| m.model_id == id) {
+                continue;
+            }
             let size_mib = dir_weight_size_mib(&path);
             out.push(ModelInfo {
                 model_id: id,
@@ -117,59 +116,62 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
                     Some(n) => n.to_string(),
                     None => continue,
                 };
-                    if name.starts_with('.') || name.starts_with("checkpoint-") || name == "_crash_logs" {
-                        continue;
-                    }
-                    if p.is_dir() {
-                        // The directory itself (transformers format).
-                        // No port — llama-server can't serve a
-                        // transformers dir; the user has to GGUF-export
-                        // first. The picker's hint already encodes that
-                        // by leaving the port field blank.
-                        let size_mib = dir_weight_size_mib(&p);
-                        out.push(ModelInfo {
-                            model_id: name.clone(),
-                            port: None,
-                            base_model: Some(p.to_string_lossy().into_owned()),
-                            size_mib,
-                            provider: "tuned".to_string(),
-                        });
-                        // Any .gguf one level deep is its own pickable
-                        // entry with an assigned port so the Server
-                        // tab can launch it directly.
-                        let mut inner_files: Vec<PathBuf> = Vec::new();
-                        if let Ok(inner) = std::fs::read_dir(&p) {
-                            for f in inner.flatten() {
-                                let fp = f.path();
-                                if fp.is_file() {
-                                    inner_files.push(fp);
-                                }
+                if name.starts_with('.') || name.starts_with("checkpoint-") || name == "_crash_logs"
+                {
+                    continue;
+                }
+                if p.is_dir() {
+                    // The directory itself (transformers format).
+                    // No port — llama-server can't serve a
+                    // transformers dir; the user has to GGUF-export
+                    // first. The picker's hint already encodes that
+                    // by leaving the port field blank.
+                    let size_mib = dir_weight_size_mib(&p);
+                    out.push(ModelInfo {
+                        model_id: name.clone(),
+                        port: None,
+                        base_model: Some(p.to_string_lossy().into_owned()),
+                        size_mib,
+                        provider: "tuned".to_string(),
+                    });
+                    // Any .gguf one level deep is its own pickable
+                    // entry with an assigned port so the Server
+                    // tab can launch it directly.
+                    let mut inner_files: Vec<PathBuf> = Vec::new();
+                    if let Ok(inner) = std::fs::read_dir(&p) {
+                        for f in inner.flatten() {
+                            let fp = f.path();
+                            if fp.is_file() {
+                                inner_files.push(fp);
                             }
                         }
-                        inner_files.sort();
-                        for fp in inner_files {
-                            let ext = fp.extension().and_then(|s| s.to_str()).unwrap_or("");
-                            if !ext.eq_ignore_ascii_case("gguf") { continue; }
-                            let fname = fp
-                                .file_stem()
-                                .and_then(|s| s.to_str())
-                                .unwrap_or("model")
-                                .to_string();
-                            let fsize = std::fs::metadata(&fp).ok().map(|m| m.len() / 1024 / 1024);
-                            let port = tuned_base_port.saturating_add(tuned_gguf_idx);
-                            tuned_gguf_idx = tuned_gguf_idx.saturating_add(1);
-                            out.push(ModelInfo {
-                                model_id: fname,
-                                port: Some(port),
-                                base_model: Some(fp.to_string_lossy().into_owned()),
-                                size_mib: fsize,
-                                provider: "tuned".to_string(),
-                            });
+                    }
+                    inner_files.sort();
+                    for fp in inner_files {
+                        let ext = fp.extension().and_then(|s| s.to_str()).unwrap_or("");
+                        if !ext.eq_ignore_ascii_case("gguf") {
+                            continue;
                         }
+                        let fname = fp
+                            .file_stem()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("model")
+                            .to_string();
+                        let fsize = std::fs::metadata(&fp).ok().map(|m| m.len() / 1024 / 1024);
+                        let port = tuned_base_port.saturating_add(tuned_gguf_idx);
+                        tuned_gguf_idx = tuned_gguf_idx.saturating_add(1);
+                        out.push(ModelInfo {
+                            model_id: fname,
+                            port: Some(port),
+                            base_model: Some(fp.to_string_lossy().into_owned()),
+                            size_mib: fsize,
+                            provider: "tuned".to_string(),
+                        });
                     }
                 }
             }
         }
+    }
     // Cloud models — ALWAYS surfaced so the user can see Claude / GPT
     // options in the agent dropdowns even before saving a key. If they
     // pick one without the matching credentials saved, the dispatch
@@ -213,11 +215,7 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
     // kimi-k2-* preview ids are being discontinued 2026-05-25 by
     // Moonshot; we ship only the current K2.5 + K2.6 line plus the
     // stable Moonshot V1 128K context fallback.
-    for id in [
-        "kimi-k2.6",
-        "kimi-k2.5",
-        "moonshot-v1-128k",
-    ] {
+    for id in ["kimi-k2.6", "kimi-k2.5", "moonshot-v1-128k"] {
         out.push(ModelInfo {
             model_id: id.to_string(),
             port: None,
@@ -228,12 +226,24 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
     }
     // DeepSeek API (api.deepseek.com).
     for id in ["deepseek-v4-pro", "deepseek-v4-flash"] {
-        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "deepseek".into() });
+        out.push(ModelInfo {
+            model_id: id.into(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "deepseek".into(),
+        });
     }
     // xAI Grok (api.x.ai). grok-4.3 is the May 2026 flagship; older
     // ids redirect to it server-side.
     for id in ["grok-4.3", "grok-4.20", "grok-4.1-fast"] {
-        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "xai".into() });
+        out.push(ModelInfo {
+            model_id: id.into(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "xai".into(),
+        });
     }
     // Groq LPU (api.groq.com) — fastest inference for open models.
     for id in [
@@ -243,15 +253,38 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
         "deepseek-r1-distill-llama-70b",
         "gpt-oss-120b",
     ] {
-        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "groq".into() });
+        out.push(ModelInfo {
+            model_id: id.into(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "groq".into(),
+        });
     }
     // Perplexity Sonar (api.perplexity.ai) — built-in web search.
     for id in ["sonar-pro", "sonar", "sonar-reasoning"] {
-        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "perplexity".into() });
+        out.push(ModelInfo {
+            model_id: id.into(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "perplexity".into(),
+        });
     }
     // Mistral (api.mistral.ai).
-    for id in ["mistral-large-latest", "magistral-medium-latest", "codestral-latest", "mistral-small-latest"] {
-        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "mistral".into() });
+    for id in [
+        "mistral-large-latest",
+        "magistral-medium-latest",
+        "codestral-latest",
+        "mistral-small-latest",
+    ] {
+        out.push(ModelInfo {
+            model_id: id.into(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "mistral".into(),
+        });
     }
     // Together AI (api.together.xyz) — open-source model host. Top 5
     // popular options; users can plug exact IDs later.
@@ -261,11 +294,27 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
         "deepseek-ai/DeepSeek-V3",
         "mistralai/Mixtral-8x22B-Instruct-v0.1",
     ] {
-        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "together".into() });
+        out.push(ModelInfo {
+            model_id: id.into(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "together".into(),
+        });
     }
     // Google Gemini (generativelanguage.googleapis.com).
-    for id in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"] {
-        out.push(ModelInfo { model_id: id.into(), port: None, base_model: None, size_mib: None, provider: "gemini".into() });
+    for id in [
+        "gemini-2.5-pro",
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+    ] {
+        out.push(ModelInfo {
+            model_id: id.into(),
+            port: None,
+            base_model: None,
+            size_mib: None,
+            provider: "gemini".into(),
+        });
     }
 
     Ok(out)
@@ -278,7 +327,9 @@ fn walk_gguf(dir: &Path, out: &mut Vec<PathBuf>, depth: usize) {
     if depth > 6 {
         return;
     }
-    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in read.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -323,7 +374,9 @@ fn walk_transformers_dirs(
     if depth > 6 {
         return;
     }
-    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut has_config = false;
     let mut has_weights = false;
     for entry in read.flatten() {
@@ -344,7 +397,9 @@ fn walk_transformers_dirs(
         out.push(dir.to_path_buf());
         return;
     }
-    let Ok(read2) = std::fs::read_dir(dir) else { return };
+    let Ok(read2) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in read2.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -374,7 +429,11 @@ fn dir_weight_size_mib(dir: &Path) -> Option<u64> {
             }
         }
     }
-    if total > 0 { Some(total) } else { None }
+    if total > 0 {
+        Some(total)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

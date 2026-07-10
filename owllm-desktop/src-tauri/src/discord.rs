@@ -75,7 +75,10 @@ pub async fn discord_download_file(
         let txt = resp.text().await.unwrap_or_default();
         return Err(format!("discord download HTTP {status}: {txt}"));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("download bytes: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("download bytes: {e}"))?;
     if bytes.len() > MAX_BYTES {
         return Err(format!(
             "file too large: {} bytes (limit {} bytes)",

@@ -39,8 +39,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// their checkout (`.owllm-fleet/` clutter, accidental commits, etc.).
 fn fleet_root() -> Option<PathBuf> {
     if cfg!(windows) {
-        std::env::var_os("LOCALAPPDATA")
-            .map(|d| PathBuf::from(d).join("owllm").join("fleet"))
+        std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("owllm").join("fleet"))
     } else {
         std::env::var_os("HOME").map(|d| PathBuf::from(d).join(".owllm").join("fleet"))
     }
@@ -57,7 +56,10 @@ fn repo_create_lock(repo: &Path) -> Arc<Mutex<()>> {
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let key = repo.to_string_lossy().to_string();
     let mut guard = map.lock().unwrap_or_else(|p| p.into_inner());
-    guard.entry(key).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    guard
+        .entry(key)
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
 }
 
 /// App-managed scratch that must NEVER wedge the worktree workflow: the image
@@ -90,7 +92,13 @@ fn porcelain_path(line: &str) -> &str {
 /// agent names so weird characters in either don't break paths).
 fn safe_seg(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -248,20 +256,23 @@ pub async fn fleet_worktree_create(
     // Belt-and-braces: if a previous run crashed mid-flight and left a
     // stale worktree at this exact path, prune it before re-creating
     // so the `git worktree add` doesn't fail with "already exists".
-    let _ = git(&cwd, &["worktree", "remove", "--force", &dest.to_string_lossy()]);
+    let _ = git(
+        &cwd,
+        &["worktree", "remove", "--force", &dest.to_string_lossy()],
+    );
     let _ = std::fs::remove_dir_all(&dest);
 
-    let prefix = branch_prefix.as_deref().filter(|s| !s.trim().is_empty()).unwrap_or("owllm-fleet");
+    let prefix = branch_prefix
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("owllm-fleet");
     let branch = format!("{}/{}/{}", prefix, safe_seg(&run_id), safe_seg(&agent_name));
     // If the branch somehow already exists (interrupted run), delete it
     // first so we can re-create cleanly.
     let _ = git(&cwd, &["branch", "-D", &branch]);
 
     let dest_str = dest.to_string_lossy().to_string();
-    let (ok, _, err) = git(
-        &cwd,
-        &["worktree", "add", "-b", &branch, &dest_str, "HEAD"],
-    )?;
+    let (ok, _, err) = git(&cwd, &["worktree", "add", "-b", &branch, &dest_str, "HEAD"])?;
     if !ok {
         return Ok(CreateOutcome::Error {
             message: format!("git worktree add failed: {}", err.trim()),
@@ -292,7 +303,9 @@ pub enum FinalizeOutcome {
     },
     /// The agent didn't touch anything — nothing to commit.
     NoChanges,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[tauri::command]
@@ -345,10 +358,7 @@ pub async fn fleet_worktree_finalize(
     }
     let (_, sha_out, _) = git(&wt, &["rev-parse", "HEAD"])?;
     let commit_sha = sha_out.trim().to_string();
-    let (_, show_out, _) = git(
-        &wt,
-        &["show", "--name-status", "--format=", &commit_sha],
-    )?;
+    let (_, show_out, _) = git(&wt, &["show", "--name-status", "--format=", &commit_sha])?;
     let files: Vec<String> = show_out
         .lines()
         .map(|l| l.trim().to_string())
@@ -400,10 +410,14 @@ pub enum MergeOutcome {
     /// Merge would have conflicted. Aborted; nothing committed in
     /// project_cwd. `files` lists conflict paths; the agent's branch
     /// is left intact so the user can inspect or merge manually.
-    Conflict { files: Vec<String> },
+    Conflict {
+        files: Vec<String>,
+    },
     /// Nothing to merge — the agent didn't change anything (No-op).
     NoChanges,
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 #[tauri::command]
@@ -461,10 +475,7 @@ pub async fn fleet_worktree_merge(
     }
     let (_, sha, _) = git(&cwd, &["rev-parse", "HEAD"])?;
     let commit_sha = sha.trim().to_string();
-    let (_, show, _) = git(
-        &cwd,
-        &["show", "--name-only", "--format=", &commit_sha],
-    )?;
+    let (_, show, _) = git(&cwd, &["show", "--name-only", "--format=", &commit_sha])?;
     let files_changed = show.lines().filter(|l| !l.trim().is_empty()).count() as u32;
     Ok(MergeOutcome::Merged {
         commit_sha,
@@ -540,7 +551,9 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
             } else if let Some(b) = line.strip_prefix("branch ") {
                 let branch = b.trim().trim_start_matches("refs/heads/").to_string();
                 let Some(p) = path.take() else { continue };
-                if !branch.starts_with("owllm-fleet/") { continue; } // team only
+                if !branch.starts_with("owllm-fleet/") {
+                    continue;
+                } // team only
                 let wt = PathBuf::from(&p);
                 let dirty = git(&wt, &["status", "--porcelain", "--untracked-files=no"])
                     .map(|(_, o, _)| !o.trim().is_empty())
@@ -548,11 +561,15 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
                 let merged = git(&cwd, &["merge-base", "--is-ancestor", &branch, "HEAD"])
                     .map(|(ok, _, _)| ok)
                     .unwrap_or(false); // can't tell → assume unmerged → keep
-                if dirty || !merged { continue; } // has work → KEEP
+                if dirty || !merged {
+                    continue;
+                } // has work → KEEP
                 let _ = git(&cwd, &["worktree", "remove", "--force", &p]);
                 let _ = git(&cwd, &["branch", "-D", &branch]);
                 let _ = std::fs::remove_dir_all(&p);
-                if let Some(parent) = wt.parent() { let _ = std::fs::remove_dir(parent); } // empty run dir
+                if let Some(parent) = wt.parent() {
+                    let _ = std::fs::remove_dir(parent);
+                } // empty run dir
                 removed += 1;
             }
         }
@@ -596,7 +613,7 @@ mod tests {
         assert!(is_app_scratch(".owllm/project.json"));
         assert!(is_app_scratch("./.owllm-inbox/x.png"));
         assert!(is_app_scratch(".owllm-inbox\\image_1.png")); // porcelain can emit backslashes
-        // Real source changes must STILL block (branch cuts from HEAD).
+                                                              // Real source changes must STILL block (branch cuts from HEAD).
         assert!(!is_app_scratch("src/main.rs"));
         assert!(!is_app_scratch("owllm-desktop/ui/src/App.tsx"));
         assert!(!is_app_scratch(".owllm-inbox-notes.md")); // sibling file, not the dir
@@ -605,9 +622,15 @@ mod tests {
 
     #[test]
     fn porcelain_path_parsing() {
-        assert_eq!(porcelain_path(" M .owllm-inbox/image_1.png"), ".owllm-inbox/image_1.png");
+        assert_eq!(
+            porcelain_path(" M .owllm-inbox/image_1.png"),
+            ".owllm-inbox/image_1.png"
+        );
         assert_eq!(porcelain_path("A  src/new.rs"), "src/new.rs");
-        assert_eq!(porcelain_path("R  old/path.rs -> new/path.rs"), "new/path.rs");
+        assert_eq!(
+            porcelain_path("R  old/path.rs -> new/path.rs"),
+            "new/path.rs"
+        );
         assert_eq!(porcelain_path("?? untracked.txt"), "untracked.txt");
         // A source file next to a scratch change is still seen as source.
         assert!(!is_app_scratch(porcelain_path("M  Cargo.toml")));

@@ -44,7 +44,11 @@ pub fn normalize_origin(input: &str) -> String {
     if s.is_empty() {
         return String::new();
     }
-    let with_scheme = if s.contains("://") { s.to_string() } else { format!("https://{s}") };
+    let with_scheme = if s.contains("://") {
+        s.to_string()
+    } else {
+        format!("https://{s}")
+    };
     match url::Url::parse(&with_scheme) {
         Ok(u) => {
             let scheme = u.scheme();
@@ -61,9 +65,15 @@ pub fn normalize_origin(input: &str) -> String {
 }
 
 fn load() -> Vec<BrowserCred> {
-    let Some(path) = vault_path() else { return Vec::new() };
-    let Ok(cipher) = std::fs::read(&path) else { return Vec::new() };
-    let Ok(plain) = crate::crypt::unprotect(&cipher) else { return Vec::new() };
+    let Some(path) = vault_path() else {
+        return Vec::new();
+    };
+    let Ok(cipher) = std::fs::read(&path) else {
+        return Vec::new();
+    };
+    let Ok(plain) = crate::crypt::unprotect(&cipher) else {
+        return Vec::new();
+    };
     serde_json::from_slice(&plain).unwrap_or_default()
 }
 
@@ -96,7 +106,10 @@ pub fn upsert(mut creds: Vec<BrowserCred>, cred: BrowserCred) -> Vec<BrowserCred
 
 /// Merge a batch (from import) into the current set, replacing matches. Returns
 /// (merged, added_or_updated_count).
-pub fn merge_batch(current: Vec<BrowserCred>, incoming: Vec<BrowserCred>) -> (Vec<BrowserCred>, usize) {
+pub fn merge_batch(
+    current: Vec<BrowserCred>,
+    incoming: Vec<BrowserCred>,
+) -> (Vec<BrowserCred>, usize) {
     let mut merged = current;
     let mut n = 0;
     for c in incoming {
@@ -104,7 +117,9 @@ pub fn merge_batch(current: Vec<BrowserCred>, incoming: Vec<BrowserCred>) -> (Ve
             continue;
         }
         let before = merged.len();
-        let had = merged.iter().any(|e| e.origin == c.origin && e.username == c.username);
+        let had = merged
+            .iter()
+            .any(|e| e.origin == c.origin && e.username == c.username);
         merged = upsert(merged, c);
         if !had || merged.len() == before {
             n += 1;
@@ -119,18 +134,26 @@ pub fn find_for_origin<'a>(creds: &'a [BrowserCred], page_origin: &str) -> Optio
     if let Some(c) = creds.iter().find(|c| c.origin == norm) {
         return Some(c);
     }
-    let host = url::Url::parse(&norm).ok().and_then(|u| u.host_str().map(str::to_string));
+    let host = url::Url::parse(&norm)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_string));
     if let Some(h) = host {
-        return creds
-            .iter()
-            .find(|c| url::Url::parse(&c.origin).ok().and_then(|u| u.host_str().map(str::to_string)) == Some(h.clone()));
+        return creds.iter().find(|c| {
+            url::Url::parse(&c.origin)
+                .ok()
+                .and_then(|u| u.host_str().map(str::to_string))
+                == Some(h.clone())
+        });
     }
     None
 }
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 // ---- Tauri commands ----
@@ -139,14 +162,24 @@ fn now_ms() -> i64 {
 pub fn browser_vault_list() -> Vec<CredMeta> {
     let mut out: Vec<CredMeta> = load()
         .into_iter()
-        .map(|c| CredMeta { origin: c.origin, username: c.username, note: c.note, ts: c.ts })
+        .map(|c| CredMeta {
+            origin: c.origin,
+            username: c.username,
+            note: c.note,
+            ts: c.ts,
+        })
         .collect();
     out.sort_by(|a, b| a.origin.cmp(&b.origin).then(a.username.cmp(&b.username)));
     out
 }
 
 #[tauri::command(async)]
-pub fn browser_vault_add(origin: String, username: String, password: String, note: Option<String>) -> Result<String, String> {
+pub fn browser_vault_add(
+    origin: String,
+    username: String,
+    password: String,
+    note: Option<String>,
+) -> Result<String, String> {
     let cred = BrowserCred {
         origin: normalize_origin(&origin),
         username: username.trim().to_string(),
@@ -212,15 +245,39 @@ mod tests {
     #[test]
     fn normalize_strips_path_and_defaults_https() {
         assert_eq!(normalize_origin("github.com"), "https://github.com");
-        assert_eq!(normalize_origin("https://github.com/login?x=1"), "https://github.com");
-        assert_eq!(normalize_origin("http://localhost:3000/app"), "http://localhost:3000");
-        assert_eq!(normalize_origin("  example.com/a/b  "), "https://example.com");
+        assert_eq!(
+            normalize_origin("https://github.com/login?x=1"),
+            "https://github.com"
+        );
+        assert_eq!(
+            normalize_origin("http://localhost:3000/app"),
+            "http://localhost:3000"
+        );
+        assert_eq!(
+            normalize_origin("  example.com/a/b  "),
+            "https://example.com"
+        );
     }
 
     #[test]
     fn upsert_replaces_same_origin_user() {
-        let base = vec![BrowserCred { origin: "https://a.com".into(), username: "u".into(), password: "old".into(), note: String::new(), ts: 1 }];
-        let merged = upsert(base, BrowserCred { origin: "https://a.com".into(), username: "u".into(), password: "new".into(), note: "n".into(), ts: 2 });
+        let base = vec![BrowserCred {
+            origin: "https://a.com".into(),
+            username: "u".into(),
+            password: "old".into(),
+            note: String::new(),
+            ts: 1,
+        }];
+        let merged = upsert(
+            base,
+            BrowserCred {
+                origin: "https://a.com".into(),
+                username: "u".into(),
+                password: "new".into(),
+                note: "n".into(),
+                ts: 2,
+            },
+        );
         assert_eq!(merged.len(), 1);
         assert_eq!(merged[0].password, "new");
         assert_eq!(merged[0].note, "n");
@@ -228,8 +285,23 @@ mod tests {
 
     #[test]
     fn upsert_adds_distinct_user() {
-        let base = vec![BrowserCred { origin: "https://a.com".into(), username: "u1".into(), password: "p".into(), note: String::new(), ts: 1 }];
-        let merged = upsert(base, BrowserCred { origin: "https://a.com".into(), username: "u2".into(), password: "p".into(), note: String::new(), ts: 1 });
+        let base = vec![BrowserCred {
+            origin: "https://a.com".into(),
+            username: "u1".into(),
+            password: "p".into(),
+            note: String::new(),
+            ts: 1,
+        }];
+        let merged = upsert(
+            base,
+            BrowserCred {
+                origin: "https://a.com".into(),
+                username: "u2".into(),
+                password: "p".into(),
+                note: String::new(),
+                ts: 1,
+            },
+        );
         assert_eq!(merged.len(), 2);
     }
 
@@ -238,9 +310,27 @@ mod tests {
         let (merged, n) = merge_batch(
             vec![],
             vec![
-                BrowserCred { origin: "https://a.com".into(), username: "u".into(), password: "p".into(), note: String::new(), ts: 1 },
-                BrowserCred { origin: String::new(), username: "x".into(), password: "p".into(), note: String::new(), ts: 1 }, // skipped: no origin
-                BrowserCred { origin: "https://b.com".into(), username: "u".into(), password: String::new(), note: String::new(), ts: 1 }, // skipped: no password
+                BrowserCred {
+                    origin: "https://a.com".into(),
+                    username: "u".into(),
+                    password: "p".into(),
+                    note: String::new(),
+                    ts: 1,
+                },
+                BrowserCred {
+                    origin: String::new(),
+                    username: "x".into(),
+                    password: "p".into(),
+                    note: String::new(),
+                    ts: 1,
+                }, // skipped: no origin
+                BrowserCred {
+                    origin: "https://b.com".into(),
+                    username: "u".into(),
+                    password: String::new(),
+                    note: String::new(),
+                    ts: 1,
+                }, // skipped: no password
             ],
         );
         assert_eq!(merged.len(), 1);
@@ -249,7 +339,13 @@ mod tests {
 
     #[test]
     fn find_for_origin_matches_host_across_scheme() {
-        let creds = vec![BrowserCred { origin: "https://site.com".into(), username: "u".into(), password: "p".into(), note: String::new(), ts: 1 }];
+        let creds = vec![BrowserCred {
+            origin: "https://site.com".into(),
+            username: "u".into(),
+            password: "p".into(),
+            note: String::new(),
+            ts: 1,
+        }];
         assert!(find_for_origin(&creds, "http://site.com/login").is_some());
         assert!(find_for_origin(&creds, "https://other.com").is_none());
     }

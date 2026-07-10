@@ -100,7 +100,12 @@ fn capture_hwnd_rgba(hwnd: isize) -> Result<(Vec<u8>, u32, u32), String> {
 
     unsafe {
         let hwnd = hwnd as HWND;
-        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         if GetWindowRect(hwnd, &mut rect) == 0 {
             return Err("GetWindowRect failed".into());
         }
@@ -132,7 +137,14 @@ fn capture_hwnd_rgba(hwnd: isize) -> Result<(Vec<u8>, u32, u32), String> {
             biClrImportant: 0,
         };
         let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
-        let dib = CreateDIBSection(mem_dc, &bi, DIB_RGB_COLORS, &mut bits, std::ptr::null_mut(), 0);
+        let dib = CreateDIBSection(
+            mem_dc,
+            &bi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            std::ptr::null_mut(),
+            0,
+        );
         if dib.is_null() || bits.is_null() {
             DeleteDC(mem_dc);
             ReleaseDC(std::ptr::null_mut(), screen_dc);
@@ -252,17 +264,29 @@ pub async fn support_send_report(
 
     // 1) Commit the redacted report bundle.
     let report_b64 = base64::engine::general_purpose::STANDARD.encode(report_json.as_bytes());
-    gh_put_file(&client, &token, &format!("{dir}/report.json"), &report_b64, &format!("report {stamp}"))
-        .await
-        .map_err(|e| format!("couldn't upload the report to the OwLLM team repo: {e}"))?;
+    gh_put_file(
+        &client,
+        &token,
+        &format!("{dir}/report.json"),
+        &report_b64,
+        &format!("report {stamp}"),
+    )
+    .await
+    .map_err(|e| format!("couldn't upload the report to the OwLLM team repo: {e}"))?;
 
     let mut shot_line = String::new();
     if let Some(png) = png_base64.filter(|s| !s.is_empty()) {
         // png_base64 is already base64 of the PNG bytes — the Contents API
         // wants exactly that.
-        gh_put_file(&client, &token, &format!("{dir}/screenshot.png"), &png, &format!("screenshot {stamp}"))
-            .await
-            .map_err(|e| format!("report uploaded but screenshot failed: {e}"))?;
+        gh_put_file(
+            &client,
+            &token,
+            &format!("{dir}/screenshot.png"),
+            &png,
+            &format!("screenshot {stamp}"),
+        )
+        .await
+        .map_err(|e| format!("report uploaded but screenshot failed: {e}"))?;
         shot_line = format!(
             "\n📸 Screenshot: [`{dir}/screenshot.png`](https://github.com/{repo}/blob/main/{dir}/screenshot.png)\n",
             repo = BUG_REPORT_REPO,
@@ -271,11 +295,13 @@ pub async fn support_send_report(
 
     // 2) Open the issue referencing the bundle.
     let bundle_url = format!("https://github.com/{}/tree/main/{}", BUG_REPORT_REPO, dir);
-    let body = format!(
-        "{body_md}\n\n---\n📦 Full redacted bundle: [`{dir}/`]({bundle_url}){shot_line}",
-    );
+    let body =
+        format!("{body_md}\n\n---\n📦 Full redacted bundle: [`{dir}/`]({bundle_url}){shot_line}",);
     let issue_url = gh_create_issue(&client, &token, &title, &body).await?;
-    Ok(SentReport { issue_url, bundle_url })
+    Ok(SentReport {
+        issue_url,
+        bundle_url,
+    })
 }
 
 /// PUT a file into the bug-report repo via the GitHub Contents API.
@@ -286,7 +312,10 @@ async fn gh_put_file(
     content_b64: &str,
     message: &str,
 ) -> Result<(), String> {
-    let url = format!("https://api.github.com/repos/{}/contents/{}", BUG_REPORT_REPO, path);
+    let url = format!(
+        "https://api.github.com/repos/{}/contents/{}",
+        BUG_REPORT_REPO, path
+    );
     let resp = client
         .put(&url)
         .header("Authorization", format!("Bearer {token}"))
@@ -332,7 +361,9 @@ async fn gh_create_issue(
             .ok()
             .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(String::from))
             .unwrap_or_else(|| "unknown error".into());
-        return Err(format!("opened the bundle but couldn't create the issue — GitHub {code}: {msg}"));
+        return Err(format!(
+            "opened the bundle but couldn't create the issue — GitHub {code}: {msg}"
+        ));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| format!("parse issue: {e}"))?;
     v.get("html_url")
@@ -354,7 +385,13 @@ pub async fn support_snapshot(app: tauri::AppHandle) -> Result<SupportSnapshot, 
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|m| matches!(m.state, crate::modules::ModuleState::Installed | crate::modules::ModuleState::UpdateAvailable))
+        .filter(|m| {
+            matches!(
+                m.state,
+                crate::modules::ModuleState::Installed
+                    | crate::modules::ModuleState::UpdateAvailable
+            )
+        })
         .map(|m| m.id)
         .collect();
     Ok(SupportSnapshot {

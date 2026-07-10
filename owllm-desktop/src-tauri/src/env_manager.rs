@@ -142,7 +142,10 @@ pub enum EnvProfileState {
     /// venv exists, hash matches, but the probe failed. Something
     /// rotted (DLL missing, CUDA driver downgraded, etc.). Show
     /// "Repair" button + the probe error so the user knows why.
-    Broken { python_exe: String, probe_error: String },
+    Broken {
+        python_exe: String,
+        probe_error: String,
+    },
 }
 
 /// Best-effort SHA-256 of a profile's authoritative content. Used
@@ -232,9 +235,10 @@ fn read_profiles_yaml() -> Result<Vec<EnvProfile>, String> {
     if !path.is_file() {
         return Ok(Vec::new());
     }
-    let txt = std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let profiles: Vec<EnvProfile> = serde_yaml::from_str(&txt)
-        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let txt =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let profiles: Vec<EnvProfile> =
+        serde_yaml::from_str(&txt).map_err(|e| format!("parse {}: {e}", path.display()))?;
     Ok(profiles)
 }
 
@@ -288,7 +292,11 @@ async fn status_impl(profile: EnvProfile) -> Result<EnvProfileState, String> {
         let current_hash = profile_hash(&profile);
         let python_exe = python_exe.to_string_lossy().into_owned();
         if installed_hash != current_hash {
-            return Ok(EnvProfileState::Stale { python_exe, installed_hash, current_hash });
+            return Ok(EnvProfileState::Stale {
+                python_exe,
+                installed_hash,
+                current_hash,
+            });
         }
         Ok(EnvProfileState::Ready { python_exe })
     })
@@ -339,21 +347,31 @@ async fn status_impl(profile: EnvProfile) -> Result<EnvProfileState, String> {
             }
         }
         let find = |key: &str| -> Option<String> {
-            out.lines().find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
+            out.lines()
+                .find_map(|l| l.trim().strip_prefix(key).map(|v| v.trim().to_string()))
         };
         match find("OWLLM_PY=").as_deref() {
             Some("NONE") => return Ok(EnvProfileState::NotInstalled),
             Some("OK") => {}
             // No definitive marker after retries → WSL never answered. Surface
             // that honestly rather than a false "not installed".
-            _ => return Err("WSL did not respond to the env probe (cold start?) — press Refresh".to_string()),
+            _ => {
+                return Err(
+                    "WSL did not respond to the env probe (cold start?) — press Refresh"
+                        .to_string(),
+                )
+            }
         }
         let home = find("OWLLM_HOME=").unwrap_or_default();
         let python_exe = format!("{home}/.owllm/envs/{}/bin/python", profile.name);
         let installed_hash = find("OWLLM_HASH=").unwrap_or_default();
         let current_hash = profile_hash(&profile);
         if installed_hash != current_hash {
-            return Ok(EnvProfileState::Stale { python_exe, installed_hash, current_hash });
+            return Ok(EnvProfileState::Stale {
+                python_exe,
+                installed_hash,
+                current_hash,
+            });
         }
         Ok(EnvProfileState::Ready { python_exe })
     })
@@ -420,7 +438,9 @@ pub async fn env_profile_install(
             Ok(())
         }
         Err(error) => {
-            let _ = channel.send(InstallEvent::Failed { error: error.clone() });
+            let _ = channel.send(InstallEvent::Failed {
+                error: error.clone(),
+            });
             Err(error)
         }
     }
@@ -466,9 +486,11 @@ mod wsl_backend {
             "nvidia-smi 2>/dev/null | grep -oE 'CUDA Version: [0-9]+\\.[0-9]+' | head -1",
         )
         .ok()?;
-        let ver = out
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("CUDA Version:").map(|s| s.trim().to_string()))?;
+        let ver = out.lines().find_map(|l| {
+            l.trim()
+                .strip_prefix("CUDA Version:")
+                .map(|s| s.trim().to_string())
+        })?;
         let mut it = ver.split('.');
         let maj: u32 = it.next()?.parse().ok()?;
         let min: u32 = it.next().unwrap_or("0").parse().unwrap_or(0);
@@ -525,8 +547,12 @@ const BLACKWELL_MIN_CC: u32 = 120;
 #[cfg(windows)]
 fn wsl_invocation(distro: &str, script: &str) -> Vec<String> {
     vec![
-        "-d".into(), distro.into(), "--".into(),
-        "bash".into(), "-lc".into(), script.into(),
+        "-d".into(),
+        distro.into(),
+        "--".into(),
+        "bash".into(),
+        "-lc".into(),
+        script.into(),
     ]
 }
 
@@ -565,7 +591,10 @@ async fn run_install(
             .map_err(|e| format!("join: {e}"))?;
         match &idx {
             Some(u) => {
-                let _ = channel.send(InstallEvent::Log { stream: "info".into(), line: format!("Detected CUDA → torch index {u}") });
+                let _ = channel.send(InstallEvent::Log {
+                    stream: "info".into(),
+                    line: format!("Detected CUDA → torch index {u}"),
+                });
             }
             None => {
                 let _ = channel.send(InstallEvent::Log { stream: "info".into(), line: "No NVIDIA CUDA visible in WSL — defaulting torch to cu121. Update the NVIDIA Windows driver for GPU training.".into() });
@@ -639,8 +668,14 @@ async fn run_install(
              uv --version"
             .to_string();
         let argv = vec![
-            "-d".into(), distro.clone(), "-u".into(), "root".into(), "--".into(),
-            "bash".into(), "-lc".into(), provision,
+            "-d".into(),
+            distro.clone(),
+            "-u".into(),
+            "root".into(),
+            "--".into(),
+            "bash".into(),
+            "-lc".into(),
+            provision,
         ];
         run_subprocess(channel, wsl, &argv, None)
             .await
@@ -651,7 +686,9 @@ async fn run_install(
     //    distro lacks it). We DON'T fall back to `python3 -m venv` anymore:
     //    on Ubuntu 25.x that picks system 3.14 and fails on missing ensurepip.
     //    uv is guaranteed present by step 0.
-    let _ = channel.send(InstallEvent::Step { label: format!("Creating venv in WSL: {env}") });
+    let _ = channel.send(InstallEvent::Step {
+        label: format!("Creating venv in WSL: {env}"),
+    });
     let mk = format!(
         "set -e; mkdir -p {root}; rm -rf {t}; \
          command -v uv >/dev/null 2>&1 || {{ echo 'uv missing after provisioning'; exit 1; }}; \
@@ -672,7 +709,9 @@ async fn run_install(
     //     `import setuptools` at import time — without it the probe dies with
     //     "No module named 'setuptools'" and the whole env is discarded. The
     //     native-Linux path already seeds these; the WSL path was missing it.
-    let _ = channel.send(InstallEvent::Step { label: "Seeding setuptools + wheel".into() });
+    let _ = channel.send(InstallEvent::Step {
+        label: "Seeding setuptools + wheel".into(),
+    });
     let seed = format!(
         "if command -v uv >/dev/null 2>&1; then uv pip install --python {py} setuptools wheel; \
          else {py} -m pip install --upgrade setuptools wheel; fi",
@@ -693,10 +732,22 @@ async fn run_install(
     //    (b) else → the pinned per-package loop (CUDA/Blackwell resolution +
     //        optional-package tolerance).
     if let Some(backend) = &profile.torch_backend {
-        let names = profile.packages.iter().map(|p| q(&p.name)).collect::<Vec<_>>().join(" ");
-        let pretty = profile.packages.iter().map(|p| p.name.clone()).collect::<Vec<_>>().join(" ");
+        let names = profile
+            .packages
+            .iter()
+            .map(|p| q(&p.name))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let pretty = profile
+            .packages
+            .iter()
+            .map(|p| p.name.clone())
+            .collect::<Vec<_>>()
+            .join(" ");
         let _ = channel.send(InstallEvent::Step {
-            label: format!("Installing {pretty} via uv --torch-backend={backend} (GPU-matched stack)"),
+            label: format!(
+                "Installing {pretty} via uv --torch-backend={backend} (GPU-matched stack)"
+            ),
         });
         let install = format!(
             "command -v uv >/dev/null 2>&1 || {{ echo 'uv is required for this environment'; exit 1; }}; \
@@ -712,71 +763,93 @@ async fn run_install(
                 format!("uv --torch-backend install failed: {e}")
             })?;
     } else {
-    for pkg in &profile.packages {
-        // Pick the Blackwell build when present and a Blackwell GPU is here;
-        // otherwise the normal pinned version. Same for the wheel index.
-        let version = if is_blackwell {
-            pkg.version_blackwell.clone().unwrap_or_else(|| pkg.version.clone())
-        } else {
-            pkg.version.clone()
-        };
-        let spec = format!("{}=={}", pkg.name, version);
-        let index = if is_blackwell && pkg.index_blackwell.is_some() {
-            pkg.index_blackwell.clone()
-        } else if pkg.cuda_wheel {
-            cuda_index.clone()
-        } else {
-            pkg.index_url.clone()
-        };
-        let _ = channel.send(InstallEvent::Step {
-            label: format!("Installing {spec}{}", index.as_ref().map(|u| format!(" (index {u})")).unwrap_or_default()),
-        });
-        let idx_arg = index.as_ref().map(|u| format!(" --index-url {}", q(u))).unwrap_or_default();
-        let install = format!(
-            "if command -v uv >/dev/null 2>&1; then uv pip install --python {py}{idx} {spec}; \
+        for pkg in &profile.packages {
+            // Pick the Blackwell build when present and a Blackwell GPU is here;
+            // otherwise the normal pinned version. Same for the wheel index.
+            let version = if is_blackwell {
+                pkg.version_blackwell
+                    .clone()
+                    .unwrap_or_else(|| pkg.version.clone())
+            } else {
+                pkg.version.clone()
+            };
+            let spec = format!("{}=={}", pkg.name, version);
+            let index = if is_blackwell && pkg.index_blackwell.is_some() {
+                pkg.index_blackwell.clone()
+            } else if pkg.cuda_wheel {
+                cuda_index.clone()
+            } else {
+                pkg.index_url.clone()
+            };
+            let _ = channel.send(InstallEvent::Step {
+                label: format!(
+                    "Installing {spec}{}",
+                    index
+                        .as_ref()
+                        .map(|u| format!(" (index {u})"))
+                        .unwrap_or_default()
+                ),
+            });
+            let idx_arg = index
+                .as_ref()
+                .map(|u| format!(" --index-url {}", q(u)))
+                .unwrap_or_default();
+            let install = format!(
+                "if command -v uv >/dev/null 2>&1; then uv pip install --python {py}{idx} {spec}; \
              else {py} -m pip install --disable-pip-version-check --no-input{idx} {spec}; fi",
-            py = q(&venv_py),
-            idx = idx_arg,
-            spec = q(&spec),
-        );
-        let install_res =
-            run_subprocess(channel, wsl, &wsl_invocation(&distro, &install), None).await;
-        if let Err(e) = install_res {
-            if pkg.optional {
-                // Best-effort package (e.g. flash-attn): don't abort the
-                // whole env — warn and keep going. The probe treats it as
-                // optional, so the env is still usable without it.
-                let _ = channel.send(InstallEvent::Log {
+                py = q(&venv_py),
+                idx = idx_arg,
+                spec = q(&spec),
+            );
+            let install_res =
+                run_subprocess(channel, wsl, &wsl_invocation(&distro, &install), None).await;
+            if let Err(e) = install_res {
+                if pkg.optional {
+                    // Best-effort package (e.g. flash-attn): don't abort the
+                    // whole env — warn and keep going. The probe treats it as
+                    // optional, so the env is still usable without it.
+                    let _ = channel.send(InstallEvent::Log {
                     stream: "warn".into(),
                     line: format!(
                         "Optional package {spec} didn't install ({e}) — skipping it; the environment still works without it."
                     ),
                 });
-            } else {
-                let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
-                return Err(format!("pip install {spec} failed: {e}"));
+                } else {
+                    let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
+                    return Err(format!("pip install {spec} failed: {e}"));
+                }
             }
         }
-    }
     } // end else (pinned per-package loop)
 
     // 3) Probe (must print "OK").
-    let _ = channel.send(InstallEvent::Step { label: "Running verification probe".into() });
+    let _ = channel.send(InstallEvent::Step {
+        label: "Running verification probe".into(),
+    });
     let probe = format!("{py} -c {code}", py = q(&venv_py), code = q(&profile.probe));
     let probe_out = run_subprocess_capture(wsl, &wsl_invocation(&distro, &probe))
         .await
         .map_err(|e| format!("probe spawn failed: {e}"))?;
     for line in probe_out.stdout.lines() {
-        let _ = channel.send(InstallEvent::Log { stream: "probe".into(), line: line.to_string() });
+        let _ = channel.send(InstallEvent::Log {
+            stream: "probe".into(),
+            line: line.to_string(),
+        });
     }
     for line in probe_out.stderr.lines() {
-        let _ = channel.send(InstallEvent::Log { stream: "probe-err".into(), line: line.to_string() });
+        let _ = channel.send(InstallEvent::Log {
+            stream: "probe-err".into(),
+            line: line.to_string(),
+        });
     }
     if !probe_out.success || !probe_out.stdout.contains("OK") {
         let _ = crate::wsl::run_in_distro(&distro, &format!("rm -rf {}", q(&tmp)));
         return Err(format!(
             "probe failed (exit {}). stderr: {}",
-            probe_out.code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            probe_out
+                .code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into()),
             probe_out.stderr.lines().last().unwrap_or("(empty)")
         ));
     }
@@ -881,8 +954,13 @@ async fn run_install(
     for pkg in &profile.packages {
         let spec = format!("{}=={}", pkg.name, pkg.version);
         let _ = channel.send(InstallEvent::Step {
-            label: format!("Installing {spec}{}",
-                pkg.index_url.as_ref().map(|u| format!(" (index {u})")).unwrap_or_default()),
+            label: format!(
+                "Installing {spec}{}",
+                pkg.index_url
+                    .as_ref()
+                    .map(|u| format!(" (index {u})"))
+                    .unwrap_or_default()
+            ),
         });
         let mut args: Vec<String> = vec![
             "-m".into(),
@@ -942,7 +1020,10 @@ async fn run_install(
         let _ = std::fs::remove_dir_all(&tmp_dir);
         return Err(format!(
             "probe failed (exit {}). stderr: {}",
-            probe_output.code.map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            probe_output
+                .code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into()),
             probe_output.stderr.lines().last().unwrap_or("(empty)")
         ));
     }
@@ -960,8 +1041,7 @@ async fn run_install(
         }
         let _ = std::fs::remove_dir_all(&stash);
     }
-    std::fs::rename(&tmp_dir, &final_dir)
-        .map_err(|e| format!("atomic rename failed: {e}"))?;
+    std::fs::rename(&tmp_dir, &final_dir).map_err(|e| format!("atomic rename failed: {e}"))?;
     let final_python = if cfg!(windows) {
         final_dir.join("Scripts").join("python.exe")
     } else {
@@ -1066,19 +1146,26 @@ async fn run_subprocess(
             acc
         }
     });
-    let status = child
-        .wait()
-        .await
-        .map_err(|e| format!("wait: {e}"))?;
+    let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
     let _ = out_task.await;
     if let Ok(tail) = err_task.await {
         last_err_lines = tail;
     }
     if !status.success() {
-        let tail = last_err_lines.iter().rev().take(8).rev().cloned().collect::<Vec<_>>().join("\n");
+        let tail = last_err_lines
+            .iter()
+            .rev()
+            .take(8)
+            .rev()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
         return Err(format!(
             "exit {} · stderr tail:\n{tail}",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into())
         ));
     }
     Ok(())
@@ -1243,9 +1330,16 @@ fn max_sm_arch(arches: &[String]) -> Option<u32> {
 
 /// Pure mapping: raw probes → named diagnoses. Unit-tested below.
 fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorReport {
-    const FIX_REPAIR: &str = "Click Repair — it reinstalls the environment with builds matched to your hardware.";
+    const FIX_REPAIR: &str =
+        "Click Repair — it reinstalls the environment with builds matched to your hardware.";
     let mut checks: Vec<DoctorCheck> = Vec::new();
-    let push = |checks: &mut Vec<DoctorCheck>, id: &str, label: &str, ok: bool, warn: bool, detail: String, fix: Option<&str>| {
+    let push = |checks: &mut Vec<DoctorCheck>,
+                id: &str,
+                label: &str,
+                ok: bool,
+                warn: bool,
+                detail: String,
+                fix: Option<&str>| {
         checks.push(DoctorCheck {
             id: id.into(),
             label: label.into(),
@@ -1275,7 +1369,11 @@ fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorRepor
             "uv package manager",
             true,
             !p.uv_ok,
-            if p.uv_ok { "present".into() } else { "missing — Repair installs it automatically".into() },
+            if p.uv_ok {
+                "present".into()
+            } else {
+                "missing — Repair installs it automatically".into()
+            },
             None,
         );
 
@@ -1287,7 +1385,9 @@ fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorRepor
             "Environment venv",
             venv_ok,
             false,
-            p.venv_python.clone().unwrap_or_else(|| "not installed".into()),
+            p.venv_python
+                .clone()
+                .unwrap_or_else(|| "not installed".into()),
             (!venv_ok).then_some("Click Install to create the environment."),
         );
 
@@ -1319,7 +1419,10 @@ fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorRepor
                 Some(py) => {
                     // 5) torch — the named failure modes.
                     let t = py.get("torch");
-                    let t_ok = t.and_then(|t| t.get("ok")).and_then(|v| v.as_bool()).unwrap_or(false);
+                    let t_ok = t
+                        .and_then(|t| t.get("ok"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
                     if !t_ok {
                         let err = t
                             .and_then(|t| t.get("err"))
@@ -1335,18 +1438,33 @@ fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorRepor
                         } else {
                             format!("torch failed to import ({err})")
                         };
-                        push(&mut checks, "torch", "PyTorch", false, false, named, Some(FIX_REPAIR));
+                        push(
+                            &mut checks,
+                            "torch",
+                            "PyTorch",
+                            false,
+                            false,
+                            named,
+                            Some(FIX_REPAIR),
+                        );
                     } else {
                         // The script stores torch_info's dict under "v".
                         let null = serde_json::Value::Null;
                         let t = t.and_then(|t| t.get("v")).unwrap_or(&null);
                         let version = t.get("version").and_then(|v| v.as_str()).unwrap_or("?");
                         let cuda = t.get("cuda").and_then(|v| v.as_str());
-                        let available = t.get("available").and_then(|v| v.as_bool()).unwrap_or(false);
+                        let available = t
+                            .get("available")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
                         let arches: Vec<String> = t
                             .get("arches")
                             .and_then(|v| v.as_array())
-                            .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
                             .unwrap_or_default();
                         let max_sm = max_sm_arch(&arches);
                         if cuda.is_none() {
@@ -1358,13 +1476,19 @@ fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorRepor
                                 "PyTorch",
                                 !gpu,
                                 !gpu,
-                                format!("CPU-only torch {version} build installed — no CUDA support"),
+                                format!(
+                                    "CPU-only torch {version} build installed — no CUDA support"
+                                ),
                                 gpu.then_some(FIX_REPAIR),
                             );
                         } else if let (Some(cc), Some(max)) = (p.gpu_cc, max_sm) {
                             if cc > max {
                                 // THE Blackwell-class failure: build predates the GPU.
-                                let gen = if cc >= 120 { " (Blackwell / RTX 50xx)" } else { "" };
+                                let gen = if cc >= 120 {
+                                    " (Blackwell / RTX 50xx)"
+                                } else {
+                                    ""
+                                };
                                 push(
                                     &mut checks,
                                     "torch",
@@ -1390,14 +1514,18 @@ fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorRepor
                                     Some("Update the NVIDIA Windows driver (it provides WSL's CUDA), then re-run the check."),
                                 );
                             } else {
-                                let device = t.get("device").and_then(|v| v.as_str()).unwrap_or("GPU");
+                                let device =
+                                    t.get("device").and_then(|v| v.as_str()).unwrap_or("GPU");
                                 push(
                                     &mut checks,
                                     "torch",
                                     "PyTorch",
                                     true,
                                     false,
-                                    format!("torch {version} · cuda {} · {device}", cuda.unwrap_or("?")),
+                                    format!(
+                                        "torch {version} · cuda {} · {device}",
+                                        cuda.unwrap_or("?")
+                                    ),
                                     None,
                                 );
                             }
@@ -1427,13 +1555,24 @@ fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorRepor
                         for pkg in profile.packages.iter().filter(|x| x.name != "torch") {
                             let m = import_name(&pkg.name);
                             let e = py.get(&m);
-                            let ok = e.and_then(|e| e.get("ok")).and_then(|v| v.as_bool()).unwrap_or(false);
+                            let ok = e
+                                .and_then(|e| e.get("ok"))
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
                             if ok {
                                 let v = e
                                     .and_then(|e| e.get("v"))
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("present");
-                                push(&mut checks, &pkg.name, &pkg.name, true, false, v.to_string(), None);
+                                push(
+                                    &mut checks,
+                                    &pkg.name,
+                                    &pkg.name,
+                                    true,
+                                    false,
+                                    v.to_string(),
+                                    None,
+                                );
                             } else {
                                 let err = e
                                     .and_then(|e| e.get("err"))
@@ -1462,7 +1601,11 @@ fn build_doctor_report(profile: &EnvProfile, p: &DoctorProbes) -> EnvDoctorRepor
 
             // 7) manifest drift (stale = works, but pins changed since install).
             let current = profile_hash(profile);
-            let drift = p.installed_hash.as_deref().map(|h| h != current).unwrap_or(true);
+            let drift = p
+                .installed_hash
+                .as_deref()
+                .map(|h| h != current)
+                .unwrap_or(true);
             push(
                 &mut checks,
                 "manifest",
@@ -1684,7 +1827,11 @@ mod tests {
         assert!(!r.healthy);
         assert!(r.repair_recommended);
         assert!(r.diagnosis.contains("sm_120"), "diagnosis: {}", r.diagnosis);
-        assert!(r.diagnosis.contains("Blackwell"), "diagnosis: {}", r.diagnosis);
+        assert!(
+            r.diagnosis.contains("Blackwell"),
+            "diagnosis: {}",
+            r.diagnosis
+        );
     }
 
     #[test]
@@ -1697,7 +1844,11 @@ mod tests {
         let r = build_doctor_report(&profile(), &p);
         assert!(!r.healthy);
         assert!(r.repair_recommended);
-        assert!(r.diagnosis.contains("CPU-only"), "diagnosis: {}", r.diagnosis);
+        assert!(
+            r.diagnosis.contains("CPU-only"),
+            "diagnosis: {}",
+            r.diagnosis
+        );
     }
 
     #[test]
@@ -1745,7 +1896,11 @@ mod tests {
         };
         let r = build_doctor_report(&profile(), &p);
         assert!(!r.healthy);
-        assert!(r.diagnosis.contains("not installed"), "diagnosis: {}", r.diagnosis);
+        assert!(
+            r.diagnosis.contains("not installed"),
+            "diagnosis: {}",
+            r.diagnosis
+        );
     }
 
     // Live probe (needs a real WSL distro + installed env):
@@ -1787,8 +1942,14 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let r = rt.block_on(doctor_impl(prof)).expect("doctor runs");
         eprintln!("== live doctor report ==\n{r:#?}");
-        assert!(r.checks.iter().any(|c| c.id == "sandbox" && c.ok), "sandbox check failed");
-        assert!(r.checks.iter().any(|c| c.id == "torch"), "torch check missing — venv probe didn't run");
+        assert!(
+            r.checks.iter().any(|c| c.id == "sandbox" && c.ok),
+            "sandbox check failed"
+        );
+        assert!(
+            r.checks.iter().any(|c| c.id == "torch"),
+            "torch check missing — venv probe didn't run"
+        );
     }
 
     /// DESTRUCTIVE live probe of the P0-6 done-when: deliberately break the

@@ -81,15 +81,25 @@ fn parse_reply(title: &str) -> Option<(u64, u64, u64, &str)> {
     let (id, rest) = rest.split_once('\u{2063}')?;
     let (k, rest) = rest.split_once('\u{2063}')?;
     let (total, payload) = rest.split_once('\u{2063}')?;
-    Some((id.parse().ok()?, k.parse().ok()?, total.parse().ok()?, payload))
+    Some((
+        id.parse().ok()?,
+        k.parse().ok()?,
+        total.parse().ok()?,
+        payload,
+    ))
 }
 
 /// Called by the title-changed handler for every title the page sets.
 fn capture_reply(title: &str) {
-    let Some((id, k, total, payload)) = parse_reply(title) else { return };
+    let Some((id, k, total, payload)) = parse_reply(title) else {
+        return;
+    };
     let mut guard = REPLIES.lock().unwrap_or_else(|p| p.into_inner());
     let map = guard.get_or_insert_with(HashMap::new);
-    let acc = map.entry(id).or_insert_with(|| ReplyAcc { total, chunks: Default::default() });
+    let acc = map.entry(id).or_insert_with(|| ReplyAcc {
+        total,
+        chunks: Default::default(),
+    });
     acc.total = total; // trust the latest report for this id
     acc.chunks.insert(k, payload.to_string());
     if map.len() > 64 {
@@ -410,7 +420,9 @@ fn is_local_host(url: &str) -> bool {
         .rsplit('@')
         .next()
         .unwrap_or("");
-    let bare = host.strip_prefix('[').map(|h| h.split(']').next().unwrap_or(h));
+    let bare = host
+        .strip_prefix('[')
+        .map(|h| h.split(']').next().unwrap_or(h));
     if let Some(v6) = bare {
         return v6 == "::1";
     }
@@ -495,11 +507,15 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
     *CURRENT_DEVICE.lock().unwrap_or_else(|p| p.into_inner()) = dev.name;
 
     let Some(win) = get_window(&app) else {
-        return Ok(format!("device set to {} (applies when the browser opens)", dev.name));
+        return Ok(format!(
+            "device set to {} (applies when the browser opens)",
+            dev.name
+        ));
     };
     // Remember where we were, tear down, rebuild with the new UA + viewport.
     let back_to = win.url().map(|u| u.to_string()).unwrap_or_default();
-    win.destroy().map_err(|e| format!("could not rebuild browser window: {e}"))?;
+    win.destroy()
+        .map_err(|e| format!("could not rebuild browser window: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while get_window(&app).is_some() {
         if Instant::now() > deadline {
@@ -519,8 +535,16 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
         dev.name,
         dev.width as u32,
         dev.height as u32,
-        if dev.ua.is_some() { ", mobile user-agent" } else { "" },
-        if url == "about:blank" { "blank page".to_string() } else { url }
+        if dev.ua.is_some() {
+            ", mobile user-agent"
+        } else {
+            ""
+        },
+        if url == "about:blank" {
+            "blank page".to_string()
+        } else {
+            url
+        }
     ))
 }
 
@@ -539,7 +563,12 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
 
     match action.as_str() {
         "navigate" | "open" => {
-            let url_s = params.get("url").and_then(Value::as_str).unwrap_or("").trim().to_string();
+            let url_s = params
+                .get("url")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
             if url_s.is_empty() {
                 return Err("navigate requires a url".to_string());
             }
@@ -553,7 +582,8 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
                 format!("https://{url_s}")
             };
             let url = full.parse().map_err(|e| format!("bad url {full:?}: {e}"))?;
-            win.navigate(url).map_err(|e| format!("navigate failed: {e}"))?;
+            win.navigate(url)
+                .map_err(|e| format!("navigate failed: {e}"))?;
             // Give the new document a moment to begin, then await its load via
             // the (re-injected) bridge. Evaled every poll tick until it reports.
             std::thread::sleep(Duration::from_millis(200));
@@ -590,8 +620,11 @@ fn eval_until_reply(
     params: &Value,
     timeout: Duration,
 ) -> Result<String, String> {
-    let params_js = serde_json::to_string(&params.to_string()).unwrap_or_else(|_| "\"{}\"".to_string());
-    let call = format!("try{{window.__owllmRun&&window.__owllmRun({req},{action:?},{params_js})}}catch(e){{}}");
+    let params_js =
+        serde_json::to_string(&params.to_string()).unwrap_or_else(|_| "\"{}\"".to_string());
+    let call = format!(
+        "try{{window.__owllmRun&&window.__owllmRun({req},{action:?},{params_js})}}catch(e){{}}"
+    );
     let start = Instant::now();
     let mut last_invoke = Instant::now() - Duration::from_secs(1);
     let mut requested: Option<u64> = None;
@@ -694,7 +727,13 @@ mod tests {
         ] {
             assert!(is_local_host(u), "{u} should default to http");
         }
-        for u in ["github.com", "example.com/login", "127x.com", "myapp.io:443", "1270.0.0.1"] {
+        for u in [
+            "github.com",
+            "example.com/login",
+            "127x.com",
+            "myapp.io:443",
+            "1270.0.0.1",
+        ] {
             assert!(!is_local_host(u), "{u} should default to https");
         }
     }
@@ -706,7 +745,10 @@ mod tests {
         // A single-chunk reply (total=1) — exactly what report() writes for a
         // short payload: SENTINEL id Z 0 Z 1 Z b64.
         let title = format!("{SENTINEL}42\u{2063}0\u{2063}1\u{2063}{payload}");
-        assert_eq!(parse_reply(&title), Some((42u64, 0u64, 1u64, payload.as_str())));
+        assert_eq!(
+            parse_reply(&title),
+            Some((42u64, 0u64, 1u64, payload.as_str()))
+        );
         // Ordinary page titles + malformed sentinels are ignored.
         assert_eq!(parse_reply("GitHub — where software is built"), None);
         assert_eq!(parse_reply(""), None);
@@ -765,8 +807,16 @@ pub fn browser_status(app: tauri::AppHandle) -> Result<BrowserStatus, String> {
     match get_window(&app) {
         Some(win) => {
             let url = win.url().map(|u| u.to_string()).unwrap_or_default();
-            Ok(BrowserStatus { running: true, url, device })
+            Ok(BrowserStatus {
+                running: true,
+                url,
+                device,
+            })
         }
-        None => Ok(BrowserStatus { running: false, url: String::new(), device }),
+        None => Ok(BrowserStatus {
+            running: false,
+            url: String::new(),
+            device,
+        }),
     }
 }

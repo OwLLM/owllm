@@ -173,7 +173,10 @@ pub fn github_status() -> GithubStatus {
 /// `gh` credentials into the sandbox (and the host). Idempotent — reconnecting
 /// overwrites the stored token and re-writes credentials.
 #[tauri::command]
-pub async fn github_connect(token: String, distro: Option<String>) -> Result<GithubConnect, String> {
+pub async fn github_connect(
+    token: String,
+    distro: Option<String>,
+) -> Result<GithubConnect, String> {
     let token = token.trim().to_string();
     if token.is_empty() {
         return Err("paste a GitHub token first".to_string());
@@ -184,7 +187,10 @@ pub async fn github_connect(token: String, distro: Option<String>) -> Result<Git
 /// Shared connect path: validate the token → store it → wire git/gh creds.
 /// Used by both the token-paste flow (github_connect) and the OAuth Device
 /// Flow (github_device_poll on success).
-async fn connect_with_token(token: String, distro: Option<String>) -> Result<GithubConnect, String> {
+async fn connect_with_token(
+    token: String,
+    distro: Option<String>,
+) -> Result<GithubConnect, String> {
     let tok = token.clone();
     let (login, id) = tokio::task::spawn_blocking(move || curl_github_user(&tok))
         .await
@@ -252,7 +258,15 @@ pub struct DevicePollResult {
 /// POST form fields to a GitHub OAuth endpoint, asking for a JSON response.
 fn curl_post_form(url: &str, fields: &[(&str, &str)]) -> Result<serde_json::Value, String> {
     let mut cmd = std::process::Command::new("curl");
-    cmd.args(["-s", "-X", "POST", "-H", "Accept: application/json", "-H", "User-Agent: owllm-desktop"]);
+    cmd.args([
+        "-s",
+        "-X",
+        "POST",
+        "-H",
+        "Accept: application/json",
+        "-H",
+        "User-Agent: owllm-desktop",
+    ]);
     for (k, v) in fields {
         cmd.arg("-d").arg(format!("{k}={v}"));
     }
@@ -263,10 +277,16 @@ fn curl_post_form(url: &str, fields: &[(&str, &str)]) -> Result<serde_json::Valu
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output().map_err(|e| format!("couldn't run curl to reach GitHub: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("couldn't run curl to reach GitHub: {e}"))?;
     let body = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str(body.trim())
-        .map_err(|_| format!("GitHub returned a non-JSON response (offline?): {}", body.chars().take(160).collect::<String>()))
+    serde_json::from_str(body.trim()).map_err(|_| {
+        format!(
+            "GitHub returned a non-JSON response (offline?): {}",
+            body.chars().take(160).collect::<String>()
+        )
+    })
 }
 
 /// Step 1: ask GitHub for a device + user code.
@@ -282,20 +302,30 @@ pub async fn github_device_start(client_id: String) -> Result<DeviceCodeStart, S
             &[("client_id", &cid), ("scope", "repo")],
         )?;
         if let Some(err) = v.get("error").and_then(|x| x.as_str()) {
-            let desc = v.get("error_description").and_then(|x| x.as_str()).unwrap_or(err);
+            let desc = v
+                .get("error_description")
+                .and_then(|x| x.as_str())
+                .unwrap_or(err);
             return Err(format!("GitHub rejected the device request: {desc}"));
         }
         let s = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
         let user_code = s("user_code");
         let device_code = s("device_code");
         if user_code.is_empty() || device_code.is_empty() {
-            return Err("GitHub didn't return a device code (is Device Flow enabled on the OAuth app?)".to_string());
+            return Err(
+                "GitHub didn't return a device code (is Device Flow enabled on the OAuth app?)"
+                    .to_string(),
+            );
         }
         Ok(DeviceCodeStart {
             user_code,
             verification_uri: {
                 let u = s("verification_uri");
-                if u.is_empty() { "https://github.com/login/device".to_string() } else { u }
+                if u.is_empty() {
+                    "https://github.com/login/device".to_string()
+                } else {
+                    u
+                }
             },
             device_code,
             interval: v.get("interval").and_then(|x| x.as_u64()).unwrap_or(5),
@@ -310,7 +340,10 @@ pub async fn github_device_start(client_id: String) -> Result<DeviceCodeStart, S
 /// status is no longer `pending`/`slowDown`. On `authorized` the token is
 /// stored + git creds wired (same as a paste-connect), and `login` is set.
 #[tauri::command]
-pub async fn github_device_poll(client_id: String, device_code: String) -> Result<DevicePollResult, String> {
+pub async fn github_device_poll(
+    client_id: String,
+    device_code: String,
+) -> Result<DevicePollResult, String> {
     let cid = client_id.trim().to_string();
     let dc = device_code.trim().to_string();
     let v = tokio::task::spawn_blocking(move || {
@@ -329,7 +362,11 @@ pub async fn github_device_poll(client_id: String, device_code: String) -> Resul
     if let Some(token) = v.get("access_token").and_then(|x| x.as_str()) {
         // Authorized — run the same connect path as a pasted token.
         let connected = connect_with_token(token.to_string(), None).await?;
-        return Ok(DevicePollResult { status: "authorized".into(), login: Some(connected.login), detail: None });
+        return Ok(DevicePollResult {
+            status: "authorized".into(),
+            login: Some(connected.login),
+            detail: None,
+        });
     }
     let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("error");
     let status = match err {
@@ -339,8 +376,15 @@ pub async fn github_device_poll(client_id: String, device_code: String) -> Resul
         "expired_token" => "expired",
         _ => "error",
     };
-    let detail = v.get("error_description").and_then(|x| x.as_str()).map(|s| s.to_string());
-    Ok(DevicePollResult { status: status.to_string(), login: None, detail })
+    let detail = v
+        .get("error_description")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    Ok(DevicePollResult {
+        status: status.to_string(),
+        login: None,
+        detail,
+    })
 }
 
 /// Disconnect: forget the token and scrub credentials from the sandbox and

@@ -28,7 +28,7 @@ pub struct ServerStatus {
 
 #[derive(Clone, Serialize)]
 pub struct ServerLogEvent {
-    pub stream: String,   // "stdout" | "stderr"
+    pub stream: String, // "stdout" | "stderr"
     pub line: String,
 }
 
@@ -58,7 +58,12 @@ pub struct InferenceExpose {
 }
 
 impl Default for InferenceExpose {
-    fn default() -> Self { Self { enabled: false, api_key: String::new() } }
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: String::new(),
+        }
+    }
 }
 
 fn inference_expose_path() -> Option<std::path::PathBuf> {
@@ -195,7 +200,10 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
     // clear the adoption so the UI stops claiming a model is running.
     if inner.child.is_none() && inner.adopted {
         let port = inner.port;
-        let live = match port { Some(p) => server_present(p).await, None => false };
+        let live = match port {
+            Some(p) => server_present(p).await,
+            None => false,
+        };
         if live {
             return Ok(ServerStatus {
                 running: true,
@@ -207,8 +215,15 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
         inner.adopted = false;
         inner.model_id = None;
         inner.port = None;
-        inner.message = "The shared model server stopped (the OwLLM instance that owned it closed).".to_string();
-        return Ok(ServerStatus { running: false, model_id: None, port: None, message: inner.message.clone() });
+        inner.message =
+            "The shared model server stopped (the OwLLM instance that owned it closed)."
+                .to_string();
+        return Ok(ServerStatus {
+            running: false,
+            model_id: None,
+            port: None,
+            message: inner.message.clone(),
+        });
     }
     // Reap dead child so the "running" bit doesn't lie after a crash.
     let (alive, exit_code) = match inner.child.as_mut() {
@@ -235,7 +250,8 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
             (Some(0), _) => "Stopped cleanly.".to_string(),
             (code, Some(cause)) => format!(
                 "Crashed{}. {cause} See log for the full trace.",
-                code.map(|c| format!(" (exit code {c})")).unwrap_or_default()
+                code.map(|c| format!(" (exit code {c})"))
+                    .unwrap_or_default()
             ),
             // Decode Windows NTSTATUS-style codes that surface as
             // signed i32 from Tokio's exit_status — these are by far
@@ -273,8 +289,13 @@ fn find_sibling_mmproj(base_model: &str) -> Option<std::path::PathBuf> {
     let dir = std::path::Path::new(base_model).parent()?;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let p = entry.path();
-        let is_gguf = p.extension().map(|x| x.eq_ignore_ascii_case("gguf")).unwrap_or(false);
-        if !is_gguf { continue; }
+        let is_gguf = p
+            .extension()
+            .map(|x| x.eq_ignore_ascii_case("gguf"))
+            .unwrap_or(false);
+        if !is_gguf {
+            continue;
+        }
         if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
             if stem.to_ascii_lowercase().starts_with("mmproj") {
                 return Some(p);
@@ -335,13 +356,15 @@ pub async fn server_start(
             mgr.inner()
                 .install(&app, "local-inference", &snap)
                 .await
-                .map_err(|e| {
-                    format!("no inference engine and auto-install failed: {e}.")
-                })?;
-            let _ = app.emit("server-log", ServerLogEvent {
-                stream: "stdout".into(),
-                line: "[supervisor] Local Inference engine installed — starting the model…".into(),
-            });
+                .map_err(|e| format!("no inference engine and auto-install failed: {e}."))?;
+            let _ = app.emit(
+                "server-log",
+                ServerLogEvent {
+                    stream: "stdout".into(),
+                    line: "[supervisor] Local Inference engine installed — starting the model…"
+                        .into(),
+                },
+            );
             paths::llama_server_exe().ok_or_else(|| {
                 let name = paths::llama_server_filename();
                 format!(
@@ -379,11 +402,14 @@ pub async fn server_start(
             stream: "stdout".into(),
             line: format!("[supervisor] adopted the model server already live on :{port} — not spawning a second one"),
         });
-        let _ = app.emit("llama-ready", serde_json::json!({
-            "model_id": model_id,
-            "port": port,
-            "elapsed_ms": 0,
-        }));
+        let _ = app.emit(
+            "llama-ready",
+            serde_json::json!({
+                "model_id": model_id,
+                "port": port,
+                "elapsed_ms": 0,
+            }),
+        );
         return Ok(());
     }
     inner.adopted = false;
@@ -394,11 +420,16 @@ pub async fn server_start(
     // working when exposed.
     let expose = load_inference_expose();
     let exposed = expose.enabled && !expose.api_key.trim().is_empty();
-    let expose_key = if exposed { expose.api_key.trim().to_string() } else { String::new() };
+    let expose_key = if exposed {
+        expose.api_key.trim().to_string()
+    } else {
+        String::new()
+    };
 
     let mut cmd = Command::new(&exe);
     cmd.arg("--model").arg(&base_model);
-    cmd.arg("--host").arg(if exposed { "0.0.0.0" } else { "127.0.0.1" });
+    cmd.arg("--host")
+        .arg(if exposed { "0.0.0.0" } else { "127.0.0.1" });
     cmd.arg("--port").arg(port.to_string());
     if exposed {
         cmd.arg("--api-key").arg(&expose_key);
@@ -434,9 +465,7 @@ pub async fn server_start(
     // CAP the requested/stored value to it: a stale 32768 default must not be allowed
     // to silently spill to CPU. A SMALLER explicit value is still honoured.
     let budget = crate::hardware::gpu_memory_budget().await;
-    let (vram, unified) = budget
-        .map(|b| (b.gb, b.unified))
-        .unwrap_or((8.0, false));
+    let (vram, unified) = budget.map(|b| (b.gb, b.unified)).unwrap_or((8.0, false));
     let model_gb = std::fs::metadata(&base_model)
         .map(|m| m.len() as f64 / 1_000_000_000.0)
         .unwrap_or(0.0);
@@ -447,12 +476,19 @@ pub async fn server_start(
     // system (the inverse of the discrete-VRAM spill bug this formula fixed).
     let reserve = if unified { (vram * 0.25).max(4.0) } else { 2.0 };
     let headroom = (vram - model_gb - reserve).max(0.0);
-    let max_fit: u32 = if headroom >= 8.0 { 32768 }
-        else if headroom >= 5.0 { 16384 }
-        else if headroom >= 3.0 { 12288 }
-        else if headroom >= 1.8 { 8192 }
-        else if headroom >= 1.0 { 4096 }
-        else { 2048 };
+    let max_fit: u32 = if headroom >= 8.0 {
+        32768
+    } else if headroom >= 5.0 {
+        16384
+    } else if headroom >= 3.0 {
+        12288
+    } else if headroom >= 1.8 {
+        8192
+    } else if headroom >= 1.0 {
+        4096
+    } else {
+        2048
+    };
     let ctx_size = match ctx {
         // Honour an explicit choice — but cap it to what physically fits so it can't
         // spill the KV cache onto the CPU. (model_gb==0 → couldn't stat; trust the ask.)
@@ -521,10 +557,16 @@ pub async fn server_start(
     // when present so local vision input just works.
     if let Some(mmproj) = find_sibling_mmproj(&base_model) {
         cmd.arg("--mmproj").arg(&mmproj);
-        let _ = app.emit("server-log", ServerLogEvent {
-            stream: "stdout".into(),
-            line: format!("[supervisor] vision projector found — loading --mmproj {}", mmproj.display()),
-        });
+        let _ = app.emit(
+            "server-log",
+            ServerLogEvent {
+                stream: "stdout".into(),
+                line: format!(
+                    "[supervisor] vision projector found — loading --mmproj {}",
+                    mmproj.display()
+                ),
+            },
+        );
     }
     // Pin inference to the GPU(s) the user picked in gpu_config.json.
     // Without this, llama.cpp's default split-mode=layer spreads the model
@@ -645,7 +687,9 @@ pub async fn server_start(
                     return;
                 }
                 let mut req = client.get(&url);
-                if !health_key.is_empty() { req = req.bearer_auth(&health_key); }
+                if !health_key.is_empty() {
+                    req = req.bearer_auth(&health_key);
+                }
                 match req.send().await {
                     Ok(resp) if resp.status().as_u16() == 200 => {
                         let elapsed_ms = started.elapsed().as_millis() as u64;
@@ -653,10 +697,7 @@ pub async fn server_start(
                             "server-log",
                             ServerLogEvent {
                                 stream: "stdout".into(),
-                                line: format!(
-                                    "[supervisor] model ready in {} ms",
-                                    elapsed_ms
-                                ),
+                                line: format!("[supervisor] model ready in {} ms", elapsed_ms),
                             },
                         );
                         let _ = app.emit(
@@ -692,11 +733,16 @@ pub async fn server_stop(
         inner.adopted = false;
         inner.model_id = None;
         inner.port = None;
-        inner.message = "Released the shared server (it stays up for other OwLLM instances).".to_string();
+        inner.message =
+            "Released the shared server (it stays up for other OwLLM instances).".to_string();
         drop(inner);
         let _ = app.emit(
             "server-log",
-            ServerLogEvent { stream: "stdout".into(), line: "[supervisor] released the shared model server (not owned by this instance)".into() },
+            ServerLogEvent {
+                stream: "stdout".into(),
+                line: "[supervisor] released the shared model server (not owned by this instance)"
+                    .into(),
+            },
         );
         return Ok(());
     }
@@ -792,14 +838,22 @@ fn list_vulkan_devices(exe: &std::path::Path) -> Vec<(u32, String)> {
         use std::os::windows::process::CommandExt;
         c.creation_flags(0x08000000);
     }
-    let Ok(out) = c.output() else { return Vec::new(); };
+    let Ok(out) = c.output() else {
+        return Vec::new();
+    };
     let text = String::from_utf8_lossy(&out.stdout);
     let mut devs = Vec::new();
     for line in text.lines() {
         let l = line.trim();
-        let Some(rest) = l.strip_prefix("Vulkan") else { continue };
-        let Some(colon) = rest.find(':') else { continue };
-        let Ok(idx) = rest[..colon].parse::<u32>() else { continue };
+        let Some(rest) = l.strip_prefix("Vulkan") else {
+            continue;
+        };
+        let Some(colon) = rest.find(':') else {
+            continue;
+        };
+        let Ok(idx) = rest[..colon].parse::<u32>() else {
+            continue;
+        };
         let after = rest[colon + 1..].trim();
         let name = after.split('(').next().unwrap_or(after).trim().to_string();
         if !name.is_empty() {
@@ -870,7 +924,8 @@ mod tests {
         std::fs::write(&bad, b"Junk_this_is_not_a_gguf_file_____").unwrap();
         let mut cmd = std::process::Command::new(&exe);
         cmd.arg("-m").arg(&bad).arg("--port").arg("18181");
-        cmd.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -971,17 +1026,27 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 fn load_windows() -> std::collections::HashMap<String, u64> {
-    let Some(p) = windows_registry_path() else { return Default::default(); };
-    if !p.is_file() { return Default::default(); }
+    let Some(p) = windows_registry_path() else {
+        return Default::default();
+    };
+    if !p.is_file() {
+        return Default::default();
+    }
     std::fs::read_to_string(&p)
         .ok()
         .and_then(|r| serde_json::from_str(&r).ok())
         .unwrap_or_default()
 }
 fn save_windows(m: &std::collections::HashMap<String, u64>) {
-    let Some(p) = windows_registry_path() else { return; };
-    if let Some(parent) = p.parent() { let _ = std::fs::create_dir_all(parent); }
-    if let Ok(json) = serde_json::to_string_pretty(m) { let _ = std::fs::write(&p, json); }
+    let Some(p) = windows_registry_path() else {
+        return;
+    };
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(m) {
+        let _ = std::fs::write(&p, json);
+    }
 }
 fn prune_windows(m: &mut std::collections::HashMap<String, u64>) {
     let now = now_secs();
@@ -1017,7 +1082,11 @@ pub fn other_live_windows() -> usize {
 /// log which path triggered the cleanup.
 pub fn kill_all_llama_servers(reason: &str) {
     use sysinfo::System;
-    let target_lc = if cfg!(windows) { "llama-server.exe" } else { "llama-server" };
+    let target_lc = if cfg!(windows) {
+        "llama-server.exe"
+    } else {
+        "llama-server"
+    };
     let mut sys = System::new();
     sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
     let mut killed = 0usize;

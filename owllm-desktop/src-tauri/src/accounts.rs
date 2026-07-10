@@ -52,13 +52,19 @@ fn win_quote_arg(s: &str) -> String {
             i += 1;
         }
         if i == chars.len() {
-            for _ in 0..(bs * 2) { out.push('\\'); }
+            for _ in 0..(bs * 2) {
+                out.push('\\');
+            }
         } else if chars[i] == '"' {
-            for _ in 0..(bs * 2 + 1) { out.push('\\'); }
+            for _ in 0..(bs * 2 + 1) {
+                out.push('\\');
+            }
             out.push('"');
             i += 1;
         } else {
-            for _ in 0..bs { out.push('\\'); }
+            for _ in 0..bs {
+                out.push('\\');
+            }
             out.push(chars[i]);
             i += 1;
         }
@@ -108,7 +114,10 @@ fn unregister_cli_child(pid: u32) {
 
 /// Wait for a registered CLI child and drop it from the kill registry no
 /// matter how the wait ends. Used by every one-shot `*_cli_complete` path.
-fn wait_cli_child(mut child: std::process::Child, pid: u32) -> std::io::Result<std::process::Output> {
+fn wait_cli_child(
+    mut child: std::process::Child,
+    pid: u32,
+) -> std::io::Result<std::process::Output> {
     let started = Instant::now();
     loop {
         if child.try_wait()?.is_some() {
@@ -192,8 +201,12 @@ fn secrets_path() -> Option<PathBuf> {
 /// Read the secrets file. Returns an empty map when the file is
 /// missing or unreadable so callers can treat "no keys" identically.
 fn load_secrets() -> BTreeMap<String, String> {
-    let Some(path) = secrets_path() else { return BTreeMap::new() };
-    let Ok(raw) = std::fs::read_to_string(&path) else { return BTreeMap::new() };
+    let Some(path) = secrets_path() else {
+        return BTreeMap::new();
+    };
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return BTreeMap::new();
+    };
     serde_json::from_str(&raw).unwrap_or_default()
 }
 
@@ -283,14 +296,14 @@ fn accounts_status_blocking() -> AccountsStatus {
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false),
         moonshot_api_key: nonempty(&map, "MOONSHOT_API_KEY"),
-        deepseek_api_key:  nonempty(&map, "DEEPSEEK_API_KEY"),
-        xai_api_key:       nonempty(&map, "XAI_API_KEY"),
-        groq_api_key:      nonempty(&map, "GROQ_API_KEY"),
+        deepseek_api_key: nonempty(&map, "DEEPSEEK_API_KEY"),
+        xai_api_key: nonempty(&map, "XAI_API_KEY"),
+        groq_api_key: nonempty(&map, "GROQ_API_KEY"),
         perplexity_api_key: nonempty(&map, "PERPLEXITY_API_KEY"),
-        mistral_api_key:   nonempty(&map, "MISTRAL_API_KEY"),
-        together_api_key:  nonempty(&map, "TOGETHER_API_KEY"),
-        gemini_api_key:    nonempty(&map, "GEMINI_API_KEY") || nonempty(&map, "GOOGLE_API_KEY"),
-        gemini_cli:        gemini_cli_logged_in(),
+        mistral_api_key: nonempty(&map, "MISTRAL_API_KEY"),
+        together_api_key: nonempty(&map, "TOGETHER_API_KEY"),
+        gemini_api_key: nonempty(&map, "GEMINI_API_KEY") || nonempty(&map, "GOOGLE_API_KEY"),
+        gemini_cli: gemini_cli_logged_in(),
         hf_token: map
             .get("HF_TOKEN")
             .map(|s| !s.trim().is_empty())
@@ -387,7 +400,12 @@ fn now_ms() -> i64 {
 /// every provider. Also prunes rows older than 8 days (the widest
 /// window shown is 7 days).
 #[tauri::command]
-pub async fn usage_record(provider: String, model: String, chars_in: i64, chars_out: i64) -> Result<(), String> {
+pub async fn usage_record(
+    provider: String,
+    model: String,
+    chars_in: i64,
+    chars_out: i64,
+) -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let Some(conn) = usage_db() else { return };
         let ts = now_ms();
@@ -407,7 +425,9 @@ pub async fn usage_record(provider: String, model: String, chars_in: i64, chars_
 /// Session (5h) + Weekly (7d) aggregates of the app's recorded traffic
 /// for `provider`. Empty when nothing was recorded yet.
 fn usage_tally_stats(provider: &str) -> Vec<UsageStat> {
-    let Some(conn) = usage_db() else { return Vec::new() };
+    let Some(conn) = usage_db() else {
+        return Vec::new();
+    };
     let now = now_ms();
     let p = provider.to_lowercase();
     let mut out = Vec::new();
@@ -565,7 +585,9 @@ async fn fetch_anthropic_usage(provider: &str, stats: &[UsageStat]) -> AccountUs
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
         return unavailable("no home dir");
     };
-    let creds_path = PathBuf::from(home).join(".claude").join(".credentials.json");
+    let creds_path = PathBuf::from(home)
+        .join(".claude")
+        .join(".credentials.json");
     let Ok(raw) = std::fs::read_to_string(&creds_path) else {
         return unavailable("Claude CLI is not logged in (no credentials file)");
     };
@@ -608,7 +630,9 @@ async fn fetch_anthropic_usage(provider: &str, stats: &[UsageStat]) -> AccountUs
     let mut windows = Vec::new();
     if let Some(map) = body.as_object() {
         for (key, val) in map {
-            let Some(util) = val.get("utilization").and_then(|u| u.as_f64()) else { continue };
+            let Some(util) = val.get("utilization").and_then(|u| u.as_f64()) else {
+                continue;
+            };
             windows.push(UsageWindow {
                 label: usage_window_label(key),
                 used_pct: util,
@@ -659,7 +683,11 @@ async fn fetch_moonshot_balance(provider: &str, stats: &[UsageStat]) -> AccountU
     };
 
     let secrets = load_secrets();
-    let Some(key) = secrets.get("MOONSHOT_API_KEY").cloned().filter(|v| !v.trim().is_empty()) else {
+    let Some(key) = secrets
+        .get("MOONSHOT_API_KEY")
+        .cloned()
+        .filter(|v| !v.trim().is_empty())
+    else {
         return unavailable("Moonshot API key not saved — showing this app's recorded traffic");
     };
 
@@ -708,12 +736,19 @@ async fn fetch_moonshot_balance(provider: &str, stats: &[UsageStat]) -> AccountU
             continue;
         }
         let data = body.get("data").cloned().unwrap_or_default();
-        let avail = data.get("available_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let cash = data.get("cash_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let voucher = data.get("voucher_balance").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let balance = format!(
-            "Available ¥{avail:.2} (cash ¥{cash:.2} · voucher ¥{voucher:.2})"
-        );
+        let avail = data
+            .get("available_balance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let cash = data
+            .get("cash_balance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let voucher = data
+            .get("voucher_balance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let balance = format!("Available ¥{avail:.2} (cash ¥{cash:.2} · voucher ¥{voucher:.2})");
         return AccountUsage {
             available: false,
             provider: provider.to_string(),
@@ -760,25 +795,31 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
         }
         "moonshot_api" => generic_api_probe(&load_secrets(), "MOONSHOT_API_KEY", Some("sk-")),
         "deepseek_api" => generic_api_probe(&load_secrets(), "DEEPSEEK_API_KEY", Some("sk-")),
-        "xai_api"      => generic_api_probe(&load_secrets(), "XAI_API_KEY", Some("xai-")),
-        "groq_api"     => generic_api_probe(&load_secrets(), "GROQ_API_KEY", Some("gsk_")),
+        "xai_api" => generic_api_probe(&load_secrets(), "XAI_API_KEY", Some("xai-")),
+        "groq_api" => generic_api_probe(&load_secrets(), "GROQ_API_KEY", Some("gsk_")),
         "perplexity_api" => generic_api_probe(&load_secrets(), "PERPLEXITY_API_KEY", Some("pplx-")),
-        "mistral_api"  => generic_api_probe(&load_secrets(), "MISTRAL_API_KEY", None),
+        "mistral_api" => generic_api_probe(&load_secrets(), "MISTRAL_API_KEY", None),
         "together_api" => generic_api_probe(&load_secrets(), "TOGETHER_API_KEY", None),
-        "gemini_api"   => {
+        "gemini_api" => {
             // Google accepts either env var; check both.
             let map = load_secrets();
             if nonempty(&map, "GEMINI_API_KEY") || nonempty(&map, "GOOGLE_API_KEY") {
                 (true, "Key present".to_string())
             } else {
-                (false, "No GEMINI_API_KEY (or GOOGLE_API_KEY) saved".to_string())
+                (
+                    false,
+                    "No GEMINI_API_KEY (or GOOGLE_API_KEY) saved".to_string(),
+                )
             }
         }
         "gemini_cli" => {
             if gemini_cli_logged_in() {
                 (true, "gemini CLI credentials found".to_string())
             } else {
-                (false, "gemini CLI not installed or not logged in".to_string())
+                (
+                    false,
+                    "gemini CLI not installed or not logged in".to_string(),
+                )
             }
         }
         "huggingface" => {
@@ -790,7 +831,9 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
             let v = load_secrets().get("HF_TOKEN").cloned();
             match v {
                 Some(k) if k.starts_with("hf_") => (true, "Token present (hf_…)".to_string()),
-                Some(k) if !k.trim().is_empty() => (true, format!("Token present ({} chars)", k.len())),
+                Some(k) if !k.trim().is_empty() => {
+                    (true, format!("Token present ({} chars)", k.len()))
+                }
                 _ => (false, "No HF_TOKEN saved".to_string()),
             }
         }
@@ -798,14 +841,20 @@ pub fn accounts_test_probe(backend: String) -> ProbeResult {
             if claude_cli_logged_in() {
                 (true, "claude CLI credentials found".to_string())
             } else {
-                (false, "claude CLI not installed or not logged in".to_string())
+                (
+                    false,
+                    "claude CLI not installed or not logged in".to_string(),
+                )
             }
         }
         "codex_cli" => {
             if codex_cli_logged_in() {
                 (true, "codex CLI credentials found".to_string())
             } else {
-                (false, "codex CLI not installed or not logged in".to_string())
+                (
+                    false,
+                    "codex CLI not installed or not logged in".to_string(),
+                )
             }
         }
         "kimi_cli" => {
@@ -880,8 +929,15 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
         // Claude Code CLI: --print is non-interactive, prompt goes on
         // stdin (no --prompt flag — that's REPL-only). Matches how
         // claude_cli_complete invokes it elsewhere in this file.
-        "claude_cli" => probe_cli_subscription(
-            find_claude_cli(), vec!["--print".into()], "Claude", Some("ok")).await,
+        "claude_cli" => {
+            probe_cli_subscription(
+                find_claude_cli(),
+                vec!["--print".into()],
+                "Claude",
+                Some("ok"),
+            )
+            .await
+        }
         // OpenAI Codex CLI: `codex exec <prompt>` is the non-interactive
         // shape. There's no --print/--prompt; older docs to the contrary.
         // Two things have to be right or it exits 1 with "Reading additional
@@ -898,12 +954,26 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
         //      never keep the probe side-effect-free and unescaped. This is
         //      why the chat path worked but Test didn't — Test was missing
         //      the flags.
-        "codex_cli" => probe_cli_subscription(
-            find_codex_cli(),
-            ["exec", "--skip-git-repo-check", "--color", "never",
-             "--sandbox", "read-only", "ok"].iter().map(|s| s.to_string()).collect(),
-            "Codex", Some("ok"),
-        ).await,
+        "codex_cli" => {
+            probe_cli_subscription(
+                find_codex_cli(),
+                [
+                    "exec",
+                    "--skip-git-repo-check",
+                    "--color",
+                    "never",
+                    "--sandbox",
+                    "read-only",
+                    "ok",
+                ]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+                "Codex",
+                Some("ok"),
+            )
+            .await
+        }
         "kimi_cli" => {
             // Both legacy kimi-cli and current kimi-code support --print
             // non-interactive mode. Use the same shape as the chat path so the
@@ -922,42 +992,98 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             args.push("ok".into());
             probe_cli_subscription(find_kimi_cli(), args, "Kimi", None).await
         }
-        "gemini_cli" => probe_cli_subscription(
-            find_gemini_cli(),
-            vec![
-                "--skip-trust".into(),
-                "--output-format".into(),
-                "text".into(),
-                "--prompt".into(),
-                "ok".into(),
-            ],
-            "Gemini",
-            None,
-        ).await,
+        "gemini_cli" => {
+            probe_cli_subscription(
+                find_gemini_cli(),
+                vec![
+                    "--skip-trust".into(),
+                    "--output-format".into(),
+                    "text".into(),
+                    "--prompt".into(),
+                    "ok".into(),
+                ],
+                "Gemini",
+                None,
+            )
+            .await
+        }
 
         // -- API keys: HTTP GET the provider's /v1/models endpoint
         //    with the key in Authorization. 200 = valid. 401/403 =
         //    invalid key. Other = network / transient.
-        "claude_api"     => probe_api_key("ANTHROPIC_API_KEY", "https://api.anthropic.com/v1/models", true).await,
-        "openai_api"     => probe_api_key("OPENAI_API_KEY", "https://api.openai.com/v1/models", false).await,
-        "moonshot_api"   => probe_api_key("MOONSHOT_API_KEY", "https://api.moonshot.ai/v1/models", false).await,
-        "deepseek_api"   => probe_api_key("DEEPSEEK_API_KEY", "https://api.deepseek.com/v1/models", false).await,
-        "xai_api"        => probe_api_key("XAI_API_KEY", "https://api.x.ai/v1/models", false).await,
-        "groq_api"       => probe_api_key("GROQ_API_KEY", "https://api.groq.com/openai/v1/models", false).await,
-        "perplexity_api" => probe_api_key("PERPLEXITY_API_KEY", "https://api.perplexity.ai/models", false).await,
-        "mistral_api"    => probe_api_key("MISTRAL_API_KEY", "https://api.mistral.ai/v1/models", false).await,
-        "together_api"   => probe_api_key("TOGETHER_API_KEY", "https://api.together.xyz/v1/models", false).await,
+        "claude_api" => {
+            probe_api_key(
+                "ANTHROPIC_API_KEY",
+                "https://api.anthropic.com/v1/models",
+                true,
+            )
+            .await
+        }
+        "openai_api" => {
+            probe_api_key("OPENAI_API_KEY", "https://api.openai.com/v1/models", false).await
+        }
+        "moonshot_api" => {
+            probe_api_key(
+                "MOONSHOT_API_KEY",
+                "https://api.moonshot.ai/v1/models",
+                false,
+            )
+            .await
+        }
+        "deepseek_api" => {
+            probe_api_key(
+                "DEEPSEEK_API_KEY",
+                "https://api.deepseek.com/v1/models",
+                false,
+            )
+            .await
+        }
+        "xai_api" => probe_api_key("XAI_API_KEY", "https://api.x.ai/v1/models", false).await,
+        "groq_api" => {
+            probe_api_key(
+                "GROQ_API_KEY",
+                "https://api.groq.com/openai/v1/models",
+                false,
+            )
+            .await
+        }
+        "perplexity_api" => {
+            probe_api_key(
+                "PERPLEXITY_API_KEY",
+                "https://api.perplexity.ai/models",
+                false,
+            )
+            .await
+        }
+        "mistral_api" => {
+            probe_api_key("MISTRAL_API_KEY", "https://api.mistral.ai/v1/models", false).await
+        }
+        "together_api" => {
+            probe_api_key(
+                "TOGETHER_API_KEY",
+                "https://api.together.xyz/v1/models",
+                false,
+            )
+            .await
+        }
         "gemini_api" => {
             // Google's REST API takes the key as a query param, not
             // Authorization header. Probe the models list endpoint.
             let map = load_secrets();
-            let key = map.get("GEMINI_API_KEY").or_else(|| map.get("GOOGLE_API_KEY")).cloned();
+            let key = map
+                .get("GEMINI_API_KEY")
+                .or_else(|| map.get("GOOGLE_API_KEY"))
+                .cloned();
             match key.filter(|k| !k.trim().is_empty()) {
                 Some(k) => {
-                    let url = format!("https://generativelanguage.googleapis.com/v1beta/models?key={k}");
+                    let url =
+                        format!("https://generativelanguage.googleapis.com/v1beta/models?key={k}");
                     match http_get(&url, None).await {
                         Ok(200) => (true, "API responded 200 OK".to_string()),
-                        Ok(s) => (false, format!("API responded HTTP {s} — key may be invalid")),
+                        Ok(s) => (
+                            false,
+                            format!("API responded HTTP {s} — key may be invalid"),
+                        ),
                         Err(e) => (false, format!("network: {e}")),
                     }
                 }
@@ -972,26 +1098,42 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
         // the user hit alongside the Save bug.
         "huggingface" => {
             let map = load_secrets();
-            let key = map.get("HF_TOKEN").cloned().filter(|k| !k.trim().is_empty());
+            let key = map
+                .get("HF_TOKEN")
+                .cloned()
+                .filter(|k| !k.trim().is_empty());
             match key {
                 Some(k) => {
                     let bearer = format!("Bearer {k}");
                     match http_get(
                         "https://huggingface.co/api/whoami-v2",
                         Some(("Authorization", bearer)),
-                    ).await {
+                    )
+                    .await
+                    {
                         Ok(200) => (true, "Token valid (HF /whoami-v2 → 200 OK)".to_string()),
-                        Ok(401) => (false, "HF rejected the token (401 Unauthorized — expired or wrong scope)".to_string()),
-                        Ok(s)   => (false, format!("HF responded HTTP {s}")),
-                        Err(e)  => (false, format!("network: {e}")),
+                        Ok(401) => (
+                            false,
+                            "HF rejected the token (401 Unauthorized — expired or wrong scope)"
+                                .to_string(),
+                        ),
+                        Ok(s) => (false, format!("HF responded HTTP {s}")),
+                        Err(e) => (false, format!("network: {e}")),
                     }
                 }
-                None => (false, "No HF_TOKEN saved — paste a token and Save first".to_string()),
+                None => (
+                    false,
+                    "No HF_TOKEN saved — paste a token and Save first".to_string(),
+                ),
             }
         }
         other => (false, format!("Unknown backend '{other}'")),
     };
-    ProbeResult { ok, detail, elapsed_ms: start.elapsed().as_millis() as u64 }
+    ProbeResult {
+        ok,
+        detail,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    }
 }
 
 /// Probe whether a backend's credentials are present INSIDE the WSL sandbox —
@@ -1004,7 +1146,11 @@ pub async fn accounts_test_probe_wsl(backend: String) -> ProbeResult {
     let (ok, detail) = tokio::task::spawn_blocking(move || wsl_probe(&backend))
         .await
         .unwrap_or((false, "probe failed".to_string()));
-    ProbeResult { ok, detail, elapsed_ms: start.elapsed().as_millis() as u64 }
+    ProbeResult {
+        ok,
+        detail,
+        elapsed_ms: start.elapsed().as_millis() as u64,
+    }
 }
 
 #[cfg(windows)]
@@ -1012,7 +1158,10 @@ fn wsl_probe(backend: &str) -> (bool, String) {
     // Use a real general-purpose distro, not a Docker/system one (which has no
     // bash → wsl exits 1 with a UTF-16 error that showed as garbled mojibake).
     let Some(distro) = crate::wsl::best_linux_distro() else {
-        return (false, "No Ubuntu/Linux distro in WSL yet — set it up on Home".to_string());
+        return (
+            false,
+            "No Ubuntu/Linux distro in WSL yet — set it up on Home".to_string(),
+        );
     };
     // CLI backends get an HONEST 3-way probe instead of "does a config file
     // exist" (which was a false positive — it reported kimi/gemini as ready
@@ -1111,7 +1260,11 @@ async fn probe_cli_subscription(
             for a in &args_vec {
                 push_arg(&mut cmd, batch, a);
             }
-            cmd.stdin(if stdin_owned.is_some() { Stdio::piped() } else { Stdio::null() });
+            cmd.stdin(if stdin_owned.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            });
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
@@ -1131,7 +1284,12 @@ async fn probe_cli_subscription(
     .await;
 
     let output = match result {
-        Err(_) => return (false, format!("{name} CLI timed out after 15s — login may be stale")),
+        Err(_) => {
+            return (
+                false,
+                format!("{name} CLI timed out after 15s — login may be stale"),
+            )
+        }
         Ok(Err(e)) => return (false, format!("{name} CLI join error: {e}")),
         Ok(Ok(Err(e))) => return (false, format!("{name} CLI spawn error: {e}")),
         Ok(Ok(Ok(out))) => out,
@@ -1160,22 +1318,52 @@ async fn probe_cli_subscription(
         "billing required",
     ];
     if let Some(hit) = sub_errors.iter().find(|p| lower.contains(*p)) {
-        let snippet = combined.lines()
+        let snippet = combined
+            .lines()
             .find(|l| l.to_ascii_lowercase().contains(hit))
             .unwrap_or(*hit)
-            .trim().to_string();
-        let trimmed = if snippet.len() > 140 { format!("{}…", &snippet[..140]) } else { snippet };
+            .trim()
+            .to_string();
+        let trimmed = if snippet.len() > 140 {
+            format!("{}…", &snippet[..140])
+        } else {
+            snippet
+        };
         return (false, format!("{name}: {trimmed}"));
     }
     if !output.status.success() {
-        let snippet = stderr.lines().next().unwrap_or("non-zero exit").trim().to_string();
-        let trimmed = if snippet.len() > 140 { format!("{}…", &snippet[..140]) } else { snippet };
-        return (false, format!("{name} CLI exited {}: {trimmed}", output.status.code().unwrap_or(-1)));
+        let snippet = stderr
+            .lines()
+            .next()
+            .unwrap_or("non-zero exit")
+            .trim()
+            .to_string();
+        let trimmed = if snippet.len() > 140 {
+            format!("{}…", &snippet[..140])
+        } else {
+            snippet
+        };
+        return (
+            false,
+            format!(
+                "{name} CLI exited {}: {trimmed}",
+                output.status.code().unwrap_or(-1)
+            ),
+        );
     }
     if stdout.trim().is_empty() {
-        return (false, format!("{name} CLI returned empty output — model may have refused"));
+        return (
+            false,
+            format!("{name} CLI returned empty output — model may have refused"),
+        );
     }
-    (true, format!("{name} responded: {}", stdout.trim().chars().take(80).collect::<String>()))
+    (
+        true,
+        format!(
+            "{name} responded: {}",
+            stdout.trim().chars().take(80).collect::<String>()
+        ),
+    )
 }
 
 /// Round-trip an API key against the provider's /v1/models endpoint.
@@ -1195,8 +1383,8 @@ async fn probe_api_key(env: &str, url: &str, use_anthropic_header: bool) -> (boo
     match http_get(url, Some(header)).await {
         Ok(200) => (true, "API responded 200 OK".to_string()),
         Ok(401) | Ok(403) => (false, format!("API rejected key (HTTP {})", 401)),
-        Ok(s)   => (false, format!("API responded HTTP {s}")),
-        Err(e)  => (false, format!("network: {e}")),
+        Ok(s) => (false, format!("API responded HTTP {s}")),
+        Err(e) => (false, format!("network: {e}")),
     }
 }
 
@@ -1356,16 +1544,22 @@ fn extra_search_dirs() -> Vec<PathBuf> {
         // Rust/cargo-installed binaries (some codex distributions, misc
         // tools) and Volta-managed Node shims both live under the home dir.
         let cargo_bin = PathBuf::from(h).join(".cargo").join("bin");
-        if cargo_bin.is_dir() { dirs.push(cargo_bin); }
+        if cargo_bin.is_dir() {
+            dirs.push(cargo_bin);
+        }
         let volta_bin = PathBuf::from(h).join(".volta").join("bin");
-        if volta_bin.is_dir() { dirs.push(volta_bin); }
+        if volta_bin.is_dir() {
+            dirs.push(volta_bin);
+        }
     }
 
     // Volta on Windows installs its shims under %LOCALAPPDATA%\Volta\bin.
     #[cfg(windows)]
     if let Some(lad) = &localappdata {
         let volta = PathBuf::from(lad).join("Volta").join("bin");
-        if volta.is_dir() { dirs.push(volta); }
+        if volta.is_dir() {
+            dirs.push(volta);
+        }
     }
 
     // npm's REAL global prefix — THE catch-all for "claude / codex /
@@ -1387,56 +1581,72 @@ fn extra_search_dirs() -> Vec<PathBuf> {
 fn npm_global_bin_dirs() -> Vec<PathBuf> {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Vec<PathBuf>> = OnceLock::new();
-    CACHE.get_or_init(|| {
-        // Locate npm: PATH first, then the bundled Node.js runtime.
-        let npm = ["npm.cmd", "npm.exe", "npm"]
-            .iter()
-            .find_map(|n| which_in_path(n).ok())
-            .or_else(|| {
-                crate::paths::module_node_dir().and_then(|d| {
-                    ["npm.cmd", "npm.exe", "npm"]
-                        .iter()
-                        .map(|n| d.join(n))
-                        .find(|c| c.is_file())
-                })
-            });
-        let Some(npm) = npm else { return Vec::new(); };
+    CACHE
+        .get_or_init(|| {
+            // Locate npm: PATH first, then the bundled Node.js runtime.
+            let npm = ["npm.cmd", "npm.exe", "npm"]
+                .iter()
+                .find_map(|n| which_in_path(n).ok())
+                .or_else(|| {
+                    crate::paths::module_node_dir().and_then(|d| {
+                        ["npm.cmd", "npm.exe", "npm"]
+                            .iter()
+                            .map(|n| d.join(n))
+                            .find(|c| c.is_file())
+                    })
+                });
+            let Some(npm) = npm else {
+                return Vec::new();
+            };
 
-        let mut cmd = Command::new(&npm);
-        #[cfg(windows)]
-        let batch = is_batch_shim(&npm);
-        #[cfg(not(windows))]
-        let batch = false;
-        push_arg(&mut cmd, batch, "config");
-        push_arg(&mut cmd, batch, "get");
-        push_arg(&mut cmd, batch, "prefix");
-        // Bundled Node on PATH so npm can resolve `node` if needed.
-        if let Some(node_dir) = crate::paths::module_node_dir() {
-            let existing = std::env::var("PATH").unwrap_or_default();
-            #[cfg(windows)] let sep = ";";
-            #[cfg(not(windows))] let sep = ":";
-            cmd.env("PATH", format!("{}{sep}{}", node_dir.display(), existing));
-        }
-        cmd.stdin(Stdio::null());
-        cmd.stdout(Stdio::piped());
-        cmd.stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let Ok(out) = cmd.output() else { return Vec::new(); };
-        if !out.status.success() { return Vec::new(); }
-        let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if prefix.is_empty() { return Vec::new(); }
+            let mut cmd = Command::new(&npm);
+            #[cfg(windows)]
+            let batch = is_batch_shim(&npm);
+            #[cfg(not(windows))]
+            let batch = false;
+            push_arg(&mut cmd, batch, "config");
+            push_arg(&mut cmd, batch, "get");
+            push_arg(&mut cmd, batch, "prefix");
+            // Bundled Node on PATH so npm can resolve `node` if needed.
+            if let Some(node_dir) = crate::paths::module_node_dir() {
+                let existing = std::env::var("PATH").unwrap_or_default();
+                #[cfg(windows)]
+                let sep = ";";
+                #[cfg(not(windows))]
+                let sep = ":";
+                cmd.env("PATH", format!("{}{sep}{}", node_dir.display(), existing));
+            }
+            cmd.stdin(Stdio::null());
+            cmd.stdout(Stdio::piped());
+            cmd.stderr(Stdio::null());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(CREATE_NO_WINDOW);
+            }
+            let Ok(out) = cmd.output() else {
+                return Vec::new();
+            };
+            if !out.status.success() {
+                return Vec::new();
+            }
+            let prefix = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if prefix.is_empty() {
+                return Vec::new();
+            }
 
-        let base = PathBuf::from(&prefix);
-        let mut dirs = Vec::new();
-        if base.is_dir() { dirs.push(base.clone()); }   // Windows shims
-        let bin = base.join("bin");
-        if bin.is_dir() { dirs.push(bin); }             // POSIX layout
-        dirs
-    }).clone()
+            let base = PathBuf::from(&prefix);
+            let mut dirs = Vec::new();
+            if base.is_dir() {
+                dirs.push(base.clone());
+            } // Windows shims
+            let bin = base.join("bin");
+            if bin.is_dir() {
+                dirs.push(bin);
+            } // POSIX layout
+            dirs
+        })
+        .clone()
 }
 
 /// PATH search → fallback to extra_search_dirs. Use this anywhere we
@@ -1540,7 +1750,11 @@ pub async fn claude_cli_complete(
             args.push("--effort".into());
             args.push(e.to_string());
         }
-        if let Some(sid) = session_id.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if let Some(sid) = session_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
             args.push("--session-id".into());
             args.push(sid.to_string());
         }
@@ -1585,7 +1799,9 @@ pub async fn claude_cli_complete(
         // against what the other flags already consumed and fold the rest into stdin.
         let host_batch_shim = !on_wsl
             && !crate::sandbox::is_isolated(cwd.as_deref())
-            && find_claude_cli().map(|p| is_batch_shim(&p)).unwrap_or(false);
+            && find_claude_cli()
+                .map(|p| is_batch_shim(&p))
+                .unwrap_or(false);
         let max_system_arg: usize = if host_batch_shim {
             let already: usize = args.iter().map(|a| a.len() + 3).sum::<usize>() + 96;
             7_000usize.saturating_sub(already)
@@ -1615,7 +1831,10 @@ pub async fn claude_cli_complete(
         // process needed. Doing the retry at the source guarantees the conflict
         // self-heals on every path; the prompt still carries the folded history,
         // so dropping the id costs nothing.
-        let session_was_set = session_id.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false);
+        let session_was_set = session_id
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
         let run_once = |args: &[String]| -> Result<String, String> {
             // WSL-isolated project → run `claude` inside the distro; else the
             // Windows CLI. (On Windows, npm installs claude.cmd; push_arg routes
@@ -1627,8 +1846,9 @@ pub async fn claude_cli_complete(
                 c.args(sargs);
                 c
             } else {
-                let exe = find_claude_cli()
-                    .ok_or_else(|| "claude CLI not found on PATH — install Claude Code first".to_string())?;
+                let exe = find_claude_cli().ok_or_else(|| {
+                    "claude CLI not found on PATH — install Claude Code first".to_string()
+                })?;
                 #[cfg(windows)]
                 let batch = is_batch_shim(&exe);
                 #[cfg(not(windows))]
@@ -1666,16 +1886,21 @@ pub async fn claude_cli_complete(
                 let _ = stdin.write_all(stdin_payload.as_bytes());
             }
             // Wait as long as the CLI needs (agentic runs can be 15-30 min).
-            let output = wait_cli_child(child, pid)
-                .map_err(|e| format!("wait claude: {e}"))?;
+            let output = wait_cli_child(child, pid).map_err(|e| format!("wait claude: {e}"))?;
             if !output.status.success() {
                 // Non-zero exit can still carry a 401 in stdout with empty stderr —
                 // surface the auth text (not a generic "exited N") so the retry fires.
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                return Err(cli_exit_err("claude", output.status.code().unwrap_or(-1), &stdout, &stderr));
+                return Err(cli_exit_err(
+                    "claude",
+                    output.status.code().unwrap_or(-1),
+                    &stdout,
+                    &stderr,
+                ));
             }
-            let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
+            let stdout =
+                String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
             let trimmed = stdout.trim().to_string();
             // Exit 0 but the body is an auth-failure envelope (the CLI prints
             // "… API Error: 401 Invalid authentication credentials" and exits 0
@@ -1688,7 +1913,9 @@ pub async fn claude_cli_complete(
             Ok(trimmed)
         };
         match run_once(&args) {
-            Err(e) if session_was_set && is_session_in_use(&e) => run_once(&strip_session_arg(&args)),
+            Err(e) if session_was_set && is_session_in_use(&e) => {
+                run_once(&strip_session_arg(&args))
+            }
             other => other,
         }
     })
@@ -1758,7 +1985,11 @@ fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
     }
     format!(
         "{cli} CLI exited {code} — {}",
-        if stderr.is_empty() { "no stderr".to_string() } else { stderr.to_string() }
+        if stderr.is_empty() {
+            "no stderr".to_string()
+        } else {
+            stderr.to_string()
+        }
     )
 }
 
@@ -1819,7 +2050,9 @@ pub async fn codex_cli_complete(
         // the sandbox, so we omit -o on this path).
         if let Some((exe, sargs)) = {
             let mut args = base_args.clone();
-            if pass_prompt_positionally { args.push(prompt.clone()); }
+            if pass_prompt_positionally {
+                args.push(prompt.clone());
+            }
             crate::sandbox::program_argv(cwd.as_deref(), "codex", &args)
         } {
             let mut cmd = Command::new(exe);
@@ -1841,7 +2074,12 @@ pub async fn codex_cli_complete(
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
                 let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-                return Err(cli_exit_err("codex", output.status.code().unwrap_or(-1), &stdout, &stderr));
+                return Err(cli_exit_err(
+                    "codex",
+                    output.status.code().unwrap_or(-1),
+                    &stdout,
+                    &stderr,
+                ));
             }
             let reply = String::from_utf8_lossy(&output.stdout).trim().to_string();
             if reply.is_empty() {
@@ -1851,13 +2089,16 @@ pub async fn codex_cli_complete(
         }
 
         // Windows path (unchanged): -o <tempfile> captures the clean final msg.
-        let exe = find_codex_cli()
-            .ok_or_else(|| "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)".to_string())?;
+        let exe = find_codex_cli().ok_or_else(|| {
+            "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)"
+                .to_string()
+        })?;
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let out_file = std::env::temp_dir().join(format!("owllm-codex-{}-{}.txt", std::process::id(), stamp));
+        let out_file =
+            std::env::temp_dir().join(format!("owllm-codex-{}-{}.txt", std::process::id(), stamp));
         #[cfg(windows)]
         let batch = is_batch_shim(&exe);
         #[cfg(not(windows))]
@@ -1893,8 +2134,7 @@ pub async fn codex_cli_complete(
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
         }
-        let output = wait_cli_child(child, pid)
-            .map_err(|e| format!("wait codex: {e}"))?;
+        let output = wait_cli_child(child, pid).map_err(|e| format!("wait codex: {e}"))?;
         let from_file = std::fs::read_to_string(&out_file).ok();
         let _ = std::fs::remove_file(&out_file);
         if !output.status.success() {
@@ -1902,7 +2142,12 @@ pub async fn codex_cli_complete(
             let body = from_file
                 .clone()
                 .unwrap_or_else(|| String::from_utf8_lossy(&output.stdout).into_owned());
-            return Err(cli_exit_err("codex", output.status.code().unwrap_or(-1), &body, &stderr));
+            return Err(cli_exit_err(
+                "codex",
+                output.status.code().unwrap_or(-1),
+                &body,
+                &stderr,
+            ));
         }
         let reply = from_file
             .map(|s| s.trim().to_string())
@@ -1940,7 +2185,11 @@ pub enum ClaudeStreamEvent {
     /// The CLI is invoking a tool. `input` is the JSON arguments,
     /// pretty-printed; `tool_use_id` lets us match the matching
     /// `tool_result` back to this call.
-    ToolUse { tool_use_id: String, name: String, input: String },
+    ToolUse {
+        tool_use_id: String,
+        name: String,
+        input: String,
+    },
     /// The result of a tool call (file contents, command output, etc.).
     /// Surfaced under the same Thought block as the matching tool_use
     /// so the user sees both the request and its outcome.
@@ -1948,7 +2197,11 @@ pub enum ClaudeStreamEvent {
     /// reliable signal. (The UI must NOT guess from the result text: a grep
     /// that searches for "error"/"denied" returns matching lines containing
     /// those words and was being mislabeled "Failed".)
-    ToolResult { tool_use_id: String, content: String, is_error: bool },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
     /// Non-fatal error during stream parsing — surfaced so the user
     /// knows the dispatch had partial trouble, but the CLI keeps
     /// running.
@@ -1990,8 +2243,8 @@ fn map_owllm_tool_to_cli(name: &str) -> Option<&'static str> {
         // STILL UNBRIDGED for CLI: screenshot_url, memory_search/read (on-demand),
         // ssh_* — these genuinely don't work for a CLI agent yet.
         "dispatch" | "verify" | "ssh" | "ssh_exec" | "ssh_upload" | "ssh_download"
-        | "screenshot_url" | "memory_read" | "memory_search" | "memory_write"
-        | "load_skill" | "list_skills" | "publish_release" => None,
+        | "screenshot_url" | "memory_read" | "memory_search" | "memory_write" | "load_skill"
+        | "list_skills" | "publish_release" => None,
         _ => None,
     }
 }
@@ -2559,11 +2812,24 @@ pub async fn claude_cli_stream(
 #[derive(Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum CodexStreamEvent {
-    Text { delta: String },
-    Thinking { delta: String },
-    ToolUse { tool_use_id: String, name: String, input: String },
-    ToolResult { tool_use_id: String, content: String },
-    Error { message: String },
+    Text {
+        delta: String,
+    },
+    Thinking {
+        delta: String,
+    },
+    ToolUse {
+        tool_use_id: String,
+        name: String,
+        input: String,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Flatten an MCP tool `result` value (string, or an array of content
@@ -2575,7 +2841,11 @@ fn codex_result_text(r: &serde_json::Value) -> String {
     if let Some(arr) = r.as_array() {
         let joined = arr
             .iter()
-            .filter_map(|p| p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+            .filter_map(|p| {
+                p.get("text")
+                    .and_then(|t| t.as_str())
+                    .map(|s| s.to_string())
+            })
             .collect::<Vec<_>>()
             .join("\n");
         if !joined.is_empty() {
@@ -2985,7 +3255,9 @@ fn claude_cli_logged_in() -> bool {
     let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) else {
         return false;
     };
-    let creds = PathBuf::from(home).join(".claude").join(".credentials.json");
+    let creds = PathBuf::from(home)
+        .join(".claude")
+        .join(".credentials.json");
     creds.exists()
 }
 
@@ -3013,7 +3285,9 @@ fn user_home_dir() -> Option<PathBuf> {
 /// the older `MoonshotAI/kimi-cli` used `~/.kimi`. We keep both so the app
 /// works regardless of which `kimi` binary is on PATH.
 fn kimi_home_candidates() -> Vec<PathBuf> {
-    let Some(home) = user_home_dir() else { return Vec::new() };
+    let Some(home) = user_home_dir() else {
+        return Vec::new();
+    };
     vec![home.join(".kimi-code"), home.join(".kimi")]
 }
 
@@ -3036,9 +3310,7 @@ fn kimi_is_new_flavor() -> bool {
 /// directly in `config.toml` (legacy). Accept either marker in either home.
 fn kimi_cli_logged_in() -> bool {
     kimi_home_candidates().iter().any(|kimi| {
-        kimi.join("credentials")
-            .join("kimi-code.json")
-            .is_file()
+        kimi.join("credentials").join("kimi-code.json").is_file()
             || kimi.join("config.toml").exists()
     })
 }
@@ -3058,7 +3330,8 @@ fn kimi_config_text() -> Option<String> {
 /// with NO --model flag — and rejects any model id that isn't declared in its
 /// [models] table with a hard `LLMNotSet` error.
 fn kimi_config_has_default(text: &str) -> bool {
-    text.lines().any(|l| l.trim_start().starts_with("default_model"))
+    text.lines()
+        .any(|l| l.trim_start().starts_with("default_model"))
 }
 
 /// Model ids declared in the kimi config's `[models."<id>"]` tables.
@@ -3079,11 +3352,9 @@ fn kimi_config_model_keys(text: &str) -> Vec<String> {
 /// we're safely logged in; without this check a modern-logged-in user reads as
 /// `has_default=false` and an undeclared id gets force-passed.
 fn kimi_has_modern_login() -> bool {
-    kimi_home_candidates().iter().any(|kimi| {
-        kimi.join("credentials")
-            .join("kimi-code.json")
-            .is_file()
-    })
+    kimi_home_candidates()
+        .iter()
+        .any(|kimi| kimi.join("credentials").join("kimi-code.json").is_file())
 }
 
 /// Recursively copy a directory, best-effort (individual file failures are
@@ -3140,12 +3411,12 @@ fn prepare_kimi_code_home(
         // for caller guidance, so inject OWLLM's prompt through that variable.
         let agent_yaml = base.join("agent.yaml");
         std::fs::write(&agent_yaml, kimi_agent_yaml(system_prompt))
-        .map_err(|e| format!("write agent.yaml: {e}"))?;
+            .map_err(|e| format!("write agent.yaml: {e}"))?;
     }
 
     if with_mcp {
-        let info = crate::mcp_gateway::ensure_started(app)
-            .map_err(|e| format!("browser gateway: {e}"))?;
+        let info =
+            crate::mcp_gateway::ensure_started(app).map_err(|e| format!("browser gateway: {e}"))?;
         let mcp = json!({
             "mcpServers": {
                 crate::mcp_gateway::SERVER_NAME: {
@@ -3229,7 +3500,11 @@ fn kimi_output_llm_unset(out: &str) -> bool {
 /// recognize it as an auth failure.
 fn kimi_output_auth_failed(out: &str) -> bool {
     let l = out.to_ascii_lowercase();
-    l.contains("401") || l.contains("unauthorized") || l.contains("not logged in") || l.contains("login expired") || l.contains("signed out")
+    l.contains("401")
+        || l.contains("unauthorized")
+        || l.contains("not logged in")
+        || l.contains("login expired")
+        || l.contains("signed out")
 }
 
 /// `--model` args for a kimi invocation, resilient to the CLI's config:
@@ -3242,7 +3517,10 @@ fn kimi_output_auth_failed(out: &str) -> bool {
 fn kimi_model_args(requested: Option<&str>) -> Vec<String> {
     let cfg = kimi_config_text();
     let has_default = cfg.as_deref().map(kimi_config_has_default).unwrap_or(false);
-    let keys = cfg.as_deref().map(kimi_config_model_keys).unwrap_or_default();
+    let keys = cfg
+        .as_deref()
+        .map(kimi_config_model_keys)
+        .unwrap_or_default();
     kimi_model_args_inner(requested, has_default, &keys, kimi_has_modern_login())
 }
 
@@ -3277,10 +3555,7 @@ fn kimi_model_args_inner(
 /// names we accept and remove.
 fn gemini_credential_paths(home: &std::path::Path) -> Vec<PathBuf> {
     let dir = home.join(".gemini");
-    vec![
-        dir.join("oauth_creds.json"),
-        dir.join("credentials.json"),
-    ]
+    vec![dir.join("oauth_creds.json"), dir.join("credentials.json")]
 }
 
 fn gemini_cli_logged_in() -> bool {
@@ -3323,7 +3598,10 @@ fn generic_api_probe(
         }
         Some(_) => (
             false,
-            format!("Key does not start with {:?} — double-check the provider's docs", prefix.unwrap_or("")),
+            format!(
+                "Key does not start with {:?} — double-check the provider's docs",
+                prefix.unwrap_or("")
+            ),
         ),
         None => (false, format!("No {env} saved")),
     }
@@ -3367,7 +3645,10 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
 
     match backend.as_str() {
         "claude_cli" => {
-            try_remove(&home.join(".claude").join(".credentials.json"), &mut removed);
+            try_remove(
+                &home.join(".claude").join(".credentials.json"),
+                &mut removed,
+            );
         }
         "codex_cli" => {
             try_remove(&home.join(".codex").join("auth.json"), &mut removed);
@@ -3377,7 +3658,10 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
             // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
             // Remove from BOTH so Disconnect actually clears the real token.
             for kimi in kimi_home_candidates() {
-                try_remove(&kimi.join("credentials").join("kimi-code.json"), &mut removed);
+                try_remove(
+                    &kimi.join("credentials").join("kimi-code.json"),
+                    &mut removed,
+                );
                 try_remove(&kimi.join("config.toml"), &mut removed);
             }
         }
@@ -3424,15 +3708,14 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
     // (claude, kimi) errors out with "unknown argument /login" if
     // they receive it on the command line.
     let (find_fn, login_args): (fn() -> Option<PathBuf>, &[&str]) = match backend.as_str() {
-        "claude_cli"  => (find_claude_cli,  &[]),
-        "codex_cli"   => (find_codex_cli,   &["login"]),
-        "kimi_cli"    => (find_kimi_cli,    &[]),
-        "gemini_cli"  => (find_gemini_cli,  &[]),
+        "claude_cli" => (find_claude_cli, &[]),
+        "codex_cli" => (find_codex_cli, &["login"]),
+        "kimi_cli" => (find_kimi_cli, &[]),
+        "gemini_cli" => (find_gemini_cli, &[]),
         other => return Err(format!("unknown subscription backend: {other}")),
     };
-    let exe = find_fn().ok_or_else(|| format!(
-        "CLI not found on PATH for {backend} — install it first"
-    ))?;
+    let exe = find_fn()
+        .ok_or_else(|| format!("CLI not found on PATH for {backend} — install it first"))?;
 
     #[cfg(windows)]
     {
@@ -3444,11 +3727,7 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         //     OAuth URL and any closing message stay readable.
         // We pass the cli args inside one quoted string so any spaces
         // in the exe path survive cmd's word-splitting.
-        let inner = format!(
-            "\"\"{}\" {}\"",
-            exe.display(),
-            login_args.join(" ")
-        );
+        let inner = format!("\"\"{}\" {}\"", exe.display(), login_args.join(" "));
         let mut cmd = Command::new("cmd.exe");
         cmd.raw_arg("/c");
         cmd.raw_arg("start");
@@ -3462,7 +3741,8 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         // CREATE_NEW_CONSOLE (0x00000010) on the wrapper so the new
         // console actually decouples from this Tauri-spawned process.
         cmd.creation_flags(0x00000010);
-        cmd.spawn().map_err(|e| format!("spawn login console: {e}"))?;
+        cmd.spawn()
+            .map_err(|e| format!("spawn login console: {e}"))?;
     }
 
     #[cfg(not(windows))]
@@ -3472,7 +3752,8 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
-        cmd.spawn().map_err(|e| format!("spawn {}: {e}", exe.display()))?;
+        cmd.spawn()
+            .map_err(|e| format!("spawn {}: {e}", exe.display()))?;
     }
 
     Ok(())
@@ -3536,20 +3817,36 @@ pub async fn cli_install_stream(
     let (tool_path, args): (PathBuf, Vec<String>) = if let Some(uv) = kimi_uv {
         // `uv tool install` puts the shim in ~/.local/bin, which
         // extra_search_dirs() already walks — no restart needed.
-        (uv, ["tool", "install", "--upgrade", "--python", "3.13", "kimi-cli"]
-            .iter().map(|s| s.to_string()).collect())
+        (
+            uv,
+            [
+                "tool",
+                "install",
+                "--upgrade",
+                "--python",
+                "3.13",
+                "kimi-cli",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        )
     } else {
         let (tool, args): (&'static str, Vec<&'static str>) = match backend.as_str() {
             "claude_cli" => ("npm", vec!["install", "-g", "@anthropic-ai/claude-code"]),
-            "codex_cli"  => ("npm", vec!["install", "-g", "@openai/codex"]),
-            "kimi_cli"   => ("pip", vec!["install", "--upgrade", "kimi-cli"]),
+            "codex_cli" => ("npm", vec!["install", "-g", "@openai/codex"]),
+            "kimi_cli" => ("pip", vec!["install", "--upgrade", "kimi-cli"]),
             "gemini_cli" => ("npm", vec!["install", "-g", "@google/gemini-cli"]),
             other => return Err(format!("unknown CLI backend: {other}")),
         };
 
         // Find the package manager. Mirrors cli_install's pre-check.
         let tool_path = {
-            let names = [format!("{tool}.exe"), format!("{tool}.cmd"), tool.to_string()];
+            let names = [
+                format!("{tool}.exe"),
+                format!("{tool}.cmd"),
+                tool.to_string(),
+            ];
             names.iter().find_map(|n| which_extended(n))
                 .ok_or_else(|| {
                     if tool == "npm" {
@@ -3683,8 +3980,8 @@ pub fn cli_install(backend: String) -> Result<(), String> {
     //   * Gemini CLI:  @google/gemini-cli (npm)
     let (tool, install_cmd) = match backend.as_str() {
         "claude_cli" => ("npm", "npm install -g @anthropic-ai/claude-code"),
-        "codex_cli"  => ("npm", "npm install -g @openai/codex"),
-        "kimi_cli"   => ("pip", "pip install --upgrade kimi-cli"),
+        "codex_cli" => ("npm", "npm install -g @openai/codex"),
+        "kimi_cli" => ("pip", "pip install --upgrade kimi-cli"),
         "gemini_cli" => ("npm", "npm install -g @google/gemini-cli"),
         other => return Err(format!("unknown CLI backend: {other}")),
     };
@@ -3701,8 +3998,11 @@ pub fn cli_install(backend: String) -> Result<(), String> {
     ];
     let pm_found = names.iter().any(|n| which_extended(n).is_some());
     if !pm_found {
-        let runtime = if tool == "npm" { "Node.js (https://nodejs.org/)" }
-                      else            { "Python (https://www.python.org/)" };
+        let runtime = if tool == "npm" {
+            "Node.js (https://nodejs.org/)"
+        } else {
+            "Python (https://www.python.org/)"
+        };
         return Err(format!(
             "{tool} not found on PATH — install {runtime} first, then click Install again."
         ));
@@ -3731,7 +4031,8 @@ pub fn cli_install(backend: String) -> Result<(), String> {
         // CREATE_NEW_CONSOLE so the install window is decoupled from
         // this Tauri-spawned process.
         cmd.creation_flags(0x00000010);
-        cmd.spawn().map_err(|e| format!("spawn install console: {e}"))?;
+        cmd.spawn()
+            .map_err(|e| format!("spawn install console: {e}"))?;
     }
 
     #[cfg(not(windows))]
@@ -3913,7 +4214,9 @@ pub async fn kimi_cli_complete(
         match crate::mcp_gateway::write_cli_config(&app) {
             Ok(p) => Some(p.to_string_lossy().to_string()),
             Err(e) => {
-                eprintln!("kimi: browser gateway not wired ({e}); run continues without browser tools");
+                eprintln!(
+                    "kimi: browser gateway not wired ({e}); run continues without browser tools"
+                );
                 None
             }
         }
@@ -4178,9 +4481,9 @@ pub async fn kimi_cli_complete(
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_should_grant_browser, is_browser_role_allowlist, kimi_config_has_default,
-        kimi_agent_yaml, kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
-        kimi_output_mcp_failed,
+        codex_should_grant_browser, is_browser_role_allowlist, kimi_agent_yaml,
+        kimi_config_has_default, kimi_config_model_keys, kimi_output_auth_failed,
+        kimi_output_llm_unset, kimi_output_mcp_failed,
     };
 
     // The exact kimi output that crashed a team run (reproduced live 2026-07-06,
@@ -4191,10 +4494,16 @@ mod tests {
         let out = "Unknown error: Failed to connect MCP servers: {'owllm': \
             RuntimeError('Client failed to connect: All connection attempts failed')}";
         assert!(kimi_output_mcp_failed(out));
-        assert!(kimi_output_mcp_failed("kimi_cli.exception.MCPRuntimeError: ..."));
-        assert!(!kimi_output_mcp_failed("Here is the summary you asked for."));
+        assert!(kimi_output_mcp_failed(
+            "kimi_cli.exception.MCPRuntimeError: ..."
+        ));
+        assert!(!kimi_output_mcp_failed(
+            "Here is the summary you asked for."
+        ));
         // A real reply that merely mentions MCP must not trip the detector.
-        assert!(!kimi_output_mcp_failed("I added an MCP server to your config."));
+        assert!(!kimi_output_mcp_failed(
+            "I added an MCP server to your config."
+        ));
     }
 
     #[test]
@@ -4206,10 +4515,16 @@ mod tests {
 
     #[test]
     fn kimi_auth_failure_is_detected_despite_exit_0() {
-        assert!(kimi_output_auth_failed("⚠ moonshot is signed out — its login expired (401). Re-authenticate..."));
+        assert!(kimi_output_auth_failed(
+            "⚠ moonshot is signed out — its login expired (401). Re-authenticate..."
+        ));
         assert!(kimi_output_auth_failed("HTTP 401 Unauthorized"));
-        assert!(kimi_output_auth_failed("You are not logged in. Run `kimi login`."));
-        assert!(!kimi_output_auth_failed("The server responded with a 200 OK."));
+        assert!(kimi_output_auth_failed(
+            "You are not logged in. Run `kimi login`."
+        ));
+        assert!(!kimi_output_auth_failed(
+            "The server responded with a 200 OK."
+        ));
     }
 
     #[test]
@@ -4230,7 +4545,10 @@ mod tests {
     #[test]
     fn kimi_config_default_and_keys_parse() {
         assert!(kimi_config_has_default(KIMI_CFG));
-        assert_eq!(kimi_config_model_keys(KIMI_CFG), vec!["kimi-code/kimi-for-coding"]);
+        assert_eq!(
+            kimi_config_model_keys(KIMI_CFG),
+            vec!["kimi-code/kimi-for-coding"]
+        );
         assert!(!kimi_config_has_default("theme = \"dark\"\n"));
         assert!(kimi_config_model_keys("theme = \"dark\"\n").is_empty());
     }

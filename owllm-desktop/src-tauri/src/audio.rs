@@ -121,7 +121,10 @@ fn find_model() -> Option<PathBuf> {
         }
     }
     if let Some(res) = crate::paths::resources_root() {
-        let p = res.join("runtime").join("whisper.cpp").join(WHISPER_MODEL_NAME);
+        let p = res
+            .join("runtime")
+            .join("whisper.cpp")
+            .join(WHISPER_MODEL_NAME);
         if p.is_file() {
             return Some(p);
         }
@@ -219,8 +222,8 @@ fn emit_progress(app: &tauri::AppHandle, phase: &str, done: u64, total: u64, fin
 }
 
 async fn install_whisper_binary_windows(app: &tauri::AppHandle) -> Result<(), String> {
-    use std::io::Write as _;
     use futures_util::StreamExt;
+    use std::io::Write as _;
     let dir = whisper_root()?;
     let tmp_zip = dir.join("whisper-bin-x64.downloading.zip");
     let _ = std::fs::remove_file(&tmp_zip);
@@ -265,7 +268,9 @@ async fn install_whisper_binary_windows(app: &tauri::AppHandle) -> Result<(), St
     let cursor = std::io::Cursor::new(zip_bytes);
     let mut archive = zip::ZipArchive::new(cursor).map_err(|e| format!("open zip: {e}"))?;
     for i in 0..archive.len() {
-        let mut entry = archive.by_index(i).map_err(|e| format!("zip entry {i}: {e}"))?;
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| format!("zip entry {i}: {e}"))?;
         let entry_path = match entry.enclosed_name() {
             Some(p) => p.to_path_buf(),
             None => continue,
@@ -329,8 +334,8 @@ async fn download_model_file(app: &tauri::AppHandle, dst: &Path) -> Result<(), S
     let total = resp.content_length().unwrap_or(0);
     let mut downloaded: u64 = 0;
     let mut stream = resp.bytes_stream();
-    let mut file = std::fs::File::create(&tmp)
-        .map_err(|e| format!("create {}: {e}", tmp.display()))?;
+    let mut file =
+        std::fs::File::create(&tmp).map_err(|e| format!("create {}: {e}", tmp.display()))?;
     let mut last_emit = std::time::Instant::now();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| format!("download chunk: {e}"))?;
@@ -371,7 +376,10 @@ pub async fn audio_transcribe_local(
         return Err("empty audio attachment".to_string());
     }
     if bytes.len() > 50 * 1024 * 1024 {
-        return Err(format!("audio too large: {} bytes (max 50 MB)", bytes.len()));
+        return Err(format!(
+            "audio too large: {} bytes (max 50 MB)",
+            bytes.len()
+        ));
     }
 
     let model = find_model().ok_or_else(|| {
@@ -539,14 +547,19 @@ fn append_mono_samples(buf: AudioBufferRef<'_>, src_channels: usize, out: &mut V
     match buf {
         F32(b) => mix!(b, |s: f32| s),
         F64(b) => mix!(b, |s: f64| s as f32),
-        S8(b)  => mix!(b, |s: i8|  (s as f32) / (i8::MAX  as f32)),
+        S8(b) => mix!(b, |s: i8| (s as f32) / (i8::MAX as f32)),
         S16(b) => mix!(b, |s: i16| (s as f32) / (i16::MAX as f32)),
-        S24(b) => mix!(b, |s: symphonia::core::sample::i24| (s.0 as f32) / 8_388_608.0),
+        S24(b) => mix!(b, |s: symphonia::core::sample::i24| (s.0 as f32)
+            / 8_388_608.0),
         S32(b) => mix!(b, |s: i32| (s as f32) / (i32::MAX as f32)),
-        U8(b)  => mix!(b, |s: u8|  ((s as i16 - 128) as f32) / 128.0),
+        U8(b) => mix!(b, |s: u8| ((s as i16 - 128) as f32) / 128.0),
         U16(b) => mix!(b, |s: u16| ((s as i32 - 32768) as f32) / 32_768.0),
-        U24(b) => mix!(b, |s: symphonia::core::sample::u24| ((s.0 as i32 - 8_388_608) as f32) / 8_388_608.0),
-        U32(b) => mix!(b, |s: u32| ((s as i64 - 2_147_483_648) as f32) / 2_147_483_648.0),
+        U24(b) => mix!(
+            b,
+            |s: symphonia::core::sample::u24| ((s.0 as i32 - 8_388_608) as f32) / 8_388_608.0
+        ),
+        U32(b) => mix!(b, |s: u32| ((s as i64 - 2_147_483_648) as f32)
+            / 2_147_483_648.0),
     }
 }
 
@@ -597,13 +610,13 @@ fn write_wav_16k_mono(path: &Path, samples: &[f32]) -> std::io::Result<()> {
     file.write_all(&(36 + data_size).to_le_bytes())?;
     file.write_all(b"WAVE")?;
     file.write_all(b"fmt ")?;
-    file.write_all(&16u32.to_le_bytes())?;       // PCM chunk size
-    file.write_all(&1u16.to_le_bytes())?;        // audio format = PCM
-    file.write_all(&1u16.to_le_bytes())?;        // mono
-    file.write_all(&16_000u32.to_le_bytes())?;   // sample rate
-    file.write_all(&byte_rate.to_le_bytes())?;   // byte rate
-    file.write_all(&2u16.to_le_bytes())?;        // block align
-    file.write_all(&16u16.to_le_bytes())?;       // bits per sample
+    file.write_all(&16u32.to_le_bytes())?; // PCM chunk size
+    file.write_all(&1u16.to_le_bytes())?; // audio format = PCM
+    file.write_all(&1u16.to_le_bytes())?; // mono
+    file.write_all(&16_000u32.to_le_bytes())?; // sample rate
+    file.write_all(&byte_rate.to_le_bytes())?; // byte rate
+    file.write_all(&2u16.to_le_bytes())?; // block align
+    file.write_all(&16u16.to_le_bytes())?; // bits per sample
     file.write_all(b"data")?;
     file.write_all(&data_size.to_le_bytes())?;
     for s in samples {

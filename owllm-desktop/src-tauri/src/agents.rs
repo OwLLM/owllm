@@ -102,22 +102,34 @@ pub async fn list_skill_packs() -> Result<Vec<SkillPack>, String> {
     // %APPDATA%\OwLLM Desktop\skills/, but the legacy LLM/data/skills/
     // location is also enumerated during the migration window.
     for skills_root in paths::skills_dirs_read() {
-        let Ok(read) = std::fs::read_dir(&skills_root) else { continue };
+        let Ok(read) = std::fs::read_dir(&skills_root) else {
+            continue;
+        };
         for entry in read.flatten() {
             let dir = entry.path();
-            if !dir.is_dir() { continue; }
+            if !dir.is_dir() {
+                continue;
+            }
             // The shallow clone of upstream repos lives under
             // skills/_remote/ — skip that container since the
             // individual skills are listed at the top level.
-            if dir.file_name().and_then(|n| n.to_str()) == Some("_remote") { continue; }
+            if dir.file_name().and_then(|n| n.to_str()) == Some("_remote") {
+                continue;
+            }
             let md = dir.join("SKILL.md");
-            if !md.is_file() { continue; }
+            if !md.is_file() {
+                continue;
+            }
             let raw = match std::fs::read_to_string(&md) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
             let (frontmatter, body) = split_skill_md(&raw);
-            let id = dir.file_name().and_then(|n| n.to_str()).unwrap_or("").to_string();
+            let id = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
             out.push(SkillPack {
                 id,
                 path: md.to_string_lossy().into_owned(),
@@ -174,13 +186,27 @@ pub async fn sync_project_skills(cwd: String) -> Result<SkillSyncResult, String>
         if std::fs::copy(&p.path, dest.join("SKILL.md")).is_ok() {
             count += 1;
         }
-        let name = p.frontmatter.get("name").and_then(|v| v.as_str()).unwrap_or(p.id.as_str());
-        let desc = p.frontmatter.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        let name = p
+            .frontmatter
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(p.id.as_str());
+        let desc = p
+            .frontmatter
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let desc1 = desc.lines().next().unwrap_or("").trim();
-        index.push_str(&format!("- **{}** — `{}/SKILL.md`\n  {}\n", name, p.id, desc1));
+        index.push_str(&format!(
+            "- **{}** — `{}/SKILL.md`\n  {}\n",
+            name, p.id, desc1
+        ));
     }
     std::fs::write(base.join("INDEX.md"), index).map_err(|e| format!("write INDEX.md: {e}"))?;
-    Ok(SkillSyncResult { count, index_rel: ".owllm/skills/INDEX.md".into() })
+    Ok(SkillSyncResult {
+        count,
+        index_rel: ".owllm/skills/INDEX.md".into(),
+    })
 }
 
 /// Split a SKILL.md document into its YAML frontmatter (as JSON) and
@@ -217,11 +243,14 @@ pub async fn save_agent_definition(path: String, data: JsonValue) -> Result<(), 
     // both during the migration window, so the Studio "Save" round-
     // trip still works whichever home the file came from.
     let allowed_dirs = paths::custom_agents_dirs_read();
-    let write_target_root = paths::custom_agents_dir()
-        .ok_or_else(|| "user-data root not found".to_string())?;
+    let write_target_root =
+        paths::custom_agents_dir().ok_or_else(|| "user-data root not found".to_string())?;
     let target = std::path::PathBuf::from(&path);
     if target.extension().and_then(|s| s.to_str()) != Some("json") {
-        return Err("save_agent_definition only writes .json files (built-in YAML roles are read-only)".into());
+        return Err(
+            "save_agent_definition only writes .json files (built-in YAML roles are read-only)"
+                .into(),
+        );
     }
     // Make sure the canonical path is inside one of the allowed roots.
     let target_canon = target.canonicalize().unwrap_or(target.clone());
@@ -231,7 +260,9 @@ pub async fn save_agent_definition(path: String, data: JsonValue) -> Result<(), 
     }) || {
         // First-time write into the new dir (which doesn't exist yet).
         let _ = std::fs::create_dir_all(&write_target_root);
-        let wc = write_target_root.canonicalize().unwrap_or(write_target_root.clone());
+        let wc = write_target_root
+            .canonicalize()
+            .unwrap_or(write_target_root.clone());
         target_canon.starts_with(&wc)
     };
     if !ok {
@@ -243,16 +274,16 @@ pub async fn save_agent_definition(path: String, data: JsonValue) -> Result<(), 
     if let Some(parent) = target.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let pretty = serde_json::to_string_pretty(&data)
-        .map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(&target, pretty)
-        .map_err(|e| format!("write {}: {e}", target.display()))?;
+    let pretty = serde_json::to_string_pretty(&data).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&target, pretty).map_err(|e| format!("write {}: {e}", target.display()))?;
     Ok(())
 }
 
 /// True when `target`'s canonical path sits inside any of `dirs`.
 fn path_inside(dirs: &[std::path::PathBuf], target: &Path) -> bool {
-    let tc = target.canonicalize().unwrap_or_else(|_| target.to_path_buf());
+    let tc = target
+        .canonicalize()
+        .unwrap_or_else(|_| target.to_path_buf());
     dirs.iter().any(|d| {
         let dc = d.canonicalize().unwrap_or_else(|_| d.clone());
         tc.starts_with(&dc)
@@ -264,7 +295,13 @@ fn sanitize_stem(name: &str) -> String {
     let s: String = name
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     s.trim_matches(|c| c == '_' || c == '-').to_string()
 }
@@ -275,7 +312,10 @@ fn sanitize_stem(name: &str) -> String {
 /// can never shadow a shipped one — duplicate-to-edit always picks a new
 /// name. Custom teams sync through the vault like other non-secret state.
 #[tauri::command]
-pub async fn save_team_template(file_stem: String, data: JsonValue) -> Result<TeamTemplate, String> {
+pub async fn save_team_template(
+    file_stem: String,
+    data: JsonValue,
+) -> Result<TeamTemplate, String> {
     let stem = sanitize_stem(&file_stem);
     if stem.is_empty() {
         return Err("that name produces an empty file name — use letters or digits".into());
@@ -327,7 +367,10 @@ pub async fn delete_team_template(path: String) -> Result<(), String> {
 /// the role so the UI can select it for editing. Refuses stems that match
 /// a built-in role id (the `base` namespace must stay unambiguous).
 #[tauri::command]
-pub async fn create_agent_definition(file_stem: String, data: JsonValue) -> Result<AgentRole, String> {
+pub async fn create_agent_definition(
+    file_stem: String,
+    data: JsonValue,
+) -> Result<AgentRole, String> {
     let stem = sanitize_stem(&file_stem);
     if stem.is_empty() {
         return Err("that name produces an empty file name — use letters or digits".into());
@@ -345,7 +388,9 @@ pub async fn create_agent_definition(file_stem: String, data: JsonValue) -> Resu
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
     let path = dir.join(format!("{stem}.json"));
     if path.is_file() {
-        return Err(format!("a custom agent named '{stem}' already exists — pick another name"));
+        return Err(format!(
+            "a custom agent named '{stem}' already exists — pick another name"
+        ));
     }
     let mut data = data;
     if let Some(obj) = data.as_object_mut() {
@@ -367,7 +412,10 @@ pub async fn create_agent_definition(file_stem: String, data: JsonValue) -> Resu
 pub async fn delete_agent_definition(path: String) -> Result<(), String> {
     let target = std::path::PathBuf::from(&path);
     if target.extension().and_then(|s| s.to_str()) != Some("json") {
-        return Err("delete_agent_definition only removes .json files (built-in YAML roles are read-only)".into());
+        return Err(
+            "delete_agent_definition only removes .json files (built-in YAML roles are read-only)"
+                .into(),
+        );
     }
     if !path_inside(&paths::custom_agents_dirs_read(), &target) {
         return Err(format!(
@@ -397,17 +445,27 @@ pub async fn list_agent_roles() -> Result<Vec<AgentRole>, String> {
 }
 
 fn collect_team_dir(dir: &Path, built_in: bool, out: &mut Vec<TeamTemplate>) {
-    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in read.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
         // Skip `__init__.json` etc. — files starting with underscore.
-        if id.starts_with('_') { continue; }
-        let Ok(raw) = std::fs::read_to_string(&path) else { continue };
-        let Ok(data) = serde_json::from_str::<JsonValue>(&raw) else { continue };
+        if id.starts_with('_') {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(data) = serde_json::from_str::<JsonValue>(&raw) else {
+            continue;
+        };
         out.push(TeamTemplate {
             id: id.to_string(),
             path: path.to_string_lossy().into_owned(),
@@ -418,7 +476,9 @@ fn collect_team_dir(dir: &Path, built_in: bool, out: &mut Vec<TeamTemplate>) {
 }
 
 fn collect_role_dir(dir: &Path, built_in: bool, out: &mut Vec<AgentRole>) {
-    let Ok(read) = std::fs::read_dir(dir) else { return };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return;
+    };
     for entry in read.flatten() {
         let path = entry.path();
         // Built-ins are YAML, user-saved customs are JSON. Handle both.
@@ -431,8 +491,12 @@ fn collect_role_dir(dir: &Path, built_in: bool, out: &mut Vec<AgentRole>) {
             _ => None,
         };
         let Some(data) = parsed else { continue };
-        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else { continue };
-        if id.starts_with('_') || id == "loader" { continue; }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if id.starts_with('_') || id == "loader" {
+            continue;
+        }
         out.push(AgentRole {
             id: id.to_string(),
             path: path.to_string_lossy().into_owned(),
@@ -508,8 +572,13 @@ fn yaml_lite_to_json(raw: &str) -> JsonValue {
                 while i < lines.len() {
                     let l = lines[i];
                     let trimmed = l.trim_start();
-                    if trimmed.is_empty() { i += 1; continue; }
-                    if !l.starts_with(' ') { break; }
+                    if trimmed.is_empty() {
+                        i += 1;
+                        continue;
+                    }
+                    if !l.starts_with(' ') {
+                        break;
+                    }
                     if let Some(rest) = trimmed.strip_prefix("- ") {
                         items.push(Value::String(rest.trim().to_string()));
                         i += 1;
@@ -525,7 +594,9 @@ fn yaml_lite_to_json(raw: &str) -> JsonValue {
                 if n.fract() == 0.0 && v.find('.').is_none() {
                     Value::Number((n as i64).into())
                 } else {
-                    serde_json::Number::from_f64(n).map(Value::Number).unwrap_or(Value::String(v.to_string()))
+                    serde_json::Number::from_f64(n)
+                        .map(Value::Number)
+                        .unwrap_or(Value::String(v.to_string()))
                 }
             } else if v == "true" {
                 Value::Bool(true)
@@ -606,12 +677,22 @@ system_prompt: |
             .block_on(save_team_template("OWLLM Probe CRUD Team".into(), data))
             .expect("save team");
         assert_eq!(saved.id, "owllm_probe_crud_team");
-        assert_eq!(saved.data["name"], "owllm_probe_crud_team", "name enforced to stem");
+        assert_eq!(
+            saved.data["name"], "owllm_probe_crud_team",
+            "name enforced to stem"
+        );
         let listed = rt.block_on(list_team_templates()).unwrap();
-        assert!(listed.iter().any(|t| t.id == saved.id && !t.built_in), "custom team listed");
+        assert!(
+            listed.iter().any(|t| t.id == saved.id && !t.built_in),
+            "custom team listed"
+        );
         // built-in name collision refused
         assert!(
-            rt.block_on(save_team_template("code_artisan".into(), serde_json::json!({}))).is_err(),
+            rt.block_on(save_team_template(
+                "code_artisan".into(),
+                serde_json::json!({})
+            ))
+            .is_err(),
             "built-in shadowing must be refused"
         );
         // edit = same stem saves over itself
@@ -623,12 +704,17 @@ system_prompt: |
         assert_eq!(resaved.data["description"], "edited");
         // delete + containment guard
         assert!(
-            rt.block_on(delete_team_template("C:\\Windows\\notours.json".into())).is_err(),
+            rt.block_on(delete_team_template("C:\\Windows\\notours.json".into()))
+                .is_err(),
             "outside-path delete must be refused"
         );
-        rt.block_on(delete_team_template(saved.path.clone())).expect("delete team");
+        rt.block_on(delete_team_template(saved.path.clone()))
+            .expect("delete team");
         let listed2 = rt.block_on(list_team_templates()).unwrap();
-        assert!(!listed2.iter().any(|t| t.id == saved.id), "deleted team gone");
+        assert!(
+            !listed2.iter().any(|t| t.id == saved.id),
+            "deleted team gone"
+        );
 
         // --- agent: create → list → duplicate-collision → delete ---
         let role = serde_json::json!({
@@ -637,22 +723,37 @@ system_prompt: |
             "system_prompt": "You are a probe.",
         });
         let created = rt
-            .block_on(create_agent_definition("OWLLM Probe CRUD Agent".into(), role.clone()))
+            .block_on(create_agent_definition(
+                "OWLLM Probe CRUD Agent".into(),
+                role.clone(),
+            ))
             .expect("create agent");
         assert_eq!(created.id, "owllm_probe_crud_agent");
         let roles = rt.block_on(list_agent_roles()).unwrap();
-        assert!(roles.iter().any(|r| r.id == created.id && !r.built_in), "custom agent listed");
         assert!(
-            rt.block_on(create_agent_definition(created.id.clone(), role)).is_err(),
+            roles.iter().any(|r| r.id == created.id && !r.built_in),
+            "custom agent listed"
+        );
+        assert!(
+            rt.block_on(create_agent_definition(created.id.clone(), role))
+                .is_err(),
             "same-name create must be refused"
         );
         assert!(
-            rt.block_on(create_agent_definition("critic".into(), serde_json::json!({}))).is_err(),
+            rt.block_on(create_agent_definition(
+                "critic".into(),
+                serde_json::json!({})
+            ))
+            .is_err(),
             "built-in role shadowing must be refused"
         );
-        rt.block_on(delete_agent_definition(created.path.clone())).expect("delete agent");
+        rt.block_on(delete_agent_definition(created.path.clone()))
+            .expect("delete agent");
         let roles2 = rt.block_on(list_agent_roles()).unwrap();
-        assert!(!roles2.iter().any(|r| r.id == created.id), "deleted agent gone");
+        assert!(
+            !roles2.iter().any(|r| r.id == created.id),
+            "deleted agent gone"
+        );
     }
 
     #[test]

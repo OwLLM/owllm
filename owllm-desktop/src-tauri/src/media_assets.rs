@@ -81,7 +81,9 @@ fn httpdate_like(epoch_secs: u64) -> String {
     let mut day = days_since_epoch;
     loop {
         let yr_days = if is_leap(year) { 366 } else { 365 };
-        if day < yr_days { break; }
+        if day < yr_days {
+            break;
+        }
         day -= yr_days;
         year += 1;
     }
@@ -92,12 +94,20 @@ fn httpdate_like(epoch_secs: u64) -> String {
     };
     let mut month = 0;
     for (i, md) in mdays.iter().enumerate() {
-        if day < *md { month = i; break; }
+        if day < *md {
+            month = i;
+            break;
+        }
         day -= *md;
     }
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month + 1, day + 1, hour, minute, sec
+        year,
+        month + 1,
+        day + 1,
+        hour,
+        minute,
+        sec
     )
 }
 
@@ -112,7 +122,10 @@ fn new_id() -> String {
         .unwrap_or(0);
     let mut rand_bytes = [0u8; 8];
     getrand_unsafe(&mut rand_bytes);
-    let rand_hex = rand_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    let rand_hex = rand_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
     format!("{:x}_{}", ms, rand_hex)
 }
 
@@ -124,7 +137,9 @@ fn getrand_unsafe(buf: &mut [u8]) {
         .unwrap_or(0);
     seed ^= Instant::now().elapsed().as_nanos();
     for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005u128).wrapping_add(1442695040888963407u128);
+        seed = seed
+            .wrapping_mul(6364136223846793005u128)
+            .wrapping_add(1442695040888963407u128);
         *b = (seed >> 96) as u8;
     }
 }
@@ -135,10 +150,13 @@ fn getrand_unsafe(buf: &mut [u8]) {
 fn asset_dir_for(project_id: &str) -> Result<PathBuf, String> {
     let location = project_location(project_id)?;
     if !location.is_empty() {
-        let p = PathBuf::from(location).join(ASSET_DIR_NAME).join(ASSET_SUBDIR_NAME);
+        let p = PathBuf::from(location)
+            .join(ASSET_DIR_NAME)
+            .join(ASSET_SUBDIR_NAME);
         return Ok(p);
     }
-    let root = crate::paths::user_data_root().ok_or_else(|| "user data root not found".to_string())?;
+    let root =
+        crate::paths::user_data_root().ok_or_else(|| "user data root not found".to_string())?;
     Ok(root.join(FALLBACK_ASSETS_DIR).join(project_id))
 }
 
@@ -252,17 +270,32 @@ fn list_assets_impl(project_id: String) -> Result<Vec<MediaAsset>, String> {
     let mut out = Vec::new();
     for entry in read.flatten() {
         let path = entry.path();
-        if !path.is_file() { continue; }
+        if !path.is_file() {
+            continue;
+        }
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if !is_media_ext(ext) { continue; }
+        if !is_media_ext(ext) {
+            continue;
+        }
         // Skip sidecars themselves (they end with .asset.json and may be mistaken if ext parsing drifts).
-        if path.to_string_lossy().ends_with(SIDECAR_EXT) { continue; }
+        if path.to_string_lossy().ends_with(SIDECAR_EXT) {
+            continue;
+        }
 
-        let id = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(new_id);
+        let id = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(new_id);
         let sidecar = sidecar_path(&path);
-        let mut meta = load_sidecar(&sidecar).unwrap_or_else(|| default_meta_for(&path.file_name().unwrap_or_default().to_string_lossy(), &id));
+        let mut meta = load_sidecar(&sidecar).unwrap_or_else(|| {
+            default_meta_for(&path.file_name().unwrap_or_default().to_string_lossy(), &id)
+        });
         meta.id = id;
-        meta.file_name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        meta.file_name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         meta.status = normalize_status(&meta.status);
         out.push(MediaAsset {
             kind: media_kind(ext),
@@ -281,7 +314,11 @@ pub async fn media_assets_list(project_id: String) -> Result<Vec<MediaAsset>, St
         .map_err(|e| format!("join error: {e:?}"))?
 }
 
-fn read_asset_impl(project_id: String, asset_id: String, include_data: bool) -> Result<MediaAssetDetail, String> {
+fn read_asset_impl(
+    project_id: String,
+    asset_id: String,
+    include_data: bool,
+) -> Result<MediaAssetDetail, String> {
     let dir = ensure_asset_dir(&project_id)?;
     let assets = list_assets_impl(project_id)?;
     let asset = assets
@@ -291,8 +328,15 @@ fn read_asset_impl(project_id: String, asset_id: String, include_data: bool) -> 
 
     let media_path = dir.join(&asset.meta.file_name);
     let data_url = if include_data && asset.kind == "image" {
-        let bytes = std::fs::read(&media_path).map_err(|e| format!("read {}: {e}", media_path.display()))?;
-        let mime = match media_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase().as_str() {
+        let bytes = std::fs::read(&media_path)
+            .map_err(|e| format!("read {}: {e}", media_path.display()))?;
+        let mime = match media_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str()
+        {
             "png" => "image/png",
             "jpg" | "jpeg" => "image/jpeg",
             "gif" => "image/gif",
@@ -322,7 +366,11 @@ pub async fn media_assets_get(
         .map_err(|e| format!("join error: {e:?}"))?
 }
 
-fn update_asset_impl(project_id: String, asset_id: String, patch: AssetPatch) -> Result<(), String> {
+fn update_asset_impl(
+    project_id: String,
+    asset_id: String,
+    patch: AssetPatch,
+) -> Result<(), String> {
     let dir = ensure_asset_dir(&project_id)?;
     let assets = list_assets_impl(project_id)?;
     let asset = assets
@@ -332,14 +380,27 @@ fn update_asset_impl(project_id: String, asset_id: String, patch: AssetPatch) ->
 
     let media_path = dir.join(&asset.meta.file_name);
     let sidecar = sidecar_path(&media_path);
-    let mut meta = load_sidecar(&sidecar).unwrap_or_else(|| default_meta_for(&asset.meta.file_name, &asset_id));
+    let mut meta = load_sidecar(&sidecar)
+        .unwrap_or_else(|| default_meta_for(&asset.meta.file_name, &asset_id));
 
-    if let Some(v) = patch.prompt { meta.prompt = v; }
-    if let Some(v) = patch.target_platform { meta.target_platform = v; }
-    if let Some(v) = patch.campaign { meta.campaign = v; }
-    if let Some(v) = patch.status { meta.status = normalize_status(&v); }
-    if let Some(v) = patch.tags { meta.tags = v; }
-    if let Some(v) = patch.notes { meta.notes = v; }
+    if let Some(v) = patch.prompt {
+        meta.prompt = v;
+    }
+    if let Some(v) = patch.target_platform {
+        meta.target_platform = v;
+    }
+    if let Some(v) = patch.campaign {
+        meta.campaign = v;
+    }
+    if let Some(v) = patch.status {
+        meta.status = normalize_status(&v);
+    }
+    if let Some(v) = patch.tags {
+        meta.tags = v;
+    }
+    if let Some(v) = patch.notes {
+        meta.notes = v;
+    }
     meta.updated_at = now_iso();
     save_sidecar(&sidecar, &meta)
 }
@@ -355,12 +416,20 @@ pub async fn media_assets_update(
         .map_err(|e| format!("join error: {e:?}"))?
 }
 
-fn import_asset_impl(project_id: String, source_path: String, meta: Option<AssetMeta>) -> Result<MediaAsset, String> {
+fn import_asset_impl(
+    project_id: String,
+    source_path: String,
+    meta: Option<AssetMeta>,
+) -> Result<MediaAsset, String> {
     let source = PathBuf::from(&source_path);
     if !source.is_file() {
         return Err(format!("not a file: {source_path}"));
     }
-    let ext = source.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let ext = source
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
     if !is_media_ext(&ext) {
         return Err(format!("unsupported media extension: {ext}"));
     }
@@ -380,15 +449,20 @@ fn import_asset_impl(project_id: String, source_path: String, meta: Option<Asset
     let id = new_id();
     let unique_name = format!("{}_{}", id, safe_name);
     let dest = dir.join(&unique_name);
-    std::fs::copy(&source, &dest).map_err(|e| format!("copy {} -> {}: {e}", source.display(), dest.display()))?;
+    std::fs::copy(&source, &dest)
+        .map_err(|e| format!("copy {} -> {}: {e}", source.display(), dest.display()))?;
 
     let mut new_meta = meta.unwrap_or_else(|| default_meta_for(&unique_name, &id));
     new_meta.id = id;
     new_meta.file_name = unique_name.clone();
     new_meta.status = normalize_status(&new_meta.status);
     let now = now_iso();
-    if new_meta.created_at.is_empty() { new_meta.created_at = now.clone(); }
-    if new_meta.updated_at.is_empty() { new_meta.updated_at = now; }
+    if new_meta.created_at.is_empty() {
+        new_meta.created_at = now.clone();
+    }
+    if new_meta.updated_at.is_empty() {
+        new_meta.updated_at = now;
+    }
 
     let sidecar = sidecar_path(&dest);
     save_sidecar(&sidecar, &new_meta)?;

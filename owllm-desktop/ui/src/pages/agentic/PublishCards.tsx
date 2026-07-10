@@ -146,10 +146,14 @@ export default function PublishCards({
 
   const refresh = useCallback(() => {
     if (!repoDir) { setReady(null); return; }
-    invoke<ReadyCheck[]>("publish_readiness", { repoDir })
+    invoke<ReadyCheck[]>("publish_readiness", {
+      repoDir,
+      mode: settings.mode,
+      sign: (settings.sign.thumbprint.trim() || settings.sign.subject.trim()) ? settings.sign : null,
+    })
       .then((r) => { if (mounted.current) setReady(r); })
       .catch(() => { if (mounted.current) setReady(null); });
-  }, [repoDir]);
+  }, [repoDir, settings.mode, settings.sign]);
 
   useEffect(() => {
     mounted.current = true;
@@ -260,6 +264,8 @@ export default function PublishCards({
   const showPush = isRepo && hasRemote;
   const showMerge = isRepo && hasRemote;
   const showPublish = isRepo && hasPublishScript;
+  const canPublish = ready?.every((c) => c.ok) ?? false;
+  const publishFailReason = ready?.filter((c) => !c.ok).map((c) => `${c.label}: ${c.detail}`).join("\n");
   if (!showCommit && !showPush && !showMerge && !showPublish) return null;
 
   const modeLabel = settings.visibility === "dry-run" ? "Dry run" : settings.visibility === "draft" ? "Draft" : "Publish";
@@ -318,9 +324,11 @@ export default function PublishCards({
             {showPublish && (
               <button
                 onClick={doPublish}
-                disabled={disabled || loading}
-                title={`${modeLabel} release (${settings.mode})${signed ? "" : ", unsigned"}`}
-                style={{ ...chipBtn, flex: 1, background: modeColor, color: "#06080d", border: "none" }}
+                disabled={disabled || loading || !canPublish}
+                title={canPublish
+                  ? `${modeLabel} release (${settings.mode})${signed ? "" : ", unsigned"}`
+                  : (publishFailReason || "Readiness check running…")}
+                style={{ ...chipBtn, flex: 1, background: modeColor, color: "#06080d", border: "none", opacity: canPublish ? 1 : 0.5 }}
               >
                 {loading ? "⏳" : "🚀"} {modeLabel}
               </button>

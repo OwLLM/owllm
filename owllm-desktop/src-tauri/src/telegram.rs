@@ -170,7 +170,10 @@ pub async fn telegram_download_file(
         .await
         .map_err(|e| format!("getFile: {e}"))?;
     let status = resp.status();
-    let body = resp.text().await.map_err(|e| format!("getFile body: {e}"))?;
+    let body = resp
+        .text()
+        .await
+        .map_err(|e| format!("getFile body: {e}"))?;
     if !status.is_success() {
         return Err(format!("getFile HTTP {status}: {body}"));
     }

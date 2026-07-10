@@ -80,7 +80,12 @@ pub struct KvmTarget {
 /// so the whole capability stays dormant unless a user explicitly opts in.
 fn feature_enabled() -> bool {
     let env_on = std::env::var("OWLLM_KVM_NODE")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"))
+        .map(|v| {
+            matches!(
+                v.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
         .unwrap_or(false);
     env_on || load_enabled_setting()
 }
@@ -88,9 +93,15 @@ fn feature_enabled() -> bool {
 /// Read the persisted UI toggle. Any read/parse failure → false (fail-closed),
 /// mirroring load_consent().
 fn load_enabled_setting() -> bool {
-    let Some(path) = consent_path() else { return false };
-    let Ok(txt) = std::fs::read_to_string(&path) else { return false };
-    let Ok(v) = serde_json::from_str::<Value>(&txt) else { return false };
+    let Some(path) = consent_path() else {
+        return false;
+    };
+    let Ok(txt) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&txt) else {
+        return false;
+    };
     v.get("enabled").and_then(Value::as_bool) == Some(true)
 }
 
@@ -137,9 +148,15 @@ fn consent_path() -> Option<PathBuf> {
 /// EMPTY set — i.e. fail-closed (a corrupt file grants nothing).
 fn load_consent() -> HashSet<String> {
     let mut set = HashSet::new();
-    let Some(path) = consent_path() else { return set };
-    let Ok(txt) = std::fs::read_to_string(&path) else { return set };
-    let Ok(v) = serde_json::from_str::<Value>(&txt) else { return set };
+    let Some(path) = consent_path() else {
+        return set;
+    };
+    let Ok(txt) = std::fs::read_to_string(&path) else {
+        return set;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&txt) else {
+        return set;
+    };
     if let Some(map) = v.get("hosts").and_then(Value::as_object) {
         for (host, granted) in map {
             if granted.as_bool() == Some(true) {
@@ -172,7 +189,14 @@ fn save_consent(host: &str, grant: bool) -> Result<(), String> {
 /// is keyed on the NAME (not the action) so any current or future action that
 /// carries one of these can't leak it by omission.
 const SENSITIVE_FIELDS: &[&str] = &[
-    "text", "combo", "key", "keys", "password", "passphrase", "token", "secret",
+    "text",
+    "combo",
+    "key",
+    "keys",
+    "password",
+    "passphrase",
+    "token",
+    "secret",
 ];
 
 fn sha256_hex(s: &str) -> String {
@@ -299,7 +323,9 @@ fn nonce_bytes<const N: usize>() -> [u8; N] {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0)
-        ^ CTR.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        ^ CTR
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut x = seed;
     let mut out = [0u8; N];
     for b in out.iter_mut() {
@@ -399,9 +425,15 @@ async fn login(cli: &reqwest::Client, t: &KvmTarget) -> Result<String, String> {
         .send()
         .await
         .map_err(|e| format!("login request: {e}"))?;
-    let body: Value = resp.json().await.map_err(|e| format!("login response: {e}"))?;
+    let body: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("login response: {e}"))?;
     if body.get("code").and_then(Value::as_i64) != Some(0) {
-        let msg = body.get("msg").and_then(Value::as_str).unwrap_or("invalid credentials");
+        let msg = body
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or("invalid credentials");
         return Err(format!("login rejected: {msg}"));
     }
     body.get("data")
@@ -436,11 +468,19 @@ async fn api_post(
         .await
         .map_err(|e| format!("POST {path}: {e}"))?;
     let status = resp.status();
-    let v: Value = resp.json().await.map_err(|e| format!("POST {path} response: {e}"))?;
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("POST {path} response: {e}"))?;
     let code = v.get("code").and_then(Value::as_i64);
     if code != Some(0) {
-        let msg = v.get("msg").and_then(Value::as_str).unwrap_or("unknown error");
-        return Err(format!("{path} failed (code {code:?}, HTTP {status}): {msg}"));
+        let msg = v
+            .get("msg")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown error");
+        return Err(format!(
+            "{path} failed (code {code:?}, HTTP {status}): {msg}"
+        ));
     }
     Ok(v.get("data").cloned().unwrap_or(Value::Null))
 }
@@ -473,7 +513,18 @@ fn jpeg_dimensions(jpeg: &[u8]) -> Option<(u32, u32)> {
         // SOF0/1/2/3/5/6/7/9/A/B/D/E/F carry frame dimensions (skip DHT/DAC etc).
         let is_sof = matches!(
             marker,
-            0xC0 | 0xC1 | 0xC2 | 0xC3 | 0xC5 | 0xC6 | 0xC7 | 0xC9 | 0xCA | 0xCB | 0xCD | 0xCE | 0xCF
+            0xC0 | 0xC1
+                | 0xC2
+                | 0xC3
+                | 0xC5
+                | 0xC6
+                | 0xC7
+                | 0xC9
+                | 0xCA
+                | 0xCB
+                | 0xCD
+                | 0xCE
+                | 0xCF
         );
         if is_sof {
             let h = ((jpeg[i + 5] as u32) << 8) | jpeg[i + 6] as u32;
@@ -493,7 +544,13 @@ fn save_frame(host: &str, jpeg: &[u8]) -> Result<String, String> {
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir kvm_frames: {e}"))?;
     let safe_host: String = host
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S%3fZ");
     let path = dir.join(format!("{safe_host}-{ts}.jpg"));
@@ -537,21 +594,74 @@ async fn do_screenshot(t: &KvmTarget) -> Result<Value, String> {
 /// are handled by `modifier_bit`; returns None for anything unmapped.
 fn hid_keycode(name: &str) -> Option<u8> {
     Some(match name {
-        "a" => 0x04, "b" => 0x05, "c" => 0x06, "d" => 0x07, "e" => 0x08, "f" => 0x09,
-        "g" => 0x0a, "h" => 0x0b, "i" => 0x0c, "j" => 0x0d, "k" => 0x0e, "l" => 0x0f,
-        "m" => 0x10, "n" => 0x11, "o" => 0x12, "p" => 0x13, "q" => 0x14, "r" => 0x15,
-        "s" => 0x16, "t" => 0x17, "u" => 0x18, "v" => 0x19, "w" => 0x1a, "x" => 0x1b,
-        "y" => 0x1c, "z" => 0x1d,
-        "1" => 0x1e, "2" => 0x1f, "3" => 0x20, "4" => 0x21, "5" => 0x22,
-        "6" => 0x23, "7" => 0x24, "8" => 0x25, "9" => 0x26, "0" => 0x27,
-        "enter" | "return" => 0x28, "esc" | "escape" => 0x29, "backspace" | "bksp" => 0x2a,
-        "tab" => 0x2b, "space" | "spacebar" => 0x2c, "minus" => 0x2d, "equal" => 0x2e,
-        "f1" => 0x3a, "f2" => 0x3b, "f3" => 0x3c, "f4" => 0x3d, "f5" => 0x3e, "f6" => 0x3f,
-        "f7" => 0x40, "f8" => 0x41, "f9" => 0x42, "f10" => 0x43, "f11" => 0x44, "f12" => 0x45,
-        "print" | "printscreen" | "prtsc" => 0x46, "scrolllock" => 0x47, "pause" => 0x48,
-        "insert" | "ins" => 0x49, "home" => 0x4a, "pageup" | "pgup" => 0x4b,
-        "delete" | "del" => 0x4c, "end" => 0x4d, "pagedown" | "pgdn" => 0x4e,
-        "right" => 0x4f, "left" => 0x50, "down" => 0x51, "up" => 0x52,
+        "a" => 0x04,
+        "b" => 0x05,
+        "c" => 0x06,
+        "d" => 0x07,
+        "e" => 0x08,
+        "f" => 0x09,
+        "g" => 0x0a,
+        "h" => 0x0b,
+        "i" => 0x0c,
+        "j" => 0x0d,
+        "k" => 0x0e,
+        "l" => 0x0f,
+        "m" => 0x10,
+        "n" => 0x11,
+        "o" => 0x12,
+        "p" => 0x13,
+        "q" => 0x14,
+        "r" => 0x15,
+        "s" => 0x16,
+        "t" => 0x17,
+        "u" => 0x18,
+        "v" => 0x19,
+        "w" => 0x1a,
+        "x" => 0x1b,
+        "y" => 0x1c,
+        "z" => 0x1d,
+        "1" => 0x1e,
+        "2" => 0x1f,
+        "3" => 0x20,
+        "4" => 0x21,
+        "5" => 0x22,
+        "6" => 0x23,
+        "7" => 0x24,
+        "8" => 0x25,
+        "9" => 0x26,
+        "0" => 0x27,
+        "enter" | "return" => 0x28,
+        "esc" | "escape" => 0x29,
+        "backspace" | "bksp" => 0x2a,
+        "tab" => 0x2b,
+        "space" | "spacebar" => 0x2c,
+        "minus" => 0x2d,
+        "equal" => 0x2e,
+        "f1" => 0x3a,
+        "f2" => 0x3b,
+        "f3" => 0x3c,
+        "f4" => 0x3d,
+        "f5" => 0x3e,
+        "f6" => 0x3f,
+        "f7" => 0x40,
+        "f8" => 0x41,
+        "f9" => 0x42,
+        "f10" => 0x43,
+        "f11" => 0x44,
+        "f12" => 0x45,
+        "print" | "printscreen" | "prtsc" => 0x46,
+        "scrolllock" => 0x47,
+        "pause" => 0x48,
+        "insert" | "ins" => 0x49,
+        "home" => 0x4a,
+        "pageup" | "pgup" => 0x4b,
+        "delete" | "del" => 0x4c,
+        "end" => 0x4d,
+        "pagedown" | "pgdn" => 0x4e,
+        "right" => 0x4f,
+        "left" => 0x50,
+        "down" => 0x51,
+        "up" => 0x52,
         _ => return None,
     })
 }
@@ -576,7 +686,10 @@ fn modifier_bit(name: &str) -> Option<u8> {
 fn keyboard_report(combo: &str) -> Result<[u8; 8], String> {
     let mut modifiers = 0u8;
     let mut keys: Vec<u8> = Vec::new();
-    for raw in combo.split(|c| c == '+' || c == '-' || c == ' ').filter(|s| !s.is_empty()) {
+    for raw in combo
+        .split(|c| c == '+' || c == '-' || c == ' ')
+        .filter(|s| !s.is_empty())
+    {
         let tok = raw.trim().to_ascii_lowercase();
         if let Some(m) = modifier_bit(&tok) {
             modifiers |= m;
@@ -584,7 +697,9 @@ fn keyboard_report(combo: &str) -> Result<[u8; 8], String> {
         }
         if let Some(k) = hid_keycode(&tok) {
             if keys.len() >= 6 {
-                return Err(format!("too many keys in combo '{combo}' (USB HID max is 6)"));
+                return Err(format!(
+                    "too many keys in combo '{combo}' (USB HID max is 6)"
+                ));
             }
             keys.push(k);
             continue;
@@ -615,12 +730,19 @@ fn tagged(tag: u8, report: &[u8]) -> Vec<u8> {
 fn mouse_frames(op: &str, params: &Value) -> Result<Vec<Vec<u8>>, String> {
     let x = params.get("x").and_then(Value::as_i64).unwrap_or(0);
     let y = params.get("y").and_then(Value::as_i64).unwrap_or(0);
-    let button = params.get("button").and_then(Value::as_str).unwrap_or("left");
+    let button = params
+        .get("button")
+        .and_then(Value::as_str)
+        .unwrap_or("left");
     let bit = match button {
         "left" => 1u8,
         "right" => 2,
         "middle" => 4,
-        other => return Err(format!("unknown mouse button '{other}' (left|right|middle)")),
+        other => {
+            return Err(format!(
+                "unknown mouse button '{other}' (left|right|middle)"
+            ))
+        }
     };
     let clamp = |v: i64| v.clamp(-127, 127) as i8 as u8;
     let report = |buttons: u8, dx: i64, dy: i64, wheel: i64| {
@@ -632,10 +754,18 @@ fn mouse_frames(op: &str, params: &Value) -> Result<Vec<Vec<u8>>, String> {
         "up" => vec![report(0, 0, 0, 0)],
         "click" => vec![report(bit, 0, 0, 0), report(0, 0, 0, 0)],
         "scroll" => {
-            let wheel = if y != 0 { y } else { params.get("wheel").and_then(Value::as_i64).unwrap_or(0) };
+            let wheel = if y != 0 {
+                y
+            } else {
+                params.get("wheel").and_then(Value::as_i64).unwrap_or(0)
+            };
             vec![report(0, 0, 0, wheel)]
         }
-        other => return Err(format!("unknown mouse op '{other}' (move|click|down|up|scroll)")),
+        other => {
+            return Err(format!(
+                "unknown mouse op '{other}' (move|click|down|up|scroll)"
+            ))
+        }
     })
 }
 
@@ -657,7 +787,12 @@ fn ws_frame(opcode: u8, payload: &[u8]) -> Vec<u8> {
 /// Open `/api/ws`, send the given (already tag-prefixed) HID frames, close.
 /// Synchronous: the handshake + a few tiny writes are wrapped in spawn_blocking
 /// by `ws_send`. TLS via native-tls (schannel/openssl/SecureTransport per OS).
-fn ws_send_blocking(host: String, port: u16, token: String, frames: Vec<Vec<u8>>) -> Result<(), String> {
+fn ws_send_blocking(
+    host: String,
+    port: u16,
+    token: String,
+    frames: Vec<Vec<u8>>,
+) -> Result<(), String> {
     use std::io::{Read, Write};
     let connector = native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(true)
@@ -666,8 +801,10 @@ fn ws_send_blocking(host: String, port: u16, token: String, frames: Vec<Vec<u8>>
         .map_err(|e| format!("tls connector: {e}"))?;
     let tcp = std::net::TcpStream::connect((host.as_str(), port))
         .map_err(|e| format!("connect {host}:{port}: {e}"))?;
-    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10))).ok();
-    tcp.set_write_timeout(Some(std::time::Duration::from_secs(10))).ok();
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok();
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(10)))
+        .ok();
     let mut tls = connector
         .connect(&host, tcp)
         .map_err(|e| format!("tls handshake: {e}"))?;
@@ -687,7 +824,9 @@ fn ws_send_blocking(host: String, port: u16, token: String, frames: Vec<Vec<u8>>
     let mut hdr = Vec::new();
     let mut byte = [0u8; 1];
     loop {
-        let n = tls.read(&mut byte).map_err(|e| format!("ws read handshake: {e}"))?;
+        let n = tls
+            .read(&mut byte)
+            .map_err(|e| format!("ws read handshake: {e}"))?;
         if n == 0 {
             return Err("ws: connection closed during handshake".into());
         }
@@ -706,7 +845,8 @@ fn ws_send_blocking(host: String, port: u16, token: String, frames: Vec<Vec<u8>>
     }
 
     for f in &frames {
-        tls.write_all(&ws_frame(0x2, f)).map_err(|e| format!("ws send frame: {e}"))?;
+        tls.write_all(&ws_frame(0x2, f))
+            .map_err(|e| format!("ws send frame: {e}"))?;
     }
     // Polite close frame (opcode 0x8), best-effort.
     let _ = tls.write_all(&ws_frame(0x8, &[]));
@@ -730,7 +870,14 @@ async fn do_type(t: &KvmTarget, params: &Value) -> Result<Value, String> {
         .ok_or("missing string field 'text' in params")?;
     let langue = params.get("langue").and_then(Value::as_str).unwrap_or("en");
     let (cli, token) = connect(t).await?;
-    api_post(&cli, t, &token, "/api/hid/paste", json!({ "content": text, "langue": langue })).await?;
+    api_post(
+        &cli,
+        t,
+        &token,
+        "/api/hid/paste",
+        json!({ "content": text, "langue": langue }),
+    )
+    .await?;
     Ok(json!({ "typed": text.chars().count() }))
 }
 
@@ -755,13 +902,28 @@ async fn do_mouse(t: &KvmTarget, params: &Value) -> Result<Value, String> {
 }
 
 async fn do_power(t: &KvmTarget, params: &Value) -> Result<Value, String> {
-    let kind = params.get("type").and_then(Value::as_str).unwrap_or("power");
+    let kind = params
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("power");
     if kind != "power" && kind != "reset" {
-        return Err(format!("power: 'type' must be 'power' or 'reset', got '{kind}'"));
+        return Err(format!(
+            "power: 'type' must be 'power' or 'reset', got '{kind}'"
+        ));
     }
-    let duration = params.get("duration").and_then(Value::as_i64).unwrap_or(800);
+    let duration = params
+        .get("duration")
+        .and_then(Value::as_i64)
+        .unwrap_or(800);
     let (cli, token) = connect(t).await?;
-    api_post(&cli, t, &token, "/api/vm/gpio", json!({ "type": kind, "duration": duration })).await?;
+    api_post(
+        &cli,
+        t,
+        &token,
+        "/api/vm/gpio",
+        json!({ "type": kind, "duration": duration }),
+    )
+    .await?;
     Ok(json!({ "type": kind, "duration": duration }))
 }
 
@@ -772,7 +934,14 @@ async fn do_mount_iso(t: &KvmTarget, params: &Value) -> Result<Value, String> {
         .ok_or("missing string field 'file' in params")?;
     let cdrom = params.get("cdrom").and_then(Value::as_bool).unwrap_or(true);
     let (cli, token) = connect(t).await?;
-    api_post(&cli, t, &token, "/api/storage/image/mount", json!({ "file": file, "cdrom": cdrom })).await?;
+    api_post(
+        &cli,
+        t,
+        &token,
+        "/api/storage/image/mount",
+        json!({ "file": file, "cdrom": cdrom }),
+    )
+    .await?;
     Ok(json!({ "file": file, "cdrom": cdrom }))
 }
 
@@ -855,19 +1024,50 @@ fn hydrate_target_from_store(t: &mut KvmTarget) {
     };
     let Some(e) = entry else { return };
     if t.transport.trim().is_empty() {
-        t.transport = e.get("transport").and_then(Value::as_str).unwrap_or("websocket").to_string();
+        t.transport = e
+            .get("transport")
+            .and_then(Value::as_str)
+            .unwrap_or("websocket")
+            .to_string();
     }
     if t.port.is_none() {
         t.port = e.get("port").and_then(Value::as_u64).map(|p| p as u16);
     }
-    if t.auth.username.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        t.auth.username = e.get("username").and_then(Value::as_str).map(str::to_string);
+    if t.auth
+        .username
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        t.auth.username = e
+            .get("username")
+            .and_then(Value::as_str)
+            .map(str::to_string);
     }
-    if t.auth.token.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        t.auth.token = e.get("password").and_then(Value::as_str).and_then(decrypt_stored_password);
+    if t.auth
+        .token
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        t.auth.token = e
+            .get("password")
+            .and_then(Value::as_str)
+            .and_then(decrypt_stored_password);
     }
-    if t.auth.ssh_key_path.as_deref().map(str::trim).unwrap_or("").is_empty() {
-        t.auth.ssh_key_path = e.get("sshKeyPath").and_then(Value::as_str).map(str::to_string);
+    if t.auth
+        .ssh_key_path
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("")
+        .is_empty()
+    {
+        t.auth.ssh_key_path = e
+            .get("sshKeyPath")
+            .and_then(Value::as_str)
+            .map(str::to_string);
     }
 }
 
@@ -887,7 +1087,11 @@ pub fn kvm_node_save(
         return Err("missing field 'host' (the NanoKVM IP or hostname)".to_string());
     }
     let mut doc = load_nodes_doc();
-    if !doc["nodes"].get(&host).map(Value::is_object).unwrap_or(false) {
+    if !doc["nodes"]
+        .get(&host)
+        .map(Value::is_object)
+        .unwrap_or(false)
+    {
         doc["nodes"][&host] = json!({});
     }
     let node = &mut doc["nodes"][&host];
@@ -908,7 +1112,8 @@ pub fn kvm_node_save(
     if let Some(k) = ssh_key_path {
         node["sshKeyPath"] = json!(k);
     }
-    let path = creds_path().ok_or_else(|| "could not resolve app data dir for kvm_nodes.json".to_string())?;
+    let path = creds_path()
+        .ok_or_else(|| "could not resolve app data dir for kvm_nodes.json".to_string())?;
     let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     std::fs::write(&path, txt).map_err(|e| format!("write kvm_nodes.json: {e}"))?;
     Ok(json!({ "ok": true, "host": host }))
@@ -940,7 +1145,8 @@ pub fn kvm_node_delete(host: String) -> Result<Value, String> {
     if let Some(map) = doc["nodes"].as_object_mut() {
         map.remove(host.trim());
     }
-    let path = creds_path().ok_or_else(|| "could not resolve app data dir for kvm_nodes.json".to_string())?;
+    let path = creds_path()
+        .ok_or_else(|| "could not resolve app data dir for kvm_nodes.json".to_string())?;
     let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     std::fs::write(&path, txt).map_err(|e| format!("write kvm_nodes.json: {e}"))?;
     Ok(json!({ "ok": true, "host": host }))
@@ -1058,7 +1264,8 @@ mod tests {
         let target = secret_target();
         let params = json!({ "text": "hunter2 my password" });
         let envelope = env_err("type", "not connected — Phase 1");
-        let line = serde_json::to_string(&audit_record("type", &target, &params, &envelope)).unwrap();
+        let line =
+            serde_json::to_string(&audit_record("type", &target, &params, &envelope)).unwrap();
 
         // Secrets never appear verbatim.
         assert!(!line.contains("SUPER_SECRET_TOKEN"), "token leaked: {line}");
@@ -1066,7 +1273,10 @@ mod tests {
         // Token is present only as the redaction marker.
         assert!(line.contains("<redacted>"), "missing token marker: {line}");
         // sshKeyPath keeps the PATH (never file contents).
-        assert!(line.contains("/home/user/.ssh/id_rsa"), "key path missing: {line}");
+        assert!(
+            line.contains("/home/user/.ssh/id_rsa"),
+            "key path missing: {line}"
+        );
         // Keystroke recorded as {len, sha256}.
         assert!(line.contains("\"len\""), "missing len: {line}");
         assert!(line.contains("\"sha256\""), "missing sha256: {line}");
@@ -1089,7 +1299,10 @@ mod tests {
         });
         let red = redact_params(&params);
         for f in ["combo", "key", "password", "token"] {
-            assert!(red[f].get("sha256").is_some(), "field {f} not redacted: {red}");
+            assert!(
+                red[f].get("sha256").is_some(),
+                "field {f} not redacted: {red}"
+            );
         }
         assert_eq!(red["op"], json!("click"), "non-sensitive field mangled");
         assert_eq!(red["x"], json!(10));
@@ -1103,7 +1316,10 @@ mod tests {
             "injection on an unlisted host must be refused"
         );
         for action in ["keys", "mouse", "boot_key", "mount_iso", "power"] {
-            assert!(!consent_allowed(action, "1.2.3.4", &granted), "{action} should fail closed");
+            assert!(
+                !consent_allowed(action, "1.2.3.4", &granted),
+                "{action} should fail closed"
+            );
         }
     }
 
@@ -1140,8 +1356,15 @@ mod tests {
         append_audit_line(&path, &rec).unwrap();
         append_audit_line(&path, &rec).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(body.lines().count(), 2, "each action appends exactly one line");
-        assert!(!body.contains("SUPER_SECRET_TOKEN"), "disk log leaked token");
+        assert_eq!(
+            body.lines().count(),
+            2,
+            "each action appends exactly one line"
+        );
+        assert!(
+            !body.contains("SUPER_SECRET_TOKEN"),
+            "disk log leaked token"
+        );
         let _ = std::fs::remove_file(&path);
     }
 
@@ -1150,10 +1373,19 @@ mod tests {
     #[test]
     fn keyboard_report_combo_and_single_key() {
         // ctrl(0x01)|alt(0x04) = 0x05 modifiers; DEL usage = 0x4c in the first slot.
-        assert_eq!(keyboard_report("ctrl+alt+del").unwrap(), [0x05, 0, 0x4c, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            keyboard_report("ctrl+alt+del").unwrap(),
+            [0x05, 0, 0x4c, 0, 0, 0, 0, 0]
+        );
         // A lone boot key, dash/space separators, and case-insensitivity.
-        assert_eq!(keyboard_report("F12").unwrap(), [0x00, 0, 0x45, 0, 0, 0, 0, 0]);
-        assert_eq!(keyboard_report("ctrl-c").unwrap(), [0x01, 0, 0x06, 0, 0, 0, 0, 0]);
+        assert_eq!(
+            keyboard_report("F12").unwrap(),
+            [0x00, 0, 0x45, 0, 0, 0, 0, 0]
+        );
+        assert_eq!(
+            keyboard_report("ctrl-c").unwrap(),
+            [0x01, 0, 0x06, 0, 0, 0, 0, 0]
+        );
         // Unknown token and empty combo fail loudly (never a panic).
         assert!(keyboard_report("ctrl+zzz").is_err());
         assert!(keyboard_report("").is_err());
@@ -1164,14 +1396,20 @@ mod tests {
     #[test]
     fn mouse_frames_cover_move_click_scroll() {
         // Relative move: tag=2, buttons=0, dx/dy two's-complement in a byte.
-        assert_eq!(mouse_frames("move", &json!({ "x": 5, "y": -3 })).unwrap(), vec![vec![2u8, 0, 5, 0xFD, 0]]);
+        assert_eq!(
+            mouse_frames("move", &json!({ "x": 5, "y": -3 })).unwrap(),
+            vec![vec![2u8, 0, 5, 0xFD, 0]]
+        );
         // Click = button-down then button-up (right = bit 0x02).
         assert_eq!(
             mouse_frames("click", &json!({ "button": "right" })).unwrap(),
             vec![vec![2u8, 2, 0, 0, 0], vec![2u8, 0, 0, 0, 0]]
         );
         // Scroll uses y (or an explicit wheel).
-        assert_eq!(mouse_frames("scroll", &json!({ "y": 1 })).unwrap(), vec![vec![2u8, 0, 0, 0, 1]]);
+        assert_eq!(
+            mouse_frames("scroll", &json!({ "y": 1 })).unwrap(),
+            vec![vec![2u8, 0, 0, 0, 1]]
+        );
         assert!(mouse_frames("teleport", &json!({})).is_err());
         assert!(mouse_frames("click", &json!({ "button": "pinky" })).is_err());
     }
@@ -1183,14 +1421,23 @@ mod tests {
         assert_eq!(f[0], 0x82, "FIN + binary opcode");
         assert_eq!(f[1], 0x80 | payload.len() as u8, "mask bit + 7-bit length");
         let mask = &f[2..6];
-        let unmasked: Vec<u8> = f[6..].iter().enumerate().map(|(i, b)| b ^ mask[i % 4]).collect();
-        assert_eq!(unmasked, payload, "server unmasks back to the original HID report");
+        let unmasked: Vec<u8> = f[6..]
+            .iter()
+            .enumerate()
+            .map(|(i, b)| b ^ mask[i % 4])
+            .collect();
+        assert_eq!(
+            unmasked, payload,
+            "server unmasks back to the original HID report"
+        );
     }
 
     #[test]
     fn jpeg_extract_and_dimensions() {
         // Minimal JPEG: SOI, SOF0 (marker C0, len 17, precision 8, h=0x0090, w=0x0140), EOI.
-        let mut j = vec![0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x90, 0x01, 0x40];
+        let mut j = vec![
+            0xFF, 0xD8, 0xFF, 0xC0, 0x00, 0x11, 0x08, 0x00, 0x90, 0x01, 0x40,
+        ];
         j.extend_from_slice(&[0u8; 6]); // rest of the SOF payload (components), unread
         j.extend_from_slice(&[0xFF, 0xD9]);
         let frame = extract_jpeg(&j).expect("a full SOI..EOI frame");
@@ -1208,7 +1455,9 @@ mod tests {
         // which is exactly what the server's DecodeDecrypt expects.
         let out = encrypt_password("Yuzha6341---").unwrap();
         let b64 = urlencoding::decode(&out).unwrap();
-        let raw = base64::engine::general_purpose::STANDARD.decode(b64.as_bytes()).unwrap();
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(b64.as_bytes())
+            .unwrap();
         assert_eq!(&raw[..8], b"Salted__", "missing OpenSSL salt header");
         // 8-byte magic + 8-byte salt + AES block(s); a 12-char secret pads to 16.
         assert_eq!(raw.len(), 16 + 16, "unexpected ciphertext length");

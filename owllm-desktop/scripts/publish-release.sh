@@ -36,6 +36,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$(cd "$HERE/.." && pwd)"
 cd "$APP"
 
+# Stream a verbatim copy of this run to .cache so a failure can be diagnosed
+# without relying on the app's log view (which truncates or may be closed).
+mkdir -p "$APP/.cache"
+LIVE_LOG="$APP/.cache/publish-latest.log"
+: > "$LIVE_LOG"
+exec > >(tee -a "$LIVE_LOG") 2>&1
+# Persist the log under the version even if the script aborts mid-run.
+trap 'cp -f "$LIVE_LOG" "$APP/.cache/publish-v${VERSION:-unknown}.log" 2>/dev/null || true' EXIT
+
 VERSION="$(node -e 'process.stdout.write(require("./src-tauri/tauri.conf.json").version)')"
 TAG="v$VERSION"
 KEY_FILE=".tauri-keys/owllm-updater.key"
@@ -78,6 +87,12 @@ esac
 
 step() { echo ""; echo "=== $* ==="; }
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
+
+# No --notes → fall back to the OWLLM_RELEASE_NOTES env var (set by the
+# deterministic finish-and-publish.sh), then derive from git history.
+# finish-and-publish.sh stopped passing notes as a shell-quoted argument
+# because commit subjects can contain quotes that broke the inner bash -c.
+[ -n "${OWLLM_RELEASE_NOTES:-}" ] && [ -z "$NOTES" ] && NOTES="$OWLLM_RELEASE_NOTES"
 
 # No --notes → derive them from git history. Version-bump commits (the ones
 # touching tauri.conf.json) mark release boundaries, and commit subjects in

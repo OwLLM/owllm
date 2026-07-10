@@ -68,8 +68,12 @@ impl Default for WhatsAppConfig {
     }
 }
 
-fn default_webhook_port() -> u16 { 8911 }
-fn default_webhook_host() -> String { "0.0.0.0".to_string() }
+fn default_webhook_port() -> u16 {
+    8911
+}
+fn default_webhook_host() -> String {
+    "0.0.0.0".to_string()
+}
 
 /// Discord — connects OUTBOUND via the gateway WebSocket (no public URL).
 /// `allowed_channel_ids` are Discord snowflakes (kept as strings: they exceed
@@ -134,9 +138,15 @@ pub struct EmailConfig {
     pub auto_approve: bool,
 }
 
-fn default_imap_port() -> u16 { 993 }
-fn default_smtp_port() -> u16 { 587 }
-fn default_poll_seconds() -> u32 { 30 }
+fn default_imap_port() -> u16 {
+    993
+}
+fn default_smtp_port() -> u16 {
+    587
+}
+fn default_poll_seconds() -> u32 {
+    30
+}
 
 impl Default for EmailConfig {
     fn default() -> Self {
@@ -203,8 +213,8 @@ pub async fn load_bridge_configs() -> Result<BridgeConfigs, String> {
     if !path.is_file() {
         return Ok(BridgeConfigs::default());
     }
-    let raw = std::fs::read_to_string(&path)
-        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
     // Empty / corrupt file -> defaults, never error to the user.
     Ok(serde_json::from_str(&raw).unwrap_or_default())
 }
@@ -256,13 +266,10 @@ fn write(c: &BridgeConfigs) -> Result<(), String> {
         return Err("no home directory".to_string());
     };
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let json = serde_json::to_string_pretty(c)
-        .map_err(|e| format!("serialize: {e}"))?;
-    std::fs::write(&path, json)
-        .map_err(|e| format!("write {}: {e}", path.display()))?;
+    let json = serde_json::to_string_pretty(c).map_err(|e| format!("serialize: {e}"))?;
+    std::fs::write(&path, json).map_err(|e| format!("write {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -278,7 +285,9 @@ fn routes_path() -> Option<PathBuf> {
     Some(crate::paths::owllm_config_home()?.join("bridge_chat_routes.json"))
 }
 fn load_routes() -> std::collections::HashMap<String, String> {
-    let Some(path) = routes_path() else { return Default::default(); };
+    let Some(path) = routes_path() else {
+        return Default::default();
+    };
     if !path.is_file() {
         return Default::default();
     }
@@ -288,7 +297,9 @@ fn load_routes() -> std::collections::HashMap<String, String> {
         .unwrap_or_default()
 }
 fn save_routes(m: &std::collections::HashMap<String, String>) -> Result<(), String> {
-    let Some(path) = routes_path() else { return Err("no home directory".to_string()); };
+    let Some(path) = routes_path() else {
+        return Err("no home directory".to_string());
+    };
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
@@ -319,7 +330,9 @@ pub async fn bridge_routes_clear_prefix(prefix: String) -> Result<(), String> {
     let mut m = load_routes();
     let before = m.len();
     m.retain(|k, _| !k.starts_with(&prefix));
-    if m.len() != before { save_routes(&m)?; }
+    if m.len() != before {
+        save_routes(&m)?;
+    }
     Ok(())
 }
 
@@ -390,7 +403,10 @@ mod tests {
         }"#;
         let parsed: BridgeConfigs = serde_json::from_str(raw).unwrap();
         assert_eq!(parsed.telegram.allowed_chat_ids, vec![1, 2]);
-        assert_eq!(parsed.whatsapp.allowed_senders, vec!["+15550001111".to_string()]);
+        assert_eq!(
+            parsed.whatsapp.allowed_senders,
+            vec!["+15550001111".to_string()]
+        );
         assert!(parsed.whatsapp.auto_approve);
     }
 }

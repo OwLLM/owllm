@@ -19,10 +19,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Clone)]
 pub struct EditorLaunch {
-    pub editor: String,        // user-facing name, e.g. "VSCodium"
-    pub command: String,       // executable that was actually spawned
+    pub editor: String,  // user-facing name, e.g. "VSCodium"
+    pub command: String, // executable that was actually spawned
     pub workspace: String,
-    pub message: String,       // human-readable status
+    pub message: String, // human-readable status
 }
 
 #[tauri::command]
@@ -58,7 +58,8 @@ fn pick_editor() -> Option<(String, PathBuf)> {
     if let Ok(path) = std::env::var("OWLLM_EXTERNAL_EDITOR") {
         let pb = PathBuf::from(&path);
         if pb.is_file() {
-            let name = pb.file_stem()
+            let name = pb
+                .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("Editor")
                 .to_string();
@@ -68,8 +69,8 @@ fn pick_editor() -> Option<(String, PathBuf)> {
     // Common Windows installs ship .cmd shims on PATH.
     let candidates: &[(&str, &[&str])] = &[
         ("VSCodium", &["codium", "codium.cmd"]),
-        ("Cursor",   &["cursor", "cursor.cmd"]),
-        ("VS Code",  &["code", "code.cmd"]),
+        ("Cursor", &["cursor", "cursor.cmd"]),
+        ("VS Code", &["code", "code.cmd"]),
     ];
     for (name, exes) in candidates {
         for exe_name in *exes {

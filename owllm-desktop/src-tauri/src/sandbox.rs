@@ -93,7 +93,13 @@ pub struct SandboxProject {
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn sanitize_name(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect::<String>()
         .trim_matches('_')
         .to_string()
@@ -123,7 +129,9 @@ pub fn bwrap_prefix_argv(project_dir: &str, sandbox_home: &str, allow_net: bool)
         a.push(p.into());
         a.push(p.into());
     };
-    for p in ["/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt"] {
+    for p in [
+        "/usr", "/bin", "/sbin", "/lib", "/lib32", "/lib64", "/etc", "/opt",
+    ] {
         ro(p);
     }
     a.push("--proc".into());
@@ -287,11 +295,17 @@ fn ensure_sandbox(distro: &str) -> bool {
     // to plain routing) but don't cache, so the next command re-probes.
     match crate::wsl::run_in_distro_script(distro, &script) {
         Ok(o) if o.contains("OWLLM_BWRAP=yes") => {
-            sandbox_cache().lock().unwrap().insert(distro.to_string(), true);
+            sandbox_cache()
+                .lock()
+                .unwrap()
+                .insert(distro.to_string(), true);
             true
         }
         Ok(o) if o.contains("OWLLM_BWRAP=no") => {
-            sandbox_cache().lock().unwrap().insert(distro.to_string(), false);
+            sandbox_cache()
+                .lock()
+                .unwrap()
+                .insert(distro.to_string(), false);
             false
         }
         _ => false, // probe failed / ambiguous — fall back once, re-probe next time
@@ -333,7 +347,14 @@ fn runner_argv(distro: &str, linux_cwd: &str, command: &str) -> (String, Vec<Str
     );
     (
         "wsl.exe".to_string(),
-        vec!["-d".into(), distro.into(), "--".into(), "bash".into(), "-lc".into(), script],
+        vec![
+            "-d".into(),
+            distro.into(),
+            "--".into(),
+            "bash".into(),
+            "-lc".into(),
+            script,
+        ],
     )
 }
 
@@ -359,7 +380,9 @@ fn full_access_path() -> Option<std::path::PathBuf> {
 }
 #[cfg(windows)]
 fn norm_cwd(cwd: &str) -> String {
-    cwd.trim().trim_end_matches(|c| c == '/' || c == '\\').to_lowercase()
+    cwd.trim()
+        .trim_end_matches(|c| c == '/' || c == '\\')
+        .to_lowercase()
 }
 #[cfg(windows)]
 fn full_access_set() -> std::collections::BTreeSet<String> {
@@ -382,19 +405,27 @@ pub fn is_full_access(cwd: Option<&str>) -> bool {
 /// False for: host runs, full-access WSL (no jail), WSL without bwrap installed.
 #[cfg(windows)]
 pub fn is_bwrap_jailed(cwd: Option<&str>) -> bool {
-    if is_full_access(cwd) { return false; }
+    if is_full_access(cwd) {
+        return false;
+    }
     if let Some((distro, _)) = cwd.and_then(|c| crate::wsl::parse_wsl_unc(c)) {
         return ensure_sandbox(&distro.to_string());
     }
     false
 }
 #[cfg(not(windows))]
-pub fn is_bwrap_jailed(_cwd: Option<&str>) -> bool { false }
+pub fn is_bwrap_jailed(_cwd: Option<&str>) -> bool {
+    false
+}
 
 #[cfg(windows)]
-fn full_access_get_impl(cwd: String) -> bool { is_full_access(Some(&cwd)) }
+fn full_access_get_impl(cwd: String) -> bool {
+    is_full_access(Some(&cwd))
+}
 #[cfg(not(windows))]
-fn full_access_get_impl(_cwd: String) -> bool { false }
+fn full_access_get_impl(_cwd: String) -> bool {
+    false
+}
 
 #[cfg(windows)]
 fn full_access_set_impl(cwd: String, enabled: bool) -> Result<(), String> {
@@ -403,10 +434,17 @@ fn full_access_set_impl(cwd: String, enabled: bool) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     let mut set = full_access_set();
-    if enabled { set.insert(norm_cwd(&cwd)); } else { set.remove(&norm_cwd(&cwd)); }
+    if enabled {
+        set.insert(norm_cwd(&cwd));
+    } else {
+        set.remove(&norm_cwd(&cwd));
+    }
     let list: Vec<String> = set.into_iter().collect();
-    std::fs::write(&p, serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?)
-        .map_err(|e| format!("write {}: {e}", p.display()))?;
+    std::fs::write(
+        &p,
+        serde_json::to_string_pretty(&list).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| format!("write {}: {e}", p.display()))?;
     Ok(())
 }
 #[cfg(not(windows))]
@@ -493,7 +531,7 @@ fn wsl_unc_to_win_drive(dir: &std::path::Path) -> Option<std::path::PathBuf> {
         .or_else(|| s.strip_prefix("wsl$/"))?;
     let off = lower.len() - rest.len(); // bytes consumed from the front of `norm`
     let orig = &norm[off..]; // `<distro>/mnt/<drive>/<tail...>` with original case
-    // Match `mnt` + a single drive letter on the lowercased view.
+                             // Match `mnt` + a single drive letter on the lowercased view.
     let mut lparts = rest.splitn(4, '/');
     let _distro = lparts.next()?;
     if lparts.next()? != "mnt" {
@@ -566,8 +604,7 @@ fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, 
     // so recreating it on the next line raced and returned "Access is denied" —
     // which broke every paste AFTER the first into the same folder. Creating the
     // dir idempotently and deleting individual old files avoids the race.
-    create_inbox_dir(&dir)
-        .map_err(|e| format!("create inbox dir {}: {e}", dir.display()))?;
+    create_inbox_dir(&dir).map_err(|e| format!("create inbox dir {}: {e}", dir.display()))?;
     if let Ok(rd) = std::fs::read_dir(&dir) {
         for ent in rd.flatten() {
             let p = ent.path();
@@ -608,13 +645,18 @@ fn save_inbox_impl(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, 
 /// (".owllm-inbox/image_N.ext"): codex passes them via `-i`, claude reads them
 /// with its Read tool. Both verified end-to-end.
 #[tauri::command]
-pub fn agent_save_inbox_images(cwd: String, images: Vec<InboxImage>) -> Result<Vec<String>, String> {
+pub fn agent_save_inbox_images(
+    cwd: String,
+    images: Vec<InboxImage>,
+) -> Result<Vec<String>, String> {
     save_inbox_impl(cwd, images)
 }
 
 /// Read whether a project folder is marked full-access (agents run unsandboxed).
 #[tauri::command]
-pub fn agent_full_access_get(cwd: String) -> bool { full_access_get_impl(cwd) }
+pub fn agent_full_access_get(cwd: String) -> bool {
+    full_access_get_impl(cwd)
+}
 
 /// Mark/unmark a project folder full-access. When ON, that project's agents run
 /// OUTSIDE the bwrap sandbox (full host access). OFF by default; the UI gates the
@@ -625,20 +667,39 @@ pub fn agent_full_access_set(cwd: String, enabled: bool) -> Result<(), String> {
 }
 
 #[cfg(windows)]
-pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+pub fn program_argv(
+    cwd: Option<&str>,
+    program: &str,
+    args: &[String],
+) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
     // A full-access (trusted) project opts OUT of the bwrap jail entirely — plain
     // WSL routing below, which can reach the Windows drives + interop. Otherwise
     // confine to the project folder when bubblewrap is available.
     if !is_full_access(cwd) && ensure_sandbox(&distro) {
-        return Some(runner_argv(&distro, &linux_cwd, &exec_script(program, args)));
+        return Some(runner_argv(
+            &distro,
+            &linux_cwd,
+            &exec_script(program, args),
+        ));
     }
     // Fallback: bubblewrap not present — plain WSL routing (Linux process, but
     // not folder-confined). The Harden action installs bwrap to seal it.
-    let script = format!("cd {} && {}", crate::wsl::sh_quote(&linux_cwd), exec_script(program, args));
+    let script = format!(
+        "cd {} && {}",
+        crate::wsl::sh_quote(&linux_cwd),
+        exec_script(program, args)
+    );
     Some((
         "wsl.exe".to_string(),
-        vec!["-d".into(), distro, "--".into(), "bash".into(), "-lc".into(), script],
+        vec![
+            "-d".into(),
+            distro,
+            "--".into(),
+            "bash".into(),
+            "-lc".into(),
+            script,
+        ],
     ))
 }
 
@@ -650,19 +711,38 @@ pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option
 /// tradeoff, scoped to that role only: the run gains /mnt + interop access
 /// like a full-access run, while every other agent in the team stays jailed.
 #[cfg(windows)]
-pub fn program_argv_unjailed(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+pub fn program_argv_unjailed(
+    cwd: Option<&str>,
+    program: &str,
+    args: &[String],
+) -> Option<(String, Vec<String>)> {
     let (distro, linux_cwd) = cwd.and_then(crate::wsl::parse_wsl_unc)?;
-    let script = format!("cd {} && {}", crate::wsl::sh_quote(&linux_cwd), exec_script(program, args));
+    let script = format!(
+        "cd {} && {}",
+        crate::wsl::sh_quote(&linux_cwd),
+        exec_script(program, args)
+    );
     Some((
         "wsl.exe".to_string(),
-        vec!["-d".into(), distro, "--".into(), "bash".into(), "-lc".into(), script],
+        vec![
+            "-d".into(),
+            distro,
+            "--".into(),
+            "bash".into(),
+            "-lc".into(),
+            script,
+        ],
     ))
 }
 /// Non-Windows: the sandbox model differs (bwrap/Lima share the host network
 /// namespace, so the gateway is reachable without an interop exception) —
 /// same routing as [`program_argv`].
 #[cfg(not(windows))]
-pub fn program_argv_unjailed(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+pub fn program_argv_unjailed(
+    cwd: Option<&str>,
+    program: &str,
+    args: &[String],
+) -> Option<(String, Vec<String>)> {
     program_argv(cwd, program, args)
 }
 
@@ -676,7 +756,14 @@ pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<Strin
     let script = crate::wsl::build_wsl_bash_script(&linux_cwd, command);
     Some((
         "wsl.exe".to_string(),
-        vec!["-d".into(), distro, "--".into(), "bash".into(), "-lc".into(), script],
+        vec![
+            "-d".into(),
+            distro,
+            "--".into(),
+            "bash".into(),
+            "-lc".into(),
+            script,
+        ],
     ))
 }
 
@@ -821,7 +908,11 @@ pub fn is_isolated(cwd: Option<&str>) -> bool {
 }
 
 #[cfg(target_os = "linux")]
-pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+pub fn program_argv(
+    cwd: Option<&str>,
+    program: &str,
+    args: &[String],
+) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
     if !engine_available("bwrap") {
         return None;
@@ -868,12 +959,19 @@ pub fn is_isolated(cwd: Option<&str>) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-pub fn program_argv(cwd: Option<&str>, program: &str, args: &[String]) -> Option<(String, Vec<String>)> {
+pub fn program_argv(
+    cwd: Option<&str>,
+    program: &str,
+    args: &[String],
+) -> Option<(String, Vec<String>)> {
     let dir = isolated_dir(cwd)?;
     if !engine_available("limactl") {
         return None;
     }
-    Some(("limactl".to_string(), lima_argv(LIMA_INSTANCE, &dir, program, args)))
+    Some((
+        "limactl".to_string(),
+        lima_argv(LIMA_INSTANCE, &dir, program, args),
+    ))
 }
 
 #[cfg(target_os = "macos")]
@@ -883,7 +981,10 @@ pub fn shell_argv(cwd: Option<&str>, command: &str) -> Option<(String, Vec<Strin
         return None;
     }
     let bash_args = vec!["-lc".to_string(), command.to_string()];
-    Some(("limactl".to_string(), lima_argv(LIMA_INSTANCE, &dir, "bash", &bash_args)))
+    Some((
+        "limactl".to_string(),
+        lima_argv(LIMA_INSTANCE, &dir, "bash", &bash_args),
+    ))
 }
 
 // ---- other OSes: never isolated (host fallback) ---------------------------
@@ -893,7 +994,11 @@ pub fn is_isolated(_cwd: Option<&str>) -> bool {
     false
 }
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
-pub fn program_argv(_cwd: Option<&str>, _program: &str, _args: &[String]) -> Option<(String, Vec<String>)> {
+pub fn program_argv(
+    _cwd: Option<&str>,
+    _program: &str,
+    _args: &[String],
+) -> Option<(String, Vec<String>)> {
     None
 }
 #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
@@ -913,7 +1018,10 @@ fn status_impl() -> SandboxStatus {
     // Folder-confinement is ready when the target distro has bubblewrap (+ the
     // runner, installed idempotently by ensure_sandbox). Probed once per distro
     // then cached, so polling status is cheap.
-    let confined = default_target.as_deref().map(ensure_sandbox).unwrap_or(false);
+    let confined = default_target
+        .as_deref()
+        .map(ensure_sandbox)
+        .unwrap_or(false);
     SandboxStatus {
         available: w.available,
         kind: "wsl".into(),
@@ -930,7 +1038,11 @@ fn status_impl() -> SandboxStatus {
     let ok = engine_available("bwrap");
     SandboxStatus {
         available: ok,
-        kind: if ok { "bubblewrap".into() } else { "none".into() },
+        kind: if ok {
+            "bubblewrap".into()
+        } else {
+            "none".into()
+        },
         strong: false,
         beta: true,
         confined: ok, // bubblewrap IS the folder-confinement on Linux
@@ -974,7 +1086,9 @@ fn harden_impl(distro: Option<String>) -> Result<SandboxStatus, String> {
     let distro = distro
         .filter(|d| !d.trim().is_empty())
         .or_else(crate::wsl::best_linux_distro)
-        .ok_or_else(|| "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string())?;
+        .ok_or_else(|| {
+            "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string()
+        })?;
     install_bwrap(&distro)?;
     if !ensure_sandbox(&distro) {
         return Err("bubblewrap installed but isn't runnable in this distro — folder-confinement unavailable.".to_string());
@@ -1052,7 +1166,9 @@ fn resolve_linux_distro(distro: Option<String>) -> Result<String, String> {
     distro
         .filter(|d| !d.trim().is_empty())
         .or_else(crate::wsl::best_linux_distro)
-        .ok_or_else(|| "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string())
+        .ok_or_else(|| {
+            "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string()
+        })
 }
 
 /// Run a PowerShell snippet (with optional env vars) and return its stdout.
@@ -1120,11 +1236,21 @@ fn disk_usage_impl(distro: Option<String>) -> SandboxDisk {
         Some((p, b)) => (Some(p), b),
         None => (None, 0),
     };
-    let (cache_bytes, copies_bytes) = match crate::wsl::run_in_distro_script(&distro, DISK_DU_SCRIPT) {
-        Ok(out) => (parse_sentinel(&out, "OWLLM_CACHE="), parse_sentinel(&out, "OWLLM_COPIES=")),
-        Err(_) => (0, 0),
-    };
-    SandboxDisk { vhdx_bytes, vhdx_path, cache_bytes, copies_bytes, available: true }
+    let (cache_bytes, copies_bytes) =
+        match crate::wsl::run_in_distro_script(&distro, DISK_DU_SCRIPT) {
+            Ok(out) => (
+                parse_sentinel(&out, "OWLLM_CACHE="),
+                parse_sentinel(&out, "OWLLM_COPIES="),
+            ),
+            Err(_) => (0, 0),
+        };
+    SandboxDisk {
+        vhdx_bytes,
+        vhdx_path,
+        cache_bytes,
+        copies_bytes,
+        available: true,
+    }
 }
 
 #[cfg(not(windows))]
@@ -1182,7 +1308,11 @@ fn reclaim_disk_impl(distro: Option<String>) -> Result<ReclaimResult, String> {
 
     // 1) Discard free blocks inside the distro so compaction can reclaim them
     //    (a non-sparse vhdx only gives back blocks that have been trimmed).
-    let _ = crate::wsl::run_in_distro_script_user(&distro, Some("root"), "fstrim -av 2>/dev/null || true");
+    let _ = crate::wsl::run_in_distro_script_user(
+        &distro,
+        Some("root"),
+        "fstrim -av 2>/dev/null || true",
+    );
 
     // 2) Write the diskpart + wrapper scripts to temp, run the wrapper ELEVATED.
     let tmp = std::env::temp_dir();
@@ -1192,7 +1322,9 @@ fn reclaim_disk_impl(distro: Option<String>) -> Result<ReclaimResult, String> {
     let _ = std::fs::remove_file(&res);
     std::fs::write(
         &dp,
-        format!("select vdisk file=\"{vhdx}\"\nattach vdisk readonly\ncompact vdisk\ndetach vdisk\n"),
+        format!(
+            "select vdisk file=\"{vhdx}\"\nattach vdisk readonly\ncompact vdisk\ndetach vdisk\n"
+        ),
     )
     .map_err(|e| format!("write diskpart script: {e}"))?;
     // Bake the paths straight into the wrapper FILE (single-quoted → backslashes
@@ -1240,7 +1372,11 @@ fn reclaim_disk_impl(distro: Option<String>) -> Result<ReclaimResult, String> {
     let after = nums.get(1).copied().unwrap_or(before);
     let before = nums.first().copied().unwrap_or(before);
     let _ = std::fs::remove_file(&res);
-    Ok(ReclaimResult { before_bytes: before, after_bytes: after, freed_bytes: before.saturating_sub(after) })
+    Ok(ReclaimResult {
+        before_bytes: before,
+        after_bytes: after,
+        freed_bytes: before.saturating_sub(after),
+    })
 }
 
 #[cfg(not(windows))]
@@ -1369,7 +1505,11 @@ fn run_capture(exe: &str, args: &[&str]) -> Result<String, String> {
         Err(format!(
             "{exe} exited {}: {}",
             out.status.code().unwrap_or(-1),
-            if se.trim().is_empty() { so.trim() } else { se.trim() }
+            if se.trim().is_empty() {
+                so.trim()
+            } else {
+                se.trim()
+            }
         ))
     }
 }
@@ -1397,7 +1537,9 @@ fn linux_provision() -> Result<String, String> {
     if which("pkexec") {
         run_capture("pkexec", &["bash", "-lc", &script])
     } else {
-        Err(format!("Root required and pkexec not found. Run in a terminal:\n  sudo bash -lc '{script}'"))
+        Err(format!(
+            "Root required and pkexec not found. Run in a terminal:\n  sudo bash -lc '{script}'"
+        ))
     }
 }
 
@@ -1441,7 +1583,11 @@ pub(crate) fn win_to_mnt(p: &str) -> Result<String, String> {
     let p = p.replace('\\', "/");
     let b = p.as_bytes();
     if b.len() >= 2 && b[1] == b':' {
-        Ok(format!("/mnt/{}{}", (b[0] as char).to_ascii_lowercase(), &p[2..]))
+        Ok(format!(
+            "/mnt/{}{}",
+            (b[0] as char).to_ascii_lowercase(),
+            &p[2..]
+        ))
     } else {
         Err(format!("not a Windows path: {p}"))
     }
@@ -1508,7 +1654,10 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
     let distro = distro
         .filter(|d| !d.trim().is_empty())
         .or_else(crate::wsl::best_linux_distro)
-        .ok_or_else(|| "no Ubuntu/Linux distro in WSL — isolation needs Ubuntu (set it up on the Home page).".to_string())?;
+        .ok_or_else(|| {
+            "no Ubuntu/Linux distro in WSL — isolation needs Ubuntu (set it up on the Home page)."
+                .to_string()
+        })?;
     let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
 
     // Build the API-key env file: every saved provider key becomes an
@@ -1517,9 +1666,18 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
     let secrets = crate::accounts::all_secrets();
     let mut env_lines = String::new();
     for k in [
-        "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "MOONSHOT_API_KEY", "DEEPSEEK_API_KEY",
-        "XAI_API_KEY", "GROQ_API_KEY", "PERPLEXITY_API_KEY", "MISTRAL_API_KEY",
-        "TOGETHER_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "HF_TOKEN",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "MOONSHOT_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "XAI_API_KEY",
+        "GROQ_API_KEY",
+        "PERPLEXITY_API_KEY",
+        "MISTRAL_API_KEY",
+        "TOGETHER_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "HF_TOKEN",
     ] {
         if let Some(v) = secrets.get(k) {
             if !v.trim().is_empty() {
@@ -1583,7 +1741,11 @@ fn sync_logins_impl(distro: Option<String>) -> Result<SyncResult, String> {
     }
     let synced = parse("SYNCED:");
     let report = build_mirror_report(&found_on_host, &synced);
-    Ok(SyncResult { synced, found_on_host, report })
+    Ok(SyncResult {
+        synced,
+        found_on_host,
+        report,
+    })
 }
 
 /// Which provider logins are present INSIDE the sandbox right now (codex/claude/
@@ -1608,7 +1770,11 @@ fn login_status_impl(distro: Option<String>) -> Vec<String> {
         echo \"LOGINS:$s\"";
     crate::wsl::run_in_distro(&distro, script)
         .ok()
-        .and_then(|o| o.lines().find_map(|l| l.strip_prefix("LOGINS:")).map(|s| s.to_string()))
+        .and_then(|o| {
+            o.lines()
+                .find_map(|l| l.strip_prefix("LOGINS:"))
+                .map(|s| s.to_string())
+        })
         .unwrap_or_default()
         .split_whitespace()
         .map(|s| s.to_string())
@@ -1648,18 +1814,35 @@ fn convert_impl(current: String) -> Result<SandboxProject, String> {
     };
     if let Some((d, linux)) = crate::wsl::parse_wsl_unc(&current) {
         // isolated → host
-        let name = linux.trim_end_matches('/').rsplit('/').next().unwrap_or("project").to_string();
+        let name = linux
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or("project")
+            .to_string();
         let home = std::env::var("USERPROFILE").map_err(|_| "no USERPROFILE".to_string())?;
         let dest_win = format!("{home}\\OwLLM-Projects\\{name}");
         let dest_mnt = win_to_mnt(&dest_win)?;
-        let script = format!("mkdir -p {dst} && cp -rf {src}/. {dst}/ && echo OWLLM_COPIED=1",
-            src = q(linux.trim_end_matches('/')), dst = q(&dest_mnt));
+        let script = format!(
+            "mkdir -p {dst} && cp -rf {src}/. {dst}/ && echo OWLLM_COPIED=1",
+            src = q(linux.trim_end_matches('/')),
+            dst = q(&dest_mnt)
+        );
         let out = crate::wsl::run_in_distro(&d, &script)?;
         assert_copied(&out)?;
-        Ok(SandboxProject { name, path: dest_win.clone(), inner_path: dest_win, kind: "none".into() })
+        Ok(SandboxProject {
+            name,
+            path: dest_win.clone(),
+            inner_path: dest_win,
+            kind: "none".into(),
+        })
     } else {
         // host → isolated
-        let base = current.trim_end_matches(['\\', '/']).rsplit(['\\', '/']).next().unwrap_or("project");
+        let base = current
+            .trim_end_matches(['\\', '/'])
+            .rsplit(['\\', '/'])
+            .next()
+            .unwrap_or("project");
         // create_impl on Windows delegates to wsl_create_project, which both
         // sanitizes the name and resolves a REAL Linux distro. Run the copy in
         // the distro the project was actually created in (parsed back from its
@@ -1669,8 +1852,11 @@ fn convert_impl(current: String) -> Result<SandboxProject, String> {
         let (distro, _) = crate::wsl::parse_wsl_unc(&p.path)
             .ok_or_else(|| format!("created project has a non-WSL path: {}", p.path))?;
         let src_mnt = win_to_mnt(&current)?;
-        let script = format!("cp -rf {src}/. {dst}/ && echo OWLLM_COPIED=1",
-            src = q(src_mnt.trim_end_matches('/')), dst = q(&p.inner_path));
+        let script = format!(
+            "cp -rf {src}/. {dst}/ && echo OWLLM_COPIED=1",
+            src = q(src_mnt.trim_end_matches('/')),
+            dst = q(&p.inner_path)
+        );
         let out = crate::wsl::run_in_distro(&distro, &script)?;
         assert_copied(&out)?;
         Ok(p)
@@ -1691,7 +1877,6 @@ pub fn sandbox_convert_project(current: String) -> Result<SandboxProject, String
 fn sync_logins_impl(_distro: Option<String>) -> Result<SyncResult, String> {
     Err("login sync is currently implemented for WSL (Windows) only".to_string())
 }
-
 
 /// Mirror host logins into the sandbox. Returns what synced AND what was
 /// found on the Windows host, so the UI can explain the outcome precisely.
@@ -1749,8 +1934,16 @@ mod tests {
 
     #[test]
     fn mirror_report_covers_every_state() {
-        let found = vec!["codex".to_string(), "claude".to_string(), "keys".to_string()];
-        let synced = vec!["claude".to_string(), "gemini".to_string(), "keys".to_string()];
+        let found = vec![
+            "codex".to_string(),
+            "claude".to_string(),
+            "keys".to_string(),
+        ];
+        let synced = vec![
+            "claude".to_string(),
+            "gemini".to_string(),
+            "keys".to_string(),
+        ];
         let r = build_mirror_report(&found, &synced);
         assert_eq!(r.len(), 5, "one row per provider");
         let get = |p: &str| r.iter().find(|m| m.provider == p).unwrap();
@@ -1764,7 +1957,11 @@ mod tests {
         // not found + synced → present from an earlier sync
         assert!(get("gemini").detail.contains("present in the sandbox"));
         // not found + not synced → actionable "log in first"
-        assert!(get("kimi").detail.contains("log in"), "{}", get("kimi").detail);
+        assert!(
+            get("kimi").detail.contains("log in"),
+            "{}",
+            get("kimi").detail
+        );
     }
 
     /// Live probe (real WSL + whatever logins exist on this machine):
@@ -1777,12 +1974,25 @@ mod tests {
         let r = sync_logins_impl(None).expect("sync runs");
         eprintln!("== live sync report ==");
         for m in &r.report {
-            eprintln!("{:>7}: host={} sandbox={} — {}", m.provider, m.on_host, m.in_sandbox, m.detail);
+            eprintln!(
+                "{:>7}: host={} sandbox={} — {}",
+                m.provider, m.on_host, m.in_sandbox, m.detail
+            );
         }
         assert_eq!(r.report.len(), 5);
         for m in &r.report {
-            assert_eq!(m.on_host, r.found_on_host.contains(&m.provider), "{} host flag", m.provider);
-            assert_eq!(m.in_sandbox, r.synced.contains(&m.provider), "{} sandbox flag", m.provider);
+            assert_eq!(
+                m.on_host,
+                r.found_on_host.contains(&m.provider),
+                "{} host flag",
+                m.provider
+            );
+            assert_eq!(
+                m.in_sandbox,
+                r.synced.contains(&m.provider),
+                "{} sandbox flag",
+                m.provider
+            );
         }
     }
 
@@ -1793,7 +2003,9 @@ mod tests {
         use std::path::PathBuf;
         let f = wsl_unc_to_win_drive;
         assert_eq!(
-            f(std::path::Path::new(r"\\wsl.localhost\Ubuntu\mnt\c\1_Git\LocaLLM")),
+            f(std::path::Path::new(
+                r"\\wsl.localhost\Ubuntu\mnt\c\1_Git\LocaLLM"
+            )),
             Some(PathBuf::from(r"C:\1_Git\LocaLLM"))
         );
         assert_eq!(
@@ -1801,7 +2013,9 @@ mod tests {
             Some(PathBuf::from(r"D:\x"))
         );
         assert_eq!(
-            f(std::path::Path::new(r"\\?\UNC\wsl.localhost\Ubuntu\mnt\c\1_Git\LocaLLM")),
+            f(std::path::Path::new(
+                r"\\?\UNC\wsl.localhost\Ubuntu\mnt\c\1_Git\LocaLLM"
+            )),
             Some(PathBuf::from(r"C:\1_Git\LocaLLM"))
         );
         // Prefixes are case-insensitive.
@@ -1810,9 +2024,15 @@ mod tests {
             Some(PathBuf::from(r"E:\Proj"))
         );
         // A WSL path that is NOT a /mnt/<drive>/ mount has no Windows drive.
-        assert_eq!(f(std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user")), None);
+        assert_eq!(
+            f(std::path::Path::new(r"\\wsl.localhost\Ubuntu\home\user")),
+            None
+        );
         // /mnt/<non-drive> (a real mount, but not a drive letter) → None.
-        assert_eq!(f(std::path::Path::new(r"\\wsl.localhost\Ubuntu\mnt\wsl\x")), None);
+        assert_eq!(
+            f(std::path::Path::new(r"\\wsl.localhost\Ubuntu\mnt\wsl\x")),
+            None
+        );
         // An ordinary Windows path is not a redirector path → None.
         assert_eq!(f(std::path::Path::new(r"C:\Users\mc\proj")), None);
     }
@@ -1845,16 +2065,39 @@ mod tests {
 
         let probe = r#"echo "PWD=$(pwd)"; echo "CDRIVE=$(ls /mnt/c/Windows >/dev/null 2>&1 && echo VISIBLE || echo HIDDEN)"; echo "LS=$(ls | tr '\n' ',')"; echo "NODE=$(node --version 2>&1)"; echo wrote-from-agent > out.txt && echo WROTE"#;
         let (exe, argv) = runner_argv(&distro, &mnt, probe);
-        let out = std::process::Command::new(&exe).args(&argv).output().expect("spawn wsl.exe");
+        let out = std::process::Command::new(&exe)
+            .args(&argv)
+            .output()
+            .expect("spawn wsl.exe");
         let so = String::from_utf8_lossy(&out.stdout);
-        eprintln!("--- real bwrap transport probe ---\n{so}\n--- stderr ---\n{}", String::from_utf8_lossy(&out.stderr));
+        eprintln!(
+            "--- real bwrap transport probe ---\n{so}\n--- stderr ---\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
 
-        assert!(so.contains(&format!("PWD={mnt}")), "must chdir INTO the project, got: {so}");
-        assert!(so.contains("CDRIVE=HIDDEN"), "the rest of C: must be hidden, got: {so}");
-        assert!(so.contains("LS=seed.txt,"), "only the project's files are visible, got: {so}");
+        assert!(
+            so.contains(&format!("PWD={mnt}")),
+            "must chdir INTO the project, got: {so}"
+        );
+        assert!(
+            so.contains("CDRIVE=HIDDEN"),
+            "the rest of C: must be hidden, got: {so}"
+        );
+        assert!(
+            so.contains("LS=seed.txt,"),
+            "only the project's files are visible, got: {so}"
+        );
         assert!(so.contains("WROTE"), "agent could write, got: {so}");
-        assert!(win_dir.join("out.txt").exists(), "the write must land in the REAL Windows folder");
-        assert_eq!(std::fs::read_to_string(win_dir.join("out.txt")).unwrap().trim(), "wrote-from-agent");
+        assert!(
+            win_dir.join("out.txt").exists(),
+            "the write must land in the REAL Windows folder"
+        );
+        assert_eq!(
+            std::fs::read_to_string(win_dir.join("out.txt"))
+                .unwrap()
+                .trim(),
+            "wrote-from-agent"
+        );
         let _ = std::fs::remove_dir_all(&win_dir);
     }
 
@@ -1871,15 +2114,24 @@ mod tests {
         assert_eq!(&argv[0..5], &["-d", "Ubuntu", "--", "bash", "-lc"]);
         let script = &argv[5];
         // NO shell metacharacters that wsl.exe could mangle
-        assert!(!script.contains('\''), "script must be quote-free: {script}");
+        assert!(
+            !script.contains('\''),
+            "script must be quote-free: {script}"
+        );
         assert!(!script.contains('"'), "script must be quote-free: {script}");
         assert!(script.starts_with("exec $HOME/.owllm/run-sandboxed.sh "));
         // the command is recoverable by decoding the last token
         let b64cmd = base64::engine::general_purpose::STANDARD.encode(nasty.as_bytes());
-        assert!(script.ends_with(&b64cmd), "command must be the final base64 token");
+        assert!(
+            script.ends_with(&b64cmd),
+            "command must be the final base64 token"
+        );
         let decoded = String::from_utf8(
-            base64::engine::general_purpose::STANDARD.decode(b64cmd.as_bytes()).unwrap(),
-        ).unwrap();
+            base64::engine::general_purpose::STANDARD
+                .decode(b64cmd.as_bytes())
+                .unwrap(),
+        )
+        .unwrap();
         assert_eq!(decoded, nasty);
     }
 
@@ -1907,7 +2159,7 @@ mod tests {
         // the user's real drive folder (isolate-in-place) → NEVER
         assert!(!is_managed_sandbox_copy("/mnt/c/Users/mc/repo"));
         assert!(!is_managed_sandbox_copy("/mnt/d/owllm/repo")); // even with 'owllm' in it
-        // the managed root itself → NEVER (no project name)
+                                                                // the managed root itself → NEVER (no project name)
         assert!(!is_managed_sandbox_copy("/home/mc/owllm"));
         assert!(!is_managed_sandbox_copy("/home/mc/owllm/"));
         // arbitrary distro paths → NEVER
@@ -1948,10 +2200,23 @@ mod tests {
 
     #[test]
     fn lima_argv_shape() {
-        let a = lima_argv("owllm", "/Users/me/owllm/p", "claude", &["-p".into(), "hi".into()]);
+        let a = lima_argv(
+            "owllm",
+            "/Users/me/owllm/p",
+            "claude",
+            &["-p".into(), "hi".into()],
+        );
         assert_eq!(
             a,
-            vec!["shell", "--workdir", "/Users/me/owllm/p", "owllm", "claude", "-p", "hi"]
+            vec![
+                "shell",
+                "--workdir",
+                "/Users/me/owllm/p",
+                "owllm",
+                "claude",
+                "-p",
+                "hi"
+            ]
         );
     }
 }

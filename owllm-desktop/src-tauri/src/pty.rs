@@ -77,7 +77,8 @@ fn resolve_cli_command(name: &str, args: &[String]) -> Result<(PathBuf, Vec<Stri
         // quoting required (no special cmd-meta chars). If a future
         // path lands in C:\Program Files\... CommandBuilder still
         // quotes the spaces correctly because we hand it as ONE arg.
-        let mut wrapped: Vec<String> = vec!["/c".to_string(), resolved.to_string_lossy().to_string()];
+        let mut wrapped: Vec<String> =
+            vec!["/c".to_string(), resolved.to_string_lossy().to_string()];
         wrapped.extend(args.iter().cloned());
         Ok((PathBuf::from("cmd.exe"), wrapped))
     } else {
@@ -130,7 +131,12 @@ pub fn pty_spawn(
 
     let pty_system = native_pty_system();
     let pair = pty_system
-        .openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .openpty(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| format!("openpty: {e}"))?;
 
     let mut cmd = CommandBuilder::new(&exe);
@@ -181,7 +187,9 @@ pub fn pty_spawn(
                 Ok(0) => break, // EOF — child closed
                 Ok(n) => {
                     if event_for_data
-                        .send(PtyEvent::Data { data: buf[..n].to_vec() })
+                        .send(PtyEvent::Data {
+                            data: buf[..n].to_vec(),
+                        })
                         .is_err()
                     {
                         break;
@@ -198,10 +206,13 @@ pub fn pty_spawn(
         let _ = event_for_data.send(PtyEvent::Exit { code: Some(code) });
     });
 
-    SESSIONS
-        .lock()
-        .unwrap()
-        .insert(session_id.clone(), Slot { writer, master: pair.master });
+    SESSIONS.lock().unwrap().insert(
+        session_id.clone(),
+        Slot {
+            writer,
+            master: pair.master,
+        },
+    );
     Ok(session_id)
 }
 
@@ -230,7 +241,12 @@ pub fn pty_resize(session_id: String, cols: u16, rows: u16) -> Result<(), String
         .get(&session_id)
         .ok_or_else(|| format!("no PTY session: {session_id}"))?;
     slot.master
-        .resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
         .map_err(|e| format!("pty_resize: {e}"))?;
     Ok(())
 }

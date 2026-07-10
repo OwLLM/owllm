@@ -54,10 +54,14 @@ fn curl_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
     let mut cmd = std::process::Command::new("curl");
     cmd.args([
         "-s",
-        "-H", &format!("Authorization: Bearer {token}"),
-        "-H", "User-Agent: owllm-desktop",
-        "-H", "Accept: application/vnd.github+json",
-        "-H", "X-GitHub-Api-Version: 2022-11-28",
+        "-H",
+        &format!("Authorization: Bearer {token}"),
+        "-H",
+        "User-Agent: owllm-desktop",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "X-GitHub-Api-Version: 2022-11-28",
         url,
     ]);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -68,8 +72,12 @@ fn curl_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
     }
     let out = cmd.output().map_err(|e| format!("curl GitHub: {e}"))?;
     let body = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str(body.trim())
-        .map_err(|_| format!("GitHub returned non-JSON (offline?): {}", body.chars().take(160).collect::<String>()))
+    serde_json::from_str(body.trim()).map_err(|_| {
+        format!(
+            "GitHub returned non-JSON (offline?): {}",
+            body.chars().take(160).collect::<String>()
+        )
+    })
 }
 
 /// POST a JSON body to a GitHub API URL; return the parsed JSON response.
@@ -77,13 +85,20 @@ fn curl_post(token: &str, url: &str, json_body: &str) -> Result<serde_json::Valu
     let mut cmd = std::process::Command::new("curl");
     cmd.args([
         "-s",
-        "-X", "POST",
-        "-H", &format!("Authorization: Bearer {token}"),
-        "-H", "User-Agent: owllm-desktop",
-        "-H", "Accept: application/vnd.github+json",
-        "-H", "X-GitHub-Api-Version: 2022-11-28",
-        "-H", "Content-Type: application/json",
-        "-d", json_body,
+        "-X",
+        "POST",
+        "-H",
+        &format!("Authorization: Bearer {token}"),
+        "-H",
+        "User-Agent: owllm-desktop",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "-H",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "-H",
+        "Content-Type: application/json",
+        "-d",
+        json_body,
         url,
     ]);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -94,8 +109,12 @@ fn curl_post(token: &str, url: &str, json_body: &str) -> Result<serde_json::Valu
     }
     let out = cmd.output().map_err(|e| format!("curl GitHub: {e}"))?;
     let body = String::from_utf8_lossy(&out.stdout);
-    serde_json::from_str(body.trim())
-        .map_err(|_| format!("GitHub returned non-JSON (offline?): {}", body.chars().take(160).collect::<String>()))
+    serde_json::from_str(body.trim()).map_err(|_| {
+        format!(
+            "GitHub returned non-JSON (offline?): {}",
+            body.chars().take(160).collect::<String>()
+        )
+    })
 }
 
 fn repo_exists(token: &str, login: &str) -> bool {
@@ -125,14 +144,22 @@ fn create_repo(token: &str) -> Result<(), String> {
     let already = v
         .get("errors")
         .and_then(|e| e.as_array())
-        .map(|arr| arr.iter().any(|e| {
-            e.get("message").and_then(|m| m.as_str()).map(|s| s.contains("already exists")).unwrap_or(false)
-        }))
+        .map(|arr| {
+            arr.iter().any(|e| {
+                e.get("message")
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.contains("already exists"))
+                    .unwrap_or(false)
+            })
+        })
         .unwrap_or(false);
     if already || msg.contains("already exists") {
         Ok(())
     } else {
-        Err(format!("GitHub couldn't create the vault repo: {}", if msg.is_empty() { "unknown error" } else { msg }))
+        Err(format!(
+            "GitHub couldn't create the vault repo: {}",
+            if msg.is_empty() { "unknown error" } else { msg }
+        ))
     }
 }
 
@@ -189,7 +216,11 @@ fn build_status(repo_exists: bool, cloned: bool, login: &str) -> VaultStatus {
         login: Some(login.to_string()),
         repo_exists,
         cloned,
-        path: if cloned { dir.as_ref().map(|p| p.to_string_lossy().into_owned()) } else { None },
+        path: if cloned {
+            dir.as_ref().map(|p| p.to_string_lossy().into_owned())
+        } else {
+            None
+        },
         repo_url: Some(format!("https://github.com/{login}/{VAULT_REPO}")),
     }
 }
@@ -253,7 +284,16 @@ fn commit_push(dir: &std::path::Path, branch: &str) -> Result<(), String> {
     run_git(&["add", "-A"], Some(dir))?;
     let _ = run_git(&["commit", "-m", "owllm sync"], Some(dir));
     let _ = run_git(&["fetch", "origin", branch], Some(dir));
-    let _ = run_git(&["merge", "-X", "ours", "--no-edit", &format!("origin/{branch}")], Some(dir));
+    let _ = run_git(
+        &[
+            "merge",
+            "-X",
+            "ours",
+            "--no-edit",
+            &format!("origin/{branch}"),
+        ],
+        Some(dir),
+    );
     run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(dir))
         .map(|_| ())
         .map_err(|e| format!("push failed: {e}"))
@@ -267,13 +307,20 @@ pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), Stri
         return Err("vault not set up on this device yet".to_string());
     }
     let host = local_lan_ip().ok_or_else(|| "couldn't determine this PC's LAN IP".to_string())?;
-    let rec = GpuServer { name: machine_name(), host, port, api_key, device: machine_name() };
+    let rec = GpuServer {
+        name: machine_name(),
+        host,
+        port,
+        api_key,
+        device: machine_name(),
+    };
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let branch = current_branch(&dir);
         let state_dir = dir.join("state");
         std::fs::create_dir_all(&state_dir).map_err(|e| format!("mkdir state: {e}"))?;
         let json = serde_json::to_string_pretty(&rec).map_err(|e| e.to_string())?;
-        std::fs::write(state_dir.join("gpu-server.json"), json).map_err(|e| format!("write: {e}"))?;
+        std::fs::write(state_dir.join("gpu-server.json"), json)
+            .map_err(|e| format!("write: {e}"))?;
         commit_push(&dir, &branch)
     })
     .await
@@ -284,11 +331,15 @@ pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), Stri
 #[tauri::command]
 pub async fn vault_unpublish_server() -> Result<(), String> {
     let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
-    if !is_cloned(&dir) { return Ok(()); }
+    if !is_cloned(&dir) {
+        return Ok(());
+    }
     tokio::task::spawn_blocking(move || -> Result<(), String> {
         let branch = current_branch(&dir);
         let f = dir.join("state").join("gpu-server.json");
-        if f.exists() { let _ = std::fs::remove_file(&f); }
+        if f.exists() {
+            let _ = std::fs::remove_file(&f);
+        }
         commit_push(&dir, &branch)
     })
     .await
@@ -307,11 +358,19 @@ pub async fn vault_read_server() -> Result<Option<GpuServer>, String> {
     tokio::task::spawn_blocking(move || -> Result<Option<GpuServer>, String> {
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        match run_git(&["show", &format!("origin/{branch}:state/gpu-server.json")], Some(&dir)) {
+        match run_git(
+            &["show", &format!("origin/{branch}:state/gpu-server.json")],
+            Some(&dir),
+        ) {
             Ok(contents) => {
-                let rec: GpuServer = serde_json::from_str(&contents).map_err(|e| format!("parse: {e}"))?;
+                let rec: GpuServer =
+                    serde_json::from_str(&contents).map_err(|e| format!("parse: {e}"))?;
                 // Don't offer a device its own record.
-                if rec.device == me { Ok(None) } else { Ok(Some(rec)) }
+                if rec.device == me {
+                    Ok(None)
+                } else {
+                    Ok(Some(rec))
+                }
             }
             Err(_) => Ok(None),
         }
@@ -326,13 +385,19 @@ pub async fn vault_read_server() -> Result<Option<GpuServer>, String> {
 /// edits propagate). Together this gives union-of-all-devices for agent teams
 /// + roles, with the locally-syncing device winning the vault copy.
 fn copy_dir_files(from: &std::path::Path, to: &std::path::Path, overwrite: bool) {
-    let Ok(rd) = std::fs::read_dir(from) else { return };
+    let Ok(rd) = std::fs::read_dir(from) else {
+        return;
+    };
     for e in rd.flatten() {
         let p = e.path();
-        if !p.is_file() { continue; }
+        if !p.is_file() {
+            continue;
+        }
         let Some(name) = p.file_name() else { continue };
         let dest = to.join(name);
-        if !overwrite && dest.exists() { continue; }
+        if !overwrite && dest.exists() {
+            continue;
+        }
         let _ = std::fs::copy(&p, &dest);
     }
 }
@@ -353,18 +418,27 @@ pub async fn vault_sync_teams() -> Result<(), String> {
         let branch = current_branch(&dir);
         // Bring the working tree to the latest remote first.
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let _ = run_git(
+            &["reset", "--hard", &format!("origin/{branch}")],
+            Some(&dir),
+        );
         let mut any = false;
         for (src_opt, sub) in &pairs {
-            let Some(src) = src_opt.as_ref() else { continue };
+            let Some(src) = src_opt.as_ref() else {
+                continue;
+            };
             let vault_sub = dir.join("state").join(sub);
             let _ = std::fs::create_dir_all(&vault_sub);
             let _ = std::fs::create_dir_all(src);
             copy_dir_files(&vault_sub, src, false); // remote → local (add missing)
-            copy_dir_files(src, &vault_sub, true);  // local → vault (ours)
+            copy_dir_files(src, &vault_sub, true); // local → vault (ours)
             any = true;
         }
-        if any { commit_push(&dir, &branch) } else { Ok(()) }
+        if any {
+            commit_push(&dir, &branch)
+        } else {
+            Ok(())
+        }
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -447,7 +521,9 @@ fn export_directives(conn: &rusqlite::Connection, project_id: &str) -> Vec<Vault
             id: r.get::<_, String>(0).unwrap_or_default(),
             kind: r.get::<_, String>(1).unwrap_or_else(|_| "must".into()),
             text: r.get::<_, String>(2).unwrap_or_default(),
-            source: r.get::<_, String>(3).unwrap_or_else(|_| "user_typed".into()),
+            source: r
+                .get::<_, String>(3)
+                .unwrap_or_else(|_| "user_typed".into()),
             created_at: r.get::<_, String>(4).unwrap_or_default(),
             updated_at: r.get::<_, String>(5).unwrap_or_default(),
         })
@@ -523,7 +599,10 @@ struct VaultMemEntry {
 /// (new blobs) or the legacy tags convention (pre-kind blobs, and any blob
 /// laundered through an old client that dropped the kind field).
 fn is_worklog(kind: &str, tags: &str) -> bool {
-    kind == "worklog" || tags.split(',').any(|t| t.trim().eq_ignore_ascii_case("worklog"))
+    kind == "worklog"
+        || tags
+            .split(',')
+            .any(|t| t.trim().eq_ignore_ascii_case("worklog"))
 }
 
 /// Read a project's shared team-memory rows (scope == project id) for export.
@@ -622,7 +701,15 @@ fn merge_team_memory(conn: &rusqlite::Connection, project_id: &str, entries: &[V
 /// Keep a project id safe as a filename (ids are `{hex}_{hex}` already, but be
 /// defensive against anything hand-edited into the DB).
 fn safe_id(id: &str) -> String {
-    id.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
+    id.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
@@ -671,8 +758,9 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
             })
         })
         .map_err(|e| format!("query export: {e}"))?;
-    let mut projects: Vec<VaultProject> =
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("decode export: {e}"))?;
+    let mut projects: Vec<VaultProject> = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("decode export: {e}"))?;
     let _ = crate::directives::ensure_schema(&conn);
     for p in projects.iter_mut() {
         // Shared team-memory (scope == project id).
@@ -723,10 +811,22 @@ fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool,
                  updated_at, team_default_model_id, chat_json, agent_logs_json) \
                  VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 rusqlite::params![
-                    p.id, p.name, p.description, p.location, p.team_json,
-                    p.model_overrides_json, p.graph_json,
-                    if p.created_at.is_empty() { p.updated_at.clone() } else { p.created_at.clone() },
-                    p.updated_at, p.team_default_model_id, p.chat_json, p.agent_logs_json,
+                    p.id,
+                    p.name,
+                    p.description,
+                    p.location,
+                    p.team_json,
+                    p.model_overrides_json,
+                    p.graph_json,
+                    if p.created_at.is_empty() {
+                        p.updated_at.clone()
+                    } else {
+                        p.created_at.clone()
+                    },
+                    p.updated_at,
+                    p.team_default_model_id,
+                    p.chat_json,
+                    p.agent_logs_json,
                 ],
             )
             .map_err(|e| format!("insert project: {e}"))?;
@@ -741,8 +841,15 @@ fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool,
                      agent_logs_json = ?8, team_default_model_id = ?9, updated_at = ?10 \
                      WHERE id = ?1",
                     rusqlite::params![
-                        p.id, p.name, p.description, p.team_json, p.model_overrides_json,
-                        p.graph_json, p.chat_json, p.agent_logs_json, p.team_default_model_id,
+                        p.id,
+                        p.name,
+                        p.description,
+                        p.team_json,
+                        p.model_overrides_json,
+                        p.graph_json,
+                        p.chat_json,
+                        p.agent_logs_json,
+                        p.team_default_model_id,
                         p.updated_at,
                     ],
                 )
@@ -770,7 +877,13 @@ fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool,
         } else {
             serde_json::from_str::<Vec<VaultDirective>>(&p.directives_json).unwrap_or_default()
         };
-        merge_directives(conn, &p.id, &p.directives_updated_at, p.directives_seeded, &dirs);
+        merge_directives(
+            conn,
+            &p.id,
+            &p.directives_updated_at,
+            p.directives_seeded,
+            &dirs,
+        );
     }
     Ok(changed)
 }
@@ -789,7 +902,10 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
         let branch = current_branch(&dir);
         // Bring the working tree to the latest remote first (same as teams).
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let _ = run_git(
+            &["reset", "--hard", &format!("origin/{branch}")],
+            Some(&dir),
+        );
         let proj_dir = dir.join("state").join("projects");
         std::fs::create_dir_all(&proj_dir).map_err(|e| format!("mkdir projects: {e}"))?;
 
@@ -809,8 +925,12 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
                     if p.extension().and_then(|x| x.to_str()) != Some("json") {
                         continue;
                     }
-                    let Ok(txt) = std::fs::read_to_string(&p) else { continue };
-                    let Ok(vp) = serde_json::from_str::<VaultProject>(&txt) else { continue };
+                    let Ok(txt) = std::fs::read_to_string(&p) else {
+                        continue;
+                    };
+                    let Ok(vp) = serde_json::from_str::<VaultProject>(&txt) else {
+                        continue;
+                    };
                     if vp.id.is_empty() {
                         continue;
                     }
@@ -860,7 +980,10 @@ pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        match run_git(&["show", &format!("origin/{branch}:state/local.json")], Some(&dir)) {
+        match run_git(
+            &["show", &format!("origin/{branch}:state/local.json")],
+            Some(&dir),
+        ) {
             Ok(contents) => Ok(Some(contents)),
             Err(_) => Ok(None),
         }
@@ -890,7 +1013,13 @@ pub async fn vault_write_state(json: String) -> Result<(), String> {
         // just-written blob on conflict (JS already decided newer-wins).
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
         let _ = run_git(
-            &["merge", "-X", "ours", "--no-edit", &format!("origin/{branch}")],
+            &[
+                "merge",
+                "-X",
+                "ours",
+                "--no-edit",
+                &format!("origin/{branch}"),
+            ],
             Some(&dir),
         );
         run_git(&["push", "origin", &format!("HEAD:{branch}")], Some(&dir))
@@ -912,7 +1041,10 @@ pub async fn vault_align() -> Result<(), String> {
     tokio::task::spawn_blocking(move || {
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let _ = run_git(
+            &["reset", "--hard", &format!("origin/{branch}")],
+            Some(&dir),
+        );
     })
     .await
     .map_err(|e| format!("join error: {e}"))?;
@@ -923,8 +1055,8 @@ pub async fn vault_align() -> Result<(), String> {
 /// safe to call on every connect / launch. Returns the resulting status.
 #[tauri::command]
 pub async fn vault_ensure() -> Result<VaultStatus, String> {
-    let (token, login) = token_and_login()
-        .ok_or_else(|| "Connect GitHub first (Sync sign-in).".to_string())?;
+    let (token, login) =
+        token_and_login().ok_or_else(|| "Connect GitHub first (Sync sign-in).".to_string())?;
     tokio::task::spawn_blocking(move || -> Result<VaultStatus, String> {
         // 1) Repo on GitHub.
         if !repo_exists(&token, &login) {

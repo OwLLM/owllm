@@ -157,7 +157,12 @@ pub fn wsl_program_command(
         script.push_str(&sh_quote(a));
     }
     let mut cmd = std::process::Command::new("wsl.exe");
-    cmd.arg("-d").arg(distro).arg("--").arg("bash").arg("-lc").arg(script);
+    cmd.arg("-d")
+        .arg(distro)
+        .arg("--")
+        .arg("bash")
+        .arg("-lc")
+        .arg(script);
     cmd
 }
 
@@ -208,7 +213,9 @@ pub fn run_in_distro_script_user(
         cmd.arg("-u").arg(u);
     }
     cmd.arg("--").arg("bash").arg("-ls");
-    cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -222,17 +229,27 @@ pub fn run_in_distro_script_user(
             .map_err(|e| format!("write script to wsl stdin: {e}"))?;
         // stdin dropped here → EOF so bash runs the script and exits.
     }
-    let out = child.wait_with_output().map_err(|e| format!("wait wsl: {e}"))?;
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("wait wsl: {e}"))?;
     let stdout = decode_wsl(&out.stdout);
     let stderr = decode_wsl(&out.stderr);
     if !out.status.success() {
         return Err(format!(
             "wsl exited {}: {}",
             out.status.code().unwrap_or(-1),
-            if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+            if stderr.trim().is_empty() {
+                stdout.trim()
+            } else {
+                stderr.trim()
+            }
         ));
     }
-    Ok(if stderr.trim().is_empty() { stdout } else { format!("{stdout}\n{stderr}") })
+    Ok(if stderr.trim().is_empty() {
+        stdout
+    } else {
+        format!("{stdout}\n{stderr}")
+    })
 }
 
 /// One `wsl.exe -l -q` call. Returns (distro names, definitive_none).
@@ -251,7 +268,9 @@ fn list_distros_once() -> (Vec<String>, bool) {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     // Spawn failure = wsl.exe not present = genuinely no WSL → definitive.
-    let Ok(out) = cmd.output() else { return (Vec::new(), true) };
+    let Ok(out) = cmd.output() else {
+        return (Vec::new(), true);
+    };
     let raw: Vec<u8> = out.stdout.iter().copied().filter(|&b| b != 0).collect();
     let names: Vec<String> = String::from_utf8_lossy(&raw)
         .lines()
@@ -291,7 +310,10 @@ fn list_distros() -> Vec<String> {
 /// always correct regardless of `-l` ordering quirks.
 fn default_distro_name() -> Option<String> {
     let mut cmd = std::process::Command::new("wsl.exe");
-    cmd.arg("--").arg("bash").arg("-lc").arg("printf %s \"$WSL_DISTRO_NAME\"");
+    cmd.arg("--")
+        .arg("bash")
+        .arg("-lc")
+        .arg("printf %s \"$WSL_DISTRO_NAME\"");
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(windows)]
     {
@@ -303,7 +325,11 @@ fn default_distro_name() -> Option<String> {
         return None;
     }
     let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
 }
 
 fn isolation_path() -> Option<PathBuf> {
@@ -314,7 +340,13 @@ fn isolation_path() -> Option<PathBuf> {
 fn sanitize_project_name(name: &str) -> String {
     let s: String = name
         .chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     s.trim_matches('_').to_string()
 }
@@ -384,11 +416,17 @@ pub fn wsl_restart() -> Result<(), String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let out = cmd.output().map_err(|e| format!("launch `wsl --shutdown`: {e}"))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("launch `wsl --shutdown`: {e}"))?;
     if !out.status.success() {
         let err = decode_wsl(&out.stderr);
         let so = decode_wsl(&out.stdout);
-        let detail = if err.trim().is_empty() { so.trim() } else { err.trim() };
+        let detail = if err.trim().is_empty() {
+            so.trim()
+        } else {
+            err.trim()
+        };
         return Err(format!(
             "wsl --shutdown exited {}: {}",
             out.status.code().unwrap_or(-1),
@@ -428,7 +466,9 @@ pub fn wsl_create_project(name: String, distro: Option<String>) -> Result<WslPro
     let distro = distro
         .filter(|d| !d.trim().is_empty())
         .or_else(best_linux_distro)
-        .ok_or_else(|| "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string())?;
+        .ok_or_else(|| {
+            "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string()
+        })?;
     let safe = sanitize_project_name(&name);
     if safe.is_empty() {
         return Err("invalid project name".to_string());
@@ -458,13 +498,21 @@ pub fn wsl_create_project(name: String, distro: Option<String>) -> Result<WslPro
             out.trim().chars().take(240).collect::<String>()
         ));
     }
-    Ok(WslProject { name: safe, distro, linux_path, unc_path })
+    Ok(WslProject {
+        name: safe,
+        distro,
+        linux_path,
+        unc_path,
+    })
 }
 
 /// List existing isolated projects under ~/owllm in the distro.
 #[tauri::command]
 pub fn wsl_list_projects(distro: Option<String>) -> Result<Vec<WslProject>, String> {
-    let distro = match distro.filter(|d| !d.trim().is_empty()).or_else(best_linux_distro) {
+    let distro = match distro
+        .filter(|d| !d.trim().is_empty())
+        .or_else(best_linux_distro)
+    {
         Some(d) => d,
         None => return Ok(Vec::new()),
     };
@@ -497,7 +545,10 @@ pub fn wsl_toolchain_status(distro: Option<String>) -> WslToolchain {
     // Resolve a REAL Linux distro (skip docker-desktop etc.), never the raw
     // default — probing a busybox distro reports everything missing and the
     // UI then provisions into the wrong place.
-    let Some(distro) = distro.filter(|d| !d.trim().is_empty()).or_else(best_linux_distro) else {
+    let Some(distro) = distro
+        .filter(|d| !d.trim().is_empty())
+        .or_else(best_linux_distro)
+    else {
         return WslToolchain::default();
     };
     let script = "for c in node uv git claude codex gemini; do \
@@ -545,7 +596,9 @@ pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
     let distro = distro
         .filter(|d| !d.trim().is_empty())
         .or_else(best_linux_distro)
-        .ok_or_else(|| "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string())?;
+        .ok_or_else(|| {
+            "No Ubuntu/Linux distro in WSL — set it up on the Home page first.".to_string()
+        })?;
     // Piped via STDIN (run_in_distro_script_user), NOT as a `-lc "<script>"`
     // arg — the gh-install line has nested quotes that the Windows→wsl.exe
     // command-line handoff can mangle. `|| true` on the optional pieces so a
@@ -580,7 +633,9 @@ pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
     if !out.contains("PROVISION_DONE") {
         let chars: Vec<char> = out.trim().chars().collect();
         let tail: String = chars[chars.len().saturating_sub(240)..].iter().collect();
-        return Err(format!("provisioning did not complete. Output tail: {tail}"));
+        return Err(format!(
+            "provisioning did not complete. Output tail: {tail}"
+        ));
     }
     Ok(out)
 }
@@ -602,14 +657,14 @@ pub fn wsl_install() -> Result<String, String> {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    cmd.spawn().map_err(|e| format!("launch `wsl --install`: {e}"))?;
+    cmd.spawn()
+        .map_err(|e| format!("launch `wsl --install`: {e}"))?;
     Ok("Launching WSL install — accept the UAC prompt, then reboot when it finishes. Reopen OwLLM afterwards.".to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
 
     #[test]
     fn parses_modern_unc() {
@@ -624,7 +679,10 @@ mod tests {
         // The reported bug: Docker registers as the DEFAULT, but Ubuntu is the
         // real distro. Mapping must pick Ubuntu, not docker-desktop (no bash).
         assert_eq!(
-            pick_best_distro(&Some("docker-desktop".into()), &s(&["docker-desktop", "Ubuntu"])),
+            pick_best_distro(
+                &Some("docker-desktop".into()),
+                &s(&["docker-desktop", "Ubuntu"])
+            ),
             Some("Ubuntu".into())
         );
         // A real default is kept as-is.
@@ -633,7 +691,10 @@ mod tests {
             Some("Ubuntu".into())
         );
         // Only system distros → None (isolation genuinely unavailable; prompt Ubuntu).
-        assert_eq!(pick_best_distro(&Some("docker-desktop".into()), &s(&["docker-desktop"])), None);
+        assert_eq!(
+            pick_best_distro(&Some("docker-desktop".into()), &s(&["docker-desktop"])),
+            None
+        );
         assert_eq!(pick_best_distro(&None, &s(&["rancher-desktop"])), None);
     }
 
@@ -719,7 +780,11 @@ mod tests {
     #[ignore]
     fn probe_create_project_resolves_real_distro() {
         let p = wsl_create_project("owllm_probe_p05".to_string(), None).expect("create");
-        assert!(!is_system_distro(&p.distro), "project landed in {}", p.distro);
+        assert!(
+            !is_system_distro(&p.distro),
+            "project landed in {}",
+            p.distro
+        );
         assert!(p.linux_path.starts_with('/'));
         assert!(p.unc_path.to_lowercase().contains("wsl"));
         // cleanup

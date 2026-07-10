@@ -25,8 +25,8 @@ use std::path::PathBuf;
 #[derive(Default, Serialize, Clone)]
 pub struct HardwareInfo {
     pub cpu_name: String,
-    pub cpu_cores: u32,           // physical cores
-    pub cpu_threads: u32,         // logical cores (incl. SMT)
+    pub cpu_cores: u32,   // physical cores
+    pub cpu_threads: u32, // logical cores (incl. SMT)
     pub ram_total_gb: f64,
     pub ram_used_gb: f64,
     pub gpus: Vec<GpuInfo>,
@@ -36,7 +36,7 @@ pub struct HardwareInfo {
 pub struct GpuInfo {
     pub index: u32,
     pub name: String,
-    pub vram_gb: f64,             // adapter VRAM in GiB
+    pub vram_gb: f64, // adapter VRAM in GiB
     /// Stable hardware UUID (e.g. `GPU-12e7cda9-...`). Empty string
     /// when the discovery path can't get one (wmic fallback).
     pub uuid: String,
@@ -247,7 +247,11 @@ async fn gpus_via_nvidia_smi() -> Option<Vec<GpuInfo>> {
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
     let parsed = parse_nvidia_smi_gpus(&stdout);
-    if parsed.is_empty() { None } else { Some(parsed) }
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
 }
 
 fn parse_nvidia_smi_gpus(text: &str) -> Vec<GpuInfo> {
@@ -255,9 +259,13 @@ fn parse_nvidia_smi_gpus(text: &str) -> Vec<GpuInfo> {
         .enumerate()
         .filter_map(|(i, raw)| {
             let line = raw.trim();
-            if line.is_empty() { return None; }
+            if line.is_empty() {
+                return None;
+            }
             let parts: Vec<&str> = line.split(',').map(|s| s.trim()).collect();
-            if parts.len() < 3 { return None; }
+            if parts.len() < 3 {
+                return None;
+            }
             let name = parts[0].to_string();
             let total_mib: u64 = parts[1].parse().ok()?;
             let uuid = parts[2].to_string();
@@ -336,7 +344,11 @@ async fn gpus_via_system_profiler() -> Option<Vec<GpuInfo>> {
         return None;
     }
     let parsed = parse_system_profiler_displays(&String::from_utf8_lossy(&out.stdout));
-    if parsed.is_empty() { None } else { Some(parsed) }
+    if parsed.is_empty() {
+        None
+    } else {
+        Some(parsed)
+    }
 }
 
 /// Pure parser for `system_profiler SPDisplaysDataType -json`. Kept
@@ -407,7 +419,9 @@ fn gpus_via_drm_sysfs() -> Option<Vec<GpuInfo>> {
         .collect();
     names.sort();
     for n in names {
-        let dev = std::path::Path::new("/sys/class/drm").join(&n).join("device");
+        let dev = std::path::Path::new("/sys/class/drm")
+            .join(&n)
+            .join("device");
         let read = |f: &str| std::fs::read_to_string(dev.join(f)).unwrap_or_default();
         let vendor = read("vendor");
         let vendor = vendor.trim();
@@ -419,8 +433,14 @@ fn gpus_via_drm_sysfs() -> Option<Vec<GpuInfo>> {
         if !is_amd_intel {
             continue;
         }
-        let vram = read("mem_info_vram_total").trim().parse::<u64>().unwrap_or(0);
-        let gtt = read("mem_info_gtt_total").trim().parse::<u64>().unwrap_or(0);
+        let vram = read("mem_info_vram_total")
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
+        let gtt = read("mem_info_gtt_total")
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
         // GTT (shared system RAM) dominating dedicated VRAM = APU/iGPU.
         let unified = gtt > vram;
         let total = if unified { vram + gtt } else { vram };
@@ -436,7 +456,11 @@ fn gpus_via_drm_sysfs() -> Option<Vec<GpuInfo>> {
             unified,
         });
     }
-    if out.is_empty() { None } else { Some(out) }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -452,7 +476,8 @@ fn is_integrated_gpu(name: &str) -> bool {
         return true;
     }
     // Intel iGPUs. NOT Arc — Arc cards have real dedicated VRAM.
-    if n.contains("intel") && (n.contains("uhd") || n.contains("iris") || n.contains("hd graphics")) {
+    if n.contains("intel") && (n.contains("uhd") || n.contains("iris") || n.contains("hd graphics"))
+    {
         return true;
     }
     // AMD APUs: "AMD Radeon(TM) Graphics", "Radeon 680M/780M/890M",
@@ -464,9 +489,7 @@ fn is_integrated_gpu(name: &str) -> bool {
         }
         // "…780M" / "…890M Graphics" model numbers are the RDNA APU line.
         if n.split_whitespace().any(|w| {
-            w.len() >= 4
-                && w.ends_with('m')
-                && w[..w.len() - 1].chars().all(|c| c.is_ascii_digit())
+            w.len() >= 4 && w.ends_with('m') && w[..w.len() - 1].chars().all(|c| c.is_ascii_digit())
         }) {
             return true;
         }
@@ -509,15 +532,24 @@ pub async fn gpu_memory_budget() -> Option<GpuMemoryBudget> {
     let info = probe().await;
     let pool: Vec<&GpuInfo> = {
         let sel: Vec<&GpuInfo> = info.gpus.iter().filter(|g| g.selected).collect();
-        if sel.is_empty() { info.gpus.iter().collect() } else { sel }
+        if sel.is_empty() {
+            info.gpus.iter().collect()
+        } else {
+            sel
+        }
     };
     let best = pool.into_iter().max_by(|a, b| {
-        a.vram_gb.partial_cmp(&b.vram_gb).unwrap_or(std::cmp::Ordering::Equal)
+        a.vram_gb
+            .partial_cmp(&b.vram_gb)
+            .unwrap_or(std::cmp::Ordering::Equal)
     })?;
     if best.vram_gb <= 0.1 {
         return None;
     }
-    Some(GpuMemoryBudget { gb: best.vram_gb, unified: best.unified })
+    Some(GpuMemoryBudget {
+        gb: best.vram_gb,
+        unified: best.unified,
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -552,7 +584,11 @@ fn legacy_gpu_config_paths() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Some(root) = paths::llm_root() {
         v.push(root.join("data").join("gpu_config.json"));
-        v.push(root.join("desktop_app").join("config").join("gpu_config.json"));
+        v.push(
+            root.join("desktop_app")
+                .join("config")
+                .join("gpu_config.json"),
+        );
     }
     v
 }
@@ -581,7 +617,9 @@ fn load_gpu_selection() -> Option<GpuSelection> {
 /// default GPU behaviour untouched. Used by the model-server spawn to pin
 /// inference to the chosen GPU(s).
 pub fn selected_gpu_uuids() -> Vec<String> {
-    load_gpu_selection().map(|s| s.selected_gpu_uuids).unwrap_or_default()
+    load_gpu_selection()
+        .map(|s| s.selected_gpu_uuids)
+        .unwrap_or_default()
 }
 
 /// Map GPU UUIDs to their nvidia-smi device NAMES. Names are the only
@@ -592,14 +630,21 @@ pub fn selected_gpu_uuids() -> Vec<String> {
 /// matching UUIDs; empty when nvidia-smi is unavailable.
 pub fn gpu_names_for_uuids(uuids: &[String]) -> Vec<String> {
     let mut cmd = std::process::Command::new("nvidia-smi");
-    cmd.args(["--query-gpu=name,memory.total,uuid", "--format=csv,noheader,nounits"]);
+    cmd.args([
+        "--query-gpu=name,memory.total,uuid",
+        "--format=csv,noheader,nounits",
+    ]);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000);
     }
-    let Ok(out) = cmd.output() else { return Vec::new(); };
-    if !out.status.success() { return Vec::new(); }
+    let Ok(out) = cmd.output() else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
     let stdout = String::from_utf8_lossy(&out.stdout);
     parse_nvidia_smi_gpus(&stdout)
         .into_iter()
@@ -778,9 +823,30 @@ mod tests {
     #[test]
     fn unified_budget_rewrites() {
         let mut gpus = vec![
-            GpuInfo { index: 0, name: "Apple M3".into(), vram_gb: 0.0, uuid: String::new(), selected: true, unified: true },
-            GpuInfo { index: 1, name: "AMD Radeon(TM) Graphics".into(), vram_gb: 2.0, uuid: String::new(), selected: true, unified: false },
-            GpuInfo { index: 2, name: "NVIDIA GeForce RTX 4090".into(), vram_gb: 24.0, uuid: "GPU-x".into(), selected: true, unified: false },
+            GpuInfo {
+                index: 0,
+                name: "Apple M3".into(),
+                vram_gb: 0.0,
+                uuid: String::new(),
+                selected: true,
+                unified: true,
+            },
+            GpuInfo {
+                index: 1,
+                name: "AMD Radeon(TM) Graphics".into(),
+                vram_gb: 2.0,
+                uuid: String::new(),
+                selected: true,
+                unified: false,
+            },
+            GpuInfo {
+                index: 2,
+                name: "NVIDIA GeForce RTX 4090".into(),
+                vram_gb: 24.0,
+                uuid: "GPU-x".into(),
+                selected: true,
+                unified: false,
+            },
         ];
         apply_unified_budgets(&mut gpus, 32.0);
         assert!((gpus[0].vram_gb - 24.0).abs() < 0.01); // 75 % of 32 GB

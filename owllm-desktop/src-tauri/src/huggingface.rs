@@ -139,8 +139,7 @@ struct ApiTreeEntry {
 /// when not set — every endpoint here works anonymously, the token
 /// just unlocks gated repos and lifts rate-limits.
 fn hf_token() -> Option<String> {
-    crate::accounts::accounts_get_secret("HF_TOKEN".to_string())
-        .filter(|s| !s.trim().is_empty())
+    crate::accounts::accounts_get_secret("HF_TOKEN".to_string()).filter(|s| !s.trim().is_empty())
 }
 
 fn client() -> reqwest::Client {
@@ -190,17 +189,13 @@ pub async fn hf_search(
     if let Some(tok) = hf_token() {
         req = req.bearer_auth(tok);
     }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("hf request: {e}"))?;
+    let resp = req.send().await.map_err(|e| format!("hf request: {e}"))?;
     let status = resp.status();
     let body = resp.text().await.map_err(|e| format!("hf body: {e}"))?;
     if !status.is_success() {
         return Err(format!("HuggingFace returned {status}: {body}"));
     }
-    let parsed: Vec<ApiModel> = serde_json::from_str(&body)
-        .map_err(|e| format!("hf json: {e}"))?;
+    let parsed: Vec<ApiModel> = serde_json::from_str(&body).map_err(|e| format!("hf json: {e}"))?;
     // Colour every search/filter result by GPU-fit, just like the curated
     // Recommended cards — otherwise checking a filter dropped the user into a
     // wall of identically-bordered cards with no size legend (#25). VRAM is
@@ -249,8 +244,8 @@ pub async fn hf_model_files(
     if !status.is_success() {
         return Err(format!("HuggingFace returned {status}: {body}"));
     }
-    let entries: Vec<ApiTreeEntry> = serde_json::from_str(&body)
-        .map_err(|e| format!("hf json: {e}"))?;
+    let entries: Vec<ApiTreeEntry> =
+        serde_json::from_str(&body).map_err(|e| format!("hf json: {e}"))?;
     Ok(entries
         .into_iter()
         .filter(|e| e.kind == "file")
@@ -270,12 +265,22 @@ pub enum DownloadEvent {
     /// Total size known (some servers don't send Content-Length;
     /// when that's the case we emit Started with total=None and the
     /// UI shows an indeterminate spinner instead of a bar).
-    Started { total: Option<u64> },
-    Progress { received: u64, total: Option<u64> },
+    Started {
+        total: Option<u64>,
+    },
+    Progress {
+        received: u64,
+        total: Option<u64>,
+    },
     /// Final fired exactly once on success. `path` is where the
     /// file was actually written (the destination dir + filename).
-    Finished { path: String, bytes: u64 },
-    Failed { error: String },
+    Finished {
+        path: String,
+        bytes: u64,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Download one file from a HuggingFace repo to the local
@@ -305,12 +310,13 @@ pub async fn hf_download(
     // repo dir on dev machines.
     let models_dir = crate::paths::models_root_new()
         .or_else(|| crate::paths::llm_root().map(|r| r.join("models")))
-        .ok_or_else(|| "models root not resolvable (no %LOCALAPPDATA% AND no LLM/ tree)".to_string())?;
+        .ok_or_else(|| {
+            "models root not resolvable (no %LOCALAPPDATA% AND no LLM/ tree)".to_string()
+        })?;
     let dest_dir = models_dir.join(model_id.replace('/', std::path::MAIN_SEPARATOR_STR));
     let dest_file = dest_dir.join(&file);
     if let Some(parent) = dest_file.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
     // Idempotency guard. If the file is already on disk at a sane
     // size, treat the request as a no-op success — no re-download.
@@ -322,7 +328,9 @@ pub async fn hf_download(
     // return.
     if let Ok(meta) = std::fs::metadata(&dest_file) {
         if meta.is_file() && meta.len() > 0 {
-            let _ = channel.send(DownloadEvent::Started { total: Some(meta.len()) });
+            let _ = channel.send(DownloadEvent::Started {
+                total: Some(meta.len()),
+            });
             let _ = channel.send(DownloadEvent::Finished {
                 path: dest_file.to_string_lossy().into_owned(),
                 bytes: meta.len(),
@@ -399,7 +407,11 @@ pub async fn hf_download(
                 return Ok(());
             }
         }
-        let msg = format!("rename {} → {}: {e}", partial.display(), dest_file.display());
+        let msg = format!(
+            "rename {} → {}: {e}",
+            partial.display(),
+            dest_file.display()
+        );
         let _ = channel.send(DownloadEvent::Failed { error: msg.clone() });
         return Err(msg);
     }
@@ -422,7 +434,12 @@ pub async fn hf_download(
 /// when the just-downloaded file was a primary model GGUF (not itself a
 /// projector / LoRA). Silent + best-effort: skips if already present, never
 /// touches the foreground download's progress channel.
-fn spawn_mmproj_fetch(model_id: &str, branch: &str, dest_dir: &std::path::Path, downloaded_file: &str) {
+fn spawn_mmproj_fetch(
+    model_id: &str,
+    branch: &str,
+    dest_dir: &std::path::Path,
+    downloaded_file: &str,
+) {
     let lf = downloaded_file.to_ascii_lowercase();
     if !lf.ends_with(".gguf") || lf.contains("mmproj") || lf.contains("-lora-") {
         return;
@@ -436,24 +453,44 @@ fn spawn_mmproj_fetch(model_id: &str, branch: &str, dest_dir: &std::path::Path, 
             Err(_) => return,
         };
         let proj = files.into_iter().find(|f| {
-            let name = f.path.rsplit('/').next().unwrap_or(&f.path).to_ascii_lowercase();
+            let name = f
+                .path
+                .rsplit('/')
+                .next()
+                .unwrap_or(&f.path)
+                .to_ascii_lowercase();
             name.starts_with("mmproj") && name.ends_with(".gguf")
         });
         let Some(proj) = proj else { return };
-        let base = proj.path.rsplit('/').next().unwrap_or(&proj.path).to_string();
+        let base = proj
+            .path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&proj.path)
+            .to_string();
         let dest = dest_dir.join(&base);
         if let Ok(m) = std::fs::metadata(&dest) {
-            if m.is_file() && m.len() > 0 { return; }
+            if m.is_file() && m.len() > 0 {
+                return;
+            }
         }
-        let url = format!("https://huggingface.co/{model_id}/resolve/{branch}/{}", proj.path);
+        let url = format!(
+            "https://huggingface.co/{model_id}/resolve/{branch}/{}",
+            proj.path
+        );
         let mut req = client().get(&url);
-        if let Some(tok) = hf_token() { req = req.bearer_auth(tok); }
+        if let Some(tok) = hf_token() {
+            req = req.bearer_auth(tok);
+        }
         let resp = match req.send().await {
             Ok(r) if r.status().is_success() => r,
             _ => return,
         };
         let partial = with_suffix(&dest, ".partial");
-        let mut out = match std::fs::File::create(&partial) { Ok(f) => f, Err(_) => return };
+        let mut out = match std::fs::File::create(&partial) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
         let mut stream = resp.bytes_stream();
         use futures_util::StreamExt;
         while let Some(chunk) = stream.next().await {
@@ -464,7 +501,10 @@ fn spawn_mmproj_fetch(model_id: &str, branch: &str, dest_dir: &std::path::Path, 
                         return;
                     }
                 }
-                Err(_) => { let _ = std::fs::remove_file(&partial); return; }
+                Err(_) => {
+                    let _ = std::fs::remove_file(&partial);
+                    return;
+                }
             }
         }
         drop(out);
@@ -516,14 +556,19 @@ pub async fn delete_tuned_adapter(path: String) -> Result<(), String> {
     // target is rooted in one of those.
     let allowed_roots = crate::paths::fine_tuned_dirs_read();
     if allowed_roots.is_empty() {
-        return Err("no fine_tuned root found (neither %LOCALAPPDATA% nor legacy LLM/ tree)".to_string());
+        return Err(
+            "no fine_tuned root found (neither %LOCALAPPDATA% nor legacy LLM/ tree)".to_string(),
+        );
     }
-    let canon_target = std::fs::canonicalize(&target)
-        .map_err(|e| format!("canonicalize {path}: {e}"))?;
+    let canon_target =
+        std::fs::canonicalize(&target).map_err(|e| format!("canonicalize {path}: {e}"))?;
     let mut ok = false;
     for r in &allowed_roots {
         if let Ok(canon_root) = std::fs::canonicalize(r) {
-            if canon_target.starts_with(&canon_root) { ok = true; break; }
+            if canon_target.starts_with(&canon_root) {
+                ok = true;
+                break;
+            }
         }
     }
     if !ok {
@@ -539,7 +584,10 @@ pub async fn delete_tuned_adapter(path: String) -> Result<(), String> {
         std::fs::remove_file(&canon_target)
             .map_err(|e| format!("remove_file {}: {e}", canon_target.display()))?;
     } else {
-        return Err(format!("not a file or directory: {}", canon_target.display()));
+        return Err(format!(
+            "not a file or directory: {}",
+            canon_target.display()
+        ));
     }
     Ok(())
 }
@@ -560,7 +608,9 @@ pub struct ModelWeightFile {
 /// canonicalized so symlinks/.. can't escape the sandbox.
 fn under_models_root(canon: &std::path::Path) -> bool {
     crate::paths::models_dirs_read().iter().any(|r| {
-        std::fs::canonicalize(r).map(|rc| canon.starts_with(&rc)).unwrap_or(false)
+        std::fs::canonicalize(r)
+            .map(|rc| canon.starts_with(&rc))
+            .unwrap_or(false)
     })
 }
 
@@ -584,7 +634,11 @@ pub async fn model_weight_files(dir: String) -> Result<Vec<ModelWeightFile>, Str
             if let Some(name) = canon.file_name().and_then(|s| s.to_str()) {
                 if is_weight(name) {
                     let size = std::fs::metadata(&canon).map(|m| m.len()).unwrap_or(0);
-                    out.push(ModelWeightFile { path: canon.to_string_lossy().into_owned(), name: name.to_string(), size_bytes: size });
+                    out.push(ModelWeightFile {
+                        path: canon.to_string_lossy().into_owned(),
+                        name: name.to_string(),
+                        size_bytes: size,
+                    });
                 }
             }
             return Ok(out);
@@ -592,14 +646,26 @@ pub async fn model_weight_files(dir: String) -> Result<Vec<ModelWeightFile>, Str
         // Walk up to 2 levels deep (covers GGUF repos that nest under a subdir).
         let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(canon.clone(), 0)];
         while let Some((d, depth)) = stack.pop() {
-            let rd = match std::fs::read_dir(&d) { Ok(r) => r, Err(_) => continue };
+            let rd = match std::fs::read_dir(&d) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
             for e in rd.flatten() {
                 let p = e.path();
-                if p.is_dir() { if depth < 2 { stack.push((p, depth + 1)); } continue; }
+                if p.is_dir() {
+                    if depth < 2 {
+                        stack.push((p, depth + 1));
+                    }
+                    continue;
+                }
                 if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
                     if is_weight(name) {
                         let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                        out.push(ModelWeightFile { path: p.to_string_lossy().into_owned(), name: name.to_string(), size_bytes: size });
+                        out.push(ModelWeightFile {
+                            path: p.to_string_lossy().into_owned(),
+                            name: name.to_string(),
+                            size_bytes: size,
+                        });
                     }
                 }
             }
@@ -618,7 +684,10 @@ pub async fn delete_model_weight(path: String) -> Result<u64, String> {
     let canon = std::fs::canonicalize(std::path::PathBuf::from(&path))
         .map_err(|e| format!("canonicalize {path}: {e}"))?;
     if !under_models_root(&canon) {
-        return Err(format!("refused: {} is not under a models root", canon.display()));
+        return Err(format!(
+            "refused: {} is not under a models root",
+            canon.display()
+        ));
     }
     if !canon.is_file() {
         return Err(format!("not a file: {}", canon.display()));
@@ -640,79 +709,83 @@ pub async fn list_tuned_adapters() -> Result<Vec<TunedAdapter>, String> {
         }
         let mut out: Vec<TunedAdapter> = Vec::new();
         for root in roots {
-        for entry in std::fs::read_dir(&root).map_err(|e| format!("readdir: {e}"))? {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if !path.is_dir() {
-                continue;
-            }
-            let name = match entry.file_name().to_str() {
-                Some(s) => s.to_string(),
-                None => continue,
-            };
-            // Skip transient checkpoint dirs and crash logs.
-            if name.starts_with('.')
-                || name.starts_with("checkpoint-")
-                || name == "_crash_logs"
-            {
-                continue;
-            }
-            let (total, modified) = dir_summary(&path);
-            let base_hint = parse_base_from_name(&name);
-            // GPU-fit badge: try the base hint first (the actual model
-            // the adapter rides on top of), fall back to the raw adapter
-            // dir name so things like "260504_gemma-7b-finetune" still
-            // colour correctly when the legacy "_base_" convention is
-            // missing.
-            let params = base_hint
-                .as_deref()
-                .and_then(crate::recommendations::parse_params_b)
-                .or_else(|| crate::recommendations::parse_params_b(&name));
-            let compat = params
-                .and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
-            out.push(TunedAdapter {
-                name: name.clone(),
-                path: path.to_string_lossy().into_owned(),
-                size_mib: total / 1024 / 1024,
-                modified,
-                base_hint: base_hint.clone(),
-                compat: compat.clone(),
-            });
-            // GGUFs that the user exported via the 📦 button land
-            // INSIDE the transformers dir (default output = <dir>/<dir>-f16.gguf).
-            // Surface them as separate rows so the user can Test the
-            // .gguf directly (server_start handles .gguf paths) and
-            // delete it without nuking the source transformers weights.
-            if let Ok(inner) = std::fs::read_dir(&path) {
-                for f in inner.flatten() {
-                    let fp = f.path();
-                    if !fp.is_file() {
-                        continue;
+            for entry in std::fs::read_dir(&root).map_err(|e| format!("readdir: {e}"))? {
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let path = entry.path();
+                if !path.is_dir() {
+                    continue;
+                }
+                let name = match entry.file_name().to_str() {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                };
+                // Skip transient checkpoint dirs and crash logs.
+                if name.starts_with('.') || name.starts_with("checkpoint-") || name == "_crash_logs"
+                {
+                    continue;
+                }
+                let (total, modified) = dir_summary(&path);
+                let base_hint = parse_base_from_name(&name);
+                // GPU-fit badge: try the base hint first (the actual model
+                // the adapter rides on top of), fall back to the raw adapter
+                // dir name so things like "260504_gemma-7b-finetune" still
+                // colour correctly when the legacy "_base_" convention is
+                // missing.
+                let params = base_hint
+                    .as_deref()
+                    .and_then(crate::recommendations::parse_params_b)
+                    .or_else(|| crate::recommendations::parse_params_b(&name));
+                let compat =
+                    params.and_then(|p| crate::recommendations::compat_for_params(p, vram_gb));
+                out.push(TunedAdapter {
+                    name: name.clone(),
+                    path: path.to_string_lossy().into_owned(),
+                    size_mib: total / 1024 / 1024,
+                    modified,
+                    base_hint: base_hint.clone(),
+                    compat: compat.clone(),
+                });
+                // GGUFs that the user exported via the 📦 button land
+                // INSIDE the transformers dir (default output = <dir>/<dir>-f16.gguf).
+                // Surface them as separate rows so the user can Test the
+                // .gguf directly (server_start handles .gguf paths) and
+                // delete it without nuking the source transformers weights.
+                if let Ok(inner) = std::fs::read_dir(&path) {
+                    for f in inner.flatten() {
+                        let fp = f.path();
+                        if !fp.is_file() {
+                            continue;
+                        }
+                        let ext = fp.extension().and_then(|s| s.to_str()).unwrap_or("");
+                        if !ext.eq_ignore_ascii_case("gguf") {
+                            continue;
+                        }
+                        let fsize = f.metadata().map(|m| m.len()).unwrap_or(0);
+                        let fmtime = f
+                            .metadata()
+                            .ok()
+                            .and_then(|m| m.modified().ok())
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| format_unix_seconds(d.as_secs() as i64));
+                        let fname = fp
+                            .file_name()
+                            .and_then(|s| s.to_str())
+                            .unwrap_or("model.gguf")
+                            .to_string();
+                        out.push(TunedAdapter {
+                            name: fname,
+                            path: fp.to_string_lossy().into_owned(),
+                            size_mib: fsize / 1024 / 1024,
+                            modified: fmtime,
+                            base_hint: base_hint.clone(),
+                            compat: compat.clone(),
+                        });
                     }
-                    let ext = fp.extension().and_then(|s| s.to_str()).unwrap_or("");
-                    if !ext.eq_ignore_ascii_case("gguf") {
-                        continue;
-                    }
-                    let fsize = f.metadata().map(|m| m.len()).unwrap_or(0);
-                    let fmtime = f.metadata().ok()
-                        .and_then(|m| m.modified().ok())
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| format_unix_seconds(d.as_secs() as i64));
-                    let fname = fp.file_name().and_then(|s| s.to_str()).unwrap_or("model.gguf").to_string();
-                    out.push(TunedAdapter {
-                        name: fname,
-                        path: fp.to_string_lossy().into_owned(),
-                        size_mib: fsize / 1024 / 1024,
-                        modified: fmtime,
-                        base_hint: base_hint.clone(),
-                        compat: compat.clone(),
-                    });
                 }
             }
-        }
         }
         out.sort_by(|a, b| b.modified.cmp(&a.modified));
         Ok(out)
@@ -730,7 +803,11 @@ fn format_unix_seconds(secs: i64) -> String {
     let m = (secs_of_day % 3600) / 60;
     // Civil from days (Howard Hinnant's algorithm).
     let z = days + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as i64;
     let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
@@ -834,9 +911,14 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
             vram_gb: Option<f32>,
             depth: usize,
         ) -> std::io::Result<()> {
-            if depth > 3 { return Ok(()); }
+            if depth > 3 {
+                return Ok(());
+            }
             for entry in std::fs::read_dir(dir)? {
-                let entry = match entry { Ok(e) => e, Err(_) => continue };
+                let entry = match entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
                 let path = entry.path();
                 let raw_name = match entry.file_name().to_str() {
                     Some(s) if !s.starts_with('.') => s.to_string(),
@@ -880,10 +962,10 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                         continue;
                     }
                     let (total, _) = dir_summary(&path);
-                    let has_marker = path.join(".download").is_file()
-                                  || path.join(".incomplete").is_file();
-                    let is_incomplete = has_marker
-                        || (has_config && !has_weights && total < 100 * 1024 * 1024);
+                    let has_marker =
+                        path.join(".download").is_file() || path.join(".incomplete").is_file();
+                    let is_incomplete =
+                        has_marker || (has_config && !has_weights && total < 100 * 1024 * 1024);
                     let onboarding = if is_incomplete {
                         "BROKEN"
                     } else if has_gguf {
@@ -967,12 +1049,24 @@ fn fmt_size(bytes: u64) -> String {
 fn icons_for_name(name: &str) -> String {
     let n = name.to_lowercase();
     let mut out: Vec<&str> = Vec::new();
-    if n.contains("instruct") || n.contains("-it") { out.push("💡"); }
-    if n.contains("chat") || n.contains("dialog")  { out.push("💬"); }
-    if n.contains("vl") || n.contains("vision") || n.contains("llava") { out.push("👁"); }
-    if n.contains("r1") || n.contains("reasoning") || n.contains("thinking") { out.push("🧠"); }
-    if n.ends_with(".gguf") || n.contains("gguf") { out.push("📦"); }
-    if n.contains("lora") || n.contains("adapter") || n.contains("peft") { out.push("🧩"); }
+    if n.contains("instruct") || n.contains("-it") {
+        out.push("💡");
+    }
+    if n.contains("chat") || n.contains("dialog") {
+        out.push("💬");
+    }
+    if n.contains("vl") || n.contains("vision") || n.contains("llava") {
+        out.push("👁");
+    }
+    if n.contains("r1") || n.contains("reasoning") || n.contains("thinking") {
+        out.push("🧠");
+    }
+    if n.ends_with(".gguf") || n.contains("gguf") {
+        out.push("📦");
+    }
+    if n.contains("lora") || n.contains("adapter") || n.contains("peft") {
+        out.push("🧩");
+    }
     out.join(" ")
 }
 
@@ -1042,7 +1136,11 @@ fn hf_cache_roots() -> Vec<PathBuf> {
     };
     // Explicit env vars take priority — match what transformers /
     // huggingface_hub read at runtime.
-    for var in &["TRANSFORMERS_CACHE", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE"] {
+    for var in &[
+        "TRANSFORMERS_CACHE",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+    ] {
         if let Ok(v) = std::env::var(var) {
             push_if(&mut candidates, PathBuf::from(v));
         }
@@ -1055,8 +1153,14 @@ fn hf_cache_roots() -> Vec<PathBuf> {
     }
     // Standard fallback locations.
     if let Some(home) = dirs_home() {
-        push_if(&mut candidates, home.join(".cache").join("huggingface").join("hub"));
-        push_if(&mut candidates, home.join(".cache").join("huggingface").join("transformers"));
+        push_if(
+            &mut candidates,
+            home.join(".cache").join("huggingface").join("hub"),
+        );
+        push_if(
+            &mut candidates,
+            home.join(".cache").join("huggingface").join("transformers"),
+        );
     }
     // Common Windows convention we've seen in this codebase: C:\hf\*.
     #[cfg(windows)]
@@ -1152,8 +1256,14 @@ fn app_cache_roots() -> Vec<(String, PathBuf)> {
         push_labeled("owllm-fine-tuned", root.join("fine_tuned"));
     }
     if let Some(home) = dirs_home() {
-        push_labeled("pip-cache", home.join("AppData").join("Local").join("pip").join("Cache"));
-        push_labeled("npm-cache", home.join("AppData").join("Local").join("npm-cache"));
+        push_labeled(
+            "pip-cache",
+            home.join("AppData").join("Local").join("pip").join("Cache"),
+        );
+        push_labeled(
+            "npm-cache",
+            home.join("AppData").join("Local").join("npm-cache"),
+        );
         push_labeled("hf-user-cache", home.join(".cache").join("huggingface"));
     }
 
@@ -1296,7 +1406,10 @@ pub async fn hf_cache_list() -> Result<HfCacheSummary, String> {
             push_dir_unique(&mut all_roots, p);
         }
         Ok(HfCacheSummary {
-            roots: all_roots.iter().map(|p| p.to_string_lossy().into_owned()).collect(),
+            roots: all_roots
+                .iter()
+                .map(|p| p.to_string_lossy().into_owned())
+                .collect(),
             total_bytes: total,
             entries,
         })

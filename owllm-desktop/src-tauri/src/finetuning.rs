@@ -51,8 +51,13 @@ pub struct TrainConfig {
 #[derive(Serialize, Clone, Debug)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum TrainEvent {
-    Started { run_name: String },
-    Log { stream: String, line: String },
+    Started {
+        run_name: String,
+    },
+    Log {
+        stream: String,
+        line: String,
+    },
     /// Parsed from a JSON line on stdout — finetune.py periodically
     /// prints structured progress so the UI can render tiles without
     /// regexing the log.
@@ -65,8 +70,12 @@ pub enum TrainEvent {
         eta_sec: Option<f64>,
         epoch: Option<f64>,
     },
-    Finished { output_dir: String },
-    Failed { error: String },
+    Finished {
+        output_dir: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 /// Shared mutable state for the singleton training run. We only
@@ -163,10 +172,7 @@ fn resolve_base_model_arg(base: &str) -> String {
 /// spawned (or immediately on validation failure). Progress events
 /// stream over the Channel for the rest of the run.
 #[tauri::command]
-pub async fn train_start(
-    config: TrainConfig,
-    channel: Channel<TrainEvent>,
-) -> Result<(), String> {
+pub async fn train_start(config: TrainConfig, channel: Channel<TrainEvent>) -> Result<(), String> {
     // Singleton guard — refuse to start a second run while one is
     // active. The UI button is disabled but a stray double-click on
     // a slow machine should still bounce off here cleanly.
@@ -243,15 +249,24 @@ pub async fn train_start(
     let argv: Vec<String> = vec![
         script.to_string_lossy().into_owned(),
         // Downloaded model → its local path (load from disk); else a HF id.
-        "--model-name".into(), resolve_base_model_arg(&config.base_model),
-        "--data-path".into(), config.dataset.clone(),
-        "--output-dir".into(), run_dir.to_string_lossy().into_owned(),
-        "--adapter-name".into(), config.run_name.clone(),
-        "--epochs".into(), config.epochs.to_string(),
-        "--learning-rate".into(), format!("{}", config.learning_rate),
-        "--lora-r".into(), config.lora_r.to_string(),
-        "--max-seq-length".into(), config.max_seq_len.to_string(),
-        "--stop-file".into(), stop_file.to_string_lossy().into_owned(),
+        "--model-name".into(),
+        resolve_base_model_arg(&config.base_model),
+        "--data-path".into(),
+        config.dataset.clone(),
+        "--output-dir".into(),
+        run_dir.to_string_lossy().into_owned(),
+        "--adapter-name".into(),
+        config.run_name.clone(),
+        "--epochs".into(),
+        config.epochs.to_string(),
+        "--learning-rate".into(),
+        format!("{}", config.learning_rate),
+        "--lora-r".into(),
+        config.lora_r.to_string(),
+        "--max-seq-length".into(),
+        config.max_seq_len.to_string(),
+        "--stop-file".into(),
+        stop_file.to_string_lossy().into_owned(),
     ];
 
     let _ = channel.send(TrainEvent::Started {
@@ -279,13 +294,7 @@ pub async fn train_start(
     let run_dir_for_task = run_dir.clone();
 
     tokio::spawn(async move {
-        let outcome = spawn_trainer(
-            &python_exe,
-            &argv,
-            &cuda_devices,
-            &channel_for_task,
-        )
-        .await;
+        let outcome = spawn_trainer(&python_exe, &argv, &cuda_devices, &channel_for_task).await;
         // Always flip running=false on exit, regardless of outcome.
         {
             if let Ok(mut st) = TRAIN_STATE.lock() {
@@ -357,7 +366,10 @@ async fn spawn_trainer(
     if !status.success() {
         return Err(format!(
             "trainer exited with code {}",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into())
         ));
     }
     Ok(())
@@ -382,7 +394,10 @@ fn build_trainer_command(
         let q = crate::wsl::sh_quote;
         let mut script = String::new();
         if !cuda_visible_devices.is_empty() {
-            script.push_str(&format!("export CUDA_VISIBLE_DEVICES={}; ", q(cuda_visible_devices)));
+            script.push_str(&format!(
+                "export CUDA_VISIBLE_DEVICES={}; ",
+                q(cuda_visible_devices)
+            ));
         }
         script.push_str("export PYTHONUNBUFFERED=1; exec ");
         script.push_str(&q(python_exe));
@@ -391,7 +406,12 @@ fn build_trainer_command(
             script.push_str(&q(&win_arg_to_mnt(a)));
         }
         let mut c = Command::new("wsl.exe");
-        c.arg("-d").arg(&distro).arg("--").arg("bash").arg("-lc").arg(&script);
+        c.arg("-d")
+            .arg(&distro)
+            .arg("--")
+            .arg("bash")
+            .arg("-lc")
+            .arg(&script);
         return Ok(c);
     }
     // Host path: spawn the interpreter directly.
@@ -484,10 +504,18 @@ fn on_log_line(ch: &Channel<TrainEvent>, stream: &str, line: &str) {
     });
     if let Ok(mut st) = TRAIN_STATE.lock() {
         st.last_step = Some(step);
-        if total_steps.is_some() { st.last_total_steps = total_steps; }
-        if loss.is_some() { st.last_loss = loss; }
-        if lr.is_some() { st.last_lr = lr; }
-        if sps.is_some() { st.last_sps = sps; }
+        if total_steps.is_some() {
+            st.last_total_steps = total_steps;
+        }
+        if loss.is_some() {
+            st.last_loss = loss;
+        }
+        if lr.is_some() {
+            st.last_lr = lr;
+        }
+        if sps.is_some() {
+            st.last_sps = sps;
+        }
     }
 }
 
@@ -508,12 +536,31 @@ pub struct DatasetSummary {
 // crashed the run with "Could not detect dataset format" — the "crashed
 // without a clear reason" report.
 const DS_INPUT_KEYS: &[&str] = &[
-    "instruction", "prompt", "input", "question", "query", "text", "user",
-    "human", "customer_message", "customer", "message", "query_text",
+    "instruction",
+    "prompt",
+    "input",
+    "question",
+    "query",
+    "text",
+    "user",
+    "human",
+    "customer_message",
+    "customer",
+    "message",
+    "query_text",
 ];
 const DS_OUTPUT_KEYS: &[&str] = &[
-    "output", "response", "completion", "answer", "reply", "assistant", "gpt",
-    "bot", "assistant_response", "response_text", "answer_text",
+    "output",
+    "response",
+    "completion",
+    "answer",
+    "reply",
+    "assistant",
+    "gpt",
+    "bot",
+    "assistant_response",
+    "response_text",
+    "answer_text",
 ];
 
 /// First example object out of a parsed JSON value (array, {"data":[...]}, or
@@ -586,8 +633,8 @@ pub async fn dataset_check(path: String) -> Result<DatasetSummary, String> {
         }
         "json" => {
             let text = std::fs::read_to_string(&p).map_err(|e| format!("read {path}: {e}"))?;
-            let v: serde_json::Value = serde_json::from_str(&text)
-                .map_err(|e| format!("parse {path}: {e}"))?;
+            let v: serde_json::Value =
+                serde_json::from_str(&text).map_err(|e| format!("parse {path}: {e}"))?;
             let count = match &v {
                 serde_json::Value::Array(arr) => arr.len() as u64,
                 serde_json::Value::Object(map) => {
@@ -611,7 +658,10 @@ pub async fn dataset_check(path: String) -> Result<DatasetSummary, String> {
             // Header + N rows → N examples.
             let total_lines = text.lines().filter(|l| !l.trim().is_empty()).count() as u64;
             let count = total_lines.saturating_sub(1);
-            Ok(DatasetSummary { count, format: "csv".to_string() })
+            Ok(DatasetSummary {
+                count,
+                format: "csv".to_string(),
+            })
         }
         "parquet" => {
             let bytes = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
@@ -654,7 +704,13 @@ pub async fn dataset_ingest(manifest_json: String) -> Result<String, String> {
     // for txt/md/docx/url; PDF wants pypdf and degrades to a per-source error).
     let python = crate::paths::bundled_python_exe()
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| if cfg!(windows) { "python".to_string() } else { "python3".to_string() });
+        .unwrap_or_else(|| {
+            if cfg!(windows) {
+                "python".to_string()
+            } else {
+                "python3".to_string()
+            }
+        });
 
     let dir = std::env::temp_dir();
     let stamp = std::time::SystemTime::now()
@@ -676,13 +732,18 @@ pub async fn dataset_ingest(manifest_json: String) -> Result<String, String> {
         if let Some(arr) = v.get_mut("sources").and_then(|s| s.as_array_mut()) {
             for src in arr.iter_mut() {
                 let is_file = src.get("type").and_then(|t| t.as_str()).unwrap_or("file") == "file";
-                let val = src.get("value").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                let val = src
+                    .get("value")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if !is_file || !val.to_lowercase().ends_with(".pdf") {
                     continue;
                 }
-                let extracted = tokio::task::spawn_blocking(move || pdf_extract::extract_text(&val))
-                    .await
-                    .map_err(|e| format!("pdf task join: {e}"))?;
+                let extracted =
+                    tokio::task::spawn_blocking(move || pdf_extract::extract_text(&val))
+                        .await
+                        .map_err(|e| format!("pdf task join: {e}"))?;
                 if let Some(obj) = src.as_object_mut() {
                     match extracted {
                         Ok(text) if !text.trim().is_empty() => {
@@ -693,7 +754,10 @@ pub async fn dataset_ingest(manifest_json: String) -> Result<String, String> {
                                 "no extractable text in this PDF — it looks scanned/image-only (OCR isn't supported yet)".into()));
                         }
                         Err(e) => {
-                            obj.insert("error".into(), serde_json::Value::String(format!("couldn't read this PDF: {e}")));
+                            obj.insert(
+                                "error".into(),
+                                serde_json::Value::String(format!("couldn't read this PDF: {e}")),
+                            );
                         }
                     }
                 }
@@ -707,14 +771,19 @@ pub async fn dataset_ingest(manifest_json: String) -> Result<String, String> {
 
     let mut cmd = Command::new(&python);
     cmd.arg(&script)
-        .arg("--input").arg(&manifest_path)
-        .arg("--output").arg(&result_path);
+        .arg("--input")
+        .arg(&manifest_path)
+        .arg("--output")
+        .arg(&result_path);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = cmd.output().await.map_err(|e| format!("spawn python ({python}): {e}"))?;
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("spawn python ({python}): {e}"))?;
     let _ = std::fs::remove_file(&manifest_path);
     if !output.status.success() {
         let _ = std::fs::remove_file(&result_path);
@@ -726,12 +795,23 @@ pub async fn dataset_ingest(manifest_json: String) -> Result<String, String> {
             .lines()
             .rev()
             .find_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(|s| s.to_string()))
-            .unwrap_or_else(|| stderr.trim().lines().last().unwrap_or("dataset ingest failed").to_string());
+            .and_then(|v| {
+                v.get("error")
+                    .and_then(|e| e.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| {
+                stderr
+                    .trim()
+                    .lines()
+                    .last()
+                    .unwrap_or("dataset ingest failed")
+                    .to_string()
+            });
         return Err(format!("dataset ingest failed: {msg}"));
     }
-    let result = std::fs::read_to_string(&result_path)
-        .map_err(|e| format!("read ingest result: {e}"))?;
+    let result =
+        std::fs::read_to_string(&result_path).map_err(|e| format!("read ingest result: {e}"))?;
     let _ = std::fs::remove_file(&result_path);
     Ok(result)
 }
@@ -753,7 +833,9 @@ pub async fn dataset_save(path: String, content: String) -> Result<String, Strin
 /// find them. Empty string if no root resolves (the UI then just uses a dialog).
 #[tauri::command]
 pub async fn dataset_default_dir() -> Result<String, String> {
-    let Some(root) = crate::paths::llm_root() else { return Ok(String::new()); };
+    let Some(root) = crate::paths::llm_root() else {
+        return Ok(String::new());
+    };
     let dir = root.join("datasets");
     let _ = std::fs::create_dir_all(&dir);
     Ok(dir.to_string_lossy().into_owned())
@@ -806,7 +888,11 @@ pub async fn train_status() -> Result<TrainStatus, String> {
     let st = TRAIN_STATE.lock().map_err(|e| format!("state lock: {e}"))?;
     Ok(TrainStatus {
         running: st.running,
-        state: if st.running { "running".into() } else { "idle".into() },
+        state: if st.running {
+            "running".into()
+        } else {
+            "idle".into()
+        },
         run_name: st.run_name.clone(),
         step: st.last_step,
         total_steps: st.last_total_steps,
@@ -844,12 +930,24 @@ pub struct AbliterateConfig {
 pub enum AbliterateEvent {
     /// Raw JSON line emitted by abliterate.py — UI parses for nicer
     /// rendering but always has the underlying string available.
-    Progress { stage: String, step: Option<u64>, total: Option<u64>, detail: Option<String> },
+    Progress {
+        stage: String,
+        step: Option<u64>,
+        total: Option<u64>,
+        detail: Option<String>,
+    },
     /// Anything that didn't decode as JSON. Forwarded verbatim to a
     /// log tail so import errors surface to the user.
-    Log { stream: String, line: String },
-    Finished { output_dir: String },
-    Failed { error: String },
+    Log {
+        stream: String,
+        line: String,
+    },
+    Finished {
+        output_dir: String,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 #[tauri::command]
@@ -902,10 +1000,16 @@ pub async fn abliterate_start(
                 let mut candidates: Vec<std::path::PathBuf> = Vec::new();
                 for e in entries.flatten() {
                     let p = e.path();
-                    if !p.is_dir() { continue; }
+                    if !p.is_dir() {
+                        continue;
+                    }
                     let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-                    if name.contains("dedicated") { continue; }
-                    if name.starts_with("llamacpp") { continue; }
+                    if name.contains("dedicated") {
+                        continue;
+                    }
+                    if name.starts_with("llamacpp") {
+                        continue;
+                    }
                     let venv_py = p.join(".venv").join("Scripts").join("python.exe");
                     if venv_py.is_file() {
                         candidates.push(venv_py);
@@ -922,8 +1026,9 @@ pub async fn abliterate_start(
         "No Python environment with torch + transformers found. Install one via the Train page Environment picker, \
          or ensure an LLM/.envs/<name>/.venv/Scripts/python.exe exists.".to_string()
     })?;
-    let script = crate::paths::abliterate_script()
-        .ok_or_else(|| "LLM/tools/abliterate.py not found — legacy tree may be incomplete".to_string())?;
+    let script = crate::paths::abliterate_script().ok_or_else(|| {
+        "LLM/tools/abliterate.py not found — legacy tree may be incomplete".to_string()
+    })?;
 
     // Output dir — explicit user-provided OR auto-derive into
     // <llm_root>/fine_tuned/ so list_tuned_adapters picks it up
@@ -931,10 +1036,10 @@ pub async fn abliterate_start(
     let out_dir = if let Some(d) = config.output_dir.as_deref().filter(|s| !s.is_empty()) {
         std::path::PathBuf::from(d)
     } else {
-        let safe = config
-            .model
-            .replace('/', "__")
-            .replace(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.', "_");
+        let safe = config.model.replace('/', "__").replace(
+            |c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '-' && c != '.',
+            "_",
+        );
         let root = crate::paths::llm_root()
             .ok_or_else(|| "could not resolve LLM root for default output_dir".to_string())?;
         root.join("fine_tuned").join(format!("{safe}__abliterated"))
@@ -945,9 +1050,12 @@ pub async fn abliterate_start(
 
     let mut argv: Vec<String> = vec![
         script.to_string_lossy().into_owned(),
-        "--model".into(), config.model.clone(),
-        "--output-dir".into(), out_dir.to_string_lossy().into_owned(),
-        "--stop-file".into(), stop_file.to_string_lossy().into_owned(),
+        "--model".into(),
+        config.model.clone(),
+        "--output-dir".into(),
+        out_dir.to_string_lossy().into_owned(),
+        "--stop-file".into(),
+        stop_file.to_string_lossy().into_owned(),
     ];
     // Auto-pick up an external prompt corpus when the user has dropped
     // one next to the script. Filename convention is fixed so SuperGemma /
@@ -1026,7 +1134,10 @@ async fn spawn_abliterator(
     if !status.success() {
         return Err(format!(
             "abliterate exited with code {}",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into())
         ));
     }
     Ok(())
@@ -1036,7 +1147,11 @@ fn on_abliterate_line(ch: &Channel<AbliterateEvent>, stream: &str, line: &str) {
     let trimmed = line.trim();
     if trimmed.starts_with('{') {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
-            let stage = v.get("event").and_then(|e| e.as_str()).unwrap_or("?").to_string();
+            let stage = v
+                .get("event")
+                .and_then(|e| e.as_str())
+                .unwrap_or("?")
+                .to_string();
             let step = v.get("step").and_then(|e| e.as_u64());
             let total = v.get("total").and_then(|e| e.as_u64());
             // Compose a short human-readable detail from the rest.
@@ -1045,13 +1160,20 @@ fn on_abliterate_line(ch: &Channel<AbliterateEvent>, stream: &str, line: &str) {
                 .map(|m| {
                     let mut parts: Vec<String> = Vec::new();
                     for (k, val) in m {
-                        if k == "event" || k == "step" || k == "total" { continue; }
+                        if k == "event" || k == "step" || k == "total" {
+                            continue;
+                        }
                         parts.push(format!("{k}={}", val));
                     }
                     parts.join(" ")
                 })
                 .filter(|s| !s.is_empty());
-            let _ = ch.send(AbliterateEvent::Progress { stage, step, total, detail });
+            let _ = ch.send(AbliterateEvent::Progress {
+                stage,
+                step,
+                total,
+                detail,
+            });
             return;
         }
     }
@@ -1107,42 +1229,62 @@ pub async fn export_gguf(
     }
     // Find a llamacpp env python.exe — that's where convert_hf_to_gguf.py
     // ships (bundled with the gguf pip package).
-    let root = crate::paths::llm_root()
-        .ok_or_else(|| "could not resolve LLM root".to_string())?;
+    let root = crate::paths::llm_root().ok_or_else(|| "could not resolve LLM root".to_string())?;
     let envs_dir = root.join(".envs");
-    say(&format!("[export-gguf] scanning envs at {}", envs_dir.display()));
+    say(&format!(
+        "[export-gguf] scanning envs at {}",
+        envs_dir.display()
+    ));
     let mut python_exe: Option<std::path::PathBuf> = None;
     let mut convert_py: Option<std::path::PathBuf> = None;
     if let Ok(entries) = std::fs::read_dir(&envs_dir) {
         let mut candidates: Vec<std::path::PathBuf> = Vec::new();
         for e in entries.flatten() {
             let p = e.path();
-            if !p.is_dir() { continue; }
+            if !p.is_dir() {
+                continue;
+            }
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
-            if name.contains("dedicated") { continue; }
-            if !name.starts_with("llamacpp") { continue; }
+            if name.contains("dedicated") {
+                continue;
+            }
+            if !name.starts_with("llamacpp") {
+                continue;
+            }
             let venv_py = p.join(".venv").join("Scripts").join("python.exe");
             if venv_py.is_file() {
                 candidates.push(venv_py);
             }
         }
         candidates.sort_by(|a, b| b.cmp(a)); // stable > edge
-        say(&format!("[export-gguf] found {} llamacpp env(s)", candidates.len()));
+        say(&format!(
+            "[export-gguf] found {} llamacpp env(s)",
+            candidates.len()
+        ));
         for c in &candidates {
             say(&format!("  candidate: {}", c.display()));
         }
         if let Some(py) = candidates.first() {
             // convert_hf_to_gguf.py lives under .venv/Lib/site-packages/bin/
             let conv = py
-                .parent().and_then(|p| p.parent()) // .venv/
-                .map(|venv| venv.join("Lib").join("site-packages").join("bin").join("convert_hf_to_gguf.py"));
+                .parent()
+                .and_then(|p| p.parent()) // .venv/
+                .map(|venv| {
+                    venv.join("Lib")
+                        .join("site-packages")
+                        .join("bin")
+                        .join("convert_hf_to_gguf.py")
+                });
             if let Some(c) = conv {
                 say(&format!("[export-gguf] checking {}", c.display()));
                 if c.is_file() {
                     convert_py = Some(c);
                     python_exe = Some(py.clone());
                 } else {
-                    say(&format!("ERROR: convert_hf_to_gguf.py not at expected path: {}", c.display()));
+                    say(&format!(
+                        "ERROR: convert_hf_to_gguf.py not at expected path: {}",
+                        c.display()
+                    ));
                 }
             }
         }
@@ -1163,8 +1305,10 @@ pub async fn export_gguf(
     // path we're on up-front so we can compute the right output
     // filename and the user gets a single final .gguf they can serve.
     let outtype_lower = outtype_raw.to_ascii_lowercase();
-    let is_native = matches!(outtype_lower.as_str(),
-        "f32" | "f16" | "bf16" | "q8_0" | "auto");
+    let is_native = matches!(
+        outtype_lower.as_str(),
+        "f32" | "f16" | "bf16" | "q8_0" | "auto"
+    );
 
     let basename = src
         .file_name()
@@ -1188,16 +1332,25 @@ pub async fn export_gguf(
     } else {
         src.join(format!("{basename}-f16.tmp.gguf"))
     };
-    let convert_outtype = if is_native { outtype_lower.clone() } else { "f16".to_string() };
+    let convert_outtype = if is_native {
+        outtype_lower.clone()
+    } else {
+        "f16".to_string()
+    };
 
     let argv: Vec<String> = vec![
         convert_py.to_string_lossy().into_owned(),
         src.to_string_lossy().into_owned(),
-        "--outfile".into(), f16_tmp_path.to_string_lossy().into_owned(),
-        "--outtype".into(), convert_outtype.clone(),
+        "--outfile".into(),
+        f16_tmp_path.to_string_lossy().into_owned(),
+        "--outtype".into(),
+        convert_outtype.clone(),
     ];
     say(&format!("[export-gguf] python = {}", python_exe.display()));
-    say(&format!("[export-gguf] outfile = {}", final_out_path.display()));
+    say(&format!(
+        "[export-gguf] outfile = {}",
+        final_out_path.display()
+    ));
     say(&format!("[export-gguf] argv = {}", argv.join(" ")));
     if !is_native {
         say(&format!(
@@ -1220,7 +1373,9 @@ pub async fn export_gguf(
         // expects a newer gguf than is installed), auto-upgrade gguf
         // in this venv and retry once. This makes the env self-heal
         // without the user needing to know about pip.
-        if let Err(reason) = preflight_convert(&python_str, &convert_py_str, &channel_for_task).await {
+        if let Err(reason) =
+            preflight_convert(&python_str, &convert_py_str, &channel_for_task).await
+        {
             let _ = channel_for_task.send(AbliterateEvent::Failed { error: reason });
             return;
         }
@@ -1253,7 +1408,8 @@ pub async fn export_gguf(
             &final_out_for_task,
             &outtype_for_task,
             &channel_for_task,
-        ).await;
+        )
+        .await;
         // Best-effort cleanup of the f16 intermediate so the user's
         // disk doesn't gain 28 GB of scratch per export.
         if f16_tmp_for_task != final_out_for_task {
@@ -1294,7 +1450,10 @@ async fn spawn_llama_quantize(
         stream: "stdout".into(),
         line: format!(
             "[export-gguf] {} {} {} {}",
-            exe.display(), f16_path.display(), out_path.display(), quant_type.to_uppercase()
+            exe.display(),
+            f16_path.display(),
+            out_path.display(),
+            quant_type.to_uppercase()
         ),
     });
     let mut cmd = Command::new(&exe);
@@ -1309,30 +1468,44 @@ async fn spawn_llama_quantize(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let mut child = cmd.spawn().map_err(|e| format!("spawn llama-quantize: {e}"))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("spawn llama-quantize: {e}"))?;
     let stdout = child.stdout.take().ok_or_else(|| "no stdout".to_string())?;
     let stderr = child.stderr.take().ok_or_else(|| "no stderr".to_string())?;
     let ch_out = channel.clone();
     let stdout_task = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            let _ = ch_out.send(AbliterateEvent::Log { stream: "stdout".into(), line });
+            let _ = ch_out.send(AbliterateEvent::Log {
+                stream: "stdout".into(),
+                line,
+            });
         }
     });
     let ch_err = channel.clone();
     let stderr_task = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            let _ = ch_err.send(AbliterateEvent::Log { stream: "stderr".into(), line });
+            let _ = ch_err.send(AbliterateEvent::Log {
+                stream: "stderr".into(),
+                line,
+            });
         }
     });
-    let status = child.wait().await.map_err(|e| format!("wait llama-quantize: {e}"))?;
+    let status = child
+        .wait()
+        .await
+        .map_err(|e| format!("wait llama-quantize: {e}"))?;
     let _ = stdout_task.await;
     let _ = stderr_task.await;
     if !status.success() {
         return Err(format!(
             "llama-quantize exited with code {}",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into())
         ));
     }
     Ok(())
@@ -1353,8 +1526,14 @@ pub async fn hf_dir_weight_bytes(path: String) -> Result<u64, String> {
         for entry in std::fs::read_dir(&p).map_err(|e| e.to_string())? {
             let entry = entry.map_err(|e| e.to_string())?;
             let fp = entry.path();
-            if !fp.is_file() { continue; }
-            let name = fp.file_name().and_then(|s| s.to_str()).unwrap_or("").to_ascii_lowercase();
+            if !fp.is_file() {
+                continue;
+            }
+            let name = fp
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
             if name.ends_with(".safetensors") || name.ends_with(".bin") {
                 if let Ok(m) = std::fs::metadata(&fp) {
                     total = total.saturating_add(m.len());
@@ -1420,7 +1599,10 @@ async fn preflight_convert(
             }
             buf
         });
-        let status = child.wait().await.map_err(|e| format!("preflight wait: {e}"))?;
+        let status = child
+            .wait()
+            .await
+            .map_err(|e| format!("preflight wait: {e}"))?;
         let stderr_buf = stderr_task.await.unwrap_or_default();
         Ok::<(bool, String), String>((status.success(), stderr_buf))
     };
@@ -1493,7 +1675,10 @@ async fn preflight_convert(
     if !status.success() {
         return Err(format!(
             "auto-upgrade failed (pip exit code {}). Try `pip install -U gguf` manually in {} ",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into()),
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into()),
             python_exe,
         ));
     }
@@ -1540,14 +1725,20 @@ async fn spawn_gguf_exporter(
     let stdout_task = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            let _ = ch_out.send(AbliterateEvent::Log { stream: "stdout".into(), line });
+            let _ = ch_out.send(AbliterateEvent::Log {
+                stream: "stdout".into(),
+                line,
+            });
         }
     });
     let ch_err = channel.clone();
     let stderr_task = tokio::spawn(async move {
         let mut reader = tokio::io::BufReader::new(stderr).lines();
         while let Ok(Some(line)) = reader.next_line().await {
-            let _ = ch_err.send(AbliterateEvent::Log { stream: "stderr".into(), line });
+            let _ = ch_err.send(AbliterateEvent::Log {
+                stream: "stderr".into(),
+                line,
+            });
         }
     });
     let status = child.wait().await.map_err(|e| format!("wait: {e}"))?;
@@ -1556,7 +1747,10 @@ async fn spawn_gguf_exporter(
     if !status.success() {
         return Err(format!(
             "gguf export exited with code {}",
-            status.code().map(|c| c.to_string()).unwrap_or_else(|| "?".into())
+            status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "?".into())
         ));
     }
     Ok(())

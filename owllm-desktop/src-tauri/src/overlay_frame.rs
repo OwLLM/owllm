@@ -24,7 +24,8 @@ const EXTRA_BOTTOM: u32 = 0;
 const CONTENT_OFFSET_X: i32 = SHIFT_OUT + CORNER_OUTSET;
 const CONTENT_OFFSET_Y: i32 = EXTRA_TOP + SHIFT_OUT + CORNER_OUTSET;
 const OVERLAY_EXTRA_W: u32 = EXTRA_RIGHT + 2 * (SHIFT_OUT as u32) + 2 * CORNER_OUTSET as u32;
-const OVERLAY_EXTRA_H: u32 = EXTRA_TOP as u32 + EXTRA_BOTTOM + 2 * (SHIFT_OUT as u32) + 2 * CORNER_OUTSET as u32;
+const OVERLAY_EXTRA_H: u32 =
+    EXTRA_TOP as u32 + EXTRA_BOTTOM + 2 * (SHIFT_OUT as u32) + 2 * CORNER_OUTSET as u32;
 
 /// Turn off Windows' "ghost window" feature for this process.
 ///
@@ -183,10 +184,7 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
     if !enabled() {
         return Ok(());
     }
-    let Some(overlay) = main
-        .app_handle()
-        .get_webview_window(OVERLAY_LABEL)
-    else {
+    let Some(overlay) = main.app_handle().get_webview_window(OVERLAY_LABEL) else {
         return Ok(());
     };
     sync_geometry(main.outer_position()?, main.outer_size()?, &overlay)?;

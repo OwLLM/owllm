@@ -36,12 +36,16 @@ pub async fn slack_open_connection(app_token: String) -> Result<String, String> 
         .await
         .map_err(|e| format!("apps.connections.open: {e}"))?;
     let body = resp.text().await.map_err(|e| format!("body: {e}"))?;
-    let parsed: OpenConnResp = serde_json::from_str(&body)
-        .map_err(|e| format!("parse: {e} — body was: {body}"))?;
+    let parsed: OpenConnResp =
+        serde_json::from_str(&body).map_err(|e| format!("parse: {e} — body was: {body}"))?;
     if !parsed.ok {
-        return Err(parsed.error.unwrap_or_else(|| "apps.connections.open returned ok=false".to_string()));
+        return Err(parsed
+            .error
+            .unwrap_or_else(|| "apps.connections.open returned ok=false".to_string()));
     }
-    parsed.url.ok_or_else(|| "no url in apps.connections.open response".to_string())
+    parsed
+        .url
+        .ok_or_else(|| "no url in apps.connections.open response".to_string())
 }
 
 #[derive(serde::Deserialize)]
@@ -54,7 +58,11 @@ struct PostMsgResp {
 /// POST chat.postMessage. `bot_token` is xoxb-…. `channel` is a channel id
 /// (C…/G…/D…) or name.
 #[tauri::command]
-pub async fn slack_send_message(bot_token: String, channel: String, text: String) -> Result<(), String> {
+pub async fn slack_send_message(
+    bot_token: String,
+    channel: String,
+    text: String,
+) -> Result<(), String> {
     let cli = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -70,10 +78,12 @@ pub async fn slack_send_message(bot_token: String, channel: String, text: String
         .await
         .map_err(|e| format!("chat.postMessage: {e}"))?;
     let body = resp.text().await.map_err(|e| format!("body: {e}"))?;
-    let parsed: PostMsgResp = serde_json::from_str(&body)
-        .map_err(|e| format!("parse: {e} — body was: {body}"))?;
+    let parsed: PostMsgResp =
+        serde_json::from_str(&body).map_err(|e| format!("parse: {e} — body was: {body}"))?;
     if !parsed.ok {
-        return Err(parsed.error.unwrap_or_else(|| "chat.postMessage returned ok=false".to_string()));
+        return Err(parsed
+            .error
+            .unwrap_or_else(|| "chat.postMessage returned ok=false".to_string()));
     }
     Ok(())
 }
@@ -111,13 +121,24 @@ pub async fn slack_download_file(
         let txt = resp.text().await.unwrap_or_default();
         return Err(format!("slack download HTTP {status}: {txt}"));
     }
-    let bytes = resp.bytes().await.map_err(|e| format!("download bytes: {e}"))?;
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("download bytes: {e}"))?;
     if bytes.len() > MAX_BYTES {
-        return Err(format!("file too large: {} bytes (limit {})", bytes.len(), MAX_BYTES));
+        return Err(format!(
+            "file too large: {} bytes (limit {})",
+            bytes.len(),
+            MAX_BYTES
+        ));
     }
     let mime = expected_mime
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "application/octet-stream".to_string());
     let data_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(SlackFileDownload { mime, data_b64, size: bytes.len() as i64 })
+    Ok(SlackFileDownload {
+        mime,
+        data_b64,
+        size: bytes.len() as i64,
+    })
 }

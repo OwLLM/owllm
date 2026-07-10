@@ -50,7 +50,9 @@ pub struct ProjectRow {
 
 #[tauri::command]
 pub async fn list_projects() -> Result<Vec<ProjectRow>, String> {
-    let Some(path) = project_db_path() else { return Ok(Vec::new()) };
+    let Some(path) = project_db_path() else {
+        return Ok(Vec::new());
+    };
     if !path.is_file() {
         return Ok(Vec::new());
     }
@@ -113,8 +115,8 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
     // adds chat_json / agent_logs_json to pre-existing databases.
     // Without that, this read would fail on older DBs the moment we
     // SELECT the new columns.
-    let conn = rusqlite::Connection::open(path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn =
+        rusqlite::Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
 
     let exists: i64 = conn
         .query_row(
@@ -185,7 +187,10 @@ pub struct CreateProjectInput {
 }
 
 fn now_iso() -> String {
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // RFC3339-ish using a single chrono-free Z timestamp. The Python
     // side stores ISO-8601 strings; both formats sort correctly so
     // this is round-trip safe.
@@ -240,10 +245,16 @@ fn is_leap(y: i64) -> bool {
 
 fn new_id() -> String {
     // ULID-ish: 13-hex epoch ms + 16-hex random. No external crate.
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
     let mut rand_bytes = [0u8; 8];
     getrand_unsafe(&mut rand_bytes);
-    let rand_hex = rand_bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>();
+    let rand_hex = rand_bytes
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>();
     format!("{:x}_{}", ms, rand_hex)
 }
 
@@ -251,20 +262,27 @@ fn new_id() -> String {
 // rand_chacha would be cleaner but adds dep mass.
 fn getrand_unsafe(buf: &mut [u8]) {
     use std::time::Instant;
-    let mut seed = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let mut seed = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     // Mix in a couple of clock samples — gives us enough entropy for
     // a per-record id collision-resistant against the few-projects-
     // per-second worst case.
     seed ^= Instant::now().elapsed().as_nanos();
     for b in buf.iter_mut() {
-        seed = seed.wrapping_mul(6364136223846793005u128).wrapping_add(1442695040888963407u128);
+        seed = seed
+            .wrapping_mul(6364136223846793005u128)
+            .wrapping_add(1442695040888963407u128);
         *b = (seed >> 96) as u8;
     }
 }
 
 #[tauri::command]
 pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, String> {
-    let Some(path) = project_db_path() else { return Err("LLM/ tree not found".into()) };
+    let Some(path) = project_db_path() else {
+        return Err("LLM/ tree not found".into());
+    };
     let path2 = path.clone();
     tokio::task::spawn_blocking(move || {
         if let Some(parent) = path2.parent() {
@@ -337,7 +355,9 @@ pub struct UpdateProjectInput {
 
 #[tauri::command]
 pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
-    let Some(path) = project_db_path() else { return Err("LLM/ tree not found".into()) };
+    let Some(path) = project_db_path() else {
+        return Err("LLM/ tree not found".into());
+    };
     let path2 = path.clone();
     tokio::task::spawn_blocking(move || {
         let conn = rusqlite::Connection::open(&path2)
@@ -397,10 +417,7 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
         params.push(Box::new(now));
         params.push(Box::new(input.id));
 
-        let sql = format!(
-            "UPDATE agent_projects SET {} WHERE id = ?",
-            sets.join(", ")
-        );
+        let sql = format!("UPDATE agent_projects SET {} WHERE id = ?", sets.join(", "));
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
         conn.execute(&sql, refs.as_slice())
             .map_err(|e| format!("update: {e}"))?;
@@ -412,7 +429,9 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn delete_project(id: String) -> Result<(), String> {
-    let Some(path) = project_db_path() else { return Err("LLM/ tree not found".into()) };
+    let Some(path) = project_db_path() else {
+        return Err("LLM/ tree not found".into());
+    };
     let path2 = path.clone();
     // Read the location BEFORE deleting so we can auto-clean a sandbox copy.
     let location = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
@@ -428,8 +447,11 @@ pub async fn delete_project(id: String) -> Result<(), String> {
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
             Err(e) => return Err(format!("read location: {e}")),
         };
-        conn.execute("DELETE FROM agent_projects WHERE id = ?", rusqlite::params![id])
-            .map_err(|e| format!("delete: {e}"))?;
+        conn.execute(
+            "DELETE FROM agent_projects WHERE id = ?",
+            rusqlite::params![id],
+        )
+        .map_err(|e| format!("delete: {e}"))?;
         Ok(loc)
     })
     .await

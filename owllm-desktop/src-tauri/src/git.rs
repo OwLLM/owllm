@@ -51,7 +51,13 @@ pub struct GitStatus {
 #[tauri::command]
 pub async fn git_status(dir: String) -> Result<GitStatus, String> {
     tokio::task::spawn_blocking(move || {
-        let empty = GitStatus { is_repo: false, branch: String::new(), ahead: 0, behind: 0, files: Vec::new() };
+        let empty = GitStatus {
+            is_repo: false,
+            branch: String::new(),
+            ahead: 0,
+            behind: 0,
+            files: Vec::new(),
+        };
         // Cheap repo check first — non-repos return is_repo:false (not an error).
         match git(&dir, &["rev-parse", "--is-inside-work-tree"]) {
             Ok((true, out, _)) if out.trim() == "true" => {}
@@ -74,15 +80,28 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
                     let bracket = &rest[b + 1..rest.find(']').unwrap_or(rest.len())];
                     for tok in bracket.split(',') {
                         let t = tok.trim();
-                        if let Some(n) = t.strip_prefix("ahead ") { ahead = n.trim().parse().unwrap_or(0); }
-                        if let Some(n) = t.strip_prefix("behind ") { behind = n.trim().parse().unwrap_or(0); }
+                        if let Some(n) = t.strip_prefix("ahead ") {
+                            ahead = n.trim().parse().unwrap_or(0);
+                        }
+                        if let Some(n) = t.strip_prefix("behind ") {
+                            behind = n.trim().parse().unwrap_or(0);
+                        }
                     }
                 }
             } else if line.len() > 3 {
-                files.push(GitFile { code: line[..2].to_string(), path: line[3..].to_string() });
+                files.push(GitFile {
+                    code: line[..2].to_string(),
+                    path: line[3..].to_string(),
+                });
             }
         }
-        Ok(GitStatus { is_repo: true, branch, ahead, behind, files })
+        Ok(GitStatus {
+            is_repo: true,
+            branch,
+            ahead,
+            behind,
+            files,
+        })
     })
     .await
     .map_err(|e| format!("join: {e}"))?
@@ -103,8 +122,15 @@ pub async fn git_branches(dir: String) -> Result<GitBranches, String> {
         if !ok {
             return Err(format!("git branch: {err}"));
         }
-        let branches: Vec<String> = out.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect();
-        Ok(GitBranches { current: cur.trim().to_string(), branches })
+        let branches: Vec<String> = out
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        Ok(GitBranches {
+            current: cur.trim().to_string(),
+            branches,
+        })
     })
     .await
     .map_err(|e| format!("join: {e}"))?

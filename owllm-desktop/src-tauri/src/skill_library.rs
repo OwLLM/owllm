@@ -129,7 +129,11 @@ pub async fn fetch_skill_source(
         .map_err(|e| format!("join error: {e}"))??;
 
     Ok(FetchResult {
-        local_path: remote_root().unwrap().join(key_clone).to_string_lossy().into_owned(),
+        local_path: remote_root()
+            .unwrap()
+            .join(key_clone)
+            .to_string_lossy()
+            .into_owned(),
     })
 }
 
@@ -172,9 +176,7 @@ fn run_git(git_exe: &Path, url: &str, target: &Path, force: bool) -> Result<(), 
     cmd.args(["clone", "--depth", "1", url, target.to_str().unwrap_or("")]);
     #[cfg(windows)]
     cmd.creation_flags(CREATE_NO_WINDOW);
-    let out = cmd
-        .output()
-        .map_err(|e| format!("spawn git: {e}"))?;
+    let out = cmd.output().map_err(|e| format!("spawn git: {e}"))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         return Err(format!(
@@ -232,7 +234,9 @@ fn walk_for_skill_md(
     installed: &std::collections::HashSet<String>,
     out: &mut Vec<DiscoveredSkill>,
 ) {
-    let Ok(read) = std::fs::read_dir(cur) else { return };
+    let Ok(read) = std::fs::read_dir(cur) else {
+        return;
+    };
     for entry in read.flatten() {
         let path = entry.path();
         let file_name = match path.file_name().and_then(|n| n.to_str()) {
@@ -360,7 +364,9 @@ pub async fn install_skill(
     .await
     .map_err(|e| format!("join error: {e}"))??;
 
-    Ok(InstallResult { installed_folder: folder_name })
+    Ok(InstallResult {
+        installed_folder: folder_name,
+    })
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
@@ -447,7 +453,8 @@ fn alias_tool_name(name: &str) -> String {
         "WebFetch" | "WebSearch" => "http_get".into(),
         "TodoWrite" => "todo_write".into(),
         _ => {
-            if n.chars().all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
+            if n.chars()
+                .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit())
                 || n.contains('_')
             {
                 n.to_string()
@@ -466,13 +473,14 @@ pub async fn uninstall_skill(folder_name: String) -> Result<bool, String> {
     {
         return Err("folder name must be alphanumerics + _ / -".into());
     }
-    let dest = installed_root().ok_or("LLM/ tree not found")?.join(&folder_name);
+    let dest = installed_root()
+        .ok_or("LLM/ tree not found")?
+        .join(&folder_name);
     if !dest.is_dir() {
         return Ok(false);
     }
     tokio::task::spawn_blocking(move || {
-        std::fs::remove_dir_all(&dest)
-            .map_err(|e| format!("rmtree {}: {e}", dest.display()))
+        std::fs::remove_dir_all(&dest).map_err(|e| format!("rmtree {}: {e}", dest.display()))
     })
     .await
     .map_err(|e| format!("join error: {e}"))??;
@@ -510,13 +518,13 @@ pub async fn list_installed_skill_folders() -> Result<Vec<String>, String> {
 /// alias-rewrite path as the interactive Skill Library, so results are identical
 /// to a manual install. Requires `git` on PATH (Err if absent — caller retries).
 pub fn provision_all_curated_skills() -> Result<usize, String> {
-    let git_exe = which_git().ok_or_else(|| {
-        "git not on PATH — cannot auto-download skill libraries".to_string()
-    })?;
+    let git_exe = which_git()
+        .ok_or_else(|| "git not on PATH — cannot auto-download skill libraries".to_string())?;
     let remote = remote_root().ok_or("skills dir unavailable")?;
     std::fs::create_dir_all(&remote).map_err(|e| format!("mkdir {}: {e}", remote.display()))?;
     let inst_root = installed_root().ok_or("skills dir unavailable")?;
-    std::fs::create_dir_all(&inst_root).map_err(|e| format!("mkdir {}: {e}", inst_root.display()))?;
+    std::fs::create_dir_all(&inst_root)
+        .map_err(|e| format!("mkdir {}: {e}", inst_root.display()))?;
 
     let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut installed = 0usize;

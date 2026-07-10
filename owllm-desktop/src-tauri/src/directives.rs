@@ -43,7 +43,10 @@ fn db_path() -> Option<PathBuf> {
 fn now_iso() -> String {
     // Reuse the same lightweight formatter as projects.rs. We can't
     // import it directly (private), so re-implement the wrapper here.
-    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     iso_from_epoch(secs)
 }
 
@@ -57,7 +60,9 @@ fn iso_from_epoch(epoch_secs: u64) -> String {
     let mut day = days;
     loop {
         let yr = if is_leap(year) { 366 } else { 365 };
-        if day < yr { break; }
+        if day < yr {
+            break;
+        }
         day -= yr;
         year += 1;
     }
@@ -68,17 +73,35 @@ fn iso_from_epoch(epoch_secs: u64) -> String {
     };
     let mut month = 0;
     for (i, md) in mdays.iter().enumerate() {
-        if day < *md { month = i; break; }
+        if day < *md {
+            month = i;
+            break;
+        }
         day -= *md;
     }
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
-        year, month + 1, day + 1, hour, minute, sec)
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        year,
+        month + 1,
+        day + 1,
+        hour,
+        minute,
+        sec
+    )
 }
-fn is_leap(y: i64) -> bool { (y % 4 == 0 && y % 100 != 0) || y % 400 == 0 }
+fn is_leap(y: i64) -> bool {
+    (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+}
 
 fn new_id() -> String {
-    let ms = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
     let rand = nanos as u64;
     format!("{:x}{:x}", ms, rand & 0xffff_ffff_ffff)
 }
@@ -95,11 +118,13 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
             updated_at TEXT NOT NULL\
         )",
         [],
-    ).map_err(|e| format!("create agent_directives: {e}"))?;
+    )
+    .map_err(|e| format!("create agent_directives: {e}"))?;
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_directives_project ON agent_directives(project_id)",
         [],
-    ).map_err(|e| format!("create idx_directives_project: {e}"))?;
+    )
+    .map_err(|e| format!("create idx_directives_project: {e}"))?;
     // Add director_mode column to agent_projects so the toggle on the
     // SuperUserCard persists. Idempotent ALTER (swallow duplicate-column
     // error) — same pattern as projects.rs:97-104 for chat_json.
@@ -134,7 +159,8 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
             version INTEGER NOT NULL\
         )",
         [],
-    ).map_err(|e| format!("create directives_seed_marks: {e}"))?;
+    )
+    .map_err(|e| format!("create directives_seed_marks: {e}"))?;
     Ok(())
 }
 
@@ -285,8 +311,8 @@ fn open_conn() -> Result<rusqlite::Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let conn = rusqlite::Connection::open(&path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn =
+        rusqlite::Connection::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
     ensure_schema(&conn)?;
     Ok(conn)
 }
@@ -298,21 +324,31 @@ pub async fn directives_list(project_id: String) -> Result<Vec<Directive>, Strin
         // Auto-seed native best-practice rules the first time a project is listed,
         // so the rules panel is never empty and the user never starts from zero.
         seed_defaults_if_needed(&conn, &project_id)?;
-        let mut stmt = conn.prepare(
-            "SELECT id, project_id, kind, text, source, created_at, updated_at \
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, project_id, kind, text, source, created_at, updated_at \
              FROM agent_directives WHERE project_id = ?1 \
-             ORDER BY kind, created_at"
-        ).map_err(|e| format!("prepare: {e}"))?;
-        let rows = stmt.query_map([&project_id], |r| {
-            Ok(Directive {
-                id: r.get(0)?, project_id: r.get(1)?, kind: r.get(2)?,
-                text: r.get(3)?, source: r.get(4)?,
-                created_at: r.get(5)?, updated_at: r.get(6)?,
+             ORDER BY kind, created_at",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map([&project_id], |r| {
+                Ok(Directive {
+                    id: r.get(0)?,
+                    project_id: r.get(1)?,
+                    kind: r.get(2)?,
+                    text: r.get(3)?,
+                    source: r.get(4)?,
+                    created_at: r.get(5)?,
+                    updated_at: r.get(6)?,
+                })
             })
-        }).map_err(|e| format!("query: {e}"))?;
+            .map_err(|e| format!("query: {e}"))?;
         let out: Result<Vec<_>, _> = rows.collect();
         out.map_err(|e| format!("row decode: {e}"))
-    }).await.map_err(|e| format!("join error: {e}"))?
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 // JS sends `projectId` (camelCase) per Tauri's argument convention;
@@ -380,16 +416,22 @@ pub async fn directives_update(input: UpdateDirectiveInput) -> Result<(), String
             sets.push("text = ?");
             params.push(Box::new(t));
         }
-        if sets.is_empty() { return Ok(()); }
+        if sets.is_empty() {
+            return Ok(());
+        }
         sets.push("updated_at = ?");
         params.push(Box::new(now_iso()));
         // Editing a rule makes it the user's own — promote it to 'user_typed' so a
         // future native-set version bump won't delete it as an untouched builtin.
         sets.push("source = 'user_typed'");
         params.push(Box::new(input.id.clone()));
-        let sql = format!("UPDATE agent_directives SET {} WHERE id = ?", sets.join(", "));
+        let sql = format!(
+            "UPDATE agent_directives SET {} WHERE id = ?",
+            sets.join(", ")
+        );
         let refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|b| b.as_ref()).collect();
-        conn.execute(&sql, refs.as_slice()).map_err(|e| format!("update: {e}"))?;
+        conn.execute(&sql, refs.as_slice())
+            .map_err(|e| format!("update: {e}"))?;
         // Stamp the owning project so the edit syncs as the newer rule set.
         if let Ok(pid) = conn.query_row(
             "SELECT project_id FROM agent_directives WHERE id = ?1",
@@ -399,7 +441,9 @@ pub async fn directives_update(input: UpdateDirectiveInput) -> Result<(), String
             touch_directives(&conn, &pid);
         }
         Ok(())
-    }).await.map_err(|e| format!("join error: {e}"))?
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 /// Re-add any built-in best-practice rules the user has deleted (matched by
@@ -439,13 +483,18 @@ pub async fn directives_delete(id: String) -> Result<(), String> {
                 |r| r.get::<_, String>(0),
             )
             .ok();
-        conn.execute("DELETE FROM agent_directives WHERE id = ?1", rusqlite::params![id])
-            .map_err(|e| format!("delete: {e}"))?;
+        conn.execute(
+            "DELETE FROM agent_directives WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| format!("delete: {e}"))?;
         if let Some(pid) = pid {
             touch_directives(&conn, &pid);
         }
         Ok(())
-    }).await.map_err(|e| format!("join error: {e}"))?
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 /// Set the per-project director_mode flag (the SuperUserCard toggle).
@@ -459,22 +508,29 @@ pub async fn project_set_director_mode(project_id: String, enabled: bool) -> Res
         conn.execute(
             "UPDATE agent_projects SET director_mode = ?1, updated_at = ?2 WHERE id = ?3",
             rusqlite::params![enabled as i64, now_iso(), project_id],
-        ).map_err(|e| format!("update director_mode: {e}"))?;
+        )
+        .map_err(|e| format!("update director_mode: {e}"))?;
         Ok(())
-    }).await.map_err(|e| format!("join error: {e}"))?
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 #[tauri::command]
 pub async fn project_get_director_mode(project_id: String) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         let conn = open_conn()?;
-        let v: i64 = conn.query_row(
-            "SELECT director_mode FROM agent_projects WHERE id = ?1",
-            rusqlite::params![project_id],
-            |r| r.get(0),
-        ).unwrap_or(0);
+        let v: i64 = conn
+            .query_row(
+                "SELECT director_mode FROM agent_projects WHERE id = ?1",
+                rusqlite::params![project_id],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
         Ok(v != 0)
-    }).await.map_err(|e| format!("join error: {e}"))?
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 fn normalize_kind(k: &str) -> String {

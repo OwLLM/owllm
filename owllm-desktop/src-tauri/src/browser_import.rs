@@ -95,12 +95,19 @@ fn chromium_paths(kind: BrowserKind) -> Option<(PathBuf, PathBuf)> {
         let root = match kind {
             BrowserKind::Chrome => l.join("Google").join("Chrome").join("User Data"),
             BrowserKind::Edge => l.join("Microsoft").join("Edge").join("User Data"),
-            BrowserKind::Brave => l.join("BraveSoftware").join("Brave-Browser").join("User Data"),
+            BrowserKind::Brave => l
+                .join("BraveSoftware")
+                .join("Brave-Browser")
+                .join("User Data"),
             // Opera keeps Local State + profile in one dir under Roaming.
             BrowserKind::Opera => a.join("Opera Software").join("Opera Stable"),
             BrowserKind::Firefox => return None,
         };
-        let profile = if kind == BrowserKind::Opera { root.clone() } else { root.join("Default") };
+        let profile = if kind == BrowserKind::Opera {
+            root.clone()
+        } else {
+            root.join("Default")
+        };
         Some((root, profile))
     } else if cfg!(target_os = "macos") {
         let base = home?.join("Library").join("Application Support");
@@ -111,7 +118,11 @@ fn chromium_paths(kind: BrowserKind) -> Option<(PathBuf, PathBuf)> {
             BrowserKind::Opera => base.join("com.operasoftware.Opera"),
             BrowserKind::Firefox => return None,
         };
-        let profile = if kind == BrowserKind::Opera { root.clone() } else { root.join("Default") };
+        let profile = if kind == BrowserKind::Opera {
+            root.clone()
+        } else {
+            root.join("Default")
+        };
         Some((root, profile))
     } else {
         let cfg = home?.join(".config");
@@ -122,7 +133,11 @@ fn chromium_paths(kind: BrowserKind) -> Option<(PathBuf, PathBuf)> {
             BrowserKind::Opera => cfg.join("opera"),
             BrowserKind::Firefox => return None,
         };
-        let profile = if kind == BrowserKind::Opera { root.clone() } else { root.join("Default") };
+        let profile = if kind == BrowserKind::Opera {
+            root.clone()
+        } else {
+            root.join("Default")
+        };
         Some((root, profile))
     }
 }
@@ -132,7 +147,12 @@ fn firefox_profile() -> Option<PathBuf> {
     let roots = if cfg!(windows) {
         vec![std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Mozilla").join("Firefox"))]
     } else if cfg!(target_os = "macos") {
-        vec![std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Library").join("Application Support").join("Firefox"))]
+        vec![std::env::var_os("HOME").map(|h| {
+            PathBuf::from(h)
+                .join("Library")
+                .join("Application Support")
+                .join("Firefox")
+        })]
     } else {
         vec![std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".mozilla").join("firefox"))]
     };
@@ -166,7 +186,8 @@ fn chromium_count(profile: &PathBuf) -> usize {
     }
     with_temp_copy(&db, |tmp| {
         let conn = rusqlite::Connection::open(tmp).ok()?;
-        conn.query_row("SELECT COUNT(*) FROM logins", [], |r| r.get::<_, i64>(0)).ok()
+        conn.query_row("SELECT COUNT(*) FROM logins", [], |r| r.get::<_, i64>(0))
+            .ok()
     })
     .unwrap_or(0)
     .max(0) as usize
@@ -174,7 +195,9 @@ fn chromium_count(profile: &PathBuf) -> usize {
 
 fn firefox_count(profile: &PathBuf) -> usize {
     let f = profile.join("logins.json");
-    let Ok(raw) = std::fs::read_to_string(&f) else { return 0 };
+    let Ok(raw) = std::fs::read_to_string(&f) else {
+        return 0;
+    };
     serde_json::from_str::<serde_json::Value>(&raw)
         .ok()
         .and_then(|v| v.get("logins").and_then(|l| l.as_array()).map(|a| a.len()))
@@ -208,7 +231,11 @@ pub fn browser_import_scan() -> Vec<DetectedBrowser> {
                         profile: profile.to_string_lossy().into_owned(),
                         count: chromium_count(&profile),
                         supported,
-                        note: if supported { String::new() } else { "import supported on Windows in this build".into() },
+                        note: if supported {
+                            String::new()
+                        } else {
+                            "import supported on Windows in this build".into()
+                        },
                     });
                 }
             }
@@ -219,7 +246,8 @@ pub fn browser_import_scan() -> Vec<DetectedBrowser> {
                 profile: profile.to_string_lossy().into_owned(),
                 count: firefox_count(&profile),
                 supported: false,
-                note: "Firefox (NSS) import isn't wired up yet — Chrome/Edge/Brave/Opera are".into(),
+                note: "Firefox (NSS) import isn't wired up yet — Chrome/Edge/Brave/Opera are"
+                    .into(),
             });
         }
     }
@@ -232,7 +260,10 @@ pub fn browser_import_scan() -> Vec<DetectedBrowser> {
 pub fn browser_import_run(id: String) -> Result<String, String> {
     let kind = BrowserKind::from_id(&id).ok_or_else(|| format!("unknown browser '{id}'"))?;
     if !kind.is_chromium() {
-        return Err("Firefox import isn't supported in this build yet. Chrome, Edge, Brave and Opera work.".into());
+        return Err(
+            "Firefox import isn't supported in this build yet. Chrome, Edge, Brave and Opera work."
+                .into(),
+        );
     }
     if !cfg!(windows) {
         return Err(format!(
@@ -245,7 +276,8 @@ pub fn browser_import_run(id: String) -> Result<String, String> {
 
 #[cfg(windows)]
 fn import_chromium(kind: BrowserKind) -> Result<String, String> {
-    let (root, profile) = chromium_paths(kind).ok_or_else(|| "could not locate browser profile".to_string())?;
+    let (root, profile) =
+        chromium_paths(kind).ok_or_else(|| "could not locate browser profile".to_string())?;
     let key = chromium_master_key(&root)?;
     let db = profile.join("Login Data");
     if !db.exists() {
@@ -253,7 +285,9 @@ fn import_chromium(kind: BrowserKind) -> Result<String, String> {
     }
     let rows = with_temp_copy(&db, |tmp| {
         let conn = rusqlite::Connection::open(tmp).ok()?;
-        let mut stmt = conn.prepare("SELECT origin_url, username_value, password_value FROM logins").ok()?;
+        let mut stmt = conn
+            .prepare("SELECT origin_url, username_value, password_value FROM logins")
+            .ok()?;
         let mapped = stmt
             .query_map([], |r| {
                 Ok((
@@ -270,7 +304,9 @@ fn import_chromium(kind: BrowserKind) -> Result<String, String> {
     let mut creds = Vec::new();
     let now = now_ms();
     for (origin, user, blob) in rows {
-        let Some(pw) = decrypt_chromium_password(&blob, &key) else { continue };
+        let Some(pw) = decrypt_chromium_password(&blob, &key) else {
+            continue;
+        };
         if pw.is_empty() {
             continue;
         }
@@ -296,7 +332,8 @@ fn import_chromium(_kind: BrowserKind) -> Result<String, String> {
 fn chromium_master_key(user_data_root: &PathBuf) -> Result<Vec<u8>, String> {
     let ls = user_data_root.join("Local State");
     let raw = std::fs::read_to_string(&ls).map_err(|e| format!("read Local State: {e}"))?;
-    let enc = parse_encrypted_key(&raw).ok_or_else(|| "no os_crypt.encrypted_key in Local State".to_string())?;
+    let enc = parse_encrypted_key(&raw)
+        .ok_or_else(|| "no os_crypt.encrypted_key in Local State".to_string())?;
     crate::crypt::unprotect(&enc).map_err(|e| format!("DPAPI unwrap of browser key failed: {e}"))
 }
 
@@ -341,7 +378,10 @@ fn decrypt_chromium_password(blob: &[u8], key: &[u8]) -> Option<String> {
 
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

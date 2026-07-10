@@ -29,13 +29,13 @@ fn now_ms() -> i64 {
 }
 
 fn open_db() -> Result<rusqlite::Connection, String> {
-    let path = crate::projects::project_db_path()
-        .ok_or_else(|| "no project database path".to_string())?;
+    let path =
+        crate::projects::project_db_path().ok_or_else(|| "no project database path".to_string())?;
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let conn = rusqlite::Connection::open(&path)
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn =
+        rusqlite::Connection::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
     ensure_schema(&conn)?;
     Ok(conn)
 }
@@ -114,13 +114,16 @@ pub(crate) fn normalize_tags(s: &str) -> String {
 /// One-time (gated on the kind-column ALTER) canonicalization of tags written
 /// before normalization existed.
 fn normalize_existing_tags(conn: &rusqlite::Connection) {
-    let rows: Vec<(i64, String)> = match conn.prepare("SELECT id, tags FROM team_memory WHERE tags != ''") {
-        Ok(mut stmt) => match stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
-            Ok(it) => it.filter_map(|r| r.ok()).collect(),
+    let rows: Vec<(i64, String)> =
+        match conn.prepare("SELECT id, tags FROM team_memory WHERE tags != ''") {
+            Ok(mut stmt) => {
+                match stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))) {
+                    Ok(it) => it.filter_map(|r| r.ok()).collect(),
+                    Err(_) => return,
+                }
+            }
             Err(_) => return,
-        },
-        Err(_) => return,
-    };
+        };
     for (id, tags) in rows {
         let norm = normalize_tags(&tags);
         if norm != tags {
@@ -164,7 +167,10 @@ pub async fn agent_memory_get(
             .map_err(|e| format!("prepare: {e}"))?;
         let rows = stmt
             .query_map(rusqlite::params![project_id, agent_name, lim], |r| {
-                Ok(MemTurn { role: r.get(0)?, content: r.get(1)? })
+                Ok(MemTurn {
+                    role: r.get(0)?,
+                    content: r.get(1)?,
+                })
             })
             .map_err(|e| format!("query: {e}"))?;
         let mut out: Vec<MemTurn> = Vec::new();
@@ -257,7 +263,11 @@ pub struct TeamMemoryEntry {
 
 fn scope_of(s: &str) -> String {
     let t = s.trim();
-    if t.is_empty() { "global".to_string() } else { t.to_string() }
+    if t.is_empty() {
+        "global".to_string()
+    } else {
+        t.to_string()
+    }
 }
 
 /// Store (or upsert when `key` is non-empty) one shared memory entry. Returns
@@ -468,7 +478,8 @@ pub async fn team_memory_search(
             })
             .collect();
         let n = all.len() as f64;
-        let avg_len = (toks.iter().map(|t| t.content_len).sum::<usize>() as f64 / n.max(1.0)).max(1.0);
+        let avg_len =
+            (toks.iter().map(|t| t.content_len).sum::<usize>() as f64 / n.max(1.0)).max(1.0);
         // IDF per query term over the loaded corpus: a term present in every
         // row scores ~0, a rare term scores high — corpus-specific stopwording.
         let idf: Vec<f64> = terms

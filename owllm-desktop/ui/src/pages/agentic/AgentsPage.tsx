@@ -1842,7 +1842,13 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
     }
     setBusy("check");
     try {
-      const next = await invoke<PublisherReadyCheck[]>("publish_readiness", { repoDir: checkCwd });
+      const next = await invoke<PublisherReadyCheck[]>("publish_readiness", {
+        repoDir: checkCwd,
+        mode: cfg.mode,
+        sign: (cfg.signThumbprint.trim() || cfg.signSubject.trim())
+          ? { thumbprint: cfg.signThumbprint.trim() || null, subject: cfg.signSubject.trim() || null, tsa: cfg.signTsa.trim() || null }
+          : null,
+      });
       if (cwdRef.current === checkCwd && seq === refreshSeq.current) setChecks(next);
     } catch (e) {
       if (cwdRef.current === checkCwd && seq === refreshSeq.current) {
@@ -1851,7 +1857,7 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
     } finally {
       if (cwdRef.current === checkCwd && seq === refreshSeq.current) setBusy(null);
     }
-  }, [cwd]);
+  }, [cwd, cfg.mode, cfg.signThumbprint, cfg.signSubject, cfg.signTsa]);
   useEffect(() => { void refresh(); }, [refresh]);
 
   const okIds = new Set((checks ?? []).filter(c => c.ok).map(c => c.id));
@@ -1859,9 +1865,13 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
   const ready = checks != null && failing.length === 0;
   const canCommit = okIds.has("repo");
   const canMerge = okIds.has("repo") && okIds.has("remote") && okIds.has("auth");
-  const canPublish = canMerge && okIds.has("version") && okIds.has("script");
+  // All probes must pass before Publish is enabled — including host-mode node/cargo/gh
+  // and cert-mounted when signing is configured. This stops the "click Publish → hidden
+  // failure" loop that produced v0.8.26-30 with no release pages.
+  const canPublish = ready;
   const reasonFor = (need: string[]) =>
     (checks ?? []).filter(c => need.includes(c.id) && !c.ok).map(c => `${c.label}: ${c.detail}`).join("\n");
+  const failReasons = (checks ?? []).filter(c => !c.ok).map(c => `${c.label}: ${c.detail}`).join("\n");
 
   const run = async (kind: string, fn: () => Promise<string>) => {
     setBusy(kind);
@@ -1922,7 +1932,7 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
             ? cfg.mode === "host"
               ? "Bump version → commit → tag → push → host builds, signs and publishes to GitHub"
               : "Bump version → commit → tag → push → GitHub Actions builds and publishes the release"
-            : reasonFor(["repo", "remote", "auth", "version", "script"]),
+            : (failReasons || "Readiness check running…"),
           () => {
             const signed = !!(cfg.signThumbprint.trim() || cfg.signSubject.trim());
             const modeLabel = cfg.mode === "host" ? "HOST mode" : "CI mode";

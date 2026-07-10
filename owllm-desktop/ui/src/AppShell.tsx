@@ -721,7 +721,7 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
 // right next to Info), plus everything contributed by ADVANCED. They're
 // the "utility" pages, visually separated from the work surfaces by a
 // flex spacer.
-const RIGHT_ALIGNED_KEYS = new Set(["info", "server", "mcp", "environment", "accounts", "logs"]);
+const RIGHT_ALIGNED_KEYS = new Set(["info", "server", "mcp", "environment", "accounts", "devices", "logs"]);
 
 function SubTabs({
   pages, activeKey, onChange,

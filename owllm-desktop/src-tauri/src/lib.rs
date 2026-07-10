@@ -50,6 +50,7 @@ mod pty;
 mod readiness;
 mod recommendations;
 mod release;
+mod remote_devices;
 mod sandbox;
 mod server;
 mod skill_library;
@@ -237,6 +238,25 @@ pub fn run() {
             kvm::kvm_node_save,
             kvm::kvm_node_list,
             kvm::kvm_node_delete,
+            remote_devices::device_get_identity,
+            remote_devices::device_set_name,
+            remote_devices::device_remote_enabled_get,
+            remote_devices::device_remote_enabled_set,
+            remote_devices::devices_list,
+            remote_devices::device_forget,
+            remote_devices::device_trust_list,
+            remote_devices::device_request_pairing,
+            remote_devices::device_pairing_approve,
+            remote_devices::device_pairing_deny,
+            remote_devices::device_trust_revoke,
+            remote_devices::device_trust_remove,
+            remote_devices::device_trust_set_policy,
+            remote_devices::device_send,
+            remote_devices::device_cancel,
+            remote_devices::device_control_state,
+            remote_devices::device_stop_remote_control,
+            remote_devices::device_audit_tail,
+            remote_devices::device_selftest,
             browser::browser_ensure,
             browser::browser_start,
             browser::browser_cmd,

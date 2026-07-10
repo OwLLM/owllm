@@ -38,6 +38,7 @@ import ArenaPage from "../pages/gamify/ArenaPage";
 // Advanced toggle (not a mode — independent reveal):
 import MCPPage from "../pages/advanced/MCPPage";
 import AccountsPage from "../pages/advanced/AccountsPage";
+import DevicesPage from "../pages/advanced/DevicesPage";
 
 // ---------------------------------------------------------------------
 // Schema
@@ -145,6 +146,7 @@ export const ADVANCED: ModuleDef = {
   pages: [
     { key: "mcp",         label: "🧩 MCP",         component: MCPPage         },
     { key: "accounts",    label: "🔐 Accounts",    component: AccountsPage    },
+    { key: "devices",     label: "🖥 Devices",     component: DevicesPage     },
   ],
   firstTab: "mcp",
 };

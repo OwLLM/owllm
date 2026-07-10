@@ -21,7 +21,7 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 | **Fine-tuning** | Models, Dataset, Train, Chat | Python env is installed on demand, ONLY needed for Train |
 | **Agentic** | Code, Agents, Studio, Bridges | the flagship: teams, solo coder, bridges |
 | **Gamify** (experimental) | Gamify, Characters, Arena | RPG world driven by the same dispatch stream |
-| **Advanced** | MCP, Accounts | MCP servers/packs; API keys + subscription CLI logins |
+| **Advanced** | MCP, Accounts, Devices | MCP servers/packs; API keys + subscription CLI logins; secure remote device control |
 
 ## Models & inference
 
@@ -198,6 +198,27 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
 - **Safety**: ships DISABLED; enable via the Accounts-page 🖥🔌 panel (or
   `OWLLM_KVM_NODE=1`); per-host consent allowlist, fail-closed for all
   injection actions; every action → redacted JSONL audit (`kvm_audit.jsonl`).
+
+## Remote Devices / Fleet Control (`remote_devices/`, Devices page)
+
+- Securely control one OwLLM install from another. **Control requires a paired,
+  cryptographic device key the target explicitly approved — a matching GitHub
+  account only aids discovery, it NEVER grants control.** (Distinct from OWLLM
+  Node above, which drives external KVM hardware; this controls OwLLM *devices*.)
+- **Identity**: per-install Ed25519 (sign/id) + X25519 (seal) keypair, DPAPI-
+  wrapped at rest, never synced. `device_id = hex(SHA-256(ed_pub))`. Editable name.
+- **Sealed transport**: every command is an end-to-end AES-256-GCM sealed +
+  Ed25519-signed envelope — a relay only forwards ciphertext. `Transport` seam
+  with a v1 `LoopbackTransport` (in-process; drives a real self-test) and a
+  documented network `RelayTransport` next step.
+- **Trust + policy**: pairing request → unmistakable target-side approval →
+  per-controller `PermissionPolicy` (Shell / WSL / File writes / Admin), default
+  read-only diagnostics. `authorize()` is a unit-tested pure chokepoint; dangerous
+  kinds also need per-action approval. Revocable, fail-closed.
+- **Executor**: diagnostics (read-only), shell, "Run in WSL" — all timed-out +
+  cancellable. "Being controlled" banner + emergency Stop. Redacted JSONL audit
+  on both ends (output stored only as length + digest). Ships DISABLED
+  (`OWLLM_REMOTE_DEVICES=1` or the page toggle). Design: `docs/REMOTE_DEVICES.md`.
 
 ## USB-portable mode — "OwLLM Go" (`paths.rs::init_portable_mode`)
 

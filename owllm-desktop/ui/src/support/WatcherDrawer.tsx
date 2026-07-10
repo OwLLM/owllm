@@ -135,6 +135,7 @@ const PAGE_BLURBS: Record<string, string> = {
   info: "the Info page — live system info + sandbox-disk maintenance.",
   accounts: "the Accounts page — API keys + subscription-CLI logins for cloud models.",
   mcp: "the MCP page — connect MCP servers so agents gain extra tools.",
+  devices: "the Devices page — securely control your other OwLLM machines. Pairing + a device key are required; a GitHub login alone never grants control.",
 };
 
 /// FULL per-page/function documentation the Watcher reads for the page the user
@@ -194,6 +195,14 @@ const PAGE_DOCS: Record<string, string> = {
     "• OWLLM Node (🖥🔌 panel): opt-in KVM remote control — lets agents see + operate a REMOTE computer through a NanoKVM/PiKVM device (kvm_node tool: screenshot, type, keys, mouse, power, mount ISO). Ships DISABLED; flip the toggle here, then '+ Allow' each device host — injection is refused for any host not on the list (fail-closed), and every action is written to a redacted audit log.",
   mcp:
     "MCP — connect MCP servers so agents gain extra tools (filesystem, git, web, integrations). Add a server, it's verified, then its tools are available to the team.",
+  devices:
+    "DEVICES — OwLLM Remote Devices / Fleet Control. Securely control your OTHER OwLLM machines from this one.\n" +
+    "• The KEY IDEA: controlling a machine needs a paired, cryptographic device key that the TARGET explicitly approved — a matching GitHub account only helps devices discover each other, it NEVER grants control. Ships DISABLED; flip the master toggle first.\n" +
+    "• This device: an Ed25519 + X25519 keypair generated once per install (private keys are DPAPI-encrypted on this PC and NEVER synced). Editable name; the device ID is derived from the key. '🔬 Run secure self-test' seals→opens→runs a diagnostics command end-to-end to prove the crypto pipeline.\n" +
+    "• Pairing: a controller sends a request → the target shows an UNMISTAKABLE approval prompt → approving grants read-only diagnostics only. Widen with the per-controller toggles (Shell / WSL / File writes / Admin). File writes & Admin are dangerous — they also need a per-action approval (not executable in v1). Revoke any time; revocation fails closed on the next request.\n" +
+    "• Remote console (the magenta-bordered panel, deliberately UNLIKE the local terminal): pick a target + mode (Diagnostics / Shell / Run in WSL) and run. Every command is authenticated, authorized, timed-out, cancellable, and audited on BOTH sides (output is never stored raw — only a length + digest).\n" +
+    "• Safety: while a remote command runs the target shows a red 'being controlled' banner with a 'Stop remote control' button (cancels every in-flight command).\n" +
+    "• v1 transport is in-process loopback (control your own device as a live self-test); the network relay is a documented next step. See docs/REMOTE_DEVICES.md.",
 };
 
 /// The guided "Help using the app" option list. Each topic shows a real,

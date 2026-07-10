@@ -157,6 +157,17 @@ md-5 = "0.10"
 # and in browser_vault.rs for origin normalisation.
 aes-gcm = "0.10"
 url = "2"
+# OwLLM Remote Devices / Fleet Control (remote_devices/) — cryptographic device
+# identity + end-to-end sealed command envelopes. The device keypair IS the
+# permission credential: a matching GitHub account alone can NEVER control a
+# machine. Ed25519 signs every request (identity + un-forgeable authorship);
+# X25519 does the ECDH so a future relay only ever forwards ciphertext (the
+# body is AES-256-GCM sealed with `aes-gcm` above, key = SHA-256 of the shared
+# secret via `sha2`). `rand`'s OsRng seeds both keygen and the GCM/replay
+# nonces. All pure-Rust dalek/RustCrypto crates — no system dep, every target.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"
 
 # Windows-only: needed by overlay_frame to make the cyan chrome window
 # an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).

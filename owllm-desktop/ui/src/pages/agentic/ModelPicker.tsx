@@ -298,6 +298,10 @@ export default function ModelPicker({
   localOnly?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  // Sections start COLLAPSED (lab name + count only) so the popover stays
+  // short — the full flat list had grown unusably long. Clicking a header
+  // toggles it; the section holding the current selection opens by itself.
+  const [expanded, setExpanded] = useState<Partial<Record<Section, boolean>>>({});
   // Re-render when the cloud catalogue changes (the async remote refresh
   // landing, or a localStorage override edit) so newly-added models appear
   // without an app restart.
@@ -361,6 +365,10 @@ export default function ModelPicker({
     if (!open) {
       const r = btnRef.current?.getBoundingClientRect();
       if (r) setRect(r);
+      // Fresh open: collapse everything except the section holding the
+      // current selection, so the user lands on context, not a wall.
+      const current = entries.find(e => e.id === value);
+      setExpanded(current ? { [current.section]: true } : {});
     }
     setOpen(v => !v);
   };
@@ -425,16 +433,35 @@ export default function ModelPicker({
             const meta = SECTION_META[sec];
             const items = entries.filter(e => e.section === sec);
             if (items.length === 0) return null;
+            // A lone section (e.g. localOnly with just LOCAL) always shows
+            // its items — collapsing it would only add a pointless click.
+            const soleSection = sections.filter(s => entries.some(e => e.section === s)).length === 1;
+            const isOpen = soleSection || !!expanded[sec];
             return (
               <div key={sec} style={{ display: "flex", flexDirection: "column", padding: "4px 0" }}>
-                <div style={{
-                  padding: "8px 14px 4px",
-                  fontSize: 11, fontWeight: 800, letterSpacing: 1.4,
-                  color: meta.color,
-                }}>
-                  {meta.label}
-                </div>
-                {items.map(e => {
+                <button
+                  type="button"
+                  onClick={() => { if (!soleSection) setExpanded(prev => ({ ...prev, [sec]: !prev[sec] })); }}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 8,
+                    padding: "8px 14px 4px",
+                    background: "transparent", border: "none",
+                    fontSize: 11, fontWeight: 800, letterSpacing: 1.4,
+                    color: meta.color, textAlign: "left",
+                    cursor: soleSection ? "default" : "pointer",
+                  }}
+                >
+                  {!soleSection && (
+                    <span style={{ fontSize: 9, color: "var(--fg-muted)", width: 10, flexShrink: 0 }}>
+                      {isOpen ? "▾" : "▸"}
+                    </span>
+                  )}
+                  <span style={{ flex: 1 }}>{meta.label}</span>
+                  <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: 0, color: "var(--fg-muted)" }}>
+                    {items.length}
+                  </span>
+                </button>
+                {isOpen && items.map(e => {
                   const isActive = e.id === value;
                   const muted = !e.available;
                   return (

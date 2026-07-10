@@ -254,6 +254,22 @@ export async function refreshBrowserState(): Promise<void> {
       _browserStateLine = CAP;
     }
   } catch { _browserStateLine = CAP; }
+  // KVM capability line — same lesson as the browser: the tool being in the
+  // list doesn't tell the model the capability is LIVE. Announced only when
+  // the user enabled OWLLM Node (default off), so agents aren't steered into
+  // a hard-erroring tool; consented hosts are named so the model can act
+  // without asking the user for connection details it already has.
+  try {
+    const kvm = await invoke<{ enabled: boolean; hosts: string[] }>("kvm_node_status");
+    if (kvm?.enabled) {
+      const hosts = (kvm.hosts ?? []).length
+        ? ` Consented hosts: ${kvm.hosts.join(", ")}.`
+        : " No hosts consented yet — the first injection action will require the user's per-host approval.";
+      _browserStateLine +=
+        " OWLLM NODE (KVM) — you CAN control networked KVM nodes (screenshot/type/keys/mouse/boot_key) " +
+        "via the kvm_node tool (or mcp__owllm__kvm_node). CALL IT DIRECTLY, same rules as the browser tools." + hosts;
+    }
+  } catch { /* feature absent/off — say nothing */ }
 }
 
 /// SYNC accessor for the (sync) prompt builders, same pattern as
@@ -667,6 +683,7 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
     !SKILL_TOOL_NAMES.has(t.name) &&
     !MEMORY_TOOL_NAMES.has(t.name) &&
     !BROWSER_TOOL_NAMES.has(t.name) &&
+    !KVM_TOOL_NAMES.has(t.name) &&
     (!allowSet || allowSet.has(t.name)),
   );
   // Advertise the skill tools (load_skill / list_skills) regardless of the
@@ -686,6 +703,12 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
   // with the user; an agent must always be able to look at it (browser_snapshot)
   // or open a page, regardless of its role allowlist.
   for (const t of LOCAL_TOOL_SPECS.filter((t) => BROWSER_TOOL_NAMES.has(t.name))) {
+    localTools.push(t);
+  }
+  // KVM node control — cross-cutting like the browser: no role YAML names it,
+  // so allowlist-gating hid it from every agent. The backend feature flag +
+  // per-host consent (fail-closed) remain the real gate at exec time.
+  for (const t of LOCAL_TOOL_SPECS.filter((t) => KVM_TOOL_NAMES.has(t.name))) {
     localTools.push(t);
   }
   // Keep the browser-state prompt line warm on every tool-catalog build (i.e.
@@ -1431,6 +1454,15 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
 /// browser_* tool is automatically included.
 export const BROWSER_TOOL_NAMES = new Set(
   LOCAL_TOOL_SPECS.filter((t) => t.name.startsWith("browser_")).map((t) => t.name),
+);
+
+/// KVM node control — same cross-cutting rule as the browser. No role YAML
+/// lists kvm_node, so allowlist-gating it made the tool invisible to EVERY
+/// specialist; the backend is the real gate (feature flag + per-host consent,
+/// fail-closed), so advertising the tool is safe — a disabled backend answers
+/// with a clear "enable KVM in the panel" error instead of silent absence.
+export const KVM_TOOL_NAMES = new Set(
+  LOCAL_TOOL_SPECS.filter((t) => t.name === "kvm_node").map((t) => t.name),
 );
 
 // ---- Canonical-name + arg-alias resolution (the "normalize" half of

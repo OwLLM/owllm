@@ -643,9 +643,22 @@ fn tool_specs() -> Vec<Value> {
         json!({ "name": "browser_device",
             "description": "Switch device emulation: desktop, iphone, android or tablet (viewport size + mobile user-agent).",
             "inputSchema": { "type": "object", "properties": { "device": { "type": "string", "enum": ["desktop", "iphone", "android", "tablet"] } }, "required": ["device"] } }),
+        json!({ "name": "browser_screenshot",
+            "description": "Describe the current page (title/URL/state summary). The browser window is natively visible to the user; agents act via browser_snapshot.",
+            "inputSchema": { "type": "object", "properties": {} } }),
         json!({ "name": "browser_close",
             "description": "Close the agent browser window.",
             "inputSchema": { "type": "object", "properties": {} } }),
+        // KVM node control — mirrors the kvm_node local tool so CLI agents get
+        // the same capability. The backend feature flag + per-host consent
+        // (kvm.rs, fail-closed) gate execution, so exposure here is safe.
+        json!({ "name": "kvm_node",
+            "description": "Control a networked KVM node (Sipeed NanoKVM) as the target machine's eyes + hands. Actions: 'screenshot' (capture target video → saved PNG path), 'type' (USB-HID keyboard text), 'keys' (key chord e.g. 'ctrl+alt+del'), 'mouse' (move/click), 'boot_key' (tap F2/F12/Del during POST), 'mount_iso', 'power'. Take a 'screenshot' first to see the target before acting.",
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["screenshot", "type", "keys", "mouse", "boot_key", "mount_iso", "power"] },
+                "target": { "type": "object", "description": "KVM node: { host, port?, auth: { sshKeyPath? | token? }, transport: 'ssh'|'http' }." },
+                "params": { "type": "object", "description": "Action params: type={text} keys={combo} mouse={x?,y?,button?,op?} boot_key={key} mount_iso={isoPath} power={line}." }
+            }, "required": ["action", "target"] } }),
     ]
 }
 
@@ -712,7 +725,37 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
             json!({ "key": as_str(args, "key") }),
         ),
         "browser_device" => crate::browser::browser_set_device(app.clone(), as_str(args, "device")),
+        "browser_screenshot" => {
+            crate::browser::browser_cmd(app.clone(), "screenshot".into(), json!({}))
+        }
         "browser_close" => crate::browser::browser_stop(app.clone()),
+        "kvm_node" => {
+            // `target`/`params` may arrive as objects (per schema) or as JSON
+            // strings (models and the local-tool path both do this) — accept both.
+            let tval = match args.get("target") {
+                Some(Value::String(s)) => serde_json::from_str::<Value>(s)
+                    .map_err(|e| format!("target is not valid JSON: {e}"))?,
+                Some(v) => v.clone(),
+                None => return Err("kvm_node requires a 'target' object".into()),
+            };
+            let target: crate::kvm::KvmTarget =
+                serde_json::from_value(tval).map_err(|e| format!("bad target: {e}"))?;
+            let params = match args.get("params") {
+                Some(Value::String(s)) if !s.trim().is_empty() => {
+                    serde_json::from_str::<Value>(s).unwrap_or_else(|_| json!({}))
+                }
+                Some(v) => v.clone(),
+                None => json!({}),
+            };
+            // Gateway requests run on the tiny_http thread (not in the tokio
+            // runtime), so blocking on the async command here is safe.
+            tauri::async_runtime::block_on(crate::kvm::kvm_node_exec(
+                target,
+                as_str(args, "action"),
+                params,
+            ))
+            .map(|v| v.to_string())
+        }
         other => Err(format!("unknown tool: {other}")),
     }
 }

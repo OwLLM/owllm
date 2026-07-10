@@ -50,6 +50,70 @@ const OWLLM_BG: Color = Color(14, 17, 23, 255);
 /// `get_webview_window` simply returns None and we report "not running".
 const BROWSER_LABEL: &str = "owllm-browser";
 
+/// The app's chrome colour (resolved `--bg-header`), pushed by the UI via
+/// `browser_set_chrome` on boot and on every accent change. The agent-browser
+/// window paints its NATIVE title bar / border with it so the popup reads as
+/// an OwLLM window instead of a stock light-grey OS frame. None until the UI
+/// has pushed once (then the window still gets the dark-theme frame).
+static CHROME_BG: Mutex<Option<(u8, u8, u8)>> = Mutex::new(None);
+
+/// Parse "#rrggbb" (case-insensitive, leading '#' optional).
+fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.is_ascii() {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Paint the window's native frame in OwLLM chrome: caption + border in the
+/// app's `--bg-header` colour, white caption text (the app header forces white
+/// in both theme modes — see styles.css). Windows 11 only (the DWM colour
+/// attributes appeared in build 22000); on Windows 10 the calls fail benignly
+/// and the window keeps the dark-theme frame from `.theme(Dark)`.
+#[cfg(windows)]
+fn apply_chrome(win: &WebviewWindow) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    };
+    let Some((r, g, b)) = *CHROME_BG.lock().unwrap_or_else(|p| p.into_inner()) else {
+        return;
+    };
+    let Ok(hwnd) = win.hwnd() else { return };
+    // COLORREF is 0x00BBGGRR.
+    let bg: u32 = (r as u32) | ((g as u32) << 8) | ((b as u32) << 16);
+    let white: u32 = 0x00ff_ffff;
+    let set = |attr: i32, val: &u32| unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0 as _,
+            attr as u32,
+            val as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    let _ = set(DWMWA_CAPTION_COLOR, &bg);
+    let _ = set(DWMWA_BORDER_COLOR, &bg);
+    let _ = set(DWMWA_TEXT_COLOR, &white);
+}
+
+#[cfg(not(windows))]
+fn apply_chrome(_win: &WebviewWindow) {}
+
+/// UI → backend: the resolved app chrome colour (`--bg-header`). Stored for
+/// every future agent-browser window build and applied live if one is open.
+#[tauri::command(async)]
+pub fn browser_set_chrome(app: tauri::AppHandle, bg: String) -> Result<(), String> {
+    let rgb = parse_hex_rgb(&bg).ok_or_else(|| format!("bad chrome colour {bg:?}"))?;
+    *CHROME_BG.lock().unwrap_or_else(|p| p.into_inner()) = Some(rgb);
+    if let Some(win) = get_window(&app) {
+        apply_chrome(&win);
+    }
+    Ok(())
+}
+
 /// Sentinel that fronts every reply written into `document.title`. Uses an
 /// invisible separator (U+2063) so it can never collide with real page titles.
 const SENTINEL: &str = "\u{2063}OWLLM\u{2063}";
@@ -456,6 +520,9 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<WebviewWindow
         // Dark OwLLM base so the blank / loading webview is OwLLM's surface,
         // not the bare white "window colour" a fresh webview shows.
         .background_color(OWLLM_BG)
+        // Dark native frame (falls back gracefully where unsupported) —
+        // apply_chrome() below then paints it in the app's accent chrome.
+        .theme(Some(tauri::Theme::Dark))
         .decorations(true)
         .resizable(true)
         .visible(true);
@@ -478,9 +545,11 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<WebviewWindow
         let _ = std::fs::create_dir_all(&dir);
         builder = builder.data_directory(dir);
     }
-    builder
+    let win = builder
         .build()
-        .map_err(|e| format!("failed to open agent browser window: {e}"))
+        .map_err(|e| format!("failed to open agent browser window: {e}"))?;
+    apply_chrome(&win);
+    Ok(win)
 }
 
 /// Create the agent-browser window if it isn't already open. Idempotent.
@@ -712,6 +781,16 @@ pub fn browser_focus(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_hex_parses() {
+        assert_eq!(parse_hex_rgb("#5865b8"), Some((0x58, 0x65, 0xb8)));
+        assert_eq!(parse_hex_rgb("5865B8"), Some((0x58, 0x65, 0xb8)));
+        assert_eq!(parse_hex_rgb(" #ffffff "), Some((255, 255, 255)));
+        for bad in ["", "#fff", "#12345", "#1234567", "#gg0000", "€€"] {
+            assert_eq!(parse_hex_rgb(bad), None, "{bad:?} should not parse");
+        }
+    }
 
     #[test]
     fn local_hosts_get_http() {

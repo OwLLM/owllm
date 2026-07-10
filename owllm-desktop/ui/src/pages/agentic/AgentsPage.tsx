@@ -16,7 +16,7 @@ import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -8464,17 +8464,36 @@ export function AgentsPage({
     void onSupSendRef.current?.(`📓 Next step from the Notebook:\n${t}`);
     return "dispatched";
   };
+  // Auto-feed identity of THIS Agents page — the notebook blob is per project,
+  // so this is what stops a second page on the same project from popping the
+  // queue at its own run end.
+  const notebookSurfaceId = `agents:${pageId}`;
   // 📓 Auto-feed: called at each CLEAN run end. If the Notebook's auto-feed
-  // toggle is on and a pending step exists, dispatch it as the next goal once
-  // the busy flags have settled (they clear synchronously right after the
-  // run's finally, before this timeout fires).
+  // toggle is on, this page drives it, and a pending step exists, dispatch it
+  // as the next goal once the busy flags have settled. They normally clear
+  // right after the run's finally — but when they haven't yet (a queued steer
+  // follow-up), retry for a while instead of silently dropping the chain
+  // (the old single-shot check is how a running queue "just stopped").
   const scheduleNotebookAutoFeed = () => {
     const pid = selectedProjectId;
-    setTimeout(() => {
-      if (supSendBusyRef.current || dispatchInFlightRef.current) return;
-      const step = takeNextAutoStep(pid);
+    let tries = 0;
+    const attempt = () => {
+      if (supSendBusyRef.current || dispatchInFlightRef.current) {
+        if (++tries <= 8) setTimeout(attempt, 800);
+        return;
+      }
+      const step = takeNextAutoStep(pid, notebookSurfaceId);
       if (step) void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
-    }, 800);
+    };
+    setTimeout(attempt, 800);
+  };
+  // 📓 The chain can only continue from a CLEAN finish — when a run ends any
+  // other way (verify failed, error, Stop) while this page's auto-feed still
+  // has pending steps, say so in the chat. The silent stall read as "the app
+  // stopped working".
+  const notifyAutoFeedPaused = (reason: string) => {
+    if (!autoFeedWouldRun(selectedProjectId, notebookSurfaceId)) return;
+    setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 Auto-feed paused — ${reason}. Pending steps stay in the Notebook queue; fix or dispatch the next one (▶ Start queue) to continue.`, ts: Date.now(), seq: nextSeq() }]);
   };
   // onSupSend is declared later in this component — reach it via a ref so the
   // notebook helpers above (defined early, next to the steer queue) can call it.
@@ -10960,6 +10979,7 @@ export function AgentsPage({
         setPhase("done");
         setRunEndedAt(Date.now());
         if (okRun) scheduleNotebookAutoFeed(); // 📓 clean finish → next pending step
+        else notifyAutoFeedPaused("the solo run did not finish cleanly");
         return;
       }
 
@@ -12293,6 +12313,7 @@ export function AgentsPage({
       if (e?.name === "AbortError") {
         setRunError("Stopped.");
         appendLog("system", { role: "system", color: "#ff8c8c", text: "⏹ Stopped by user." });
+        notifyAutoFeedPaused("the run was stopped");
       } else {
         const clean = cleanAgentError(e);
         setRunError(clean);
@@ -12301,6 +12322,7 @@ export function AgentsPage({
           role: "system", color: "#ff8c8c", text: `⚠ ${clean}`,
           action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
         });
+        notifyAutoFeedPaused("the run ended with an error");
       }
       setPhase("idle");
     } finally {
@@ -12885,6 +12907,7 @@ export function AgentsPage({
       <RunNotebook
         projectId={selectedProjectId}
         projectName={activeTeam?.display}
+        surfaceId={notebookSurfaceId}
         active={isActive}
         running={busy || supSendBusy}
         onFeed={feedFromNotebook}

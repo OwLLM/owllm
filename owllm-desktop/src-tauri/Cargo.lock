@@ -3223,7 +3223,7 @@ dependencies = [
 
 [[package]]
 name = "owllm-desktop"
-version = "0.8.39"
+version = "0.8.41"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -3233,6 +3233,7 @@ dependencies = [
  "ed25519-dalek",
  "flate2",
  "futures-util",
+ "gtk",
  "imap",
  "lettre",
  "mailparse",

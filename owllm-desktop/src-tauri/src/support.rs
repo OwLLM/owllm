@@ -53,9 +53,11 @@ pub struct WindowCapture {
 /// Capture the actual app window — including in-app modals/popups, which
 /// live in the same WebView surface. Windows: PrintWindow with
 /// PW_RENDERFULLCONTENT (renders the WebView2 composition surface into a
-/// DIB, works even when partially occluded). Other platforms return an
-/// explicit error the UI surfaces as the documented fallback message.
-/// NEVER captures other windows or monitors.
+/// DIB, works even when partially occluded). Linux: GDK pixbuf readback of
+/// our own GTK window (works on X11 and, for the app's own surface, on
+/// Wayland — no portal round-trip needed because we never touch other
+/// windows). macOS returns an explicit error the UI surfaces as the
+/// documented fallback message. NEVER captures other windows or monitors.
 #[tauri::command]
 pub async fn support_capture_window(app: tauri::AppHandle) -> Result<WindowCapture, String> {
     let main = app
@@ -78,11 +80,56 @@ pub async fn support_capture_window(app: tauri::AppHandle) -> Result<WindowCaptu
             not_captured: "the decorative frame chrome around the window (a separate overlay layer); other windows and monitors are never captured".to_string(),
         })
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        // GTK/GDK are main-thread-only; hop over and hand the PNG back.
+        let (tx, rx) = std::sync::mpsc::channel::<Result<(Vec<u8>, u32, u32), String>>();
+        let win = main.clone();
+        main.run_on_main_thread(move || {
+            let _ = tx.send(capture_gtk_window_png(&win));
+        })
+        .map_err(|e| format!("main thread: {e}"))?;
+        let (png, w, h) = tokio::task::spawn_blocking(move || {
+            rx.recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|_| "capture timed out".to_string())?
+        })
+        .await
+        .map_err(|e| format!("join: {e}"))??;
+        use base64::Engine as _;
+        Ok(WindowCapture {
+            png_base64: base64::engine::general_purpose::STANDARD.encode(png),
+            width: w,
+            height: h,
+            not_captured: "other windows and monitors are never captured".to_string(),
+        })
+    }
+    #[cfg(not(any(windows, target_os = "linux")))]
     {
         let _ = main;
         Err("App-window capture isn't implemented on this platform yet — attach a regular OS screenshot instead.".to_string())
     }
+}
+
+/// GDK readback of our own window → PNG bytes (+ pixel size). Must run on
+/// the GTK main thread. Returns an honest error when the compositor gives
+/// us nothing (e.g. the window is unmapped) instead of a black image.
+#[cfg(target_os = "linux")]
+fn capture_gtk_window_png(win: &tauri::WebviewWindow) -> Result<(Vec<u8>, u32, u32), String> {
+    use gtk::prelude::*;
+    let gtk_win = win.gtk_window().map_err(|e| format!("gtk window: {e}"))?;
+    let gdk_win = gtk_win
+        .window()
+        .ok_or_else(|| "window is not realized yet".to_string())?;
+    let w = gdk_win.width();
+    let h = gdk_win.height();
+    // gdk_pixbuf_get_from_window — bound as WindowExtManual::pixbuf().
+    let pixbuf = gdk_win.pixbuf(0, 0, w, h).ok_or_else(|| {
+        "the compositor refused the readback — attach a regular OS screenshot instead".to_string()
+    })?;
+    let png = pixbuf
+        .save_to_bufferv("png", &[])
+        .map_err(|e| format!("png encode: {e}"))?;
+    Ok((png, pixbuf.width() as u32, pixbuf.height() as u32))
 }
 
 /// PrintWindow → 32-bit DIB → tightly-packed RGBA bytes (top-down).

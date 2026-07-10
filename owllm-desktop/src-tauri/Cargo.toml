@@ -3,7 +3,7 @@ name = "owllm-desktop"
 # Kept in sync with tauri.conf.json "version" (the release source of truth).
 # User-visible version strings read crate::APP_VERSION (parsed from the conf),
 # so this only affects exe/crate metadata.
-version = "0.8.39"
+version = "0.8.41"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
 authors = ["OWLLM"]
 edition = "2021"
@@ -179,6 +179,15 @@ rand = "0.8"
 # decorative frame (must hover above the React content, must NOT hover
 # above the user's browser when they alt-tab away). Single function
 # call, no need for the heavier `windows` crate.
+# Linux chrome integration for the in-page HybridFrame (no overlay window
+# off-Windows): gtk gives us (a) input-shape so the transparent EXTRA_TOP
+# band above the frame stops swallowing clicks meant for windows behind us
+# (frame_shape.rs), and (b) gdk pixbuf window readback for The Watcher's
+# bug-report screenshot (support.rs). Same gtk 0.18 tauri/tao already link —
+# this adds a direct path to it, not a new library in the tree.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
@@ -193,6 +202,9 @@ windows-sys = { version = "0.59", features = [
     # PrintWindow itself lives under Storage_Xps in windows-sys.
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
+    # DwmSetWindowAttribute — paint the agent-browser window's native title
+    # bar / border in the app's chrome colour (browser.rs::apply_chrome).
+    "Win32_Graphics_Dwm",
     # GetShortPathNameW — collapse a spaced path (…\OwLLM Desktop\…) to its 8.3
     # form so the `--mcp-config` arg survives the Claude CLI batch-shim spawn
     # (Rust Command → cmd.exe → claude.cmd → node), which splits on the space

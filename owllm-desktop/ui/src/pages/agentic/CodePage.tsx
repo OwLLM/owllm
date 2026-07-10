@@ -22,7 +22,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun } from "./RunNotebook";
 import { RunTimerChip } from "./RunTimer";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
@@ -364,6 +364,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [ruleScope, setRuleScope] = useState<{ id: string; shared: boolean }>({ id: "", shared: false });
   const ruleScopeRef = useRef(ruleScope);
   ruleScopeRef.current = ruleScope;
+  // Auto-feed identity of THIS Code page — the notebook blob is per project,
+  // so this is what stops a second page on the same project from popping the
+  // queue when its own (unrelated) turn finishes.
+  const notebookSurfaceId = `code:${pageId}`;
   const [directives, setDirectives] = useState<Directive[]>([]);
   const directivesRef = useRef<Directive[]>([]);
   directivesRef.current = directives;
@@ -1540,14 +1544,19 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       // After state settles: steers queued on a path that can't inject
       // mid-turn (CLI/API) land as a follow-up turn — never silently dropped
       // (unless the user hit Stop). Then, on a clean finish, auto-feed the
-      // next pending notebook step (opt-in toggle).
+      // next pending notebook step (opt-in toggle, and only when THIS page
+      // drives it — a second page on the same project must not pop the queue).
+      // A non-clean finish with steps still pending says so instead of
+      // letting the queue stall silently.
       setTimeout(() => {
         if (busySendRef.current) return;
         const leftover = drainSteer();
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
         if (ok) {
-          const st = takeNextAutoStep(ruleScopeRef.current.id);
+          const st = takeNextAutoStep(ruleScopeRef.current.id, notebookSurfaceId);
           if (st) void sendRef.current?.(st.text);
+        } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
+          setMessages((msgs) => [...msgs, { role: "assistant", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }
       }, 80);
     }
@@ -2693,6 +2702,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
               <RunNotebook
                 inline
                 projectId={ruleScope.id || null}
+                surfaceId={notebookSurfaceId}
                 projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
                 running={busy}
                 onFeed={feedFromNotebook}

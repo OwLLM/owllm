@@ -140,6 +140,28 @@
           }
         },
         {
+          "id": "local-inference-linux-arm64-cuda",
+          "displayName": "Linux ARM64 CUDA build (NVIDIA Jetson, JetPack 7 / CUDA 13+)",
+          "platform": "linux-aarch64",
+          "requires": {
+            "gpu": "nvidia",
+            "vramGb": 4,
+            "diskGb": 2,
+            "cudaMajorMin": 13
+          },
+          "sizeBytes": 637984830,
+          "channels": {
+            "stable": {
+              "version": "b9488-cuda13.2",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-arm64-cuda-b9488.zip",
+              "sha256": "b576c9e7f181d8df72a25aa9f257ec1df8c696d8eafc3a2a3cfbc25fdab53cc5",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
           "id": "local-inference-linux-arm64-cpu",
           "displayName": "Linux ARM64 CPU build (Jetson / Raspberry Pi / ARM servers)",
           "platform": "linux-aarch64",
@@ -211,6 +233,25 @@
               "signature": null
             }
           }
+        },
+        {
+          "id": "audio-stt-whisper-cli-linux-arm64",
+          "displayName": "whisper-cli ARM64 build (binary only — the model downloads on first use)",
+          "platform": "linux-aarch64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 1090931,
+          "channels": {
+            "stable": {
+              "version": "v1.8.4-cli",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/audio-stt-whisper-cli-linux-arm64-v1.8.4.zip",
+              "sha256": "c9d3de9506f6f69fc8dbae6ef34dd326308ea7b58202f9e66abe8d0d92a3b64d",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
         }
       ]
     },
@@ -237,6 +278,25 @@
               "releasedAt": "2026-04-02T00:00:00Z",
               "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/python-3.11.9-embed-win-x64.zip",
               "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "python-3.11-embed-linux-arm64",
+          "displayName": "Python 3.11 standalone (Linux ARM64)",
+          "platform": "linux-aarch64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 101560698,
+          "channels": {
+            "stable": {
+              "version": "3.11.15",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/python-3.11-embed-linux-arm64.zip",
+              "sha256": "9d531a0a50303d89f728fe2384727b49c5bd2babc46972608cfb3fcf3cd96a7d",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -357,6 +417,25 @@
               "releasedAt": "2026-05-10T00:00:00Z",
               "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.05.28/mcp-toolchain-node20-uv0.5.zip",
               "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+              "minShellVersion": "0.1.0",
+              "signature": null
+            }
+          }
+        },
+        {
+          "id": "mcp-toolchain-node-uv-linux-arm64",
+          "displayName": "Node.js 20 LTS + uv (Linux ARM64)",
+          "platform": "linux-aarch64",
+          "requires": {
+            "diskGb": 1
+          },
+          "sizeBytes": 74553318,
+          "channels": {
+            "stable": {
+              "version": "node20.20.2-uv0.11.28",
+              "releasedAt": "2026-07-11T00:00:00Z",
+              "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/mcp-toolchain-node-uv-linux-arm64.zip",
+              "sha256": "665cd0129a064e86df5e8862de82c702b7f174d6b9fa2e07f0098d87a40fb20e",
               "minShellVersion": "0.1.0",
               "signature": null
             }

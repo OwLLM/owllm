@@ -28,6 +28,14 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Local serving**: llama.cpp (`llama-server --jinja`), auto-start on first send,
   one server shared across app windows/instances (port adoption), VRAM-aware
   context sizing, vision via auto-downloaded `--mmproj` projectors.
+- **Platforms**: engine + runtime modules ship per-platform variants — Windows
+  x64 (CUDA/Vulkan/CPU), Linux x64 (Vulkan/CPU), Linux ARM64 (CUDA for Jetson
+  JetPack 7+ gated by `cudaMajorMin`, CPU for Pi/ARM servers), macOS ARM64
+  (Metal). Unsupported platform/arch combos degrade honestly: the wizard names
+  the arch ("no build published for windows-aarch64 (ARM64) yet") instead of
+  offering a foreign binary. python-runtime / mcp-toolchain / audio-stt have
+  Linux-ARM64 variants; the CUDA module bundles its own CUDA runtime libs
+  (spawned with `LD_LIBRARY_PATH` — stock JetPack has only the driver).
 - **Browse/download**: HuggingFace search + curated recs, VRAM-fit color coding,
   cache management, Tuned tab for fine-tuned/abliterated artifacts. Interrupted
   downloads keep their `.partial` and resume via HTTP Range — the Downloaded

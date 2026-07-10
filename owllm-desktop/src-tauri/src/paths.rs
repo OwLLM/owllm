@@ -438,10 +438,13 @@ pub fn bundled_python_exe() -> Option<PathBuf> {
             }
         }
     }
+    // Installed python-runtime module (the wizard's install path — on
+    // Linux ARM64 it's the only bundled interpreter source).
+    if let Some(p) = module_python_exe() {
+        return Some(p);
+    }
     // No bundled runtime → fall back to a system interpreter (Unix only;
-    // on Windows the bundled runtime is the supported path). `python3` on
-    // PATH is the norm on Linux and covers the ARM64 builds, where no
-    // python-runtime module exists yet.
+    // on Windows the bundled runtime is the supported path).
     #[cfg(not(windows))]
     {
         for name in ["python3", "python"] {

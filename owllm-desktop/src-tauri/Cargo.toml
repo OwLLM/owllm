@@ -193,6 +193,9 @@ windows-sys = { version = "0.59", features = [
     # PrintWindow itself lives under Storage_Xps in windows-sys.
     "Win32_Graphics_Gdi",
     "Win32_Storage_Xps",
+    # DwmSetWindowAttribute — paint the agent-browser window's native title
+    # bar / border in the app's chrome colour (browser.rs::apply_chrome).
+    "Win32_Graphics_Dwm",
     # GetShortPathNameW — collapse a spaced path (…\OwLLM Desktop\…) to its 8.3
     # form so the `--mcp-config` arg survives the Claude CLI batch-shim spawn
     # (Rust Command → cmd.exe → claude.cmd → node), which splits on the space

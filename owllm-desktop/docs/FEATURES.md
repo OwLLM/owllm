@@ -114,6 +114,11 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   bridge (`initialization_script`) and reads results back through a
   base64-over-`document.title` channel (`eval` → poll `title()`), so no remote
   IPC capability is needed.
+- **OwLLM chrome**: the popup wears the app's own look — dark webview base,
+  dark native frame, and (Windows 11) a DWM-painted title bar/border in the
+  app's `--bg-header` accent colour. The UI pushes the resolved colour via
+  `browser_set_chrome` on boot and on every accent change (`theme.ts`), so an
+  open browser window re-skins live with the theme picker.
 - **Local dev servers**: scheme-less localhost-family URLs (`localhost:5173`,
   `127.0.0.1:3000`, `[::1]`, `192.168.*`, `10.*`, `*.localhost`) default to
   `http://` instead of `https://`, so agents can open and test a web app they

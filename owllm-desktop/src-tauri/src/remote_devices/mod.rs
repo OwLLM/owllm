@@ -24,26 +24,29 @@ mod audit;
 mod crypto;
 mod executor;
 mod identity;
+mod lan;
 mod policy;
 mod registry;
 mod transport;
 mod trust;
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use rand::{rngs::OsRng, RngCore};
 use serde::Serialize;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
+use tokio::sync::oneshot;
 
 use protocol::{
-    CommandKind, CommandRequest, CommandResult, DeviceRecord, PermissionPolicy, SignedEnvelope,
-    TrustedController,
+    Authorization, CommandKind, CommandRequest, CommandResult, DevicePublic, DeviceRecord,
+    PairRequest, PermissionPolicy, SignedEnvelope, TrustedController,
 };
-use transport::{LoopbackTransport, Transport};
+use transport::{LanDirectTransport, LoopbackTransport, Transport};
 
 // ------------------------------------------------------------------
 // Shared small helpers
@@ -180,18 +183,50 @@ fn set_enabled(enabled: bool) -> Result<(), String> {
 // Replay guard (in-memory, bounded) — see docs for the persistence note
 // ------------------------------------------------------------------
 
-static SEEN: Lazy<Mutex<VecDeque<String>>> = Lazy::new(|| Mutex::new(VecDeque::new()));
 const SEEN_MAX: usize = 4096;
+const FRESHNESS_SECS: i64 = 120;
 
-fn replay_ok(nonce: &str) -> bool {
+// Persisted so a restart doesn't reopen the replay window for nonces seen in the
+// last freshness window. Entries older than the window are rejected by the ts
+// check anyway, so the file is pruned to stay tiny.
+static SEEN: Lazy<Mutex<VecDeque<(String, i64)>>> = Lazy::new(|| Mutex::new(load_seen()));
+
+fn seen_path() -> Option<PathBuf> {
+    crate::paths::user_data_root().map(|r| r.join("remote_devices_seen.json"))
+}
+
+fn load_seen() -> VecDeque<(String, i64)> {
+    let cutoff = now_unix() - FRESHNESS_SECS * 3;
+    seen_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<VecDeque<(String, i64)>>(&t).ok())
+        .map(|v| v.into_iter().filter(|(_, ts)| *ts >= cutoff).collect())
+        .unwrap_or_default()
+}
+
+fn persist_seen(q: &VecDeque<(String, i64)>) {
+    if let Some(path) = seen_path() {
+        if let Some(p) = path.parent() {
+            let _ = std::fs::create_dir_all(p);
+        }
+        if let Ok(txt) = serde_json::to_string(q) {
+            let _ = std::fs::write(path, txt);
+        }
+    }
+}
+
+fn replay_ok(nonce: &str, ts: i64) -> bool {
     let mut q = SEEN.lock().unwrap();
-    if q.iter().any(|n| n == nonce) {
+    let cutoff = now_unix() - FRESHNESS_SECS * 3;
+    q.retain(|(_, t)| *t >= cutoff);
+    if q.iter().any(|(n, _)| n == nonce) {
         return false;
     }
-    q.push_back(nonce.to_string());
+    q.push_back((nonce.to_string(), ts));
     while q.len() > SEEN_MAX {
         q.pop_front();
     }
+    persist_seen(&q);
     true
 }
 
@@ -245,6 +280,7 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
             request_id: "?".into(),
             kind: CommandKind::Diagnostics,
             command: String::new(),
+            payload: None,
             timeout_ms: 0,
         };
         audit_inbound(&frame, &placeholder, &r);
@@ -258,14 +294,14 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
         serde_json::from_slice(&plaintext).map_err(|e| format!("bad request payload: {e}"))?;
 
     // Freshness — reject stale/pre-recorded frames.
-    if (now_unix() - frame.ts).abs() > 120 {
+    if (now_unix() - frame.ts).abs() > FRESHNESS_SECS {
         let r = deny(&req.request_id, "stale request (outside the freshness window)");
         audit_inbound(&frame, &req, &r);
         return Ok(r);
     }
 
     // Replay — reject a re-sent nonce within the window.
-    if !replay_ok(&frame.nonce) {
+    if !replay_ok(&frame.nonce, frame.ts) {
         let r = deny(&req.request_id, "replayed request rejected");
         audit_inbound(&frame, &req, &r);
         return Ok(r);
@@ -284,9 +320,24 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
         }
     };
 
-    // Authorized surface — show the banner while it runs, then execute.
+    // Authorized surface — show the banner while it runs, then execute. Dangerous
+    // kinds (FileWrite/Admin) additionally require a LIVE per-action approval on
+    // this machine, even when the policy toggle is on.
     begin_control(&frame, &req);
-    let result = executor::execute(&req, &policy).await;
+    let result = match policy::authorize(req.kind, &policy) {
+        Authorization::Denied => deny(&req.request_id, "permission denied by target policy"),
+        Authorization::Allowed => executor::execute(&req, &policy).await,
+        Authorization::RequiresApproval => {
+            if await_approval(&frame, &req).await {
+                executor::execute_dangerous(&req).await
+            } else {
+                deny(
+                    &req.request_id,
+                    "dangerous action was not approved on the target (denied or timed out)",
+                )
+            }
+        }
+    };
     end_control(&req.request_id);
 
     let _ = registry::touch_last_seen(&frame.from_device);
@@ -308,14 +359,185 @@ fn recipient_x_pub(to_device: &str) -> Result<[u8; 32], String> {
     raw.try_into().map_err(|_| "target x25519 pub is not 32 bytes".to_string())
 }
 
+// ------------------------------------------------------------------
+// Listener lifecycle + public-record helpers
+// ------------------------------------------------------------------
+
+/// Start the LAN listener if the feature is on and it isn't already running.
+fn ensure_listener_started(rt: tokio::runtime::Handle) {
+    if feature_enabled() && lan::current_endpoint().is_none() {
+        if let Err(e) = lan::start(rt) {
+            eprintln!("remote_devices: listener start failed: {e}");
+        }
+    }
+}
+
+/// This device's public record (with the current LAN endpoint).
+pub fn self_public_record() -> Result<DevicePublic, String> {
+    identity::public_record(github_login())
+}
+
+/// (device_id, pretty-JSON) of this device's public record — for the vault.
+pub fn self_vault_record() -> Result<(String, String), String> {
+    let rec = self_public_record()?;
+    let json = serde_json::to_string_pretty(&rec).map_err(|e| e.to_string())?;
+    Ok((rec.device_id, json))
+}
+
+/// Ingest a peer's public record (from the vault) into the local registry.
+/// Skips our own record, and rejects any record whose id doesn't match its key.
+pub fn ingest_peer_record(json: &str) -> Result<bool, String> {
+    let peer: DevicePublic =
+        serde_json::from_str(json).map_err(|e| format!("bad device record: {e}"))?;
+    let me = identity::load_or_create()?;
+    if peer.device_id == me.secrets.device_id() {
+        return Ok(false);
+    }
+    if crypto::device_id_from_ed_pub_b64(&peer.ed25519_pub).as_deref() != Some(peer.device_id.as_str())
+    {
+        return Err("device record id does not match its ed25519 key".into());
+    }
+    registry::upsert(peer, false)?;
+    Ok(true)
+}
+
+// ------------------------------------------------------------------
+// Reply sealing (target → controller)
+// ------------------------------------------------------------------
+
+/// Seal a CommandResult back to the controller's authenticated static X25519 key
+/// so the LAN return path is end-to-end encrypted too.
+pub fn seal_result_for(
+    to_device: &str,
+    to_x25519_pub_b64: &str,
+    result: &CommandResult,
+) -> Result<SignedEnvelope, String> {
+    let me = identity::load_or_create()?;
+    let raw = b64_decode(to_x25519_pub_b64)?;
+    let recipient: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| "reply x25519 pub is not 32 bytes".to_string())?;
+    let pt = serde_json::to_vec(result).map_err(|e| e.to_string())?;
+    let mut nonce = [0u8; 24];
+    OsRng.fill_bytes(&mut nonce);
+    crypto::seal(&me.secrets, to_device, &recipient, &pt, now_unix(), &nonce)
+}
+
+// ------------------------------------------------------------------
+// Command routing: loopback (self) vs LAN-direct (peer)
+// ------------------------------------------------------------------
+
+fn lookup_endpoint(to_device: &str) -> Option<String> {
+    let self_pub = identity::public_record(github_login()).ok()?;
+    registry::list(&self_pub)
+        .into_iter()
+        .find(|d| d.public.device_id == to_device)
+        .and_then(|d| d.public.endpoint)
+}
+
+async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandResult, String> {
+    let me = identity::load_or_create()?;
+    if to_device == me.secrets.device_id() {
+        return LoopbackTransport.deliver(env).await;
+    }
+    let endpoint = lookup_endpoint(to_device).ok_or_else(|| {
+        "target device has no known LAN endpoint (is it online + discovered?)".to_string()
+    })?;
+    LanDirectTransport { endpoint }.deliver(env).await
+}
+
+/// Build a signed pairing request for THIS device, POST it to a peer endpoint,
+/// and add the peer's returned record to the registry. Used by both "pair a
+/// known device" and "pair by IP".
+async fn pair_with_endpoint(endpoint: &str) -> Result<DevicePublic, String> {
+    let me_pub = self_public_record()?;
+    let me = identity::load_or_create()?;
+    let sig = crypto::sign_detached(&me.secrets, &PairRequest::signed_bytes(&me_pub));
+    let peer = lan::send_pair(endpoint, PairRequest { from: me_pub, sig }).await?;
+    // Learn the peer's keys/id so we can later seal commands to it.
+    registry::upsert(peer.clone(), false)?;
+    Ok(peer)
+}
+
+// ------------------------------------------------------------------
+// Pairing event + dangerous-action approval gate
+// ------------------------------------------------------------------
+
+fn emit_pairing() {
+    if let Some(app) = APP.lock().unwrap().as_ref() {
+        let _ = app.emit("remote-devices:pairing", json!({ "at": now_rfc3339() }));
+    }
+}
+
+#[derive(Clone, Serialize)]
+struct PendingApproval {
+    request_id: String,
+    controller_id: String,
+    controller_name: String,
+    kind: String,
+    command: String,
+    requested_at: String,
+}
+
+static PENDING_META: Lazy<Mutex<Vec<PendingApproval>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static PENDING_TX: Lazy<Mutex<HashMap<String, oneshot::Sender<bool>>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+const APPROVAL_TIMEOUT_SECS: u64 = 120;
+
+fn emit_approval() {
+    let payload = json!({ "pending": PENDING_META.lock().unwrap().clone() });
+    if let Some(app) = APP.lock().unwrap().as_ref() {
+        let _ = app.emit("remote-devices:approval", payload);
+    }
+}
+
+/// Register a pending approval, emit the target-side prompt, and await the human
+/// decision (or a timeout). Returns true ONLY on explicit approval.
+async fn await_approval(frame: &SignedEnvelope, req: &CommandRequest) -> bool {
+    let name = trust::find(&frame.from_device)
+        .map(|c| c.name)
+        .unwrap_or_else(|| frame.from_device.clone());
+    let (tx, rx) = oneshot::channel::<bool>();
+    PENDING_META.lock().unwrap().push(PendingApproval {
+        request_id: req.request_id.clone(),
+        controller_id: frame.from_device.clone(),
+        controller_name: name,
+        kind: kind_str(req.kind).to_string(),
+        command: req.command.clone(),
+        requested_at: now_rfc3339(),
+    });
+    PENDING_TX.lock().unwrap().insert(req.request_id.clone(), tx);
+    emit_approval();
+
+    let decided = tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx).await;
+
+    PENDING_META.lock().unwrap().retain(|p| p.request_id != req.request_id);
+    PENDING_TX.lock().unwrap().remove(&req.request_id);
+    emit_approval();
+
+    matches!(decided, Ok(Ok(true)))
+}
+
+fn resolve_approval(request_id: &str, approved: bool) -> bool {
+    let tx = PENDING_TX.lock().unwrap().remove(request_id);
+    if let Some(tx) = tx {
+        let _ = tx.send(approved);
+        true
+    } else {
+        false
+    }
+}
+
 // ==================================================================
 // Tauri commands
 // ==================================================================
 
-/// This device's public identity + live capability/enable state.
+/// This device's public identity + live capability/enable state. Also starts the
+/// LAN listener when the feature is enabled (so the endpoint below is populated).
 #[tauri::command]
-pub fn device_get_identity(app: AppHandle) -> Result<Value, String> {
+pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
     store_app(&app);
+    ensure_listener_started(tokio::runtime::Handle::current());
     let rec = identity::public_record(github_login())?;
     Ok(json!({
         "device_id": rec.device_id,
@@ -329,6 +551,8 @@ pub fn device_get_identity(app: AppHandle) -> Result<Value, String> {
         "capabilities": rec.capabilities,
         "enabled": feature_enabled(),
         "env_override": env_override(),
+        "endpoint": rec.endpoint,
+        "listening": lan::current_endpoint().is_some(),
     }))
 }
 
@@ -345,9 +569,23 @@ pub fn device_remote_enabled_get() -> bool {
 }
 
 /// Flip the master opt-in. The env override, if set, cannot be turned off here.
+/// Starts/stops the LAN listener to match.
 #[tauri::command]
-pub fn device_remote_enabled_set(enabled: bool) -> Result<(), String> {
-    set_enabled(enabled)
+pub async fn device_remote_enabled_set(app: AppHandle, enabled: bool) -> Result<(), String> {
+    store_app(&app);
+    set_enabled(enabled)?;
+    if feature_enabled() {
+        ensure_listener_started(tokio::runtime::Handle::current());
+    } else {
+        lan::stop();
+    }
+    Ok(())
+}
+
+/// LAN listener status ({ listening, endpoint }).
+#[tauri::command]
+pub fn device_listener_status() -> Value {
+    lan::status_json()
 }
 
 /// "My OwLLM Devices" — known devices, with this machine always present.
@@ -370,19 +608,36 @@ pub fn device_trust_list() -> Result<Vec<TrustedController>, String> {
     Ok(trust::list())
 }
 
-/// v1 loopback pairing: register an incoming pairing request FROM this device
-/// (so on a single machine you can drive the full approve→control flow). The
-/// network relay path delivers a peer's request the same way.
+/// Request pairing with a device. For THIS device (loopback) it records a local
+/// pending request so you can drive the approve→control flow on one machine. For
+/// a known peer it POSTs a signed pairing request to the peer's LAN endpoint.
 #[tauri::command]
-pub fn device_request_pairing(to_device: String) -> Result<(), String> {
-    let me = identity::public_record(github_login())?;
-    if to_device != me.device_id {
-        return Err(
-            "v1 loopback can only pair with THIS device; cross-device relay pairing is a follow-up"
-                .into(),
+pub async fn device_request_pairing(to_device: String) -> Result<(), String> {
+    let me = self_public_record()?;
+    if to_device == me.device_id {
+        return trust::record_pairing_request(
+            &me.device_id,
+            &me.name,
+            &me.ed25519_pub,
+            &me.x25519_pub,
         );
     }
-    trust::record_pairing_request(&me.device_id, &me.name, &me.ed25519_pub, &me.x25519_pub)
+    let endpoint = lookup_endpoint(&to_device)
+        .ok_or_else(|| "target device has no known LAN endpoint (discover it or pair by IP)".to_string())?;
+    pair_with_endpoint(&endpoint).await.map(|_| ())
+}
+
+/// Pair by typing a peer's "ip:port" directly (no vault discovery needed). Sends
+/// this device's signed pairing request and adds the peer's returned record to
+/// the registry so it can then be controlled once IT approves us.
+#[tauri::command]
+pub async fn device_pair_by_address(endpoint: String) -> Result<DeviceRecord, String> {
+    let endpoint = endpoint.trim().to_string();
+    if endpoint.is_empty() {
+        return Err("enter the peer's ip:port".into());
+    }
+    let peer = pair_with_endpoint(&endpoint).await?;
+    Ok(DeviceRecord { public: peer, last_seen: Some(now_rfc3339()), is_self: false })
 }
 
 /// Approve a pending controller with an initial permission policy.
@@ -416,13 +671,14 @@ pub fn device_trust_set_policy(device_id: String, policy: PermissionPolicy) -> R
 }
 
 /// Send a command to a device (controller side). Seals + signs, routes through
-/// the transport, audits, and returns the target's result.
+/// loopback (self) or LAN-direct (peer), audits, and returns the target's result.
 #[tauri::command]
 pub async fn device_send(
     app: AppHandle,
     to_device: String,
     kind: CommandKind,
     command: Option<String>,
+    payload: Option<String>,
     timeout_ms: Option<u64>,
 ) -> Result<CommandResult, String> {
     store_app(&app);
@@ -433,6 +689,7 @@ pub async fn device_send(
         request_id: uuid::Uuid::new_v4().to_string(),
         kind,
         command: command.unwrap_or_default(),
+        payload,
         timeout_ms: timeout_ms.unwrap_or(0),
     };
     let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
@@ -448,7 +705,7 @@ pub async fn device_send(
         &nonce,
     )?;
 
-    let result = LoopbackTransport.deliver(env).await?;
+    let result = route_command(env, &to_device).await?;
     audit::write(&audit::record(
         "outbound",
         &me.secrets.device_id(),
@@ -459,6 +716,30 @@ pub async fn device_send(
         &result,
     ));
     Ok(result)
+}
+
+/// Pending dangerous-action approvals awaiting a decision on THIS machine.
+#[tauri::command]
+pub fn device_pending_approvals() -> Value {
+    json!({ "pending": PENDING_META.lock().unwrap().clone() })
+}
+
+/// Approve a pending dangerous action (target side) — lets the held command run.
+#[tauri::command]
+pub fn device_approve_action(request_id: String) -> bool {
+    resolve_approval(&request_id, true)
+}
+
+/// Deny a pending dangerous action (target side).
+#[tauri::command]
+pub fn device_deny_action(request_id: String) -> bool {
+    resolve_approval(&request_id, false)
+}
+
+/// Pull peer device records from the vault + publish ours (discovery).
+#[tauri::command]
+pub async fn device_sync_discovery() -> Result<bool, String> {
+    crate::vault::vault_sync_devices().await
 }
 
 /// Cancel one in-flight command by id.
@@ -500,6 +781,7 @@ pub async fn device_selftest(app: AppHandle) -> Result<Value, String> {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind: CommandKind::Diagnostics,
         command: String::new(),
+        payload: None,
         timeout_ms: 10_000,
     };
     let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
@@ -550,6 +832,7 @@ mod tests {
             request_id: "r".into(),
             kind,
             command: command.into(),
+            payload: None,
             timeout_ms: 5000,
         };
         let pt = serde_json::to_vec(&req).unwrap();

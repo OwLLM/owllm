@@ -26,12 +26,35 @@ pub trait Transport {
     async fn deliver(&self, frame: SignedEnvelope) -> Result<CommandResult, String>;
 }
 
-/// In-process transport used in v1 and in tests. Routes the frame to the local
-/// inbound handler.
+/// In-process transport used for self-control and tests. Routes the frame to the
+/// local inbound handler.
 pub struct LoopbackTransport;
 
 impl Transport for LoopbackTransport {
     async fn deliver(&self, frame: SignedEnvelope) -> Result<CommandResult, String> {
         super::handle_incoming(frame).await
+    }
+}
+
+/// LAN-direct transport: POST the sealed frame to a peer's listener and open the
+/// sealed reply. The peer is reached over plain HTTP because the frame — and the
+/// reply — are end-to-end sealed; the wire carries only ciphertext.
+pub struct LanDirectTransport {
+    pub endpoint: String,
+}
+
+impl Transport for LanDirectTransport {
+    async fn deliver(&self, frame: SignedEnvelope) -> Result<CommandResult, String> {
+        let reply = super::lan::post_wire(&self.endpoint, &super::protocol::WireMessage::Command(frame)).await?;
+        match reply {
+            super::protocol::WireReply::Result(sealed) => {
+                // Open the target's sealed reply with THIS device's X25519 secret.
+                let me = super::identity::load_or_create()?;
+                let pt = super::crypto::open(&sealed, &me.secrets.x25519_secret)?;
+                serde_json::from_slice(&pt).map_err(|e| format!("bad sealed result: {e}"))
+            }
+            super::protocol::WireReply::Error { message } => Err(message),
+            super::protocol::WireReply::Paired { .. } => Err("unexpected Paired reply to a command".into()),
+        }
     }
 }

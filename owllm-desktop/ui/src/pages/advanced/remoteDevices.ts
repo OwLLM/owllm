@@ -30,6 +30,8 @@ export type DeviceIdentity = {
   capabilities: Capabilities;
   enabled: boolean;
   env_override: boolean;
+  endpoint: string | null;
+  listening: boolean;
 };
 
 export type DeviceRecord = {
@@ -42,8 +44,18 @@ export type DeviceRecord = {
   app_version: string;
   github_login: string | null;
   capabilities: Capabilities;
+  endpoint: string | null;
   last_seen: string | null;
   is_self: boolean;
+};
+
+export type PendingApproval = {
+  request_id: string;
+  controller_id: string;
+  controller_name: string;
+  kind: string;
+  command: string;
+  requested_at: string;
 };
 
 export type TrustState = "pending" | "trusted" | "revoked";
@@ -103,9 +115,14 @@ export const setEnabled = (enabled: boolean) => invoke<void>("device_remote_enab
 export const listDevices = () => invoke<DeviceRecord[]>("devices_list");
 export const forgetDevice = (deviceId: string) => invoke<void>("device_forget", { deviceId });
 
+// ---- Listener / discovery ----
+export const listenerStatus = () => invoke<{ listening: boolean; endpoint: string | null }>("device_listener_status");
+export const syncDiscovery = () => invoke<boolean>("device_sync_discovery");
+
 // ---- Trust / pairing ----
 export const listTrusted = () => invoke<TrustedController[]>("device_trust_list");
 export const requestPairing = (toDevice: string) => invoke<void>("device_request_pairing", { toDevice });
+export const pairByAddress = (endpoint: string) => invoke<DeviceRecord>("device_pair_by_address", { endpoint });
 export const approvePairing = (deviceId: string, policy: PermissionPolicy) =>
   invoke<void>("device_pairing_approve", { deviceId, policy });
 export const denyPairing = (deviceId: string) => invoke<void>("device_pairing_deny", { deviceId });
@@ -119,9 +136,15 @@ export const sendCommand = (
   toDevice: string,
   kind: CommandKind,
   command: string,
+  payload?: string | null,
   timeoutMs?: number,
-) => invoke<CommandResult>("device_send", { toDevice, kind, command, timeoutMs: timeoutMs ?? null });
+) => invoke<CommandResult>("device_send", { toDevice, kind, command, payload: payload ?? null, timeoutMs: timeoutMs ?? null });
 export const controlState = () => invoke<ControlState>("device_control_state");
 export const stopRemoteControl = () => invoke<{ cancelled: number }>("device_stop_remote_control");
 export const auditTail = (limit?: number) => invoke<unknown[]>("device_audit_tail", { limit: limit ?? 200 });
 export const selfTest = () => invoke<SelfTestResult>("device_selftest");
+
+// ---- Dangerous-action approval (target side) ----
+export const pendingApprovals = () => invoke<{ pending: PendingApproval[] }>("device_pending_approvals");
+export const approveAction = (requestId: string) => invoke<boolean>("device_approve_action", { requestId });
+export const denyAction = (requestId: string) => invoke<boolean>("device_deny_action", { requestId });

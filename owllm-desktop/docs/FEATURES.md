@@ -207,17 +207,23 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   Node above, which drives external KVM hardware; this controls OwLLM *devices*.)
 - **Identity**: per-install Ed25519 (sign/id) + X25519 (seal) keypair, DPAPI-
   wrapped at rest, never synced. `device_id = hex(SHA-256(ed_pub))`. Editable name.
-- **Sealed transport**: every command is an end-to-end AES-256-GCM sealed +
-  Ed25519-signed envelope — a relay only forwards ciphertext. `Transport` seam
-  with a v1 `LoopbackTransport` (in-process; drives a real self-test) and a
-  documented network `RelayTransport` next step.
-- **Trust + policy**: pairing request → unmistakable target-side approval →
-  per-controller `PermissionPolicy` (Shell / WSL / File writes / Admin), default
-  read-only diagnostics. `authorize()` is a unit-tested pure chokepoint; dangerous
-  kinds also need per-action approval. Revocable, fail-closed.
-- **Executor**: diagnostics (read-only), shell, "Run in WSL" — all timed-out +
-  cancellable. "Being controlled" banner + emergency Stop. Redacted JSONL audit
-  on both ends (output stored only as length + digest). Ships DISABLED
+- **Sealed transport**: every command (and its reply) is an end-to-end
+  AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries ciphertext.
+  `Transport` seam with `LoopbackTransport` (self) and **`LanDirectTransport`**
+  (`lan.rs` — a `tiny_http` listener + `reqwest` client for real cross-machine
+  control on a LAN); a WAN `RelayTransport` is the one deferred piece.
+- **Discovery**: `vault_sync_devices` (a 4th vault channel) publishes each
+  device's public record + LAN endpoint and pulls peers into the registry; or
+  **pair by IP** directly with no vault.
+- **Trust + policy**: pairing request (over the wire / by IP) → unmistakable
+  target-side approval → per-controller `PermissionPolicy` (Shell / WSL / File
+  writes / Admin), default read-only diagnostics. `authorize()` is a unit-tested
+  pure chokepoint. Revocable, fail-closed.
+- **Executor**: diagnostics (read-only), shell, "Run in WSL", and File write —
+  all timed-out + cancellable. Dangerous actions (FileWrite/Admin) run ONLY after
+  a **live target-side approval** (or 120s timeout → denied). "Being controlled"
+  banner + emergency Stop. Persistent replay cache. Redacted JSONL audit on both
+  ends (output stored only as length + digest). Ships DISABLED
   (`OWLLM_REMOTE_DEVICES=1` or the page toggle). Design: `docs/REMOTE_DEVICES.md`.
 
 ## USB-portable mode — "OwLLM Go" (`paths.rs::init_portable_mode`)

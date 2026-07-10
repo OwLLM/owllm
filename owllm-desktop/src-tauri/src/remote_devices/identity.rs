@@ -148,5 +148,7 @@ pub fn public_record(github_login: Option<String>) -> Result<DevicePublic, Strin
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         github_login,
         capabilities: capabilities(),
+        // Advertised only while the LAN listener is up (so peers can dial us).
+        endpoint: super::lan::current_endpoint(),
     })
 }

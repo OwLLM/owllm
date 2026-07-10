@@ -155,6 +155,28 @@ export async function syncProjectsNow(): Promise<boolean> {
   }
 }
 
+// Remote-device records (public metadata: name, OS, version, LAN endpoint,
+// capabilities) sync through the vault too, so "My OwLLM Devices" auto-populates
+// across the account. Metadata only — control never flows through git. On a
+// change we fire owllm:devices:refresh so the Devices page reloads.
+let _devSyncing = false;
+export async function syncDevicesNow(): Promise<boolean> {
+  if (!_enabled || _devSyncing) return false;
+  _devSyncing = true;
+  try {
+    const changed = await invoke<boolean>("vault_sync_devices");
+    if (changed) {
+      try { window.dispatchEvent(new CustomEvent("owllm:devices:refresh")); } catch { /* non-browser */ }
+    }
+    return changed;
+  } catch (e) {
+    console.warn("[vaultSync] device sync failed", e);
+    return false;
+  } finally {
+    _devSyncing = false;
+  }
+}
+
 /// A vault adoption rewrites localStorage/SQLite under every store's feet, so
 /// a full reload is the blunt-but-reliable repaint. But each reload re-runs
 /// main.tsx — including the update prompt's fresh check() — and two devices
@@ -196,6 +218,9 @@ export async function startVaultSync(): Promise<void> {
   //     across devices. Fire-and-forget; failures don't block.
   invoke("vault_sync_teams").catch(() => {});
 
+  // 2b2) Sync remote-device records (metadata only) so the fleet is discoverable.
+  void syncDevicesNow();
+
   // 2c) Sync projects + chats (SQLite rows) so conversations follow the user.
   //     If we pulled in newer projects/chats from another device, reload (once)
   //     so the whole UI repaints from the freshly-synced database.
@@ -217,6 +242,7 @@ export async function onVaultConnected(): Promise<void> {
   _lastSnapshotJson = JSON.stringify(snapshot());
   await pushNow(true);
   invoke("vault_sync_teams").catch(() => {});
+  void syncDevicesNow();
   if (await syncProjectsNow()) reloadOnce();
 }
 

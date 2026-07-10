@@ -27,6 +27,11 @@ pub struct DevicePublic {
     pub github_login: Option<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
+    /// LAN endpoint this device listens on ("ip:port"), when the remote-control
+    /// listener is running. Peers dial this directly (LAN-direct transport).
+    /// Metadata only — control still needs a paired key + policy.
+    #[serde(default)]
+    pub endpoint: Option<String>,
 }
 
 /// What a device can do — advertised to peers, informational (the real gate is
@@ -108,10 +113,13 @@ pub enum Authorization {
 pub struct CommandRequest {
     pub request_id: String,
     pub kind: CommandKind,
-    /// Command text (shell/wsl) or a diagnostics selector. Empty for a plain
-    /// diagnostics sweep.
+    /// Command text (shell/wsl), the target PATH for a `FileWrite`, or empty for
+    /// a plain diagnostics sweep.
     #[serde(default)]
     pub command: String,
+    /// base64 file content for `FileWrite` (ignored by other kinds).
+    #[serde(default)]
+    pub payload: Option<String>,
     /// Hard execution deadline in milliseconds (clamped by the executor).
     #[serde(default)]
     pub timeout_ms: u64,
@@ -147,6 +155,9 @@ pub struct CommandResult {
 pub struct SignedEnvelope {
     pub from_device: String,
     pub from_ed25519_pub: String,
+    /// The sender's STATIC X25519 public key — so the target can seal the reply
+    /// back to the controller. Signed (in the header), so it is authenticated.
+    pub from_x25519_pub: String,
     pub to_device: String,
     /// Unix seconds — freshness window (±120s) rejects stale/pre-recorded frames.
     pub ts: i64,
@@ -170,9 +181,10 @@ impl SignedEnvelope {
     /// ciphertext to a different header changes the AAD and fails the tag.
     pub fn aad(&self) -> Vec<u8> {
         format!(
-            "owllm-remote-devices-v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "owllm-remote-devices-v1\n{}\n{}\n{}\n{}\n{}\n{}\n{}\n{}",
             self.from_device,
             self.from_ed25519_pub,
+            self.from_x25519_pub,
             self.to_device,
             self.ts,
             self.nonce,
@@ -223,4 +235,50 @@ pub struct TrustedController {
     pub requested_at: String,
     #[serde(default)]
     pub decided_at: Option<String>,
+}
+
+// ------------------------------------------------------------------
+// Wire protocol (LAN-direct transport)
+// ------------------------------------------------------------------
+
+/// A pairing request sent over the wire: the controller's public record plus a
+/// signature proving it holds the matching Ed25519 secret — so no one can
+/// register a pairing request under someone else's key.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PairRequest {
+    pub from: DevicePublic,
+    /// base64 Ed25519 signature over `signed_bytes(&from)`.
+    pub sig: String,
+}
+
+impl PairRequest {
+    /// The exact bytes signed — binds the request to the sender's identity keys.
+    pub fn signed_bytes(from: &DevicePublic) -> Vec<u8> {
+        format!(
+            "owllm-remote-devices-pair-v1\n{}\n{}\n{}",
+            from.device_id, from.ed25519_pub, from.x25519_pub
+        )
+        .into_bytes()
+    }
+}
+
+/// What a controller POSTs to a target's listener.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireMessage {
+    Pair(PairRequest),
+    Command(SignedEnvelope),
+}
+
+/// The target's reply. `Result` carries the CommandResult SEALED back to the
+/// controller (so even the LAN return path is end-to-end encrypted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum WireReply {
+    /// Pairing recorded (pending human approval). Carries the target's own public
+    /// record so the controller learns its keys/id — this is what lets a manual
+    /// "pair by IP" work with no vault discovery.
+    Paired { device: DevicePublic },
+    Result(SignedEnvelope),
+    Error { message: String },
 }

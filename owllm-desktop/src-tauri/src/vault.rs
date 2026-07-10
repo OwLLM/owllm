@@ -958,6 +958,54 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Sync remote-device records through the vault: pull peer devices into the
+/// local registry (so "My OwLLM Devices" auto-populates across the account),
+/// then publish THIS device's public record. Metadata only — the vault is never
+/// a command queue; control flows through the sealed transport. Returns true
+/// when a peer record changed locally.
+#[tauri::command]
+pub async fn vault_sync_devices() -> Result<bool, String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Ok(false);
+    }
+    let (self_id, self_json) = crate::remote_devices::self_vault_record()?;
+    tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let branch = current_branch(&dir);
+        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
+        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let dev_dir = dir.join("state").join("devices");
+        std::fs::create_dir_all(&dev_dir).map_err(|e| format!("mkdir devices: {e}"))?;
+
+        // 1) remote → local registry (public metadata only).
+        let mut changed = false;
+        if let Ok(rd) = std::fs::read_dir(&dev_dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.extension().and_then(|x| x.to_str()) != Some("json") {
+                    continue;
+                }
+                let Ok(txt) = std::fs::read_to_string(&p) else {
+                    continue;
+                };
+                if let Ok(true) = crate::remote_devices::ingest_peer_record(&txt) {
+                    changed = true;
+                }
+            }
+        }
+
+        // 2) publish OUR record.
+        std::fs::write(dev_dir.join(format!("{}.json", safe_id(&self_id))), self_json)
+            .map_err(|e| format!("write device record: {e}"))?;
+
+        // 3) commit + push.
+        commit_push(&dir, &branch)?;
+        Ok(changed)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// The clone's current branch (GitHub auto_init defaults to `main`).
 fn current_branch(dir: &std::path::Path) -> String {
     run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(dir))

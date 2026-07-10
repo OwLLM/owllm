@@ -16,6 +16,7 @@ import type {
   ControlState,
   DeviceIdentity,
   DeviceRecord,
+  PendingApproval,
   PermissionPolicy,
   TrustedController,
 } from "./remoteDevices";
@@ -66,6 +67,7 @@ export default function DevicesPage() {
   const [devices, setDevices] = useState<DeviceRecord[]>([]);
   const [trusted, setTrusted] = useState<TrustedController[]>([]);
   const [control, setControl] = useState<ControlState>({ active: false, sessions: [] });
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [err, setErr] = useState("");
 
@@ -73,11 +75,14 @@ export default function DevicesPage() {
   const [target, setTarget] = useState<string>("");
   const [kind, setKind] = useState<CommandKind>("diagnostics");
   const [command, setCommand] = useState("");
+  const [fileContent, setFileContent] = useState("");
   const [running, setRunning] = useState(false);
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
 
   const [nameDraft, setNameDraft] = useState("");
   const [selftestMsg, setSelftestMsg] = useState("");
+  const [manualAddr, setManualAddr] = useState("");
+  const [discoverMsg, setDiscoverMsg] = useState("");
 
   const guard = useCallback(async (fn: () => Promise<void>) => {
     try {
@@ -90,17 +95,19 @@ export default function DevicesPage() {
 
   const reload = useCallback(async () => {
     if (!isTauri) return;
-    const [id, devs, tr, ctl, au] = await Promise.all([
+    const [id, devs, tr, ctl, ap, au] = await Promise.all([
       rd.getIdentity(),
       rd.listDevices(),
       rd.listTrusted(),
       rd.controlState(),
+      rd.pendingApprovals(),
       rd.auditTail(200),
     ]);
     setIdentity(id);
     setDevices(devs);
     setTrusted(tr);
     setControl(ctl);
+    setApprovals(ap.pending ?? []);
     setAudit((au as AuditRow[]) ?? []);
     setNameDraft((prev) => (prev === "" ? id.name : prev));
     setTarget((prev) => (prev === "" ? id.device_id : prev));
@@ -110,19 +117,29 @@ export default function DevicesPage() {
     void guard(reload);
   }, [guard, reload]);
 
-  // Live "being controlled" updates.
+  // Live updates: being-controlled, dangerous-action approvals, incoming pairing,
+  // and vault-discovery refreshes.
   useEffect(() => {
     if (!isTauri) return;
-    let un: (() => void) | undefined;
+    const uns: Array<() => void> = [];
     void (async () => {
-      un = await listen<ControlState>("remote-devices:control", (ev) => {
-        setControl(ev.payload);
-        // Refresh the audit tail whenever a session ends.
-        if (!ev.payload.active) void rd.auditTail(200).then((a) => setAudit((a as AuditRow[]) ?? []));
-      });
+      uns.push(
+        await listen<ControlState>("remote-devices:control", (ev) => {
+          setControl(ev.payload);
+          if (!ev.payload.active) void rd.auditTail(200).then((a) => setAudit((a as AuditRow[]) ?? []));
+        }),
+      );
+      uns.push(
+        await listen<{ pending: PendingApproval[] }>("remote-devices:approval", (ev) => {
+          setApprovals(ev.payload.pending ?? []);
+        }),
+      );
+      uns.push(await listen("remote-devices:pairing", () => { void guard(reload); }));
     })();
-    return () => un?.();
-  }, []);
+    const onDevices = () => { void guard(reload); };
+    window.addEventListener("owllm:devices:refresh", onDevices);
+    return () => { uns.forEach((u) => u()); window.removeEventListener("owllm:devices:refresh", onDevices); };
+  }, [guard, reload]);
 
   const pending = trusted.filter((t) => t.state === "pending");
   const trustedActive = trusted.filter((t) => t.state === "trusted");
@@ -136,9 +153,14 @@ export default function DevicesPage() {
       setRunning(true);
       const stamp = new Date().toLocaleTimeString();
       const label = targetDevice?.name ?? shortId(target);
+      // file_write carries the file content as a base64 payload (UTF-8 safe).
+      const payload =
+        kind === "file_write" && fileContent
+          ? btoa(unescape(encodeURIComponent(fileContent)))
+          : null;
       setConsoleLines((l) => [...l, `\n$ [${stamp}] ${kind}${command ? " " + command : ""} → ${label}`]);
       try {
-        const res = await rd.sendCommand(target, kind, command, 60_000);
+        const res = await rd.sendCommand(target, kind, command, payload, 60_000);
         const head = res.ok ? "[ok]" : `[${res.decision}]`;
         const body = [res.stdout, res.stderr, res.error ? `error: ${res.error}` : ""]
           .filter(Boolean)
@@ -149,6 +171,26 @@ export default function DevicesPage() {
         await rd.auditTail(200).then((a) => setAudit((a as AuditRow[]) ?? []));
       }
     });
+
+  const syncDiscover = () =>
+    guard(async () => {
+      setDiscoverMsg("syncing…");
+      const changed = await rd.syncDiscovery();
+      await reload();
+      setDiscoverMsg(changed ? "updated from vault" : "no changes");
+    });
+
+  const pairByIp = () =>
+    guard(async () => {
+      const ep = manualAddr.trim();
+      if (!ep) return;
+      await rd.pairByAddress(ep);
+      setManualAddr("");
+      await reload();
+    });
+
+  const approveAction = (id: string) => guard(async () => { await rd.approveAction(id); });
+  const denyAction = (id: string) => guard(async () => { await rd.denyAction(id); });
 
   const stopAll = () =>
     guard(async () => {
@@ -181,6 +223,10 @@ export default function DevicesPage() {
 
       {control.active && (
         <ControlledBanner state={control} onStop={stopAll} />
+      )}
+
+      {approvals.length > 0 && (
+        <ApprovalBanner approvals={approvals} onApprove={approveAction} onDeny={denyAction} />
       )}
 
       {err && (
@@ -236,6 +282,11 @@ export default function DevicesPage() {
           onPair={(id) => guard(async () => { await rd.requestPairing(id); await reload(); })}
           onForget={(id) => guard(async () => { await rd.forgetDevice(id); await reload(); })}
           trusted={trusted}
+          manualAddr={manualAddr}
+          setManualAddr={setManualAddr}
+          onPairByIp={pairByIp}
+          onDiscover={syncDiscover}
+          discoverMsg={discoverMsg}
         />
       </section>
 
@@ -259,6 +310,8 @@ export default function DevicesPage() {
         setKind={setKind}
         command={command}
         setCommand={setCommand}
+        fileContent={fileContent}
+        setFileContent={setFileContent}
         running={running}
         onRun={runCommand}
         onStop={stopAll}
@@ -308,6 +361,42 @@ function ControlledBanner({ state, onStop }: { state: ControlState; onStop: () =
   );
 }
 
+function ApprovalBanner({
+  approvals, onApprove, onDeny,
+}: {
+  approvals: PendingApproval[];
+  onApprove: (id: string) => void;
+  onDeny: (id: string) => void;
+}) {
+  return (
+    <section style={{ border: "2px solid var(--error)", borderRadius: 12, padding: 14, background: "rgba(255,60,60,0.10)", display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ fontSize: 14, fontWeight: 800, color: "var(--fg-strong)", display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 18 }}>⚠️</span> Dangerous action needs your approval
+      </div>
+      {approvals.map((a) => (
+        <div key={a.request_id} style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--error)", borderRadius: 8, padding: 10, background: "var(--bg-card)" }}>
+          <div style={{ fontSize: 13, color: "var(--fg)" }}>
+            <b>{a.controller_name}</b> wants to run a <b style={{ color: "var(--error)" }}>{a.kind}</b> action on this machine.
+          </div>
+          {a.command && (
+            <div style={{ fontSize: 11.5, color: "var(--fg)", fontFamily: "monospace", background: "var(--bg-input)", padding: "3px 8px", borderRadius: 6, wordBreak: "break-all" }}>
+              {a.command}
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            <button className="btn" onClick={() => onApprove(a.request_id)} style={{ background: "var(--warn)", color: "#241a00", fontWeight: 700, padding: "4px 14px" }}>
+              Approve once
+            </button>
+            <button className="btn" onClick={() => onDeny(a.request_id)} style={{ background: "var(--error)", color: "#fff", fontWeight: 700, padding: "4px 14px" }}>
+              Deny
+            </button>
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 function MyDeviceCard({
   identity, nameDraft, setNameDraft, onRename, onSelfTest, selftestMsg,
 }: {
@@ -333,6 +422,11 @@ function MyDeviceCard({
       <Row k="OwLLM" v={identity.app_version} />
       <Row k="GitHub" v={identity.github_login ?? "not signed in"} />
       <Row k="WSL" v={identity.capabilities.wsl ? "available" : "n/a"} />
+      <Row
+        k="Listening"
+        v={identity.listening ? `yes · ${identity.endpoint ?? "?"}` : identity.enabled ? "starting…" : "off (enable first)"}
+        mono={identity.listening}
+      />
       <Row k="Signing key" v={shortId(identity.ed25519_pub)} mono />
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 4 }}>
         <button className="ghost-btn" onClick={onSelfTest} style={{ fontSize: 11.5, padding: "3px 10px" }}>
@@ -345,17 +439,29 @@ function MyDeviceCard({
 }
 
 function DeviceList({
-  devices, onPair, onForget, trusted,
+  devices, onPair, onForget, trusted, manualAddr, setManualAddr, onPairByIp, onDiscover, discoverMsg,
 }: {
   devices: DeviceRecord[];
   onPair: (id: string) => void;
   onForget: (id: string) => void;
   trusted: TrustedController[];
+  manualAddr: string;
+  setManualAddr: (s: string) => void;
+  onPairByIp: () => void;
+  onDiscover: () => void;
+  discoverMsg: string;
 }) {
   const trustState = (id: string) => trusted.find((t) => t.device_id === id)?.state;
   return (
     <div style={cardStyle}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>My OwLLM Devices</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>My OwLLM Devices</span>
+        <span style={{ flex: 1 }} />
+        <button className="ghost-btn" onClick={onDiscover} title="Pull device records from the GitHub vault" style={{ fontSize: 10.5, padding: "1px 8px" }}>
+          🔄 Discover
+        </button>
+        {discoverMsg && <span style={{ fontSize: 10.5, color: "var(--fg-subtle)" }}>{discoverMsg}</span>}
+      </div>
       {devices.map((d) => {
         const online = isOnline(d);
         const ts = trustState(d.device_id);
@@ -376,13 +482,31 @@ function DeviceList({
                 Pair (self-test)
               </button>
             ) : (
-              <button className="ghost-btn" onClick={() => onForget(d.device_id)} title="Remove from registry" style={{ fontSize: 10.5, padding: "1px 6px", color: "var(--error)" }}>
-                ✕
-              </button>
+              <>
+                <button className="ghost-btn" onClick={() => onPair(d.device_id)} title="Send this device a pairing request (it must approve you)" style={{ fontSize: 10.5, padding: "1px 6px" }}>
+                  Pair
+                </button>
+                <button className="ghost-btn" onClick={() => onForget(d.device_id)} title="Remove from registry" style={{ fontSize: 10.5, padding: "1px 6px", color: "var(--error)" }}>
+                  ✕
+                </button>
+              </>
             )}
           </div>
         );
       })}
+      {/* Manual pair-by-IP (no vault discovery needed). */}
+      <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}>
+        <input
+          value={manualAddr}
+          onChange={(e) => setManualAddr(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && manualAddr.trim()) onPairByIp(); }}
+          placeholder="pair by ip:port (e.g. 192.168.1.5:47771)"
+          style={{ ...inputStyle, flex: 1, fontFamily: "monospace" }}
+        />
+        <button className="ghost-btn" disabled={!manualAddr.trim()} onClick={onPairByIp} style={{ fontSize: 11, padding: "2px 10px" }}>
+          + Pair by IP
+        </button>
+      </div>
     </div>
   );
 }
@@ -439,7 +563,7 @@ function TrustedControllers({
 }
 
 function RemoteConsole({
-  devices, target, setTarget, kind, setKind, command, setCommand, running, onRun, onStop, lines, onClear, wslDisabled,
+  devices, target, setTarget, kind, setKind, command, setCommand, fileContent, setFileContent, running, onRun, onStop, lines, onClear, wslDisabled,
 }: {
   devices: DeviceRecord[];
   target: string;
@@ -448,6 +572,8 @@ function RemoteConsole({
   setKind: (k: CommandKind) => void;
   command: string;
   setCommand: (s: string) => void;
+  fileContent: string;
+  setFileContent: (s: string) => void;
   running: boolean;
   onRun: () => void;
   onStop: () => void;
@@ -456,6 +582,8 @@ function RemoteConsole({
   wslDisabled: boolean;
 }) {
   const needsCommand = kind === "shell" || kind === "wsl";
+  const isFileWrite = kind === "file_write";
+  const runDisabled = running || wslDisabled || ((needsCommand || isFileWrite) && command.trim() === "");
   return (
     // Distinct from the local terminal: magenta "remote" chrome + a REMOTE badge.
     <section style={{ border: "2px solid #c04bd6", borderRadius: 12, background: "rgba(192,75,214,0.06)", padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
@@ -474,17 +602,18 @@ function RemoteConsole({
           <option value="diagnostics">Diagnostics (read-only)</option>
           <option value="shell">Shell</option>
           <option value="wsl">Run in WSL</option>
+          <option value="file_write">File write ⚠ (approval)</option>
         </select>
-        {needsCommand && (
+        {(needsCommand || isFileWrite) && (
           <input
             value={command}
             onChange={(e) => setCommand(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !running) onRun(); }}
-            placeholder={kind === "wsl" ? "uname -a" : "whoami"}
+            onKeyDown={(e) => { if (e.key === "Enter" && !running && !isFileWrite) onRun(); }}
+            placeholder={isFileWrite ? "target path (e.g. C:\\tmp\\note.txt)" : kind === "wsl" ? "uname -a" : "whoami"}
             style={{ ...inputStyle, flex: 1, minWidth: 160, fontFamily: "monospace" }}
           />
         )}
-        <button className="btn" onClick={onRun} disabled={running || wslDisabled || (needsCommand && command.trim() === "")} style={{ padding: "3px 14px", fontWeight: 700 }}>
+        <button className="btn" onClick={onRun} disabled={runDisabled} style={{ padding: "3px 14px", fontWeight: 700 }}>
           {running ? "Running…" : "▶ Run"}
         </button>
         <button className="ghost-btn" onClick={onStop} title="Emergency stop — cancel every in-flight remote command" style={{ padding: "3px 10px", color: "var(--error)" }}>
@@ -492,6 +621,15 @@ function RemoteConsole({
         </button>
         <button className="ghost-btn" onClick={onClear} style={{ padding: "3px 8px", fontSize: 11 }}>clear</button>
       </div>
+      {isFileWrite && (
+        <textarea
+          value={fileContent}
+          onChange={(e) => setFileContent(e.target.value)}
+          placeholder="file content (written on the target only after it approves the action)"
+          style={{ ...inputStyle, flex: "none", height: 70, padding: 8, fontFamily: "monospace", resize: "vertical" }}
+        />
+      )}
+      {isFileWrite && <span style={{ fontSize: 11, color: "var(--warn)" }}>File write is a dangerous action — the target must approve it live (and its policy must allow file writes).</span>}
       {wslDisabled && <span style={{ fontSize: 11, color: "var(--warn)" }}>The selected device does not report WSL — pick another target or a different mode.</span>}
       <LogBox lines={lines.length ? lines : ["(remote output appears here)"]} height={200} title="Remote console" />
     </section>

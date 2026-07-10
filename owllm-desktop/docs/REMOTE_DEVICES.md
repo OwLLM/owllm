@@ -7,10 +7,11 @@ not a GitHub login. GitHub account matching helps **discovery**; a paired,
 signed device key is what grants **control**. WSL is just one execution
 environment *inside* a Windows target.
 
-Status: **v1 slice shipped** (see "What ships in v1" below). Module lives at
-`src-tauri/src/remote_devices/` (Rust) and `ui/src/pages/advanced/DevicesPage.tsx`
-(UI). The name `fleet` was already taken by git-worktree agent isolation
-(`fleet.rs`), so this module is `remote_devices`.
+Status: **shipped, LAN-complete.** Real cross-machine control works today over
+a LAN-direct transport (no external relay needed); a WAN relay is the only major
+deferred piece. Module lives at `src-tauri/src/remote_devices/` (Rust) and
+`ui/src/pages/advanced/DevicesPage.tsx` (UI). The name `fleet` was already taken
+by git-worktree agent isolation (`fleet.rs`), so this module is `remote_devices`.
 
 ---
 
@@ -50,8 +51,9 @@ src-tauri/src/remote_devices/
   trust.rs       Trusted-controller store + pairing request/approve/deny/revoke
   policy.rs      authorize(kind, policy) — the pure security decision (+ tests)
   crypto.rs      sign / verify / seal / open — Ed25519 + X25519 + AES-256-GCM (+ tests)
-  executor.rs    Diagnostics / shell / WSL execution with timeout + cancellation
-  transport.rs   Transport trait + LoopbackTransport (in-process, for v1 + tests)
+  executor.rs    Diagnostics / shell / WSL / FileWrite exec, timeout + cancellation
+  transport.rs   Transport trait + LoopbackTransport (self) + LanDirectTransport (peer)
+  lan.rs         tiny_http listener + reqwest client (the LAN-direct wire)
   audit.rs       Redacted append-only JSONL, both sides (+ redaction tests)
 ```
 
@@ -60,9 +62,10 @@ Files on disk (all under `paths::user_data_root()`, none synced):
 | File | Contents |
 |---|---|
 | `remote_device_identity.json` | This device's id, name, DPAPI-wrapped Ed25519 + X25519 secrets, public keys |
-| `remote_devices_registry.json` | Known peer devices (public metadata) |
+| `remote_devices_registry.json` | Known peer devices (public metadata + LAN endpoint) |
 | `remote_devices_trust.json` | Trusted controller keys + per-controller `PermissionPolicy` + pairing queue |
 | `remote_devices_enabled.json` | Master opt-in toggle (default OFF) |
+| `remote_devices_seen.json` | Persistent replay-nonce cache (pruned to the freshness window) |
 | `remote_devices_audit.jsonl` | Append-only redacted audit trail |
 
 ---
@@ -85,14 +88,18 @@ and cosmetic. Secrets are DPAPI-protected at rest; only public keys + id + name
 "My OwLLM Devices" is a metadata list: name, OS, arch, OwLLM version,
 capabilities (shell / WSL / …), last-seen, online/offline, trusted/untrusted.
 
-Discovery is intended to piggyback on the existing **vault** (the private
-`owllm-vault` git repo already used for GPU-server sharing — `vault.rs`
-`GpuServer` is the single-record precursor). Each device publishes a
-**public-only** record to `state/devices/<device_id>.json`; peers on the same
-GitHub account read the directory. **The vault is metadata-only and is never a
-command queue** — control never flows through git. (v1 ships the local registry
-and the record shape; wiring the `vault_sync_devices` channel is the documented
-next step, following the `vault_sync_projects` template.)
+Discovery piggybacks on the existing **vault** (the private `owllm-vault` git
+repo already used for GPU-server sharing). `vault_sync_devices` (a fourth vault
+channel, built on the `vault_sync_projects` template) publishes each device's
+**public-only** record — including its LAN endpoint — to
+`state/devices/<device_id>.json` and pulls peers' records into the local
+registry. It runs at launch and on tab-hide (wired in `vaultSync.ts`), and the
+Devices page has a manual **🔄 Discover** button. **The vault is metadata-only
+and is never a command queue** — control never flows through git. Records are
+rejected on ingest unless their id matches their Ed25519 key.
+
+No vault? You can still **pair by IP**: type a peer's `ip:port` and the two
+devices exchange public records directly over the LAN.
 
 ## Transport abstraction
 
@@ -103,15 +110,27 @@ trait Transport {
 ```
 
 A `frame` is the **fully sealed + signed envelope bytes** — opaque to the
-transport. v1 implements `LoopbackTransport`, which routes a frame to the local
-target handler in-process. That is enough to (a) run the entire
-sign→seal→route→open→verify→authorize→execute→audit pipeline end-to-end in unit
-tests, and (b) let the UI drive a real *self-controlled* session (pair with your
-own device, approve, run diagnostics) with zero network. The production
-`RelayTransport` (an OwLLM WebSocket relay that forwards ciphertext between
-devices) implements the same trait; because the relay only sees frames, swapping
-it in changes **nothing** about the security properties. **SSH is an optional
-compatibility mode, not the default** — it would be a third `Transport` impl.
+transport. Two transports ship today:
+
+- **`LoopbackTransport`** — in-process, routes a frame to the local handler.
+  Used for the self-test and single-machine demo.
+- **`LanDirectTransport`** — POSTs the frame to a peer's HTTP listener
+  (`lan.rs`, `tiny_http`) over the LAN and opens the peer's **sealed reply**. The
+  listener speaks plain HTTP because the frame *and* the reply are end-to-end
+  sealed; the wire carries only ciphertext. The listener runs only while the
+  feature is enabled, binds `0.0.0.0:47771` (ephemeral fallback), and publishes
+  `ip:port` as the device's endpoint. `device_send` picks loopback (self) vs
+  LAN (peer) automatically from the target's endpoint.
+
+Every transport gets a fresh sealed reply, so the return path is encrypted too:
+the target seals the `CommandResult` back to the controller's authenticated
+static X25519 key (carried, signed, in the request frame).
+
+The deferred WAN **`RelayTransport`** (an OwLLM WebSocket relay that forwards
+ciphertext between devices behind NAT) implements the same trait; because the
+relay only sees frames, swapping it in changes **nothing** about the security
+properties. **SSH is an optional compatibility mode, not the default** — it
+would be a third `Transport` impl.
 
 ## Sealed, signed envelope
 
@@ -178,10 +197,13 @@ single security-decision chokepoint.
   an active-session table so it can be **cancelled** / killed.
 - **WSL** (gated, Windows targets): routed through the existing
   `wsl::run_in_distro_script` with a timeout; picks `best_linux_distro()`.
-- **FileWrite / Admin**: authorize returns `RequiresApproval`; the v1 executor
-  **refuses to run them** (returns an approval-gated error) — the decision layer
-  is complete and fail-closed; wiring approved-dangerous execution is a
-  deliberate next step, not an accidental gap.
+- **FileWrite / Admin** (dangerous): authorize returns `RequiresApproval`. The
+  target registers a **pending approval**, emits `remote-devices:approval` (the
+  UI shows a prominent prompt), and the command **waits** on a `oneshot` for a
+  human `device_approve_action` / `device_deny_action` — or a 120s timeout →
+  denied. Only on explicit approval does `executor::execute_dangerous` run it
+  (FileWrite = write the base64 payload to the path; Admin = an audited
+  privileged shell). Nothing dangerous runs on a toggle alone.
 - **"Being controlled" banner + Stop:** while a remote session runs the target
   emits a `remote-devices:control` event (UI shows a prominent banner).
   `device_stop_remote_control` halts all in-flight sessions immediately.
@@ -191,19 +213,22 @@ single security-decision chokepoint.
 
 ---
 
-## What ships in v1 (this slice)
+## What ships
 
 - Cryptographic **device identity** (Ed25519 + X25519), DPAPI-protected, editable name.
-- **Registry** of known devices + this device's public record shape.
-- **Trust store + full pairing flow** (request / approve / deny / revoke), per-controller policy.
+- **Registry** of known devices; auto-populated across the account via `vault_sync_devices`.
+- **LAN-direct transport** — real cross-machine control (listener + sealed request/reply).
+- **Trust store + full pairing flow** (request / approve / deny / revoke) — over the wire and by IP.
 - **Permission policy** with the four toggles, read-only default, unit-tested `authorize()`.
 - **Sealed+signed envelope** crypto, unit-tested round-trip + tamper/replay rejection.
-- **Executor**: diagnostics + shell + WSL, with timeout + cancellation; dangerous kinds fail-closed.
-- **Transport abstraction** + `LoopbackTransport`; end-to-end **self-test** command.
+- **Executor**: diagnostics + shell + WSL + FileWrite, with timeout + cancellation.
+- **Approved-dangerous execution** — FileWrite/Admin run only after a live target-side approval.
+- **Persistent replay cache** — survives restart (pruned to the freshness window).
 - **Redacted audit** on both ends; audit viewer in the UI.
-- **Devices page** (Advanced): identity card, device list, trust/pairing UI with the
-  unmistakable approval prompt, permission toggles, a *visibly distinct* remote
-  terminal, WSL "Run in WSL" mode, "being controlled" banner + emergency Stop.
+- **Devices page** (Advanced): identity + listener status, device list with Discover +
+  pair-by-IP, unmistakable pairing AND dangerous-action approval prompts, permission
+  toggles, a *visibly distinct* remote console (diagnostics / shell / Run-in-WSL /
+  File write), "being controlled" banner + emergency Stop.
 - Master **opt-in toggle**, default OFF (env override `OWLLM_REMOTE_DEVICES`).
 
 ## Verifying the security-critical behavior
@@ -230,7 +255,9 @@ linking Tauri, which is how they were verified here (11/11 passing).
 
 ## Deliberately deferred (documented, not hidden)
 
-- `RelayTransport` (the network WebSocket relay) + `vault_sync_devices` discovery channel.
-- Approved-dangerous execution (FileWrite/Admin run path).
-- Persistent replay cache across restarts (v1 keeps the nonce cache in memory).
-- SSH compatibility transport.
+- **`RelayTransport`** — a WAN OwLLM WebSocket relay for devices behind NAT (LAN-direct
+  covers same-network today). Same `Transport` contract, so it's a drop-in.
+- **SSH compatibility transport** (a third `Transport` impl).
+- Real elevation for Admin (UAC/sudo) beyond an audited privileged shell.
+- Concurrency: the LAN listener processes one request at a time (a dangerous action
+  awaiting approval blocks the queue up to its timeout) — fine for v1, revisit for fleets.

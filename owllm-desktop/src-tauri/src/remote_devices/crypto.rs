@@ -92,6 +92,13 @@ pub fn device_id_from_ed_pub(ed_pub: &[u8; 32]) -> String {
     h.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Same, from a base64 Ed25519 public key. None if it isn't a valid 32-byte key.
+pub fn device_id_from_ed_pub_b64(ed_pub_b64: &str) -> Option<String> {
+    let raw = unb64(ed_pub_b64).ok()?;
+    let arr: [u8; 32] = raw.try_into().ok()?;
+    Some(device_id_from_ed_pub(&arr))
+}
+
 // ------------------------------------------------------------------
 // Key derivation for the seal
 // ------------------------------------------------------------------
@@ -146,6 +153,7 @@ pub fn seal(
     let mut env = SignedEnvelope {
         from_device,
         from_ed25519_pub: b64(&from_ed_pub),
+        from_x25519_pub: b64(&from.x25519_public()),
         to_device: to_device.to_string(),
         ts,
         nonce: b64(nonce_bytes),
@@ -209,6 +217,26 @@ pub fn open(env: &SignedEnvelope, my_x25519_secret: &[u8; 32]) -> Result<Vec<u8>
 
 fn arr64(v: &[u8], what: &str) -> Result<[u8; 64], String> {
     v.try_into().map_err(|_| format!("{what}: expected 64 bytes, got {}", v.len()))
+}
+
+// ------------------------------------------------------------------
+// Detached signatures (used to prove key possession on a pairing request)
+// ------------------------------------------------------------------
+
+/// Sign arbitrary bytes with this device's Ed25519 key; returns base64.
+pub fn sign_detached(from: &DeviceSecrets, msg: &[u8]) -> String {
+    let sig: Signature = from.signing_key().sign(msg);
+    b64(&sig.to_bytes())
+}
+
+/// Verify a base64 detached signature over `msg` against a base64 Ed25519 pubkey.
+pub fn verify_detached(ed25519_pub_b64: &str, msg: &[u8], sig_b64: &str) -> Result<(), String> {
+    let ed_pub = arr32(&unb64(ed25519_pub_b64)?, "ed25519_pub")?;
+    let vk = VerifyingKey::from_bytes(&ed_pub).map_err(|e| format!("bad ed25519 pub: {e}"))?;
+    let sig_bytes = arr64(&unb64(sig_b64)?, "sig")?;
+    let sig = Signature::from_bytes(&sig_bytes);
+    vk.verify_strict(msg, &sig)
+        .map_err(|_| "signature verification failed".to_string())
 }
 
 #[cfg(test)]

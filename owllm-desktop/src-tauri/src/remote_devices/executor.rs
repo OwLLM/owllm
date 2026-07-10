@@ -123,6 +123,52 @@ pub async fn execute(req: &CommandRequest, policy: &PermissionPolicy) -> Command
     }
 }
 
+/// Run a dangerous command AFTER a target-side approval was granted. The caller
+/// (handle_incoming) owns the approval gate; this does NOT re-authorize.
+pub async fn execute_dangerous(req: &CommandRequest) -> CommandResult {
+    let started = Instant::now();
+    let mut r = match req.kind {
+        CommandKind::FileWrite => run_file_write(req, started),
+        // Admin runs as an (audited) shell command — the elevation semantics are
+        // OS-specific; v1 treats it as an explicitly-approved privileged command.
+        CommandKind::Admin => run_process(req, clamp_timeout(req.timeout_ms), started, ProcKind::Shell).await,
+        _ => refused(req, Authorization::Denied, "not a dangerous kind", started),
+    };
+    // We're only here because the human approved it.
+    r.decision = "approved".into();
+    r
+}
+
+fn run_file_write(req: &CommandRequest, started: Instant) -> CommandResult {
+    let path = req.command.trim();
+    if path.is_empty() {
+        return finish_err(req, started, "empty file path");
+    }
+    let content = match &req.payload {
+        Some(b64) => {
+            use base64::{engine::general_purpose::STANDARD, Engine as _};
+            match STANDARD.decode(b64) {
+                Ok(bytes) => bytes,
+                Err(e) => return finish_err(req, started, &format!("bad base64 payload: {e}")),
+            }
+        }
+        None => Vec::new(),
+    };
+    match std::fs::write(path, &content) {
+        Ok(()) => CommandResult {
+            request_id: req.request_id.clone(),
+            ok: true,
+            stdout: format!("wrote {} bytes to {path}", content.len()),
+            stderr: String::new(),
+            exit_code: Some(0),
+            error: None,
+            decision: "approved".into(),
+            duration_ms: started.elapsed().as_millis() as u64,
+        },
+        Err(e) => finish_err(req, started, &format!("write failed: {e}")),
+    }
+}
+
 // ------------------------------------------------------------------
 // Diagnostics — read-only, no side effects
 // ------------------------------------------------------------------

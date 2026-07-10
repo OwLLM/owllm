@@ -1067,11 +1067,10 @@ mod tests {
     }
 
     #[test]
-    fn linux_aarch64_is_unsupported_not_windows() {
-        // An ARM64 Linux host must NOT resolve (and install) Windows zips —
-        // the old Platform::host() fallback claimed windows-x86_64 there.
-        // Until arm64 module builds are listed in the registry, the honest
-        // answer is NoMatchingPlatform.
+    fn linux_aarch64_gets_arm64_build_not_windows() {
+        // An ARM64 Linux host must resolve its own build — the old
+        // Platform::host() fallback claimed windows-x86_64 there, which
+        // made the resolver install Windows zips on Jetson-class boxes.
         let hw = HardwareSnapshot {
             platform: Platform::LinuxAarch64,
             gpu_vendor: Some(GpuVendor::Nvidia), // Jetson-class unified SoC
@@ -1085,8 +1084,8 @@ mod tests {
             .iter()
             .find(|m| m.id == "local-inference")
             .unwrap();
-        let err = resolve_variant(m, &hw, Channel::Stable).unwrap_err();
-        assert_eq!(err, ResolveError::NoMatchingPlatform);
+        let (v, _) = resolve_variant(m, &hw, Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-linux-arm64-cpu");
     }
 
     #[test]

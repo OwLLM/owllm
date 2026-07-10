@@ -31,7 +31,12 @@ export type DeviceIdentity = {
   enabled: boolean;
   env_override: boolean;
   endpoint: string | null;
+  endpoints: string[];
   listening: boolean;
+  public_endpoint: string | null;
+  relay_url: string | null;
+  relay_client: boolean;
+  relay_serving: boolean;
 };
 
 export type DeviceRecord = {
@@ -115,9 +120,14 @@ export const setEnabled = (enabled: boolean) => invoke<void>("device_remote_enab
 export const listDevices = () => invoke<DeviceRecord[]>("devices_list");
 export const forgetDevice = (deviceId: string) => invoke<void>("device_forget", { deviceId });
 
-// ---- Listener / discovery ----
-export const listenerStatus = () => invoke<{ listening: boolean; endpoint: string | null }>("device_listener_status");
+// ---- Listener / discovery / WAN ----
+export const listenerStatus = () => invoke<{ listening: boolean; endpoint: string | null; endpoints: string[] }>("device_listener_status");
 export const syncDiscovery = () => invoke<boolean>("device_sync_discovery");
+export const setPublicEndpoint = (endpoint: string | null) => invoke<void>("device_set_public_endpoint", { endpoint });
+export const setRelay = (url: string | null) => invoke<void>("device_set_relay", { url });
+export const relayServe = (bind?: string | null) => invoke<{ serving: boolean; bind: string }>("device_relay_serve", { bind: bind ?? null });
+export const relayStop = () => invoke<{ serving: boolean }>("device_relay_stop");
+export const relayStatus = () => invoke<{ url: string | null; client: boolean; serving: boolean }>("device_relay_status");
 
 // ---- Trust / pairing ----
 export const listTrusted = () => invoke<TrustedController[]>("device_trust_list");

@@ -27,11 +27,21 @@ pub struct DevicePublic {
     pub github_login: Option<String>,
     #[serde(default)]
     pub capabilities: Capabilities,
-    /// LAN endpoint this device listens on ("ip:port"), when the remote-control
-    /// listener is running. Peers dial this directly (LAN-direct transport).
-    /// Metadata only — control still needs a paired key + policy.
+    /// Primary listen endpoint ("ip:port") — kept for back-compat. `endpoints`
+    /// is the full candidate list; this mirrors its first entry.
     #[serde(default)]
     pub endpoint: Option<String>,
+    /// ALL addresses a peer can dial to reach this device's listener, most
+    /// WAN-reachable first: a user-set public host, then overlay (Tailscale/VPN)
+    /// IPs, then LAN IPs. The controller tries each until one connects — this is
+    /// what makes control work off-LAN (over a Tailscale/WireGuard overlay or a
+    /// port-forwarded/DDNS host). Metadata only; control still needs a paired key.
+    #[serde(default)]
+    pub endpoints: Vec<String>,
+    /// True if this device is reachable via a shared relay (for pure-NAT peers
+    /// with no overlay/port-forward). The relay only ever forwards ciphertext.
+    #[serde(default)]
+    pub relay: bool,
 }
 
 /// What a device can do — advertised to peers, informational (the real gate is
@@ -281,4 +291,26 @@ pub enum WireReply {
     Paired { device: DevicePublic },
     Result(SignedEnvelope),
     Error { message: String },
+}
+
+// ------------------------------------------------------------------
+// Relay protocol (WAN store-and-forward — the relay sees only ciphertext)
+// ------------------------------------------------------------------
+
+/// A wire message dropped at the relay by a controller. `to` routes it to the
+/// target's mailbox; `corr` lets the relay hand the reply back to this sender.
+/// `frame` is the opaque sealed envelope — the relay cannot read it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayPacket {
+    pub to: String,
+    pub corr: String,
+    pub frame: SignedEnvelope,
+}
+
+/// A target's reply flowing back through the relay, matched to the waiting
+/// sender by `corr`. `frame` is the sealed CommandResult envelope.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayReply {
+    pub corr: String,
+    pub frame: SignedEnvelope,
 }

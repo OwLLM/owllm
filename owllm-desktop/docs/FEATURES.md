@@ -207,13 +207,16 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   Node above, which drives external KVM hardware; this controls OwLLM *devices*.)
 - **Identity**: per-install Ed25519 (sign/id) + X25519 (seal) keypair, DPAPI-
   wrapped at rest, never synced. `device_id = hex(SHA-256(ed_pub))`. Editable name.
-- **Sealed transport**: every command (and its reply) is an end-to-end
-  AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries ciphertext.
-  `Transport` seam with `LoopbackTransport` (self) and **`LanDirectTransport`**
-  (`lan.rs` — a `tiny_http` listener + `reqwest` client for real cross-machine
-  control on a LAN); a WAN `RelayTransport` is the one deferred piece.
+- **Sealed transport (WAN-capable)**: every command AND its reply is an
+  end-to-end AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries
+  ciphertext. `Transport` seam with `LoopbackTransport` (self), `LanDirectTransport`
+  (`lan.rs` — `tiny_http` listener + `reqwest`), and `RelayTransport` (`relay.rs`).
+  Devices need NOT be on the same network: each publishes all its addresses
+  (overlay/Tailscale + public host:port + LAN), the controller tries each, then
+  falls back to a **self-hostable relay** (store-and-forward, both peers dial out,
+  ciphertext-only — run it via `device_relay_serve` on any always-on box).
 - **Discovery**: `vault_sync_devices` (a 4th vault channel) publishes each
-  device's public record + LAN endpoint and pulls peers into the registry; or
+  device's public record + all endpoints and pulls peers into the registry; or
   **pair by IP** directly with no vault.
 - **Trust + policy**: pairing request (over the wire / by IP) → unmistakable
   target-side approval → per-controller `PermissionPolicy` (Shell / WSL / File

@@ -83,6 +83,8 @@ export default function DevicesPage() {
   const [selftestMsg, setSelftestMsg] = useState("");
   const [manualAddr, setManualAddr] = useState("");
   const [discoverMsg, setDiscoverMsg] = useState("");
+  const [publicEpDraft, setPublicEpDraft] = useState("");
+  const [relayUrlDraft, setRelayUrlDraft] = useState("");
 
   const guard = useCallback(async (fn: () => Promise<void>) => {
     try {
@@ -192,6 +194,10 @@ export default function DevicesPage() {
   const approveAction = (id: string) => guard(async () => { await rd.approveAction(id); });
   const denyAction = (id: string) => guard(async () => { await rd.denyAction(id); });
 
+  const savePublicEndpoint = () => guard(async () => { await rd.setPublicEndpoint(publicEpDraft.trim() || null); setPublicEpDraft(""); await reload(); });
+  const saveRelay = () => guard(async () => { await rd.setRelay(relayUrlDraft.trim() || null); setRelayUrlDraft(""); await reload(); });
+  const toggleRelayServer = (on: boolean) => guard(async () => { if (on) await rd.relayServe(); else await rd.relayStop(); await reload(); });
+
   const stopAll = () =>
     guard(async () => {
       const r = await rd.stopRemoteControl();
@@ -289,6 +295,20 @@ export default function DevicesPage() {
           discoverMsg={discoverMsg}
         />
       </section>
+
+      {/* Network / WAN reachability */}
+      {identity && (
+        <NetworkPanel
+          identity={identity}
+          publicEpDraft={publicEpDraft}
+          setPublicEpDraft={setPublicEpDraft}
+          onSavePublic={savePublicEndpoint}
+          relayUrlDraft={relayUrlDraft}
+          setRelayUrlDraft={setRelayUrlDraft}
+          onSaveRelay={saveRelay}
+          onToggleServer={toggleRelayServer}
+        />
+      )}
 
       {/* Trusted controllers + permission toggles */}
       {(trustedActive.length > 0 || revoked.length > 0) && (
@@ -435,6 +455,67 @@ function MyDeviceCard({
         {selftestMsg && <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{selftestMsg}</span>}
       </div>
     </div>
+  );
+}
+
+function NetworkPanel({
+  identity, publicEpDraft, setPublicEpDraft, onSavePublic, relayUrlDraft, setRelayUrlDraft, onSaveRelay, onToggleServer,
+}: {
+  identity: DeviceIdentity;
+  publicEpDraft: string;
+  setPublicEpDraft: (s: string) => void;
+  onSavePublic: () => void;
+  relayUrlDraft: string;
+  setRelayUrlDraft: (s: string) => void;
+  onSaveRelay: () => void;
+  onToggleServer: (on: boolean) => void;
+}) {
+  return (
+    <section style={{ ...cardStyle, border: "1px solid rgba(var(--accent-rgb),0.45)" }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>Network &amp; reachability (WAN)</div>
+      <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+        Controlling a device works across <b>any network the two machines can route to each other on</b> — same LAN, a
+        Tailscale/WireGuard/VPN overlay (recommended for off-LAN, no setup here — your overlay IP is published
+        automatically), a public host you set below, or a relay you host.
+      </span>
+
+      <Row k="Listening on" v={identity.endpoints.length ? identity.endpoints.join("  ·  ") : (identity.enabled ? "starting…" : "off")} mono />
+
+      {/* Public endpoint */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+        <span style={{ fontSize: 11.5, color: "var(--fg)" }}>
+          Public endpoint <span style={{ color: "var(--fg-muted)" }}>(port-forward / DDNS / Tailscale MagicDNS host:port)</span>
+          {identity.public_endpoint && <span style={{ ...badge("var(--ok)"), marginLeft: 6 }}>{identity.public_endpoint}</span>}
+        </span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input value={publicEpDraft} onChange={(e) => setPublicEpDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onSavePublic(); }}
+            placeholder={identity.public_endpoint ?? "myhost.example.com:47771  (blank = clear)"}
+            style={{ ...inputStyle, flex: 1, fontFamily: "monospace" }} />
+          <button className="ghost-btn" onClick={onSavePublic} style={{ fontSize: 11, padding: "2px 10px" }}>Save</button>
+        </div>
+      </div>
+
+      {/* Relay */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 6 }}>
+        <span style={{ fontSize: 11.5, color: "var(--fg)" }}>
+          Relay <span style={{ color: "var(--fg-muted)" }}>(pure-NAT fallback — both devices dial out; it only sees ciphertext)</span>
+          {identity.relay_url && <span style={{ ...badge(identity.relay_client ? "var(--ok)" : "var(--warn)"), marginLeft: 6 }}>{identity.relay_client ? "connected" : "set"}</span>}
+        </span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <input value={relayUrlDraft} onChange={(e) => setRelayUrlDraft(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onSaveRelay(); }}
+            placeholder={identity.relay_url ?? "https://relay.example.com  (blank = clear)"}
+            style={{ ...inputStyle, flex: 1, fontFamily: "monospace" }} />
+          <button className="ghost-btn" onClick={onSaveRelay} style={{ fontSize: 11, padding: "2px 10px" }}>Save</button>
+        </div>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, cursor: "pointer", color: identity.relay_serving ? "var(--accent)" : "var(--fg-muted)", marginTop: 2 }}>
+          <input type="checkbox" checked={identity.relay_serving} onChange={(e) => onToggleServer(e.target.checked)} />
+          Host a relay on this machine (bind 0.0.0.0:47772) — for an always-on box with a public URL/tunnel
+          {identity.relay_serving && <span style={badge("var(--ok)")}>serving</span>}
+        </label>
+      </div>
+    </section>
   );
 }
 

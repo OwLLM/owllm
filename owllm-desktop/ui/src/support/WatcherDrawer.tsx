@@ -202,7 +202,8 @@ const PAGE_DOCS: Record<string, string> = {
     "• Pairing: a controller sends a request → the target shows an UNMISTAKABLE approval prompt → approving grants read-only diagnostics only. Widen with the per-controller toggles (Shell / WSL / File writes / Admin). File writes & Admin are dangerous — they also need a per-action approval (not executable in v1). Revoke any time; revocation fails closed on the next request.\n" +
     "• Remote console (the magenta-bordered panel, deliberately UNLIKE the local terminal): pick a target + mode (Diagnostics / Shell / Run in WSL) and run. Every command is authenticated, authorized, timed-out, cancellable, and audited on BOTH sides (output is never stored raw — only a length + digest).\n" +
     "• Safety: while a remote command runs the target shows a red 'being controlled' banner with a 'Stop remote control' button (cancels every in-flight command).\n" +
-    "• v1 transport is in-process loopback (control your own device as a live self-test); the network relay is a documented next step. See docs/REMOTE_DEVICES.md.",
+    "• REACHING DEVICES OFF-LAN: control works across ANY network the two machines can route to each other on. On a Tailscale/WireGuard/VPN overlay it 'just works' (your overlay IP is auto-detected + published, NAT-traversed, no setup). Or set a Public endpoint (port-forward / DDNS / MagicDNS host:port) in Network & reachability. Or, for pure-NAT with no overlay, point both devices at a Relay you host (both dial OUT to it, so it works behind any NAT; the relay only ever sees ciphertext — host one via the 'Host a relay' toggle on an always-on box with a public URL/tunnel). The controller tries LAN → overlay → public → relay automatically.\n" +
+    "• Transports: loopback (self-test), LAN/overlay direct, and relay — all carrying the same sealed frames. See docs/REMOTE_DEVICES.md.",
 };
 
 /// The guided "Help using the app" option list. Each topic shows a real,

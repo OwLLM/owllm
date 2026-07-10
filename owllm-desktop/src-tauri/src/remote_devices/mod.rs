@@ -27,6 +27,7 @@ mod identity;
 mod lan;
 mod policy;
 mod registry;
+mod relay;
 mod transport;
 mod trust;
 
@@ -177,6 +178,58 @@ fn set_enabled(enabled: bool) -> Result<(), String> {
     }
     let txt = serde_json::to_string_pretty(&json!({ "enabled": enabled })).unwrap();
     std::fs::write(&path, txt).map_err(|e| format!("write enable flag: {e}"))
+}
+
+// ------------------------------------------------------------------
+// WAN config: user-set public endpoint + relay URL
+// ------------------------------------------------------------------
+
+fn config_path() -> Option<PathBuf> {
+    crate::paths::user_data_root().map(|r| r.join("remote_devices_config.json"))
+}
+
+fn load_config() -> Value {
+    config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+        .unwrap_or_else(|| json!({}))
+}
+
+fn cfg_string(key: &str) -> Option<String> {
+    load_config()
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// A user-set public host:port for THIS device (port-forward / DDNS / MagicDNS),
+/// published as the most WAN-reachable candidate.
+fn public_endpoint() -> Option<String> {
+    cfg_string("public_endpoint")
+}
+
+/// The shared relay URL both devices dial out to (WAN, pure-NAT fallback).
+fn relay_url() -> Option<String> {
+    cfg_string("relay_url")
+}
+
+fn write_config(key: &str, value: Option<String>) -> Result<(), String> {
+    let path = config_path().ok_or_else(|| "could not resolve app data dir".to_string())?;
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let mut doc = load_config();
+    match value {
+        Some(v) if !v.trim().is_empty() => doc[key] = json!(v.trim()),
+        _ => {
+            if let Some(obj) = doc.as_object_mut() {
+                obj.remove(key);
+            }
+        }
+    }
+    let txt = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(&path, txt).map_err(|e| format!("write remote-devices config: {e}"))
 }
 
 // ------------------------------------------------------------------
@@ -363,18 +416,49 @@ fn recipient_x_pub(to_device: &str) -> Result<[u8; 32], String> {
 // Listener lifecycle + public-record helpers
 // ------------------------------------------------------------------
 
-/// Start the LAN listener if the feature is on and it isn't already running.
+/// Start the LAN listener + relay client to match the current config, if the
+/// feature is on. Idempotent — safe to call from any command entry point.
 fn ensure_listener_started(rt: tokio::runtime::Handle) {
-    if feature_enabled() && lan::current_endpoint().is_none() {
-        if let Err(e) = lan::start(rt) {
-            eprintln!("remote_devices: listener start failed: {e}");
+    if feature_enabled() {
+        if lan::current_port().is_none() {
+            if let Err(e) = lan::start(rt.clone()) {
+                eprintln!("remote_devices: listener start failed: {e}");
+            }
         }
+        ensure_relay_client(rt);
+    } else {
+        lan::stop();
+        relay::stop_client();
     }
 }
 
-/// This device's public record (with the current LAN endpoint).
+/// Run the relay client loop iff the feature is on AND a relay URL is configured,
+/// so this device stays reachable via the relay. Stops it otherwise.
+fn ensure_relay_client(rt: tokio::runtime::Handle) {
+    match (feature_enabled(), relay_url()) {
+        (true, Some(url)) => {
+            if !relay::client_running() {
+                if let Ok(me) = identity::load_or_create() {
+                    relay::start_client(rt, url, me.secrets.device_id());
+                }
+            }
+        }
+        _ => relay::stop_client(),
+    }
+}
+
+/// This device's public record, decorated with the user-set public endpoint
+/// (most WAN-reachable) and the relay-reachability flag.
 pub fn self_public_record() -> Result<DevicePublic, String> {
-    identity::public_record(github_login())
+    let mut rec = identity::public_record(github_login())?;
+    if let Some(pe) = public_endpoint() {
+        if !rec.endpoints.contains(&pe) {
+            rec.endpoints.insert(0, pe);
+        }
+    }
+    rec.endpoint = rec.endpoints.first().cloned();
+    rec.relay = relay::client_running();
+    Ok(rec)
 }
 
 /// (device_id, pretty-JSON) of this device's public record — for the vault.
@@ -424,15 +508,32 @@ pub fn seal_result_for(
 }
 
 // ------------------------------------------------------------------
-// Command routing: loopback (self) vs LAN-direct (peer)
+// Command routing: loopback (self) → direct candidates (LAN/overlay/public)
+// → relay fallback
 // ------------------------------------------------------------------
 
+/// All direct-dial endpoints known for a target: its full candidate list
+/// (public + overlay + LAN), falling back to the legacy single `endpoint`.
+fn target_endpoints(to_device: &str) -> Vec<String> {
+    let Ok(self_pub) = self_public_record() else {
+        return vec![];
+    };
+    let Some(rec) = registry::list(&self_pub).into_iter().find(|d| d.public.device_id == to_device)
+    else {
+        return vec![];
+    };
+    let mut eps = rec.public.endpoints.clone();
+    if eps.is_empty() {
+        if let Some(e) = rec.public.endpoint {
+            eps.push(e);
+        }
+    }
+    eps
+}
+
+/// A single known endpoint for a target (first candidate) — for pairing dials.
 fn lookup_endpoint(to_device: &str) -> Option<String> {
-    let self_pub = identity::public_record(github_login()).ok()?;
-    registry::list(&self_pub)
-        .into_iter()
-        .find(|d| d.public.device_id == to_device)
-        .and_then(|d| d.public.endpoint)
+    target_endpoints(to_device).into_iter().next()
 }
 
 async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandResult, String> {
@@ -440,10 +541,28 @@ async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandRe
     if to_device == me.secrets.device_id() {
         return LoopbackTransport.deliver(env).await;
     }
-    let endpoint = lookup_endpoint(to_device).ok_or_else(|| {
-        "target device has no known LAN endpoint (is it online + discovered?)".to_string()
-    })?;
-    LanDirectTransport { endpoint }.deliver(env).await
+
+    // 1) Try every direct candidate in order (public host → overlay → LAN). A
+    //    dead address fails fast on the connect timeout, so we fall through.
+    let cands = target_endpoints(to_device);
+    let mut last_err = String::new();
+    for ep in &cands {
+        match (LanDirectTransport { endpoint: ep.clone() }).deliver(env.clone()).await {
+            Ok(r) => return Ok(r),
+            Err(e) => last_err = e,
+        }
+    }
+
+    // 2) Relay fallback (works behind any NAT — both peers dial the relay out).
+    if let Some(url) = relay_url() {
+        return (relay::RelayTransport { url }).deliver(env).await;
+    }
+
+    if cands.is_empty() {
+        Err("target device has no known endpoint and no relay is configured (discover it, pair by IP, or set a relay)".into())
+    } else {
+        Err(format!("no direct endpoint reachable (tried {}); last error: {last_err}. Configure a relay for off-LAN control.", cands.len()))
+    }
 }
 
 /// Build a signed pairing request for THIS device, POST it to a peer endpoint,
@@ -538,7 +657,7 @@ fn resolve_approval(request_id: &str, approved: bool) -> bool {
 pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
     store_app(&app);
     ensure_listener_started(tokio::runtime::Handle::current());
-    let rec = identity::public_record(github_login())?;
+    let rec = self_public_record()?;
     Ok(json!({
         "device_id": rec.device_id,
         "name": rec.name,
@@ -552,7 +671,12 @@ pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
         "enabled": feature_enabled(),
         "env_override": env_override(),
         "endpoint": rec.endpoint,
-        "listening": lan::current_endpoint().is_some(),
+        "endpoints": rec.endpoints,
+        "listening": lan::current_port().is_some(),
+        "public_endpoint": public_endpoint(),
+        "relay_url": relay_url(),
+        "relay_client": relay::client_running(),
+        "relay_serving": relay::serving(),
     }))
 }
 
@@ -569,17 +693,59 @@ pub fn device_remote_enabled_get() -> bool {
 }
 
 /// Flip the master opt-in. The env override, if set, cannot be turned off here.
-/// Starts/stops the LAN listener to match.
+/// Starts/stops the LAN listener + relay client to match.
 #[tauri::command]
 pub async fn device_remote_enabled_set(app: AppHandle, enabled: bool) -> Result<(), String> {
     store_app(&app);
     set_enabled(enabled)?;
-    if feature_enabled() {
-        ensure_listener_started(tokio::runtime::Handle::current());
-    } else {
-        lan::stop();
-    }
+    ensure_listener_started(tokio::runtime::Handle::current());
     Ok(())
+}
+
+/// Set (or clear, with null) this device's public host:port — for reaching it
+/// off-LAN via a port-forward / DDNS / Tailscale MagicDNS name.
+#[tauri::command]
+pub fn device_set_public_endpoint(endpoint: Option<String>) -> Result<(), String> {
+    write_config("public_endpoint", endpoint)
+}
+
+/// Set (or clear, with null) the shared relay URL and (re)start the relay client
+/// so this device becomes reachable via the relay.
+#[tauri::command]
+pub async fn device_set_relay(app: AppHandle, url: Option<String>) -> Result<(), String> {
+    store_app(&app);
+    write_config("relay_url", url)?;
+    // Re-evaluate the client loop against the new URL.
+    relay::stop_client();
+    ensure_relay_client(tokio::runtime::Handle::current());
+    Ok(())
+}
+
+/// Run a relay server on this machine (e.g. an always-on box with a public URL /
+/// tunnel). Any device that points its relay URL here can be reached through it.
+/// The relay only ever forwards ciphertext.
+#[tauri::command]
+pub fn device_relay_serve(bind: Option<String>) -> Result<Value, String> {
+    let bind = bind.unwrap_or_else(|| "0.0.0.0:47772".to_string());
+    relay::serve(&bind)?;
+    Ok(json!({ "serving": true, "bind": bind }))
+}
+
+/// Stop the relay server running on this machine.
+#[tauri::command]
+pub fn device_relay_stop() -> Value {
+    relay::stop_serving();
+    json!({ "serving": false })
+}
+
+/// Relay status ({ url, client, serving }).
+#[tauri::command]
+pub fn device_relay_status() -> Value {
+    json!({
+        "url": relay_url(),
+        "client": relay::client_running(),
+        "serving": relay::serving(),
+    })
 }
 
 /// LAN listener status ({ listening, endpoint }).

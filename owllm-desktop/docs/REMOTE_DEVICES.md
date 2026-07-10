@@ -7,11 +7,29 @@ not a GitHub login. GitHub account matching helps **discovery**; a paired,
 signed device key is what grants **control**. WSL is just one execution
 environment *inside* a Windows target.
 
-Status: **shipped, LAN-complete.** Real cross-machine control works today over
-a LAN-direct transport (no external relay needed); a WAN relay is the only major
-deferred piece. Module lives at `src-tauri/src/remote_devices/` (Rust) and
+Status: **shipped, WAN-capable.** Real cross-machine control works on the same
+LAN, across an overlay (Tailscale/WireGuard/VPN), to a public host you set, or
+through a self-hostable relay — so devices do NOT need to be on the same network.
+Module lives at `src-tauri/src/remote_devices/` (Rust) and
 `ui/src/pages/advanced/DevicesPage.tsx` (UI). The name `fleet` was already taken
 by git-worktree agent isolation (`fleet.rs`), so this module is `remote_devices`.
+
+## Reaching a device off-LAN (the WAN story)
+
+Control flows to whatever address the two machines can route to each other on.
+Each device publishes ALL its candidate addresses (most WAN-reachable first) and
+the controller tries each, then falls back to a relay:
+
+1. **Overlay (recommended)** — on a Tailscale/WireGuard/VPN, the device's overlay
+   IP (e.g. a Tailscale `100.x`) is auto-detected and published, so direct
+   control works from anywhere with automatic NAT traversal and no config here.
+2. **Public endpoint** — set a per-device `host:port` (port-forward / DDNS /
+   Tailscale MagicDNS); it's published as the first candidate.
+3. **LAN IP** — same-network direct.
+4. **Relay** — a self-hostable store-and-forward server (`relay.rs`, or an
+   always-on OwLLM instance via `device_relay_serve`). BOTH devices dial OUT to
+   it, so it works behind any NAT. The relay only ever moves ciphertext and
+   matches replies by correlation id — it can't read, forge, or replay anything.
 
 ---
 
@@ -126,11 +144,14 @@ Every transport gets a fresh sealed reply, so the return path is encrypted too:
 the target seals the `CommandResult` back to the controller's authenticated
 static X25519 key (carried, signed, in the request frame).
 
-The deferred WAN **`RelayTransport`** (an OwLLM WebSocket relay that forwards
-ciphertext between devices behind NAT) implements the same trait; because the
-relay only sees frames, swapping it in changes **nothing** about the security
-properties. **SSH is an optional compatibility mode, not the default** — it
-would be a third `Transport` impl.
+- **`RelayTransport`** — WAN store-and-forward for pure-NAT peers (see the WAN
+  section above). Implements the same trait; because the relay only sees frames,
+  it changes **nothing** about the security properties.
+
+`route_command` picks automatically: loopback for self, then each direct
+candidate (public → overlay → LAN, dead ones fail fast on the connect timeout),
+then the relay. **SSH would be an optional compatibility mode** — a fourth
+`Transport` impl (deferred).
 
 ## Sealed, signed envelope
 
@@ -217,7 +238,8 @@ single security-decision chokepoint.
 
 - Cryptographic **device identity** (Ed25519 + X25519), DPAPI-protected, editable name.
 - **Registry** of known devices; auto-populated across the account via `vault_sync_devices`.
-- **LAN-direct transport** — real cross-machine control (listener + sealed request/reply).
+- **WAN-capable transport** — direct over LAN / overlay (Tailscale) / public host, then a
+  self-hostable relay; multi-candidate try-all routing; sealed request AND reply.
 - **Trust store + full pairing flow** (request / approve / deny / revoke) — over the wire and by IP.
 - **Permission policy** with the four toggles, read-only default, unit-tested `authorize()`.
 - **Sealed+signed envelope** crypto, unit-tested round-trip + tamper/replay rejection.
@@ -255,9 +277,9 @@ linking Tauri, which is how they were verified here (11/11 passing).
 
 ## Deliberately deferred (documented, not hidden)
 
-- **`RelayTransport`** — a WAN OwLLM WebSocket relay for devices behind NAT (LAN-direct
-  covers same-network today). Same `Transport` contract, so it's a drop-in.
-- **SSH compatibility transport** (a third `Transport` impl).
+- **SSH compatibility transport** (a fourth `Transport` impl).
 - Real elevation for Admin (UAC/sudo) beyond an audited privileged shell.
+- A hosted OwLLM relay service (today the relay is self-hosted — run it on any
+  always-on box with a public URL/tunnel, or via `device_relay_serve`).
 - Concurrency: the LAN listener processes one request at a time (a dangerous action
-  awaiting approval blocks the queue up to its timeout) — fine for v1, revisit for fleets.
+  awaiting approval blocks the queue up to its timeout) — fine now, revisit for large fleets.

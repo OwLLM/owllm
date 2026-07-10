@@ -148,7 +148,10 @@ pub fn public_record(github_login: Option<String>) -> Result<DevicePublic, Strin
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         github_login,
         capabilities: capabilities(),
-        // Advertised only while the LAN listener is up (so peers can dial us).
+        // All addresses peers can dial (LAN + overlay). mod::self_public_record
+        // decorates this with the user-set public endpoint + relay flag.
         endpoint: super::lan::current_endpoint(),
+        endpoints: super::lan::candidate_endpoints(),
+        relay: false,
     })
 }

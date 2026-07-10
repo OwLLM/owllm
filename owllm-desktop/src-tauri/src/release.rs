@@ -8,6 +8,35 @@
 
 use std::process::Command;
 
+/// Code-signing certificate selection for a release. Mirrors the Publisher card's
+/// code-signing fields and maps 1:1 onto publish-release.sh's OWLLM_SIGN_* env.
+#[derive(serde::Deserialize, serde::Serialize, Clone, Default)]
+pub struct SignCfg {
+    pub thumbprint: Option<String>,
+    pub subject: Option<String>,
+    pub tsa: Option<String>,
+}
+
+impl SignCfg {
+    /// True if any selector that would trigger Authenticode signing is present.
+    pub fn has_signing(&self) -> bool {
+        self.thumbprint.as_ref().is_some_and(|s| !s.trim().is_empty())
+            || self.subject.as_ref().is_some_and(|s| !s.trim().is_empty())
+    }
+
+    /// Apply the config to a Command as environment variables consumed by the
+    /// publish scripts. Empty values are still exported (scripts treat empty as
+    /// "not configured"), and TSA falls back to Certum's RFC3161 server.
+    pub fn apply_to(&self, cmd: &mut Command) {
+        cmd.env("OWLLM_SIGN_THUMBPRINT", self.thumbprint.clone().unwrap_or_default());
+        cmd.env("OWLLM_SIGN_SUBJECT", self.subject.clone().unwrap_or_default());
+        cmd.env(
+            "OWLLM_SIGN_TSA",
+            self.tsa.clone().filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "http://time.certum.pl".into()),
+        );
+    }
+}
+
 /// One readiness probe result for the Publisher card's READY / NOT READY tag.
 #[derive(serde::Serialize, Clone)]
 pub struct ReadyCheck {
@@ -92,6 +121,7 @@ pub async fn publish_release(
     notes: Option<String>,
     dry_run: Option<bool>,
     draft: Option<bool>,
+    sign: Option<SignCfg>,
 ) -> Result<String, String> {
     let posix = to_gitbash_path(&repo_dir);
     let script = format!("{posix}/owllm-desktop/scripts/publish-release.sh");
@@ -106,6 +136,9 @@ pub async fn publish_release(
     let out = tokio::task::spawn_blocking(move || {
         let bash = which_bash();
         let mut cmd = Command::new(&bash);
+        if let Some(s) = sign {
+            s.apply_to(&mut cmd);
+        }
         cmd.args(&args);
         #[cfg(windows)]
         {
@@ -140,15 +173,33 @@ pub async fn publish_release(
 /// pushes, tags, then runs the canonical publish-release.sh — none of it dependent
 /// on the model committing/tagging/not-lying. Same host-only requirements +
 /// success markers as publish_release.
+///
+/// `mode` controls whether the build happens on this host (`host`) or is deferred
+/// to CI (`ci`). Host mode requires the local build toolchain + signing cert;
+/// CI mode only bumps/commits/tags/pushes and lets the repo's GitHub Actions
+/// workflow finish the release.
 #[tauri::command]
-pub async fn finish_and_publish(repo_dir: String, notes: Option<String>) -> Result<String, String> {
+pub async fn finish_and_publish(
+    repo_dir: String,
+    notes: Option<String>,
+    mode: Option<String>,
+    sign: Option<SignCfg>,
+) -> Result<String, String> {
     let posix = to_gitbash_path(&repo_dir);
     let script = format!("{posix}/owllm-desktop/scripts/finish-and-publish.sh");
-    let args: Vec<String> = vec![script, "--notes".into(), notes.unwrap_or_default()];
+    let mut args: Vec<String> = vec![script, "--notes".into(), notes.unwrap_or_default()];
+    let host_mode = mode.as_deref().unwrap_or("host").eq_ignore_ascii_case("host");
+    if !host_mode {
+        args.push("--mode".into());
+        args.push(mode.unwrap_or_else(|| "ci".into()));
+    }
 
     let out = tokio::task::spawn_blocking(move || {
         let bash = which_bash();
         let mut cmd = Command::new(&bash);
+        if let Some(s) = sign {
+            s.apply_to(&mut cmd);
+        }
         cmd.args(&args);
         // NO current_dir: repo_dir can be a WSL/posix path Windows can't cd into
         // (os error 267). finish-and-publish.sh cd's to the repo itself (from its

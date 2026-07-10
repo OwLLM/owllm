@@ -14,7 +14,14 @@ export type ProjectCard = {
   rules?: string | string[];
   mode?: string;
   verify?: { command?: string; lanes?: Record<string, string> };
-  release?: { versionFile?: string; versionScheme?: string; stagePath?: string; command?: string };
+  release?: {
+    versionFile?: string;
+    versionScheme?: string;
+    stagePath?: string;
+    command?: string;
+    /** "host" builds and signs on the local machine; "ci" only tags/pushes and lets GitHub Actions build. */
+    mode?: "host" | "ci";
+  };
   [k: string]: any;
 };
 

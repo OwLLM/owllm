@@ -6,14 +6,18 @@
 #   2. stage ONLY owllm-desktop/ (the app — excludes root scratch/icons/.claude junk),
 #      commit, push the branch
 #   3. tag v<version>, push the tag
-#   4. hand off to the canonical publish-release.sh (build → sign → gh release → verify)
-# Runs on the HOST (has git auth + the signing key + Windows build), invoked by
-# release.rs::finish_and_publish. Idempotent-ish: if there is nothing to commit it
-# still bumps+tags+publishes the current tree.
+#   4a. host mode (default): hand off to the canonical publish-release.sh
+#       (build → sign → gh release → verify) on THIS machine.
+#   4b. ci mode: stop after the tag push; the repo's GitHub Actions workflow builds
+#       and drafts/publishes the release. No local build toolchain / signing cert needed.
+# Runs on the HOST (has git auth +, in host mode, the signing key + Windows build),
+# invoked by release.rs::finish_and_publish. Idempotent-ish: if there is nothing to
+# commit it still bumps+tags+publishes the current tree.
 set -euo pipefail
 
 NOTES=""
 PRERELEASE=""
+MODE="host"
 while [ $# -gt 0 ]; do
   case "$1" in
     --notes) NOTES="${2:-}"; shift 2 ;;
@@ -21,9 +25,18 @@ while [ $# -gt 0 ]; do
     # so the auto-updater skips it). The "test before you promote" path — nothing
     # reaches users until the release is flipped to Latest.
     --prerelease) PRERELEASE=1; shift ;;
+    --mode) MODE="${2:-host}"; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Normalize mode so typos default to the safe, explicit CI path rather than
+# accidentally running a local build.
+case "${MODE,,}" in
+  host) MODE="host" ;;
+  ci|github|actions) MODE="ci" ;;
+  *) echo "unknown mode '$MODE' — use 'host' or 'ci'" >&2; exit 2 ;;
+esac
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$(cd "$HERE/.." && pwd)"        # owllm-desktop/
@@ -39,6 +52,10 @@ CARD="$REPO/.owllm/project.json"
 VERSION_FILE="owllm-desktop/src-tauri/tauri.conf.json"
 STAGE_PATH="owllm-desktop"
 PUBLISH_CMD='bash "owllm-desktop/scripts/publish-release.sh" --notes "$OWLLM_RELEASE_NOTES"'
+# In CI mode the release is built by GitHub Actions, so we never run the local
+# publish command. The signing env vars are still meaningful in host mode: they
+# are inherited by publish-release.sh which reads OWLLM_SIGN_THUMBPRINT etc.
+[ "$MODE" = "ci" ] && PUBLISH_CMD=""
 if [ -f "$CARD" ]; then
   _rd() { CARD="$CARD" K="$1" node -e 'try{const r=(require(process.env.CARD).release)||{};process.stdout.write(String(r[process.env.K]||""))}catch{}'; }
   vf="$(_rd versionFile)"; sp="$(_rd stagePath)"; pc="$(_rd command)"
@@ -49,7 +66,7 @@ fi
 # Forward the pre-release channel to the publish command (the canonical
 # publish-release.sh understands --prerelease; a card override that doesn't will
 # ignore it or error clearly).
-[ -n "$PRERELEASE" ] && PUBLISH_CMD="$PUBLISH_CMD --prerelease"
+[ -n "$PRERELEASE" ] && [ "$MODE" = "host" ] && PUBLISH_CMD="$PUBLISH_CMD --prerelease"
 CONF="$REPO/$VERSION_FILE"
 [ -f "$CONF" ] || fail "version file '$VERSION_FILE' not found — set release.versionFile in .owllm/project.json"
 
@@ -60,6 +77,7 @@ NEW="$(CUR="$CUR" node -e '
   p += 1; if (p >= 100) { p = 0; b += 1; } if (b >= 10) { b = 0; a += 1; }
   process.stdout.write(`${a}.${b}.${p}`);')"
 [ -n "$NEW" ] || fail "version bump produced empty result from '$CUR'"
+TAG="v$NEW"
 CUR="$CUR" NEW="$NEW" CONF="$CONF" node -e '
   const fs=require("fs");
   let s=fs.readFileSync(process.env.CONF,"utf8");
@@ -127,5 +145,15 @@ echo "tagged v$NEW"
 # 4. Run the project's publish command (default = the canonical OwLLM
 #    publish-release.sh: build → sign → gh release → verify). The generated notes
 #    are passed via $OWLLM_RELEASE_NOTES so any project's command can use them.
+if [ "$MODE" = "ci" ]; then
+  if [ -f "$REPO/.github/workflows/release.yml" ]; then
+    echo "CI mode: tag pushed — GitHub Actions workflow will build and publish the release."
+  else
+    echo "CI mode: tag pushed — no .github/workflows/release.yml found; you must trigger/build the release manually."
+  fi
+  echo "PUBLISH_OK: $TAG pushed for CI build."
+  exit 0
+fi
+
 export OWLLM_RELEASE_NOTES="$NOTES_BODY"
 ( cd "$REPO" && bash -c "$PUBLISH_CMD" ) || fail "publish command failed: $PUBLISH_CMD"

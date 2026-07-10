@@ -1754,6 +1754,7 @@ type PublisherReadyCheck = { id: string; label: string; ok: boolean; detail: str
 // (SimplySign/Certum, a PFX, an HSM) without editing scripts. Empty = unsigned.
 type PublisherCfg = {
   targetBranch: string; commitScope: string; commitMsg: string;
+  mode: "host" | "ci";
   signThumbprint: string; signSubject: string; signTsa: string;
 };
 
@@ -1761,6 +1762,7 @@ const defaultPublisherCfg = (): PublisherCfg => ({
   targetBranch: "main",
   commitScope: "",
   commitMsg: "",
+  mode: "host",
   signThumbprint: "",
   signSubject: "",
   signTsa: "",
@@ -1791,6 +1793,26 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
     setChecks(null);
     setLog("");
     setCfg(loadPublisherCfg(storageKey));
+  }, [cwd, storageKey]);
+  // Seed the Publisher card's mode from the committed Project Card when there is
+  // NO per-cwd localStorage override. This keeps the project's default in sync
+  // across machines/teammates, while still letting the user override it locally.
+  useEffect(() => {
+    if (!cwd) return;
+    let live = true;
+    (async () => {
+      const hasLocal = !!localStorage.getItem(storageKey);
+      if (hasLocal) return;
+      try {
+        const txt = await invoke<string>("tool_read_file", { path: ".owllm/project.json", cwd });
+        const card = JSON.parse(txt) as { release?: { mode?: string } } | null;
+        const cardMode = card?.release?.mode;
+        if (live && (cardMode === "host" || cardMode === "ci")) {
+          setCfg(prev => prev.mode === cardMode ? prev : { ...prev, mode: cardMode });
+        }
+      } catch { /* no card or malformed — keep default */ }
+    })();
+    return () => { live = false; };
   }, [cwd, storageKey]);
   const refresh = useCallback(async () => {
     const checkCwd = cwd;
@@ -1880,16 +1902,23 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
           () => { void run("merge", () => invoke<string>("repo_merge", { repoDir: cwd, target: cfg.targetBranch })); })}
         {bigBtn("Publish", "🚀", canPublish,
           canPublish
-            ? "Bump version → commit → tag → push → CI drafts the release"
+            ? cfg.mode === "host"
+              ? "Bump version → commit → tag → push → host builds, signs and publishes to GitHub"
+              : "Bump version → commit → tag → push → GitHub Actions builds and publishes the release"
             : reasonFor(["repo", "remote", "auth", "version", "script"]),
           () => {
             const signed = !!(cfg.signThumbprint.trim() || cfg.signSubject.trim());
+            const modeLabel = cfg.mode === "host" ? "HOST mode" : "CI mode";
             if (!window.confirm(
-              `Publish a new release?\n\nThis bumps the version, commits, tags, pushes, and runs the host build → ${signed ? "code-signs" : "does NOT code-sign"} → publishes to GitHub.` +
-              (signed ? "" : "\n\nNo signing certificate is configured (⚙ Set up repo → Code signing), so this build will be UNSIGNED.")
+              `Publish a new release? (${modeLabel})\n\n` +
+              (cfg.mode === "host"
+                ? `This bumps the version, commits, tags, pushes, and runs the host build → ${signed ? "code-signs" : "does NOT code-sign"} → publishes to GitHub.`
+                : `This bumps the version, commits, tags, and pushes. The repository's GitHub Actions workflow will build and publish the release.`) +
+              (cfg.mode === "host" && !signed ? "\n\nNo signing certificate is configured (⚙ Set up repo → Code signing), so this build will be UNSIGNED." : "")
             )) return;
             void run("publish", () => invoke<string>("finish_and_publish", {
               repoDir: cwd, notes: "",
+              mode: cfg.mode,
               // Client side of the signing contract — flows to publish-release.sh's
               // OWLLM_SIGN_* env. Backend finish_and_publish must forward `sign`.
               sign: (cfg.signThumbprint.trim() || cfg.signSubject.trim())
@@ -1996,6 +2025,39 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
                 />
               </label>
             ))}
+            {/* Publish mode — the user explicitly wants the Host vs CI distinction
+                visible and changeable, because the local build does NOT need GitHub
+                Actions billing and the "Set up repo" popup used to imply CI only. */}
+            <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", margin: "6px 0 10px" }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+              <span style={{ fontSize: 11, fontWeight: 800, color: "var(--fg-strong)" }}>Publish mode</span>
+              <span style={{
+                fontSize: 9, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase",
+                padding: "1px 7px", borderRadius: 4,
+                color: cfg.mode === "host" ? "#3cf26b" : "#7fd4ff",
+                background: cfg.mode === "host" ? "rgba(60,242,107,0.12)" : "rgba(127,212,255,0.12)",
+                border: `1px solid ${cfg.mode === "host" ? "rgba(60,242,107,0.5)" : "rgba(127,212,255,0.5)"}`,
+              }}>{cfg.mode === "host" ? "Host" : "CI / GitHub Actions"}</span>
+            </div>
+            <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginBottom: 10, lineHeight: 1.5 }}>
+              <strong>Host</strong> builds and signs the release on this machine (needs the build toolchain + cert here).<br />
+              <strong>CI / GitHub Actions</strong> only bumps, commits, tags and pushes; the repo workflow builds and publishes it (no local build toolchain needed, but GitHub Actions must be enabled and billed).
+            </div>
+            <label style={{ display: "block", marginBottom: 10 }}>
+              <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: 0.4, color: "var(--fg-muted)", marginBottom: 3 }}>Mode</div>
+              <select
+                value={cfg.mode}
+                onChange={(e) => saveCfg({ ...cfg, mode: e.target.value as PublisherCfg["mode"] })}
+                style={{
+                  width: "100%", boxSizing: "border-box", padding: "6px 8px",
+                  background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.15)",
+                  borderRadius: 6, color: "var(--fg)", fontSize: 12,
+                }}
+              >
+                <option value="host">Host — build + sign + publish on this machine</option>
+                <option value="ci">CI / GitHub Actions — push tag, let workflow build</option>
+              </select>
+            </label>
             {/* Code signing — generic per-project cert config. Maps onto
                 publish-release.sh's OWLLM_SIGN_* knobs; empty = unsigned. */}
             <div style={{ borderTop: "1px solid rgba(255,255,255,0.08)", margin: "6px 0 10px" }} />
@@ -10740,7 +10802,11 @@ export function AgentsPage({
           // like "WTF is that?" as the top "What's New" bullet. Send NO headline;
           // the shell then produces a clean "Maintenance release vX.Y.Z". (A proper
           // per-release changelog needs a curated source, not the chat prompt.)
-          try { sPub = await invoke<string>("finish_and_publish", { repoDir: projectCwd, notes: "" }); }
+          const pubCfg = loadPublisherCfg(`publisherCard:${projectCwd ?? "none"}`);
+          const pubSign = (pubCfg.signThumbprint.trim() || pubCfg.signSubject.trim())
+            ? { thumbprint: pubCfg.signThumbprint.trim() || null, subject: pubCfg.signSubject.trim() || null, tsa: pubCfg.signTsa.trim() || null }
+            : null;
+          try { sPub = await invoke<string>("finish_and_publish", { repoDir: projectCwd, notes: "", mode: pubCfg.mode, sign: pubSign }); }
           catch (e: any) { sPub = `PUBLISH_FAILED: ${String(e?.message ?? e)}`; }
           const okPub = /PUBLISH_OK/.test(sPub);
           appendLog("system", { role: "system", color: okPub ? "#7fd17f" : "#ff8c8c", text: `📦 ${sPub.slice(-1400)}` });

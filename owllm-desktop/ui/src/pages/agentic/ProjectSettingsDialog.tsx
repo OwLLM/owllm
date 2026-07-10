@@ -148,6 +148,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [relVersionFile, setRelVersionFile] = useState("");
   const [relStagePath, setRelStagePath] = useState("");
   const [relCommand, setRelCommand] = useState("");
+  const [relMode, setRelMode] = useState<"host" | "ci">("host");
   const [showRelease, setShowRelease] = useState(false);
   const [legacyVerifyJson, setLegacyVerifyJson] = useState(false);   // a separate .owllm/verify.json exists (takes precedence)
   const [cardBusy, setCardBusy] = useState<string | null>(null);
@@ -186,7 +187,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     if (!open || mode === "new") return;
     const cwd = effectiveCwd || location;
     setCardRaw(null); setCardExists(false); setCardGoal(""); setCardVerify("");
-    setCardMode(""); setRelVersionFile(""); setRelStagePath(""); setRelCommand("");
+    setCardMode(""); setRelVersionFile(""); setRelStagePath(""); setRelCommand(""); setRelMode("host");
     setShowRelease(false); setLegacyVerifyJson(false); setCardMsg(null); setFindings(null);
     if (!cwd) return;
     let live = true;
@@ -210,7 +211,8 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
         setRelVersionFile(card.release?.versionFile ?? "");
         setRelStagePath(card.release?.stagePath ?? "");
         setRelCommand(card.release?.command ?? "");
-        if (card.release && (card.release.versionFile || card.release.command)) setShowRelease(true);
+        setRelMode(card.release?.mode === "ci" ? "ci" : "host");
+        if (card.release && (card.release.versionFile || card.release.command || card.release.mode)) setShowRelease(true);
       } else {
         setCardVerify(legacyCmd);
       }
@@ -293,11 +295,12 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
       else if (card.verify) { delete card.verify.command; if (!card.verify.lanes || !Object.keys(card.verify.lanes).length) delete card.verify; }
 
       const vf = relVersionFile.trim(), sp = relStagePath.trim(), rc = relCommand.trim();
-      if (vf || sp || rc) {
+      if (vf || sp || rc || relMode !== "host") {
         card.release = { ...(card.release ?? {}) };
         if (vf) card.release.versionFile = vf; else delete card.release.versionFile;
         if (sp) card.release.stagePath = sp; else delete card.release.stagePath;
         if (rc) card.release.command = rc; else delete card.release.command;
+        if (relMode === "ci") card.release.mode = "ci"; else delete card.release.mode;
         if (!Object.keys(card.release).length) delete card.release;
       } else { delete card.release; }
 
@@ -616,7 +619,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
               {showRelease && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingLeft: 12, borderLeft: "2px solid var(--border)" }}>
                   <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-                    When a goal says “publish”, the release runs by rule on the host: bump → commit → tag → build → release → verify.
+                    When a goal says “publish”, the release runs by rule: bump → commit → tag → push, then either build locally or let GitHub Actions finish it.
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <label style={LBL}>Version file</label>
@@ -629,6 +632,16 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <label style={LBL}>Publish command</label>
                     <input value={relCommand} onChange={e => setRelCommand(e.target.value)} placeholder='e.g. bash scripts/publish.sh --notes "$OWLLM_RELEASE_NOTES"' style={INPUT} />
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={LBL}>Build mode</label>
+                    <select value={relMode} onChange={e => setRelMode(e.target.value as "host" | "ci")} style={INPUT}>
+                      <option value="host">Host — build + sign + publish on this machine</option>
+                      <option value="ci">CI / GitHub Actions — push tag, let workflow build</option>
+                    </select>
+                    <div style={{ fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.4 }}>
+                      Host needs the build toolchain and signing cert on this computer. CI needs a working GitHub Actions workflow and billing.
+                    </div>
                   </div>
                 </div>
               )}

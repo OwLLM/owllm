@@ -5,7 +5,20 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 type ReadyCheck = { id: string; label: string; ok: boolean; detail: string };
-type PublishMode = "publish" | "draft" | "dry-run";
+type ReleaseVisibility = "publish" | "draft" | "dry-run";
+type PublishMode = "host" | "ci";
+
+type SignCfg = {
+  thumbprint: string;
+  subject: string;
+  tsa: string;
+};
+
+type PublishSettings = {
+  visibility: ReleaseVisibility;
+  mode: PublishMode;
+  sign: SignCfg;
+};
 
 type WtFinalize =
   | { status: "committed"; commitSha: string; filesChanged: number; files: string[] }
@@ -17,6 +30,34 @@ type WtMerge =
   | { status: "conflict"; files: string[] }
   | { status: "noChanges" }
   | { status: "error"; message: string };
+
+const SETTINGS_KEY = "publishCards:settings:v1";
+
+const defaultSettings = (): PublishSettings => ({
+  visibility: "publish",
+  mode: "host",
+  sign: { thumbprint: "", subject: "", tsa: "http://time.certum.pl" },
+});
+
+const loadSettings = (): PublishSettings => {
+  const base = defaultSettings();
+  try {
+    const raw = localStorage.getItem(SETTINGS_KEY);
+    if (!raw) return base;
+    const parsed = JSON.parse(raw) as Partial<PublishSettings>;
+    return {
+      visibility: (parsed.visibility as ReleaseVisibility) ?? base.visibility,
+      mode: (parsed.mode as PublishMode) ?? base.mode,
+      sign: { ...base.sign, ...(parsed.sign ?? {}) },
+    };
+  } catch {
+    return base;
+  }
+};
+
+const saveSettings = (s: PublishSettings) => {
+  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* quota — non-fatal */ }
+};
 
 const chipBtn: React.CSSProperties = {
   height: 26,
@@ -65,12 +106,20 @@ export default function PublishCards({
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [pubNotes, setPubNotes] = useState("");
-  const [pubMode, setPubMode] = useState<PublishMode>("publish");
+  const [settings, setSettings] = useState<PublishSettings>(loadSettings);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const mergeTarget = "main";
   const mounted = useRef(true);
+
+  const updateSettings = (patch: Partial<PublishSettings>) => {
+    setSettings((prev) => {
+      const next = { ...prev, ...patch, sign: { ...prev.sign, ...(patch.sign ?? {}) } };
+      saveSettings(next);
+      return next;
+    });
+  };
 
   const refresh = useCallback(() => {
     if (!repoDir) { setReady(null); return; }
@@ -127,11 +176,40 @@ export default function PublishCards({
     return invoke<string>("repo_merge", { repoDir: gitDir, target: mergeTarget });
   });
 
-  const doPublish = () => run(() => {
-    if (pubMode === "publish") {
-      return invoke("finish_and_publish", { repoDir, notes: pubNotes });
+  const signPayload = settings.sign.thumbprint.trim() || settings.sign.subject.trim()
+    ? {
+        thumbprint: settings.sign.thumbprint.trim() || null,
+        subject: settings.sign.subject.trim() || null,
+        tsa: settings.sign.tsa.trim() || null,
+      }
+    : null;
+
+  const doPublish = () => run(async () => {
+    const visibility = settings.visibility;
+    if (visibility === "publish") {
+      const signed = !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
+      const modeLabel = settings.mode === "host" ? "HOST mode" : "CI mode";
+      if (!window.confirm(
+        `Publish a new release? (${modeLabel})\n\n` +
+        (settings.mode === "host"
+          ? `This bumps the version, commits, tags, pushes, and runs the host build → ${signed ? "code-signs" : "does NOT code-sign"} → publishes a public release to GitHub.`
+          : `This bumps the version, commits, tags, and pushes. The repository's GitHub Actions workflow will build and publish a public release.`) +
+        (settings.mode === "host" && !signed ? "\n\nNo signing certificate is configured, so this build will be UNSIGNED." : "")
+      )) return "Cancelled.";
+      return invoke("finish_and_publish", {
+        repoDir,
+        notes: pubNotes,
+        mode: settings.mode,
+        sign: signPayload,
+      });
     }
-    return invoke("publish_release", { repoDir, notes: pubNotes, dryRun: pubMode === "dry-run", draft: pubMode === "draft" });
+    return invoke("publish_release", {
+      repoDir,
+      notes: pubNotes,
+      dryRun: visibility === "dry-run",
+      draft: visibility === "draft",
+      sign: signPayload,
+    });
   });
 
   const isRepo = ready?.find((c) => c.id === "repo")?.ok ?? false;
@@ -144,8 +222,9 @@ export default function PublishCards({
   const showPublish = isRepo && hasPublishScript;
   if (!showCommit && !showPush && !showMerge && !showPublish) return null;
 
-  const modeLabel = pubMode === "dry-run" ? "Dry run" : pubMode === "draft" ? "Draft" : "Publish";
-  const modeColor = pubMode === "publish" ? "#7ff0c5" : pubMode === "draft" ? "#7aa2ff" : "#ffd97a";
+  const modeLabel = settings.visibility === "dry-run" ? "Dry run" : settings.visibility === "draft" ? "Draft" : "Publish";
+  const modeColor = settings.visibility === "publish" ? "#7ff0c5" : settings.visibility === "draft" ? "#7aa2ff" : "#ffd97a";
+  const signed = !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
 
   return (
     <>
@@ -200,7 +279,7 @@ export default function PublishCards({
               <button
                 onClick={doPublish}
                 disabled={disabled || loading}
-                title={`${modeLabel} release (${pubMode})`}
+                title={`${modeLabel} release (${settings.mode})${signed ? "" : ", unsigned"}`}
                 style={{ ...chipBtn, flex: 1, background: modeColor, color: "#06080d", border: "none" }}
               >
                 {loading ? "⏳" : "🚀"} {modeLabel}
@@ -217,6 +296,12 @@ export default function PublishCards({
               </button>
             )}
           </div>
+          {showPublish && (
+            <div style={{ display: "flex", gap: 6, fontSize: 10, color: "var(--fg-muted)", justifyContent: "space-between" }}>
+              <span>{settings.mode === "host" ? "Host build" : "CI / GitHub Actions"}</span>
+              <span>{signed ? "Signed" : "Unsigned"}</span>
+            </div>
+          )}
         </div>
       </div>
 
@@ -287,17 +372,66 @@ export default function PublishCards({
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Mode</label>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Release visibility</label>
               <select
-                value={pubMode}
-                onChange={(e) => setPubMode(e.target.value as PublishMode)}
+                value={settings.visibility}
+                onChange={(e) => updateSettings({ visibility: e.target.value as ReleaseVisibility })}
                 disabled={disabled || loading}
                 style={{ ...inputBase, height: 28 }}
               >
                 <option value="dry-run">Dry run</option>
                 <option value="draft">Draft release</option>
-                <option value="publish">Publish release</option>
+                <option value="publish">Publish public release</option>
               </select>
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Publish mode</label>
+              <select
+                value={settings.mode}
+                onChange={(e) => updateSettings({ mode: e.target.value as PublishMode })}
+                disabled={disabled || loading}
+                style={{ ...inputBase, height: 28 }}
+              >
+                <option value="host">Host — build + sign + publish on this machine</option>
+                <option value="ci">CI / GitHub Actions — push tag, let workflow build</option>
+              </select>
+              <div style={{ fontSize: 10, color: "var(--fg-subtle)", lineHeight: 1.4 }}>
+                Host mode publishes immediately from this machine. CI mode relies on GitHub Actions runners, which are currently unavailable due to billing limits.
+              </div>
+            </div>
+
+            <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-strong)" }}>Code signing (Windows)</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Cert thumbprint (SHA-1)</label>
+              <input
+                value={settings.sign.thumbprint}
+                onChange={(e) => updateSettings({ sign: { ...settings.sign, thumbprint: e.target.value } })}
+                placeholder="empty = unsigned"
+                disabled={disabled || loading}
+                style={{ ...inputBase, height: 28 }}
+              />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>…or cert subject (CN)</label>
+              <input
+                value={settings.sign.subject}
+                onChange={(e) => updateSettings({ sign: { ...settings.sign, subject: e.target.value } })}
+                placeholder="e.g. Your Company Ltd"
+                disabled={disabled || loading}
+                style={{ ...inputBase, height: 28 }}
+              />
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Timestamp URL (RFC3161)</label>
+              <input
+                value={settings.sign.tsa}
+                onChange={(e) => updateSettings({ sign: { ...settings.sign, tsa: e.target.value } })}
+                placeholder="http://time.certum.pl"
+                disabled={disabled || loading}
+                style={{ ...inputBase, height: 28 }}
+              />
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>

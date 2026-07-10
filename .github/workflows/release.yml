@@ -522,16 +522,16 @@ jobs:
           name: OwLLM Desktop ${{ steps.resolve_version.outputs.version }}
           tag_name: ${{ steps.resolve_version.outputs.version }}
           target_commitish: main
-          # Always start as draft so a human can spot-check the
-          # installers before flipping public. Promote with the gh CLI:
-          #   gh release edit <tag> --repo OwLLM/owllm --draft=false
-          draft: true
+          # Publish publicly by default. The Publisher card's Host mode creates
+          # the release immediately; CI mode now also publishes publicly rather
+          # than leaving a hidden draft that the user has to promote manually.
+          draft: false
           prerelease: ${{ github.event.inputs.prerelease == 'true' }}
           # generate_release_notes diffs against the previous tag IN THE
           # TARGET repo. OwLLM/owllm has no source commits, so leave off
-          # and supply notes manually after the draft lands.
+          # and supply notes manually after the release lands.
           generate_release_notes: false
           body: |
-            Auto-generated draft release built by `.github/workflows/release.yml` in the private source repo. Replace this body with real release notes before un-drafting (use the previous release's body as a template).
+            Auto-generated release built by `.github/workflows/release.yml` in the private source repo.
           files: |
             dist/*

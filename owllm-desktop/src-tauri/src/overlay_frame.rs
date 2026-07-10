@@ -47,9 +47,22 @@ pub fn disable_window_ghosting() {
 pub fn disable_window_ghosting() {}
 
 pub fn enabled() -> bool {
-    std::env::var("OWLLM_OVERLAY_FRAME")
-        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
-        .unwrap_or(true)
+    // The overlay frame is Windows-only decorative chrome: the owner-window
+    // wiring is a no-op stub off Windows, and the click-through path aborts on
+    // GTK (tao `CursorIgnoreEvents` unwraps a not-yet-realized GDK window,
+    // SIGABRT on launch). Default it off everywhere except Windows; opt-in only.
+    #[cfg(not(target_os = "windows"))]
+    {
+        return std::env::var("OWLLM_OVERLAY_FRAME")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::env::var("OWLLM_OVERLAY_FRAME")
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
+            .unwrap_or(true)
+    }
 }
 
 #[tauri::command]

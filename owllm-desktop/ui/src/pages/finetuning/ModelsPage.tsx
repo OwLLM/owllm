@@ -818,6 +818,26 @@ export default function ModelsPage() {
     await downloadStore.startDownload(modelId, files);
   };
 
+  // Resume an interrupted download from its on-disk .partial file(s) —
+  // straight back into hf_download (which continues via HTTP Range), WITHOUT
+  // re-opening the quantization picker. The picker only appears as a fallback
+  // when there's no partial left to resume (e.g. the user deleted it).
+  const resumeDownload = async (name: string, dirPath: string) => {
+    const hfId = name.replace(/__/g, "/");
+    try {
+      const parts = await invoke<Array<{ file: string; bytesOnDisk: number }>>(
+        "models_partial_files", { dir: dirPath },
+      );
+      if (parts.length > 0) {
+        await downloadStore.startDownload(hfId, parts.map((p) => p.file));
+        // Re-scan so the card drops its "incomplete" badge once done.
+        refreshDownloaded();
+        return;
+      }
+    } catch { /* fall through to the picker */ }
+    setPickerFor(hfId);
+  };
+
   return (
     <div
       data-ui="modelsPageRoot"
@@ -1303,10 +1323,12 @@ export default function ModelsPage() {
                   icons={d.icons}
                   envKey={d.envKey}
                   isIncomplete={d.isIncomplete}
+                  isActiveDownload={downloadStore.isActive(d.name.replace(/__/g, "/"))}
                   onboardingStatus={d.onboarding}
                   compatibilityBadge={d.compat ?? undefined}
                   selected={selectedPath === d.path}
                   onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
+                  onRepair={() => { void resumeDownload(d.name, d.path); }}
                   onAddWeights={() => {
                     // Local dir convention from huggingface-cli / hf_hub:
                     // <author>/<repo> becomes <author>__<repo> on disk

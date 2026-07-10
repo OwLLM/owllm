@@ -296,10 +296,8 @@ const FRAME_BG     = "var(--bg-header)";
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
 
-function HybridFrame({ children, outerW, outerH, onOwlClick, showWatcherHint }: {
+function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
   children: React.ReactNode; outerW: number; outerH: number;
-  /// The Watcher (P0-8): the top-center owl badge is the support entry point.
-  onOwlClick?: () => void;
   /// Periodic "The Watcher" satellite label around the owl (until first open).
   showWatcherHint?: boolean;
 }) {
@@ -386,17 +384,16 @@ function HybridFrame({ children, outerW, outerH, onOwlClick, showWatcherHint }: 
       <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TL, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TR, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BL, pointerEvents:"none" }} />
-      {/* The Watcher (P0-8): the owl badge is the unlabeled support entry
-          point. Clickable, but visually unchanged — discovery comes from
-          the periodic satellite label below + a hover tooltip. */}
+      {/* The Watcher (P0-8): the owl art is DECORATIVE here, exactly like the
+          overlay-window owl on Windows — its full 300×195 rect used to be
+          clickable, which swallowed clicks over the header center ("the
+          watcher clickable area is too large"). The summon point is the
+          compact ModeBar hotspot beneath the owl's body in BOTH modes. */}
       <img
         src={`${ICONS}/owl_studio_square.png`}
-        onClick={onOwlClick}
-        title={onOwlClick ? "The Watcher — OWLLM's support assistant" : undefined}
         style={{
           position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H,
-          pointerEvents: onOwlClick ? "auto" : "none",
-          cursor: onOwlClick ? "pointer" : undefined,
+          pointerEvents: "none",
         }}
       />
       {showWatcherHint && (
@@ -1110,6 +1107,24 @@ export default function AppShell() {
   const keepAgentsAlive = agentsMounted && installed.includes("agentic") && AgentsComponent != null;
 
   const vp = useViewportSize();
+  // Linux in-page chrome (no overlay window there): the window is transparent
+  // and LARGER than the visible frame — the EXTRA_TOP band above the frame is
+  // see-through headroom for the peeking owl. Shape the window's INPUT region
+  // to frame + owl so clicks in the empty band fall through to whatever is
+  // behind the app instead of being swallowed (they used to block underlying
+  // windows' close buttons). The command is a no-op on Windows/macOS.
+  useEffect(() => {
+    if (!isTauri() || overlayFrame) return;
+    invoke("frame_input_region", {
+      rects: [
+        // Everything from the frame's top edge down stays interactive; the
+        // EXTRA_TOP band above it (owl headroom) is click-through, exactly
+        // like the Windows overlay window. The owl summon is the compact
+        // ModeBar hotspot, which sits inside the frame body.
+        { x: 0, y: EXTRA_TOP, w: vp.w, h: Math.max(0, vp.h - EXTRA_TOP) },
+      ],
+    }).catch(() => { /* backend predates the command — harmless */ });
+  }, [overlayFrame, vp.w, vp.h]);
   const appContent = (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <ModeBar
@@ -1169,7 +1184,7 @@ export default function AppShell() {
       <ResizeEdges />
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
-        : <HybridFrame outerW={vp.w} outerH={vp.h} onOwlClick={openWatcher} showWatcherHint={watcherHint}>{appContent}</HybridFrame>}
+        : <HybridFrame outerW={vp.w} outerH={vp.h} showWatcherHint={watcherHint}>{appContent}</HybridFrame>}
       <WatcherDrawer
         open={watcherOpen}
         onClose={() => setWatcherOpen(false)}

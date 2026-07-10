@@ -42,6 +42,7 @@ mod email;
 mod env_manager;
 mod finetuning;
 mod fleet;
+mod frame_shape;
 mod git;
 mod github;
 mod hardware;
@@ -379,6 +380,7 @@ pub fn run() {
             models::list_models,
             overlay_frame::overlay_frame_enabled,
             overlay_frame::overlay_frame_capture_geometry,
+            frame_shape::frame_input_region,
             projects::list_projects,
             projects::create_project,
             projects::update_project,
@@ -428,6 +430,7 @@ pub fn run() {
             huggingface::hf_cache_delete,
             huggingface::models_list_downloaded,
             huggingface::model_weight_files,
+            huggingface::models_partial_files,
             huggingface::delete_model_weight,
             recommendations::models_recommended,
             paths::shell_open_url,

@@ -251,7 +251,9 @@ export default function PublishCards({
       return invoke("finish_and_publish", {
         repoDir,
         notes: pubNotes,
-        mode: settings.mode,
+        // Explicit mode only when this machine saved an override; null lets
+        // the script resolve the committed card (arg > card > host default).
+        mode: hasLocalSettings(repoDir) ? settings.mode : null,
         sign: signPayload,
       });
     }

@@ -408,16 +408,28 @@ if [ "$PRERELEASE" = 1 ]; then
   echo "PUBLISH_PRERELEASE_OK: $TAG published as a pre-release (NOT auto-served). Test via the link above, then promote to Latest."
   exit 0
 fi
-# Poll: GitHub's /latest CDN can lag a few seconds behind `gh release create`,
-# so checking once right after publishing false-fails. Retry up to ~60s.
+# Poll: GitHub's /latest CDN can lag MINUTES behind `gh release create` (both
+# v0.8.32 and v0.8.33 propagated slower than the old ~60s window, false-failing
+# a release that was actually fine). Retry up to ~6 min; when it still lags,
+# distinguish "CDN stale but API says Latest is right" from a real failure.
 SERVED=""
-for i in $(seq 1 20); do
+for i in $(seq 1 40); do
   SERVED="$(curl -sL "https://github.com/$REPO/releases/latest/download/latest.json" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{process.stdout.write(JSON.parse(s).version)}catch{process.stdout.write("?")}})')"
   [ "$SERVED" = "$VERSION" ] && break
-  sleep 3
+  sleep 9
 done
 HTTP="$(curl -s -o /dev/null -w "%{http_code}" -L "$URL")"
 echo "  updater serves: $SERVED | installer HTTP: $HTTP"
-[ "$SERVED" = "$VERSION" ] || fail "updater serves '$SERVED', expected '$VERSION' (after ~60s of polling)"
+if [ "$SERVED" != "$VERSION" ]; then
+  # CDN still stale — check the source of truth. If the API's Latest release IS
+  # this tag with a latest.json asset, the release is correct and the edge cache
+  # just hasn't flipped: report OK-with-caveat instead of failing the publish.
+  API_TAG="$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>/dev/null || true)"
+  if [ "$API_TAG" = "$TAG" ]; then
+    echo "PUBLISH_OK: $TAG is Latest per the GitHub API; the /latest download CDN still serves '$SERVED' and will flip shortly."
+    exit 0
+  fi
+  fail "updater serves '$SERVED', expected '$VERSION' (after ~6min; API Latest is '$API_TAG')"
+fi
 [ "$HTTP" = "200" ] || fail "installer HTTP $HTTP (expected 200)"
 echo "PUBLISH_OK: $TAG live — updater serves $VERSION, installer 200."

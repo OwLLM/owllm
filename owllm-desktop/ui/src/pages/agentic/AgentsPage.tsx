@@ -1945,7 +1945,10 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
             )) return;
             void run("publish", () => invoke<string>("finish_and_publish", {
               repoDir: cwd, notes: "",
-              mode: cfg.mode,
+              // Explicit mode ONLY when the user saved a local override here;
+              // otherwise pass null so the script resolves the committed
+              // Project Card's release.mode (arg > card > host default).
+              mode: (() => { try { return localStorage.getItem(storageKey) ? cfg.mode : null; } catch { return cfg.mode; } })(),
               // Client side of the signing contract — flows to publish-release.sh's
               // OWLLM_SIGN_* env. Backend finish_and_publish must forward `sign`.
               sign: (cfg.signThumbprint.trim() || cfg.signSubject.trim())
@@ -10845,11 +10848,17 @@ export function AgentsPage({
           // like "WTF is that?" as the top "What's New" bullet. Send NO headline;
           // the shell then produces a clean "Maintenance release vX.Y.Z". (A proper
           // per-release changelog needs a curated source, not the chat prompt.)
-          const pubCfg = loadPublisherCfg(`publisherCard:${projectCwd ?? "none"}`);
+          const pubKey = `publisherCard:${projectCwd ?? "none"}`;
+          const pubCfg = loadPublisherCfg(pubKey);
           const pubSign = (pubCfg.signThumbprint.trim() || pubCfg.signSubject.trim())
             ? { thumbprint: pubCfg.signThumbprint.trim() || null, subject: pubCfg.signSubject.trim() || null, tsa: pubCfg.signTsa.trim() || null }
             : null;
-          try { sPub = await invoke<string>("finish_and_publish", { repoDir: projectCwd, notes: "", mode: pubCfg.mode, sign: pubSign }); }
+          // Rule-based publish honors the committed Project Card's release.mode
+          // unless THIS machine saved an explicit publisher-card override — this
+          // path used to hardcode the localStorage default ("host"), silently
+          // host-building on machines where the card said ci.
+          const pubMode = (() => { try { return localStorage.getItem(pubKey) ? pubCfg.mode : null; } catch { return pubCfg.mode; } })();
+          try { sPub = await invoke<string>("finish_and_publish", { repoDir: projectCwd, notes: "", mode: pubMode, sign: pubSign }); }
           catch (e: any) { sPub = `PUBLISH_FAILED: ${String(e?.message ?? e)}`; }
           const okPub = /PUBLISH_OK/.test(sPub);
           appendLog("system", { role: "system", color: okPub ? "#7fd17f" : "#ff8c8c", text: `📦 ${sPub.slice(-1400)}` });

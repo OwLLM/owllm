@@ -17,7 +17,12 @@ set -euo pipefail
 
 NOTES=""
 PRERELEASE=""
+# Build-mode resolution: explicit --mode > Project Card release.mode > host.
+# MODE_SET tracks whether the caller CHOSE — an empty default here would
+# otherwise be indistinguishable from an explicit host pick, and the card
+# could never be overridden (or honored) correctly.
 MODE="host"
+MODE_SET=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --notes) NOTES="${2:-}"; shift 2 ;;
@@ -25,7 +30,7 @@ while [ $# -gt 0 ]; do
     # so the auto-updater skips it). The "test before you promote" path — nothing
     # reaches users until the release is flipped to Latest.
     --prerelease) PRERELEASE=1; shift ;;
-    --mode) MODE="${2:-host}"; shift 2 ;;
+    --mode) MODE="${2:-host}"; MODE_SET=1; shift 2 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -60,14 +65,22 @@ CARD="$REPO/.owllm/project.json"
 VERSION_FILE="owllm-desktop/src-tauri/tauri.conf.json"
 STAGE_PATH="owllm-desktop"
 PUBLISH_CMD='bash "owllm-desktop/scripts/publish-release.sh"'
-# In CI mode the release is built by GitHub Actions, so we never run the local
-# publish command. The signing env vars are still meaningful in host mode: they
-# are inherited by publish-release.sh which reads OWLLM_SIGN_THUMBPRINT etc.
-[ "$MODE" = "ci" ] && PUBLISH_CMD=""
 if [ -f "$CARD" ]; then
   _rd() { CARD="$CARD" K="$1" node -e 'try{const r=(require(process.env.CARD).release)||{};process.stdout.write(String(r[process.env.K]||""))}catch{}'; }
   _rds() { CARD="$CARD" K="$1" node -e 'try{const s=((require(process.env.CARD).release)||{}).sign||{};process.stdout.write(String(s[process.env.K]||""))}catch{}'; }
   vf="$(_rd versionFile)"; sp="$(_rd stagePath)"; pc="$(_rd command)"; rr="$(_rd repo)"
+  # Build mode: the committed card's release.mode is the FALLBACK when the
+  # caller passed no --mode (explicit arg > card > host default). This is what
+  # makes the mode configured on the publisher card actually take effect on a
+  # machine with no local override.
+  if [ -z "$MODE_SET" ]; then
+    cm="$(_rd mode)"
+    case "${cm,,}" in
+      host) MODE="host" ;;
+      ci|github|actions) MODE="ci" ;;
+    esac
+    [ -n "$cm" ] && echo "build mode from Project Card: $MODE"
+  fi
   [ -n "$vf" ] && VERSION_FILE="$vf"
   [ -n "$sp" ] && STAGE_PATH="$sp"
   [ -n "$pc" ] && PUBLISH_CMD="$pc"
@@ -81,6 +94,11 @@ if [ -f "$CARD" ]; then
   [ -z "${OWLLM_SIGN_SUBJECT:-}" ] && OWLLM_SIGN_SUBJECT="$(_rds subject)"
   [ -z "${OWLLM_SIGN_TSA:-}" ] && OWLLM_SIGN_TSA="$(_rds tsa)"
 fi
+# In CI mode the release is built by GitHub Actions, so we never run the local
+# publish command. Evaluated AFTER the card block — the card can be what flips
+# the mode to ci. The signing env vars are still meaningful in host mode: they
+# are inherited by publish-release.sh which reads OWLLM_SIGN_THUMBPRINT etc.
+[ "$MODE" = "ci" ] && PUBLISH_CMD=""
 # Forward the pre-release channel to the publish command (the canonical
 # publish-release.sh understands --prerelease; a card override that doesn't will
 # ignore it or error clearly).

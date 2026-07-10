@@ -207,13 +207,14 @@ pub async fn finish_and_publish(
     let posix = to_gitbash_path(&repo_dir);
     let script = format!("{posix}/owllm-desktop/scripts/finish-and-publish.sh");
     let mut args: Vec<String> = vec![script, "--notes".into(), notes.unwrap_or_default()];
-    let host_mode = mode
-        .as_deref()
-        .unwrap_or("host")
-        .eq_ignore_ascii_case("host");
-    if !host_mode {
+    // Forward --mode whenever the CALLER made a choice — including "host".
+    // The old code dropped "host", making an explicit host pick identical to
+    // "unset"; now that the script falls back to the Project Card's
+    // release.mode when no --mode is given, that distinction is load-bearing
+    // (explicit arg > committed card > host default).
+    if let Some(m) = mode.as_deref().filter(|m| !m.trim().is_empty()) {
         args.push("--mode".into());
-        args.push(mode.unwrap_or_else(|| "ci".into()));
+        args.push(m.trim().to_string());
     }
 
     let out = tokio::task::spawn_blocking(move || {

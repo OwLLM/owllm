@@ -80,7 +80,10 @@ fn win_quote_arg(s: &str) -> String {
     out
 }
 
-#[cfg(windows)]
+// Deliberately NOT #[cfg(windows)]: cross-platform call sites (the claude
+// arg-budget paths) use it too, and gating the definition broke the Linux
+// build outright (E0425). On non-Windows a .cmd/.bat never appears, so the
+// check is simply always-false there — correct, no cfg needed.
 fn is_batch_shim(p: &std::path::Path) -> bool {
     p.extension()
         .and_then(|e| e.to_str())

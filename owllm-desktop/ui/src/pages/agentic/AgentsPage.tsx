@@ -6168,10 +6168,12 @@ function OrchestratorSettings({
   const focusModel = modelFor(focus);
 
   const phaseColor = phase === "idle" || phase === "done" ? "#7d8595"
+    : phase === "preparing" ? "#9ad9ff"
     : phase === "planning" ? "#ffd97a"
     : phase === "dispatching" ? "#3cf26b"
     : "#c08aff";
   const phaseText = phase === "idle" ? "Idle"
+    : phase === "preparing" ? "Preparing (memory · sandbox · model)…"
     : phase === "planning" ? "Planning…"
     : phase === "dispatching" ? `Dispatching${activeAgent ? `: ${displayLabel(activeAgent)}` : ""}`
     : phase === "integrating" ? "Integrating…"
@@ -8015,7 +8017,7 @@ function stripDispatchDirectives(text: string): string {
 
 // Phase the dispatch loop is currently in. Used by the chrome to
 // disable Run, show the activity hint, light up the busy spinner.
-type DispatchPhase = "idle" | "planning" | "dispatching" | "integrating" | "done";
+type DispatchPhase = "idle" | "preparing" | "planning" | "dispatching" | "integrating" | "done";
 
 // Hook: track a ref'd element's rendered width + height via
 // ResizeObserver. Used to feed dynamic dimensions into the SVG-based
@@ -10325,7 +10327,11 @@ export function AgentsPage({
     setLeanRun(soloMode || (activeTeam?.agents.length ?? 99) <= 3);
     // Warm the shared-memory snapshot so it's injected into the orchestrator's and
     // every specialist's prompt this run (readable on every model path).
-    await refreshTeamMemorySnapshot();
+    // STARTED here but NOT awaited: it used to block the whole dispatch before
+    // any phase/feedback was visible ("Memory generating.." with no progress).
+    // It overlaps the sandbox warm + local-server load below and is awaited
+    // right before prompts are built (which read it synchronously).
+    const memReady = refreshTeamMemorySnapshot();
     // A goal dispatch is heavy (worktrees, commits, fan-out). Refuse to start
     // a second on top of one already running for THIS project — including one
     // still running in the background after the user changed pages. We read
@@ -10340,6 +10346,10 @@ export function AgentsPage({
     // two concurrent dispatches slip through before setBusy/setRunning fired.
     // Cleared in the finally below AND on every pre-flight early return.
     dispatchInFlightRef.current = true;
+    // Immediate feedback: the pill moves NOW, before the (possibly slow) prep
+    // below — memory snapshot, WSL warm, cold local-model load. The frozen
+    // no-feedback run start was the "is memory even working?" complaint.
+    setPhase("preparing");
     // PRE-FLIGHT: warm WSL + verify the project folder is actually reachable before
     // we dispatch. After a PC reboot WSL comes back COLD (distro not started, /mnt
     // not mounted), so an isolated project's folder — reached through WSL — is
@@ -10405,7 +10415,9 @@ export function AgentsPage({
         return;
       }
       if (!serverState.running || !serverState.port || serverState.model_id !== wantedLocal) {
-        setPhase("planning");
+        // Stay in "preparing" — the cold model load IS preparation; calling it
+        // "Planning" was the misleading frozen label users stared at.
+        setPhase("preparing");
         setRunError(`Starting local server (${wantedLocal})…`);
         const ok = await ensureLocalServer(wantedLocal);
         if (!ok) {
@@ -10421,6 +10433,10 @@ export function AgentsPage({
       dispatchInFlightRef.current = false;
       return;
     }
+    // Prompts below read the snapshot synchronously — make sure the refresh
+    // kicked off at the top has landed (bounded by its own per-invoke timeout,
+    // and it overlapped the sandbox/model prep above instead of blocking first).
+    await memReady;
 
     // Wipe the per-agent card/thought buffers ONLY for a fresh Run-button
     // dispatch. A CHAT message (onSupSend passes priorHistory — even [] for the

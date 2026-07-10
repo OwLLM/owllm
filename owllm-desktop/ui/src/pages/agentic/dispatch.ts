@@ -662,7 +662,7 @@ export type ServerStatus = {
   port: number | null;
   message?: string;
 };
-export type DispatchPhase = "idle" | "planning" | "dispatching" | "integrating" | "done";
+export type DispatchPhase = "idle" | "preparing" | "planning" | "dispatching" | "integrating" | "done";
 
 /// Why can't we reach the local llama-server? Ask the supervisor before
 /// surfacing a generic network error: a crashed server carries a NAMED
@@ -1376,12 +1376,14 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
   // Re-warm when there's no entry OR the cached warm has aged past the TTL.
   if (!entry || now - entry.at > WARM_TTL_MS) {
     const p = (async () => {
-      // Only Claude/Codex expose the `accounts_test_probe_live` warm round-trip
-      // that refreshes an OAuth token as a side effect. For them, run the probe.
-      if (backend === "claude_cli" || backend === "codex_cli") {
-        try { await invoke("accounts_test_probe_live", { backend }); }
-        catch { /* ignore — warm-up is best-effort */ }
-      }
+      // Run the live probe round-trip for EVERY subscription backend — invoking
+      // the CLI refreshes its OAuth access token as a side effect on all of
+      // them. This was claude/codex-only, which made both the proactive 25-min
+      // re-warm AND the reactive 401 clear-and-rewarm a NO-OP for Kimi/Gemini:
+      // their token expired mid-run and the retry re-ran the same stale creds
+      // until the backoff died — the "inconsistent logouts, worst with Kimi".
+      try { await invoke("accounts_test_probe_live", { backend }); }
+      catch { /* ignore — warm-up is best-effort */ }
       // THE AGENTIC-TEAM 401 FIX: a sandboxed project runs the CLI inside WSL
       // against a COPY of the Windows credentials; warming only refreshes the
       // Windows token, so the in-sandbox copy goes stale → persistent 401. After
@@ -1430,7 +1432,10 @@ export function isTransientNetError(msg: string): boolean {
   // Network blips AND transient SERVER-side errors that clear on a retry: an
   // Anthropic 529 "Overloaded", 503/502 service-unavailable, and 429 rate limits
   // are all "try again in a moment" — not a real failure of the agent's work.
-  return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
+  // "timed out" (two words) is what wait_cli_child's kill emits — without it a
+  // 20-min CLI timeout was UNCLASSIFIED and killed the whole run instead of
+  // retrying like every other transient failure.
+  return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|timed out|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
 }
 
 /// Sleep that rejects immediately if the run is cancelled mid-wait.
@@ -3387,7 +3392,13 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // Lean profile: small rosters get the trimmed injection stack (shorter memory
   // hint + halved snapshot/RAG budgets) — smallest safe activation per run.
   setLeanRun(team.agents.length <= 3);
-  await refreshTeamMemorySnapshot();
+  // Run-start prep used to sit BEFORE any phase change, so the UI froze on the
+  // previous state with zero feedback ("is memory working?"). Announce the
+  // phase first, then overlap the independent prep steps instead of running
+  // them serially — memory snapshot (bounded: per-invoke timeout inside) and
+  // the skill mirror don't depend on each other.
+  hooks.onPhase("preparing");
+  const memReady = refreshTeamMemorySnapshot();
   // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
   // provider can self-load a skill by reading it with their native file tool
   // (load_skill only reaches local models). Awaited (a fast local copy) so the
@@ -3401,6 +3412,9 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       hooks.onSystemWarning?.(`⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}`);
     }
   }
+  // Snapshot must be resolved before prompts are built below (they read it
+  // synchronously via getTeamMemorySnapshot).
+  await memReady;
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]

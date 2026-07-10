@@ -25,7 +25,14 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 /// One-shot subscription CLI calls must eventually return a final blob. If they
 /// loop internally (Kimi can repeatedly call Shell in --print mode without ever
 /// producing a final answer), the UI otherwise stays "working" forever.
+///
+/// IDLE timeout, not wall-clock: the old fixed 20-min wall killed a
+/// slow-but-alive agent turn that was still producing output (worst on Kimi,
+/// which has no streaming path and always lands here). Now the clock resets on
+/// every stdout/stderr byte, so only true SILENCE kills the child; a hard
+/// absolute ceiling below backstops a runaway that logs forever.
 const CLI_CHILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+const CLI_CHILD_ABS_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
 /// Quote an argument for cmd.exe so it round-trips through a .cmd /
 /// .bat shim to the underlying program (npm installs Claude Code as
@@ -114,26 +121,82 @@ fn unregister_cli_child(pid: u32) {
 
 /// Wait for a registered CLI child and drop it from the kill registry no
 /// matter how the wait ends. Used by every one-shot `*_cli_complete` path.
+///
+/// Liveness-aware: stdout/stderr are drained by reader threads that bump an
+/// activity stamp, and the timeout is measured from the LAST byte of output —
+/// a still-working CLI is never killed mid-stream (also prevents the classic
+/// full-pipe deadlock: the old code didn't read until exit, so a chatty child
+/// could block forever on a full pipe buffer and then be "timed out").
 fn wait_cli_child(
     mut child: std::process::Child,
     pid: u32,
 ) -> std::io::Result<std::process::Output> {
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+
     let started = Instant::now();
-    loop {
-        if child.try_wait()?.is_some() {
-            let out = child.wait_with_output();
-            unregister_cli_child(pid);
-            return out;
+    // ms-since-start of the last output byte; 0 = no output yet.
+    let last_activity = Arc::new(AtomicU64::new(0));
+    let mut readers = Vec::new();
+    let mut spawn_reader = |pipe: Option<Box<dyn Read + Send>>| -> Arc<Mutex<Vec<u8>>> {
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        if let Some(mut r) = pipe {
+            let buf2 = Arc::clone(&buf);
+            let act = Arc::clone(&last_activity);
+            readers.push(std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match r.read(&mut chunk) {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            if let Ok(mut b) = buf2.lock() {
+                                b.extend_from_slice(&chunk[..n]);
+                            }
+                            act.store(started.elapsed().as_millis() as u64, AtomicOrdering::Relaxed);
+                        }
+                    }
+                }
+            }));
         }
-        if started.elapsed() >= CLI_CHILD_TIMEOUT {
+        buf
+    };
+    let stdout_buf = spawn_reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stderr_buf = spawn_reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+
+    let take = |b: &Arc<Mutex<Vec<u8>>>| b.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+
+    loop {
+        if let Some(status) = child.try_wait()? {
+            // Let the readers drain whatever the child flushed on exit.
+            for t in readers {
+                let _ = t.join();
+            }
+            unregister_cli_child(pid);
+            return Ok(std::process::Output {
+                status,
+                stdout: take(&stdout_buf),
+                stderr: take(&stderr_buf),
+            });
+        }
+        let idle = started
+            .elapsed()
+            .saturating_sub(Duration::from_millis(last_activity.load(AtomicOrdering::Relaxed)));
+        if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
+            for t in readers {
+                let _ = t.join();
+            }
             unregister_cli_child(pid);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
                 format!(
-                    "CLI child timed out after {}s and was killed",
-                    CLI_CHILD_TIMEOUT.as_secs()
+                    "CLI child timed out ({}) and was killed",
+                    if started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+                        format!("absolute ceiling {}s", CLI_CHILD_ABS_TIMEOUT.as_secs())
+                    } else {
+                        format!("{}s with no output", CLI_CHILD_TIMEOUT.as_secs())
+                    }
                 ),
             ));
         }
@@ -1944,6 +2007,13 @@ fn looks_like_cli_auth_error(text: &str) -> bool {
         || low.contains("oauth token has expired")
         || low.contains("please run /login")
         || low.contains("please log in")
+        // Kimi/Gemini phrasings — this is the ONE shared vocabulary for every
+        // provider (model-agnostic rule); kimi_output_auth_failed delegates here.
+        || low.contains("not logged in")
+        || low.contains("login expired")
+        || low.contains("signed out")
+        || low.contains("token expired")
+        || low.contains("credentials have expired")
 }
 
 /// A TRANSIENT server-side error the CLI prints as its reply — Anthropic 529
@@ -2155,6 +2225,11 @@ pub async fn codex_cli_complete(
             .unwrap_or_else(|| String::from_utf8_lossy(&output.stdout).trim().to_string());
         if reply.is_empty() {
             return Err("codex CLI returned an empty reply".to_string());
+        }
+        // Exit-0 auth envelope — the streaming codex path already checks this;
+        // the one-shot path let a printed 401 through as the agent's answer.
+        if looks_like_cli_auth_error(&reply) {
+            return Err(reply);
         }
         Ok(reply)
     })
@@ -3499,12 +3574,13 @@ fn kimi_output_llm_unset(out: &str) -> bool {
 /// hand the error text back as the agent's answer and the retry layer would not
 /// recognize it as an auth failure.
 fn kimi_output_auth_failed(out: &str) -> bool {
+    // Shared vocabulary first (model-agnostic — covers Anthropic/OpenAI-style
+    // phrasings a Moonshot proxy can emit), plus kimi's own bare forms.
+    if looks_like_cli_auth_error(out) {
+        return true;
+    }
     let l = out.to_ascii_lowercase();
-    l.contains("401")
-        || l.contains("unauthorized")
-        || l.contains("not logged in")
-        || l.contains("login expired")
-        || l.contains("signed out")
+    l.contains("401") || l.contains("unauthorized")
 }
 
 /// `--model` args for a kimi invocation, resilient to the CLI's config:
@@ -4161,7 +4237,14 @@ pub async fn gemini_cli_complete(
             return Err(cli_exit_err("gemini", output.status.code().unwrap_or(-1), &stdout, &stderr));
         }
         let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
-        Ok(stdout.trim().to_string())
+        let reply = stdout.trim().to_string();
+        // Exit-0 auth envelope — same check every other CLI path does: gemini
+        // can print the auth failure as its "answer" and exit 0, which sailed
+        // through as the agent's reply so the token-refresh retry never fired.
+        if looks_like_cli_auth_error(&reply) {
+            return Err(reply);
+        }
+        Ok(reply)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?

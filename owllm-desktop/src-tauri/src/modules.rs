@@ -96,6 +96,8 @@ pub enum Platform {
     WindowsX86_64,
     #[serde(rename = "linux-x86_64")]
     LinuxX86_64,
+    #[serde(rename = "linux-aarch64")]
+    LinuxAarch64,
     #[serde(rename = "macos-aarch64")]
     MacOsAarch64,
 }
@@ -110,17 +112,28 @@ impl Platform {
         {
             Platform::LinuxX86_64
         }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            Platform::LinuxAarch64
+        }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             Platform::MacOsAarch64
         }
+        // No silent fallback: claiming another platform makes the resolver
+        // hand out binaries that can't run here (an aarch64 build used to
+        // masquerade as windows-x86_64 and download Windows llama-server).
+        // A new target must be added to the enum + registry explicitly.
         #[cfg(not(any(
             all(target_os = "windows", target_arch = "x86_64"),
             all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
             all(target_os = "macos", target_arch = "aarch64"),
         )))]
         {
-            Platform::WindowsX86_64
+            compile_error!(
+                "unsupported target: add it to modules::Platform and the module registry"
+            );
         }
     }
 }

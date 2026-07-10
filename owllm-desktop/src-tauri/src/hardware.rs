@@ -173,6 +173,16 @@ async fn probe() -> HardwareInfo {
         if let Some(cpu) = sys.cpus().first() {
             info.cpu_name = cpu.brand().to_string();
         }
+        // ARM Linux: /proc/cpuinfo has no "model name", so sysinfo's brand
+        // comes back empty and the UI shows "CPU: —". The device-tree model
+        // ("NVIDIA Jetson AGX Thor Developer Kit", "Raspberry Pi 5", …) is
+        // the best human-readable name those boards have.
+        #[cfg(target_os = "linux")]
+        if info.cpu_name.trim().is_empty() {
+            if let Ok(model) = std::fs::read_to_string("/proc/device-tree/model") {
+                info.cpu_name = model.trim_end_matches('\0').trim().to_string();
+            }
+        }
         info.cpu_cores = sys.physical_core_count().unwrap_or(0) as u32;
         info.cpu_threads = sys.cpus().len() as u32;
         info.ram_total_gb = bytes_to_gb(sys.total_memory());
@@ -267,7 +277,14 @@ fn parse_nvidia_smi_gpus(text: &str) -> Vec<GpuInfo> {
                 return None;
             }
             let name = parts[0].to_string();
-            let total_mib: u64 = parts[1].parse().ok()?;
+            // Jetson-class boards (unified memory) report "[N/A]" for
+            // memory.total — a real GPU with no dedicated VRAM pool. Keep
+            // it as unified/0 so apply_unified_budgets derives the budget
+            // from system RAM instead of dropping the GPU entirely.
+            let (total_mib, unified) = match parts[1].parse::<u64>() {
+                Ok(v) => (v, false),
+                Err(_) => (0, true),
+            };
             let uuid = parts[2].to_string();
             Some(GpuInfo {
                 index: i as u32,
@@ -275,7 +292,7 @@ fn parse_nvidia_smi_gpus(text: &str) -> Vec<GpuInfo> {
                 vram_gb: (total_mib as f64) / 1024.0,
                 uuid,
                 selected: true,
-                unified: false,
+                unified,
             })
         })
         .collect()
@@ -509,7 +526,8 @@ fn apply_unified_budgets(gpus: &mut [GpuInfo], ram_total_gb: f64) {
     for g in gpus.iter_mut() {
         if g.unified {
             if g.vram_gb <= 0.1 {
-                // Apple Silicon via system_profiler (no vram field).
+                // Apple Silicon via system_profiler (no vram field) and
+                // NVIDIA Jetson via nvidia-smi (memory.total = "[N/A]").
                 g.vram_gb = ram_total_gb * 0.75;
             }
         } else if is_integrated_gpu(&g.name) {

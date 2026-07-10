@@ -49,7 +49,7 @@ section("2) congruent card → clean");
 const GOOD = {
   name: "X", goal: "Build the thing and publish it.", mode: "team",
   verify: { command: "npm run build", lanes: { backend: "cargo check" } },
-  release: { versionFile: "src-tauri/tauri.conf.json", stagePath: "app", command: "publish.sh" },
+  release: { versionFile: "src-tauri/tauri.conf.json", stagePath: "app", command: "publish.sh", repo: "org/app" },
 };
 const goodFindings = lintProjectCard(GOOD, {
   versionFileExists: true, stagePathExists: true,
@@ -69,6 +69,12 @@ check("stagePath doesn't exist → error",
   has(lintProjectCard({ release: { versionFile: "x.json", stagePath: "ghost", command: "x" } }, { versionFileExists: true, stagePathExists: false }), "release.stagePath", "error"));
 check("empty release.command → warn",
   has(lintProjectCard({ release: { versionFile: "x.json", command: "" } }, { versionFileExists: true }), "release.command", "warn"));
+check("empty release.repo → warn (script-default trap for non-OwLLM projects)",
+  has(lintProjectCard({ release: { versionFile: "x.json", command: "x" } }, { versionFileExists: true }), "release.repo", "warn"));
+check("malformed release.repo → error",
+  has(lintProjectCard({ release: { versionFile: "x.json", command: "x", repo: "not a repo" } }, { versionFileExists: true }), "release.repo", "error"));
+check("well-formed release.repo → no finding",
+  !has(lintProjectCard({ release: { versionFile: "x.json", command: "x", repo: "OwLLM/owllm" } }, { versionFileExists: true }), "release.repo"));
 
 // 4) publish intent but no release config → warn.
 section("4) publish goal, no release config");

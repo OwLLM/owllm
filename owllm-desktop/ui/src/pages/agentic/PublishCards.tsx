@@ -32,7 +32,12 @@ type WtMerge =
   | { status: "noChanges" }
   | { status: "error"; message: string };
 
-const SETTINGS_KEY = "publishCards:settings:v1";
+// v1 was ONE GLOBAL blob — editing publish settings on any project silently
+// applied them to every project AND permanently stopped the committed Project
+// Card from seeding this surface anywhere. v2 keys by project so settings can't
+// bleed across projects; the old global blob seeds a project once (migration).
+const LEGACY_SETTINGS_KEY = "publishCards:settings:v1";
+const settingsKey = (repoDir: string) => `publishCards:settings:v2:${repoDir}`;
 
 const defaultSettings = (): PublishSettings => ({
   visibility: "publish",
@@ -40,10 +45,10 @@ const defaultSettings = (): PublishSettings => ({
   sign: { thumbprint: "", subject: "", tsa: "http://time.certum.pl" },
 });
 
-const loadSettings = (): PublishSettings => {
+const loadSettings = (repoDir: string): PublishSettings => {
   const base = defaultSettings();
   try {
-    const raw = localStorage.getItem(SETTINGS_KEY);
+    const raw = localStorage.getItem(settingsKey(repoDir)) ?? localStorage.getItem(LEGACY_SETTINGS_KEY);
     if (!raw) return base;
     const parsed = JSON.parse(raw) as Partial<PublishSettings>;
     return {
@@ -56,21 +61,21 @@ const loadSettings = (): PublishSettings => {
   }
 };
 
-const saveSettings = (s: PublishSettings) => {
-  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); } catch { /* quota — non-fatal */ }
+const saveSettings = (repoDir: string, s: PublishSettings) => {
+  try { localStorage.setItem(settingsKey(repoDir), JSON.stringify(s)); } catch { /* quota — non-fatal */ }
 };
 
-const hasLocalSettings = () => {
-  try { return !!localStorage.getItem(SETTINGS_KEY); }
+const hasLocalSettings = (repoDir: string) => {
+  try { return !!localStorage.getItem(settingsKey(repoDir)); }
   catch { return false; }
 };
 
 /** Merge project-card release defaults into local settings. Card values are used only
  *  when the user has NOT saved a local override (so per-machine certs can still differ). */
-function mergeCardDefaults(base: PublishSettings, card: ProjectCard | null): PublishSettings {
+function mergeCardDefaults(base: PublishSettings, card: ProjectCard | null, repoDir: string): PublishSettings {
   if (!card?.release) return base;
   const next = { ...base };
-  if (!hasLocalSettings()) {
+  if (!hasLocalSettings(repoDir)) {
     if (card.release.mode === "host" || card.release.mode === "ci") next.mode = card.release.mode;
     if (card.release.sign) {
       const s = card.release.sign;
@@ -129,17 +134,20 @@ export default function PublishCards({
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [pubNotes, setPubNotes] = useState("");
-  const [settings, setSettings] = useState<PublishSettings>(loadSettings);
+  const [settings, setSettings] = useState<PublishSettings>(() => loadSettings(repoDir));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const mergeTarget = "main";
   const mounted = useRef(true);
 
+  // Settings are per-project — swap them when the project does.
+  useEffect(() => { setSettings(loadSettings(repoDir)); }, [repoDir]);
+
   const updateSettings = (patch: Partial<PublishSettings>) => {
     setSettings((prev) => {
       const next = { ...prev, ...patch, sign: { ...prev.sign, ...(patch.sign ?? {}) } };
-      saveSettings(next);
+      saveSettings(repoDir, next);
       return next;
     });
   };
@@ -165,14 +173,14 @@ export default function PublishCards({
   // Seed mode + signing from the committed Project Card when there is no local override.
   // This keeps the project's release rules in sync across machines and teammates.
   useEffect(() => {
-    if (!repoDir || hasLocalSettings()) return;
+    if (!repoDir || hasLocalSettings(repoDir)) return;
     let live = true;
     (async () => {
       try {
         const txt = await invoke<string>("tool_read_file", { path: ".owllm/project.json", cwd: repoDir });
         const card = parseProjectCard(txt);
         if (live && card?.release) {
-          setSettings(prev => mergeCardDefaults(prev, card));
+          setSettings(prev => mergeCardDefaults(prev, card, repoDir));
         }
       } catch { /* no card or malformed — keep defaults */ }
     })();

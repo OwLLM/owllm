@@ -19,6 +19,10 @@ export type ProjectCard = {
     versionScheme?: string;
     stagePath?: string;
     command?: string;
+    /** GitHub repo releases publish TO ("owner/name"). May differ from origin —
+     *  OwLLM's source is private while releases go to a public releases-only repo.
+     *  Reaches the scripts as $OWLLM_RELEASE_REPO; empty = the script's default. */
+    repo?: string;
     /** "host" builds and signs on the local machine; "ci" only tags/pushes and lets GitHub Actions build. */
     mode?: "host" | "ci";
     /** Windows Authenticode signing config. Empty/missing = unsigned. */
@@ -118,6 +122,14 @@ export function lintProjectCard(card: ProjectCard | null | undefined, facts: Car
     }
     if (!rel.command || !rel.command.trim()) {
       out.push({ severity: "warn", field: "release.command", problem: "release.command is empty — there is no command to actually build/publish.", fix: "Set release.command to your build+publish script." });
+    }
+    // Target repo: without it, `gh release` falls back to the publish script's
+    // built-in default — correct only for OwLLM itself. Malformed ⇒ error.
+    const repo = (rel.repo ?? "").trim();
+    if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+      out.push({ severity: "error", field: "release.repo", problem: `release.repo "${repo}" is not an "owner/name" GitHub repo.`, fix: 'Set release.repo to the target repo, e.g. "OwLLM/owllm".' });
+    } else if (!repo) {
+      out.push({ severity: "warn", field: "release.repo", problem: "release.repo is empty — releases will go to the publish script's default repo, which is only right for OwLLM itself.", fix: 'Set release.repo to the GitHub repo releases should publish to (e.g. "your-org/your-app").' });
     }
   } else if (wantsPublish) {
     // The goal expects a publish but there's no release config to do it by rule.

@@ -408,6 +408,28 @@ pub async fn publish_readiness(
                     .collect()
             },
         });
+        // Target-repo probe: releases go to the Project Card's release.repo (or
+        // the publish script's default), which is usually NOT origin — OwLLM's
+        // origin is the private source repo while releases go to OwLLM/owllm.
+        // Probing only origin let a green READY lie about the actual gh target.
+        let card_repo = std::fs::read_to_string(std::path::Path::new(&host).join(".owllm/project.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.pointer("/release/repo").and_then(|r| r.as_str().map(String::from)))
+            .filter(|r| !r.trim().is_empty());
+        if let Some(target) = &card_repo {
+            let (tgt_ok, tgt_out) = run_probe("gh", &["repo", "view", target, "--json", "name"]);
+            checks.push(ReadyCheck {
+                id: "target".into(),
+                label: "Release target repo reachable".into(),
+                ok: tgt_ok,
+                detail: if tgt_ok {
+                    format!("{target} OK")
+                } else {
+                    format!("{target}: {tgt_out} — check release.repo on the Project Card + gh auth")
+                },
+            });
+        }
         let ver = [
             "owllm-desktop/src-tauri/tauri.conf.json",
             "src-tauri/tauri.conf.json",

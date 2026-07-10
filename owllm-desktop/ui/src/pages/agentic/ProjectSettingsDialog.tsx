@@ -148,6 +148,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [relVersionFile, setRelVersionFile] = useState("");
   const [relStagePath, setRelStagePath] = useState("");
   const [relCommand, setRelCommand] = useState("");
+  const [relRepo, setRelRepo] = useState("");                        // release.repo — gh target "owner/name"
   const [relMode, setRelMode] = useState<"host" | "ci">("host");
   const [relSignThumb, setRelSignThumb] = useState("");
   const [relSignSubject, setRelSignSubject] = useState("");
@@ -190,7 +191,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     if (!open || mode === "new") return;
     const cwd = effectiveCwd || location;
     setCardRaw(null); setCardExists(false); setCardGoal(""); setCardVerify("");
-    setCardMode(""); setRelVersionFile(""); setRelStagePath(""); setRelCommand(""); setRelMode("host");
+    setCardMode(""); setRelVersionFile(""); setRelStagePath(""); setRelCommand(""); setRelRepo(""); setRelMode("host");
     setRelSignThumb(""); setRelSignSubject(""); setRelSignTsa("http://time.certum.pl");
     setShowRelease(false); setLegacyVerifyJson(false); setCardMsg(null); setFindings(null);
     if (!cwd) return;
@@ -215,6 +216,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
         setRelVersionFile(card.release?.versionFile ?? "");
         setRelStagePath(card.release?.stagePath ?? "");
         setRelCommand(card.release?.command ?? "");
+        setRelRepo(card.release?.repo ?? "");
         setRelMode(card.release?.mode === "ci" ? "ci" : "host");
         setRelSignThumb(card.release?.sign?.thumbprint ?? "");
         setRelSignSubject(card.release?.sign?.subject ?? "");
@@ -301,14 +303,15 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
       if (vc) card.verify = { ...(card.verify ?? {}), command: vc };
       else if (card.verify) { delete card.verify.command; if (!card.verify.lanes || !Object.keys(card.verify.lanes).length) delete card.verify; }
 
-      const vf = relVersionFile.trim(), sp = relStagePath.trim(), rc = relCommand.trim();
+      const vf = relVersionFile.trim(), sp = relStagePath.trim(), rc = relCommand.trim(), rr = relRepo.trim();
       const st = relSignThumb.trim(), ss = relSignSubject.trim(), stsa = relSignTsa.trim();
       const hasSign = st || ss;
-      if (vf || sp || rc || relMode !== "host" || hasSign) {
+      if (vf || sp || rc || rr || relMode !== "host" || hasSign) {
         card.release = { ...(card.release ?? {}) };
         if (vf) card.release.versionFile = vf; else delete card.release.versionFile;
         if (sp) card.release.stagePath = sp; else delete card.release.stagePath;
         if (rc) card.release.command = rc; else delete card.release.command;
+        if (rr) card.release.repo = rr; else delete card.release.repo;
         if (relMode === "ci") card.release.mode = "ci"; else delete card.release.mode;
         if (hasSign) {
           card.release.sign = {
@@ -638,6 +641,10 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingLeft: 12, borderLeft: "2px solid var(--border)" }}>
                   <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
                     When a goal says “publish”, the release runs by rule: bump → commit → tag → push, then either build locally or let GitHub Actions finish it.
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <label style={LBL}>Release repo <span style={{ opacity: 0.6, fontWeight: 400, textTransform: "none", letterSpacing: 0 }}>— GitHub repo releases publish TO (may differ from origin)</span></label>
+                    <input value={relRepo} onChange={e => setRelRepo(e.target.value)} placeholder='e.g. your-org/your-app — empty = the publish script&apos;s default' style={INPUT} />
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                     <label style={LBL}>Version file</label>

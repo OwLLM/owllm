@@ -13,6 +13,7 @@
     "versionFile": "owllm-desktop/src-tauri/tauri.conf.json",
     "versionScheme": "odometer-100",
     "stagePath": "owllm-desktop",
+    "repo": "OwLLM/owllm",
     "mode": "host",
     "sign": {
       "thumbprint": "86D13D491414359FD09379181D4D1CC2B5E4E6AF",

@@ -67,10 +67,14 @@ PUBLISH_CMD='bash "owllm-desktop/scripts/publish-release.sh"'
 if [ -f "$CARD" ]; then
   _rd() { CARD="$CARD" K="$1" node -e 'try{const r=(require(process.env.CARD).release)||{};process.stdout.write(String(r[process.env.K]||""))}catch{}'; }
   _rds() { CARD="$CARD" K="$1" node -e 'try{const s=((require(process.env.CARD).release)||{}).sign||{};process.stdout.write(String(s[process.env.K]||""))}catch{}'; }
-  vf="$(_rd versionFile)"; sp="$(_rd stagePath)"; pc="$(_rd command)"
+  vf="$(_rd versionFile)"; sp="$(_rd stagePath)"; pc="$(_rd command)"; rr="$(_rd repo)"
   [ -n "$vf" ] && VERSION_FILE="$vf"
   [ -n "$sp" ] && STAGE_PATH="$sp"
   [ -n "$pc" ] && PUBLISH_CMD="$pc"
+  # release.repo — the gh target ("owner/name"). Exported so the publish command
+  # (canonical publish-release.sh or a card override) targets the card's repo
+  # instead of a hardcoded default. Caller env wins.
+  [ -z "${OWLLM_RELEASE_REPO:-}" ] && [ -n "$rr" ] && export OWLLM_RELEASE_REPO="$rr"
   # Project Card can also commit the signing cert selector so teammates/machines share it.
   # Env vars from the caller (release.rs) take precedence.
   [ -z "${OWLLM_SIGN_THUMBPRINT:-}" ] && OWLLM_SIGN_THUMBPRINT="$(_rds thumbprint)"

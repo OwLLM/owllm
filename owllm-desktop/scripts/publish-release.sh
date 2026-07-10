@@ -16,7 +16,13 @@
 # calling this). Requires on PATH: cargo+mingw (build), node/npx (sign), gh (publish).
 set -euo pipefail
 
-REPO="OwLLM/owllm"
+# Target GitHub repo for `gh release` — resolution order:
+#   1. $OWLLM_RELEASE_REPO (exported by finish-and-publish.sh from the Project
+#      Card's release.repo, or set by the caller)
+#   2. release.repo read from the card directly (covers the direct
+#      publish_release dry-run/draft path that skips finish-and-publish.sh)
+#   3. the historical OwLLM default (card-less repos publish exactly as before)
+REPO="${OWLLM_RELEASE_REPO:-}"
 NOTES=""
 DRY_RUN=0
 DRAFT=0
@@ -35,6 +41,13 @@ done
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP="$(cd "$HERE/.." && pwd)"
 cd "$APP"
+
+# Finish resolving the target repo (see the note at REPO= above).
+if [ -z "$REPO" ] && [ -f "$APP/../.owllm/project.json" ]; then
+  REPO="$(CARD="$APP/../.owllm/project.json" node -e 'try{const r=(require(process.env.CARD).release)||{};process.stdout.write(String(r.repo||""))}catch{}' 2>/dev/null || true)"
+fi
+[ -n "$REPO" ] || REPO="OwLLM/owllm"
+echo "release target repo: $REPO"
 
 # Stream a verbatim copy of this run to .cache so a failure can be diagnosed
 # without relying on the app's log view (which truncates or may be closed).

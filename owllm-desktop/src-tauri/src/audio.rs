@@ -167,29 +167,34 @@ pub fn whisper_runtime_status() -> Result<WhisperRuntimeStatus, String> {
         binary_installed: binary.is_some(),
         binary_path,
         // True wherever whisper_runtime_install can fetch the binary itself:
-        // Windows (direct zip download) and Linux ARM64 (audio-stt module).
+        // Windows (direct zip download), Linux ARM64 and Apple Silicon
+        // (audio-stt module).
         binary_auto_install: cfg!(target_os = "windows")
-            || cfg!(all(target_os = "linux", target_arch = "aarch64")),
+            || cfg!(all(target_os = "linux", target_arch = "aarch64"))
+            || cfg!(all(target_os = "macos", target_arch = "aarch64")),
     })
 }
 
-/// Installs both the whisper.cpp binary (Windows only — Mac/Linux
-/// users get a clear error pointing at brew/apt) and the ggml-base.bin
+/// Installs both the whisper.cpp binary (direct download on Windows,
+/// the audio-stt module on Linux ARM64 / Apple Silicon; other platforms
+/// get a clear error pointing at brew/apt) and the ggml-base.bin
 /// model file. Emits `owllm:whisper:install:progress` events along the
 /// way so the UI can render a progress bar with phase labels.
 #[tauri::command]
 pub async fn whisper_runtime_install(
     app: tauri::AppHandle,
 ) -> Result<WhisperRuntimeStatus, String> {
-    // 1) Binary — auto-installable on Windows (direct download) and on
-    //    Linux ARM64 (the audio-stt module, built for aarch64). Other
-    //    platforms get an honest per-arch pointer at their package manager.
+    // 1) Binary — auto-installable on Windows (direct download), Linux
+    //    ARM64 and Apple Silicon (the audio-stt module, built per-arch).
+    //    Other platforms get an honest pointer at their package manager.
     if find_whisper_cli().is_none() {
         if cfg!(target_os = "windows") {
             emit_progress(&app, "binary", 0, 0, false);
             install_whisper_binary_windows(&app).await?;
             emit_progress(&app, "binary", 1, 1, true);
-        } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        } else if cfg!(all(target_os = "linux", target_arch = "aarch64"))
+            || cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        {
             emit_progress(&app, "binary", 0, 0, false);
             let snap = crate::modules::HardwareSnapshot::probe().await;
             let mgr = app.state::<crate::modules::ModuleManager>();

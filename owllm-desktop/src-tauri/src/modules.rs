@@ -1202,6 +1202,25 @@ mod tests {
     }
 
     #[test]
+    fn macos_runtime_modules_resolve() {
+        // python-runtime, mcp-toolchain, and audio-stt must all have an
+        // installable macos-aarch64 variant (same gap the ARM64 Linux
+        // variants closed — the Mac wizard showed everything but
+        // local-inference as "no variant for this OS").
+        let r = parse_registry();
+        for (id, expect) in [
+            ("python-runtime", "python-3.11-embed-macos-arm64"),
+            ("mcp-toolchain", "mcp-toolchain-node-uv-macos-arm64"),
+            ("audio-stt", "audio-stt-whisper-cli-macos-arm64"),
+        ] {
+            let m = r.modules.iter().find(|m| m.id == id).unwrap();
+            let (v, _) = resolve_variant(m, &apple_silicon(), Channel::Stable)
+                .unwrap_or_else(|e| panic!("{id} unresolvable on macos-aarch64: {e:?}"));
+            assert_eq!(v.id, expect);
+        }
+    }
+
+    #[test]
     fn windows_arm64_degrades_with_arch_named() {
         // No windows-aarch64 builds are published yet — the resolver must
         // say so (NoMatchingPlatform → the wizard names the arch) rather

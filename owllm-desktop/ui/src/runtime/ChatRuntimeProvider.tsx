@@ -13,6 +13,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { chatRuntime, ChatRuntimeStore } from "./chatRuntime";
 import { applyCachedRemoteCatalogue, refreshRemoteCatalogue } from "../pages/agentic/cloudCatalogue";
 import { startVaultSync } from "./vaultSync";
+import { migratePageSettings } from "../state/pageSettings";
 
 // Apply the last cached remote model catalogue synchronously at module
 // load so the picker shows up-to-date models on the very first render,
@@ -47,6 +48,11 @@ export function ChatRuntimeProvider({ children }: { children: React.ReactNode })
     // models (e.g. a newly-released Claude) appear in the picker with no
     // rebuild. Failures keep the cached/bundled catalogue.
     refreshRemoteCatalogue(invoke).catch(() => {});
+
+    // Consolidate legacy per-page/per-project model prefs into the sync-ready
+    // settings document BEFORE the vault engine takes its first snapshot, so a
+    // fresh device seeds and pushes the migrated copy. Idempotent + local-only.
+    try { migratePageSettings(); } catch { /* never block boot on a pref migration */ }
 
     // Cross-device sync: adopt newer state from the user's owllm-vault, then
     // keep it pushed. No-ops when logged out / no vault (local-only).

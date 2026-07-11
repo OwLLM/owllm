@@ -15,6 +15,7 @@ import { redactForReport } from "./redact";
 // (shared ModelPicker catalogue + the shared dispatch paths) — never a
 // parallel model list (P0-8 Slice 5).
 import ModelPicker, { buildEntries, type AccountsStatusLite } from "../pages/agentic/ModelPicker";
+import { getSetting, setSetting, subscribeSettings, scope, SettingKey } from "../state/pageSettings";
 import {
   streamLocalChat,
   streamChatCompletion,
@@ -333,13 +334,21 @@ export default function WatcherDrawer({
   // User-chosen model via the SHARED ModelPicker (same catalogue as every
   // other surface — local models, tuned, subscriptions, API keys, Auto).
   // Empty = the Watcher's default policy (running local first). Persisted.
-  const [pickedModel, setPickedModel] = React.useState<string>(() => {
-    try { return localStorage.getItem("owllm:watcher:model") ?? ""; } catch { return ""; }
-  });
+  // Persisted via the shared sync-ready settings layer (global scope) so the
+  // Watcher's model follows the user across devices. Empty = default policy.
+  const [pickedModel, setPickedModel] = React.useState<string>(
+    () => getSetting<string>(scope.global(), SettingKey.watcherModel, "") ?? "",
+  );
   const pickModel = (id: string) => {
     setPickedModel(id);
-    try { localStorage.setItem("owllm:watcher:model", id); } catch { /* ignore */ }
+    setSetting(scope.global(), SettingKey.watcherModel, id);
   };
+  // Re-read on any settings change so the boot-time legacy migration and any
+  // cross-device sync (vault adoption) update the picker in place, rather than
+  // stranding the initial (possibly pre-migration) empty read.
+  React.useEffect(() => subscribeSettings(() => {
+    setPickedModel(getSetting<string>(scope.global(), SettingKey.watcherModel, "") ?? "");
+  }), []);
   // While capturing, the Watcher steps OUT of the shot (stays mounted,
   // visibility hidden) so the screenshot shows the app/bug BEHIND it.
   const [selfHidden, setSelfHidden] = React.useState(false);

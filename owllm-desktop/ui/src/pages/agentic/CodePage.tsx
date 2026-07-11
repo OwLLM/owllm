@@ -13,6 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import PublishCards from "./PublishCards";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
+import { getSetting, setSetting, scope, SettingKey } from "../../state/pageSettings";
 import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
@@ -169,13 +170,27 @@ function loadPageSession(pageId: string): CodeState | null {
     const raw = localStorage.getItem(pageSessionKey(pageId));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
-    return closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, busy: false });
+    const st = closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, busy: false });
+    // The chosen model lives in the sync-ready settings layer (owllm:settings),
+    // NOT only in this blob: this blob carries the machine-specific workspace
+    // path and is denied from vault sync, so a model kept only here could never
+    // follow the user to another PC. A synced value wins over the blob copy.
+    const m = getSetting<string>(scope.page(pageId), SettingKey.model);
+    if (m != null) st.modelId = m;
+    const m2 = getSetting<string>(scope.page(pageId), SettingKey.secondaryModel);
+    if (m2 != null) st.secondaryModelId = m2;
+    return st;
   } catch { return null; }
 }
 function savePageSession(pageId: string, s: CodeState | null | undefined): void {
   if (!s) return;
   try { localStorage.setItem(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false })); }
   catch { /* quota / unavailable */ }
+  // Mirror the model choice into the sync-ready settings layer (see load).
+  // setSetting treats ""/undefined as "clear", and no-op writes short-circuit,
+  // so this neither persists an empty pick nor churns on unrelated state saves.
+  setSetting(scope.page(pageId), SettingKey.model, s.modelId || undefined);
+  setSetting(scope.page(pageId), SettingKey.secondaryModel, s.secondaryModelId || undefined);
 }
 function dropPageSession(pageId: string): void {
   try { localStorage.removeItem(pageSessionKey(pageId)); } catch { /* best effort */ }

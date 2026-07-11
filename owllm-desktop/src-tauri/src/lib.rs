@@ -510,6 +510,8 @@ pub fn run() {
             signing::signing_status,
             signing::signing_apple_save,
             signing::signing_apple_import_p12,
+            signing::signing_apple_import_cert,
+            signing::signing_apple_gen_csr,
             signing::signing_windows_save,
             signing::signing_clear,
             signing::signing_export_env,

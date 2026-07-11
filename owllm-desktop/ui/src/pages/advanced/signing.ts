@@ -7,6 +7,8 @@ export type AppleStatus = {
   hasCertificate: boolean;
   hasCertificatePassword: boolean;
   hasAppPassword: boolean;
+  /** A key from "Generate signing request" is stored — a bare Apple .cer can be imported. */
+  hasPrivateKey: boolean;
   signingIdentity: string;
   appleId: string;
   teamId: string;
@@ -56,6 +58,24 @@ export async function signingAppleSave(input: AppleSaveInput): Promise<SigningSt
  *  parses the identity + expiry via openssl. */
 export async function signingAppleImportP12(path: string, password: string): Promise<SigningStatus> {
   return invoke<SigningStatus>("signing_apple_import_p12", { path, password });
+}
+
+export type CsrResult = {
+  /** Absolute path of the written .certSigningRequest (upload this at Apple's portal). */
+  csrPath: string;
+  csrPem: string;
+};
+
+/** No-Mac path, step 1: generate a private key (stored encrypted) + a CSR file
+ *  to upload at Apple's "Create a certificate" page. */
+export async function signingAppleGenCsr(commonName: string, email: string): Promise<CsrResult> {
+  return invoke<CsrResult>("signing_apple_gen_csr", { commonName, email });
+}
+
+/** No-Mac path, step 2: import the bare .cer/.cert/.crt/.pem Apple issues —
+ *  paired with the generated key into the .p12 the pipeline needs. */
+export async function signingAppleImportCert(path: string): Promise<SigningStatus> {
+  return invoke<SigningStatus>("signing_apple_import_cert", { path });
 }
 
 export async function signingWindowsSave(

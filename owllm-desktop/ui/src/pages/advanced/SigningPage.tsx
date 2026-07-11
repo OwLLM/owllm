@@ -17,9 +17,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { SURFACE, TEXT, BORDER, BUTTON, INPUT, banner } from "../../theme/styles";
 import {
-  signingStatus, signingAppleSave, signingAppleImportP12, signingWindowsSave,
+  signingStatus, signingAppleSave, signingAppleImportP12, signingAppleImportCert,
+  signingAppleGenCsr, signingWindowsSave,
   signingClear, signingExportEnv, signingPushGithub,
-  type SigningStatus, type AppleStatus, type WindowsStatus,
+  type SigningStatus, type AppleStatus, type WindowsStatus, type CsrResult,
 } from "./signing";
 
 const APPLE_PORTAL = "https://developer.apple.com/account/resources/certificates/add";
@@ -99,13 +100,25 @@ function AppleCard({
     }
   }, [apple]);
 
-  async function pickP12() {
+  async function pickCertificate() {
     try {
       const path = await invoke<string | null>("pick_file", {
-        title: "Choose your Developer ID .p12",
-        filters: [["Certificate", ["p12", "pfx"]]],
+        title: "Choose your certificate (.p12 from Keychain, or the .cer Apple downloads)",
+        filters: [["Certificate", ["p12", "pfx", "cer", "cert", "crt", "pem", "der"]]],
       });
-      if (path) setAskP12(path);
+      if (!path) return;
+      // A .p12/.pfx carries the key and needs its passphrase; the bare
+      // .cer/.cert Apple serves has no password — import it directly (paired
+      // with the key from "Generate signing request").
+      if (/\.(p12|pfx)$/i.test(path)) { setAskP12(path); return; }
+      setBusy(true); setMsg(null);
+      try {
+        await signingAppleImportCert(path);
+        await onChange();
+        setMsg({ tone: "success", text: "Certificate imported and paired with your key. Fill in the identity/Team ID if they weren't detected, then Save." });
+      } catch (e) {
+        setMsg({ tone: "error", text: `Import failed: ${e}` });
+      } finally { setBusy(false); }
     } catch (e) { setMsg({ tone: "error", text: `File picker failed: ${e}` }); }
   }
 
@@ -183,16 +196,19 @@ function AppleCard({
         <ExpiryChip daysLeft={daysLeft} notAfterMs={apple?.certNotAfterMs ?? 0} />
       </div>
 
-      <Row label="Certificate (.p12)" hint="Contains the Developer ID cert + private key.">
+      <Row label="Certificate (.p12 or Apple's .cer)"
+        hint="A .p12 (Keychain export) carries cert + private key. Apple's portal downloads a bare .cer — import it after generating your signing request below, and OwLLM pairs it with the key it holds.">
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <StoredDot stored={apple?.hasCertificate ?? false} />
           <span style={{ ...TEXT.muted, fontSize: 12 }}>
             {apple?.hasCertificate ? "Stored on this machine" : "Not stored"}
             {apple?.certSubject ? ` · ${apple.certSubject}` : ""}
           </span>
-          <button disabled={busy} onClick={pickP12} style={BUTTON.ghost}>Import .p12…</button>
+          <button disabled={busy} onClick={pickCertificate} style={BUTTON.ghost}>Import certificate…</button>
         </div>
       </Row>
+
+      <CsrSection apple={apple} appleId={appleId} identity={identity} busy={busy} setBusy={setBusy} setMsg={setMsg} onChange={onChange} />
 
       <Row label="Signing identity" hint='"Developer ID Application: Name (TEAMID)" — auto-detected from the .p12 when possible.'>
         <input style={{ ...INPUT.field, width: "100%" }} value={identity}
@@ -269,6 +285,102 @@ function AppleCard({
         />
       )}
     </section>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// CSR generation — the no-Mac path. Apple's portal only ISSUES a bare .cer;
+// the private key lives wherever the signing request was made. Making the
+// request here means OwLLM holds the key (encrypted), so the .cer import above
+// works on any OS — no Keychain Access required.
+// ---------------------------------------------------------------------------
+
+function CsrSection({
+  apple, appleId, identity, busy, setBusy, setMsg, onChange,
+}: {
+  apple: AppleStatus | null; appleId: string; identity: string;
+  busy: boolean; setBusy: (b: boolean) => void; setMsg: (m: Msg) => void;
+  onChange: () => Promise<void>;
+}) {
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [csr, setCsr] = useState<CsrResult | null>(null);
+
+  async function generate() {
+    const cn = name.trim() || identity.trim();
+    const em = email.trim() || appleId.trim();
+    if (!cn || !em) { setMsg({ tone: "error", text: "Enter your name and e-mail — Apple requires both on the request." }); return; }
+    if (apple?.hasPrivateKey && !window.confirm(
+      "A signing key already exists here. Generating a new request replaces it — a .cer issued for the OLD request can then no longer be imported. Continue?",
+    )) return;
+    setBusy(true); setMsg(null);
+    try {
+      const r = await signingAppleGenCsr(cn, em);
+      setCsr(r);
+      await onChange();
+      setMsg({ tone: "success", text: "Request generated — upload the file below at Apple's portal, then import the .cer it issues." });
+    } catch (e) {
+      setMsg({ tone: "error", text: `Couldn't generate the request: ${e}` });
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      <button onClick={() => setOpen((v) => !v)} style={{
+        background: "transparent", border: "none", padding: 0, cursor: "pointer",
+        color: "var(--fg-muted)", fontSize: 12, fontWeight: 600, textAlign: "left",
+        display: "flex", alignItems: "center", gap: 6,
+      }}>
+        <span>{open ? "▾" : "▸"}</span>
+        <StoredDot stored={apple?.hasPrivateKey ?? false} />
+        No Mac? Generate the signing request (CSR) here
+        {apple?.hasPrivateKey ? <span style={{ ...TEXT.subtle, fontWeight: 500 }}>· key stored — ready for the .cer</span> : null}
+      </button>
+      {open && (
+        <div style={{ ...SURFACE.panel, border: BORDER.subtle, borderRadius: 8, padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ ...TEXT.muted, fontSize: 11.5, lineHeight: 1.5 }}>
+            OwLLM creates the private key (kept encrypted on this machine) and a
+            <code> .certSigningRequest</code> file. Upload that file at Apple's
+            "Create a certificate" page, download the issued <code>.cer</code>, then use
+            <b> Import certificate…</b> above — the key and the .cer are combined automatically.
+          </div>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <Row label="Your name" style={{ flex: "1 1 200px" }}>
+              <input style={{ ...INPUT.field, width: "100%" }} value={name} placeholder="Name on the request"
+                onChange={(e) => setName(e.target.value)} />
+            </Row>
+            <Row label="E-mail" style={{ flex: "1 1 220px" }}>
+              <input style={{ ...INPUT.field, width: "100%" }} value={email} placeholder={appleId || "you@example.com"}
+                onChange={(e) => setEmail(e.target.value)} />
+            </Row>
+          </div>
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <button disabled={busy} onClick={generate} style={BUTTON.primary}>Generate request</button>
+            <button onClick={() => invoke("shell_open_url", { url: APPLE_PORTAL }).catch(() => {})} style={BUTTON.ghost}>
+              Apple portal ↗
+            </button>
+          </div>
+          {csr && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <div style={{ ...TEXT.fg, fontSize: 12 }}>
+                Saved to: <code style={{ fontSize: 11 }}>{csr.csrPath}</code>
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button style={BUTTON.ghost} onClick={async () => {
+                  try { await navigator.clipboard.writeText(csr.csrPath); setMsg({ tone: "success", text: "Path copied." }); }
+                  catch (e) { setMsg({ tone: "error", text: `Copy failed: ${e}` }); }
+                }}>Copy path</button>
+                <button style={BUTTON.ghost} onClick={async () => {
+                  try { await navigator.clipboard.writeText(csr.csrPem); setMsg({ tone: "success", text: "Request PEM copied." }); }
+                  catch (e) { setMsg({ tone: "error", text: `Copy failed: ${e}` }); }
+                }}>Copy PEM</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

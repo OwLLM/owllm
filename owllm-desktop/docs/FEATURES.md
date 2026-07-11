@@ -305,6 +305,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 - **Import `.p12`** → base64 into the store; identity + expiry are parsed
   best-effort via `openssl` when present (PATH or Git-for-Windows `usr/bin`), so
   the page shows an **expiry countdown** (amber ≤30 days, red once expired).
+- **No-Mac path (bare `.cer`)**: Apple's portal only *issues* a certificate —
+  the private key lives wherever the CSR was made. "Generate signing request"
+  (`signing_apple_gen_csr`) creates the key (stored encrypted) + a
+  `.certSigningRequest` file to upload at Apple's portal; importing the issued
+  `.cer`/`.cert`/`.crt`/`.pem` (`signing_apple_import_cert`) pairs it with that
+  key into the `.p12` the pipeline needs — with a pubkey match check so a .cer
+  from someone else's CSR is rejected with a clear message. Works on any OS.
 - **Push to GitHub Actions secrets** in one click via the `gh` CLI (which does
   the libsodium sealed-box); when `gh` is absent, "Copy values" yields the
   `NAME=value` lines to paste into Settings → Secrets.

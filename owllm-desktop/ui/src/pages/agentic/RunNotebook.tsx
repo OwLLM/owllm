@@ -214,6 +214,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const [newStep, setNewStep] = useState("");
   const [digestBusy, setDigestBusy] = useState(false);
   const [digestLogOpen, setDigestLogOpen] = useState(false);
+  const [doneOpen, setDoneOpen] = useState(false);
   const [digestError, setDigestError] = useState("");
   /// Transient per-step outcome of the last Feed click — the onFeed result
   /// ("queued" into a live run vs "dispatched" as a new goal vs "no-team")
@@ -300,13 +301,19 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const setStep = (id: string, patch: Partial<NotebookStep>) =>
     updateNotebook((prev) => ({ ...prev, steps: prev.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
   const removeStep = (id: string) => updateNotebook((prev) => ({ ...prev, steps: prev.steps.filter((s) => s.id !== id) }));
+  // Reorder within the VISIBLE (unfinished) cards only — done steps are hidden
+  // from the feed, so swap the two adjacent visible steps rather than raw array
+  // neighbours (a raw swap could silently trade places with a hidden done step).
   const moveStep = (id: string, dir: -1 | 1) =>
     updateNotebook((prev) => {
-      const i = prev.steps.findIndex((s) => s.id === id);
-      const j = i + dir;
-      if (i < 0 || j < 0 || j >= prev.steps.length) return prev;
+      const visible = prev.steps.filter((s) => s.status !== "done");
+      const vi = visible.findIndex((s) => s.id === id);
+      const vj = vi + dir;
+      if (vi < 0 || vj < 0 || vj >= visible.length) return prev;
+      const ai = prev.steps.findIndex((s) => s.id === visible[vi].id);
+      const bi = prev.steps.findIndex((s) => s.id === visible[vj].id);
       const steps = [...prev.steps];
-      [steps[i], steps[j]] = [steps[j], steps[i]];
+      [steps[ai], steps[bi]] = [steps[bi], steps[ai]];
       return { ...prev, steps };
     });
   const feedStep = (s: NotebookStep) => {
@@ -388,6 +395,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
 
   const pendingCount = useMemo(() => nb.steps.filter((s) => s.status === "pending").length, [nb.steps]);
+  // The active feed shows only unfinished, actionable cards. Completed steps
+  // drop out of the feed and are preserved in the collapsible history below.
+  const activeSteps = useMemo(() => nb.steps.filter((s) => s.status !== "done"), [nb.steps]);
+  const doneSteps = useMemo(() => nb.steps.filter((s) => s.status === "done"), [nb.steps]);
   // Human-readable INHERITED digest model (the default when no override is
   // picked): the raw id with any file path stripped.
   const digestModelLabel = useMemo(() => {
@@ -629,14 +640,16 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 <button className="ghost-btn" onClick={() => { addStep(newStep); setNewStep(""); }} style={{ height: 32, padding: "0 12px", fontSize: 12, flexShrink: 0 }}>＋ Add</button>
               </div>
 
-              {nb.steps.length === 0 && (
+              {activeSteps.length === 0 && (
                 <div style={{ padding: 14, textAlign: "center", fontSize: 12, color: "var(--fg-muted)", background: "var(--bg-input)", borderRadius: 8, border: "1px dashed var(--border)" }}>
-                  No steps yet — add one above, or 🪄 digest your notes below.
+                  {doneSteps.length > 0
+                    ? "All steps done — reopen one from Completed below, or add a new step above."
+                    : "No steps yet — add one above, or 🪄 digest your notes below."}
                 </div>
               )}
 
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {nb.steps.map((s) => (
+                {activeSteps.map((s) => (
                   <div key={s.id} style={{
                     display: "flex", flexDirection: "column", gap: 8,
                     padding: 10,
@@ -697,6 +710,32 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   </div>
                 ))}
               </div>
+
+              {/* Completed history — done steps leave the active feed but are
+                  kept here (collapsed by default) so nothing is lost and the
+                  user can reopen a step or clear it for good. */}
+              {doneSteps.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <button
+                    className="ghost-btn"
+                    onClick={() => setDoneOpen((v) => !v)}
+                    title="Show or hide completed steps"
+                    style={{ height: 26, alignSelf: "flex-start", padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}
+                  >{doneOpen ? "▾" : "▸"} Completed ({doneSteps.length})</button>
+                  {doneOpen && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {doneSteps.map((s) => (
+                        <div key={s.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
+                          <span style={{ color: "#7ff0c5", fontSize: 13, lineHeight: "18px", flexShrink: 0 }}>✓</span>
+                          <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
+                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" style={{ height: 22, padding: "0 8px", fontSize: 10.5, flexShrink: 0 }}>↺ Reopen</button>
+                          <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" style={{ height: 22, width: 22, padding: 0, fontSize: 11, color: "#ff8c8c", flexShrink: 0 }}>🗑</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

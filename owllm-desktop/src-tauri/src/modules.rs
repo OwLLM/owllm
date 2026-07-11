@@ -887,12 +887,19 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("extract {}: {e}", out_path.display()))?;
             // Restore unix modes so llama-server & friends stay executable.
-            // Zips repacked on Windows carry no modes — default those to
-            // 0755, which is correct for module payloads (binaries + libs).
+            // Trust the stored mode only if it carries an exec bit: zip 0.6's
+            // DOS branch *synthesizes* 0o664 for zips stamped create_system=
+            // Windows (discarding real modes — this shipped a non-executable
+            // llama-server on macOS/Linux, "Permission denied (os error 13)"),
+            // and Windows-repacked zips may store no mode at all. Module
+            // payloads are binaries + libs, so 0755 is the right default.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = entry.unix_mode().unwrap_or(0o755);
+                let mode = entry
+                    .unix_mode()
+                    .filter(|m| m & 0o111 != 0)
+                    .unwrap_or(0o755);
                 let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(mode));
             }
         }
@@ -1325,5 +1332,35 @@ mod tests {
         let ids: Vec<&str> = chain.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"python-runtime"));
         assert!(ids.contains(&"mcp-toolchain"));
+    }
+
+    /// Zips whose stored modes carry no exec bit (zip 0.6 synthesizes
+    /// 0o664 for Windows-stamped archives) must still extract runnable
+    /// binaries, while genuine exec-carrying modes stay untouched.
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_repairs_exec_less_modes() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        use zip::write::FileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("payload.zip");
+        let mut w = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        w.start_file("llama-server", FileOptions::default().unix_permissions(0o644))
+            .unwrap();
+        w.write_all(b"#!/bin/sh\n").unwrap();
+        w.start_file("bin/tool", FileOptions::default().unix_permissions(0o750))
+            .unwrap();
+        w.write_all(b"#!/bin/sh\n").unwrap();
+        w.finish().unwrap();
+
+        let dest = tmp.path().join("out");
+        extract_zip(&zip_path, &dest).unwrap();
+
+        let mode =
+            |p: &str| fs::metadata(dest.join(p)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("llama-server"), 0o755, "exec-less mode must be repaired");
+        assert_eq!(mode("bin/tool"), 0o750, "real exec mode must be preserved");
     }
 }

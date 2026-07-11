@@ -26,7 +26,7 @@
 // tools_dir, finetune_script) prefer the new resources tree but fall
 // back to the old `LLM/` location so a half-migrated tree still works.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Open a URL in the user's default browser. Used by the AccessTokens
 /// pane to launch huggingface.co/settings/tokens and the HF model page.
@@ -199,6 +199,7 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
     for dir in candidates {
         let direct = dir.join(binary_name);
         if direct.is_file() {
+            ensure_executable(&direct);
             return Some(direct);
         }
         // Allow one level of nesting (some upstream zips wrap their
@@ -207,6 +208,7 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
             for entry in sub.flatten() {
                 let nested = entry.path().join(binary_name);
                 if nested.is_file() {
+                    ensure_executable(&nested);
                     return Some(nested);
                 }
             }
@@ -214,6 +216,28 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
     }
     None
 }
+
+/// Self-heal the exec bit on a resolved module binary. Modules installed
+/// by app versions whose extractor trusted bogus zip modes (zip 0.6
+/// synthesizes 0o664 for Windows-stamped zips) hold binaries that spawn
+/// with "Permission denied (os error 13)" and give the user no clue why.
+/// Repairing here fixes every existing broken install without a reinstall.
+#[cfg(unix)]
+fn ensure_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o111 == 0 {
+            let _ = std::fs::set_permissions(
+                path,
+                std::fs::Permissions::from_mode(mode | 0o755),
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_executable(_path: &Path) {}
 
 /// Repointed for fine-tuning: returns `app_data_dir/modules/python-3.11-embed-win-*/python.exe`
 /// when the python-runtime module is installed. Used by env_manager to

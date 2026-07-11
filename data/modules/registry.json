@@ -94,7 +94,7 @@
               "version": "b9488-metal",
               "releasedAt": "2026-07-04T00:00:00Z",
               "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-metal-b9488.zip",
-              "sha256": "0e384b906b00532849af904dfbdccd5edf1b620292d7601fedab1ae64dd9d4d1",
+              "sha256": "6fd2f052935dfea1147a7efcc2e5c7a5092b62060825abfbe1435c93984b9bbe",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -114,7 +114,7 @@
               "version": "b9488-vulkan",
               "releasedAt": "2026-07-04T00:00:00Z",
               "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-vulkan-b9488.zip",
-              "sha256": "c1c264fd7e6f30e69f0ca8a156dbfcb159409124fa2aa049bbfa685d8c849d7d",
+              "sha256": "08e6cd95663a3d787c8dd7124f6dcb9fce59d0f41d49b7ce04606fa1a807adb0",
               "minShellVersion": "0.1.0",
               "signature": null
             }
@@ -133,7 +133,7 @@
               "version": "b9488-cpu",
               "releasedAt": "2026-07-04T00:00:00Z",
               "downloadUrl": "https://github.com/OwLLM/owllm/releases/download/modules-2026.07.04/local-inference-linux-cpu-b9488.zip",
-              "sha256": "179c9e227fc17bf3333ee535698dc07b33185e9063df0b66f2dc2b2f01025b40",
+              "sha256": "ee4c814037e16d5ffdb0eb001a4529983828f9fa29f4f42992ee3a0202630d9b",
               "minShellVersion": "0.1.0",
               "signature": null
             }

@@ -119,6 +119,10 @@ type CodeState = {
   // True while this page shows the "Just chat" (no project) view — persisted so
   // navigating away and back returns to the conversation, not the Start screen.
   chatMode?: boolean;
+  // Optional per-page label (the header rename box). Shown in the tab title as
+  // "folder(rename)" — e.g. LocaLLM(GUI_fix) — so two pages open on the SAME
+  // project stay tellable apart. Empty = the tab shows the folder name only.
+  pageRename?: string;
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
@@ -632,14 +636,17 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (!ruleScope.id) return;
     try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: ruleScope.id })); } catch { /* keep last */ }
   };
-  // Keep the shell's tab label in sync with this page's project.
+  // Keep the shell's tab label in sync with this page's project. A per-page
+  // rename (header box) renders as "folder(rename)"; unrenamed pages show the
+  // folder name only.
   useEffect(() => {
-    const label = projectRoot ? projectRoot.replace(/^.*[\\/]/, "")
+    const folder = projectRoot ? projectRoot.replace(/^.*[\\/]/, "")
       : workspace ? workspace.replace(/^.*[\\/]/, "")
-      : "New page";
-    onTitle(label);
+      : "";
+    const rename = (stx.pageRename ?? "").trim();
+    onTitle(folder ? (rename ? `${folder}(${rename})` : folder) : "New page");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectRoot, workspace]);
+  }, [projectRoot, workspace, stx.pageRename]);
   // Stale-worktree self-heal: a restored session can point at a worktree that
   // was deleted or gutted underneath it (sweep, crash, manual cleanup). The
   // old behaviour was a silently EMPTY file tree that looked broken. Verify
@@ -777,8 +784,11 @@ function CodeWorkspace({ pageId, onTitle }: {
     // at the picker while a (possibly large) checkout runs. The worktree is built
     // in the BACKGROUND; Send is gated until it's ready (see the composer). The
     // invoke below is async (runs on a Rust thread), so the UI stays responsive.
+    // Re-opening the SAME project (worktree self-heal / re-pick) keeps the
+    // page's rename; switching to a different project starts unnamed.
+    const keepRename = (stx.projectRoot === dir || stx.workspace === dir) ? stx.pageRename : undefined;
     chatRuntime.setPayload(SID, () => ({
-      ...DEFAULT_CODE_STATE, projectRoot: dir, workspace: "", modelId,
+      ...DEFAULT_CODE_STATE, projectRoot: dir, workspace: "", modelId, pageRename: keepRename,
       preparing: true,
       status: `⏳ Preparing a private workspace for ${name} on its own branch… (you can type your request now)`,
     }));
@@ -2301,6 +2311,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
         <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
+        {/* Per-page rename — tab shows "folder(rename)" so two pages on the
+            same project stay tellable apart. Empty = folder name only. */}
+        <input
+          value={stx.pageRename ?? ""}
+          onChange={(e) => setField("pageRename", e.target.value)}
+          onBlur={(e) => setField("pageRename", e.target.value.trim() || undefined)}
+          placeholder="Rename page…"
+          title={`Optional page name — the tab shows ${wsShort}(name), e.g. ${wsShort}(GUI_fix). Leave empty to show the folder name only.`}
+          style={{ ...btn, width: 110, padding: "0 8px", cursor: "text", fontWeight: 500, background: "var(--bg-input)" }}
+        />
         {/* Honest isolation badge (P1-1, shared helper): turns LOUD red when
             isolation is enabled but this workspace runs on the host. */}
         {(() => {

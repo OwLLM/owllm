@@ -21,7 +21,7 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 | **Fine-tuning** | Models, Dataset, Train, Chat | Python env is installed on demand, ONLY needed for Train |
 | **Agentic** | Code, Agents, Studio, Bridges | the flagship: teams, solo coder, bridges |
 | **Gamify** (experimental) | Gamify, Characters, Arena | RPG world driven by the same dispatch stream |
-| **Advanced** | MCP, Accounts, Devices | MCP servers/packs; API keys + subscription CLI logins; secure remote device control |
+| **Advanced** | MCP, Accounts, Signing, Devices | MCP servers/packs; API keys + subscription CLI logins; code-signing certificate vault; secure remote device control |
 
 ## Models & inference
 
@@ -287,6 +287,36 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
 Telegram, WhatsApp, Discord, Slack, Email (IMAP/SMTP), LINE — one dispatch
 core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 (`/project`, `/model`, `/brainstorm`), attachments, one-window polling locks.
+
+## Code signing (`signing.rs`, Signing page)
+
+- **One home for signing credentials**, so shipping a signed build isn't a
+  scavenger hunt across Apple's portal, the Keychain and GitHub secrets. The
+  Signing page (Advanced) stores the **Apple Developer ID** set (certificate
+  `.p12` + its password, signing identity, Apple ID, app-specific/notarization
+  password, Team ID → the six `APPLE_*` secrets `release.yml` reads) and the
+  **Windows Authenticode** selectors (thumbprint / subject / TSA → `OWLLM_SIGN_*`,
+  `release.rs::SignCfg`).
+- **Encrypted at rest** via `crypt::protect` (DPAPI per Windows user; passthrough
+  on macOS/Linux for now — same known limitation as `browser_vault.rs`). Secret
+  values are NEVER returned to the frontend by `signing_status`; they leave Rust
+  only through the explicit `signing_export_env` reveal path used by "Push to
+  GitHub secrets" / "Copy values" and the agent tool.
+- **Import `.p12`** → base64 into the store; identity + expiry are parsed
+  best-effort via `openssl` when present (PATH or Git-for-Windows `usr/bin`), so
+  the page shows an **expiry countdown** (amber ≤30 days, red once expired).
+- **Push to GitHub Actions secrets** in one click via the `gh` CLI (which does
+  the libsodium sealed-box); when `gh` is absent, "Copy values" yields the
+  `NAME=value` lines to paste into Settings → Secrets.
+- **Shared within instances**: every OwLLM window / fleet worktree on the machine
+  reads the same `owllm_config_home()` store. Across the user's other PCs the
+  vault (`vault_sync_signing`) mirrors NON-secret metadata only (identity, team,
+  expiry, presence) — the certificate/passwords stay local per machine.
+- **Reachable by agents in any project**: the `signing_get` tool (local
+  `localTools.ts` + MCP-gateway `mcp__owllm__signing_get`) returns metadata by
+  default, or the CI env values with `include_secrets=true`, so a coding agent
+  can wire signed releases from whatever project it's started in. Same reveal
+  boundary as `device_exec`.
 
 ## Sync, vault & publishing
 

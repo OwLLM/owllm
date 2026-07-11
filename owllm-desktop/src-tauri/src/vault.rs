@@ -1059,6 +1059,45 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Sync the code-signing metadata through the vault: pull the newest per-platform
+/// signing metadata (identity, team, expiry — NEVER the certificate bytes or
+/// passwords) from the account and publish ours. This lets the user's other PCs
+/// SEE that signing is configured and know to import the .p12 locally; the secret
+/// material never enters the git repo. Returns true when local metadata changed.
+#[tauri::command]
+pub async fn vault_sync_signing() -> Result<bool, String> {
+    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    if !is_cloned(&dir) {
+        return Ok(false);
+    }
+    tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        let branch = current_branch(&dir);
+        let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
+        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let sdir = dir.join("state").join("signing");
+        std::fs::create_dir_all(&sdir).map_err(|e| format!("mkdir signing: {e}"))?;
+        let file = sdir.join("meta.json");
+
+        // 1) remote → local (ingest, last-writer-wins by per-platform updated_ms).
+        let mut changed = false;
+        if let Ok(txt) = std::fs::read_to_string(&file) {
+            if let Ok(true) = crate::signing::ingest_vault_meta(&txt) {
+                changed = true;
+            }
+        }
+        // 2) publish OUR metadata — recomputed AFTER ingest so a locally-newer
+        //    set wins the next round instead of being clobbered.
+        if let Some(js) = crate::signing::vault_meta_json() {
+            std::fs::write(&file, js).map_err(|e| format!("write signing meta: {e}"))?;
+        }
+        // 3) commit + push.
+        commit_push(&dir, &branch)?;
+        Ok(changed)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// The clone's current branch (GitHub auto_init defaults to `main`).
 fn current_branch(dir: &std::path::Path) -> String {
     run_git(&["rev-parse", "--abbrev-ref", "HEAD"], Some(dir))

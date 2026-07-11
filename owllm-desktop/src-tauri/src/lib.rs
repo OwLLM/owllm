@@ -64,6 +64,7 @@ mod release;
 mod remote_devices;
 mod sandbox;
 mod server;
+mod signing;
 mod skill_library;
 mod slack;
 mod support;
@@ -504,6 +505,15 @@ pub fn run() {
             vault::vault_read_server,
             vault::vault_sync_teams,
             vault::vault_sync_projects,
+            vault::vault_sync_signing,
+            signing::signing_status,
+            signing::signing_apple_save,
+            signing::signing_apple_import_p12,
+            signing::signing_windows_save,
+            signing::signing_clear,
+            signing::signing_export_env,
+            signing::signing_push_github,
+            signing::signing_agent_get,
             sandbox::sandbox_status,
             sandbox::agent_save_inbox_images,
             sandbox::agent_full_access_get,

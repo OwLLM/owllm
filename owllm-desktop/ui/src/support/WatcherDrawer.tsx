@@ -135,6 +135,7 @@ const PAGE_BLURBS: Record<string, string> = {
   info: "the Info page — live system info + sandbox-disk maintenance.",
   accounts: "the Accounts page — API keys + subscription-CLI logins for cloud models.",
   mcp: "the MCP page — connect MCP servers so agents gain extra tools.",
+  signing: "the Signing page — store your code-signing certificates (Apple Developer ID + Windows Authenticode) once so signed releases are one click, here and from the agents.",
   devices: "the Devices page — securely control your other OwLLM machines. Pairing + a device key are required; a GitHub login alone never grants control.",
 };
 
@@ -195,6 +196,12 @@ const PAGE_DOCS: Record<string, string> = {
     "• OWLLM Node (🖥🔌 panel): opt-in KVM remote control — lets agents see + operate a REMOTE computer through a NanoKVM/PiKVM device (kvm_node tool: screenshot, type, keys, mouse, power, mount ISO). Ships DISABLED; flip the toggle here, then '+ Allow' each device host — injection is refused for any host not on the list (fail-closed), and every action is written to a redacted audit log.",
   mcp:
     "MCP — connect MCP servers so agents gain extra tools (filesystem, git, web, integrations). Add a server, it's verified, then its tools are available to the team.",
+  signing:
+    "SIGNING — one home for the credentials that ship a SIGNED build, so you don't hunt across Apple's portal, the Keychain, and GitHub secrets.\n" +
+    "• Apple — Developer ID (macOS): 'Import .p12…' loads your certificate (+ its password); the identity and an EXPIRY countdown are auto-detected when possible (amber ≤30 days, red once expired). Fill Signing identity / Apple ID / Team ID and add the app-specific (notarization) password — this is the six APPLE_* values release.yml needs.\n" +
+    "• Windows — Authenticode: point the publisher at a cert already mounted on the host by Thumbprint or Subject (+ a timestamp URL) → the OWLLM_SIGN_* variables.\n" +
+    "• Ship it: 'Push to GitHub secrets' writes the secrets to a repo's Actions in one click (needs the `gh` CLI signed in); otherwise 'Copy values' gives you NAME=value lines to paste into Settings → Secrets. The green 'Ready to sign' pill lights up once every field is present.\n" +
+    "• STORAGE: encrypted on this machine (DPAPI on Windows) and shared across every OwLLM window here. Across your OTHER PCs only the NON-secret metadata (identity, team, expiry) syncs — re-import the .p12 on each machine; the certificate/passwords never leave the device or enter the git vault. The coding agents can read this store (signing_get tool) to wire signed releases in any project.",
   devices:
     "DEVICES — OwLLM Remote Devices / Fleet Control. Securely control your OTHER OwLLM machines from this one.\n" +
     "• The KEY IDEA: controlling a machine needs a paired, cryptographic device key that the TARGET explicitly approved — a matching GitHub account only helps devices discover each other, it NEVER grants control. Ships DISABLED; click '▶ Enable remote control on this PC' (This device card) first.\n" +

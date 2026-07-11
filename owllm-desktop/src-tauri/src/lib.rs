@@ -431,6 +431,7 @@ pub fn run() {
             huggingface::models_list_downloaded,
             huggingface::model_weight_files,
             huggingface::models_partial_files,
+            huggingface::models_interrupted_downloads,
             huggingface::delete_model_weight,
             recommendations::models_recommended,
             paths::shell_open_url,

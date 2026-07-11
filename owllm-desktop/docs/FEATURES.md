@@ -280,6 +280,13 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 
 - **Vault** (opt-in `owllm-vault` GitHub repo): team templates, roles, project
   rows, chat, memory FACTS sync across the user's PCs. GitHub device-flow auth.
+- **Device-local folder paths** (`vault.rs` `VaultProject.locations`): a project's
+  on-disk folder is per-device, keyed by `device_id`, so a peer's absolute path
+  (`C:\…` on a Mac) is never adopted. A freshly-synced project imports GHOSTED
+  (empty path) with all its chat/memory/settings intact; the Project Settings
+  dialog flags the missing folder (`path_is_dir` probe) and prompts Browse… to
+  bind a local folder. Each machine writes only its own `locations` entry and
+  never clobbers a peer's.
 - **Publish pipeline**: rule-based host-side release (used to ship OWLLM
   itself and any user project via the Project Card).
 - **Fleet** (`fleet.rs`): git-worktree substrate for parallel agents/pages;

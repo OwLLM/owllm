@@ -12,6 +12,7 @@
 // one-time token-embedded clone URL.
 
 use serde::Serialize;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 
@@ -526,9 +527,18 @@ struct VaultProject {
     team_default_model_id: String,
     created_at: String,
     updated_at: String,
-    /// Carried so a BRAND-NEW device has a starting path; never overwrites an
-    /// existing local project's location (see import_project).
+    /// LEGACY single path. Kept for back-compat with vault files/clients written
+    /// before `locations` existed, but a folder path is device-LOCAL and is no
+    /// longer adopted from here on a fresh device (that caused a Windows `C:\…`
+    /// path to show up on a Mac). New devices read `locations[self_device_id]`
+    /// and otherwise start GHOSTED (empty path) until the user picks a folder.
     location: String,
+    /// Per-device folder paths, keyed by `device_id`. Each machine records ONLY
+    /// its own entry on export and never clobbers a peer's, so changing the
+    /// folder on one device can't break the path on another. `#[serde(default)]`
+    /// so vault files written before this field still load.
+    #[serde(default)]
+    locations: HashMap<String, String>,
     /// Shared team-memory entries for this project (the RAG-like brain), keyed by
     /// project ID so they match across machines. Merged per-entry on import
     /// (last-writer-wins by each entry's own ts), independent of the project's
@@ -804,6 +814,7 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
                 created_at: r.get::<_, String>(9).unwrap_or_default(),
                 updated_at: r.get::<_, String>(10).unwrap_or_default(),
                 location: r.get::<_, String>(11).unwrap_or_default(),
+                locations: HashMap::new(),
                 team_memory_json: String::new(),
                 directives_json: String::new(),
                 directives_updated_at: String::new(),
@@ -844,7 +855,24 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
 /// Upsert one remote project into the local DB. Returns true when the local DB
 /// changed (new project, or remote was newer). Existing projects keep their
 /// device-local location + trust/auto-approve flags.
-fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool, String> {
+///
+/// `self_id` is THIS device's id: a fresh import takes the folder path from
+/// `locations[self_id]` if this machine has bound one before, otherwise starts
+/// GHOSTED (empty path) — it never adopts a peer's absolute path.
+fn import_project(
+    conn: &rusqlite::Connection,
+    p: &VaultProject,
+    self_id: &str,
+) -> Result<bool, String> {
+    // Device-local folder path for a brand-new import: only a path THIS device
+    // recorded before (survives reinstall), else empty → the UI shows the
+    // project ghosted with a "pick a folder" affordance. Deliberately does NOT
+    // fall back to `p.location` — that is what surfaced a foreign machine's path.
+    let insert_location = p
+        .locations
+        .get(self_id)
+        .cloned()
+        .unwrap_or_default();
     let local_updated: Option<String> = match conn.query_row(
         "SELECT updated_at FROM agent_projects WHERE id = ?",
         rusqlite::params![p.id],
@@ -867,7 +895,7 @@ fn import_project(conn: &rusqlite::Connection, p: &VaultProject) -> Result<bool,
                     p.id,
                     p.name,
                     p.description,
-                    p.location,
+                    insert_location,
                     p.team_json,
                     p.model_overrides_json,
                     p.graph_json,
@@ -951,6 +979,11 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
         return Ok(false);
     }
     let db = crate::projects::project_db_path().ok_or_else(|| "no project db path".to_string())?;
+    // This device's stable id — keys the per-device folder path in each project
+    // file so we never adopt (or clobber) a peer's absolute path. Empty string
+    // if the keypair can't be loaded; then paths fall through as ghosted, which
+    // is the safe default.
+    let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let branch = current_branch(&dir);
         // Bring the working tree to the latest remote first (same as teams).
@@ -987,7 +1020,7 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
                     if vp.id.is_empty() {
                         continue;
                     }
-                    if import_project(&conn, &vp)? {
+                    if import_project(&conn, &vp, &self_id)? {
                         imported = true;
                     }
                 }
@@ -995,12 +1028,29 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
         }
 
         // 2) local DB → files (so locally-newer projects propagate up).
-        for vp in export_projects(&db)? {
+        for mut vp in export_projects(&db)? {
             if vp.id.is_empty() {
                 continue;
             }
+            let path = proj_dir.join(format!("{}.json", safe_id(&vp.id)));
+            // Start from the peers' per-device map already on disk (the working
+            // tree reflects origin after the reset above) so we never drop
+            // another machine's recorded path, then record only OUR own path.
+            let mut locations: HashMap<String, String> = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|txt| serde_json::from_str::<VaultProject>(&txt).ok())
+                .map(|prev| prev.locations)
+                .unwrap_or_default();
+            if !self_id.is_empty() {
+                if vp.location.trim().is_empty() {
+                    locations.remove(&self_id);
+                } else {
+                    locations.insert(self_id.clone(), vp.location.clone());
+                }
+            }
+            vp.locations = locations;
             let json = serde_json::to_string_pretty(&vp).map_err(|e| e.to_string())?;
-            let _ = std::fs::write(proj_dir.join(format!("{}.json", safe_id(&vp.id))), json);
+            let _ = std::fs::write(path, json);
         }
 
         // 3) commit + push.
@@ -1176,4 +1226,74 @@ pub async fn vault_ensure() -> Result<VaultStatus, String> {
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row_location(conn: &rusqlite::Connection, id: &str) -> String {
+        conn.query_row(
+            "SELECT location FROM agent_projects WHERE id = ?1",
+            rusqlite::params![id],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap()
+    }
+
+    fn vp_with(id: &str, locations: &[(&str, &str)]) -> VaultProject {
+        let mut vp = VaultProject::default();
+        vp.id = id.into();
+        vp.name = "proj".into();
+        vp.location = r"C:\foreign\path".into(); // a peer's absolute path
+        vp.updated_at = "2026-01-01T00:00:00Z".into();
+        vp.locations = locations
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        vp
+    }
+
+    // A fresh device that never bound a folder for this project must import it
+    // GHOSTED (empty path) — it must NOT adopt the peer's `location`.
+    #[test]
+    fn import_ghosts_when_this_device_has_no_recorded_path() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::projects::ensure_schema(&conn).unwrap();
+        let vp = vp_with("p1", &[("device-A", r"D:\1_GitHome\LLM-Studio")]);
+        assert!(import_project(&conn, &vp, "device-B").unwrap());
+        assert_eq!(row_location(&conn, "p1"), "");
+    }
+
+    // A device that HAS a recorded path in the map imports that path, so a
+    // reinstall of the same machine re-binds automatically.
+    #[test]
+    fn import_uses_this_devices_recorded_path() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::projects::ensure_schema(&conn).unwrap();
+        let vp = vp_with(
+            "p2",
+            &[("device-A", r"D:\x"), ("device-B", "/Users/me/proj")],
+        );
+        assert!(import_project(&conn, &vp, "device-B").unwrap());
+        assert_eq!(row_location(&conn, "p2"), "/Users/me/proj");
+    }
+
+    // An EXISTING local project keeps its own device-local path even when a
+    // newer remote arrives (content follows, path does not).
+    #[test]
+    fn import_keeps_existing_local_path() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::projects::ensure_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO agent_projects (id, name, location, created_at, updated_at) \
+             VALUES ('p3', 'proj', '/Users/me/local', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let mut vp = vp_with("p3", &[("device-A", r"D:\x")]);
+        vp.updated_at = "2026-02-01T00:00:00Z".into(); // remote newer → adopt content
+        assert!(import_project(&conn, &vp, "device-B").unwrap());
+        assert_eq!(row_location(&conn, "p3"), "/Users/me/local");
+    }
 }

@@ -137,6 +137,11 @@ export default function PublishCards({
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
   const [git, setGit] = useState<GitStatusInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  // Inline, right-by-the-buttons progress. The shared `status` line lives in the
+  // center column, far from this left-rail card, so an action there felt dead:
+  // no acknowledgement on click, only a result at the very end. This shows
+  // ⏳ running / ✓ done / ✗ error in place.
+  const [activity, setActivity] = useState<{ kind: "run" | "ok" | "err"; msg: string } | null>(null);
   const [pubNotes, setPubNotes] = useState("");
   const [settings, setSettings] = useState<PublishSettings>(() => loadSettings(repoDir));
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -219,30 +224,39 @@ export default function PublishCards({
 
   const status = (msg: string) => { if (onStatus) onStatus(msg); };
 
-  const run = async (fn: () => Promise<unknown>) => {
+  const run = async (label: string, fn: () => Promise<unknown>) => {
     setLoading(true);
+    // Immediate acknowledgement — both inline and on the shared status line —
+    // so a long host build (commit → tag → build → sign → publish) doesn't look
+    // frozen while it runs.
+    setActivity({ kind: "run", msg: `${label}…` });
+    status(`⏳ ${label}…`);
     try {
       const out = await fn();
-      status(String(out ?? "Done."));
+      const msg = String(out ?? "Done.");
+      setActivity({ kind: "ok", msg });
+      status(msg);
       refresh();
     } catch (e) {
-      status(String((e as Error).message ?? e));
+      const msg = String((e as Error).message ?? e);
+      setActivity({ kind: "err", msg });
+      status(msg);
     } finally {
       setLoading(false);
       fetchGit();
     }
   };
 
-  const doCommit = () => run(async () => {
+  const doCommit = () => run("Committing changes", async () => {
     const out = await invoke<string>("repo_commit", { repoDir: gitDir, message: commitMsg });
     setCommitMsg("");
     setCommitOpen(false);
     return out;
   });
 
-  const doPush = () => run(() => invoke("repo_push", { repoDir: gitDir }));
+  const doPush = () => run("Pushing to origin", () => invoke("repo_push", { repoDir: gitDir }));
 
-  const doMerge = () => run(async () => {
+  const doMerge = () => run(isolated ? "Merging worktree" : `Merging to ${mergeTarget}`, async () => {
     if (isolated && projectRoot && branch && gitDir) {
       const fin = await invoke<WtFinalize>("fleet_worktree_finalize", {
         worktreePath: gitDir, agentName: "code", summary: "Code page session",
@@ -267,7 +281,7 @@ export default function PublishCards({
       }
     : null;
 
-  const doPublish = () => run(async () => {
+  const doPublish = () => run(`${modeLabel} release`, async () => {
     const visibility = settings.visibility;
     if (visibility === "publish") {
       const signed = !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
@@ -391,11 +405,24 @@ export default function PublishCards({
             )}
             {showPublish && (
               <button
-                onClick={doPublish}
-                disabled={disabled || loading || !canPublish}
+                // Stay clickable when not ready: a disabled button swallows the
+                // click silently ("does nothing"). Instead, surface WHY inline
+                // and open the checks — only run the real publish when ready.
+                onClick={() => {
+                  if (canPublish) { doPublish(); return; }
+                  setChecksOpen(true);
+                  refresh();
+                  setActivity({
+                    kind: "err",
+                    msg: ready
+                      ? `Can't publish yet — ${readyFails.length} unmet check${readyFails.length > 1 ? "s" : ""}:\n${publishFailReason}`
+                      : "Checking release readiness…",
+                  });
+                }}
+                disabled={disabled || loading}
                 title={canPublish
                   ? `${modeLabel} release (${settings.mode})${signed ? "" : ", unsigned"}`
-                  : (publishFailReason || "Readiness check running…")}
+                  : (publishFailReason || "Readiness check running… — click to see what's missing")}
                 style={{ ...chipBtn, flex: 1, background: modeColor, color: "#06080d", border: "none", opacity: canPublish ? 1 : 0.5 }}
               >
                 {loading ? "⏳" : "🚀"} {modeLabel}
@@ -412,6 +439,20 @@ export default function PublishCards({
               </button>
             )}
           </div>
+          {/* Inline activity — immediate ⏳ on click, then ✓/✗ result, right
+              where the buttons are (the shared status line is in another column). */}
+          {activity && (
+            <div
+              style={{
+                display: "flex", gap: 5, alignItems: "flex-start", padding: "0 2px",
+                fontSize: 10.5, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word",
+                color: activity.kind === "err" ? "#ff8c8c" : activity.kind === "ok" ? "#7ff0c5" : "var(--fg-muted)",
+              }}
+            >
+              <span style={{ flexShrink: 0 }}>{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}</span>
+              <span style={{ minWidth: 0 }}>{activity.msg}</span>
+            </div>
+          )}
           {/* Readiness summary — click to expand the per-check list, so "why
               is Publish greyed out" is readable in place, not just a tooltip
               on a disabled button. */}

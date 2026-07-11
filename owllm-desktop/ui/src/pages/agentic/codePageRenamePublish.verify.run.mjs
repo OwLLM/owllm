@@ -63,6 +63,16 @@ anchor("PublishCards.tsx", cards, "readiness summary renders READY / N issues",
   'readyFails.length === 0 ? "READY" : `${readyFails.length} issue');
 anchor("PublishCards.tsx", cards, "expanded checklist shows the actionable detail per failing check",
   "{!c.ok && <div style={{ color: \"var(--fg-muted)\", wordBreak: \"break-word\" }}>{c.detail}</div>}");
+// Action feedback: every button acknowledges immediately (inline + shared line)
+// and a not-ready Publish explains itself instead of swallowing the click.
+anchor("PublishCards.tsx", cards, "run() gives an immediate inline ⏳ acknowledgement",
+  'setActivity({ kind: "run", msg: `${label}…` });');
+anchor("PublishCards.tsx", cards, "run() pushes an immediate ⏳ to the shared status line",
+  "status(`⏳ ${label}…`);");
+anchor("PublishCards.tsx", cards, "the inline activity row renders in the card",
+  '{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}');
+anchor("PublishCards.tsx", cards, "a not-ready Publish stays clickable and surfaces the reason",
+  "if (canPublish) { doPublish(); return; }");
 
 if (failures > 0) {
   console.error(`\n${failures} source anchor(s) FAILED — the feature code has drifted or been reverted.`);

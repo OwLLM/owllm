@@ -796,10 +796,34 @@ export default function ModelsPage() {
       .catch(() => { /* keep prior */ });
   }, []);
 
+  // AUTO-RESUME on mount: any interrupted download left on disk (.partial
+  // files) continues straight into the progress banner via HTTP Range —
+  // never back through the quantization picker, never from 0%. The store
+  // guards against re-running the scan on remounts.
+  React.useEffect(() => {
+    void downloadStore.resumeInterrupted().then((resumed) => {
+      // Re-scan so resumed models show up with their "incomplete" badge
+      // while the download runs (and drop it when it finishes).
+      if (resumed.length > 0) refreshDownloaded();
+    });
+  }, [refreshDownloaded]);
+
   // Step 1: clicking Download opens the WeightPickerDialog so the
   // user can choose which files to fetch (Q4/Q5/Q6/Q8 etc) instead of
-  // pulling every variant blindly.
-  const startDownload = (modelId: string) => {
+  // pulling every variant blindly — UNLESS this model already has an
+  // interrupted download on disk, in which case we continue it (HTTP
+  // Range) instead of re-asking the quantization question.
+  const startDownload = async (modelId: string) => {
+    try {
+      const rows = await invoke<downloadStore.InterruptedDownload[]>(
+        "models_interrupted_downloads",
+      );
+      const mine = rows.filter((r) => r.modelId === modelId);
+      if (mine.length > 0) {
+        void downloadStore.startDownload(modelId, mine.map((m) => m.file));
+        return;
+      }
+    } catch { /* scan failure → normal picker flow */ }
     setPickerFor(modelId);
   };
 

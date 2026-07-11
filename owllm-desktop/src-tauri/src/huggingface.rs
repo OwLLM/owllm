@@ -265,8 +265,15 @@ pub enum DownloadEvent {
     /// Total size known (some servers don't send Content-Length;
     /// when that's the case we emit Started with total=None and the
     /// UI shows an indeterminate spinner instead of a bar).
+    /// `resumed_from` is the byte offset a Range-resume continues at
+    /// (0 for a fresh download) — the UI seeds the bar with it so a
+    /// resumed download never flashes 0% before the first tick.
     Started {
         total: Option<u64>,
+        // rename_all on the enum only camelCases the VARIANT names;
+        // struct-variant fields need their own rename to match the UI.
+        #[serde(rename = "resumedFrom")]
+        resumed_from: u64,
     },
     Progress {
         received: u64,
@@ -330,6 +337,7 @@ pub async fn hf_download(
         if meta.is_file() && meta.len() > 0 {
             let _ = channel.send(DownloadEvent::Started {
                 total: Some(meta.len()),
+                resumed_from: meta.len(),
             });
             let _ = channel.send(DownloadEvent::Finished {
                 path: dest_file.to_string_lossy().into_owned(),
@@ -384,6 +392,7 @@ pub async fn hf_download(
                 .map_err(|e| format!("finalize {}: {e}", dest_file.display()))?;
             let _ = channel.send(DownloadEvent::Started {
                 total: Some(resume_from),
+                resumed_from: resume_from,
             });
             let _ = channel.send(DownloadEvent::Finished {
                 path: dest_file.to_string_lossy().into_owned(),
@@ -415,7 +424,10 @@ pub async fn hf_download(
     let total = resp
         .content_length()
         .map(|len| if resuming { resume_from + len } else { len });
-    let _ = channel.send(DownloadEvent::Started { total });
+    let _ = channel.send(DownloadEvent::Started {
+        total,
+        resumed_from: if resuming { resume_from } else { 0 },
+    });
 
     let mut out = if resuming {
         std::fs::OpenOptions::new()
@@ -755,6 +767,54 @@ pub struct PartialDownload {
     pub bytes_on_disk: u64,
 }
 
+/// Collect the `.partial` files inside one model dir (up to 2 levels deep,
+/// matching where hf_download can write repo-relative subpaths). Returns the
+/// ORIGINAL repo-relative file names with '/' separators + bytes on disk.
+fn collect_partials(model_dir: &std::path::Path) -> Vec<PartialDownload> {
+    let mut out: Vec<PartialDownload> = Vec::new();
+    let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(model_dir.to_path_buf(), 0)];
+    while let Some((d, depth)) = stack.pop() {
+        let rd = match std::fs::read_dir(&d) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        for e in rd.flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                if depth < 2 {
+                    stack.push((p, depth + 1));
+                }
+                continue;
+            }
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let Some(original) = name.strip_suffix(".partial") else {
+                continue;
+            };
+            let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            // Repo-relative path with '/' separators (hf_download joins it
+            // to both the /resolve/ URL and the destination dir).
+            let rel_dir = p
+                .parent()
+                .and_then(|par| par.strip_prefix(model_dir).ok())
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            let file = if rel_dir.is_empty() {
+                original.to_string()
+            } else {
+                format!("{rel_dir}/{original}")
+            };
+            out.push(PartialDownload {
+                file,
+                bytes_on_disk: size,
+            });
+        }
+    }
+    out.sort_by(|a, b| a.file.cmp(&b.file));
+    out
+}
+
 /// List the interrupted (`.partial`) downloads inside a downloaded model dir.
 /// Confined to the models roots, same as model_weight_files.
 #[tauri::command]
@@ -764,52 +824,99 @@ pub async fn models_partial_files(dir: String) -> Result<Vec<PartialDownload>, S
     if !under_models_root(&canon) {
         return Err("path is not under a models root".into());
     }
-    tokio::task::spawn_blocking(move || -> Result<Vec<PartialDownload>, String> {
-        let mut out: Vec<PartialDownload> = Vec::new();
-        let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(canon.clone(), 0)];
-        while let Some((d, depth)) = stack.pop() {
-            let rd = match std::fs::read_dir(&d) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() {
-                    if depth < 2 {
-                        stack.push((p, depth + 1));
-                    }
-                    continue;
-                }
-                let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
-                    continue;
-                };
-                let Some(original) = name.strip_suffix(".partial") else {
-                    continue;
-                };
-                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-                // Repo-relative path with '/' separators (hf_download joins it
-                // to both the /resolve/ URL and the destination dir).
-                let rel_dir = p
-                    .parent()
-                    .and_then(|par| par.strip_prefix(&canon).ok())
-                    .map(|r| r.to_string_lossy().replace('\\', "/"))
-                    .unwrap_or_default();
-                let file = if rel_dir.is_empty() {
-                    original.to_string()
-                } else {
-                    format!("{rel_dir}/{original}")
-                };
-                out.push(PartialDownload {
-                    file,
-                    bytes_on_disk: size,
-                });
-            }
+    tokio::task::spawn_blocking(move || Ok(collect_partials(&canon)))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// One interrupted download found anywhere under the models roots. `model_id`
+/// is the HF id ready for `hf_download` (legacy `author__model` dir names are
+/// mapped back to `author/model`). The `.partial` file on disk IS the
+/// persisted download state — model, quant file, destination and bytes
+/// received — so resuming across app restarts needs no extra bookkeeping.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct InterruptedDownload {
+    pub model_id: String,
+    pub file: String,
+    pub bytes_on_disk: u64,
+}
+
+/// Scan every models root for interrupted downloads. The UI calls this on
+/// the Models page mount to AUTO-resume them (straight into the progress
+/// banner via HTTP Range — never back through the quantization picker), and
+/// on a Download click to continue instead of restarting.
+#[tauri::command]
+pub async fn models_interrupted_downloads() -> Result<Vec<InterruptedDownload>, String> {
+    tokio::task::spawn_blocking(move || -> Result<Vec<InterruptedDownload>, String> {
+        let mut out: Vec<InterruptedDownload> = Vec::new();
+        for root in crate::paths::models_dirs_read() {
+            scan_root_for_partials(&root, "", &mut out, 0);
         }
-        out.sort_by(|a, b| a.file.cmp(&b.file));
+        out.sort_by(|a, b| {
+            a.model_id
+                .cmp(&b.model_id)
+                .then_with(|| a.file.cmp(&b.file))
+        });
         Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Walk one models root looking for interrupted downloads. Same namespace
+/// heuristic as models_list_downloaded's scan_level: a dir with no files and
+/// only subdirs is an org namespace to recurse into; anything else is a
+/// model dir to scan for partials.
+fn scan_root_for_partials(
+    dir: &std::path::Path,
+    prefix: &str,
+    out: &mut Vec<InterruptedDownload>,
+    depth: usize,
+) {
+    if depth > 3 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let name = match e.file_name().to_str() {
+            Some(s) if !s.starts_with('.') => s.to_string(),
+            _ => continue,
+        };
+        let display = if prefix.is_empty() {
+            name
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let mut has_file = false;
+        let mut has_subdir = false;
+        if let Ok(it) = std::fs::read_dir(&path) {
+            for c in it.flatten() {
+                if c.path().is_dir() {
+                    has_subdir = true;
+                } else {
+                    has_file = true;
+                }
+            }
+        }
+        if !has_file && has_subdir {
+            scan_root_for_partials(&path, &display, out, depth + 1);
+            continue;
+        }
+        for p in collect_partials(&path) {
+            out.push(InterruptedDownload {
+                model_id: display.replace("__", "/"),
+                file: p.file,
+                bytes_on_disk: p.bytes_on_disk,
+            });
+        }
+    }
 }
 
 /// Delete a single weight file from a downloaded model. Confined to the models
@@ -1601,5 +1708,79 @@ pub async fn hf_cache_delete(path: String) -> Result<u64, String> {
         // Lost a race with an earlier delete in the batch — also success.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(e) => Err(format!("delete {}: {e}", canon_target.display())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn touch(path: &std::path::Path, bytes: usize) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![0u8; bytes]).unwrap();
+    }
+
+    #[test]
+    fn collect_partials_reports_repo_relative_names_and_sizes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let model = tmp.path().join("unsloth").join("Some-GGUF");
+        touch(&model.join("model-Q4_K_M.gguf.partial"), 7);
+        touch(&model.join("sub").join("shard-00001.gguf.partial"), 3);
+        // Complete files must NOT be reported.
+        touch(&model.join("done-Q8_0.gguf"), 5);
+
+        let got = collect_partials(&model);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].file, "model-Q4_K_M.gguf");
+        assert_eq!(got[0].bytes_on_disk, 7);
+        assert_eq!(got[1].file, "sub/shard-00001.gguf");
+        assert_eq!(got[1].bytes_on_disk, 3);
+    }
+
+    #[test]
+    fn scan_finds_nested_and_legacy_model_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // New-style nested layout: <root>/<org>/<model>/file.partial —
+        // the org dir holds no files, so it's recursed as a namespace.
+        touch(
+            &root.join("unsloth").join("Qwen-GGUF").join("q4.gguf.partial"),
+            11,
+        );
+        // Legacy flat layout: <root>/author__model/file.partial.
+        touch(&root.join("meta__llama").join("w.safetensors.partial"), 4);
+        // A complete model dir must contribute nothing.
+        touch(&root.join("org").join("done-model").join("m.gguf"), 9);
+
+        let mut out: Vec<InterruptedDownload> = Vec::new();
+        scan_root_for_partials(root, "", &mut out, 0);
+        out.sort_by(|a, b| a.model_id.cmp(&b.model_id));
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].model_id, "meta/llama");
+        assert_eq!(out[0].file, "w.safetensors");
+        assert_eq!(out[0].bytes_on_disk, 4);
+        assert_eq!(out[1].model_id, "unsloth/Qwen-GGUF");
+        assert_eq!(out[1].file, "q4.gguf");
+        assert_eq!(out[1].bytes_on_disk, 11);
+    }
+
+    #[test]
+    fn scan_treats_dir_with_files_as_model_not_namespace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        // Model dir that has BOTH a file and a subdir: the partial inside
+        // the subdir belongs to THIS model (repo-relative subpath), not to
+        // a deeper "model" named after the subdir.
+        let model = root.join("org").join("mixed");
+        touch(&model.join("config.json"), 2);
+        touch(&model.join("parts").join("x.gguf.partial"), 6);
+
+        let mut out: Vec<InterruptedDownload> = Vec::new();
+        scan_root_for_partials(root, "", &mut out, 0);
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].model_id, "org/mixed");
+        assert_eq!(out[0].file, "parts/x.gguf");
     }
 }

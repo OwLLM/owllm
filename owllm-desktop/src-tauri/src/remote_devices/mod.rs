@@ -543,6 +543,14 @@ pub fn self_public_record() -> Result<DevicePublic, String> {
     Ok(rec)
 }
 
+/// This device's stable id (`hex(SHA-256(ed25519_pub))`). Cheap: just loads (or
+/// creates once) the local device keypair — no network. Used to key device-local
+/// project data (e.g. the on-disk folder path) inside the shared vault so each
+/// machine keeps its own path instead of adopting a peer's absolute path.
+pub fn self_device_id() -> Option<String> {
+    identity::load_or_create().ok().map(|me| me.secrets.device_id())
+}
+
 /// (device_id, pretty-JSON) of this device's public record — for the vault.
 pub fn self_vault_record() -> Result<(String, String), String> {
     let rec = self_public_record()?;

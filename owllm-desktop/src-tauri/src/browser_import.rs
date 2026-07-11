@@ -229,7 +229,10 @@ pub fn browser_import_scan() -> Vec<DetectedBrowser> {
                         id: kind.id().into(),
                         name: kind.name().into(),
                         profile: profile.to_string_lossy().into_owned(),
-                        count: chromium_count(&profile),
+                        // Don't advertise a login count we can't import —
+                        // a real number next to "unsupported" reads as
+                        // "this should work". Keep it 0 off-Windows.
+                        count: if supported { chromium_count(&profile) } else { 0 },
                         supported,
                         note: if supported {
                             String::new()

@@ -173,6 +173,16 @@ async fn probe() -> HardwareInfo {
         if let Some(cpu) = sys.cpus().first() {
             info.cpu_name = cpu.brand().to_string();
         }
+        // ARM Linux: /proc/cpuinfo has no "model name", so sysinfo's brand
+        // comes back empty and the UI shows "CPU: —". The device-tree model
+        // ("NVIDIA Jetson AGX Thor Developer Kit", "Raspberry Pi 5", …) is
+        // the best human-readable name those boards have.
+        #[cfg(target_os = "linux")]
+        if info.cpu_name.trim().is_empty() {
+            if let Ok(model) = std::fs::read_to_string("/proc/device-tree/model") {
+                info.cpu_name = model.trim_end_matches('\0').trim().to_string();
+            }
+        }
         info.cpu_cores = sys.physical_core_count().unwrap_or(0) as u32;
         info.cpu_threads = sys.cpus().len() as u32;
         info.ram_total_gb = bytes_to_gb(sys.total_memory());
@@ -267,15 +277,23 @@ fn parse_nvidia_smi_gpus(text: &str) -> Vec<GpuInfo> {
                 return None;
             }
             let name = parts[0].to_string();
-            let total_mib: u64 = parts[1].parse().ok()?;
+            // Jetson/Tegra-class SoCs (unified memory) print "[N/A]" for
+            // memory.total — dropping the line hid the ONLY GPU on those
+            // boxes and left them "CPU only". Keep the GPU with a zero
+            // budget and unified=true; apply_unified_budgets sizes it from
+            // system RAM.
+            let (vram_gb, unified) = match parts[1].parse::<u64>() {
+                Ok(total_mib) => ((total_mib as f64) / 1024.0, false),
+                Err(_) => (0.0, true),
+            };
             let uuid = parts[2].to_string();
             Some(GpuInfo {
                 index: i as u32,
                 name,
-                vram_gb: (total_mib as f64) / 1024.0,
+                vram_gb,
                 uuid,
                 selected: true,
-                unified: false,
+                unified,
             })
         })
         .collect()
@@ -431,6 +449,32 @@ fn gpus_via_drm_sysfs() -> Option<Vec<GpuInfo>> {
             _ => ("", false),
         };
         if !is_amd_intel {
+            // aarch64 SoCs (Jetson/Tegra, Mali, Adreno, …): the GPU is not
+            // an AMD/Intel PCI part and exposes no mem_info_* files — its
+            // memory IS system RAM. On aarch64 every DRM card is an
+            // integrated unified-memory GPU, so report it honestly with a
+            // zero budget and let apply_unified_budgets size it from RAM.
+            // Requiring a discrete-VRAM vendor here left these boxes as
+            // "No GPU detected — CPU only" with a 0 GB memory budget.
+            #[cfg(target_arch = "aarch64")]
+            {
+                let driver = read("uevent")
+                    .lines()
+                    .find_map(|l| l.strip_prefix("DRIVER=").map(str::to_string))
+                    .unwrap_or_default();
+                out.push(GpuInfo {
+                    index: out.len() as u32,
+                    name: if driver.is_empty() {
+                        format!("SoC GPU ({n})")
+                    } else {
+                        format!("SoC GPU ({driver})")
+                    },
+                    vram_gb: 0.0,
+                    uuid: String::new(),
+                    selected: true,
+                    unified: true,
+                });
+            }
             continue;
         }
         let vram = read("mem_info_vram_total")
@@ -475,6 +519,10 @@ fn is_integrated_gpu(name: &str) -> bool {
     if n.contains("apple") {
         return true;
     }
+    // ARM SoC GPUs (Windows-on-ARM Snapdragon, Mali boards): always unified.
+    if n.contains("adreno") || n.contains("qualcomm") || n.contains("snapdragon") || n.contains("mali") {
+        return true;
+    }
     // Intel iGPUs. NOT Arc — Arc cards have real dedicated VRAM.
     if n.contains("intel") && (n.contains("uhd") || n.contains("iris") || n.contains("hd graphics"))
     {
@@ -499,9 +547,11 @@ fn is_integrated_gpu(name: &str) -> bool {
 
 /// Rewrite `vram_gb` to a realistic GPU-addressable budget on unified
 /// architectures. Fractions are deliberately conservative:
-///   * Apple Silicon: ~75 % of RAM — approximates Metal's
-///     recommendedMaxWorkingSetSize (llama.cpp queries the exact value
-///     at runtime; this is only for fit tags / context sizing).
+///   * Apple Silicon and unified SoCs that report no memory figure
+///     (Jetson/Tegra via nvidia-smi "[N/A]", aarch64 DRM cards): ~75 % of
+///     RAM — approximates Metal's recommendedMaxWorkingSetSize and the
+///     shared-RAM budget SoC GPUs actually address (llama.cpp queries the
+///     exact value at runtime; this is only for fit tags / context sizing).
 ///   * Windows/other iGPU-by-name: 50 % of RAM — Windows' shared GPU
 ///     memory pool is capped at half of system RAM.
 ///   * Linux drm probes already carry real VRAM+GTT totals — untouched.
@@ -509,7 +559,9 @@ fn apply_unified_budgets(gpus: &mut [GpuInfo], ram_total_gb: f64) {
     for g in gpus.iter_mut() {
         if g.unified {
             if g.vram_gb <= 0.1 {
-                // Apple Silicon via system_profiler (no vram field).
+                // Unified GPU with no reported figure: Apple Silicon via
+                // system_profiler, Jetson via nvidia-smi "[N/A]", aarch64
+                // DRM SoC cards.
                 g.vram_gb = ram_total_gb * 0.75;
             }
         } else if is_integrated_gpu(&g.name) {
@@ -767,6 +819,22 @@ mod tests {
     }
 
     #[test]
+    fn keeps_jetson_gpu_with_na_memory_as_unified() {
+        // Jetson/Tegra-class unified-memory SoCs: nvidia-smi reports the GPU
+        // but prints "[N/A]" for memory.total. The GPU must survive parsing
+        // as unified so the shared-RAM budget gets applied.
+        let sample = "NVIDIA Thor, [N/A], GPU-abc123\r\n";
+        let gpus = parse_nvidia_smi_gpus(sample);
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].name, "NVIDIA Thor");
+        assert!(gpus[0].unified);
+        assert!(gpus[0].vram_gb < 0.1);
+        let mut gpus = gpus;
+        apply_unified_budgets(&mut gpus, 64.0);
+        assert!((gpus[0].vram_gb - 48.0).abs() < 0.01); // 75 % of 64 GB
+    }
+
+    #[test]
     fn skips_unnamed_adapters() {
         // Some virtual adapters have no Name. Drop them.
         let sample = "AdapterRAM=1024\r\n\r\nName=Real GPU\r\nAdapterRAM=2048\r\n\r\n";
@@ -814,6 +882,10 @@ mod tests {
         assert!(is_integrated_gpu("Intel(R) Iris(R) Xe Graphics"));
         // Apple.
         assert!(is_integrated_gpu("Apple M2"));
+        // ARM SoCs (Windows-on-ARM / Mali boards).
+        assert!(is_integrated_gpu("Qualcomm(R) Adreno(TM) X1-85 GPU"));
+        assert!(is_integrated_gpu("Snapdragon X Elite GPU"));
+        assert!(is_integrated_gpu("Mali-G720"));
         // Discrete cards must stay discrete.
         assert!(!is_integrated_gpu("NVIDIA GeForce RTX 4090"));
         assert!(!is_integrated_gpu("AMD Radeon RX 7900 XTX"));

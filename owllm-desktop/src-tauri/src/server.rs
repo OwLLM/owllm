@@ -136,6 +136,51 @@ async fn server_present(port: u16) -> bool {
     }
 }
 
+/// Port of any llama-server that is live RIGHT NOW from this app's point of
+/// view: the child we own (if still alive), an adopted server (re-verified),
+/// or one answering /health on a configured model port — covering a server
+/// started by another OwLLM instance or by hand outside the app entirely.
+/// Used by the Home readiness panel so a running engine never reads as
+/// "Not installed". Dead ports refuse instantly, so the scan stays cheap.
+pub async fn any_live_server_port(app: &AppHandle) -> Option<u16> {
+    let state = app.state::<ServerState>();
+    {
+        let mut inner = state.inner.lock().await;
+        let owned_alive = match inner.child.as_mut() {
+            Some(c) => matches!(c.try_wait(), Ok(None)),
+            None => false,
+        };
+        if owned_alive {
+            if let Some(p) = inner.port {
+                return Some(p);
+            }
+        }
+        if inner.child.is_none() && inner.adopted {
+            if let Some(p) = inner.port {
+                if server_present(p).await {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    // Neither owned nor adopted — knock on every configured model port in
+    // case a server is running that this instance never started.
+    let mut ports: Vec<u16> = models::list_models()
+        .await
+        .ok()?
+        .into_iter()
+        .filter_map(|m| m.port)
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    for p in ports {
+        if server_present(p).await {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// Classify a llama-server crash from its stderr tail. Returns the named
 /// cause + remediation, or None when the output matches nothing known.
 /// Patterns gathered from real llama.cpp failures (CUDA + Vulkan builds).
@@ -342,8 +387,7 @@ pub async fn server_start(
                 stream: "stdout".into(),
                 line: "[supervisor] llama.cpp engine not installed — installing the Local Inference module now (one-time, ~download)…".into(),
             });
-            let hw = crate::hardware::hardware_info().await.unwrap_or_default();
-            let snap = crate::modules::HardwareSnapshot::from_probe(&hw);
+            let snap = crate::modules::HardwareSnapshot::probe().await;
             let mgr = app.state::<crate::modules::ModuleManager>();
             // SELF-HEAL: clear any prior local-inference record first. install()
             // skips re-download when the recorded version matches — even if a
@@ -427,6 +471,9 @@ pub async fn server_start(
     };
 
     let mut cmd = Command::new(&exe);
+    if let Some(lp) = module_lib_path(&exe) {
+        cmd.env("LD_LIBRARY_PATH", lp);
+    }
     cmd.arg("--model").arg(&base_model);
     cmd.arg("--host")
         .arg(if exposed { "0.0.0.0" } else { "127.0.0.1" });
@@ -821,6 +868,31 @@ fn apply_gpu_selection(cmd: &mut Command, exe: &std::path::Path) {
     }
 }
 
+/// Linux: LD_LIBRARY_PATH value that lets the loader resolve shared
+/// libraries shipped NEXT TO the llama-server binary. The ARM64 CUDA
+/// module bundles the CUDA runtime (libcublas & co.) in its own dir
+/// because Jetson/JetPack machines ship only the driver — without this
+/// the CUDA build fails to load on a stock JetPack install.
+#[allow(unused_variables)]
+fn module_lib_path(exe: &std::path::Path) -> Option<std::ffi::OsString> {
+    #[cfg(target_os = "linux")]
+    {
+        let dir = exe.parent()?;
+        let mut v = std::ffi::OsString::from(dir);
+        if let Some(existing) = std::env::var_os("LD_LIBRARY_PATH") {
+            if !existing.is_empty() {
+                v.push(":");
+                v.push(existing);
+            }
+        }
+        return Some(v);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Loose GPU-name match (nvidia-smi vs Vulkan can phrase a name slightly
 /// differently). Case-insensitive equality or containment either way.
 fn gpu_name_matches(a: &str, b: &str) -> bool {
@@ -832,6 +904,9 @@ fn gpu_name_matches(a: &str, b: &str) -> bool {
 /// "VulkanN: <name> (<mem>)" lines into (index, name) pairs.
 fn list_vulkan_devices(exe: &std::path::Path) -> Vec<(u32, String)> {
     let mut c = std::process::Command::new(exe);
+    if let Some(lp) = module_lib_path(exe) {
+        c.env("LD_LIBRARY_PATH", lp);
+    }
     c.arg("--list-devices");
     #[cfg(windows)]
     {

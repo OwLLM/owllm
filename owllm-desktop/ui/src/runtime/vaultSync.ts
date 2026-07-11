@@ -177,6 +177,29 @@ export async function syncDevicesNow(): Promise<boolean> {
   }
 }
 
+// Code-signing metadata (identity, team, expiry — never the certificate bytes
+// or passwords) syncs through the vault too, so the user's other PCs SEE that
+// signing is configured and know to import the .p12 locally. Metadata only —
+// secret material never enters the git repo. On a change we fire
+// owllm:signing:refresh so an open Signing page reloads.
+let _signSyncing = false;
+export async function syncSigningNow(): Promise<boolean> {
+  if (!_enabled || _signSyncing) return false;
+  _signSyncing = true;
+  try {
+    const changed = await invoke<boolean>("vault_sync_signing");
+    if (changed) {
+      try { window.dispatchEvent(new CustomEvent("owllm:signing:refresh")); } catch { /* non-browser */ }
+    }
+    return changed;
+  } catch (e) {
+    console.warn("[vaultSync] signing sync failed", e);
+    return false;
+  } finally {
+    _signSyncing = false;
+  }
+}
+
 /// A vault adoption rewrites localStorage/SQLite under every store's feet, so
 /// a full reload is the blunt-but-reliable repaint. But each reload re-runs
 /// main.tsx — including the update prompt's fresh check() — and two devices
@@ -221,6 +244,9 @@ export async function startVaultSync(): Promise<void> {
   // 2b2) Sync remote-device records (metadata only) so the fleet is discoverable.
   void syncDevicesNow();
 
+  // 2b3) Sync code-signing metadata (non-secret) so signed-release config follows the user.
+  void syncSigningNow();
+
   // 2c) Sync projects + chats (SQLite rows) so conversations follow the user.
   //     If we pulled in newer projects/chats from another device, reload (once)
   //     so the whole UI repaints from the freshly-synced database.
@@ -243,6 +269,7 @@ export async function onVaultConnected(): Promise<void> {
   await pushNow(true);
   invoke("vault_sync_teams").catch(() => {});
   void syncDevicesNow();
+  void syncSigningNow();
   if (await syncProjectsNow()) reloadOnce();
 }
 

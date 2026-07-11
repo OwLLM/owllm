@@ -1158,6 +1158,21 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     ],
   },
   {
+    name: "signing_get",
+    aliases: ["get_signing", "signing_credentials", "code_signing", "signing_creds"],
+    description:
+      "Read the user's shared code-signing credentials (managed on the OwLLM Signing page) so you can " +
+      "set up a signed + notarized release in ANY project. Returns status/metadata (identity, team id, " +
+      "expiry, which fields are present) by default. Pass include_secrets=true to also get the CI env " +
+      "values — for Apple: APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, " +
+      "APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID — e.g. to set them as GitHub Actions secrets. Handle secret " +
+      "values carefully: never echo them into logs, commits, or chat.",
+    args: [
+      { name: "platform", required: false, description: "Which signing set: 'apple' (default) or 'windows'.", aliases: ["os", "target"] },
+      { name: "include_secrets", required: false, description: "true to also return the secret CI env values. Default false (metadata only).", aliases: ["secrets", "reveal", "with_secrets"] },
+    ],
+  },
+  {
     name: "ssh_upload",
     aliases: ["scp_upload", "upload_file", "ssh_put", "scp_put", "send_file", "scp"],
     description: "Copy a LOCAL file to a REMOTE host over SSH/SCP using the user's SSH keys.",
@@ -1736,6 +1751,18 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         if (res.error) parts.push(`error: ${res.error}`);
         parts.push(`device: ${match.name} · decision: ${res.decision} · exit_code: ${res.exit_code ?? "n/a"}`);
         return { ok: !!res.ok, output: parts.join("\n\n") };
+      }
+      case "signing_get": {
+        // Read the shared code-signing vault so an agent in any project can wire
+        // signed releases. Secrets only when explicitly asked.
+        const platform = String(call.args.platform ?? "apple").trim().toLowerCase() || "apple";
+        const includeSecrets = /^(true|1|yes)$/i.test(String(call.args.include_secrets ?? ""));
+        try {
+          const data = await invoke<unknown>("signing_agent_get", { platform, includeSecrets });
+          return { ok: true, output: JSON.stringify(data, null, 2) };
+        } catch (e) {
+          return { ok: false, output: `signing_get: ${String(e)}` };
+        }
       }
       case "publish_release": {
         // Host-side build+sign+publish. cwd is the project root (the repo to ship).

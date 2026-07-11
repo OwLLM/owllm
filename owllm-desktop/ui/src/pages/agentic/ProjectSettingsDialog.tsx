@@ -138,6 +138,20 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [actBusy, setActBusy] = useState<string | null>(null);
   const [actMsg, setActMsg] = useState<string | null>(null);
+  // Ghost detection: a project synced from another machine carries that
+  // machine's folder path, which won't exist here. When the path is set but
+  // isn't a real directory on THIS device, flag it so the user is prompted to
+  // pick a local folder instead of the stale path failing silently at run time.
+  const [folderMissing, setFolderMissing] = useState(false);
+  useEffect(() => {
+    let alive = true;
+    const p = location.trim();
+    if (!open || mode !== "edit" || !p || isWslPath(p)) { setFolderMissing(false); return; }
+    invoke<boolean>("path_is_dir", { path: p })
+      .then(ok => { if (alive) setFolderMissing(!ok); })
+      .catch(() => { if (alive) setFolderMissing(false); });
+    return () => { alive = false; };
+  }, [open, mode, location]);
   // --- Project Card (.owllm/project.json) — the one committed file holding this
   // project's goal / verify / release / mode, edited right here so it's visible.
   const [cardRaw, setCardRaw] = useState<ProjectCard | null>(null);   // parsed card (preserves unknown fields on save)
@@ -599,9 +613,14 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <label style={LBL}>Folder / location</label>
               <div style={{ display: "flex", gap: 8 }}>
-                <input value={location} onChange={e => onChangeLocation(e.target.value)} placeholder="/path/to/repo · github.com/me/x" style={{ ...INPUT, flex: 1 }} />
+                <input value={location} onChange={e => onChangeLocation(e.target.value)} placeholder="/path/to/repo · github.com/me/x" style={{ ...INPUT, flex: 1, ...(folderMissing ? { borderColor: "#e0a03a" } : null) }} />
                 <button onClick={() => browse(onChangeLocation)} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
               </div>
+              {folderMissing && (
+                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#e0a03a", background: "rgba(224,160,58,0.10)", border: "1px solid rgba(224,160,58,0.35)", borderRadius: 8, padding: "6px 10px" }}>
+                  <span>📁 This folder isn't on this device — the project (chat, memory & settings) synced from another machine. <b>Browse…</b> to point it at a local folder here.</span>
+                </div>
+              )}
             </div>
             {/* Security */}
             <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, borderRadius: 10, background: "var(--bg-elevated)", border: "1px solid var(--border)" }}>

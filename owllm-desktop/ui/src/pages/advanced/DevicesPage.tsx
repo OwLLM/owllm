@@ -178,6 +178,11 @@ export default function DevicesPage() {
 
   const syncDiscover = () =>
     guard(async () => {
+      // Without GitHub there IS no vault — don't pretend to sync.
+      if (identity && !identity.github_login) {
+        setDiscoverMsg("not signed in to GitHub — nothing to discover");
+        return;
+      }
       setDiscoverMsg("syncing…");
       const changed = await rd.syncDiscovery();
       await reload();
@@ -274,6 +279,31 @@ export default function DevicesPage() {
             </div>
           ))}
         </section>
+      )}
+
+      {/* No GitHub = no vault = Discover always comes back empty. Say it
+          UP FRONT instead of letting the user hunt for ghosts (their words:
+          "I was trying to discover other devices for minutes before
+          realising I'm not connected to GitHub"). Pair-by-IP still works. */}
+      {identity && !identity.github_login && (
+        <div data-ui="devicesGithubNotice" style={{
+          display: "flex", alignItems: "center", gap: 12, padding: "10px 14px",
+          borderRadius: 10, border: "1px solid rgba(255,196,106,0.55)",
+          background: "rgba(64,44,12,0.35)", color: "#ffd79a", fontSize: 12.5, lineHeight: 1.5,
+        }}>
+          <span style={{ fontSize: 18 }}>⚠️</span>
+          <div style={{ flex: 1 }}>
+            <b>Not signed in to GitHub — discovery has nothing to search.</b> Your other
+            OwLLM machines publish their device records through your GitHub vault, so
+            🔄 Discover will keep coming back empty until you connect GitHub (or create a
+            free account). Manual "Pair by IP" below works without it.
+          </div>
+          <button
+            className="btn"
+            onClick={() => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "home" } }))}
+            style={{ background: "var(--accent)", color: "#fff", fontWeight: 700, padding: "7px 12px", flexShrink: 0 }}
+          >Connect GitHub →</button>
+        </div>
       )}
 
       {/* My device + registry */}

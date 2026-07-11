@@ -875,9 +875,9 @@ async fn run_install(
     hash: &str,
     channel: &tauri::ipc::Channel<InstallEvent>,
 ) -> Result<String, String> {
-    // 1) Find the bundled Python.
+    // 1) Find an interpreter (bundled runtime, else system python3).
     let bundled = crate::paths::bundled_python_exe()
-        .ok_or_else(|| "bundled Python not found (expected LLM/python_runtime/python3.11/python.exe). Run the installer to bootstrap the runtime.".to_string())?;
+        .ok_or_else(|| "no Python interpreter found — install python3 (e.g. apt install python3) or point OWLLM_PYTHON at one.".to_string())?;
     let envs_dir = envs_root().ok_or_else(|| "LLM/ root not found".to_string())?;
     std::fs::create_dir_all(&envs_dir).map_err(|e| format!("mkdir envs root: {e}"))?;
     let final_dir = envs_dir.join(&profile.name);

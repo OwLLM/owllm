@@ -344,29 +344,95 @@ pub async fn hf_download(
     // installer uses.
     let partial = with_suffix(&dest_file, ".partial");
 
+    // RESUME: a leftover .partial is the persisted download state. Ask the
+    // server for the missing tail (HTTP Range) instead of restarting at 0 —
+    // the "40 GB download went back to 0%" bug. Server says:
+    //   206 → append from where we stopped;
+    //   200 → Range unsupported/ignored → honest restart from scratch;
+    //   416 → our partial already covers the file (or is bogus) — finish it
+    //         if its size matches the server's total, else restart.
+    let mut resume_from: u64 = std::fs::metadata(&partial)
+        .ok()
+        .filter(|m| m.is_file())
+        .map(|m| m.len())
+        .unwrap_or(0);
+
     let mut req = client().get(&url);
     if let Some(tok) = hf_token() {
         req = req.bearer_auth(tok);
     }
-    let resp = req.send().await.map_err(|e| {
+    if resume_from > 0 {
+        req = req.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+    }
+    let mut resp = req.send().await.map_err(|e| {
         let msg = format!("hf request: {e}");
         let _ = channel.send(DownloadEvent::Failed { error: msg.clone() });
         msg
     })?;
-    let status = resp.status();
+    let mut status = resp.status();
+    if status == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && resume_from > 0 {
+        // Content-Range on a 416 is "bytes */<total>". If our partial IS the
+        // whole file, promote it; otherwise it's junk — restart clean.
+        let server_total = resp
+            .headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.rsplit('/').next())
+            .and_then(|t| t.parse::<u64>().ok());
+        if server_total == Some(resume_from) {
+            std::fs::rename(&partial, &dest_file)
+                .map_err(|e| format!("finalize {}: {e}", dest_file.display()))?;
+            let _ = channel.send(DownloadEvent::Started {
+                total: Some(resume_from),
+            });
+            let _ = channel.send(DownloadEvent::Finished {
+                path: dest_file.to_string_lossy().into_owned(),
+                bytes: resume_from,
+            });
+            return Ok(());
+        }
+        resume_from = 0;
+        let mut retry = client().get(&url);
+        if let Some(tok) = hf_token() {
+            retry = retry.bearer_auth(tok);
+        }
+        resp = retry.send().await.map_err(|e| {
+            let msg = format!("hf request: {e}");
+            let _ = channel.send(DownloadEvent::Failed { error: msg.clone() });
+            msg
+        })?;
+        status = resp.status();
+    }
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         let msg = format!("HuggingFace returned {status}: {body}");
         let _ = channel.send(DownloadEvent::Failed { error: msg.clone() });
         return Err(msg);
     }
-    let total = resp.content_length();
+    let resuming = status == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
+    // Full size for the progress bar: on 206 the body is only the tail, so
+    // add back what's already on disk (Content-Range's total is equivalent).
+    let total = resp
+        .content_length()
+        .map(|len| if resuming { resume_from + len } else { len });
     let _ = channel.send(DownloadEvent::Started { total });
 
-    let mut out = std::fs::File::create(&partial)
-        .map_err(|e| format!("create {}: {e}", partial.display()))?;
+    let mut out = if resuming {
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&partial)
+            .map_err(|e| format!("append {}: {e}", partial.display()))?
+    } else {
+        std::fs::File::create(&partial)
+            .map_err(|e| format!("create {}: {e}", partial.display()))?
+    };
     let mut stream = resp.bytes_stream();
-    let mut received: u64 = 0;
+    let mut received: u64 = if resuming { resume_from } else { 0 };
+    // Surface the resumed offset immediately — the bar starts at the real
+    // percentage instead of 0 until the first throttled tick.
+    if resuming {
+        let _ = channel.send(DownloadEvent::Progress { received, total });
+    }
     let mut last_emit = std::time::Instant::now();
     use futures_util::StreamExt;
     while let Some(chunk) = stream.next().await {
@@ -677,6 +743,75 @@ pub async fn model_weight_files(dir: String) -> Result<Vec<ModelWeightFile>, Str
     .map_err(|e| e.to_string())?
 }
 
+/// One interrupted download inside a model directory: the `.partial` file
+/// hf_download left behind, reported as the ORIGINAL repo-relative file name
+/// (what hf_download's `file` param expects) plus the bytes already on disk.
+/// This is the on-disk "persisted download state" the Resume button feeds
+/// straight back into hf_download — no quantization re-picking.
+#[derive(Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PartialDownload {
+    pub file: String,
+    pub bytes_on_disk: u64,
+}
+
+/// List the interrupted (`.partial`) downloads inside a downloaded model dir.
+/// Confined to the models roots, same as model_weight_files.
+#[tauri::command]
+pub async fn models_partial_files(dir: String) -> Result<Vec<PartialDownload>, String> {
+    let canon = std::fs::canonicalize(std::path::PathBuf::from(&dir))
+        .map_err(|e| format!("canonicalize {dir}: {e}"))?;
+    if !under_models_root(&canon) {
+        return Err("path is not under a models root".into());
+    }
+    tokio::task::spawn_blocking(move || -> Result<Vec<PartialDownload>, String> {
+        let mut out: Vec<PartialDownload> = Vec::new();
+        let mut stack: Vec<(std::path::PathBuf, usize)> = vec![(canon.clone(), 0)];
+        while let Some((d, depth)) = stack.pop() {
+            let rd = match std::fs::read_dir(&d) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            for e in rd.flatten() {
+                let p = e.path();
+                if p.is_dir() {
+                    if depth < 2 {
+                        stack.push((p, depth + 1));
+                    }
+                    continue;
+                }
+                let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                    continue;
+                };
+                let Some(original) = name.strip_suffix(".partial") else {
+                    continue;
+                };
+                let size = e.metadata().map(|m| m.len()).unwrap_or(0);
+                // Repo-relative path with '/' separators (hf_download joins it
+                // to both the /resolve/ URL and the destination dir).
+                let rel_dir = p
+                    .parent()
+                    .and_then(|par| par.strip_prefix(&canon).ok())
+                    .map(|r| r.to_string_lossy().replace('\\', "/"))
+                    .unwrap_or_default();
+                let file = if rel_dir.is_empty() {
+                    original.to_string()
+                } else {
+                    format!("{rel_dir}/{original}")
+                };
+                out.push(PartialDownload {
+                    file,
+                    bytes_on_disk: size,
+                });
+            }
+        }
+        out.sort_by(|a, b| a.file.cmp(&b.file));
+        Ok(out)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Delete a single weight file from a downloaded model. Confined to the models
 /// roots so a stray call can't remove an arbitrary file. Returns freed bytes.
 #[tauri::command]
@@ -934,6 +1069,7 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                     let has_config = path.join("config.json").is_file();
                     let mut has_safetensors = false;
                     let mut has_gguf = false;
+                    let mut has_partial = false;
                     let mut has_any_file = false;
                     let mut has_subdir = false;
                     if let Ok(it) = std::fs::read_dir(&path) {
@@ -948,6 +1084,10 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                                 match ext.to_ascii_lowercase().as_str() {
                                     "safetensors" | "bin" => has_safetensors = true,
                                     "gguf" => has_gguf = true,
+                                    // hf_download's interrupted-download
+                                    // leftovers — resumable, so the card must
+                                    // surface the model instead of hiding it.
+                                    "partial" => has_partial = true,
                                     _ => {}
                                 }
                             }
@@ -964,8 +1104,9 @@ pub async fn models_list_downloaded() -> Result<Vec<DownloadedModel>, String> {
                     let (total, _) = dir_summary(&path);
                     let has_marker =
                         path.join(".download").is_file() || path.join(".incomplete").is_file();
-                    let is_incomplete =
-                        has_marker || (has_config && !has_weights && total < 100 * 1024 * 1024);
+                    let is_incomplete = has_marker
+                        || has_partial
+                        || (has_config && !has_weights && total < 100 * 1024 * 1024);
                     let onboarding = if is_incomplete {
                         "BROKEN"
                     } else if has_gguf {

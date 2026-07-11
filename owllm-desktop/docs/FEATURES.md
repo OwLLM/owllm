@@ -28,8 +28,18 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Local serving**: llama.cpp (`llama-server --jinja`), auto-start on first send,
   one server shared across app windows/instances (port adoption), VRAM-aware
   context sizing, vision via auto-downloaded `--mmproj` projectors.
+- **Platforms**: engine + runtime modules ship per-platform variants — Windows
+  x64 (CUDA/Vulkan/CPU), Linux x64 (Vulkan/CPU), Linux ARM64 (CUDA for Jetson
+  JetPack 7+ gated by `cudaMajorMin`, CPU for Pi/ARM servers), macOS ARM64
+  (Metal). Unsupported platform/arch combos degrade honestly: the wizard names
+  the arch ("no build published for windows-aarch64 (ARM64) yet") instead of
+  offering a foreign binary. python-runtime / mcp-toolchain / audio-stt have
+  Linux-ARM64 variants; the CUDA module bundles its own CUDA runtime libs
+  (spawned with `LD_LIBRARY_PATH` — stock JetPack has only the driver).
 - **Browse/download**: HuggingFace search + curated recs, VRAM-fit color coding,
-  cache management, Tuned tab for fine-tuned/abliterated artifacts.
+  cache management, Tuned tab for fine-tuned/abliterated artifacts. Interrupted
+  downloads keep their `.partial` and resume via HTTP Range — the Downloaded
+  card shows ⏬ Resume download (no quant re-pick, no restart from 0%).
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).
@@ -60,10 +70,12 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are
   injected at the next agent boundary — or **between tool calls** on local
   models (`getSteer` in `dispatch.ts`). Never dropped.
-- **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane + NEXT-STEPS
-  list + 🪄 Digest agent (rewrites raw notes into implementable steps,
-  additive-only). Steps feed the run (steer or new goal); auto-feed walks the
-  list at each clean run end. Also mounted on the Code page.
+- **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane + Kanban
+  plan board (NOW/NEXT/LATER) + NEXT-STEPS list + 🪄 Digest agent (rewrites
+  raw notes into implementable steps, additive-only). Steps feed the run
+  (steer or new goal); ⚡ Start batch feeds the whole NOW lane (the board is
+  never consumed); ▶ Start queue feeds the first pending step and auto-feed
+  walks the rest at each clean run end. Also mounted on the Code page.
 - **Memory**: per-agent history + shared **team memory** (`memory.rs`) — FACTS
   (durable, keyed, vault-synced) vs WORKLOG (auto-captured, local, capped 100),
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph
@@ -295,7 +307,12 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 ## Support & UX
 
 - **The Watcher**: in-app support agent — per-page docs (`PAGE_DOCS`), guided
-  walkthroughs, screenshot+ask, one-click bug report to GitHub.
+  walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
+  works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).
+- **Linux chrome**: no overlay window off-Windows — the frame draws in-page,
+  the main window is transparent (`tauri.linux.conf.json`) and the see-through
+  headroom band above the frame is click-through via GTK input-shape
+  (`frame_shape.rs`), mirroring the Windows overlay behaviour.
 - Update streams: signed Tauri updater (shell) + per-launch module swap +
   hot-pulled data layer (teams/roles/profiles from the public repo).
 - Frameless HybridFrame window (transparent — NEVER make it opaque),

@@ -1076,8 +1076,13 @@ pub async fn tool_screenshot_url(url: String, out_png: String) -> Result<String,
     // The screenshot_url.py wrapper script ships in the app's resources
     // (apps/owllm-desktop/resources/tools/), with the legacy LLM/tools/
     // path as the fallback.
-    let python = crate::paths::bundled_python_exe()
-        .ok_or_else(|| "bundled Python not found (expected LLM/python_runtime/python3.11/python.exe). Run the installer to bootstrap the runtime.".to_string())?;
+    let python = crate::paths::bundled_python_exe().ok_or_else(|| {
+        if cfg!(windows) {
+            "bundled Python not found (expected python_runtime\\python3.11\\python.exe). Run the installer to bootstrap the runtime.".to_string()
+        } else {
+            "no Python interpreter found — install python3 (e.g. apt install python3) or point OWLLM_PYTHON at one.".to_string()
+        }
+    })?;
     let script = crate::paths::tools_dir()
         .map(|d| d.join("screenshot_url.py"))
         .filter(|p| p.is_file())

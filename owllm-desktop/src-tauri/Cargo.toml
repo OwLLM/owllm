@@ -179,6 +179,15 @@ rand = "0.8"
 # decorative frame (must hover above the React content, must NOT hover
 # above the user's browser when they alt-tab away). Single function
 # call, no need for the heavier `windows` crate.
+# Linux chrome integration for the in-page HybridFrame (no overlay window
+# off-Windows): gtk gives us (a) input-shape so the transparent EXTRA_TOP
+# band above the frame stops swallowing clicks meant for windows behind us
+# (frame_shape.rs), and (b) gdk pixbuf window readback for The Watcher's
+# bug-report screenshot (support.rs). Same gtk 0.18 tauri/tao already link —
+# this adds a direct path to it, not a new library in the tree.
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",

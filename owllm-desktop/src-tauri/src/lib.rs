@@ -42,6 +42,7 @@ mod email;
 mod env_manager;
 mod finetuning;
 mod fleet;
+mod frame_shape;
 mod git;
 mod github;
 mod hardware;
@@ -76,7 +77,9 @@ mod wsl_setup;
 /// windows-subsystem app stderr is invisible and a panic that unwinds out of
 /// the event loop leaves NO trace (no WER entry, no dialog) — the window just
 /// disappears. That exact "silent crash" was reported and was undiagnosable.
-/// Mirrors the paths_debug fallback chain: %TEMP%, then %USERPROFILE%.
+/// Mirrors the paths_debug fallback chain: %TEMP%, then %USERPROFILE%
+/// (with $HOME and /tmp so the chain also resolves on Linux/macOS,
+/// where TEMP and USERPROFILE don't exist and panics logged nothing).
 fn install_crash_log_hook() {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -87,9 +90,14 @@ fn install_crash_log_hook() {
             info,
             std::backtrace::Backtrace::force_capture(),
         );
-        for base in [std::env::var_os("TEMP"), std::env::var_os("USERPROFILE")]
-            .into_iter()
-            .flatten()
+        for base in [
+            std::env::var_os("TEMP"),
+            std::env::var_os("USERPROFILE"),
+            std::env::var_os("HOME"),
+            Some(std::ffi::OsString::from("/tmp")),
+        ]
+        .into_iter()
+        .flatten()
         {
             let path = std::path::PathBuf::from(base).join("owllm-crash.log");
             use std::io::Write;
@@ -372,6 +380,7 @@ pub fn run() {
             models::list_models,
             overlay_frame::overlay_frame_enabled,
             overlay_frame::overlay_frame_capture_geometry,
+            frame_shape::frame_input_region,
             projects::list_projects,
             projects::create_project,
             projects::update_project,
@@ -421,6 +430,7 @@ pub fn run() {
             huggingface::hf_cache_delete,
             huggingface::models_list_downloaded,
             huggingface::model_weight_files,
+            huggingface::models_partial_files,
             huggingface::delete_model_weight,
             recommendations::models_recommended,
             paths::shell_open_url,

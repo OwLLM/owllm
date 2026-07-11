@@ -26,7 +26,7 @@
 // tools_dir, finetune_script) prefer the new resources tree but fall
 // back to the old `LLM/` location so a half-migrated tree still works.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Open a URL in the user's default browser. Used by the AccessTokens
 /// pane to launch huggingface.co/settings/tokens and the HF model page.
@@ -139,6 +139,10 @@ pub const fn llama_server_filename() -> &'static str {
 ///      (new path; populated by the wizard's module installer)
 ///   3. Legacy `%LOCALAPPDATA%\OwLLM Desktop\runtime\llama.cpp\`
 ///   4. Repo `runtime-data\runtime\llama.cpp\` (dev fallback)
+///   5. Anywhere on PATH — a system/hand-built install (brew, apt, a
+///      self-compiled build on an ARM SoC) that never went through the
+///      module system. Without this the app called such an engine
+///      "not installed" even while it was serving requests.
 pub fn llama_server_exe() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_LLAMA_SERVER") {
         let pb = PathBuf::from(p);
@@ -157,12 +161,17 @@ pub fn llama_server_exe() -> Option<PathBuf> {
             return Some(exe);
         }
     }
-    let exe = llm_root()?.join("runtime").join("llama.cpp").join(exe_name);
-    if exe.is_file() {
-        Some(exe)
-    } else {
-        None
+    if let Some(root) = llm_root() {
+        let exe = root.join("runtime").join("llama.cpp").join(exe_name);
+        if exe.is_file() {
+            return Some(exe);
+        }
     }
+    // App-managed locations exhausted — accept a binary on PATH.
+    let path_var = std::env::var_os("PATH")?;
+    std::env::split_paths(&path_var)
+        .map(|dir| dir.join(exe_name))
+        .find(|cand| cand.is_file())
 }
 
 /// Look for `<binary>` under `app_data_dir/modules/<variant-prefix>*\`.
@@ -190,6 +199,7 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
     for dir in candidates {
         let direct = dir.join(binary_name);
         if direct.is_file() {
+            ensure_executable(&direct);
             return Some(direct);
         }
         // Allow one level of nesting (some upstream zips wrap their
@@ -198,6 +208,7 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
             for entry in sub.flatten() {
                 let nested = entry.path().join(binary_name);
                 if nested.is_file() {
+                    ensure_executable(&nested);
                     return Some(nested);
                 }
             }
@@ -205,6 +216,28 @@ pub fn module_binary(variant_prefix: &str, binary_name: &str) -> Option<PathBuf>
     }
     None
 }
+
+/// Self-heal the exec bit on a resolved module binary. Modules installed
+/// by app versions whose extractor trusted bogus zip modes (zip 0.6
+/// synthesizes 0o664 for Windows-stamped zips) hold binaries that spawn
+/// with "Permission denied (os error 13)" and give the user no clue why.
+/// Repairing here fixes every existing broken install without a reinstall.
+#[cfg(unix)]
+fn ensure_executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o111 == 0 {
+            let _ = std::fs::set_permissions(
+                path,
+                std::fs::Permissions::from_mode(mode | 0o755),
+            );
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn ensure_executable(_path: &Path) {}
 
 /// Repointed for fine-tuning: returns `app_data_dir/modules/python-3.11-embed-win-*/python.exe`
 /// when the python-runtime module is installed. Used by env_manager to
@@ -250,11 +283,42 @@ pub fn module_node_dir() -> Option<PathBuf> {
 }
 
 fn appdata_root() -> Option<PathBuf> {
-    // %APPDATA%\com.localllm.owllm-desktop  matches Tauri's
-    // app_data_dir() for our identifier without needing the AppHandle
-    // (paths.rs is called from places that don't have one).
-    let appdata = std::env::var_os("APPDATA")?;
-    Some(PathBuf::from(appdata).join("com.localllm.owllm-desktop"))
+    // Mirrors Tauri's app_data_dir() for our identifier without needing
+    // the AppHandle (paths.rs is called from places that don't have one).
+    // Must match per-OS, or module lookups miss what ModuleManager
+    // installed: %APPDATA% only exists on Windows, so resolving it
+    // unconditionally made every installed module invisible on Linux.
+    const IDENTIFIER: &str = "com.localllm.owllm-desktop";
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")?;
+        Some(PathBuf::from(appdata).join(IDENTIFIER))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join(IDENTIFIER),
+        )
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        if let Some(xdg) = std::env::var_os("XDG_DATA_HOME") {
+            if !xdg.is_empty() {
+                return Some(PathBuf::from(xdg).join(IDENTIFIER));
+            }
+        }
+        let home = std::env::var_os("HOME")?;
+        Some(
+            PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join(IDENTIFIER),
+        )
+    }
 }
 
 /// The OwLLM config + credentials home ON THE HOST. Normally
@@ -369,24 +433,59 @@ pub fn bundled_python_exe() -> Option<PathBuf> {
             return Some(pb);
         }
     }
-    if let Some(rt) = runtime_root() {
-        let candidate = rt
-            .join("python_runtime")
-            .join("python3.11")
-            .join("python.exe");
-        if candidate.is_file() {
-            return Some(candidate);
+    // The bundled runtime's interpreter layout differs per OS: the Windows
+    // embeddable build ships python.exe at the top, a Linux/macOS runtime
+    // ships bin/python3. Probing only python.exe made this None on every
+    // non-Windows install, which killed venv creation (finetuning env
+    // Install/Repair) and the screenshot tool there.
+    let rel_candidates: &[&[&str]] = if cfg!(windows) {
+        &[&["python3.11", "python.exe"]]
+    } else {
+        &[
+            &["python3.11", "bin", "python3"],
+            &["python3.11", "bin", "python3.11"],
+            &["bin", "python3"],
+        ]
+    };
+    let roots = [
+        runtime_root().map(|r| r.join("python_runtime")),
+        llm_root().map(|r| r.join("python_runtime")),
+    ];
+    for root in roots.iter().flatten() {
+        for rel in rel_candidates {
+            let mut candidate = root.clone();
+            for part in *rel {
+                candidate = candidate.join(part);
+            }
+            if candidate.is_file() {
+                return Some(candidate);
+            }
         }
     }
-    let candidate = llm_root()?
-        .join("python_runtime")
-        .join("python3.11")
-        .join("python.exe");
-    if candidate.is_file() {
-        Some(candidate)
-    } else {
-        None
+    // Installed python-runtime module (the wizard's install path — on
+    // Linux ARM64 it's the only bundled interpreter source).
+    if let Some(p) = module_python_exe() {
+        return Some(p);
     }
+    // No bundled runtime → fall back to a system interpreter (Unix only;
+    // on Windows the bundled runtime is the supported path).
+    #[cfg(not(windows))]
+    {
+        for name in ["python3", "python"] {
+            if let Ok(out) = std::process::Command::new("which").arg(name).output() {
+                if out.status.success() {
+                    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !p.is_empty() {
+                        let pb = PathBuf::from(p);
+                        if pb.is_file() {
+                            return Some(pb);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Path to the finetune.py training entrypoint. Lives at the legacy

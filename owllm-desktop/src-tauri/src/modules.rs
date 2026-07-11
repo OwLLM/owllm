@@ -94,10 +94,21 @@ pub struct Variant {
 pub enum Platform {
     #[serde(rename = "windows-x86_64")]
     WindowsX86_64,
+    #[serde(rename = "windows-aarch64")]
+    WindowsAarch64,
     #[serde(rename = "linux-x86_64")]
     LinuxX86_64,
+    #[serde(rename = "linux-aarch64")]
+    LinuxAarch64,
     #[serde(rename = "macos-aarch64")]
     MacOsAarch64,
+    /// Forward-compat catch-all: a platform string this build doesn't know
+    /// yet (the registry is fetched live from main, so it can gain new
+    /// platforms before every installed app updates). Deserializing it must
+    /// not fail the WHOLE registry parse — the unknown variant simply never
+    /// matches the host, so it's skipped by the resolver.
+    #[serde(other, rename = "unknown")]
+    Unknown,
 }
 
 impl Platform {
@@ -106,21 +117,61 @@ impl Platform {
         {
             Platform::WindowsX86_64
         }
+        // Native Windows-on-ARM builds. (An x64 build running under
+        // emulation still reports windows-x86_64 — correct, since it can
+        // only launch x64 child binaries anyway.)
+        #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+        {
+            Platform::WindowsAarch64
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
         {
             Platform::LinuxX86_64
+        }
+        #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+        {
+            Platform::LinuxAarch64
         }
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
         {
             Platform::MacOsAarch64
         }
+        // No silent fallback: claiming another platform makes the resolver
+        // hand out binaries that can't run here (an aarch64 build used to
+        // masquerade as windows-x86_64 and download Windows llama-server).
+        // A new target must be added to the enum + registry explicitly.
         #[cfg(not(any(
             all(target_os = "windows", target_arch = "x86_64"),
+            all(target_os = "windows", target_arch = "aarch64"),
             all(target_os = "linux", target_arch = "x86_64"),
+            all(target_os = "linux", target_arch = "aarch64"),
             all(target_os = "macos", target_arch = "aarch64"),
         )))]
         {
-            Platform::WindowsX86_64
+            compile_error!(
+                "unsupported target: add it to modules::Platform and the module registry"
+            );
+        }
+    }
+
+    /// Registry identifier + human arch label, for user-facing messages
+    /// ("no build published for linux-aarch64 (ARM64) yet").
+    pub fn id(&self) -> &'static str {
+        match self {
+            Platform::WindowsX86_64 => "windows-x86_64",
+            Platform::WindowsAarch64 => "windows-aarch64",
+            Platform::LinuxX86_64 => "linux-x86_64",
+            Platform::LinuxAarch64 => "linux-aarch64",
+            Platform::MacOsAarch64 => "macos-aarch64",
+            Platform::Unknown => "unknown",
+        }
+    }
+
+    pub fn arch_label(&self) -> &'static str {
+        match self {
+            Platform::WindowsX86_64 | Platform::LinuxX86_64 => "x64",
+            Platform::WindowsAarch64 | Platform::LinuxAarch64 | Platform::MacOsAarch64 => "ARM64",
+            Platform::Unknown => "unknown arch",
         }
     }
 }
@@ -135,6 +186,11 @@ pub struct Requirements {
     pub ram_gb: Option<u32>,
     #[serde(rename = "diskGb", default)]
     pub disk_gb: Option<u32>,
+    /// Minimum CUDA major version the installed *driver* must support.
+    /// Gates CUDA builds so e.g. a JetPack 6 Orin (driver CUDA 12) falls
+    /// back to the CPU variant instead of a CUDA-13 binary it can't load.
+    #[serde(rename = "cudaMajorMin", default)]
+    pub cuda_major_min: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,9 +260,24 @@ pub struct HardwareSnapshot {
     pub vram_gb: u32,
     pub ram_gb: u32,
     pub free_disk_gb: u32,
+    /// CUDA major version the installed NVIDIA driver supports (from the
+    /// nvidia-smi banner). None when there is no NVIDIA driver.
+    pub cuda_major: Option<u32>,
 }
 
 impl HardwareSnapshot {
+    /// Full async probe — hardware + CUDA driver version. This is what
+    /// every install/list path should use so `cudaMajorMin` gating works.
+    pub async fn probe() -> Self {
+        let hw = crate::hardware::hardware_info().await.unwrap_or_default();
+        let cuda_major = crate::hardware::cuda_driver_version()
+            .await
+            .and_then(|v| v.split('.').next().and_then(|m| m.parse().ok()));
+        let mut snap = Self::from_probe(&hw);
+        snap.cuda_major = cuda_major;
+        snap
+    }
+
     pub fn from_probe(hw: &crate::hardware::HardwareInfo) -> Self {
         let (gpu_vendor, vram_gb) = hw
             .gpus
@@ -235,6 +306,7 @@ impl HardwareSnapshot {
             vram_gb,
             ram_gb: hw.ram_total_gb as u32,
             free_disk_gb: probe_free_disk_gb().unwrap_or(50), // generous default
+            cuda_major: None,
         }
     }
 }
@@ -311,6 +383,17 @@ fn check_requirements(req: &Requirements, hw: &HardwareSnapshot) -> Result<(), S
                 "requires {min} GB free disk, has {}",
                 hw.free_disk_gb
             ));
+        }
+    }
+    if let Some(min) = req.cuda_major_min {
+        match hw.cuda_major {
+            Some(have) if have >= min => {}
+            Some(have) => {
+                return Err(format!(
+                    "requires a CUDA {min}+ driver, this driver supports CUDA {have}"
+                ))
+            }
+            None => return Err(format!("requires a CUDA {min}+ NVIDIA driver, none detected")),
         }
     }
     Ok(())
@@ -517,7 +600,14 @@ impl ModuleManager {
                         None,
                         None,
                         None,
-                        vec![("platform".into(), "no variant for this OS".into())],
+                        vec![(
+                            "platform".into(),
+                            format!(
+                                "no build published for {} ({}) yet",
+                                hardware.platform.id(),
+                                hardware.platform.arch_label()
+                            ),
+                        )],
                     ),
                 };
             out.push(ModuleStatus {
@@ -797,12 +887,19 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
             std::io::copy(&mut entry, &mut out)
                 .map_err(|e| format!("extract {}: {e}", out_path.display()))?;
             // Restore unix modes so llama-server & friends stay executable.
-            // Zips repacked on Windows carry no modes — default those to
-            // 0755, which is correct for module payloads (binaries + libs).
+            // Trust the stored mode only if it carries an exec bit: zip 0.6's
+            // DOS branch *synthesizes* 0o664 for zips stamped create_system=
+            // Windows (discarding real modes — this shipped a non-executable
+            // llama-server on macOS/Linux, "Permission denied (os error 13)"),
+            // and Windows-repacked zips may store no mode at all. Module
+            // payloads are binaries + libs, so 0755 is the right default.
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                let mode = entry.unix_mode().unwrap_or(0o755);
+                let mode = entry
+                    .unix_mode()
+                    .filter(|m| m & 0o111 != 0)
+                    .unwrap_or(0o755);
                 let _ = fs::set_permissions(&out_path, fs::Permissions::from_mode(mode));
             }
         }
@@ -834,15 +931,13 @@ fn save_installed(root: &Path, installed: &Installed) -> Result<(), String> {
 #[tauri::command]
 pub async fn module_list<R: Runtime>(app: AppHandle<R>) -> Result<Vec<ModuleStatus>, String> {
     let manager = app.state::<ModuleManager>();
-    let hw = crate::hardware::hardware_info().await.unwrap_or_default();
-    let snap = HardwareSnapshot::from_probe(&hw);
+    let snap = HardwareSnapshot::probe().await;
     manager.list(&snap).await
 }
 
 #[tauri::command]
 pub async fn module_hardware_snapshot() -> Result<HardwareSnapshot, String> {
-    let hw = crate::hardware::hardware_info().await.unwrap_or_default();
-    Ok(HardwareSnapshot::from_probe(&hw))
+    Ok(HardwareSnapshot::probe().await)
 }
 
 #[tauri::command]
@@ -852,8 +947,7 @@ pub async fn module_install<R: Runtime>(
 ) -> Result<InstalledModule, String> {
     let manager = app.state::<ModuleManager>().inner();
     // Re-fetch hardware so the wizard's earlier snapshot can't go stale.
-    let hw = crate::hardware::hardware_info().await.unwrap_or_default();
-    let snap = HardwareSnapshot::from_probe(&hw);
+    let snap = HardwareSnapshot::probe().await;
     let app2 = app.clone();
     let id_clone = id.clone();
     let result = manager.install(&app2, &id, &snap).await;
@@ -900,6 +994,7 @@ mod tests {
             vram_gb: 24,
             ram_gb: 64,
             free_disk_gb: 500,
+            cuda_major: Some(12),
         }
     }
 
@@ -910,6 +1005,7 @@ mod tests {
             vram_gb: 0,
             ram_gb: 16,
             free_disk_gb: 100,
+            cuda_major: None,
         }
     }
 
@@ -920,6 +1016,7 @@ mod tests {
             vram_gb: 24, // unified budget (75 % of 32 GB RAM)
             ram_gb: 32,
             free_disk_gb: 200,
+            cuda_major: None,
         }
     }
 
@@ -930,6 +1027,7 @@ mod tests {
             vram_gb: 24,
             ram_gb: 64,
             free_disk_gb: 500,
+            cuda_major: Some(12),
         }
     }
 
@@ -940,6 +1038,44 @@ mod tests {
             vram_gb: 0,
             ram_gb: 16,
             free_disk_gb: 100,
+            cuda_major: None,
+        }
+    }
+
+    /// Jetson AGX Thor: JetPack 7, unified memory, driver supports CUDA 13.
+    fn jetson_thor() -> HardwareSnapshot {
+        HardwareSnapshot {
+            platform: Platform::LinuxAarch64,
+            gpu_vendor: Some(GpuVendor::Nvidia),
+            vram_gb: 92,
+            ram_gb: 122,
+            free_disk_gb: 800,
+            cuda_major: Some(13),
+        }
+    }
+
+    /// Jetson Orin on JetPack 6: driver only supports CUDA 12, so the
+    /// CUDA-13 build must NOT be offered — CPU fallback instead.
+    fn jetson_orin_jp6() -> HardwareSnapshot {
+        HardwareSnapshot {
+            platform: Platform::LinuxAarch64,
+            gpu_vendor: Some(GpuVendor::Nvidia),
+            vram_gb: 24,
+            ram_gb: 32,
+            free_disk_gb: 200,
+            cuda_major: Some(12),
+        }
+    }
+
+    /// Non-Jetson ARM64 (Raspberry Pi / ARM server): no NVIDIA driver.
+    fn arm64_no_gpu() -> HardwareSnapshot {
+        HardwareSnapshot {
+            platform: Platform::LinuxAarch64,
+            gpu_vendor: None,
+            vram_gb: 0,
+            ram_gb: 8,
+            free_disk_gb: 100,
+            cuda_major: None,
         }
     }
 
@@ -1020,6 +1156,103 @@ mod tests {
     }
 
     #[test]
+    fn jetson_thor_gets_arm64_cuda_inference() {
+        let r = parse_registry();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
+        let (v, _) = resolve_variant(m, &jetson_thor(), Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-linux-arm64-cuda");
+    }
+
+    #[test]
+    fn jetson_orin_jp6_falls_back_to_arm64_cpu() {
+        let r = parse_registry();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
+        let (v, _) = resolve_variant(m, &jetson_orin_jp6(), Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-linux-arm64-cpu");
+    }
+
+    #[test]
+    fn arm64_without_gpu_gets_arm64_cpu() {
+        let r = parse_registry();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
+        let (v, _) = resolve_variant(m, &arm64_no_gpu(), Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-linux-arm64-cpu");
+    }
+
+    #[test]
+    fn arm64_runtime_modules_resolve() {
+        // python-runtime, mcp-toolchain, and audio-stt must all have an
+        // installable linux-aarch64 variant (the ARM64 gap this closes).
+        let r = parse_registry();
+        for (id, expect) in [
+            ("python-runtime", "python-3.11-embed-linux-arm64"),
+            ("mcp-toolchain", "mcp-toolchain-node-uv-linux-arm64"),
+            ("audio-stt", "audio-stt-whisper-cli-linux-arm64"),
+        ] {
+            let m = r.modules.iter().find(|m| m.id == id).unwrap();
+            let (v, _) = resolve_variant(m, &arm64_no_gpu(), Channel::Stable)
+                .unwrap_or_else(|e| panic!("{id} unresolvable on linux-aarch64: {e:?}"));
+            assert_eq!(v.id, expect);
+        }
+    }
+
+    #[test]
+    fn macos_runtime_modules_resolve() {
+        // python-runtime, mcp-toolchain, and audio-stt must all have an
+        // installable macos-aarch64 variant (same gap the ARM64 Linux
+        // variants closed — the Mac wizard showed everything but
+        // local-inference as "no variant for this OS").
+        let r = parse_registry();
+        for (id, expect) in [
+            ("python-runtime", "python-3.11-embed-macos-arm64"),
+            ("mcp-toolchain", "mcp-toolchain-node-uv-macos-arm64"),
+            ("audio-stt", "audio-stt-whisper-cli-macos-arm64"),
+        ] {
+            let m = r.modules.iter().find(|m| m.id == id).unwrap();
+            let (v, _) = resolve_variant(m, &apple_silicon(), Channel::Stable)
+                .unwrap_or_else(|e| panic!("{id} unresolvable on macos-aarch64: {e:?}"));
+            assert_eq!(v.id, expect);
+        }
+    }
+
+    #[test]
+    fn windows_arm64_degrades_with_arch_named() {
+        // No windows-aarch64 builds are published yet — the resolver must
+        // say so (NoMatchingPlatform → the wizard names the arch) rather
+        // than hand out an x64 binary.
+        let r = parse_registry();
+        let win_arm = HardwareSnapshot {
+            platform: Platform::WindowsAarch64,
+            gpu_vendor: None,
+            vram_gb: 0,
+            ram_gb: 16,
+            free_disk_gb: 100,
+            cuda_major: None,
+        };
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
+        assert_eq!(
+            resolve_variant(m, &win_arm, Channel::Stable).unwrap_err(),
+            ResolveError::NoMatchingPlatform
+        );
+    }
+
+    #[test]
     fn linux_headless_gets_cpu_inference() {
         let r = parse_registry();
         let m = r
@@ -1029,6 +1262,44 @@ mod tests {
             .unwrap();
         let (v, _) = resolve_variant(m, &linux_headless(), Channel::Stable).unwrap();
         assert_eq!(v.id, "local-inference-linux-cpu");
+    }
+
+    #[test]
+    fn unknown_registry_platform_does_not_break_parsing() {
+        // The registry is fetched live from main, so it can gain platforms
+        // (e.g. linux-aarch64 module builds) before every installed app
+        // updates. An unknown platform string must parse as Unknown and be
+        // skipped — never fail the whole registry.
+        let raw = r#"{
+            "id": "x", "displayName": "x", "platform": "linux-riscv64",
+            "sizeBytes": 1, "channels": {}
+        }"#;
+        let v: Variant = serde_json::from_str(raw).expect("unknown platform parses");
+        assert_eq!(v.platform, Platform::Unknown);
+        assert_ne!(v.platform, Platform::host());
+    }
+
+    #[test]
+    fn linux_aarch64_gets_arm64_build_not_windows() {
+        // An ARM64 Linux host must resolve its own build — the old
+        // Platform::host() fallback claimed windows-x86_64 there, which
+        // made the resolver install Windows zips on Jetson-class boxes.
+        let hw = HardwareSnapshot {
+            platform: Platform::LinuxAarch64,
+            gpu_vendor: Some(GpuVendor::Nvidia), // Jetson-class unified SoC
+            vram_gb: 48,
+            ram_gb: 64,
+            free_disk_gb: 100,
+            cuda_major: None, // no CUDA-13 driver detected → CPU build
+        };
+        let r = parse_registry();
+        let m = r
+            .modules
+            .iter()
+            .find(|m| m.id == "local-inference")
+            .unwrap();
+        let (v, _) = resolve_variant(m, &hw, Channel::Stable).unwrap();
+        assert_eq!(v.id, "local-inference-linux-arm64-cpu");
     }
 
     #[test]
@@ -1061,5 +1332,35 @@ mod tests {
         let ids: Vec<&str> = chain.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"python-runtime"));
         assert!(ids.contains(&"mcp-toolchain"));
+    }
+
+    /// Zips whose stored modes carry no exec bit (zip 0.6 synthesizes
+    /// 0o664 for Windows-stamped archives) must still extract runnable
+    /// binaries, while genuine exec-carrying modes stay untouched.
+    #[cfg(unix)]
+    #[test]
+    fn extract_zip_repairs_exec_less_modes() {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt;
+        use zip::write::FileOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let zip_path = tmp.path().join("payload.zip");
+        let mut w = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
+        w.start_file("llama-server", FileOptions::default().unix_permissions(0o644))
+            .unwrap();
+        w.write_all(b"#!/bin/sh\n").unwrap();
+        w.start_file("bin/tool", FileOptions::default().unix_permissions(0o750))
+            .unwrap();
+        w.write_all(b"#!/bin/sh\n").unwrap();
+        w.finish().unwrap();
+
+        let dest = tmp.path().join("out");
+        extract_zip(&zip_path, &dest).unwrap();
+
+        let mode =
+            |p: &str| fs::metadata(dest.join(p)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode("llama-server"), 0o755, "exec-less mode must be repaired");
+        assert_eq!(mode("bin/tool"), 0o750, "real exec mode must be preserved");
     }
 }

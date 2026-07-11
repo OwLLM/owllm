@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "OwLLM Desktop",
+        "width": 1400,
+        "height": 960,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "resizable": true,
+        "maximized": false,
+        "decorations": false,
+        "transparent": true,
+        "center": true,
+        "visible": false
+      }
+    ]
+  }
+}

@@ -136,7 +136,7 @@ const PAGE_BLURBS: Record<string, string> = {
   info: "the Info page — live system info + sandbox-disk maintenance.",
   accounts: "the Accounts page — API keys + subscription-CLI logins for cloud models.",
   mcp: "the MCP page — connect MCP servers so agents gain extra tools.",
-  signing: "the Signing page — store your code-signing certificates (Apple Developer ID + Windows Authenticode) once so signed releases are one click, here and from the agents.",
+  signing: "the Signing page — the credential hub: certificates (Apple Developer ID + Windows Authenticode), live readiness probes, and portal web-logins in one place; provider portals open inside OwLLM's own browser already signed in.",
   devices: "the Devices page — securely control your other OwLLM machines. Pairing + a device key are required; a GitHub login alone never grants control.",
 };
 
@@ -201,7 +201,10 @@ const PAGE_DOCS: Record<string, string> = {
     "SIGNING — one home for the credentials that ship a SIGNED build, so you don't hunt across Apple's portal, the Keychain, and GitHub secrets.\n" +
     "• Apple — Developer ID (macOS): 'Import certificate…' accepts a .p12 (Keychain export, asks its password) OR the bare .cer/.cert Apple's portal downloads. The identity and an EXPIRY countdown are auto-detected when possible (amber ≤30 days, red once expired). Fill Signing identity / Apple ID / Team ID and add the app-specific (notarization) password — this is the six APPLE_* values release.yml needs.\n" +
     "• NO MAC? 'Generate the signing request (CSR) here' creates the private key on THIS machine (kept encrypted) + a .certSigningRequest file — upload it at Apple's portal, download the issued .cer, import it, and OwLLM pairs it with the key into the .p12 automatically. COMMON ISSUE → FIX: 'certificate only — no private key' on a .cer import = the request wasn't generated here; generate one and submit THAT to Apple (or export a .p12 from a Mac's Keychain).\n" +
-    "• Windows — Authenticode: point the publisher at a cert already mounted on the host by Thumbprint or Subject (+ a timestamp URL) → the OWLLM_SIGN_* variables.\n" +
+    "• Windows — Authenticode: point the publisher at a cert already mounted on the host by Thumbprint or Subject (+ a timestamp URL) → the OWLLM_SIGN_* variables. The card also shows LIVE whether that thumbprint is in the OS store right now and whether SimplySign is running.\n" +
+    "• READINESS STRIP (top of the page): live probes, not stored flags — Windows cert mounted?, SimplySign running?, Apple set complete?, openssl reachable?, gh CLI + which account, saved web-login count. '⟳ Re-check' re-probes.\n" +
+    "• OPEN PORTALS IN-APP: every 'Open … portal' button (Apple certificates, Apple ID app-passwords, Certum panel) opens the page in OwLLM's own app-styled browser — its profile keeps you logged in across runs, and a saved Web login is autofilled. No more hunting a browser that's still signed in.\n" +
+    "• WEB LOGINS card: the encrypted per-machine vault behind that auto-sign-in — save site/username/password (never shown back), open any saved site signed-in, or import passwords from Chrome/Edge/Brave/Opera. The agents' browser autofill uses the same vault.\n" +
     "• Ship it: 'Push to GitHub secrets' writes the secrets to a repo's Actions in one click (needs the `gh` CLI signed in); otherwise 'Copy values' gives you NAME=value lines to paste into Settings → Secrets. The green 'Ready to sign' pill lights up once every field is present.\n" +
     "• STORAGE: encrypted on this machine (DPAPI on Windows) and shared across every OwLLM window here. Across your OTHER PCs only the NON-secret metadata (identity, team, expiry) syncs — re-import the .p12 on each machine; the certificate/passwords never leave the device or enter the git vault. The coding agents can read this store (signing_get tool) to wire signed releases in any project.",
   devices:

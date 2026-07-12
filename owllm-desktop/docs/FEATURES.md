@@ -126,11 +126,17 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   bridge (`initialization_script`) and reads results back through a
   base64-over-`document.title` channel (`eval` → poll `title()`), so no remote
   IPC capability is needed.
-- **OwLLM chrome**: the popup wears the app's own look — dark webview base,
-  dark native frame, and (Windows 11) a DWM-painted title bar/border in the
-  app's `--bg-header` accent colour. The UI pushes the resolved colour via
-  `browser_set_chrome` on boot and on every accent change (`theme.ts`), so an
-  open browser window re-skins live with the theme picker.
+- **OwLLM chrome (app-styled window)**: the browser is a FRAMELESS multi-webview
+  window that looks like the app, not a stock OS window — an OwLLM chrome-bar
+  webview (`ui/public/browser-chrome.html`: title, back/reload, URL box,
+  min/max/close, accent-aware via the shared localStorage theme key) sits above
+  the page webview (`Window::builder` + `add_child`, tauri `unstable` feature),
+  so the bar never overlays site content. The bar's buttons/drag/URL entry
+  report over the same title channel tagged `EVT` (`parse_chrome_event`) — no
+  IPC grant to any webview. If the multi-webview build fails on some platform,
+  it falls back to the previous decorated single-webview window
+  (`build_legacy`) so agent browsing never breaks. `browser_set_chrome` still
+  paints the DWM border (and the fallback's caption) in the app accent.
 - **Local dev servers**: scheme-less localhost-family URLs (`localhost:5173`,
   `127.0.0.1:3000`, `[::1]`, `192.168.*`, `10.*`, `*.localhost`) default to
   `http://` instead of `https://`, so agents can open and test a web app they
@@ -324,6 +330,22 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   default, or the CI env values with `include_secrets=true`, so a coding agent
   can wire signed releases from whatever project it's started in. Same reveal
   boundary as `device_exec`.
+- **Credential hub (readiness strip + portals)**: `signing_hub_status` probes
+  the LIVE environment — is the stored Authenticode thumbprint mounted in the
+  OS store right now (PowerShell `Cert:` drive, NOT `certutil`, which blocks on
+  cloud-CSP certs like SimplySign; macOS `security find-identity`), is
+  SimplySign Desktop running, is `openssl` reachable, is the `gh` CLI installed
+  and which account it's logged in as, how many web logins are vaulted. Every
+  probe runs hidden with a hard 10 s kill-timeout. The page renders these as a
+  one-glance chip strip.
+- **Provider portals open in-app, already signed in**: `signing_portal_open`
+  (catalog: Apple Developer certificates, Apple ID app-passwords, Certum panel,
+  GitHub tokens, Microsoft Partner Center, Google Play Console — or any custom
+  URL) opens the page in the app-styled agent browser, whose persistent profile
+  keeps past sessions, then best-effort autofills the login from the browser
+  vault. The Signing page's **Web logins** card manages that vault (add /
+  delete / open-signed-in / import from installed browsers via
+  `browser_import`), so "renew the cert" never starts with a password reset.
 
 ## Sync, vault & publishing
 

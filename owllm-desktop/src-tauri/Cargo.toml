@@ -27,7 +27,11 @@ tauri-build = { version = "2", features = [] }
 # on every OS, so we opt in to the private-API feature. Caveat: apps
 # distributed via the Mac App Store cannot use private APIs; this is a
 # non-issue for OwLLM since we ship via .dmg, not the App Store.
-tauri = { version = "2.11", features = ["macos-private-api"] }
+# "unstable" = multi-webview (Window::builder + add_child): the agent browser
+# is a frameless OwLLM-styled window holding a chrome-bar webview above the
+# page webview (browser.rs). "Unstable" gates API stability, not runtime
+# stability — pin-checked by cargo against the tauri 2.11 line we build.
+tauri = { version = "2.11", features = ["macos-private-api", "unstable"] }
 # Shell auto-update — checks a signed endpoint, downloads delta, swaps
 # the binary on next launch. See data/modules/SCHEMA.md "update flow"
 # for how this complements per-module updates.

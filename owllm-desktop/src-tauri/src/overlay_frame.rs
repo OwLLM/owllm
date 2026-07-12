@@ -226,6 +226,10 @@ fn sync_geometry(
     Ok(())
 }
 
+// On Windows the follow loop + sync_now use the event-loop-free sync_once_win32
+// instead; this tauri-dispatcher version is only compiled-in for the (disabled)
+// non-Windows path, so silence the Windows dead-code warning.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
     sync_geometry(main.outer_position()?, main.outer_size()?, overlay)?;
 
@@ -241,6 +245,66 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
         let _ = overlay.hide();
     }
 
+    Ok(())
+}
+
+/// Windows-only, event-loop-FREE geometry sync — the body of the 33 ms follow
+/// loop. Reads the main window's rect and drives the overlay purely through
+/// Win32 (`GetWindowRect` / `SetWindowPos` / `ShowWindow`), so the loop NEVER
+/// calls a blocking `WryWindowDispatcher` method (`outer_position`, `outer_size`,
+/// `is_visible`, `is_minimized`, `set_position`, `set_size`). Each of those posts
+/// a message to the event loop and blocks on its reply; hammering ~7 of them
+/// 30×/sec from this background thread drove re-entrancy into tao's non-reentrant
+/// window-callback `parking_lot` mutex and self-deadlocked the UI thread when an
+/// incoming synchronous `SendMessage` landed mid-pump — the whole app froze
+/// ("Not Responding", no repaint, no mouse). Win32 reads/writes the kernel window
+/// object directly, entirely off the event loop, so the loop can't deadlock it.
+/// Returns `Err` only when the main window can't be read (destroyed), so the
+/// caller's give-up counter still works.
+#[cfg(target_os = "windows")]
+fn sync_once_win32(main_hwnd: isize, overlay_hwnd: isize) -> Result<(), ()> {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
+        SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+    };
+    let main = main_hwnd as HWND;
+    let overlay = overlay_hwnd as HWND;
+    unsafe {
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(main, &mut r) == 0 {
+            return Err(()); // main window gone / unqueryable
+        }
+        // Always keep the overlay glued around the main window's outer rect. No
+        // show flag here, so a hidden overlay stays hidden (matches sync_geometry).
+        let x = r.left - CONTENT_OFFSET_X;
+        let y = r.top - CONTENT_OFFSET_Y;
+        let w = (r.right - r.left) + OVERLAY_EXTRA_W as i32;
+        let h = (r.bottom - r.top) + OVERLAY_EXTRA_H as i32;
+        SetWindowPos(
+            overlay,
+            std::ptr::null_mut(),
+            x,
+            y,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+
+        let visible = IsWindowVisible(main) != 0;
+        let minimized = IsIconic(main) != 0;
+        if !visible || minimized {
+            ShowWindow(overlay, SW_HIDE);
+        } else if OVERLAY_READY.load(Ordering::Acquire) {
+            // Ready-gated: an unpainted transparent webview flashes white.
+            ShowWindow(overlay, SW_SHOWNOACTIVATE);
+        }
+    }
     Ok(())
 }
 
@@ -289,29 +353,62 @@ pub fn overlay_frame_capture_geometry(app: tauri::AppHandle) -> Option<CaptureGe
 }
 
 fn start_sync_loop(main: WebviewWindow, overlay: WebviewWindow) {
-    std::thread::spawn(move || {
-        // A single transient failure must NOT kill the follow. Reading the
-        // main window's position/size/visibility can briefly error while it's
-        // mid-move or the webview is momentarily busy; the old code did
-        // `if is_err() { break }`, so one hiccup froze the frame at a stale
-        // spot forever (the "stuck outside / not following" bug). Now we keep
-        // going on errors and only give up once main has been unreachable for
-        // a sustained stretch (≈ window really gone), not a momentary glitch.
-        let mut consecutive_err: u32 = 0;
-        loop {
-            match sync_once(&main, &overlay) {
-                Ok(()) => consecutive_err = 0,
-                Err(_) => {
-                    consecutive_err += 1;
-                    if consecutive_err > 150 {
-                        // ~5s of continuous failure → main is gone; stop.
-                        break;
+    // A single transient failure must NOT kill the follow. Reading the main
+    // window can briefly error while it's mid-move; the old code did
+    // `if is_err() { break }`, so one hiccup froze the frame at a stale spot
+    // forever (the "stuck outside / not following" bug). We keep going on
+    // errors and only give up once main has been unreachable for a sustained
+    // stretch (≈ window really gone), not a momentary glitch.
+    #[cfg(target_os = "windows")]
+    {
+        // Resolve the raw HWNDs ONCE (isize is `Send`; `.hwnd()` is a cheap
+        // cached read, not an event-loop round-trip). The 33 ms poll then uses
+        // ONLY direct Win32 via sync_once_win32 — never a blocking dispatcher
+        // call — which is what previously deadlocked the UI thread. See
+        // sync_once_win32 for the full root-cause note.
+        let (main_hwnd, overlay_hwnd) = match (main.hwnd(), overlay.hwnd()) {
+            (Ok(m), Ok(o)) => (m.0 as isize, o.0 as isize),
+            _ => return,
+        };
+        std::thread::spawn(move || {
+            // Hold the window handles for the loop's life so the HWNDs stay
+            // valid; never call their blocking dispatcher methods.
+            let _keep = (main, overlay);
+            let mut consecutive_err: u32 = 0;
+            loop {
+                match sync_once_win32(main_hwnd, overlay_hwnd) {
+                    Ok(()) => consecutive_err = 0,
+                    Err(()) => {
+                        consecutive_err += 1;
+                        if consecutive_err > 150 {
+                            break; // ~5s of continuous failure → main is gone; stop.
+                        }
                     }
                 }
+                std::thread::sleep(Duration::from_millis(33));
             }
-            std::thread::sleep(Duration::from_millis(33));
-        }
-    });
+        });
+    }
+    // Overlay frame is Windows-only (enabled() is false elsewhere); this arm
+    // exists only so the module compiles cross-platform.
+    #[cfg(not(target_os = "windows"))]
+    {
+        std::thread::spawn(move || {
+            let mut consecutive_err: u32 = 0;
+            loop {
+                match sync_once(&main, &overlay) {
+                    Ok(()) => consecutive_err = 0,
+                    Err(_) => {
+                        consecutive_err += 1;
+                        if consecutive_err > 150 {
+                            break;
+                        }
+                    }
+                }
+                std::thread::sleep(Duration::from_millis(33));
+            }
+        });
+    }
 }
 
 /// Immediately re-glue the overlay to the main window. Called from the
@@ -325,6 +422,18 @@ pub fn sync_now(app: &tauri::AppHandle) {
         app.get_webview_window("main"),
         app.get_webview_window(OVERLAY_LABEL),
     ) {
-        let _ = sync_once(&main, &overlay);
+        // Same event-loop-free path as the poll. sync_now fires on the main
+        // thread from Moved/Resized (many times/sec during a drag), so keep it
+        // off the blocking dispatcher too.
+        #[cfg(target_os = "windows")]
+        {
+            if let (Ok(m), Ok(o)) = (main.hwnd(), overlay.hwnd()) {
+                let _ = sync_once_win32(m.0 as isize, o.0 as isize);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = sync_once(&main, &overlay);
+        }
     }
 }

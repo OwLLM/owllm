@@ -16,6 +16,17 @@
 # calling this). Requires on PATH: cargo+mingw (build), node/npx (sign), gh (publish).
 set -euo pipefail
 
+# gh resolver: host `gh` → WSL sandbox `gh` (the host often has no gh; it lives in the
+# provisioned distro). Defines gh()/have_gh(). Falls back to a plain check if the lib
+# isn't alongside this script.
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_SCRIPT_DIR/lib/gh.sh" ]; then
+  # shellcheck source=lib/gh.sh
+  . "$_SCRIPT_DIR/lib/gh.sh"
+else
+  have_gh() { command -v gh >/dev/null 2>&1; }
+fi
+
 # Target GitHub repo for `gh release` — resolution order:
 #   1. $OWLLM_RELEASE_REPO (exported by finish-and-publish.sh from the Project
 #      Card's release.repo, or set by the caller)
@@ -140,7 +151,7 @@ fi
 
 [ -f "$KEY_FILE" ] || fail "signing key not found at $KEY_FILE (host-only secret — run on the host, not a sandbox)"
 command -v node >/dev/null 2>&1 || fail "node/npx not on PATH (needed to sign)"
-[ "$DRY_RUN" = 1 ] || command -v gh >/dev/null 2>&1 || fail "gh not on PATH (needed to publish)"
+[ "$DRY_RUN" = 1 ] || have_gh || fail "gh not on PATH (needed to publish)"
 
 # Resolve the Authenticode cert once, up front — used by the payload-sign step
 # below AND the installer-sign step 1b. Priority: env thumbprint · env subject ·

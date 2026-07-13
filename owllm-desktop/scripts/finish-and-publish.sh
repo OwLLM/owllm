@@ -17,6 +17,17 @@
 # commit it still bumps+tags+publishes the current tree.
 set -euo pipefail
 
+# gh resolver: host `gh` → WSL sandbox `gh` (the host often has no gh; it lives in the
+# provisioned distro). Defines gh()/have_gh(). Falls back to a plain check if the lib
+# isn't alongside (e.g. an older bundle, or a foreign repo's own copy of this script).
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_SCRIPT_DIR/lib/gh.sh" ]; then
+  # shellcheck source=lib/gh.sh
+  . "$_SCRIPT_DIR/lib/gh.sh"
+else
+  have_gh() { command -v gh >/dev/null 2>&1; }
+fi
+
 NOTES=""
 PRERELEASE=""
 REPO_DIR=""
@@ -141,7 +152,7 @@ CUR="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$CONF")
 # missing/unauthed or the repo has no releases yet: we warn and fall back to the
 # local file, preserving the previous behaviour for card-less / offline runs.
 PUBLISHED_TAGS=""
-if [ -n "${OWLLM_RELEASE_REPO:-}" ] && command -v gh >/dev/null 2>&1; then
+if [ -n "${OWLLM_RELEASE_REPO:-}" ] && have_gh; then
   PUBLISHED_TAGS="$(gh release list --repo "$OWLLM_RELEASE_REPO" --limit 100 \
     --json tagName --jq '.[].tagName' 2>/dev/null || true)"
   if [ -n "$PUBLISHED_TAGS" ]; then
@@ -284,7 +295,7 @@ export OWLLM_SIGN_THUMBPRINT OWLLM_SIGN_SUBJECT OWLLM_SIGN_TSA
 # attach real artifacts. NB: --repo is only meaningful for split-source/release
 # setups whose target repo shares the tag — those should use a custom command.
 if [ -z "$PUBLISH_CMD" ]; then
-  command -v gh >/dev/null 2>&1 || fail "gh not on PATH — needed for the generic release (or set release.command on the Project Card)"
+  have_gh || fail "gh not on PATH — needed for the generic release (or set release.command on the Project Card)"
   CHANNEL_FLAG="--latest"
   [ -n "$PRERELEASE" ] && CHANNEL_FLAG="--prerelease"
   gh release create "$TAG" ${OWLLM_RELEASE_REPO:+--repo "$OWLLM_RELEASE_REPO"} \

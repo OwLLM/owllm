@@ -12,3 +12,8 @@ desktop.ini
 # Local notes / scratch
 NOTES.local.md
 TODO.local.md
+
+# Build artifacts (never commit — swept in by Publisher checkpoint 2026-07)
+owllm-desktop/node_modules/
+owllm-desktop/src-tauri/target/
+owllm-desktop/ui/dist/

@@ -6,6 +6,7 @@
 // role's tool_allowlist. Model-agnostic (one native tool call → all CLI) and the
 // script branches per-OS (all OS).
 
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// Code-signing certificate selection for a release. Mirrors the Publisher card's
@@ -314,6 +315,152 @@ fn run_probe(name: &str, args: &[&str]) -> (bool, String) {
     }
 }
 
+/// Locate signtool.exe the same way the publish script does:
+/// first via PATH, then the standard Windows SDK install layout.
+/// Returns the newest x64 signtool when multiple SDK versions are present.
+#[cfg(windows)]
+fn find_signtool() -> Option<PathBuf> {
+    if let Ok(path) = std::env::var("PATH") {
+        for dir in path.split(';') {
+            let candidate = Path::new(dir).join("signtool.exe");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    for base in [
+        r"C:\Program Files (x86)\Windows Kits\10\bin",
+        r"C:\Program Files\Windows Kits\10\bin",
+        r"C:\Program Files (x86)\Windows Kits\11\bin",
+        r"C:\Program Files\Windows Kits\11\bin",
+    ] {
+        if let Ok(entries) = std::fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    let signtool = path.join("x64").join("signtool.exe");
+                    if signtool.is_file() {
+                        candidates.push((entry.file_name().to_string_lossy().into_owned(), signtool));
+                    }
+                }
+            }
+        }
+    }
+    // Newest SDK version first (directory names sort lexicographically descending).
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.into_iter().next().map(|(_, p)| p)
+}
+
+#[cfg(not(windows))]
+fn find_signtool() -> Option<PathBuf> {
+    None
+}
+
+/// Attempt to install the Windows SDK automatically so the user is never told
+/// to "install BS". Uses winget when available; otherwise falls back to the
+/// web installer bootstrapper.
+#[cfg(windows)]
+fn auto_install_signtool() -> Result<PathBuf, String> {
+    // 1. Try winget (Windows 10/11 with App Installer).
+    let mut winget = Command::new("winget.exe");
+    winget.args([
+        "install",
+        "--id",
+        "Microsoft.WindowsSDK",
+        "--silent",
+        "--accept-source-agreements",
+        "--accept-package-agreements",
+        "--disable-interactivity",
+    ]);
+    {
+        use std::os::windows::process::CommandExt;
+        winget.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    match winget.output() {
+        Ok(out) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if out.status.success() || combined.to_lowercase().contains("already installed") {
+                return find_signtool().ok_or_else(|| {
+                    "Windows SDK installed, but signtool.exe was not found in the expected location. Restarting the app may refresh PATH.".into()
+                });
+            }
+            // Winget failed but maybe it is not installed; continue to fallback.
+            eprintln!("winget install failed: {combined}");
+        }
+        Err(e) => eprintln!("winget not available: {e}"),
+    }
+
+    // 2. Fallback: download the tiny Windows SDK installer bootstrapper and run it.
+    let temp = std::env::temp_dir();
+    let installer = temp.join("winsdksetup.exe");
+    let url = "https://go.microsoft.com/fwlink/?linkid=2327008"; // Windows SDK for Windows 11 (10.0.26100.x)
+    let mut curl = Command::new("curl.exe");
+    curl.args([
+        "-L",
+        "-o",
+        installer.to_str().unwrap_or("winsdksetup.exe"),
+        url,
+        "--fail",
+    ]);
+    {
+        use std::os::windows::process::CommandExt;
+        curl.creation_flags(0x0800_0000);
+    }
+    let (dl_ok, dl_out) = match curl.output() {
+        Ok(out) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            (out.status.success(), combined)
+        }
+        Err(e) => (false, format!("spawn curl: {e}")),
+    };
+    if !dl_ok {
+        return Err(format!("could not download Windows SDK installer:\n{dl_out}"));
+    }
+    let mut setup = Command::new(&installer);
+    setup.args([
+        "/q",          // quiet
+        "/norestart",  // do not restart
+        "/features",   // install selected features only
+        "OptionId.SigningTools", // signtool + certs
+    ]);
+    {
+        use std::os::windows::process::CommandExt;
+        setup.creation_flags(0x0800_0000);
+    }
+    match setup.output() {
+        Ok(out) => {
+            let combined = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            if out.status.success() {
+                find_signtool().ok_or_else(|| {
+                    "Windows SDK installed, but signtool.exe still not found. Try restarting the app.".into()
+                })
+            } else {
+                Err(format!("Windows SDK installer failed:\n{combined}"))
+            }
+        }
+        Err(e) => Err(format!("spawn Windows SDK installer: {e}")),
+    }
+}
+
+#[cfg(not(windows))]
+fn auto_install_signtool() -> Result<PathBuf, String> {
+    Err("Authenticode signing requires Windows; cannot install signtool automatically.".into())
+}
+
 /// True if a configured Authenticode cert is currently mounted in the Windows
 /// certificate store. On non-Windows this always returns false when signing is
 /// requested, because Authenticode signing is Windows-only.
@@ -556,15 +703,29 @@ pub async fn publish_readiness(
                 },
             });
             if wants_sign {
-                let (signtool_ok, signtool_out) = run_probe("signtool.exe", &["/?"]);
+                // Prefer an existing SDK, but if it's missing try to install it
+                // automatically instead of asking the user to "install BS".
+                let signtool_result = find_signtool()
+                    .map(Ok)
+                    .unwrap_or_else(auto_install_signtool);
+                let (signtool_ok, signtool_out, signtool_path) = match signtool_result {
+                    Ok(path) => {
+                        let (ok, out) =
+                            run_probe(path.to_str().unwrap_or("signtool.exe"), &["/?"]);
+                        (ok, out, Some(path))
+                    }
+                    Err(e) => (false, e, None),
+                };
                 checks.push(ReadyCheck {
                     id: "signtool".into(),
                     label: "Windows SDK signtool".into(),
                     ok: signtool_ok,
                     detail: if signtool_ok {
-                        "signtool.exe on PATH".into()
+                        signtool_path
+                            .map(|p| format!("signtool.exe at {}", p.display()))
+                            .unwrap_or_else(|| "signtool.exe ready".into())
                     } else {
-                        format!("{signtool_out} — install Windows SDK or put signtool on PATH")
+                        signtool_out
                     },
                 });
                 let (cert_ok, cert_out) = cert_mounted(&sign_cfg);

@@ -394,6 +394,10 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [ruleScope, setRuleScope] = useState<{ id: string; shared: boolean }>({ id: "", shared: false });
   const ruleScopeRef = useRef(ruleScope);
   ruleScopeRef.current = ruleScope;
+  // Last folder we resolved scope for — so a folder switch resets the notebook/
+  // rules SYNCHRONOUSLY (see the scope effect) instead of leaving the previous
+  // project's memory on screen while the async project lookup is in flight.
+  const lastScopeFolderRef = useRef<string>("");
   // Auto-feed identity of THIS Code page — the notebook blob is per project,
   // so this is what stops a second page on the same project from popping the
   // queue when its own (unrelated) turn finishes.
@@ -629,19 +633,32 @@ function CodeWorkspace({ pageId, onTitle }: {
   // fall back to a stable per-folder key.
   useEffect(() => {
     const folder = (projectRoot || workspace || "").trim();
-    if (!folder) { setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
     const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+    if (!folder) { lastScopeFolderRef.current = ""; setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
+    const nf = norm(folder);
+    const fallbackId = `code:${nf}`;
+    // Folder switched → drop the previous project's scope IMMEDIATELY so its
+    // notebook and rules can never linger on screen while the async project
+    // lookup runs (or if it hangs). The lookup below only UPGRADES this to the
+    // shared team-project id when the folder matches a registered project —
+    // that shared id is what makes the Agent and Code pages load, update, and
+    // see one notebook + rule set for the same repo.
+    if (lastScopeFolderRef.current !== nf) {
+      lastScopeFolderRef.current = nf;
+      setRuleScope({ id: fallbackId, shared: false });
+      setDirectives([]);
+    }
     let alive = true;
     (async () => {
-      let id = `code:${norm(folder)}`;
+      let id = fallbackId;
       let shared = false;
       try {
         const rows = await invoke<{ id: string; location: string }[]>("list_projects");
-        const hit = (rows || []).find((r) => r.location && norm(r.location) === norm(folder));
+        const hit = (rows || []).find((r) => r.location && norm(r.location) === nf);
         if (hit) { id = hit.id; shared = true; }
       } catch { /* no projects table reachable — per-folder scope */ }
       if (!alive) return;
-      setRuleScope({ id, shared });
+      setRuleScope((prev) => (prev.id === id && prev.shared === shared ? prev : { id, shared }));
       try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: id })); }
       catch { setDirectives([]); }
     })();

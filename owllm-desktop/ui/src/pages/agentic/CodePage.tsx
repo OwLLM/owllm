@@ -13,6 +13,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
 import PublishCards from "./PublishCards";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
+import { getSetting, setSetting, scope, SettingKey } from "../../state/pageSettings";
 import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
@@ -22,7 +23,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep } from "./RunNotebook";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun } from "./RunNotebook";
 import { RunTimerChip } from "./RunTimer";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
@@ -116,6 +117,13 @@ type CodeState = {
   // by default both agents run the same model until the user picks a different
   // one for the second pane.
   secondaryModelId?: string;
+  // True while this page shows the "Just chat" (no project) view — persisted so
+  // navigating away and back returns to the conversation, not the Start screen.
+  chatMode?: boolean;
+  // Optional per-page label (the header rename box). Shown in the tab title as
+  // "folder(rename)" — e.g. LocaLLM(GUI_fix) — so two pages open on the SAME
+  // project stay tellable apart. Empty = the tab shows the folder name only.
+  pageRename?: string;
 };
 const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
@@ -131,7 +139,7 @@ type WtCreate =
   | { status: "error"; message: string };
 
 // ---- Multi-page shell state (the tab strip) --------------------------------
-type CodePageMeta = { id: string; title: string; seedProject?: string };
+type CodePageMeta = { id: string; title: string };
 const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
 const PAGE_SESSION_PREFIX = "owllm:code:page:";
@@ -162,13 +170,27 @@ function loadPageSession(pageId: string): CodeState | null {
     const raw = localStorage.getItem(pageSessionKey(pageId));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
-    return closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, busy: false });
+    const st = closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, busy: false });
+    // The chosen model lives in the sync-ready settings layer (owllm:settings),
+    // NOT only in this blob: this blob carries the machine-specific workspace
+    // path and is denied from vault sync, so a model kept only here could never
+    // follow the user to another PC. A synced value wins over the blob copy.
+    const m = getSetting<string>(scope.page(pageId), SettingKey.model);
+    if (m != null) st.modelId = m;
+    const m2 = getSetting<string>(scope.page(pageId), SettingKey.secondaryModel);
+    if (m2 != null) st.secondaryModelId = m2;
+    return st;
   } catch { return null; }
 }
 function savePageSession(pageId: string, s: CodeState | null | undefined): void {
   if (!s) return;
   try { localStorage.setItem(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false })); }
   catch { /* quota / unavailable */ }
+  // Mirror the model choice into the sync-ready settings layer (see load).
+  // setSetting treats ""/undefined as "clear", and no-op writes short-circuit,
+  // so this neither persists an empty pick nor churns on unrelated state saves.
+  setSetting(scope.page(pageId), SettingKey.model, s.modelId || undefined);
+  setSetting(scope.page(pageId), SettingKey.secondaryModel, s.secondaryModelId || undefined);
 }
 function dropPageSession(pageId: string): void {
   try { localStorage.removeItem(pageSessionKey(pageId)); } catch { /* best effort */ }
@@ -197,10 +219,22 @@ const CODE_RECENTS_MAX = 12;
 // The "New chat" surface keeps a list of past conversations in localStorage so
 // they survive tab switches AND app restarts (the chat used to be plain useState
 // that evaporated). Each thread is one conversation; the newest is first.
-type ChatMsg = { role: "user" | "assistant"; content: string };
+type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string };
 type ChatThread = { id: string; title: string; ts: number; messages: ChatMsg[] };
 const CHATS_KEY = "owllm:code:chats";
 const CHATS_MAX = 60;
+// The just-chat surface is GLOBAL (one thread list shared by every page). Its
+// LIVE state (threads, active thread, draft, busy) lives in chatRuntime — not
+// component useState — so a streaming reply keeps flowing and lands in history
+// even when the user switches pages/tabs mid-stream, exactly like the project
+// chats. Which VIEW a page shows (`chatMode`) stays per page in CodeState.
+type JustChatState = { chats: ChatThread[]; chatId: string; draft: string; busy: boolean };
+const CHAT_SID = "code:justchat";
+const CHAT_ACTIVE_KEY = "owllm:code:chats:active";
+const DEFAULT_JUSTCHAT: JustChatState = { chats: [], chatId: "", draft: "", busy: false };
+// The in-flight stream's abort handle — module-level (like the session) so
+// Stop still works after the component remounts mid-stream.
+let justChatAbort: AbortController | null = null;
 function loadChats(): ChatThread[] {
   try {
     const a = JSON.parse(localStorage.getItem(CHATS_KEY) || "[]");
@@ -339,12 +373,8 @@ function probeSandboxOnce(): Promise<{ st: WslStatus; iso: WslIsolation; s: Sand
   return _sandboxProbe;
 }
 
-function CodeWorkspace({ pageId, seedProject, onTitle }: {
+function CodeWorkspace({ pageId, onTitle }: {
   pageId: string;
-  /// When set, this page auto-opens this project on first mount — used by
-  /// "New page" to start ANOTHER isolated worktree of the SAME project so the
-  /// user gets a parallel workspace instead of a blank folder picker.
-  seedProject?: string;
   /// Report this page's display title (folder name) to the shell so the tab
   /// label stays in sync.
   onTitle: (title: string) => void;
@@ -364,6 +394,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const [ruleScope, setRuleScope] = useState<{ id: string; shared: boolean }>({ id: "", shared: false });
   const ruleScopeRef = useRef(ruleScope);
   ruleScopeRef.current = ruleScope;
+  // Auto-feed identity of THIS Code page — the notebook blob is per project,
+  // so this is what stops a second page on the same project from popping the
+  // queue when its own (unrelated) turn finishes.
+  const notebookSurfaceId = `code:${pageId}`;
   const [directives, setDirectives] = useState<Directive[]>([]);
   const directivesRef = useRef<Directive[]>([]);
   directivesRef.current = directives;
@@ -379,14 +413,36 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
 
   // Plain "just chat" mode (no project) — opened from the Start screen's "New
   // chat" action. Reuses the same model picker + streaming as the coder, but
-  // with no tools and no workspace. Conversations are PERSISTED (localStorage)
-  // as a list of threads, so history survives tab switches and app restarts.
-  const [chatMode, setChatMode] = useState(false);
-  const [chats, setChats] = useState<ChatThread[]>(loadChats);
-  const [chatId, setChatId] = useState<string>("");
+  // with no tools and no workspace. Threads live in the global chatRuntime
+  // session (hydrated from / persisted to localStorage), so history survives
+  // tab switches AND app restarts, and a mid-stream reply keeps going when the
+  // user navigates away (the old useState version silently dropped it).
+  const chatSess = useChatSession<JustChatState>(CHAT_SID);
+  const chatHydratedRef = useRef(false);
+  if (!chatHydratedRef.current) {
+    chatHydratedRef.current = true;
+    let activeThread = "";
+    try { activeThread = localStorage.getItem(CHAT_ACTIVE_KEY) || ""; } catch { /* best effort */ }
+    chatRuntime.hydrateIfIdle(CHAT_SID, { ...DEFAULT_JUSTCHAT, chats: loadChats(), chatId: activeThread });
+    chatRuntime.registerPersister(CHAT_SID, (p) => {
+      const jc = p as JustChatState;
+      saveChats(jc.chats);
+      try { localStorage.setItem(CHAT_ACTIVE_KEY, jc.chatId); } catch { /* best effort */ }
+    });
+  }
+  const jc: JustChatState = chatSess.payload ?? DEFAULT_JUSTCHAT;
+  const { chats, chatId, draft: chatDraft, busy: chatBusy } = jc;
+  const setChatField = <K extends keyof JustChatState>(k: K, v: JustChatState[K] | ((p: JustChatState[K]) => JustChatState[K])) =>
+    chatRuntime.setPayload(CHAT_SID, (prev) => {
+      const cur = (prev as JustChatState) ?? DEFAULT_JUSTCHAT;
+      const nv = typeof v === "function" ? (v as (p: JustChatState[K]) => JustChatState[K])(cur[k]) : v;
+      return { ...cur, [k]: nv };
+    });
+  const setChats = (v: ChatThread[] | ((c: ChatThread[]) => ChatThread[])) => setChatField("chats", v);
+  const setChatId = (v: string) => setChatField("chatId", v);
+  const setChatDraft = (v: string) => setChatField("draft", v);
+  const setChatBusy = (v: boolean) => setChatField("busy", v);
   const [showHistory, setShowHistory] = useState(false);
-  const [chatDraft, setChatDraft] = useState("");
-  const [chatBusy, setChatBusy] = useState(false);
   const [chatImages, setChatImages] = useState<Attachment[]>([]);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
   // Project-coding composer image attachments (paste / drag-drop / picker) — the
@@ -425,9 +481,8 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     invoke<string>("chat_scratch_dir").then((d) => { chatScratchRef.current = d; }).catch(() => {});
   }, []);
   // The active conversation is derived from the thread list (single source of
-  // truth); persist the whole list whenever it changes.
+  // truth); the chatRuntime persister saves the list on every mutation.
   const chatMsgs: ChatMsg[] = chats.find((c) => c.id === chatId)?.messages ?? [];
-  useEffect(() => { saveChats(chats); }, [chats]);
   // Sticky auto-scroll for the "Just chat" transcript: land at the bottom when
   // the view opens or you switch threads (openKey = chatId), follow streaming
   // content only while the user is near the bottom (contentKey = message count).
@@ -501,6 +556,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   const stx = sess.payload ?? DEFAULT_CODE_STATE;
   const { messages, tasks, workspace, modelId, draft, busy, status, projectRoot, branch, isolated, preparing, runStartedAt, runEndedAt } = stx;
   const agentMode: CodeAgentMode = stx.agentMode ?? "auto";
+  const chatMode: boolean = stx.chatMode ?? false;
   const secondaryOpen: boolean = stx.secondaryOpen ?? false;
   const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
   const secondaryDraft: string = stx.secondaryDraft ?? "";
@@ -595,14 +651,17 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     if (!ruleScope.id) return;
     try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: ruleScope.id })); } catch { /* keep last */ }
   };
-  // Keep the shell's tab label in sync with this page's project.
+  // Keep the shell's tab label in sync with this page's project. A per-page
+  // rename (header box) renders as "folder(rename)"; unrenamed pages show the
+  // folder name only.
   useEffect(() => {
-    const label = projectRoot ? projectRoot.replace(/^.*[\\/]/, "")
+    const folder = projectRoot ? projectRoot.replace(/^.*[\\/]/, "")
       : workspace ? workspace.replace(/^.*[\\/]/, "")
-      : "New page";
-    onTitle(label);
+      : "";
+    const rename = (stx.pageRename ?? "").trim();
+    onTitle(folder ? (rename ? `${folder}(${rename})` : folder) : "New page");
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectRoot, workspace]);
+  }, [projectRoot, workspace, stx.pageRename]);
   // Stale-worktree self-heal: a restored session can point at a worktree that
   // was deleted or gutted underneath it (sweep, crash, manual cleanup). The
   // old behaviour was a silently EMPTY file tree that looked broken. Verify
@@ -620,16 +679,6 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       .catch(() => { void openWorkspace(projectRoot); });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isolated, workspace, projectRoot, preparing]);
-  // "New page on the same project": auto-open the seeded project once on mount,
-  // but only if this page doesn't already have a workspace (restored session).
-  const seededRef = useRef(false);
-  useEffect(() => {
-    if (seededRef.current || !seedProject) return;
-    seededRef.current = true;
-    const cur = chatRuntime.getSnapshot(SID).payload as CodeState | null;
-    if (!cur?.workspace) void openWorkspace(seedProject);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
   function setField<K extends keyof CodeState>(k: K, v: CodeState[K] | ((p: CodeState[K]) => CodeState[K])) {
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
@@ -661,6 +710,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
   };
   const setStatus = (v: string) => setField("status", v);
   const setAgentMode = (v: CodeAgentMode) => setField("agentMode", v);
+  const setChatMode = (v: boolean) => setField("chatMode", v);
   const setSecondaryOpen = (v: boolean) => setField("secondaryOpen", v);
   const setSecondaryMessages = (v: Msg[] | ((m: Msg[]) => Msg[])) =>
     setField("secondaryMessages", (prev) => {
@@ -749,8 +799,11 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     // at the picker while a (possibly large) checkout runs. The worktree is built
     // in the BACKGROUND; Send is gated until it's ready (see the composer). The
     // invoke below is async (runs on a Rust thread), so the UI stays responsive.
+    // Re-opening the SAME project (worktree self-heal / re-pick) keeps the
+    // page's rename; switching to a different project starts unnamed.
+    const keepRename = (stx.projectRoot === dir || stx.workspace === dir) ? stx.pageRename : undefined;
     chatRuntime.setPayload(SID, () => ({
-      ...DEFAULT_CODE_STATE, projectRoot: dir, workspace: "", modelId,
+      ...DEFAULT_CODE_STATE, projectRoot: dir, workspace: "", modelId, pageRename: keepRename,
       preparing: true,
       status: `⏳ Preparing a private workspace for ${name} on its own branch… (you can type your request now)`,
     }));
@@ -888,10 +941,10 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     return () => { dead = true; };
   }, []);
   // Onboarding lists (WSL/sandbox projects + toolchain) only populate the PICKER
-  // screen, so fetch them ONLY when this page has no project and isn't about to
-  // open one (seeded) — a page opening a project skips these extra wsl.exe calls.
+  // screen, so fetch them ONLY when this page has no project — a page with one
+  // open skips these extra wsl.exe calls.
   useEffect(() => {
-    if (workspace || seedProject) return;
+    if (workspace) return;
     let dead = false;
     probeSandboxOnce().then(({ st, iso, s }) => {
       if (dead) return;
@@ -1540,14 +1593,19 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       // After state settles: steers queued on a path that can't inject
       // mid-turn (CLI/API) land as a follow-up turn — never silently dropped
       // (unless the user hit Stop). Then, on a clean finish, auto-feed the
-      // next pending notebook step (opt-in toggle).
+      // next pending notebook step (opt-in toggle, and only when THIS page
+      // drives it — a second page on the same project must not pop the queue).
+      // A non-clean finish with steps still pending says so instead of
+      // letting the queue stall silently.
       setTimeout(() => {
         if (busySendRef.current) return;
         const leftover = drainSteer();
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
         if (ok) {
-          const st = takeNextAutoStep(ruleScopeRef.current.id);
+          const st = takeNextAutoStep(ruleScopeRef.current.id, notebookSurfaceId);
           if (st) void sendRef.current?.(st.text);
+        } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
+          setMessages((msgs) => [...msgs, { role: "assistant", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }
       }, 80);
     }
@@ -1707,7 +1765,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
     setChatImages([]);
     setChatBusy(true);
     const ctrl = new AbortController();
-    abortRef.current = ctrl;
+    justChatAbort = ctrl;
     // The visible bubble shows the text + an image marker; the actual images
     // ride to the model via the multimodal content / attachments below.
     const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
@@ -1730,6 +1788,13 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       if (last && last.role === "assistant") c[c.length - 1] = { ...last, content: last.content + d };
       return c;
     });
+    // Thinking stream — shown collapsed in the bubble, like every other chat.
+    const onT = (d: string) => updateThread(tid, (m) => {
+      const c = [...m];
+      const last = c[c.length - 1];
+      if (last && last.role === "assistant") c[c.length - 1] = { ...last, thinking: (last.thinking ?? "") + d };
+      return c;
+    });
     try {
       const provider = providerFor(modelId, availableModels);
       const { text: enrichedText, pack } = await enrichCodePromptWithMemory(text);
@@ -1737,7 +1802,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
-        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: () => {}, history });
+        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
       } else {
         // Pass a working dir so pasted images can be saved into it for the model
         // to read (codex -i / claude file-ref). Use the workspace if one is
@@ -1751,7 +1816,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       if (err.name !== "AbortError") onD(`\n\n⚠ ${err.message ?? e}`);
     } finally {
       setChatBusy(false);
-      abortRef.current = null;
+      justChatAbort = null;
     }
   };
 
@@ -1973,7 +2038,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           {chatMsgs.map((m, i) => {
             const isUser = m.role === "user";
             return (
-              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} />
+              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} />
             );
           })}
         </div>
@@ -2001,7 +2066,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
               style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: 13.5, padding: "9px 12px", lineHeight: 1.5 }}
             />
             {chatBusy ? (
-              <button onClick={() => { abortRef.current?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
+              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
             ) : (
               <button onClick={sendChat} disabled={!chatDraft.trim() && chatImages.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: (chatDraft.trim() || chatImages.length) ? 1 : 0.5 }}>Send</button>
             )}
@@ -2261,6 +2326,16 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
         <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
+        {/* Per-page rename — tab shows "folder(rename)" so two pages on the
+            same project stay tellable apart. Empty = folder name only. */}
+        <input
+          value={stx.pageRename ?? ""}
+          onChange={(e) => setField("pageRename", e.target.value)}
+          onBlur={(e) => setField("pageRename", e.target.value.trim() || undefined)}
+          placeholder="Rename page…"
+          title={`Optional page name — the tab shows ${wsShort}(name), e.g. ${wsShort}(GUI_fix). Leave empty to show the folder name only.`}
+          style={{ ...btn, width: 110, padding: "0 8px", cursor: "text", fontWeight: 500, background: "var(--bg-input)" }}
+        />
         {/* Honest isolation badge (P1-1, shared helper): turns LOUD red when
             isolation is enabled but this workspace runs on the host. */}
         {(() => {
@@ -2324,8 +2399,25 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           </div>
         )}
         <div style={{ flex: 1 }} />
-        {/* Model picker + Clear buttons live in the chat pane's own header
-            below, aligned with the chat window (user spec 2026-07-10). */}
+        {/* Model picker + Clear buttons live HERE in the page header, above the
+            chat window (user spec 2026-07-11 — reverts the 07-10 in-pane move). */}
+        <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
+        <div style={{ minWidth: 260, maxWidth: 360 }}>
+          {/* THE shared model picker — same component, same list_models source,
+              and the SAME full set (local + cloud + subscriptions) as AgentsPage.
+              No localOnly: the agentic Code page offers every model the other
+              agentic surfaces do; execution routes by provider below. */}
+          <ModelPicker
+            value={modelId}
+            onChange={setModelId}
+            models={availableModels}
+            status={accountsStatus}
+            disabled={busy}
+            fallbackLabel="(pick a model)"
+          />
+        </div>
+        <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
+        <button onClick={clearChatHistory} disabled={busy || secondaryBusy || (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0)} title="Clear the chat window and all saved chat history" style={btn}>Clear history</button>
       </div>
 
       {/* Phase 3: Kanban plan/act board (only while a plan is active) */}
@@ -2434,29 +2526,12 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
           a single child, so the primary fills the width exactly as before. */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: wideView ? "row" : "column", gap: 8 }}>
         {/* Primary pane — same box anatomy as the second-agent pane: a slim
-            header (model picker + Clear buttons, top-right of the chat window)
-            over its own scrolling transcript. */}
+            label header over its own scrolling transcript. (Model picker +
+            Clear buttons live in the page header above.) */}
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
             <span style={{ flex: 1 }} />
-            <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
-            <div style={{ minWidth: 220, maxWidth: 320 }}>
-              {/* THE shared model picker — same component, same list_models source,
-                  and the SAME full set (local + cloud + subscriptions) as AgentsPage.
-                  No localOnly: the agentic Code page offers every model the other
-                  agentic surfaces do; execution routes by provider below. */}
-              <ModelPicker
-                value={modelId}
-                onChange={setModelId}
-                models={availableModels}
-                status={accountsStatus}
-                disabled={busy}
-                fallbackLabel="(pick a model)"
-              />
-            </div>
-            <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={{ ...btn, height: 26 }}>Clear</button>
-            <button onClick={clearChatHistory} disabled={busy || secondaryBusy || (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0)} title="Clear the chat window and all saved chat history" style={{ ...btn, height: 26 }}>Clear history</button>
           </div>
       <div
         ref={transcriptSticky.ref}
@@ -2693,6 +2768,7 @@ function CodeWorkspace({ pageId, seedProject, onTitle }: {
               <RunNotebook
                 inline
                 projectId={ruleScope.id || null}
+                surfaceId={notebookSurfaceId}
                 projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "")}
                 running={busy}
                 onFeed={feedFromNotebook}
@@ -2834,13 +2910,12 @@ export default function CodePage() {
     setPages((ps) => ps.map((p) => (p.id === id ? (p.title === title ? p : { ...p, title }) : p)));
 
   const newPage = () => {
-    // "New page" on the SAME project: seed the new page with the active page's
-    // project so it spins up ANOTHER isolated worktree of it (a parallel
-    // workspace) instead of a blank picker. No current project → a blank page.
-    const cur = active ? (chatRuntime.getSnapshot(sidForPage(active.id)).payload as CodeState | null) : null;
-    const seed = cur?.projectRoot || undefined;
+    // A new page always starts on the generic Start/onboarding screen (user
+    // spec 2026-07-11): pick or create any project — including the same one
+    // again for a parallel worktree — or just chat. It no longer auto-clones
+    // the active page's project.
     const id = newPageId();
-    setPages((ps) => [...ps, { id, title: seed ? seed.replace(/^.*[\\/]/, "") : "New page", seedProject: seed }]);
+    setPages((ps) => [...ps, { id, title: "New page" }]);
     setActiveId(id);
   };
 
@@ -2907,7 +2982,7 @@ export default function CodePage() {
             </div>
           );
         })}
-        <button onClick={newPage} title="Open another page on its own branch (a private worktree of the same project)" style={{ ...btn, height: 26, padding: "0 10px", marginLeft: 4 }}>＋ New page</button>
+        <button onClick={newPage} title="Open a new page — pick or create a project (each page gets its own branch/worktree), or just chat" style={{ ...btn, height: 26, padding: "0 10px", marginLeft: 4 }}>＋ New page</button>
       </div>
       {/* Active page — keyed so each page is an isolated component instance. */}
       <div style={{ flex: 1, minHeight: 0 }}>
@@ -2915,7 +2990,6 @@ export default function CodePage() {
           <CodeWorkspace
             key={active.id}
             pageId={active.id}
-            seedProject={active.seedProject}
             onTitle={(t) => setTitle(active.id, t)}
           />
         )}

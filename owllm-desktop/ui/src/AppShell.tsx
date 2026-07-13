@@ -296,10 +296,8 @@ const FRAME_BG     = "var(--bg-header)";
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
 
-function HybridFrame({ children, outerW, outerH, onOwlClick, showWatcherHint }: {
+function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
   children: React.ReactNode; outerW: number; outerH: number;
-  /// The Watcher (P0-8): the top-center owl badge is the support entry point.
-  onOwlClick?: () => void;
   /// Periodic "The Watcher" satellite label around the owl (until first open).
   showWatcherHint?: boolean;
 }) {
@@ -386,17 +384,16 @@ function HybridFrame({ children, outerW, outerH, onOwlClick, showWatcherHint }: 
       <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TL, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TR, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BL, pointerEvents:"none" }} />
-      {/* The Watcher (P0-8): the owl badge is the unlabeled support entry
-          point. Clickable, but visually unchanged — discovery comes from
-          the periodic satellite label below + a hover tooltip. */}
+      {/* The Watcher (P0-8): the owl art is DECORATIVE here, exactly like the
+          overlay-window owl on Windows — its full 300×195 rect used to be
+          clickable, which swallowed clicks over the header center ("the
+          watcher clickable area is too large"). The summon point is the
+          compact ModeBar hotspot beneath the owl's body in BOTH modes. */}
       <img
         src={`${ICONS}/owl_studio_square.png`}
-        onClick={onOwlClick}
-        title={onOwlClick ? "The Watcher — OWLLM's support assistant" : undefined}
         style={{
           position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H,
-          pointerEvents: onOwlClick ? "auto" : "none",
-          cursor: onOwlClick ? "pointer" : undefined,
+          pointerEvents: "none",
         }}
       />
       {showWatcherHint && (
@@ -1090,26 +1087,47 @@ export default function AppShell() {
                   ?? visiblePages[0];
   const PageBody = activePage?.component;
 
-  // ----- Keep-alive for the Agentic "Agents" page -----
+  // ----- Keep-alive pages: Agents + Code -----
   // A running team dispatch lives ENTIRELY inside AgentsPage (the
   // dispatchGoal loop, its AbortController, and all the streaming state
-  // are component-local). The normal page swap below unmounts the active
-  // page on every tab/mode change, which tore down an in-flight run — the
-  // user came back to a dead, empty page. So once the user has visited the
-  // Agents page we mount it ONCE and keep it alive, toggling visibility
-  // with `display` instead of unmounting. Every other page still swaps.
-  const AgentsComponent = useMemo(
-    () => AGENTIC.pages.find(p => p.key === "agents")?.component ?? null,
-    [],
+  // are component-local), and the Code page re-pays its whole mount cost
+  // (model list, per-page probes, worktree self-heal, file tree) on every
+  // visit. The normal page swap below unmounts the active page on every
+  // tab/mode change, which tore down an in-flight run and made reopening
+  // these pages slow. So once the user has visited one of them we mount it
+  // ONCE and keep it alive, toggling visibility with `display` instead of
+  // unmounting. Every other page still swaps.
+  const keepAliveDefs = useMemo(
+    () => (installed.includes("agentic")
+      ? AGENTIC.pages.filter(p => p.key === "agents" || p.key === "code")
+      : []),
+    [installed],
   );
-  const agentsActive = activeKey === "agents";
-  const [agentsMounted, setAgentsMounted] = useState(false);
+  const [aliveMounted, setAliveMounted] = useState<Record<string, boolean>>({});
+  const keepAliveActive = keepAliveDefs.some(p => p.key === activeKey);
   useEffect(() => {
-    if (agentsActive) setAgentsMounted(true);
-  }, [agentsActive]);
-  const keepAgentsAlive = agentsMounted && installed.includes("agentic") && AgentsComponent != null;
+    if (keepAliveActive) setAliveMounted(m => (m[activeKey] ? m : { ...m, [activeKey]: true }));
+  }, [activeKey, keepAliveActive]);
 
   const vp = useViewportSize();
+  // Linux in-page chrome (no overlay window there): the window is transparent
+  // and LARGER than the visible frame — the EXTRA_TOP band above the frame is
+  // see-through headroom for the peeking owl. Shape the window's INPUT region
+  // to frame + owl so clicks in the empty band fall through to whatever is
+  // behind the app instead of being swallowed (they used to block underlying
+  // windows' close buttons). The command is a no-op on Windows/macOS.
+  useEffect(() => {
+    if (!isTauri() || overlayFrame) return;
+    invoke("frame_input_region", {
+      rects: [
+        // Everything from the frame's top edge down stays interactive; the
+        // EXTRA_TOP band above it (owl headroom) is click-through, exactly
+        // like the Windows overlay window. The owl summon is the compact
+        // ModeBar hotspot, which sits inside the frame body.
+        { x: 0, y: EXTRA_TOP, w: vp.w, h: Math.max(0, vp.h - EXTRA_TOP) },
+      ],
+    }).catch(() => { /* backend predates the command — harmless */ });
+  }, [overlayFrame, vp.w, vp.h]);
   const appContent = (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <ModeBar
@@ -1140,21 +1158,21 @@ export default function AppShell() {
               for 'Rename' / '+ New' / 'workspace') and fix in the owning
               page file (e.g. TrainPage.tsx), not here in AppShell. */}
           <div style={{ flex: 1, overflow: "hidden", minHeight: 0, position: "relative" }}>
-            {/* Normal page swap for everything except the Agents page —
-                when Agents is active its persistent instance below shows
+            {/* Normal page swap for everything except the keep-alive pages —
+                when one of them is active its persistent instance below shows
                 instead, so we don't double-mount it. */}
-            {agentsActive ? null : (PageBody ? <PageBody /> : null)}
-            {/* Persistent Agents page: mounted once visited, kept alive so
-                an in-flight team run survives navigation. Hidden (not
-                unmounted) when another page is active. */}
-            {keepAgentsAlive && AgentsComponent && (
-              <div style={{
+            {keepAliveActive ? null : (PageBody ? <PageBody /> : null)}
+            {/* Persistent Agents/Code pages: mounted once visited, kept alive
+                so an in-flight run survives navigation and reopening them is
+                instant. Hidden (not unmounted) when another page is active. */}
+            {keepAliveDefs.filter(p => aliveMounted[p.key]).map(p => (
+              <div key={p.key} style={{
                 position: "absolute", inset: 0,
-                display: agentsActive ? "block" : "none",
+                display: activeKey === p.key ? "block" : "none",
               }}>
-                <AgentsComponent />
+                <p.component />
               </div>
-            )}
+            ))}
           </div>
     </div>
   );
@@ -1169,7 +1187,7 @@ export default function AppShell() {
       <ResizeEdges />
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
-        : <HybridFrame outerW={vp.w} outerH={vp.h} onOwlClick={openWatcher} showWatcherHint={watcherHint}>{appContent}</HybridFrame>}
+        : <HybridFrame outerW={vp.w} outerH={vp.h} showWatcherHint={watcherHint}>{appContent}</HybridFrame>}
       <WatcherDrawer
         open={watcherOpen}
         onClose={() => setWatcherOpen(false)}

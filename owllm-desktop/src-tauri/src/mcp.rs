@@ -252,6 +252,29 @@ fn resolve_command(command: &str, args: &[String]) -> (PathBuf, Vec<String>) {
             }
         }
     }
+    // Installed mcp-toolchain module (the wizard's install path — on
+    // Linux ARM64 it's the only bundled node/uv source). node lives in
+    // <module>/bin/, uv + uvx in <module>/uv/.
+    let resolved = resolved.or_else(|| {
+        let mut module_dirs: Vec<PathBuf> = Vec::new();
+        if let Some(dir) = crate::paths::module_node_dir() {
+            module_dirs.push(dir);
+        }
+        if let Some(uv) = crate::paths::module_uv_exe() {
+            if let Some(dir) = uv.parent() {
+                module_dirs.push(dir.to_path_buf());
+            }
+        }
+        for dir in &module_dirs {
+            for cand in &candidates {
+                let p = dir.join(cand);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+        None
+    });
     let resolved = resolved
         .or_else(|| {
             candidates
@@ -292,8 +315,8 @@ async fn spawn_session(cfg: &McpServerConfig) -> Result<Arc<McpSession>, String>
     let resolved_ok = exe.is_absolute() || exe == PathBuf::from("cmd.exe");
     if !resolved_ok {
         let hint = match cfg.command.as_str() {
-            "uvx" | "uv" => " — install Astral uv via `winget install --id=astral-sh.uv` (Windows) or `pip install uv`, then restart OwLLM Desktop so the new PATH is picked up.",
-            "npx" | "npm" | "node" => " — install Node.js from nodejs.org (gives you npx + npm), then restart OwLLM Desktop.",
+            "uvx" | "uv" => " — install the MCP Toolchain module (Home → modules), or Astral uv via `winget install --id=astral-sh.uv` (Windows) / `pip install uv`, then restart OwLLM Desktop so the new PATH is picked up.",
+            "npx" | "npm" | "node" => " — install the MCP Toolchain module (Home → modules), or Node.js from nodejs.org (gives you npx + npm), then restart OwLLM Desktop.",
             _ => "",
         };
         return Err(format!(
@@ -791,19 +814,25 @@ pub async fn install_uv() -> Result<String, String> {
     }
     std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {}: {e}", dir.display()))?;
 
-    // Pick the right release asset for the host. Currently only
-    // Windows x64 is wired — the other targets would just need their
-    // asset names added below.
+    // Pick the right release asset for the host.
     let asset = if cfg!(all(windows, target_arch = "x86_64")) {
         "uv-x86_64-pc-windows-msvc.zip"
+    } else if cfg!(all(windows, target_arch = "aarch64")) {
+        "uv-aarch64-pc-windows-msvc.zip"
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         "uv-aarch64-apple-darwin.tar.gz"
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
         "uv-x86_64-apple-darwin.tar.gz"
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         "uv-x86_64-unknown-linux-gnu.tar.gz"
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        "uv-aarch64-unknown-linux-gnu.tar.gz"
     } else {
-        return Err("no uv release asset known for this host arch — install uv manually".into());
+        return Err(format!(
+            "no uv release asset known for this host ({} {}) — install uv manually",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        ));
     };
     let url = format!("https://github.com/astral-sh/uv/releases/latest/download/{asset}");
 

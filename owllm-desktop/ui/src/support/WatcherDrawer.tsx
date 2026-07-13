@@ -15,6 +15,7 @@ import { redactForReport } from "./redact";
 // (shared ModelPicker catalogue + the shared dispatch paths) — never a
 // parallel model list (P0-8 Slice 5).
 import ModelPicker, { buildEntries, type AccountsStatusLite } from "../pages/agentic/ModelPicker";
+import { getSetting, setSetting, subscribeSettings, scope, SettingKey } from "../state/pageSettings";
 import {
   streamLocalChat,
   streamChatCompletion,
@@ -135,6 +136,7 @@ const PAGE_BLURBS: Record<string, string> = {
   info: "the Info page — live system info + sandbox-disk maintenance.",
   accounts: "the Accounts page — API keys + subscription-CLI logins for cloud models.",
   mcp: "the MCP page — connect MCP servers so agents gain extra tools.",
+  signing: "the Signing page — the credential hub: certificates (Apple Developer ID + Windows Authenticode), live readiness probes, and portal web-logins in one place; provider portals open inside OwLLM's own browser already signed in.",
   devices: "the Devices page — securely control your other OwLLM machines. Pairing + a device key are required; a GitHub login alone never grants control.",
 };
 
@@ -195,6 +197,16 @@ const PAGE_DOCS: Record<string, string> = {
     "• OWLLM Node (🖥🔌 panel): opt-in KVM remote control — lets agents see + operate a REMOTE computer through a NanoKVM/PiKVM device (kvm_node tool: screenshot, type, keys, mouse, power, mount ISO). Ships DISABLED; flip the toggle here, then '+ Allow' each device host — injection is refused for any host not on the list (fail-closed), and every action is written to a redacted audit log.",
   mcp:
     "MCP — connect MCP servers so agents gain extra tools (filesystem, git, web, integrations). Add a server, it's verified, then its tools are available to the team.",
+  signing:
+    "SIGNING — one home for the credentials that ship a SIGNED build, so you don't hunt across Apple's portal, the Keychain, and GitHub secrets.\n" +
+    "• Apple — Developer ID (macOS): 'Import certificate…' accepts a .p12 (Keychain export, asks its password) OR the bare .cer/.cert Apple's portal downloads. The identity and an EXPIRY countdown are auto-detected when possible (amber ≤30 days, red once expired). Fill Signing identity / Apple ID / Team ID and add the app-specific (notarization) password — this is the six APPLE_* values release.yml needs.\n" +
+    "• NO MAC? 'Generate the signing request (CSR) here' creates the private key on THIS machine (kept encrypted) + a .certSigningRequest file — upload it at Apple's portal, download the issued .cer, import it, and OwLLM pairs it with the key into the .p12 automatically. COMMON ISSUE → FIX: 'certificate only — no private key' on a .cer import = the request wasn't generated here; generate one and submit THAT to Apple (or export a .p12 from a Mac's Keychain).\n" +
+    "• Windows — Authenticode: point the publisher at a cert already mounted on the host by Thumbprint or Subject (+ a timestamp URL) → the OWLLM_SIGN_* variables. The card also shows LIVE whether that thumbprint is in the OS store right now and whether SimplySign is running.\n" +
+    "• READINESS STRIP (top of the page): live probes, not stored flags — Windows cert mounted?, SimplySign running?, Apple set complete?, openssl reachable?, gh CLI + which account, saved web-login count. '⟳ Re-check' re-probes.\n" +
+    "• OPEN PORTALS IN-APP: every 'Open … portal' button (Apple certificates, Apple ID app-passwords, Certum panel) opens the page in OwLLM's own app-styled browser — its profile keeps you logged in across runs, and a saved Web login is autofilled. No more hunting a browser that's still signed in.\n" +
+    "• WEB LOGINS card: the encrypted per-machine vault behind that auto-sign-in — save site/username/password (never shown back), open any saved site signed-in, or import passwords from Chrome/Edge/Brave/Opera. The agents' browser autofill uses the same vault.\n" +
+    "• Ship it: 'Push to GitHub secrets' writes the secrets to a repo's Actions in one click (needs the `gh` CLI signed in); otherwise 'Copy values' gives you NAME=value lines to paste into Settings → Secrets. The green 'Ready to sign' pill lights up once every field is present.\n" +
+    "• STORAGE: encrypted on this machine (DPAPI on Windows) and shared across every OwLLM window here. Across your OTHER PCs only the NON-secret metadata (identity, team, expiry) syncs — re-import the .p12 on each machine; the certificate/passwords never leave the device or enter the git vault. The coding agents can read this store (signing_get tool) to wire signed releases in any project.",
   devices:
     "DEVICES — OwLLM Remote Devices / Fleet Control. Securely control your OTHER OwLLM machines from this one.\n" +
     "• The KEY IDEA: controlling a machine needs a paired, cryptographic device key that the TARGET explicitly approved — a matching GitHub account only helps devices discover each other, it NEVER grants control. Ships DISABLED; click '▶ Enable remote control on this PC' (This device card) first.\n" +
@@ -325,13 +337,21 @@ export default function WatcherDrawer({
   // User-chosen model via the SHARED ModelPicker (same catalogue as every
   // other surface — local models, tuned, subscriptions, API keys, Auto).
   // Empty = the Watcher's default policy (running local first). Persisted.
-  const [pickedModel, setPickedModel] = React.useState<string>(() => {
-    try { return localStorage.getItem("owllm:watcher:model") ?? ""; } catch { return ""; }
-  });
+  // Persisted via the shared sync-ready settings layer (global scope) so the
+  // Watcher's model follows the user across devices. Empty = default policy.
+  const [pickedModel, setPickedModel] = React.useState<string>(
+    () => getSetting<string>(scope.global(), SettingKey.watcherModel, "") ?? "",
+  );
   const pickModel = (id: string) => {
     setPickedModel(id);
-    try { localStorage.setItem("owllm:watcher:model", id); } catch { /* ignore */ }
+    setSetting(scope.global(), SettingKey.watcherModel, id);
   };
+  // Re-read on any settings change so the boot-time legacy migration and any
+  // cross-device sync (vault adoption) update the picker in place, rather than
+  // stranding the initial (possibly pre-migration) empty read.
+  React.useEffect(() => subscribeSettings(() => {
+    setPickedModel(getSetting<string>(scope.global(), SettingKey.watcherModel, "") ?? "");
+  }), []);
   // While capturing, the Watcher steps OUT of the shot (stays mounted,
   // visibility hidden) so the screenshot shows the app/bug BEHIND it.
   const [selfHidden, setSelfHidden] = React.useState(false);

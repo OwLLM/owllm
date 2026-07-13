@@ -8,6 +8,7 @@
 // (--bg-panel, --fg-muted, etc) keyed off `data-theme`.
 
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 export type Mode = "dark" | "light";
 
@@ -98,6 +99,17 @@ function pickHeaderFgForBg(accentHex: string, baseR: number, baseG: number, base
   return luminance(r, g, b) > 0.55 ? "#06080d" : "#ffffff";
 }
 
+// Resolve the `--bg-header` recipe (70 % accent over the #1c2244 navy base —
+// same in both theme modes, see styles.css) to a concrete hex. The agent
+// browser paints its NATIVE window title bar with this so its popup window
+// wears the same chrome as the app.
+function resolveHeaderHex(accentHex: string): string {
+  const a = hexToRgbTriplet(accentHex);
+  const mix = (c: number, base: number) => Math.round(0.70 * c + 0.30 * base)
+    .toString(16).padStart(2, "0");
+  return `#${mix(a.r, NAVY_R)}${mix(a.g, NAVY_G)}${mix(a.b, NAVY_B)}`;
+}
+
 function applyAccent(hex: string) {
   const root = document.documentElement;
   const rgb = hexToRgb(hex);
@@ -117,6 +129,14 @@ function applyAccent(hex: string) {
     pickHeaderFgForBg(hex, NAVY_R, NAVY_G, NAVY_B, 0.70));
   root.style.setProperty("--bg-header-fg-light",
     pickHeaderFgForBg(hex, LITE_R, LITE_G, LITE_B, 0.35));
+  // Push the resolved chrome colour to the backend so the agent-browser
+  // window's native title bar matches the app (applied live if it's open,
+  // stored for the next open otherwise). Cosmetic — swallow failures
+  // (non-Tauri ctx, or a backend older than this UI).
+  try {
+    invoke("browser_set_chrome", { bg: resolveHeaderHex(hex) })
+      .catch(() => { /* ignore */ });
+  } catch { /* not in Tauri ctx */ }
 }
 
 function applyMode(mode: Mode) {

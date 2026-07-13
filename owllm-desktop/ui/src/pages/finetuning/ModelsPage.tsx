@@ -796,10 +796,34 @@ export default function ModelsPage() {
       .catch(() => { /* keep prior */ });
   }, []);
 
+  // AUTO-RESUME on mount: any interrupted download left on disk (.partial
+  // files) continues straight into the progress banner via HTTP Range —
+  // never back through the quantization picker, never from 0%. The store
+  // guards against re-running the scan on remounts.
+  React.useEffect(() => {
+    void downloadStore.resumeInterrupted().then((resumed) => {
+      // Re-scan so resumed models show up with their "incomplete" badge
+      // while the download runs (and drop it when it finishes).
+      if (resumed.length > 0) refreshDownloaded();
+    });
+  }, [refreshDownloaded]);
+
   // Step 1: clicking Download opens the WeightPickerDialog so the
   // user can choose which files to fetch (Q4/Q5/Q6/Q8 etc) instead of
-  // pulling every variant blindly.
-  const startDownload = (modelId: string) => {
+  // pulling every variant blindly — UNLESS this model already has an
+  // interrupted download on disk, in which case we continue it (HTTP
+  // Range) instead of re-asking the quantization question.
+  const startDownload = async (modelId: string) => {
+    try {
+      const rows = await invoke<downloadStore.InterruptedDownload[]>(
+        "models_interrupted_downloads",
+      );
+      const mine = rows.filter((r) => r.modelId === modelId);
+      if (mine.length > 0) {
+        void downloadStore.startDownload(modelId, mine.map((m) => m.file));
+        return;
+      }
+    } catch { /* scan failure → normal picker flow */ }
     setPickerFor(modelId);
   };
 
@@ -816,6 +840,26 @@ export default function ModelsPage() {
   const confirmDownload = async (modelId: string, files: string[]) => {
     setPickerFor(null);
     await downloadStore.startDownload(modelId, files);
+  };
+
+  // Resume an interrupted download from its on-disk .partial file(s) —
+  // straight back into hf_download (which continues via HTTP Range), WITHOUT
+  // re-opening the quantization picker. The picker only appears as a fallback
+  // when there's no partial left to resume (e.g. the user deleted it).
+  const resumeDownload = async (name: string, dirPath: string) => {
+    const hfId = name.replace(/__/g, "/");
+    try {
+      const parts = await invoke<Array<{ file: string; bytesOnDisk: number }>>(
+        "models_partial_files", { dir: dirPath },
+      );
+      if (parts.length > 0) {
+        await downloadStore.startDownload(hfId, parts.map((p) => p.file));
+        // Re-scan so the card drops its "incomplete" badge once done.
+        refreshDownloaded();
+        return;
+      }
+    } catch { /* fall through to the picker */ }
+    setPickerFor(hfId);
   };
 
   return (
@@ -1303,10 +1347,12 @@ export default function ModelsPage() {
                   icons={d.icons}
                   envKey={d.envKey}
                   isIncomplete={d.isIncomplete}
+                  isActiveDownload={downloadStore.isActive(d.name.replace(/__/g, "/"))}
                   onboardingStatus={d.onboarding}
                   compatibilityBadge={d.compat ?? undefined}
                   selected={selectedPath === d.path}
                   onSelect={(p) => setSelectedPath((curr) => curr === p ? null : p)}
+                  onRepair={() => { void resumeDownload(d.name, d.path); }}
                   onAddWeights={() => {
                     // Local dir convention from huggingface-cli / hf_hub:
                     // <author>/<repo> becomes <author>__<repo> on disk

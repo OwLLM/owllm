@@ -20,10 +20,21 @@ export type DownloadProgress = {
 };
 
 type DownloadEvent =
-  | { kind: "started"; total: number | null }
+  // resumedFrom > 0 when hf_download continues a .partial via HTTP Range —
+  // the bar starts at the real offset instead of flashing 0%.
+  | { kind: "started"; total: number | null; resumedFrom: number }
   | { kind: "progress"; received: number; total: number | null }
   | { kind: "finished"; path: string; bytes: number }
   | { kind: "failed"; error: string };
+
+// One interrupted download found on disk (a `.partial` file left by
+// hf_download). The partial IS the persisted download state — model id,
+// file (quant), destination and bytes received — surviving app restarts.
+export type InterruptedDownload = {
+  modelId: string;
+  file: string;
+  bytesOnDisk: number;
+};
 
 let downloading: Set<string> = new Set();
 let progress: Map<string, DownloadProgress> = new Map();
@@ -48,6 +59,52 @@ export function getSnapshot() {
 
 export function isActive(modelId: string): boolean {
   return downloading.has(modelId);
+}
+
+// Auto-resume runs once per app session — remounting the Models page must
+// not re-trigger the scan (in-flight downloads are already guarded by
+// `downloading`, this just avoids pointless disk scans).
+let resumeScanStarted = false;
+
+/// AUTO-RESUME: scan the models tree for `.partial` files and continue each
+/// one via hf_download's HTTP-Range resume — straight into the progress
+/// banner, never back through the quantization picker. Returns what it
+/// resumed so the caller can refresh lists. Safe to call on every mount.
+export async function resumeInterrupted(): Promise<InterruptedDownload[]> {
+  if (resumeScanStarted) return [];
+  resumeScanStarted = true;
+  let rows: InterruptedDownload[] = [];
+  try {
+    rows = await invoke<InterruptedDownload[]>("models_interrupted_downloads");
+  } catch {
+    return []; // scan failure = nothing to resume; manual paths still work
+  }
+  const byModel = new Map<string, InterruptedDownload[]>();
+  for (const r of rows) {
+    if (downloading.has(r.modelId)) continue; // already in flight this session
+    const list = byModel.get(r.modelId) ?? [];
+    list.push(r);
+    byModel.set(r.modelId, list);
+  }
+  for (const [modelId, parts] of byModel) {
+    // Seed the progress row at the on-disk offset so the banner shows the
+    // real resumed position immediately, before HTTP even connects (the
+    // Started event then fills in the total).
+    const next = new Map(progress);
+    next.set(modelId, {
+      file: parts[0].file,
+      received: parts[0].bytesOnDisk,
+      total: null,
+      fileIndex: 0,
+      fileCount: parts.length,
+      done: false,
+      error: null,
+    });
+    progress = next;
+    commit();
+    void startDownload(modelId, parts.map((p) => p.file));
+  }
+  return [...byModel.values()].flat();
 }
 
 /// Download one HF model (all `files`, or every file when empty). Idempotent
@@ -75,7 +132,7 @@ export async function startDownload(modelId: string, files: string[]): Promise<v
         };
         const next = new Map(progress);
         if (ev.kind === "started") {
-          next.set(modelId, { ...base, file, total: ev.total, received: 0, fileIndex: i, fileCount: toFetch.length, done: false, error: null });
+          next.set(modelId, { ...base, file, total: ev.total, received: ev.resumedFrom ?? 0, fileIndex: i, fileCount: toFetch.length, done: false, error: null });
         } else if (ev.kind === "progress") {
           next.set(modelId, { ...base, received: ev.received, total: ev.total });
         } else if (ev.kind === "finished") {

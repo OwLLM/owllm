@@ -156,7 +156,11 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
       actions={
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {isIncomplete && !isActiveDownload && (
-            <button style={btn} onClick={(e) => { e.stopPropagation(); onRepair?.(modelPath); }}>🔧 Repair</button>
+            <button
+              style={btn}
+              title="Continue the interrupted download from where it stopped (no re-pick, no restart from 0%)"
+              onClick={(e) => { e.stopPropagation(); onRepair?.(modelPath); }}
+            >⏬ Resume download</button>
           )}
           {status === "NEW" && !isIncomplete && (
             <button style={btn} onClick={(e) => { e.stopPropagation(); onAddWeights?.(modelPath); }}>🚀 Finish download</button>

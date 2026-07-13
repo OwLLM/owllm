@@ -1275,11 +1275,18 @@ export default function ServerPage() {
       setServerState(JSON.stringify(st, null, 2));
       // Default the picker to the model that's ACTUALLY running (the header
       // already shows it) so the user doesn't have to wait for a status probe
-      // to find out what's loaded. Fall back to the first registry entry only
-      // when nothing is serving. Only seeds when the user hasn't picked yet.
+      // to find out what's loaded. Otherwise seed the first SERVABLE local
+      // model — the picker is localOnly and llama-server can't load a cloud
+      // entry, so the registry's first row (often a cloud model) is invalid
+      // here. Only seeds when the user hasn't picked yet.
       if (!modelId) {
         if (st.running && st.model_id) setModelId(st.model_id);
-        else if (next.length > 0) setModelId(next[0].model_id);
+        else {
+          const servable = next.find(
+            m => (m.provider === "local" || m.provider === "tuned") && m.port != null
+          );
+          if (servable) setModelId(servable.model_id);
+        }
       }
     } catch (e) {
       setError(String(e));

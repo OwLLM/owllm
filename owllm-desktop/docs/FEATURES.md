@@ -21,15 +21,25 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 | **Fine-tuning** | Models, Dataset, Train, Chat | Python env is installed on demand, ONLY needed for Train |
 | **Agentic** | Code, Agents, Studio, Bridges | the flagship: teams, solo coder, bridges |
 | **Gamify** (experimental) | Gamify, Characters, Arena | RPG world driven by the same dispatch stream |
-| **Advanced** | MCP, Accounts, Devices | MCP servers/packs; API keys + subscription CLI logins; secure remote device control |
+| **Advanced** | MCP, Accounts, Signing, Devices | MCP servers/packs; API keys + subscription CLI logins; code-signing certificate vault; secure remote device control |
 
 ## Models & inference
 
 - **Local serving**: llama.cpp (`llama-server --jinja`), auto-start on first send,
   one server shared across app windows/instances (port adoption), VRAM-aware
   context sizing, vision via auto-downloaded `--mmproj` projectors.
+- **Platforms**: engine + runtime modules ship per-platform variants — Windows
+  x64 (CUDA/Vulkan/CPU), Linux x64 (Vulkan/CPU), Linux ARM64 (CUDA for Jetson
+  JetPack 7+ gated by `cudaMajorMin`, CPU for Pi/ARM servers), macOS ARM64
+  (Metal). Unsupported platform/arch combos degrade honestly: the wizard names
+  the arch ("no build published for windows-aarch64 (ARM64) yet") instead of
+  offering a foreign binary. python-runtime / mcp-toolchain / audio-stt have
+  Linux-ARM64 variants; the CUDA module bundles its own CUDA runtime libs
+  (spawned with `LD_LIBRARY_PATH` — stock JetPack has only the driver).
 - **Browse/download**: HuggingFace search + curated recs, VRAM-fit color coding,
-  cache management, Tuned tab for fine-tuned/abliterated artifacts.
+  cache management, Tuned tab for fine-tuned/abliterated artifacts. Interrupted
+  downloads keep their `.partial` and resume via HTTP Range — the Downloaded
+  card shows ⏬ Resume download (no quant re-pick, no restart from 0%).
 - **Cloud**: Anthropic / OpenAI / Gemini / Kimi via API keys, or **subscription
   CLIs** (Claude Code, Codex, Gemini, Kimi) — one ModelPicker everywhere
   (`list_models`; never a per-page dropdown).
@@ -60,10 +70,12 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are
   injected at the next agent boundary — or **between tool calls** on local
   models (`getSteer` in `dispatch.ts`). Never dropped.
-- **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane + NEXT-STEPS
-  list + 🪄 Digest agent (rewrites raw notes into implementable steps,
-  additive-only). Steps feed the run (steer or new goal); auto-feed walks the
-  list at each clean run end. Also mounted on the Code page.
+- **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane + Kanban
+  plan board (NOW/NEXT/LATER) + NEXT-STEPS list + 🪄 Digest agent (rewrites
+  raw notes into implementable steps, additive-only). Steps feed the run
+  (steer or new goal); ⚡ Start batch feeds the whole NOW lane (the board is
+  never consumed); ▶ Start queue feeds the first pending step and auto-feed
+  walks the rest at each clean run end. Also mounted on the Code page.
 - **Memory**: per-agent history + shared **team memory** (`memory.rs`) — FACTS
   (durable, keyed, vault-synced) vs WORKLOG (auto-captured, local, capped 100),
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph
@@ -114,6 +126,17 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   bridge (`initialization_script`) and reads results back through a
   base64-over-`document.title` channel (`eval` → poll `title()`), so no remote
   IPC capability is needed.
+- **OwLLM chrome (app-styled window)**: the browser is a FRAMELESS multi-webview
+  window that looks like the app, not a stock OS window — an OwLLM chrome-bar
+  webview (`ui/public/browser-chrome.html`: title, back/reload, URL box,
+  min/max/close, accent-aware via the shared localStorage theme key) sits above
+  the page webview (`Window::builder` + `add_child`, tauri `unstable` feature),
+  so the bar never overlays site content. The bar's buttons/drag/URL entry
+  report over the same title channel tagged `EVT` (`parse_chrome_event`) — no
+  IPC grant to any webview. If the multi-webview build fails on some platform,
+  it falls back to the previous decorated single-webview window
+  (`build_legacy`) so agent browsing never breaks. `browser_set_chrome` still
+  paints the DWM border (and the fallback's caption) in the app accent.
 - **Local dev servers**: scheme-less localhost-family URLs (`localhost:5173`,
   `127.0.0.1:3000`, `[::1]`, `192.168.*`, `10.*`, `*.localhost`) default to
   `http://` instead of `https://`, so agents can open and test a web app they
@@ -274,10 +297,70 @@ Telegram, WhatsApp, Discord, Slack, Email (IMAP/SMTP), LINE — one dispatch
 core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 (`/project`, `/model`, `/brainstorm`), attachments, one-window polling locks.
 
+## Code signing (`signing.rs`, Signing page)
+
+- **One home for signing credentials**, so shipping a signed build isn't a
+  scavenger hunt across Apple's portal, the Keychain and GitHub secrets. The
+  Signing page (Advanced) stores the **Apple Developer ID** set (certificate
+  `.p12` + its password, signing identity, Apple ID, app-specific/notarization
+  password, Team ID → the six `APPLE_*` secrets `release.yml` reads) and the
+  **Windows Authenticode** selectors (thumbprint / subject / TSA → `OWLLM_SIGN_*`,
+  `release.rs::SignCfg`).
+- **Encrypted at rest** via `crypt::protect` (DPAPI per Windows user; passthrough
+  on macOS/Linux for now — same known limitation as `browser_vault.rs`). Secret
+  values are NEVER returned to the frontend by `signing_status`; they leave Rust
+  only through the explicit `signing_export_env` reveal path used by "Push to
+  GitHub secrets" / "Copy values" and the agent tool.
+- **Import `.p12`** → base64 into the store; identity + expiry are parsed
+  best-effort via `openssl` when present (PATH or Git-for-Windows `usr/bin`), so
+  the page shows an **expiry countdown** (amber ≤30 days, red once expired).
+- **No-Mac path (bare `.cer`)**: Apple's portal only *issues* a certificate —
+  the private key lives wherever the CSR was made. "Generate signing request"
+  (`signing_apple_gen_csr`) creates the key (stored encrypted) + a
+  `.certSigningRequest` file to upload at Apple's portal; importing the issued
+  `.cer`/`.cert`/`.crt`/`.pem` (`signing_apple_import_cert`) pairs it with that
+  key into the `.p12` the pipeline needs — with a pubkey match check so a .cer
+  from someone else's CSR is rejected with a clear message. Works on any OS.
+- **Push to GitHub Actions secrets** in one click via the `gh` CLI (which does
+  the libsodium sealed-box); when `gh` is absent, "Copy values" yields the
+  `NAME=value` lines to paste into Settings → Secrets.
+- **Shared within instances**: every OwLLM window / fleet worktree on the machine
+  reads the same `owllm_config_home()` store. Across the user's other PCs the
+  vault (`vault_sync_signing`) mirrors NON-secret metadata only (identity, team,
+  expiry, presence) — the certificate/passwords stay local per machine.
+- **Reachable by agents in any project**: the `signing_get` tool (local
+  `localTools.ts` + MCP-gateway `mcp__owllm__signing_get`) returns metadata by
+  default, or the CI env values with `include_secrets=true`, so a coding agent
+  can wire signed releases from whatever project it's started in. Same reveal
+  boundary as `device_exec`.
+- **Credential hub (readiness strip + portals)**: `signing_hub_status` probes
+  the LIVE environment — is the stored Authenticode thumbprint mounted in the
+  OS store right now (PowerShell `Cert:` drive, NOT `certutil`, which blocks on
+  cloud-CSP certs like SimplySign; macOS `security find-identity`), is
+  SimplySign Desktop running, is `openssl` reachable, is the `gh` CLI installed
+  and which account it's logged in as, how many web logins are vaulted. Every
+  probe runs hidden with a hard 10 s kill-timeout. The page renders these as a
+  one-glance chip strip.
+- **Provider portals open in-app, already signed in**: `signing_portal_open`
+  (catalog: Apple Developer certificates, Apple ID app-passwords, Certum panel,
+  GitHub tokens, Microsoft Partner Center, Google Play Console — or any custom
+  URL) opens the page in the app-styled agent browser, whose persistent profile
+  keeps past sessions, then best-effort autofills the login from the browser
+  vault. The Signing page's **Web logins** card manages that vault (add /
+  delete / open-signed-in / import from installed browsers via
+  `browser_import`), so "renew the cert" never starts with a password reset.
+
 ## Sync, vault & publishing
 
 - **Vault** (opt-in `owllm-vault` GitHub repo): team templates, roles, project
   rows, chat, memory FACTS sync across the user's PCs. GitHub device-flow auth.
+- **Device-local folder paths** (`vault.rs` `VaultProject.locations`): a project's
+  on-disk folder is per-device, keyed by `device_id`, so a peer's absolute path
+  (`C:\…` on a Mac) is never adopted. A freshly-synced project imports GHOSTED
+  (empty path) with all its chat/memory/settings intact; the Project Settings
+  dialog flags the missing folder (`path_is_dir` probe) and prompts Browse… to
+  bind a local folder. Each machine writes only its own `locations` entry and
+  never clobbers a peer's.
 - **Publish pipeline**: rule-based host-side release (used to ship OWLLM
   itself and any user project via the Project Card).
 - **Fleet** (`fleet.rs`): git-worktree substrate for parallel agents/pages;
@@ -286,7 +369,12 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 ## Support & UX
 
 - **The Watcher**: in-app support agent — per-page docs (`PAGE_DOCS`), guided
-  walkthroughs, screenshot+ask, one-click bug report to GitHub.
+  walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
+  works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).
+- **Linux chrome**: no overlay window off-Windows — the frame draws in-page,
+  the main window is transparent (`tauri.linux.conf.json`) and the see-through
+  headroom band above the frame is click-through via GTK input-shape
+  (`frame_shape.rs`), mirroring the Windows overlay behaviour.
 - Update streams: signed Tauri updater (shell) + per-launch module swap +
   hot-pulled data layer (teams/roles/profiles from the public repo).
 - Frameless HybridFrame window (transparent — NEVER make it opaque),

@@ -37,8 +37,10 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
-use tauri::webview::Color;
-use tauri::{Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::webview::{Color, Webview, WebviewBuilder};
+use tauri::{
+    LogicalPosition, LogicalSize, Manager, WebviewUrl, WebviewWindowBuilder, Window, WindowEvent,
+};
 
 /// OwLLM dark base (matches the UI `--bg-panel` floor `#0e1117`), so the agent
 /// browser's blank / loading state reads as OwLLM's own surface instead of the
@@ -47,8 +49,82 @@ const OWLLM_BG: Color = Color(14, 17, 23, 255);
 
 /// Label of the single agent-browser window. Looked up by label everywhere, so
 /// there is no global handle to keep in sync — if the user closes the window,
-/// `get_webview_window` simply returns None and we report "not running".
+/// the lookup simply returns None and we report "not running".
 const BROWSER_LABEL: &str = "owllm-browser";
+
+/// Child-webview labels of the framed (app-styled) browser window: an OwLLM
+/// chrome bar on top, the actual page below. The legacy single-webview
+/// fallback keeps BROWSER_LABEL as its webview label, so `content_webview`
+/// resolves the page in either shape.
+const CONTENT_LABEL: &str = "owllm-browser-page";
+const CHROME_LABEL: &str = "owllm-browser-chrome";
+
+/// Height of the OwLLM chrome bar (logical px) in the framed window.
+const CHROME_H: f64 = 38.0;
+
+/// The app's chrome colour (resolved `--bg-header`), pushed by the UI via
+/// `browser_set_chrome` on boot and on every accent change. The agent-browser
+/// window paints its NATIVE title bar / border with it so the popup reads as
+/// an OwLLM window instead of a stock light-grey OS frame. None until the UI
+/// has pushed once (then the window still gets the dark-theme frame).
+static CHROME_BG: Mutex<Option<(u8, u8, u8)>> = Mutex::new(None);
+
+/// Parse "#rrggbb" (case-insensitive, leading '#' optional).
+fn parse_hex_rgb(s: &str) -> Option<(u8, u8, u8)> {
+    let h = s.trim().trim_start_matches('#');
+    if h.len() != 6 || !h.is_ascii() {
+        return None;
+    }
+    let r = u8::from_str_radix(&h[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&h[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&h[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Paint the window's native frame in OwLLM chrome. The framed browser window
+/// is undecorated (its bar is our own webview), so only the DWM border colour
+/// still applies — kept for it and for the legacy decorated fallback, where
+/// caption colouring still matters. Windows 11 only (the DWM colour attributes
+/// appeared in build 22000); elsewhere the calls fail benignly.
+#[cfg(windows)]
+fn apply_chrome(win: &Window) {
+    use windows_sys::Win32::Graphics::Dwm::{
+        DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR,
+    };
+    let Some((r, g, b)) = *CHROME_BG.lock().unwrap_or_else(|p| p.into_inner()) else {
+        return;
+    };
+    let Ok(hwnd) = win.hwnd() else { return };
+    // COLORREF is 0x00BBGGRR.
+    let bg: u32 = (r as u32) | ((g as u32) << 8) | ((b as u32) << 16);
+    let white: u32 = 0x00ff_ffff;
+    let set = |attr: i32, val: &u32| unsafe {
+        DwmSetWindowAttribute(
+            hwnd.0 as _,
+            attr as u32,
+            val as *const u32 as *const _,
+            std::mem::size_of::<u32>() as u32,
+        )
+    };
+    let _ = set(DWMWA_CAPTION_COLOR, &bg);
+    let _ = set(DWMWA_BORDER_COLOR, &bg);
+    let _ = set(DWMWA_TEXT_COLOR, &white);
+}
+
+#[cfg(not(windows))]
+fn apply_chrome(_win: &Window) {}
+
+/// UI → backend: the resolved app chrome colour (`--bg-header`). Stored for
+/// every future agent-browser window build and applied live if one is open.
+#[tauri::command(async)]
+pub fn browser_set_chrome(app: tauri::AppHandle, bg: String) -> Result<(), String> {
+    let rgb = parse_hex_rgb(&bg).ok_or_else(|| format!("bad chrome colour {bg:?}"))?;
+    *CHROME_BG.lock().unwrap_or_else(|p| p.into_inner()) = Some(rgb);
+    if let Some(win) = get_window(&app) {
+        apply_chrome(&win);
+    }
+    Ok(())
+}
 
 /// Sentinel that fronts every reply written into `document.title`. Uses an
 /// invisible separator (U+2063) so it can never collide with real page titles.
@@ -406,8 +482,84 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
-fn get_window(app: &tauri::AppHandle) -> Option<WebviewWindow> {
-    app.get_webview_window(BROWSER_LABEL)
+fn get_window(app: &tauri::AppHandle) -> Option<Window> {
+    app.get_window(BROWSER_LABEL)
+}
+
+/// The webview that shows the actual page: the content child of the framed
+/// window, or the single webview of the legacy fallback (same label as the
+/// window there).
+fn content_webview(app: &tauri::AppHandle) -> Option<Webview> {
+    app.get_webview(CONTENT_LABEL)
+        .or_else(|| app.get_webview(BROWSER_LABEL))
+}
+
+/// Chrome-bar → Rust events, carried on the same title channel as page
+/// replies but tagged EVT: SENTINEL + "EVT" + U+2063 + action + U+2063 + b64(data).
+fn parse_chrome_event(title: &str) -> Option<(String, String)> {
+    let rest = title.strip_prefix(SENTINEL)?;
+    let (tag, rest) = rest.split_once('\u{2063}')?;
+    if tag != "EVT" {
+        return None;
+    }
+    let (action, b64) = rest.split_once('\u{2063}')?;
+    Some((action.to_string(), decode_b64(b64)))
+}
+
+/// Act on a chrome-bar event (window buttons / drag / URL entry). Runs inside
+/// the chrome webview's title-changed callback; window methods are
+/// thread-safe, and navigation is dispatched to a worker so the callback
+/// never blocks on a page load.
+fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
+    let Some(win) = get_window(app) else { return };
+    match action {
+        "drag" => {
+            let _ = win.start_dragging();
+        }
+        "minimize" => {
+            let _ = win.minimize();
+        }
+        "maximize" => {
+            if win.is_maximized().unwrap_or(false) {
+                let _ = win.unmaximize();
+            } else {
+                let _ = win.maximize();
+            }
+        }
+        "close" => {
+            let _ = win.destroy();
+        }
+        "back" => {
+            if let Some(wv) = content_webview(app) {
+                let _ = wv.eval("history.back()");
+            }
+        }
+        "reload" => {
+            if let Some(wv) = content_webview(app) {
+                let _ = wv.eval("location.reload()");
+            }
+        }
+        "nav" => {
+            let app = app.clone();
+            let url = data.to_string();
+            std::thread::spawn(move || {
+                let _ = browser_cmd(app, "navigate".to_string(), json!({ "url": url }));
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Push the page's live url/title into the chrome bar (best-effort).
+fn update_chrome_bar(app: &tauri::AppHandle, url: Option<&str>, title: Option<&str>) {
+    let Some(chrome) = app.get_webview(CHROME_LABEL) else {
+        return;
+    };
+    let info = json!({ "url": url, "title": title });
+    let _ = chrome.eval(&format!(
+        "try{{window.__owllmChromeSet&&window.__owllmChromeSet({})}}catch(e){{}}",
+        serde_json::to_string(&info.to_string()).unwrap_or_else(|_| "\"{}\"".into())
+    ));
 }
 
 /// True when a scheme-less URL clearly points at a local dev server, so the
@@ -443,32 +595,87 @@ pub fn browser_ensure() -> Result<String, String> {
 }
 
 /// Build the agent-browser window at `url` with the current device preset.
-fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<WebviewWindow, String> {
+///
+/// Preferred shape: a FRAMELESS window that looks like OwLLM — our own chrome
+/// bar (browser-chrome.html, an app-origin webview) on top, the page webview
+/// below it, so no stock OS title bar and nothing ever overlays site content.
+/// If the multi-webview build fails on some platform/engine, fall back to the
+/// previous decorated single-webview window so agent browsing never breaks.
+fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+    match build_framed(app, url.clone()) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            eprintln!("[browser] app-styled window failed ({e}); using the decorated fallback");
+            if let Some(w) = get_window(app) {
+                let _ = w.destroy();
+            }
+            build_legacy(app, url)
+        }
+    }
+}
+
+/// The app-styled browser: frameless Window + chrome-bar webview + page webview.
+fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
     let dev = current_device();
-    #[allow(unused_mut)]
-    let mut builder = WebviewWindowBuilder::new(app, BROWSER_LABEL, WebviewUrl::External(url))
+    let start_url = url.to_string();
+    let win_w = dev.width;
+    let win_h = dev.height + CHROME_H;
+    let mut builder = Window::builder(app, BROWSER_LABEL)
         .title("OwLLM — Agent Browser")
-        .inner_size(dev.width, dev.height)
-        .initialization_script(BRIDGE_JS)
-        // The engine pushes every document.title change here; sentinel-tagged
-        // ones are the bridge's replies. This is the read half of the channel.
-        .on_document_title_changed(|_win, title| capture_reply(&title))
-        // Dark OwLLM base so the blank / loading webview is OwLLM's surface,
-        // not the bare white "window colour" a fresh webview shows.
-        .background_color(OWLLM_BG)
-        .decorations(true)
+        .inner_size(win_w, win_h)
+        // No OS chrome: the bar below IS the chrome. shadow(true) keeps the
+        // drop shadow + resize borders on undecorated Windows windows.
+        .decorations(false)
+        .shadow(true)
+        .theme(Some(tauri::Theme::Dark))
         .resizable(true)
         .visible(true);
-    if let Some(ua) = dev.ua {
-        builder = builder.user_agent(ua);
-    }
     // Centre it on the primary monitor (the "open 300px up" spec applies to the
     // in-app Agent Browser *panel*, not this native window — user spec 2026-07-05).
     if let Ok(Some(m)) = app.primary_monitor() {
         let ls = m.size().to_logical::<f64>(m.scale_factor());
-        let x = ((ls.width - dev.width) / 2.0).max(0.0);
-        let y = ((ls.height - dev.height) / 2.0).max(12.0);
+        let x = ((ls.width - win_w) / 2.0).max(0.0);
+        let y = ((ls.height - win_h) / 2.0).max(12.0);
         builder = builder.position(x, y);
+    }
+    let win = builder
+        .build()
+        .map_err(|e| format!("browser window: {e}"))?;
+
+    // Chrome bar — app origin (shares the UI's localStorage theme). Its
+    // buttons/drag/URL box report through the same title channel the page
+    // bridge uses; no IPC grant to any webview is needed.
+    let chrome = WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App("browser-chrome.html".into()))
+        .background_color(OWLLM_BG)
+        .on_document_title_changed(|wv, title| {
+            if let Some((action, data)) = parse_chrome_event(&title) {
+                handle_chrome_event(&wv.app_handle().clone(), &action, &data);
+            }
+        });
+
+    // Page webview — the engine pushes every document.title change here;
+    // sentinel-tagged ones are the bridge's replies (read half of the channel),
+    // real ones are forwarded to the chrome bar.
+    #[allow(unused_mut)]
+    let mut content = WebviewBuilder::new(CONTENT_LABEL, WebviewUrl::External(url))
+        .initialization_script(BRIDGE_JS)
+        // Dark OwLLM base so the blank / loading webview is OwLLM's surface,
+        // not the bare white "window colour" a fresh webview shows.
+        .background_color(OWLLM_BG)
+        .on_document_title_changed(|wv, title| {
+            capture_reply(&title);
+            if !title.starts_with(SENTINEL) {
+                let app = wv.app_handle().clone();
+                let url = wv.url().map(|u| u.to_string()).unwrap_or_default();
+                update_chrome_bar(&app, Some(&url), Some(&title));
+            }
+        })
+        .on_page_load(|wv, payload| {
+            let app = wv.app_handle().clone();
+            update_chrome_bar(&app, Some(payload.url().as_str()), None);
+        });
+    if let Some(ua) = dev.ua {
+        content = content.user_agent(ua);
     }
     // A stable, isolated data dir so agent-browser logins persist across runs.
     // The builder method is only present on Windows/Linux; macOS WKWebView uses
@@ -476,11 +683,88 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<WebviewWindow
     #[cfg(any(windows, target_os = "linux"))]
     if let Some(dir) = browser_data_dir() {
         let _ = std::fs::create_dir_all(&dir);
+        content = content.data_directory(dir);
+    }
+
+    win.add_child(
+        chrome,
+        LogicalPosition::new(0.0, 0.0),
+        LogicalSize::new(win_w, CHROME_H),
+    )
+    .map_err(|e| format!("chrome bar webview: {e}"))?;
+    win.add_child(
+        content,
+        LogicalPosition::new(0.0, CHROME_H),
+        LogicalSize::new(win_w, dev.height),
+    )
+    .map_err(|e| format!("page webview: {e}"))?;
+
+    // Keep both children glued to the window on resize/maximize.
+    let handle = app.clone();
+    win.on_window_event(move |ev| {
+        if let WindowEvent::Resized(size) = ev {
+            layout_children(&handle, *size);
+        }
+    });
+
+    apply_chrome(&win);
+    update_chrome_bar(app, Some(&start_url), None);
+    Ok(())
+}
+
+/// Re-fit the chrome bar + page webviews to a new window size.
+fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
+    let Some(win) = get_window(app) else { return };
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let ls = size.to_logical::<f64>(scale);
+    if let Some(chrome) = app.get_webview(CHROME_LABEL) {
+        let _ = chrome.set_position(LogicalPosition::new(0.0, 0.0));
+        let _ = chrome.set_size(LogicalSize::new(ls.width, CHROME_H));
+    }
+    if let Some(content) = app.get_webview(CONTENT_LABEL) {
+        let _ = content.set_position(LogicalPosition::new(0.0, CHROME_H));
+        let _ = content.set_size(LogicalSize::new(
+            ls.width,
+            (ls.height - CHROME_H).max(50.0),
+        ));
+    }
+}
+
+/// Previous shape (decorated single-webview window) — kept as the fallback.
+fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+    let dev = current_device();
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::new(app, BROWSER_LABEL, WebviewUrl::External(url))
+        .title("OwLLM — Agent Browser")
+        .inner_size(dev.width, dev.height)
+        .initialization_script(BRIDGE_JS)
+        .on_document_title_changed(|_win, title| capture_reply(&title))
+        .background_color(OWLLM_BG)
+        .theme(Some(tauri::Theme::Dark))
+        .decorations(true)
+        .resizable(true)
+        .visible(true);
+    if let Some(ua) = dev.ua {
+        builder = builder.user_agent(ua);
+    }
+    if let Ok(Some(m)) = app.primary_monitor() {
+        let ls = m.size().to_logical::<f64>(m.scale_factor());
+        let x = ((ls.width - dev.width) / 2.0).max(0.0);
+        let y = ((ls.height - dev.height) / 2.0).max(12.0);
+        builder = builder.position(x, y);
+    }
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(dir) = browser_data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
         builder = builder.data_directory(dir);
     }
     builder
         .build()
-        .map_err(|e| format!("failed to open agent browser window: {e}"))
+        .map_err(|e| format!("failed to open agent browser window: {e}"))?;
+    if let Some(win) = get_window(app) {
+        apply_chrome(&win);
+    }
+    Ok(())
 }
 
 /// Create the agent-browser window if it isn't already open. Idempotent.
@@ -513,7 +797,10 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
         ));
     };
     // Remember where we were, tear down, rebuild with the new UA + viewport.
-    let back_to = win.url().map(|u| u.to_string()).unwrap_or_default();
+    let back_to = content_webview(&app)
+        .and_then(|wv| wv.url().ok())
+        .map(|u| u.to_string())
+        .unwrap_or_default();
     win.destroy()
         .map_err(|e| format!("could not rebuild browser window: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -558,7 +845,7 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
     if get_window(&app).is_none() {
         browser_start(app.clone())?;
     }
-    let win = get_window(&app).ok_or_else(|| "browser did not start".to_string())?;
+    let win = content_webview(&app).ok_or_else(|| "browser did not start".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
 
     match action.as_str() {
@@ -614,7 +901,7 @@ pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Resu
 /// until ready. Runs on a threadpool thread (commands are `async`), so the
 /// waiting never touches the main event loop.
 fn eval_until_reply(
-    win: &WebviewWindow,
+    win: &Webview,
     req: u64,
     action: &str,
     params: &Value,
@@ -694,7 +981,7 @@ pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
 /// Panel view: current URL + title as JSON (the window itself is the live view).
 #[tauri::command(async)]
 pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
-    let win = get_window(&app).ok_or_else(|| "browser not running".to_string())?;
+    let win = content_webview(&app).ok_or_else(|| "browser not running".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
     eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(6))
 }
@@ -712,6 +999,16 @@ pub fn browser_focus(app: tauri::AppHandle) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chrome_hex_parses() {
+        assert_eq!(parse_hex_rgb("#5865b8"), Some((0x58, 0x65, 0xb8)));
+        assert_eq!(parse_hex_rgb("5865B8"), Some((0x58, 0x65, 0xb8)));
+        assert_eq!(parse_hex_rgb(" #ffffff "), Some((255, 255, 255)));
+        for bad in ["", "#fff", "#12345", "#1234567", "#gg0000", "€€"] {
+            assert_eq!(parse_hex_rgb(bad), None, "{bad:?} should not parse");
+        }
+    }
 
     #[test]
     fn local_hosts_get_http() {
@@ -787,6 +1084,28 @@ mod tests {
     }
 
     #[test]
+    fn chrome_events_parse() {
+        use base64::Engine as _;
+        let b64 = base64::engine::general_purpose::STANDARD.encode("github.com");
+        let t = format!("{SENTINEL}EVT\u{2063}nav\u{2063}{b64}");
+        assert_eq!(
+            parse_chrome_event(&t),
+            Some(("nav".to_string(), "github.com".to_string()))
+        );
+        let t2 = format!("{SENTINEL}EVT\u{2063}drag\u{2063}");
+        assert_eq!(
+            parse_chrome_event(&t2),
+            Some(("drag".to_string(), String::new()))
+        );
+        // Page replies (numeric id) and ordinary titles are NOT chrome events —
+        // and vice versa, an EVT title is not a page reply. Disjoint channels.
+        let reply = format!("{SENTINEL}42\u{2063}0\u{2063}1\u{2063}aaaa");
+        assert_eq!(parse_chrome_event(&reply), None);
+        assert_eq!(parse_chrome_event("GitHub — where software is built"), None);
+        assert_eq!(parse_reply(&t), None);
+    }
+
+    #[test]
     fn device_aliases_resolve() {
         assert_eq!(device_by_name("iPhone").unwrap().name, "iphone");
         assert_eq!(device_by_name("phone").unwrap().name, "iphone");
@@ -805,8 +1124,11 @@ mod tests {
 pub fn browser_status(app: tauri::AppHandle) -> Result<BrowserStatus, String> {
     let device = current_device().name.to_string();
     match get_window(&app) {
-        Some(win) => {
-            let url = win.url().map(|u| u.to_string()).unwrap_or_default();
+        Some(_) => {
+            let url = content_webview(&app)
+                .and_then(|wv| wv.url().ok())
+                .map(|u| u.to_string())
+                .unwrap_or_default();
             Ok(BrowserStatus {
                 running: true,
                 url,

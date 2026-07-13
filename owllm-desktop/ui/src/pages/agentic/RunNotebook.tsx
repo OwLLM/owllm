@@ -46,6 +46,12 @@ export type NotebookState = {
   plan: string;
   steps: NotebookStep[];
   autoFeed: boolean;
+  /// Which surface DRIVES auto-feed — the notebook blob is shared per project,
+  /// so without an owner every open page on the project popped the queue at
+  /// its own run end (a second page opened "to do something else" started
+  /// feeding notebook steps). The surface whose toggle turned auto-feed on
+  /// owns it; unchecking from ANY page stops it everywhere.
+  autoFeedOwner?: string;
   digest: Array<{ role: "you" | "digest"; text: string }>;
   /// User-picked digest model (per project). Empty/undefined = inherit the
   /// surface's default (team model → server model), same rule as before.
@@ -71,6 +77,7 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       plan: typeof p.plan === "string" ? p.plan : "",
       steps: Array.isArray(p.steps) ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string") : [],
       autoFeed: p.autoFeed === true,
+      autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
       digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
@@ -87,17 +94,31 @@ export function saveNotebook(projectId: string | null | undefined, nb: NotebookS
   } catch { /* best effort */ }
 }
 
-/// Run-end auto-feed helper (used by AgentsPage): pop the first pending step
-/// — marks it "sent" and persists — or null when auto-feed is off / nothing
-/// is pending.
-export function takeNextAutoStep(projectId: string | null | undefined): NotebookStep | null {
+/// Run-end auto-feed helper (used by AgentsPage / CodePage): pop the first
+/// pending step — marks it "sent" and persists — or null when auto-feed is
+/// off / nothing is pending / auto-feed is driven by a DIFFERENT surface.
+/// Legacy blobs saved before ownership existed have no owner: the first
+/// surface to feed adopts them, so the queue converges to a single driver.
+export function takeNextAutoStep(projectId: string | null | undefined, surfaceId: string): NotebookStep | null {
   const nb = loadNotebook(projectId);
   if (!nb.autoFeed) return null;
+  if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return null;
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
   next.status = "sent";
+  if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
   saveNotebook(projectId, nb);
   return next;
+}
+
+/// True when auto-feed is on with pending steps and THIS surface may drive it
+/// — the run-end paths use it to say "auto-feed paused" instead of stalling
+/// silently when a run doesn't finish cleanly.
+export function autoFeedWouldRun(projectId: string | null | undefined, surfaceId: string): boolean {
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeed) return false;
+  if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return false;
+  return nb.steps.some((s) => s.status === "pending");
 }
 
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -206,19 +227,28 @@ type Props = {
   /// Render the notebook INLINE (fills its parent, stacked vertically) instead
   /// of as a modal — used by the Code page's right-column Notebook tab.
   inline?: boolean;
+  /// Stable identity of the page hosting this notebook (e.g. "agents:main",
+  /// "code:<pageId>"). Turning auto-feed ON records it as the owner so only
+  /// this page walks the queue at run end; other pages on the same project
+  /// see the toggle as "driven elsewhere" and can only switch it off.
+  surfaceId?: string;
 };
 
-export default function RunNotebook({ projectId, projectName, active = true, running, onFeed, modelId, port, models, openEvent = "owllm:open-run-notebook", accountsStatus = null, inline = false }: Props) {
+export default function RunNotebook({ projectId, projectName, active = true, running, onFeed, modelId, port, models, openEvent = "owllm:open-run-notebook", accountsStatus = null, inline = false, surfaceId = "main" }: Props) {
   const [open, setOpen] = useState(false);
   const [nb, setNb] = useState<NotebookState>(() => loadNotebook(projectId));
   const [newStep, setNewStep] = useState("");
   const [digestBusy, setDigestBusy] = useState(false);
   const [digestLogOpen, setDigestLogOpen] = useState(false);
+  const [doneOpen, setDoneOpen] = useState(false);
   const [digestError, setDigestError] = useState("");
   /// Transient per-step outcome of the last Feed click — the onFeed result
   /// ("queued" into a live run vs "dispatched" as a new goal vs "no-team")
   /// was previously computed and thrown away, leaving the user guessing.
   const [feedNotice, setFeedNotice] = useState<{ id: string; kind: "queued" | "dispatched" | "no-team" } | null>(null);
+  /// Same transient outcome for the Kanban NOW-batch button (keyed separately —
+  /// lanes have no step id).
+  const [laneNotice, setLaneNotice] = useState<{ key: keyof KanbanPlan; kind: "queued" | "dispatched" | "no-team" } | null>(null);
   const [editingStepId, setEditingStepId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   // Digest proposals live IN the notebook blob (nb.proposed / nb.proposedPlan)
@@ -300,13 +330,19 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const setStep = (id: string, patch: Partial<NotebookStep>) =>
     updateNotebook((prev) => ({ ...prev, steps: prev.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
   const removeStep = (id: string) => updateNotebook((prev) => ({ ...prev, steps: prev.steps.filter((s) => s.id !== id) }));
+  // Reorder within the VISIBLE (unfinished) cards only — done steps are hidden
+  // from the feed, so swap the two adjacent visible steps rather than raw array
+  // neighbours (a raw swap could silently trade places with a hidden done step).
   const moveStep = (id: string, dir: -1 | 1) =>
     updateNotebook((prev) => {
-      const i = prev.steps.findIndex((s) => s.id === id);
-      const j = i + dir;
-      if (i < 0 || j < 0 || j >= prev.steps.length) return prev;
+      const visible = prev.steps.filter((s) => s.status !== "done");
+      const vi = visible.findIndex((s) => s.id === id);
+      const vj = vi + dir;
+      if (vi < 0 || vj < 0 || vj >= visible.length) return prev;
+      const ai = prev.steps.findIndex((s) => s.id === visible[vi].id);
+      const bi = prev.steps.findIndex((s) => s.id === visible[vj].id);
       const steps = [...prev.steps];
-      [steps[i], steps[j]] = [steps[j], steps[i]];
+      [steps[ai], steps[bi]] = [steps[bi], steps[ai]];
       return { ...prev, steps };
     });
   const feedStep = (s: NotebookStep) => {
@@ -315,6 +351,23 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
     setStep(s.id, { status: "sent" });
+  };
+  /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
+  /// the lane content is NEVER cleared or consumed — only read.
+  const feedLane = (key: keyof KanbanPlan) => {
+    const body = kanbanPlan[key].trim();
+    if (!body) return;
+    const label = KANBAN_COLUMNS.find((c) => c.key === key)!.label.toUpperCase();
+    const res = onFeed(`Implement the ${label} batch from the Notebook plan board — work through every card, in order:\n${body}`);
+    setLaneNotice({ key, kind: res });
+    window.setTimeout(() => setLaneNotice((n) => (n && n.key === key ? null : n)), 6000);
+  };
+  /// The missing "start" for the step queue: feed the FIRST pending step now.
+  /// With auto-feed on, each clean run end pulls the next one — this button is
+  /// what kicks the chain off while the team is idle.
+  const startQueue = () => {
+    const first = nb.steps.find((s) => s.status === "pending");
+    if (first) feedStep(first);
   };
 
   const startEdit = (s: NotebookStep) => { setEditingStepId(s.id); setEditingText(s.text); };
@@ -388,6 +441,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
 
   const pendingCount = useMemo(() => nb.steps.filter((s) => s.status === "pending").length, [nb.steps]);
+  // The active feed shows only unfinished, actionable cards. Completed steps
+  // drop out of the feed and are preserved in the collapsible history below.
+  const activeSteps = useMemo(() => nb.steps.filter((s) => s.status !== "done"), [nb.steps]);
+  const doneSteps = useMemo(() => nb.steps.filter((s) => s.status === "done"), [nb.steps]);
   // Human-readable INHERITED digest model (the default when no override is
   // picked): the raw id with any file path stripped.
   const digestModelLabel = useMemo(() => {
@@ -433,10 +490,24 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             {running ? (inline ? "run live — steps steer it" : "team is running — fed steps steer it live") : (inline ? "idle — steps start a run" : "team idle — fed steps start a run")}
           </span>
           <div style={{ flex: 1 }} />
-          <label title="When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it." style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: nb.autoFeed ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}>
-            <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked })} />
-            Auto-feed next step
-          </label>
+          {(() => {
+            // Ownership-aware toggle: ON from here claims the queue for THIS
+            // page; OFF from anywhere stops it everywhere. When another page
+            // owns it, this page shows it amber — uncheck to stop, re-check
+            // to take over driving from here.
+            const ownedElsewhere = nb.autoFeed && !!nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId;
+            return (
+              <label
+                title={ownedElsewhere
+                  ? "Auto-feed is driven by another page on this project. Uncheck to stop it everywhere; check again afterwards to drive it from this page."
+                  : "When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it. Only the page that turns this on feeds the queue."}
+                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: ownedElsewhere ? "#ffd97a" : nb.autoFeed ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}
+              >
+                <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked, autoFeedOwner: e.target.checked ? surfaceId : undefined })} />
+                {ownedElsewhere ? "Auto-feed (another page drives)" : "Auto-feed next step"}
+              </label>
+            );
+          })()}
           {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} style={{ height: 26, width: 28, padding: 0, fontSize: 13 }}>✕</button>}
         </div>
 
@@ -602,6 +673,25 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       placeholder={col.key === "now" ? "- Ship the coherent first batch..." : col.key === "next" ? "- Follow-up batch..." : "- Optional or parked work..."}
                       style={{ ...textareaBase, minHeight: inline ? 64 : 92, fontSize: 12, background: "var(--bg-input)" }}
                     />
+                    {col.key === "now" && (
+                      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
+                        <button
+                          onClick={() => feedLane("now")}
+                          disabled={!kanbanPlan.now.trim()}
+                          title={running ? "Feed the whole NOW batch — steers the running team at its next boundary. The board keeps its cards." : "Start the whole NOW batch as a new goal. The board keeps its cards."}
+                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(154,217,255,0.5)", borderRadius: 6, background: "rgba(14,28,40,0.6)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
+                        >⚡ Start batch</button>
+                        {laneNotice?.key === "now" && (
+                          <span style={{
+                            fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px",
+                            color: laneNotice.kind === "no-team" ? "#ffb4b4" : laneNotice.kind === "queued" ? "#ffd97a" : "#7ff0c5",
+                            border: `1px solid ${laneNotice.kind === "no-team" ? "rgba(255,140,140,0.45)" : laneNotice.kind === "queued" ? "rgba(255,217,122,0.45)" : "rgba(127,240,197,0.45)"}`,
+                          }}>
+                            {laneNotice.kind === "queued" ? "queued — steers the live run" : laneNotice.kind === "dispatched" ? "dispatched as a new goal" : "no team ready — pick a project & model"}
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 );
               })}
@@ -614,6 +704,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               <span>🎯</span>
               <span>Next steps</span>
               <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: pendingCount ? "#7ff0c5" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
+              {pendingCount > 0 && (
+                <button
+                  onClick={startQueue}
+                  title={nb.autoFeed
+                    ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
+                    : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
+                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
+                >▶ Start queue</button>
+              )}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -629,14 +728,16 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 <button className="ghost-btn" onClick={() => { addStep(newStep); setNewStep(""); }} style={{ height: 32, padding: "0 12px", fontSize: 12, flexShrink: 0 }}>＋ Add</button>
               </div>
 
-              {nb.steps.length === 0 && (
+              {activeSteps.length === 0 && (
                 <div style={{ padding: 14, textAlign: "center", fontSize: 12, color: "var(--fg-muted)", background: "var(--bg-input)", borderRadius: 8, border: "1px dashed var(--border)" }}>
-                  No steps yet — add one above, or 🪄 digest your notes below.
+                  {doneSteps.length > 0
+                    ? "All steps done — reopen one from Completed below, or add a new step above."
+                    : "No steps yet — add one above, or 🪄 digest your notes below."}
                 </div>
               )}
 
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {nb.steps.map((s) => (
+                {activeSteps.map((s) => (
                   <div key={s.id} style={{
                     display: "flex", flexDirection: "column", gap: 8,
                     padding: 10,
@@ -697,6 +798,32 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   </div>
                 ))}
               </div>
+
+              {/* Completed history — done steps leave the active feed but are
+                  kept here (collapsed by default) so nothing is lost and the
+                  user can reopen a step or clear it for good. */}
+              {doneSteps.length > 0 && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  <button
+                    className="ghost-btn"
+                    onClick={() => setDoneOpen((v) => !v)}
+                    title="Show or hide completed steps"
+                    style={{ height: 26, alignSelf: "flex-start", padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}
+                  >{doneOpen ? "▾" : "▸"} Completed ({doneSteps.length})</button>
+                  {doneOpen && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                      {doneSteps.map((s) => (
+                        <div key={s.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
+                          <span style={{ color: "#7ff0c5", fontSize: 13, lineHeight: "18px", flexShrink: 0 }}>✓</span>
+                          <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
+                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" style={{ height: 22, padding: "0 8px", fontSize: 10.5, flexShrink: 0 }}>↺ Reopen</button>
+                          <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" style={{ height: 22, width: 22, padding: 0, fontSize: 11, color: "#ff8c8c", flexShrink: 0 }}>🗑</button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
             </div>
           </div>
 

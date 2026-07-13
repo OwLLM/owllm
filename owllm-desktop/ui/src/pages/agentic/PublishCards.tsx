@@ -6,6 +6,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { parseProjectCard, type ProjectCard } from "./cardLint";
 
 type ReadyCheck = { id: string; label: string; ok: boolean; detail: string };
+// Compact `git status --porcelain -b` summary from git.rs — cheap and local,
+// unlike publish_readiness which probes the network (ls-remote / gh).
+type GitStatusInfo = { isRepo: boolean; branch: string; ahead: number; behind: number; total: number };
 type ReleaseVisibility = "publish" | "draft" | "dry-run";
 type PublishMode = "host" | "ci";
 
@@ -132,14 +135,25 @@ export default function PublishCards({
   onStatus?: (msg: string) => void;
 }) {
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
+  const [git, setGit] = useState<GitStatusInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  // Inline, right-by-the-buttons progress. The shared `status` line lives in the
+  // center column, far from this left-rail card, so an action there felt dead:
+  // no acknowledgement on click, only a result at the very end. This shows
+  // ⏳ running / ✓ done / ✗ error in place.
+  const [activity, setActivity] = useState<{ kind: "run" | "ok" | "err"; msg: string } | null>(null);
   const [pubNotes, setPubNotes] = useState("");
   const [settings, setSettings] = useState<PublishSettings>(() => loadSettings(repoDir));
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [checksOpen, setChecksOpen] = useState(false);
   const [commitOpen, setCommitOpen] = useState(false);
   const [commitMsg, setCommitMsg] = useState("");
   const mergeTarget = "main";
   const mounted = useRef(true);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  // The Code page stays mounted (keep-alive, hidden via display:none) — skip
+  // polling while it isn't visible so background pages don't probe forever.
+  const pageHidden = () => !!rootRef.current && rootRef.current.offsetParent === null;
 
   // Settings are per-project — swap them when the project does.
   useEffect(() => { setSettings(loadSettings(repoDir)); }, [repoDir]);
@@ -160,15 +174,36 @@ export default function PublishCards({
       sign: (settings.sign.thumbprint.trim() || settings.sign.subject.trim()) ? settings.sign : null,
     })
       .then((r) => { if (mounted.current) setReady(r); })
-      .catch(() => { if (mounted.current) setReady(null); });
+      // Transient IPC/probe failure: keep the last known checks. Nulling here
+      // used to make the WHOLE container vanish from the rail (all buttons are
+      // gated on `ready`) every time one probe hiccuped or the net dropped.
+      .catch(() => {});
   }, [repoDir, settings.mode, settings.sign]);
+
+  // Local repo facts (branch / ahead / behind / dirty count) — pure-local git,
+  // fast and offline-safe. This is what decides whether the container shows at
+  // all, so Commit/Merge don't wait on (or die with) the network probes.
+  const fetchGit = useCallback(() => {
+    if (!gitDir) { setGit(null); return; }
+    invoke<GitStatusInfo>("git_status", { dir: gitDir })
+      .then((g) => { if (mounted.current) setGit(g); })
+      .catch(() => { /* keep last known */ });
+  }, [gitDir]);
 
   useEffect(() => {
     mounted.current = true;
     refresh();
-    const id = window.setInterval(refresh, 8000);
+    // Readiness re-probes hit the network (ls-remote, gh) — 30s is plenty; it
+    // also re-runs after every action and whenever the settings change.
+    const id = window.setInterval(() => { if (!pageHidden()) refresh(); }, 30000);
     return () => { mounted.current = false; window.clearInterval(id); };
   }, [refresh]);
+
+  useEffect(() => {
+    fetchGit();
+    const id = window.setInterval(() => { if (!pageHidden()) fetchGit(); }, 5000);
+    return () => window.clearInterval(id);
+  }, [fetchGit]);
 
   // Seed mode + signing from the committed Project Card when there is no local override.
   // This keeps the project's release rules in sync across machines and teammates.
@@ -189,29 +224,39 @@ export default function PublishCards({
 
   const status = (msg: string) => { if (onStatus) onStatus(msg); };
 
-  const run = async (fn: () => Promise<unknown>) => {
+  const run = async (label: string, fn: () => Promise<unknown>) => {
     setLoading(true);
+    // Immediate acknowledgement — both inline and on the shared status line —
+    // so a long host build (commit → tag → build → sign → publish) doesn't look
+    // frozen while it runs.
+    setActivity({ kind: "run", msg: `${label}…` });
+    status(`⏳ ${label}…`);
     try {
       const out = await fn();
-      status(String(out ?? "Done."));
+      const msg = String(out ?? "Done.");
+      setActivity({ kind: "ok", msg });
+      status(msg);
       refresh();
     } catch (e) {
-      status(String((e as Error).message ?? e));
+      const msg = String((e as Error).message ?? e);
+      setActivity({ kind: "err", msg });
+      status(msg);
     } finally {
       setLoading(false);
+      fetchGit();
     }
   };
 
-  const doCommit = () => run(async () => {
+  const doCommit = () => run("Committing changes", async () => {
     const out = await invoke<string>("repo_commit", { repoDir: gitDir, message: commitMsg });
     setCommitMsg("");
     setCommitOpen(false);
     return out;
   });
 
-  const doPush = () => run(() => invoke("repo_push", { repoDir: gitDir }));
+  const doPush = () => run("Pushing to origin", () => invoke("repo_push", { repoDir: gitDir }));
 
-  const doMerge = () => run(async () => {
+  const doMerge = () => run(isolated ? "Merging worktree" : `Merging to ${mergeTarget}`, async () => {
     if (isolated && projectRoot && branch && gitDir) {
       const fin = await invoke<WtFinalize>("fleet_worktree_finalize", {
         worktreePath: gitDir, agentName: "code", summary: "Code page session",
@@ -236,7 +281,7 @@ export default function PublishCards({
       }
     : null;
 
-  const doPublish = () => run(async () => {
+  const doPublish = () => run(`${modeLabel} release`, async () => {
     const visibility = settings.visibility;
     if (visibility === "publish") {
       const signed = !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
@@ -266,16 +311,21 @@ export default function PublishCards({
     });
   });
 
-  const isRepo = ready?.find((c) => c.id === "repo")?.ok ?? false;
+  // The local git_status answers "is this a repo" instantly and offline; the
+  // readiness probe (network) only gates the remote-dependent buttons.
+  const isRepo = git ? git.isRepo : (ready?.find((c) => c.id === "repo")?.ok ?? false);
   const hasRemote = ready?.find((c) => c.id === "remote")?.ok ?? false;
   const hasPublishScript = ready?.find((c) => c.id === "script")?.ok ?? false;
 
   const showCommit = isRepo;
   const showPush = isRepo && hasRemote;
-  const showMerge = isRepo && hasRemote;
+  // Isolated pages merge worktree→project locally (fleet_worktree_merge) — no
+  // remote involved, so a project without origin must still get its Merge.
+  const showMerge = isRepo && ((isolated && !!projectRoot && !!branch) || hasRemote);
   const showPublish = isRepo && hasPublishScript;
   const canPublish = ready?.every((c) => c.ok) ?? false;
-  const publishFailReason = ready?.filter((c) => !c.ok).map((c) => `${c.label}: ${c.detail}`).join("\n");
+  const readyFails = ready?.filter((c) => !c.ok) ?? [];
+  const publishFailReason = readyFails.map((c) => `${c.label}: ${c.detail}`).join("\n");
   if (!showCommit && !showPush && !showMerge && !showPublish) return null;
 
   const modeLabel = settings.visibility === "dry-run" ? "Dry run" : settings.visibility === "draft" ? "Draft" : "Publish";
@@ -284,7 +334,7 @@ export default function PublishCards({
 
   return (
     <>
-      <div style={{ marginTop: "auto", padding: 6 }}>
+      <div ref={rootRef} style={{ marginTop: "auto", padding: 6 }}>
         <div
           style={{
             background: "var(--bg-surface)",
@@ -296,15 +346,35 @@ export default function PublishCards({
             gap: 6,
           }}
         >
+          {/* Live repo facts — branch, ahead/behind upstream, uncommitted count */}
+          {git?.isRepo && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--fg-muted)", padding: "0 2px", minWidth: 0 }}>
+              <span title={git.branch || "detached HEAD"} style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                ⎇ {git.branch || "(detached)"}
+              </span>
+              {git.ahead > 0 && (
+                <span title={`${git.ahead} commit(s) ahead of upstream — Push sends them`} style={{ color: "#7ff0c5", flexShrink: 0 }}>↑{git.ahead}</span>
+              )}
+              {git.behind > 0 && (
+                <span title={`${git.behind} commit(s) behind upstream`} style={{ color: "#ffd97a", flexShrink: 0 }}>↓{git.behind}</span>
+              )}
+              <span
+                title={git.total > 0 ? `${git.total} uncommitted change(s) — Commit captures them` : "Working tree clean"}
+                style={{ color: git.total > 0 ? "#ffd97a" : "var(--fg-muted)", flexShrink: 0 }}
+              >
+                {git.total > 0 ? `● ${git.total}` : "✓ clean"}
+              </span>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 6, width: "100%" }}>
             {showCommit && (
               <button
                 onClick={() => { setCommitMsg(commitMsg.trim() || "Checkpoint from Publisher card"); setCommitOpen(true); }}
                 disabled={disabled || loading}
-                title="Commit all changes in this workspace"
+                title={git && git.total > 0 ? `Commit ${git.total} change(s) in this workspace` : "Commit all changes in this workspace"}
                 style={{ ...chipBtn, flex: 1 }}
               >
-                {loading ? "⏳" : "●"} Commit
+                {loading ? "⏳" : "●"} Commit{git && git.total > 0 ? ` (${git.total})` : ""}
               </button>
             )}
             {showMerge && (
@@ -325,19 +395,34 @@ export default function PublishCards({
               <button
                 onClick={doPush}
                 disabled={disabled || loading}
-                title={`Push ${branch || "current"} to origin`}
+                title={git && git.ahead > 0
+                  ? `Push ${git.ahead} commit(s) on ${git.branch || branch || "current"} to origin`
+                  : `Push ${git?.branch || branch || "current"} to origin`}
                 style={{ ...chipBtn, flex: 1 }}
               >
-                {loading ? "⏳" : "↑"} Push
+                {loading ? "⏳" : "↑"} Push{git && git.ahead > 0 ? ` (${git.ahead})` : ""}
               </button>
             )}
             {showPublish && (
               <button
-                onClick={doPublish}
-                disabled={disabled || loading || !canPublish}
+                // Stay clickable when not ready: a disabled button swallows the
+                // click silently ("does nothing"). Instead, surface WHY inline
+                // and open the checks — only run the real publish when ready.
+                onClick={() => {
+                  if (canPublish) { doPublish(); return; }
+                  setChecksOpen(true);
+                  refresh();
+                  setActivity({
+                    kind: "err",
+                    msg: ready
+                      ? `Can't publish yet — ${readyFails.length} unmet check${readyFails.length > 1 ? "s" : ""}:\n${publishFailReason}`
+                      : "Checking release readiness…",
+                  });
+                }}
+                disabled={disabled || loading}
                 title={canPublish
                   ? `${modeLabel} release (${settings.mode})${signed ? "" : ", unsigned"}`
-                  : (publishFailReason || "Readiness check running…")}
+                  : (publishFailReason || "Readiness check running… — click to see what's missing")}
                 style={{ ...chipBtn, flex: 1, background: modeColor, color: "#06080d", border: "none", opacity: canPublish ? 1 : 0.5 }}
               >
                 {loading ? "⏳" : "🚀"} {modeLabel}
@@ -354,10 +439,53 @@ export default function PublishCards({
               </button>
             )}
           </div>
-          {showPublish && (
-            <div style={{ display: "flex", gap: 6, fontSize: 10, color: "var(--fg-muted)", justifyContent: "space-between" }}>
-              <span>{settings.mode === "host" ? "Host build" : "CI / GitHub Actions"}</span>
-              <span>{signed ? "Signed" : "Unsigned"}</span>
+          {/* Inline activity — immediate ⏳ on click, then ✓/✗ result, right
+              where the buttons are (the shared status line is in another column). */}
+          {activity && (
+            <div
+              style={{
+                display: "flex", gap: 5, alignItems: "flex-start", padding: "0 2px",
+                fontSize: 10.5, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word",
+                color: activity.kind === "err" ? "#ff8c8c" : activity.kind === "ok" ? "#7ff0c5" : "var(--fg-muted)",
+              }}
+            >
+              <span style={{ flexShrink: 0 }}>{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}</span>
+              <span style={{ minWidth: 0 }}>{activity.msg}</span>
+            </div>
+          )}
+          {/* Readiness summary — click to expand the per-check list, so "why
+              is Publish greyed out" is readable in place, not just a tooltip
+              on a disabled button. */}
+          {ready && (
+            <button
+              onClick={() => { setChecksOpen((v) => !v); if (!checksOpen) refresh(); }}
+              title={checksOpen ? "Hide readiness checks" : "Show readiness checks"}
+              style={{
+                display: "flex", gap: 6, alignItems: "center", width: "100%",
+                background: "transparent", border: "none", padding: "0 2px",
+                fontSize: 10, color: "var(--fg-muted)", cursor: "pointer", fontFamily: "inherit",
+              }}
+            >
+              {showPublish && <span>{settings.mode === "host" ? "Host build" : "CI / GitHub Actions"}</span>}
+              {showPublish && <span>· {signed ? "Signed" : "Unsigned"}</span>}
+              <span style={{ flex: 1 }} />
+              <span style={{ color: readyFails.length === 0 ? "#7ff0c5" : "#ffd97a", fontWeight: 700 }}>
+                {readyFails.length === 0 ? "READY" : `${readyFails.length} issue${readyFails.length > 1 ? "s" : ""}`}
+              </span>
+              <span>{checksOpen ? "▾" : "▸"}</span>
+            </button>
+          )}
+          {checksOpen && ready && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 3, padding: "0 2px 2px" }}>
+              {ready.map((c) => (
+                <div key={c.id} style={{ display: "flex", gap: 5, fontSize: 10.5, lineHeight: 1.45 }}>
+                  <span style={{ color: c.ok ? "#7ff0c5" : "#ff8c8c", flexShrink: 0 }}>{c.ok ? "✓" : "✗"}</span>
+                  <div style={{ minWidth: 0 }}>
+                    <div title={c.detail} style={{ color: "var(--fg)" }}>{c.label}</div>
+                    {!c.ok && <div style={{ color: "var(--fg-muted)", wordBreak: "break-word" }}>{c.detail}</div>}
+                  </div>
+                </div>
+              ))}
             </div>
           )}
         </div>

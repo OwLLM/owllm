@@ -669,6 +669,15 @@ fn tool_specs() -> Vec<Value> {
                 "device": { "type": "string", "description": "Target device NAME or id from the user's OwLLM Devices list." },
                 "command": { "type": "string", "description": "The shell command to run on the remote device." }
             }, "required": ["device", "command"] } }),
+        // Code-signing vault — the user's stored Apple Developer ID / Windows
+        // Authenticode credentials, so a coding agent in ANY project can set up
+        // signed + notarized releases. Managed from the app's Signing page.
+        json!({ "name": "signing_get",
+            "description": "Read the user's shared code-signing credentials (managed on the OwLLM Signing page) so you can wire up a signed + notarized release in ANY project. Returns status/metadata (identity, team id, expiry, which fields are present) by default. Pass include_secrets=true to also get the CI environment values — for Apple: APPLE_CERTIFICATE (base64 .p12), APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY, APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID — e.g. to set them as GitHub Actions secrets. Handle secret values carefully; never echo them into logs or commits.",
+            "inputSchema": { "type": "object", "properties": {
+                "platform": { "type": "string", "enum": ["apple", "windows"], "description": "Which signing set to read (default apple)." },
+                "include_secrets": { "type": "boolean", "description": "When true, also return the secret CI env values. Default false (metadata only)." }
+            } } }),
     ]
 }
 
@@ -796,6 +805,25 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
                 res.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "n/a".into())
             ));
             Ok(out)
+        }
+        "signing_get" => {
+            // Read the shared code-signing vault so a coding agent in ANY
+            // project can wire signed releases. Metadata by default; secrets
+            // only when explicitly asked (same reveal boundary as device_exec,
+            // which already runs arbitrary shell as this user).
+            let platform = {
+                let p = as_str(args, "platform");
+                if p.trim().is_empty() {
+                    "apple".to_string()
+                } else {
+                    p
+                }
+            };
+            let include_secrets = args
+                .get("include_secrets")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            crate::signing::agent_get(&platform, include_secrets).map(|v| v.to_string())
         }
         other => Err(format!("unknown tool: {other}")),
     }

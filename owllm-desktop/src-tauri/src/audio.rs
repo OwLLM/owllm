@@ -29,7 +29,7 @@ use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use tokio::process::Command;
 
 /// Combined codec registry — symphonia's defaults (mp3, aac, vorbis,
@@ -166,31 +166,64 @@ pub fn whisper_runtime_status() -> Result<WhisperRuntimeStatus, String> {
         model_bytes: bytes,
         binary_installed: binary.is_some(),
         binary_path,
-        binary_auto_install: cfg!(target_os = "windows"),
+        // True wherever whisper_runtime_install can fetch the binary itself:
+        // Windows (direct zip download), Linux ARM64 and Apple Silicon
+        // (audio-stt module).
+        binary_auto_install: cfg!(target_os = "windows")
+            || cfg!(all(target_os = "linux", target_arch = "aarch64"))
+            || cfg!(all(target_os = "macos", target_arch = "aarch64")),
     })
 }
 
-/// Installs both the whisper.cpp binary (Windows only — Mac/Linux
-/// users get a clear error pointing at brew/apt) and the ggml-base.bin
+/// Installs both the whisper.cpp binary (direct download on Windows,
+/// the audio-stt module on Linux ARM64 / Apple Silicon; other platforms
+/// get a clear error pointing at brew/apt) and the ggml-base.bin
 /// model file. Emits `owllm:whisper:install:progress` events along the
 /// way so the UI can render a progress bar with phase labels.
 #[tauri::command]
 pub async fn whisper_runtime_install(
     app: tauri::AppHandle,
 ) -> Result<WhisperRuntimeStatus, String> {
-    // 1) Binary — only auto-installable on Windows for now.
+    // 1) Binary — auto-installable on Windows (direct download), Linux
+    //    ARM64 and Apple Silicon (the audio-stt module, built per-arch).
+    //    Other platforms get an honest pointer at their package manager.
     if find_whisper_cli().is_none() {
         if cfg!(target_os = "windows") {
             emit_progress(&app, "binary", 0, 0, false);
             install_whisper_binary_windows(&app).await?;
             emit_progress(&app, "binary", 1, 1, true);
+        } else if cfg!(all(target_os = "linux", target_arch = "aarch64"))
+            || cfg!(all(target_os = "macos", target_arch = "aarch64"))
+        {
+            emit_progress(&app, "binary", 0, 0, false);
+            let snap = crate::modules::HardwareSnapshot::probe().await;
+            let mgr = app.state::<crate::modules::ModuleManager>();
+            // Same self-heal as the inference engine: a prior bad download
+            // must not make every retry a "skipped" no-op.
+            let _ = mgr.inner().uninstall("audio-stt");
+            mgr.inner()
+                .install(&app, "audio-stt", &snap)
+                .await
+                .map_err(|e| format!("Speech-to-Text module install failed: {e}"))?;
+            if find_whisper_cli().is_none() {
+                return Err("Speech-to-Text module installed but no whisper-cli \
+                     binary was found in it — the download may be corrupt. Try again."
+                    .into());
+            }
+            emit_progress(&app, "binary", 1, 1, true);
         } else {
-            return Err(
-                "Whisper binary not detected. Install via your package manager: \
+            let arch = if cfg!(target_arch = "aarch64") {
+                "ARM64"
+            } else {
+                "x64"
+            };
+            return Err(format!(
+                "Whisper binary not detected and no auto-install exists for this \
+                 platform ({} {arch}) yet. Install it via your package manager: \
                  macOS → `brew install whisper-cpp ffmpeg`, \
-                 Linux → `apt install whisper-cpp ffmpeg` (or the equivalent for your distro)."
-                    .into(),
-            );
+                 Linux → `apt install whisper-cpp ffmpeg` (or the equivalent for your distro).",
+                std::env::consts::OS
+            ));
         }
     } else {
         emit_progress(&app, "binary", 1, 1, true);
@@ -640,8 +673,11 @@ fn find_whisper_cli() -> Option<PathBuf> {
     //   2. <runtime_cache>/whisper.cpp/    — downloaded on first run by
     //      whisper_runtime_install (fallback when the installer didn't
     //      ship the runtime, e.g. dev builds, side-loaded artifacts).
-    //   3. $PATH                            — covers macOS Homebrew /
+    //   3. Installed `audio-stt` module   — the wizard's install path
+    //      (the only binary source on Linux ARM64).
+    //   4. $PATH                           — covers macOS Homebrew /
     //      Linux distro packages.
+    let names = whisper_cli_names();
     let mut roots: Vec<PathBuf> = Vec::new();
     if let Some(res) = crate::paths::resources_root() {
         roots.push(res.join("runtime").join("whisper.cpp"));
@@ -649,7 +685,6 @@ fn find_whisper_cli() -> Option<PathBuf> {
     if let Ok(rt) = whisper_root() {
         roots.push(rt);
     }
-    let names = whisper_cli_names();
     for dir in &roots {
         for name in &names {
             let p = dir.join(name);
@@ -670,6 +705,11 @@ fn find_whisper_cli() -> Option<PathBuf> {
                     }
                 }
             }
+        }
+    }
+    for name in &names {
+        if let Some(p) = crate::paths::module_binary("audio-stt-", name) {
+            return Some(p);
         }
     }
     find_on_path(&names)

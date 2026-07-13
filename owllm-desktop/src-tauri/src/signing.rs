@@ -714,6 +714,247 @@ pub fn signing_agent_get(
 }
 
 // ---------------------------------------------------------------------------
+// Credential hub — live environment probes + provider portals opened in the
+// OwLLM agent browser (already logged in via its persistent profile + the
+// browser vault's autofill). Powers the Signing page's readiness strip and
+// "Open portal" buttons.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct HubStatus {
+    /// The stored Authenticode thumbprint is mounted in the OS cert store RIGHT
+    /// NOW (None = no thumbprint stored, or no store probe on this OS).
+    pub cert_in_store: Option<bool>,
+    /// Subject / expiry detail from the store probe when the cert was found.
+    pub cert_store_detail: String,
+    /// SimplySign Desktop (Certum cloud cert) is running (Windows-only probe).
+    pub simplysign_running: Option<bool>,
+    /// openssl reachable — required by the Apple CSR / .cer import flows.
+    pub openssl_ok: bool,
+    /// gh CLI installed.
+    pub gh_installed: bool,
+    /// Account gh is logged in as ("" = not logged in / unknown).
+    pub gh_account: String,
+    /// Saved web logins in the agent-browser vault (portal autofill pool).
+    pub web_login_count: usize,
+}
+
+/// Hidden-window `Command` runner returning combined stdout+stderr, with a
+/// hard kill-timeout: environment probes must NEVER hang the hub status (a
+/// cloud-CSP cert can make naïve store queries block for minutes).
+fn probe_cmd(program: &str, args: &[&str]) -> Option<String> {
+    use std::io::Read;
+    use std::time::{Duration, Instant};
+    let mut cmd = Command::new(program);
+    cmd.args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let mut child = cmd.spawn().ok()?;
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {
+                if start.elapsed() > Duration::from_secs(10) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(_) => return None,
+        }
+    }
+    let mut text = String::new();
+    if let Some(mut o) = child.stdout.take() {
+        let _ = o.read_to_string(&mut text);
+    }
+    if let Some(mut e) = child.stderr.take() {
+        let mut s = String::new();
+        let _ = e.read_to_string(&mut s);
+        text.push_str(&s);
+    }
+    Some(text)
+}
+
+/// Is the cert with `thumbprint` mounted in the OS store, and what is it?
+/// Windows: PowerShell's Cert: drive — metadata only. (NOT `certutil -store`,
+/// which pokes the private-key CSP and blocks for minutes on cloud certs like
+/// SimplySign — verified on a SimplySign host 2026-07-12.)
+#[cfg(windows)]
+fn cert_store_probe(thumbprint: &str) -> (Option<bool>, String) {
+    let tp: String = thumbprint
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_uppercase();
+    if tp.is_empty() {
+        return (None, String::new());
+    }
+    // tp is filtered to hex above, so the single-quoted PS literal is safe.
+    let script = format!(
+        "Get-ChildItem Cert:\\CurrentUser\\My,Cert:\\LocalMachine\\My -ErrorAction SilentlyContinue | Where-Object {{ $_.Thumbprint -eq '{tp}' }} | Select-Object -First 1 | ForEach-Object {{ $_.Subject + ' ~ ' + $_.NotAfter.ToString('yyyy-MM-dd') }}"
+    );
+    let Some(out) = probe_cmd(
+        "powershell",
+        &["-NoProfile", "-NonInteractive", "-Command", &script],
+    ) else {
+        return (None, String::new());
+    };
+    let line = out.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    if line.is_empty() {
+        return (Some(false), String::new());
+    }
+    let cn = line
+        .split(',')
+        .find_map(|p| p.trim().strip_prefix("CN="))
+        .unwrap_or(line);
+    let expiry = line.rsplit('~').next().unwrap_or("").trim();
+    (Some(true), format!("{cn} · valid to {expiry}"))
+}
+
+/// macOS: does `security find-identity` list a codesigning identity?
+#[cfg(target_os = "macos")]
+fn cert_store_probe(_thumbprint: &str) -> (Option<bool>, String) {
+    let Some(out) = probe_cmd("security", &["find-identity", "-v", "-p", "codesigning"]) else {
+        return (None, String::new());
+    };
+    let n = out
+        .lines()
+        .filter(|l| l.contains("Developer ID Application"))
+        .count();
+    (
+        Some(n > 0),
+        if n > 0 {
+            format!("{n} Developer ID identit{} in the keychain", if n == 1 { "y" } else { "ies" })
+        } else {
+            String::new()
+        },
+    )
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn cert_store_probe(_thumbprint: &str) -> (Option<bool>, String) {
+    (None, String::new())
+}
+
+/// SimplySign Desktop running? (The Certum cloud cert only appears in the
+/// store while it is.) Windows-only concept.
+#[cfg(windows)]
+fn simplysign_probe() -> Option<bool> {
+    let out = probe_cmd("tasklist", &["/NH"])?;
+    Some(out.to_lowercase().contains("simplysign"))
+}
+
+#[cfg(not(windows))]
+fn simplysign_probe() -> Option<bool> {
+    None
+}
+
+/// Which account is gh logged in as? Parses `gh auth status` (works offline
+/// against the keyring; output shape: "Logged in to github.com account NAME").
+fn gh_account_probe() -> String {
+    let Some(out) = probe_cmd("gh", &["auth", "status"]) else {
+        return String::new();
+    };
+    for line in out.lines() {
+        if let Some(idx) = line.find(" account ") {
+            let rest = &line[idx + " account ".len()..];
+            return rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-')
+                .to_string();
+        }
+    }
+    String::new()
+}
+
+#[tauri::command(async)]
+pub fn signing_hub_status() -> HubStatus {
+    let vault = load();
+    let thumbprint = vault
+        .windows
+        .as_ref()
+        .map(|w| w.thumbprint.clone())
+        .unwrap_or_default();
+    let (cert_in_store, cert_store_detail) = cert_store_probe(&thumbprint);
+    let gh_installed = gh_available();
+    HubStatus {
+        cert_in_store,
+        cert_store_detail,
+        simplysign_running: simplysign_probe(),
+        openssl_ok: openssl_bin().map(|b| probe_openssl(&b)).unwrap_or(false),
+        gh_installed,
+        gh_account: if gh_installed {
+            gh_account_probe()
+        } else {
+            String::new()
+        },
+        web_login_count: crate::browser_vault::browser_vault_list().len(),
+    }
+}
+
+/// The provider portals the hub can open. Key → (label, url).
+const PORTALS: &[(&str, &str)] = &[
+    (
+        "apple-dev",
+        "https://developer.apple.com/account/resources/certificates/add",
+    ),
+    ("apple-id", "https://account.apple.com/account/manage"),
+    ("certum", "https://panel.certum.pl/"),
+    ("github-tokens", "https://github.com/settings/tokens"),
+    ("microsoft-partner", "https://partner.microsoft.com/dashboard"),
+    ("google-play", "https://play.google.com/console"),
+];
+
+pub fn portal_url(provider: &str) -> Option<&'static str> {
+    PORTALS
+        .iter()
+        .find(|(k, _)| *k == provider)
+        .map(|(_, u)| *u)
+}
+
+/// Open a provider portal in the OwLLM agent browser (the app-styled window),
+/// then try to log the user in from the browser vault. `url` overrides the
+/// catalog for custom portals (e.g. a repo's Actions-secrets page).
+#[tauri::command(async)]
+pub fn signing_portal_open(
+    app: tauri::AppHandle,
+    provider: String,
+    url: Option<String>,
+) -> Result<String, String> {
+    let target = match url.as_deref().map(str::trim) {
+        Some(u) if !u.is_empty() => u.to_string(),
+        _ => portal_url(&provider)
+            .ok_or_else(|| format!("unknown portal {provider:?}"))?
+            .to_string(),
+    };
+    crate::browser::browser_cmd(
+        app.clone(),
+        "navigate".to_string(),
+        serde_json::json!({ "url": target }),
+    )?;
+    let _ = crate::browser::browser_focus(app.clone());
+    // Best-effort autofill: succeeds when the vault holds a login for this
+    // site AND the landing page shows a login form. Either miss is normal.
+    match crate::browser_vault::browser_vault_autofill(app) {
+        Ok(what) => Ok(format!("Opened {target} — {what}.")),
+        Err(_) => Ok(format!(
+            "Opened {target}. No saved login was filled — sign in once in the OwLLM browser and save it under Web logins to be auto-signed-in next time."
+        )),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Cross-device vault sync — NON-SECRET metadata only.
 //
 // The certificate bytes + passwords never leave the machine (the vault is a

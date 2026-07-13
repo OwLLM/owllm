@@ -517,6 +517,8 @@ pub fn run() {
             signing::signing_export_env,
             signing::signing_push_github,
             signing::signing_agent_get,
+            signing::signing_hub_status,
+            signing::signing_portal_open,
             sandbox::sandbox_status,
             sandbox::agent_save_inbox_images,
             sandbox::agent_full_access_get,

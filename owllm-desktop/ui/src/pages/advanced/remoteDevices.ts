@@ -37,6 +37,9 @@ export type DeviceIdentity = {
   relay_url: string | null;
   relay_client: boolean;
   relay_serving: boolean;
+  /// Embedded P2P (iroh) endpoint id — peers can dial it from anywhere, no setup.
+  p2p_node_id: string | null;
+  p2p_running: boolean;
   agents_allowed: boolean;
 };
 
@@ -54,6 +57,8 @@ export type DeviceRecord = {
   /// All dialable addresses (public → overlay → LAN). Empty = the device has
   /// never published while its listener was up → Pair can't dial it yet.
   endpoints?: string[];
+  /// Embedded P2P (iroh) endpoint id — dialable from anywhere when set.
+  p2p_node_id?: string | null;
   last_seen: string | null;
   is_self: boolean;
 };

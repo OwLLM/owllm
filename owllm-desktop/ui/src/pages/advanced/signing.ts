@@ -105,3 +105,30 @@ export async function signingPushGithub(
 ): Promise<string> {
   return invoke<string>("signing_push_github", { owner, repo, platform });
 }
+
+// ---------------------------------------------------------------------------
+// Credential hub — live environment probes + provider portals opened in the
+// app-styled agent browser (already logged in via profile + vault autofill).
+// ---------------------------------------------------------------------------
+
+export type HubStatus = {
+  /** Stored Authenticode thumbprint is mounted in the OS store right now
+   *  (null = no thumbprint stored, or no store probe on this OS). */
+  certInStore: boolean | null;
+  certStoreDetail: string;
+  /** SimplySign Desktop running (null off Windows). */
+  simplysignRunning: boolean | null;
+  opensslOk: boolean;
+  ghInstalled: boolean;
+  ghAccount: string;
+  webLoginCount: number;
+};
+
+export async function signingHubStatus(): Promise<HubStatus> {
+  return invoke<HubStatus>("signing_hub_status");
+}
+
+/** Open a provider portal in the OwLLM browser; `url` overrides the catalog. */
+export async function signingPortalOpen(provider: string, url?: string): Promise<string> {
+  return invoke<string>("signing_portal_open", { provider, url: url ?? null });
+}

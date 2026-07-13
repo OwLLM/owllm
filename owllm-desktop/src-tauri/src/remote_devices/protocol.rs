@@ -42,6 +42,11 @@ pub struct DevicePublic {
     /// with no overlay/port-forward). The relay only ever forwards ciphertext.
     #[serde(default)]
     pub relay: bool,
+    /// Embedded P2P (iroh) endpoint id — lets peers dial this device through the
+    /// built-in hole-punching transport when no direct address works. No account
+    /// or network setup required; still metadata only (control needs a paired key).
+    #[serde(default)]
+    pub p2p_node_id: Option<String>,
 }
 
 /// What a device can do — advertised to peers, informational (the real gate is

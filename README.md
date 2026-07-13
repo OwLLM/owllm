@@ -81,11 +81,49 @@ That's it — agents and chat now run locally and isolated, using the remote GPU
 
 ## Platform support
 
-| | Status |
-|---|---|
-| **Windows 10 / 11** | ✅ shipping |
-| **Linux** (x86_64) | ✅ shipping — [AppImage + `.deb`](https://github.com/OwLLM/owllm/releases/latest); llama.cpp engine payloads, GPU probes (NVIDIA + AMD/Intel via sysfs), and auto-update wiring in place |
-| **macOS** (Apple Silicon, Metal) | 🧪 beta — Metal engine payload, unified-memory-aware model sizing, dmg bundle and auto-update wiring are all in place; awaiting hardware verification |
+<table>
+<tr>
+<td width="33%" valign="top" align="center">
+
+### 🪟 &nbsp;Windows
+
+**10 / 11 · x86-64**
+
+![shipping](https://img.shields.io/badge/shipping-2ea043?style=for-the-badge)
+
+[![Download installer](https://img.shields.io/badge/⬇%20Download-installer-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest)
+
+Native CUDA GPU server · WSL2 sandbox · signed auto-updater
+
+</td>
+<td width="33%" valign="top" align="center">
+
+### 🐧 &nbsp;Linux
+
+**x86-64**
+
+![shipping](https://img.shields.io/badge/shipping-2ea043?style=for-the-badge)
+
+[![Download AppImage or deb](https://img.shields.io/badge/⬇%20AppImage%20·%20.deb-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest)
+
+llama.cpp payloads · GPU probes (NVIDIA + AMD/Intel) · bubblewrap sandbox
+
+</td>
+<td width="33%" valign="top" align="center">
+
+### 🍎 &nbsp;macOS
+
+**Apple Silicon · Metal**
+
+![beta](https://img.shields.io/badge/beta-d29922?style=for-the-badge)
+
+[![Download dmg](https://img.shields.io/badge/⬇%20Download-.dmg-2f6fd4?style=for-the-badge)](https://github.com/OwLLM/owllm/releases/latest)
+
+Metal payload · unified-memory model sizing · Lima sandbox *(awaiting HW verification)*
+
+</td>
+</tr>
+</table>
 
 The runtime is delivered by a **cross-platform module system** (registry-driven, per-OS variants) — the same installer flow provisions all three OSes. **Unified-memory machines** (Apple Silicon, AMD Strix Halo / Ryzen AI APUs, Intel iGPUs) get model-fit ratings and context sizing computed from their real shared-RAM GPU budget, not a meaningless dedicated-VRAM number.
 

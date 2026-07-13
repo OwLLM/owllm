@@ -571,6 +571,13 @@ function CodeWorkspace({ pageId, onTitle }: {
   // model when it hasn't chosen one (empty = "same as 1st agent").
   const secondaryModelEffective = secondaryModelId || modelId;
   const [secondaryBusy, setSecondaryBusy] = useState(false);
+  // One-step undo for per-agent "Clear history": each pane keeps its OWN
+  // snapshot of the transcript it last cleared, so clearing one agent never
+  // touches the other and each ↩ Undo restores exactly what that pane wiped.
+  // Transient (component state) — the undo is a safety net for the click that
+  // just happened, not a persisted feature.
+  const [primaryUndo, setPrimaryUndo] = useState<Msg[] | null>(null);
+  const [secondaryUndo, setSecondaryUndo] = useState<Msg[] | null>(null);
   // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
   const [termOpen, setTermOpen] = useState(false);
   // Terminal popup chrome: hide (— keeps the shell alive, just display:none)
@@ -718,6 +725,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // start, freeze runEndedAt on stop (only if a run was actually live, so a
   // double stop() doesn't move the frozen time).
   const setBusy = (v: boolean) => {
+    // A new primary turn supersedes any pending clear-undo, so ↩ Undo can't
+    // later clobber a fresh conversation with the pre-clear snapshot.
+    if (v) setPrimaryUndo(null);
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
       if (v) return { ...cur, busy: true, runStartedAt: Date.now(), runEndedAt: undefined };
@@ -1672,6 +1682,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
     if (fromComposer) { setSecondaryDraft(""); autoFeedHopsRef.current = 0; }
+    // A new second-agent turn supersedes its pending clear-undo (see setBusy).
+    setSecondaryUndo(null);
     setSecondaryBusy(true);
     const ctrl = new AbortController();
     secondaryAbortRef.current = ctrl;
@@ -1930,20 +1942,31 @@ function CodeWorkspace({ pageId, onTitle }: {
       return { ...cur, tasks: [], draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
     });
   };
-  const clearChatHistory = () => {
-    if (busy || secondaryBusy) return;
-    if (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0) return;
-    if (window.confirm("Clear the chat window and all saved chat history? This cannot be undone.")) {
-      // The visible workspace transcripts — this is what the button promises.
-      setMessages([]);
-      setSecondaryMessages([]);
-      // …and the saved just-chat threads.
-      setChats([]);
-      setChatId("");
-      setChatDraft("");
-      setChatImages([]);
-      setShowHistory(false);
-    }
+  // Per-agent "Clear history": clears ONLY the pane it belongs to and stashes a
+  // snapshot for that pane's ↩ Undo. No confirm dialog — the undo is the safety
+  // net, and each agent is fully independent (clearing the Coder leaves the
+  // Second agent's transcript, and its undo, untouched, and vice versa).
+  const clearPrimaryHistory = () => {
+    if (busy || messages.length === 0) return;
+    setPrimaryUndo(messages);
+    setMessages([]);
+  };
+  const undoPrimaryHistory = () => {
+    const snap = primaryUndo;
+    if (!snap) return;
+    setMessages(snap);
+    setPrimaryUndo(null);
+  };
+  const clearSecondaryHistory = () => {
+    if (secondaryBusy || secondaryMessages.length === 0) return;
+    setSecondaryUndo(secondaryMessages);
+    setSecondaryMessages([]);
+  };
+  const undoSecondaryHistory = () => {
+    const snap = secondaryUndo;
+    if (!snap) return;
+    setSecondaryMessages(snap);
+    setSecondaryUndo(null);
   };
 
   // Clicking a file in the tree drops an @-reference into the composer so the
@@ -2434,7 +2457,8 @@ function CodeWorkspace({ pageId, onTitle }: {
           />
         </div>
         <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
-        <button onClick={clearChatHistory} disabled={busy || secondaryBusy || (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0)} title="Clear the chat window and all saved chat history" style={btn}>Clear history</button>
+        {/* Clear history is now PER AGENT — each pane's own button lives in that
+            pane's header (below), with an independent ↩ Undo. */}
       </div>
 
       {/* Phase 3: Kanban plan/act board (only while a plan is active) */}
@@ -2549,6 +2573,10 @@ function CodeWorkspace({ pageId, onTitle }: {
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
             <span style={{ flex: 1 }} />
+            {primaryUndo && (
+              <button onClick={undoPrimaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
+            )}
+            <button onClick={clearPrimaryHistory} disabled={busy || messages.length === 0} title="Clear this agent's conversation (undoable)" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>Clear history</button>
           </div>
       <div
         ref={transcriptSticky.ref}
@@ -2633,6 +2661,10 @@ function CodeWorkspace({ pageId, onTitle }: {
                 fallbackLabel="Same as 1st agent"
               />
               <span style={{ flex: 1 }} />
+              {secondaryUndo && (
+                <button onClick={undoSecondaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
+              )}
+              <button onClick={clearSecondaryHistory} disabled={secondaryBusy || secondaryMessages.length === 0} title="Clear this agent's conversation (undoable)" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>Clear history</button>
               <button onClick={() => setSecondaryOpen(false)} title="Close the second-agent pane" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>✕ Close</button>
             </div>
             {/* Transcript — its own scroll column, mirrors the primary chat so the

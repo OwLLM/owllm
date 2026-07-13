@@ -7,7 +7,7 @@
 // search, edit and create files and run shell commands in that folder.
 // Cline's card-based UX is inspiration for later phases (file tree, live
 // diffs, task Kanban); Phase 1 is the working agent core.
-import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
@@ -454,6 +454,25 @@ function CodeWorkspace({ pageId, onTitle }: {
   // every chat behaves the same. Sent with the next message, then cleared.
   const [codeImages, setCodeImages] = useState<Attachment[]>([]);
   const codeFileRef = useRef<HTMLInputElement | null>(null);
+  // Composer textareas — refs so "Forward" can drop the text into the target
+  // agent's draft and focus it for editing before Send (compose-then-send).
+  const codeDraftRef = useRef<HTMLTextAreaElement | null>(null);
+  const secondaryDraftRef = useRef<HTMLTextAreaElement | null>(null);
+  // Forward a reply into an agent's composer as an EDITABLE draft (not a
+  // committed message) — appends under any existing draft, then focuses the
+  // box with the cursor at the end so the user can add comments / tweak it
+  // before pressing Send.
+  const forwardToDraft = (
+    setter: (v: string | ((s: string) => string)) => void,
+    ref: RefObject<HTMLTextAreaElement | null>,
+    block: string,
+  ) => {
+    setter((d) => (d && d.trim() ? `${d.replace(/\s*$/, "")}\n\n${block}` : block));
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (el) { el.focus(); const end = el.value.length; el.setSelectionRange(end, end); }
+    });
+  };
   // Clicking a file in the tree OPENS it in a viewer (was: silently inserted an
   // @ref, which is why the tree felt "fake" — you couldn't see files). The viewer
   // is also editable: ✎ Edit turns the <pre> into a <textarea>, and once the text
@@ -1729,6 +1748,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const renderSecondaryComposer = () => (
     <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
       <textarea
+        ref={secondaryDraftRef}
         value={secondaryDraft}
         onChange={(e) => setSecondaryDraft(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
@@ -2624,15 +2644,10 @@ function CodeWorkspace({ pageId, onTitle }: {
                   <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
                     <button
                       onClick={() => {
-                        const forwarded: Msg = {
-                          role: "user",
-                          content: `Forwarded from primary agent:\n\n${m.content}`,
-                          ts: Date.now(),
-                        };
-                        setSecondaryMessages((prev) => [...((prev as Msg[] | undefined) ?? []), forwarded]);
                         setSecondaryOpen(true);
+                        forwardToDraft(setSecondaryDraft, secondaryDraftRef, `Forwarded from primary agent:\n\n${m.content}`);
                       }}
-                      title="Forward this reply to the second agent"
+                      title="Forward this reply into the second agent's composer to edit before sending"
                       style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}
                     >
                       → Forward to second agent
@@ -2698,14 +2713,9 @@ function CodeWorkspace({ pageId, onTitle }: {
                       <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
                         <button
                           onClick={() => {
-                            const forwarded: Msg = {
-                              role: "user",
-                              content: `Forwarded from second agent:\n\n${m.content}`,
-                              ts: Date.now(),
-                            };
-                            setMessages((prev) => [...prev, forwarded]);
+                            forwardToDraft(setDraft, codeDraftRef, `Forwarded from second agent:\n\n${m.content}`);
                           }}
-                          title="Forward this reply to the primary agent"
+                          title="Forward this reply into the primary agent's composer to edit before sending"
                           style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}
                         >
                           ← Forward to primary agent
@@ -2759,6 +2769,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
           <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
+            ref={codeDraftRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}

@@ -132,21 +132,79 @@ CONF="$REPO/$VERSION_FILE"
 
 # 1. Bump the patch version (string-replace to preserve formatting; rule-based rollover).
 CUR="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$CONF")"
-NEW="$(CUR="$CUR" node -e '
-  let [a,b,p] = process.env.CUR.split(".").map(Number);
+
+# The PUBLIC release chronology is the source of truth for the version floor, not
+# just this checkout's file. A stale checkout (e.g. one whose tauri.conf.json still
+# says 0.8.43 while 0.8.48 is already public) must NEVER regress or re-issue a
+# number — so we take max(local, latest published) and bump from there. Pull the
+# published release tags from release.repo (OWLLM_RELEASE_REPO). Non-fatal if gh is
+# missing/unauthed or the repo has no releases yet: we warn and fall back to the
+# local file, preserving the previous behaviour for card-less / offline runs.
+PUBLISHED_TAGS=""
+if [ -n "${OWLLM_RELEASE_REPO:-}" ] && command -v gh >/dev/null 2>&1; then
+  PUBLISHED_TAGS="$(gh release list --repo "$OWLLM_RELEASE_REPO" --limit 100 \
+    --json tagName --jq '.[].tagName' 2>/dev/null || true)"
+  if [ -n "$PUBLISHED_TAGS" ]; then
+    echo "published-release floor: newest tag on $OWLLM_RELEASE_REPO = $(printf '%s\n' "$PUBLISHED_TAGS" | head -1)"
+  else
+    echo "WARN: no published releases on $OWLLM_RELEASE_REPO (or gh not authed) — bumping from local file '$VERSION_FILE' only"
+  fi
+else
+  echo "WARN: OWLLM_RELEASE_REPO unset or gh missing — bumping from local file '$VERSION_FILE' only"
+fi
+
+# Base = max(local file, every published tag); then rule-based rollover (+1 patch,
+# rolls at 100 → minor, at 10 → major), matching the odometer-100 scheme.
+read -r BASE NEW < <(CUR="$CUR" PUBLISHED_TAGS="$PUBLISHED_TAGS" node -e '
+  const parse = v => { const m = String(v).trim().replace(/^v/,"").match(/^(\d+)\.(\d+)\.(\d+)/); return m ? [ +m[1], +m[2], +m[3] ] : null; };
+  const cmp = (x,y) => x[0]-y[0] || x[1]-y[1] || x[2]-y[2];
+  let base = parse(process.env.CUR);
+  if (!base) { console.error("bad local version: " + process.env.CUR); process.exit(3); }
+  for (const line of (process.env.PUBLISHED_TAGS || "").split("\n")) {
+    const v = parse(line); if (v && cmp(v, base) > 0) base = v;
+  }
+  let [a,b,p] = base;
   p += 1; if (p >= 100) { p = 0; b += 1; } if (b >= 10) { b = 0; a += 1; }
-  process.stdout.write(`${a}.${b}.${p}`);')"
+  process.stdout.write(`${base.join(".")} ${a}.${b}.${p}`);')
 [ -n "$NEW" ] || fail "version bump produced empty result from '$CUR'"
+[ "$BASE" != "$CUR" ] && echo "NOTE: local file '$VERSION_FILE' was $CUR but public floor is $BASE — bumping from the public floor"
 TAG="v$NEW"
-CUR="$CUR" NEW="$NEW" CONF="$CONF" node -e '
+
+# Set the PRIMARY version file to NEW. Absolute-set (match whatever version is
+# currently there) so it heals even if the file had drifted below the public floor.
+NEW="$NEW" CONF="$CONF" node -e '
   const fs=require("fs");
   let s=fs.readFileSync(process.env.CONF,"utf8");
   // Whitespace-tolerant: "version": "x", "version":"x", etc. — a compact
   // package.json is as valid as a pretty-printed tauri.conf.json.
-  const re=new RegExp(`("version"\\s*:\\s*")${process.env.CUR.replace(/\./g,"\\.")}(")`);
+  const re=/("version"\s*:\s*")([^"]+)(")/;
   if (!re.test(s)) { console.error("version line not found"); process.exit(3); }
-  fs.writeFileSync(process.env.CONF, s.replace(re,`$1${process.env.NEW}$2`));'
+  fs.writeFileSync(process.env.CONF, s.replace(re,`$1${process.env.NEW}$3`));'
 echo "version $CUR -> $NEW"
+
+# Keep sibling version files in lockstep so NO tool ever reads a stale number.
+# The bumper historically touched only tauri.conf.json, leaving the Rust crate's
+# Cargo.toml to drift (it sat at 0.8.47 while the app shipped 0.8.48) — every
+# `cargo metadata`/grep then reported the wrong version and looked like the repo
+# "wasn't on" the released version. Heal it here: set the [package] version to NEW
+# regardless of what it currently says. Only the [package] section is touched, so
+# dependency versions are never affected.
+CARGO="$(dirname "$CONF")/Cargo.toml"
+if [ -f "$CARGO" ] && [ "$(basename "$CONF")" != "Cargo.toml" ]; then
+  NEW="$NEW" CARGO="$CARGO" node -e '
+    const fs=require("fs");
+    let s=fs.readFileSync(process.env.CARGO,"utf8");
+    // Anchor to the [package] table, then its first version key; [^\[]*? keeps the
+    // match inside that table (never crosses into another [section]).
+    const re=/(\[package\][^\[]*?\bversion\s*=\s*")([^"]+)(")/;
+    const m=s.match(re);
+    if (m) {
+      fs.writeFileSync(process.env.CARGO, s.replace(re, `$1${process.env.NEW}$3`));
+      console.error(`Cargo.toml [package] version ${m[2]} -> ${process.env.NEW}`);
+    } else {
+      console.error("WARN: Cargo.toml has no [package] version — left unchanged");
+    }'
+fi
 
 # Headline from the caller — but DROP a bare "publish it" / "ship" / "release"
 # command. The release body must describe what SHIPPED, not echo the chat message

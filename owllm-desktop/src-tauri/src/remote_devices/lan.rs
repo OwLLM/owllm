@@ -182,7 +182,7 @@ fn handle_request(mut req: tiny_http::Request, rt: &tokio::runtime::Handle) {
 /// A pairing request: verify the sender actually holds the key it presents, and
 /// that the claimed id matches that key, then record it as Pending (a human on
 /// this machine must still approve).
-fn handle_pair(pr: PairRequest) -> WireReply {
+pub(super) fn handle_pair(pr: PairRequest) -> WireReply {
     if !super::feature_enabled() {
         return WireReply::Error { message: "remote device control is disabled on this machine".into() };
     }

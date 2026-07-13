@@ -510,12 +510,28 @@ function NetworkPanel({
     <section style={{ ...cardStyle, border: "1px solid rgba(var(--accent-rgb),0.45)" }}>
       <div style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>Network &amp; reachability (WAN)</div>
       <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
-        Controlling a device works across <b>any network the two machines can route to each other on</b> — same LAN, a
-        Tailscale/WireGuard/VPN overlay (recommended for off-LAN, no setup here — your overlay IP is published
-        automatically), a public host you set below, or a relay you host.
+        Off-LAN just works: the built-in <b>P2P transport</b> below punches through NATs and routers with zero setup —
+        no account, no VPN, no port-forward. The LAN path, a public host, an overlay VPN, or a self-hosted relay are
+        still used when available (they can be faster).
       </span>
 
       <Row k="Listening on" v={identity.endpoints.length ? identity.endpoints.join("  ·  ") : (identity.enabled ? "starting…" : "off")} mono />
+
+      {/* Embedded P2P (iroh) — the zero-setup off-LAN path. */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
+        <span style={{ fontSize: 11.5, color: "var(--fg)" }}>
+          P2P (built-in) <span style={{ color: "var(--fg-muted)" }}>(hole-punching + public-relay fallback — dial this device from anywhere by its node id)</span>
+          <span style={{ ...badge(identity.p2p_running ? "var(--ok)" : "var(--fg-subtle)"), marginLeft: 6 }}>{identity.p2p_running ? "online" : identity.enabled ? "starting…" : "off"}</span>
+        </span>
+        {identity.p2p_node_id && (
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <input readOnly value={identity.p2p_node_id} style={{ ...inputStyle, flex: 1, fontFamily: "monospace", fontSize: 10.5 }} onFocus={(e) => e.currentTarget.select()} />
+            <button className="ghost-btn" onClick={() => navigator.clipboard.writeText(identity.p2p_node_id ?? "")} title="Copy node id — paste it into the other machine's Pair box" style={{ fontSize: 11, padding: "2px 10px" }}>
+              Copy
+            </button>
+          </div>
+        )}
+      </div>
 
       {/* Public endpoint */}
       <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
@@ -596,7 +612,7 @@ function DeviceList({
       {devices.map((d) => {
         const online = isOnline(d);
         const ts = trustState(d.device_id);
-        const noAddress = !d.is_self && !(d.endpoints?.length || d.endpoint);
+        const noAddress = !d.is_self && !(d.endpoints?.length || d.endpoint || d.p2p_node_id);
         return (
           <div key={d.device_id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-card)" }}>
             <span className="status-dot" style={{ background: online ? "var(--ok)" : "var(--fg-subtle)", width: 8, height: 8, borderRadius: 4 }} />
@@ -632,17 +648,17 @@ function DeviceList({
           </div>
         );
       })}
-      {/* Manual pair-by-IP (no vault discovery needed). */}
+      {/* Manual pair by ip:port (LAN) or p2p node id (anywhere) — no vault discovery needed. */}
       <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 4 }}>
         <input
           value={manualAddr}
           onChange={(e) => setManualAddr(e.target.value)}
           onKeyDown={(e) => { if (e.key === "Enter" && manualAddr.trim()) onPairByIp(); }}
-          placeholder="pair by ip:port (e.g. 192.168.1.5:47771)"
+          placeholder="pair by ip:port (e.g. 192.168.1.5:47771) or p2p node id"
           style={{ ...inputStyle, flex: 1, fontFamily: "monospace" }}
         />
         <button className="ghost-btn" disabled={!manualAddr.trim()} onClick={onPairByIp} style={{ fontSize: 11, padding: "2px 10px" }}>
-          + Pair by IP
+          + Pair
         </button>
       </div>
     </div>

@@ -215,9 +215,12 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
 - **Sealed transport (WAN-capable)**: every command AND its reply is an
   end-to-end AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries
   ciphertext. `Transport` seam with `LoopbackTransport` (self), `LanDirectTransport`
-  (`lan.rs` — `tiny_http` listener + `reqwest`), and `RelayTransport` (`relay.rs`).
-  Devices need NOT be on the same network: each publishes all its addresses
-  (overlay/Tailscale + public host:port + LAN), the controller tries each, then
+  (`lan.rs` — `tiny_http` listener + `reqwest`), `P2pTransport` (`p2p.rs`), and
+  `RelayTransport` (`relay.rs`). Devices need NOT be on the same network: each
+  publishes all its addresses (overlay/Tailscale + public host:port + LAN), the
+  controller tries each, then the **embedded P2P transport** (iroh: QUIC NAT
+  hole-punching + n0's free public relays — compiled in, zero setup, no account;
+  each device publishes a `p2p_node_id`, pairable by node id from anywhere), then
   falls back to a **self-hostable relay** (store-and-forward, both peers dial out,
   ciphertext-only — run it via `device_relay_serve` on any always-on box).
 - **Discovery**: `vault_sync_devices` (a 4th vault channel) publishes each

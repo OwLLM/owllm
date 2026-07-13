@@ -171,6 +171,12 @@ url = "2"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand = "0.8"
+# Embedded P2P transport for remote_devices (p2p.rs) — QUIC with NAT
+# hole-punching and n0's free public relays as fallback. Compiled into the
+# app: no account, no login, no external daemon (unlike Tailscale). It only
+# ever carries the already-sealed envelopes, so the relays and any on-path
+# node see ciphertext-in-ciphertext; the security model is unchanged.
+iroh = "1"
 
 # Windows-only: needed by overlay_frame to make the cyan chrome window
 # an "owned" window of main via SetWindowLongPtrW(GWLP_HWNDPARENT).

@@ -6,53 +6,19 @@
 
 **Your AI agent workforce on your own hardware — one file, no admin required.**
 
-<table>
-<tr>
-
-<td width="33%" valign="top" align="center">
-
-### 🪟 &nbsp;Windows
-
-**10 / 11 · x64**
-
-![shipping](https://img.shields.io/badge/shipping-2ea043?style=for-the-badge) &nbsp; ![EV-signed](https://img.shields.io/badge/EV--signed-3ec58a?style=for-the-badge)
-
-<a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe"><img src="https://img.shields.io/badge/⬇%20Download-Setup.exe-3ec5d8?style=for-the-badge&logo=windows&logoColor=white" alt="Download the Windows installer" /></a>
-
-~30 MB · native CUDA GPU server · WSL2 sandbox · signed auto-updater
-
-</td>
-
-<td width="33%" valign="top" align="center">
-
-### 🐧 &nbsp;Linux
-
-**x86-64**
-
-![shipping](https://img.shields.io/badge/shipping-2ea043?style=for-the-badge)
-
-<a href="https://github.com/OwLLM/owllm/releases/latest"><img src="https://img.shields.io/badge/⬇%20AppImage%20·%20.deb-e95420?style=for-the-badge&logo=linux&logoColor=white" alt="Download the Linux AppImage or .deb" /></a>
-
-AppImage runs unpacked (`chmod +x`) · `.deb` for Debian / Ubuntu · GPU probes · bubblewrap sandbox
-
-</td>
-
-<td width="33%" valign="top" align="center">
-
-### 🍎 &nbsp;macOS
-
-**Apple Silicon · Metal**
-
-![next](https://img.shields.io/badge/next-d29922?style=for-the-badge)
-
-<a href="https://github.com/OwLLM/owllm/releases/latest"><img src="https://img.shields.io/badge/🔔%20Watch-for%20release-6e7681?style=for-the-badge&logo=apple&logoColor=white" alt="macOS build coming soon" /></a>
-
-Metal payload · unified-memory model sizing · Lima sandbox *(cross-platform CI configured)*
-
-</td>
-
-</tr>
-</table>
+<div align="center">
+  <a href="https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe">
+    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/windows-card.svg?v=2" width="260" alt="Download OwLLM for Windows" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://github.com/OwLLM/owllm/releases/latest">
+    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/linux-card.svg" width="260" alt="Download OwLLM for Linux" />
+  </a>
+  &nbsp;&nbsp;
+  <a href="https://github.com/OwLLM/owllm/releases/latest">
+    <img src="https://raw.githubusercontent.com/OwLLM/.github/main/profile/macos-card.svg" width="260" alt="Watch for macOS release" />
+  </a>
+</div>
 
 <sub>**Linux:** the AppImage needs no install (`chmod +x` and run — WebKit bundled); the `.deb` pulls `libwebkit2gtk-4.1` + `libgtk-3` from your distro (`sudo apt install ./OwLLM.Desktop.deb`).</sub>
 

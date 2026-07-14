@@ -412,36 +412,36 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
     // account's own devices), in which case it is auto-trusted with the
     // standard account policy right here, so an unattended machine never
     // deadlocks waiting for an approval nobody can click.
-    let policy = match trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub) {
+    let mut policy = trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub);
+    // Unknown controller — or a known one holding LESS than the standard grant
+    // (e.g. a stale pre-auto-trust record with shell off): if it's vault-verified
+    // as one of this account's own devices, (re)grant the standard policy. A
+    // restrictive leftover would otherwise deadlock a machine nobody can click
+    // approve on.
+    if policy.as_ref().map_or(true, |p| !is_full_grant(p)) {
+        let peer_name = registry::list(&self_public_record()?)
+            .into_iter()
+            .find(|d| d.public.device_id == frame.from_device)
+            .map(|d| d.public.name)
+            .unwrap_or_default();
+        if ensure_vault_autotrust(
+            &frame.from_device,
+            &peer_name,
+            &frame.from_ed25519_pub,
+            &frame.from_x25519_pub,
+        ) {
+            policy = trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub);
+        }
+    }
+    let policy = match policy {
         Some(p) => p,
         None => {
-            let peer_name = registry::list(&self_public_record()?)
-                .into_iter()
-                .find(|d| d.public.device_id == frame.from_device)
-                .map(|d| d.public.name)
-                .unwrap_or_default();
-            if ensure_vault_autotrust(
-                &frame.from_device,
-                &peer_name,
-                &frame.from_ed25519_pub,
-                &frame.from_x25519_pub,
-            ) {
-                match trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub) {
-                    Some(p) => p,
-                    None => {
-                        let r = deny(&req.request_id, "auto-trust failed — approve this controller on the target machine");
-                        audit_inbound(&frame, &req, &r);
-                        return Ok(r);
-                    }
-                }
-            } else {
-                let r = deny(
-                    &req.request_id,
-                    "controller is not a trusted device — pair and approve it on this machine first",
-                );
-                audit_inbound(&frame, &req, &r);
-                return Ok(r);
-            }
+            let r = deny(
+                &req.request_id,
+                "controller is not a trusted device — pair and approve it on this machine first",
+            );
+            audit_inbound(&frame, &req, &r);
+            return Ok(r);
         }
     };
 
@@ -612,6 +612,11 @@ pub fn standard_account_policy() -> PermissionPolicy {
     }
 }
 
+/// Whether a stored policy already covers the full standard account grant.
+fn is_full_grant(p: &PermissionPolicy) -> bool {
+    p.allow_shell && p.allow_wsl && p.allow_file_writes && p.allow_admin
+}
+
 /// Same-GitHub-account proof: the claimed device id + Ed25519 key match the
 /// device record synced through the account's PRIVATE vault repo. Only
 /// someone with push access to that repo (= signed into the same GitHub
@@ -641,7 +646,14 @@ pub fn ensure_vault_autotrust(device_id: &str, name: &str, ed25519_pub: &str, x2
     }
     if let Some(c) = trust::find(device_id) {
         if c.state == TrustState::Trusted && c.ed25519_pub == ed25519_pub {
-            return true; // already trusted — keep its (possibly edited) policy
+            if is_full_grant(&c.policy) {
+                return true; // already at (or above) the standard account grant
+            }
+            // Stale pre-auto-trust record (e.g. shell off): a same-account
+            // controller gets the standard grant. A restrictive leftover is
+            // the exact deadlock this exists to break — you can't loosen a
+            // policy from a machine that policy locks you out of.
+            return trust::approve(device_id, standard_account_policy()).is_ok();
         }
     }
     let ok = trust::record_pairing_request(device_id, name, ed25519_pub, x25519_pub).is_ok()

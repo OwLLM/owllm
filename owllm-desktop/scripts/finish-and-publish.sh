@@ -166,7 +166,7 @@ fi
 
 # Base = max(local file, every published tag); then rule-based rollover (+1 patch,
 # rolls at 100 → minor, at 10 → major), matching the odometer-100 scheme.
-read -r BASE NEW < <(CUR="$CUR" PUBLISHED_TAGS="$PUBLISHED_TAGS" node -e '
+_BUMP="$(CUR="$CUR" PUBLISHED_TAGS="$PUBLISHED_TAGS" node -e '
   const parse = v => { const m = String(v).trim().replace(/^v/,"").match(/^(\d+)\.(\d+)\.(\d+)/); return m ? [ +m[1], +m[2], +m[3] ] : null; };
   const cmp = (x,y) => x[0]-y[0] || x[1]-y[1] || x[2]-y[2];
   let base = parse(process.env.CUR);
@@ -176,7 +176,12 @@ read -r BASE NEW < <(CUR="$CUR" PUBLISHED_TAGS="$PUBLISHED_TAGS" node -e '
   }
   let [a,b,p] = base;
   p += 1; if (p >= 100) { p = 0; b += 1; } if (b >= 10) { b = 0; a += 1; }
-  process.stdout.write(`${base.join(".")} ${a}.${b}.${p}`);')
+  process.stdout.write(`${base.join(".")} ${a}.${b}.${p}`);')"
+# read from a herestring (always newline-terminated) — a process substitution
+# whose node ends with a newline-less stdout.write makes `read` return 1 at EOF
+# even though it populated the vars, which `set -e` then treats as fatal. The
+# $() capture above still surfaces a genuine node failure (exit 3) as a hard error.
+read -r BASE NEW <<< "$_BUMP"
 [ -n "$NEW" ] || fail "version bump produced empty result from '$CUR'"
 [ "$BASE" != "$CUR" ] && echo "NOTE: local file '$VERSION_FILE' was $CUR but public floor is $BASE — bumping from the public floor"
 TAG="v$NEW"

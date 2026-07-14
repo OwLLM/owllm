@@ -603,6 +603,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // and drag (title bar). null pos = default docked bottom-right.
   const [termHidden, setTermHidden] = useState(false);
   const [termPos, setTermPos] = useState<{ x: number; y: number } | null>(null);
+  // Docked (default) → the shell renders in-column right above the composer,
+  // where the input box lives. Popped out → the old floating draggable popup.
+  const [termDocked, setTermDocked] = useState(true);
   // Agent Browser popup (right-column 🌐 button) — viewer for the shared daemon.
   const [browserOpen, setBrowserOpen] = useState(false);
   useEffect(() => () => { secondaryAbortRef.current?.abort(); }, []);
@@ -2386,6 +2389,28 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
         <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
+        {/* Terminal controls, right beside the project path (user spec): a real
+            PTY shell in THIS workspace. ⌨ toggles it; ⤢/⤡ docks it above the
+            composer (default) or pops it out to the floating popup. */}
+        {workspace && (
+          <button
+            onClick={() => { if (!termOpen) { setTermOpen(true); setTermHidden(false); } else setTermHidden((h) => !h); }}
+            title={!termOpen ? `Open a terminal in ${wsShort}` : (termHidden ? "Show the terminal" : "Hide the terminal (shell keeps running)")}
+            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap",
+              ...(termOpen && !termHidden ? { background: "var(--accent)", color: "#06080d", border: "none", fontWeight: 700 } : { color: "var(--fg-muted)" }) }}
+          >
+            ⌨ Terminal
+          </button>
+        )}
+        {workspace && termOpen && (
+          <button
+            onClick={() => setTermDocked((d) => !d)}
+            title={termDocked ? "Pop out to a floating window" : "Dock above the message box"}
+            style={{ ...btn, height: 26, width: 30, padding: 0, fontSize: 13, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
+          >
+            {termDocked ? "⤢" : "⤡"}
+          </button>
+        )}
         {/* Per-page rename — tab shows "folder(rename)" so two pages on the
             same project stay tellable apart. Empty = folder name only. */}
         <input
@@ -2741,6 +2766,31 @@ function CodeWorkspace({ pageId, onTitle }: {
         ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6, flexShrink: 0 }
         : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>{status}</div>
 
+      {/* Docked terminal — a real PTY shell in the workspace, sitting right
+          above the message box (user spec). Same shell as the popup; ⤢ moves
+          it out to the floating window. Kept mounted while hidden so the shell
+          survives a hide/show. */}
+      {termOpen && workspace && termDocked && (
+        <div style={{ display: termHidden ? "none" : "flex", flexDirection: "column", height: 240, flexShrink: 0,
+          background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 8, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", borderBottom: "1px solid var(--border)", userSelect: "none" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)" }}>🖥 Terminal — {wsShort}</span>
+            <span style={{ flex: 1 }} />
+            <button className="ghost-btn" onClick={() => setTermDocked(false)} title="Pop out to a floating window" style={{ height: 24, width: 26, padding: 0, fontSize: 13 }}>⤢</button>
+            <button className="ghost-btn" onClick={() => setTermHidden(true)} title="Hide (shell keeps running — reopen from the ⌨ Terminal button)" style={{ height: 24, width: 26, padding: 0, fontSize: 13 }}>—</button>
+            <button className="ghost-btn" onClick={() => { setTermOpen(false); setTermHidden(false); }} title="Close (ends the shell)" style={{ height: 24, width: 26, padding: 0, fontSize: 12 }}>✕</button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <PtyTerminal
+              cli={navigator.userAgent.includes("Windows") ? "powershell" : "bash"}
+              args={[]}
+              cwd={workspace}
+              onExit={() => { setTermOpen(false); setTermHidden(false); }}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Composer row — lives in the SAME column as the chat panes, so it is
           always exactly as wide as the chat window. DIVIDED (fine-tune-chat
           style) when the second agent is open side-by-side: primary composer
@@ -2843,8 +2893,9 @@ function CodeWorkspace({ pageId, onTitle }: {
       </div>
 
       {/* 🖥 Terminal popup — a real PTY shell in the workspace folder, floating
-          above THIS app's UI only (fixed overlay, no OS always-on-top). */}
-      {termOpen && workspace && (
+          above THIS app's UI only (fixed overlay, no OS always-on-top). Only
+          when popped out (⤢); the docked variant renders above the composer. */}
+      {termOpen && workspace && !termDocked && (
         <div
           ref={termBoxRef}
           style={{

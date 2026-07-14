@@ -305,8 +305,19 @@ fn import_chromium(kind: BrowserKind) -> Result<String, String> {
     .ok_or_else(|| "could not read Login Data (is the browser open? try closing it)".to_string())?;
 
     let mut creds = Vec::new();
+    let mut abe_skipped = 0usize; // v20 = App-Bound Encryption, not decryptable here
     let now = now_ms();
     for (origin, user, blob) in rows {
+        // Chrome/Edge 127+ re-encrypt saved passwords as "v20" under App-Bound
+        // Encryption: the key is bound to the browser's own elevation service
+        // (SYSTEM context), so it CAN'T be unwrapped by DPAPI the way v10/v11
+        // could. Detect these explicitly and count them, so a modern Chrome
+        // (where EVERY password is v20) gives the user a clear reason instead of
+        // a silent "Imported 0".
+        if blob.len() >= 3 && &blob[..3] == b"v20" {
+            abe_skipped += 1;
+            continue;
+        }
         let Some(pw) = decrypt_chromium_password(&blob, &key) else {
             continue;
         };
@@ -322,6 +333,18 @@ fn import_chromium(kind: BrowserKind) -> Result<String, String> {
         });
     }
     let n = crate::browser_vault::store_imported(creds)?;
+    if n == 0 && abe_skipped > 0 {
+        return Err(format!(
+            "{name} protects its {abe_skipped} saved password(s) with App-Bound Encryption (Chrome/Edge 127+), which OwLLM can't read yet — so none could be imported. Add the logins you need on the Signing page's Web logins list, or import from a browser/profile that still uses the classic format.",
+            name = kind.name(),
+        ));
+    }
+    if abe_skipped > 0 {
+        return Ok(format!(
+            "Imported {n} login(s) from {}. Skipped {abe_skipped} newer entry(ies) protected by App-Bound Encryption (Chrome/Edge 127+), which OwLLM can't read yet.",
+            kind.name(),
+        ));
+    }
     Ok(format!("Imported {n} login(s) from {}", kind.name()))
 }
 

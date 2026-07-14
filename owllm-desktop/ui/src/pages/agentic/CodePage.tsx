@@ -58,7 +58,21 @@ type Msg = {
   /// begins or the turn ends.
   placeholder?: boolean;
   ts: number;
+  /// Attached images shown as clickable thumbnails in the bubble (user uploads
+  /// or results), stored so they persist and can be re-viewed by clicking.
+  images?: { src: string; alt?: string }[];
 };
+
+// Turn chat image attachments into ChatBubble thumbnails (data URIs the webview
+// can always render), so uploaded images stay visible and clickable in history.
+function attachmentThumbs(atts: { mime: string; data_b64: string; filename?: string }[]): { src: string; alt?: string }[] {
+  return atts.map((a) => ({ src: `data:${a.mime};base64,${a.data_b64}`, alt: a.filename }));
+}
+
+// JSON replacer that drops `images` (base64 data URIs) when persisting to
+// localStorage — thumbnails are for in-session re-view only; embedding megabytes
+// of base64 would blow the localStorage quota and silently lose the session.
+const dropImages = (k: string, v: unknown) => (k === "images" ? undefined : v);
 
 const CODING_SYSTEM = (ws: string) =>
   `You are OWLLM's coding agent, working directly inside the user's project at:\n${ws}\n\n` +
@@ -184,7 +198,7 @@ function loadPageSession(pageId: string): CodeState | null {
 }
 function savePageSession(pageId: string, s: CodeState | null | undefined): void {
   if (!s) return;
-  try { localStorage.setItem(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false })); }
+  try { localStorage.setItem(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false }, dropImages)); }
   catch { /* quota / unavailable */ }
   // Mirror the model choice into the sync-ready settings layer (see load).
   // setSetting treats ""/undefined as "clear", and no-op writes short-circuit,
@@ -219,7 +233,7 @@ const CODE_RECENTS_MAX = 12;
 // The "New chat" surface keeps a list of past conversations in localStorage so
 // they survive tab switches AND app restarts (the chat used to be plain useState
 // that evaporated). Each thread is one conversation; the newest is first.
-type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string };
+type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string; images?: { src: string; alt?: string }[] };
 type ChatThread = { id: string; title: string; ts: number; messages: ChatMsg[] };
 const CHATS_KEY = "owllm:code:chats";
 const CHATS_MAX = 60;
@@ -242,7 +256,7 @@ function loadChats(): ChatThread[] {
   } catch { return []; }
 }
 function saveChats(chats: ChatThread[]): void {
-  try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX))); } catch { /* private mode / quota */ }
+  try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX), dropImages)); } catch { /* private mode / quota */ }
 }
 function newThreadId(): string { return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function threadTitle(text: string): string {
@@ -285,7 +299,7 @@ function loadCodeSession(ws: string): CodeState | null {
 function saveCodeSession(s: CodeState | null | undefined): void {
   if (!s || !s.workspace) return; // no folder → nothing to save (onboarding state)
   try {
-    localStorage.setItem(codeSessionKey(s.workspace), JSON.stringify({ ...s, busy: false }));
+    localStorage.setItem(codeSessionKey(s.workspace), JSON.stringify({ ...s, busy: false }, dropImages));
   } catch { /* quota / unavailable — best effort */ }
 }
 
@@ -1601,9 +1615,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     const history: HistoryItem[] = messages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-    // The bubble shows a 🖼 marker; the actual images ride to the model via runTurn.
-    const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
-    setMessages((msgs) => [...msgs, { role: "user", content: label, ts: Date.now() }]);
+    // The bubble shows the actual images as clickable thumbnails; the same
+    // images also ride to the model via runTurn.
+    setMessages((msgs) => [...msgs, { role: "user", content: text, ts: Date.now(), images: images.length ? attachmentThumbs(images) : undefined }]);
     // Immediately show the user that something is happening, so the timer is not
     // the only visible change. The placeholder is replaced by real tokens/tools.
     setMessages((msgs) => [...msgs, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
@@ -1818,10 +1832,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     setChatBusy(true);
     const ctrl = new AbortController();
     justChatAbort = ctrl;
-    // The visible bubble shows the text + an image marker; the actual images
-    // ride to the model via the multimodal content / attachments below.
-    const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
-    const userMsg: ChatMsg = { role: "user", content: label };
+    // The visible bubble shows the actual images as clickable thumbnails; the
+    // same images also ride to the model via the multimodal content below.
+    const userMsg: ChatMsg = { role: "user", content: text, images: images.length ? attachmentThumbs(images) : undefined };
     const asstMsg: ChatMsg = { role: "assistant", content: "" };
     // Resolve/create the active thread; history = its current messages.
     let tid = chatId;
@@ -2101,7 +2114,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           {chatMsgs.map((m, i) => {
             const isUser = m.role === "user";
             return (
-              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} />
+              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} />
             );
           })}
         </div>
@@ -2664,6 +2677,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                   content={m.content}
                   thinking={m.thinking}
                   ts={m.ts}
+                  images={m.images}
                 />
                 {canForward && (
                   <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
@@ -2733,6 +2747,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       content={m.content}
                       thinking={m.thinking}
                       ts={m.ts}
+                      images={m.images}
                     />
                     {canForwardToPrimary && (
                       <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>

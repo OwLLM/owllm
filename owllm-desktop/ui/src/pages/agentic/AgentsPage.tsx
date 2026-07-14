@@ -112,7 +112,7 @@ import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIs
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
 import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
-import { ChatBubble, ChatMarkdown, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
+import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 
@@ -380,7 +380,16 @@ type GoalMsg = {
   /// call+result render as ONE collapsed input|output line. Never persisted.
   result?: string;
   resultStatus?: "ok" | "error";
+  /// Attached images (user uploads), shown as clickable thumbnails under the
+  /// bubble so an uploaded screenshot stays visible and re-viewable.
+  images?: { src: string; alt?: string }[];
 };
+
+// Turn image attachments into ChatBubble thumbnails (data URIs the webview can
+// always render) so uploaded images stay visible and clickable in the thread.
+function attachmentThumbs(atts: { mime: string; data_b64: string; filename?: string }[]): { src: string; alt?: string }[] {
+  return atts.map((a) => ({ src: `data:${a.mime};base64,${a.data_b64}`, alt: a.filename }));
+}
 
 // Extract the tool-use id shared by a call/result pair from its channelKey.
 // Call channel:  "tool:<name>:<id>"   Result channel: "tool-result:<id>".
@@ -2476,6 +2485,7 @@ function AgentChatTile({
                 isStreaming={streaming}
                 content={m.text}
                 ts={m.ts}
+                images={m.images}
               />
             );
           })
@@ -4795,6 +4805,7 @@ function MarkdownBody({ text }: { text: string }) {
           ol: (p) => <ol style={{ margin: "6px 0", paddingLeft: 22 }} {...(p as any)} />,
           li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
           a: MarkdownLink,
+          img: (p: any) => <SmartImage src={p.src} alt={p.alt} />,
           blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "8px 0", padding: "2px 0 2px 12px", color: "var(--fg-muted)" }} {...(p as any)} />,
           table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
           th: (p) => <th style={{ border: "1px solid var(--border)", padding: "5px 9px", background: "var(--bg-surface)", textAlign: "left", fontWeight: 600 }} {...(p as any)} />,
@@ -4836,6 +4847,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         isStreaming={isStreaming}
         content={m.text}
         ts={m.ts}
+        images={m.images}
       />
       {m.action === "wsl-restart" ? (
         // One-click recovery for a network/DNS failure — runs `wsl --shutdown`
@@ -9497,10 +9509,14 @@ export function AgentsPage({
     chatRuntime.registerPersister(psid, (payload) => {
       const p = payload as AgentRunPayload | null;
       if (!p) return;
-      const chatJson = JSON.stringify(p.supChat ?? []);
+      // Drop `images` (base64 data URIs) when persisting — they're for
+      // in-session re-view only; embedding them would bloat chat_json and the
+      // vault sync. The replacer strips the field at any depth.
+      const dropImages = (k: string, v: unknown) => (k === "images" ? undefined : v);
+      const chatJson = JSON.stringify(p.supChat ?? [], dropImages);
       const obj: Record<string, GoalMsg[]> = {};
       for (const [k, v] of p.agentLogs ?? new Map()) obj[k] = v;
-      const logsJson = JSON.stringify(obj);
+      const logsJson = JSON.stringify(obj, dropImages);
       invoke("update_project", {
         input: { id: pid, chat_json: chatJson, agent_logs_json: logsJson },
       })
@@ -9824,7 +9840,8 @@ export function AgentsPage({
           // it to the agent buffers, not supChat), then run. Mark any attached
           // images so the echoed turn matches what the single-assistant path shows.
           const echo: GoalMsg = { role: "you", color: "#9ad9ff",
-            text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
+            text,
+            images: images.length > 0 ? attachmentThumbs(images) : undefined,
             ts: Date.now(), seq: nextSeq() };
           setSupChat(prev => [...prev, echo]);
           await dispatchGoal(text, priorHistory, images);
@@ -9857,7 +9874,8 @@ export function AgentsPage({
 
     const userMsg: GoalMsg = {
       role: "you", color: "#9ad9ff",
-      text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
+      text,
+      images: images.length > 0 ? attachmentThumbs(images) : undefined,
       ts: Date.now(), seq: nextSeq(),
     };
     setSupChat(prev => [...prev, userMsg]);

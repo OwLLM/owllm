@@ -17,6 +17,8 @@ import {
   setLeanRun,
   getTeamMemorySnapshot,
   getBrowserStateLine,
+  getDeviceGroundTruthLine,
+  refreshDeviceGroundTruth,
   refreshTeamMemorySnapshot,
   harvestMemoryWrites,
   harvestPublishRequest,
@@ -1049,6 +1051,7 @@ export function buildOrchestratorPrompt(
     "",
     projectWorkspaceBlock(projectCwd),
     "  - Put the project root in each specialist's instruction when the task touches files, so they don't go looking elsewhere.",
+    getDeviceGroundTruthLine(),
     "",
     TEAM_OPERATING_CONTRACT,
     "",
@@ -1100,6 +1103,8 @@ export function buildSpecialistPrompt(
     layers.push(directivesBlock);
   }
   layers.push(projectWorkspaceBlock(projectCwd));
+  const deviceLine = getDeviceGroundTruthLine();
+  if (deviceLine) layers.push(deviceLine);
   layers.push(TEAM_OPERATING_CONTRACT);
   layers.push(lean ? TEAM_MEMORY_HINT_LEAN : TEAM_MEMORY_HINT);
   const memSnapshot = getTeamMemorySnapshot();
@@ -3411,6 +3416,10 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // them serially — memory snapshot (bounded: per-invoke timeout inside) and
   // the skill mirror don't depend on each other.
   hooks.onPhase("preparing");
+  // Warm this device's ground-truth line (static per session) so the orchestrator
+  // + specialists know WHICH machine they run on and can't be misled by a
+  // device-specific fact synced from another PC. Best-effort; never blocks a run.
+  const deviceReady = refreshDeviceGroundTruth();
   const memReady = refreshTeamMemorySnapshot();
   // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
   // provider can self-load a skill by reading it with their native file tool
@@ -3425,9 +3434,10 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       hooks.onSystemWarning?.(`⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}`);
     }
   }
-  // Snapshot must be resolved before prompts are built below (they read it
-  // synchronously via getTeamMemorySnapshot).
+  // Snapshot + device line must be resolved before prompts are built below (they
+  // read both synchronously via getTeamMemorySnapshot / getDeviceGroundTruthLine).
   await memReady;
+  await deviceReady;
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]

@@ -27,6 +27,7 @@ import RunNotebook, { takeNextAutoStep, autoFeedWouldRun } from "./RunNotebook";
 import { RunTimerChip } from "./RunTimer";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
+import TeamMemoryModal from "./TeamMemoryModal";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -167,6 +168,37 @@ function loadPages(): CodePageMeta[] {
 function savePages(pages: CodePageMeta[]): void {
   try { localStorage.setItem(PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
 }
+
+// ---- Cross-page activity signal (tab-strip glow + "done" badge) -------------
+// Lets the tab strip show WHERE work is happening even when you've switched to
+// another page. The primary coder's `busy` already lives per-page in
+// chatRuntime and keeps updating after the page unmounts (module singleton), so
+// a run started on page A stays visible while you work on page B — the parent
+// reads it straight from chatRuntime. The MOUNTED page additionally reports its
+// aggregate busy (coder OR second agent OR just-chat) here so the visible tab
+// glows for ANY active agent; that extra signal is cleared on unmount (the
+// second agent is aborted on unmount anyway, so it can't run in the background).
+// `done` marks a page whose run FINISHED while you were on another tab — a badge
+// that persists on its tab until you open it.
+const pageBusyExtra = new Map<string, boolean>();
+const pageDone = new Set<string>();
+const activityListeners = new Set<() => void>();
+function notifyActivity(): void { for (const cb of activityListeners) cb(); }
+const pageActivity = {
+  subscribe(cb: () => void): () => void {
+    activityListeners.add(cb);
+    return () => { activityListeners.delete(cb); };
+  },
+  reportExtra(pageId: string, busy: boolean): void {
+    if ((pageBusyExtra.get(pageId) ?? false) === busy) return;
+    if (busy) pageBusyExtra.set(pageId, true); else pageBusyExtra.delete(pageId);
+    notifyActivity();
+  },
+  extraBusy(pageId: string): boolean { return pageBusyExtra.get(pageId) ?? false; },
+  markDone(pageId: string): void { if (!pageDone.has(pageId)) { pageDone.add(pageId); notifyActivity(); } },
+  clearDone(pageId: string): void { if (pageDone.delete(pageId)) notifyActivity(); },
+  isDone(pageId: string): boolean { return pageDone.has(pageId); },
+};
 // Per-PAGE session persistence (keyed by page id, NOT the folder/worktree path,
 // so an isolated page survives the worktree being re-created at a new path).
 function pageSessionKey(pageId: string): string { return PAGE_SESSION_PREFIX + pageId; }
@@ -623,6 +655,15 @@ function CodeWorkspace({ pageId, onTitle }: {
   // Agent Browser popup (right-column 🌐 button) — viewer for the shared daemon.
   const [browserOpen, setBrowserOpen] = useState(false);
   useEffect(() => () => { secondaryAbortRef.current?.abort(); }, []);
+  // Tell the tab strip this page has an agent running (coder, second agent, or
+  // just-chat) so its tab glows for ANY active agent while it's the visible
+  // page. The coder's cross-page glow comes from chatRuntime directly; this
+  // extra is cleared on unmount, so a background page never falsely glows for a
+  // second-agent/just-chat run it can no longer sustain.
+  useEffect(() => {
+    pageActivity.reportExtra(pageId, busy || secondaryBusy || chatBusy);
+  }, [pageId, busy, secondaryBusy, chatBusy]);
+  useEffect(() => () => { pageActivity.reportExtra(pageId, false); }, [pageId]);
   // Consecutive AUTOMATIC exchanges between the two panes (⇄ auto-feed).
   // Any manual send resets it; the cap stops a both-directions-on ping-pong
   // from looping forever (the user un-pauses by just sending a message).
@@ -2398,6 +2439,16 @@ function CodeWorkspace({ pageId, onTitle }: {
 
   return (
     <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-panel)", color: "var(--fg)" }}>
+      {/* Rainbow agent "aura": a conic-gradient ring painted on each chat
+          pane's border-box (spun by the --owllm-aura-angle @property, shared
+          with the Agents page). The pane's solid fill sits on padding-box so
+          the message/input area keeps its background — the glow reads only
+          OUTSIDE the container. Houdini-less browsers fall back to a static
+          rainbow, still on-brand. */}
+      <style>{`
+        @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+        @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+      `}</style>
       {/* Header: workspace · model · status */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
@@ -2422,6 +2473,19 @@ function CodeWorkspace({ pageId, onTitle }: {
             style={{ ...btn, height: 26, width: 30, padding: 0, fontSize: 13, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
           >
             {termDocked ? "⤢" : "⤡"}
+          </button>
+        )}
+        {/* Project Memory — same shared surface (TeamMemoryModal) and same
+            project scope both code agents read/write, matching the Agents page's
+            🧠 Memory button. Scoped event so only THIS page's modal opens (the
+            keep-alive Agents modal is mounted+hidden alongside). */}
+        {(projectRoot || workspace) && (
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-code-memory"))}
+            title="Project Memory — the shared knowledge base both code agents read and write (build commands, decisions, file maps). Same memory as the Agents page for this project; syncs across your PCs via the vault."
+            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
+          >
+            🧠 Memory
           </button>
         )}
         {/* Per-page rename — tab shows "folder(rename)" so two pages on the
@@ -2627,7 +2691,16 @@ function CodeWorkspace({ pageId, onTitle }: {
         {/* Primary pane — same box anatomy as the second-agent pane: a slim
             label header over its own scrolling transcript. (Model picker +
             Clear buttons live in the page header above.) */}
-        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+        <div style={{
+          flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12,
+          // Solid fill on padding-box keeps the message/input area's background;
+          // the rainbow ring paints border-box only, so the aura reads OUTSIDE
+          // the chat container. Spins while the coder is running, static idle.
+          background: "var(--bg-input) padding-box, conic-gradient(from var(--owllm-aura-angle), #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box",
+          border: "2px solid transparent", borderRadius: 8,
+          boxShadow: "0 0 12px rgba(176,124,255,0.28), 0 0 22px rgba(127,212,255,0.16)",
+          animation: busy ? "owllm-aura-spin 4s linear infinite" : undefined,
+        }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
             <span style={{ flex: 1 }} />
@@ -2702,7 +2775,16 @@ function CodeWorkspace({ pageId, onTitle }: {
         {/* Second-agent chat pane — parallel/hand-off coder using the same
             workspace and model as the primary chat, with its own transcript. */}
         {secondaryOpen && (
-          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+          <div style={{
+            flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12,
+            // Same rainbow aura as the primary pane: rainbow ring on border-box,
+            // solid var(--bg-input) fill on padding-box so the message/input
+            // area stays solid. Spins while the second agent is running.
+            background: "var(--bg-input) padding-box, conic-gradient(from var(--owllm-aura-angle), #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box",
+            border: "2px solid transparent", borderRadius: 8,
+            boxShadow: "0 0 12px rgba(176,124,255,0.28), 0 0 22px rgba(127,212,255,0.16)",
+            animation: secondaryBusy ? "owllm-aura-spin 4s linear infinite" : undefined,
+          }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>
               {/* The second agent's OWN model — independent of the primary chat.
@@ -2945,6 +3027,17 @@ function CodeWorkspace({ pageId, onTitle }: {
           Shared component; also handles the password vault + browser import. */}
       <BrowserPanel open={browserOpen} onClose={() => setBrowserOpen(false)} />
 
+      {/* 🧠 Project Memory — the SAME shared surface the Agents page opens,
+          scoped by the SAME id both code agents use for memory (memoryScope():
+          ruleScope.id ?? projectRoot ?? workspace), so what you see here is
+          exactly what the primary and secondary code agents read and write.
+          Opens on the page-scoped event from the header 🧠 Memory button. */}
+      <TeamMemoryModal
+        openEvent="owllm:open-code-memory"
+        projectId={ruleScope.id || projectRoot || workspace || null}
+        projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "") || undefined}
+      />
+
       {/* File viewer — opening a file in the tree shows its real contents, and
           (via ✎ Edit → 💾 Save) lets you edit and write it back to disk. */}
       {viewer && (() => {
@@ -3068,6 +3161,7 @@ export default function CodePage() {
       }).catch(() => { /* best-effort */ });
     }
     dropPageSession(id);
+    pageActivity.clearDone(id);   // drop any lingering finished-badge for the closed page
     setPages((ps) => {
       const next = ps.filter((p) => p.id !== id);
       if (next.length === 0) {
@@ -3080,26 +3174,79 @@ export default function CodePage() {
     });
   };
 
+  // ---- Per-page activity: glow the working tab, badge finished-while-away ----
+  // Re-render the tab strip whenever any page's coder busy (chatRuntime, updates
+  // even after the page unmounts) or the visible page's aggregate busy / badges
+  // change. Subscribing per-page id also covers a run that outlives its tab.
+  const [, setActivityTick] = useState(0);
+  const bumpActivity = () => setActivityTick((n) => n + 1);
+  useEffect(() => {
+    const unsubs = pages.map((p) => chatRuntime.subscribe(sidForPage(p.id), bumpActivity));
+    unsubs.push(pageActivity.subscribe(bumpActivity));
+    return () => { for (const u of unsubs) u(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pages.map((p) => p.id).join(",")]);
+
+  // A page is "working" if its coder is busy (read straight from chatRuntime, so
+  // background pages stay lit) OR the mounted page reports a second-agent/chat run.
+  const pageWorking = (id: string): boolean => {
+    const snap = chatRuntime.getSnapshot(sidForPage(id)).payload as CodeState | null;
+    return !!snap?.busy || pageActivity.extraBusy(id);
+  };
+
+  // Badge a page whose run FINISHED while you were on another tab (busy→idle on a
+  // non-active page); the active tab is always "seen", so it never carries a badge.
+  const prevWorkingRef = useRef<Map<string, boolean>>(new Map());
+  useEffect(() => {
+    for (const p of pages) {
+      const now = pageWorking(p.id);
+      const was = prevWorkingRef.current.get(p.id) ?? false;
+      if (was && !now && p.id !== active?.id) pageActivity.markDone(p.id);
+      prevWorkingRef.current.set(p.id, now);
+    }
+    if (active) pageActivity.clearDone(active.id);
+  });
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg-panel)" }}>
+      {/* Keyframes for the working-tab glow pulse (parent is always mounted). */}
+      <style>{`
+        @keyframes owllm-tab-working {
+          0%, 100% { box-shadow: 0 0 0 rgba(var(--accent-rgb), 0); }
+          50% { box-shadow: 0 0 9px rgba(var(--accent-rgb), 0.65); }
+        }
+      `}</style>
       {/* Tab strip */}
       <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "5px 6px 0", flexShrink: 0, overflowX: "auto" }}>
         {pages.map((p) => {
           const on = p.id === active?.id;
+          const working = pageWorking(p.id);   // an agent is running on this page
+          const done = pageActivity.isDone(p.id); // finished while you were away
           return (
             <div
               key={p.id}
               onClick={() => setActiveId(p.id)}
-              title={p.title}
+              title={working ? `${p.title} — agent working…` : done ? `${p.title} — finished (unseen)` : p.title}
               style={{
                 display: "flex", alignItems: "center", gap: 6, padding: "5px 10px",
                 borderRadius: "7px 7px 0 0", cursor: "pointer", maxWidth: 200, flexShrink: 0,
                 background: on ? "var(--bg-input)" : "transparent",
                 border: "1px solid", borderColor: on ? "var(--border-strong)" : "transparent", borderBottom: "none",
                 color: on ? "var(--fg-strong)" : "var(--fg-muted)", fontSize: 12, fontWeight: on ? 700 : 500,
+                // Glow while an agent runs on this page — visible even from
+                // another tab, so you can see WHERE work is happening.
+                animation: working ? "owllm-tab-working 1.4s ease-in-out infinite" : undefined,
               }}
             >
+              {/* Live dot while working (accent, pulsing via the tab glow). */}
+              {working && (
+                <span title="Agent working" style={{ flexShrink: 0, width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", boxShadow: "0 0 6px var(--accent)" }} />
+              )}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title || "New page"}</span>
+              {/* Finished-while-away badge (green check) — cleared when you open the page. */}
+              {done && !working && (
+                <span title="Finished — click to view" style={{ flexShrink: 0, color: "var(--ok)", fontSize: 12, fontWeight: 800, lineHeight: 1 }}>✓</span>
+              )}
               <span
                 onClick={(e) => { e.stopPropagation(); void closePage(p.id); }}
                 title="Close this page (its worktree is removed)"

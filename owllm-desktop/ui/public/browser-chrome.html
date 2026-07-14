@@ -39,7 +39,10 @@
       }
       .btn:hover { background: rgba(255,255,255,0.08); color: var(--fg); }
       #close:hover { background: #e81123; color: #fff; }
-      #logo { flex: none; font-size: 14px; margin-right: 2px; }
+      #logo {
+        flex: none; font-size: 12px; font-weight: 800; letter-spacing: 0.5px;
+        color: var(--accent); margin: 0 4px 0 2px;
+      }
       #ttl {
         flex: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
         white-space: nowrap; color: var(--fg); font-size: 12px; font-weight: 600;
@@ -56,8 +59,8 @@
   </head>
   <body>
     <div id="bar">
-      <span id="logo">🦉</span>
-      <span id="ttl">OwLLM Browser</span>
+      <span id="logo">OwLLM</span>
+      <span id="ttl">Browser</span>
       <button class="btn" id="back" title="Back">←</button>
       <button class="btn" id="reload" title="Reload">⟳</button>
       <input id="url" spellcheck="false" placeholder="Enter a URL and press Enter" />
@@ -107,16 +110,37 @@
           }
         } catch (e) {}
       };
-      // Accent: same key + live storage event the overlay frame uses.
+      // Skin: read the SAME localStorage keys the app writes (theme.ts) so the
+      // bar wears the selected accent AND light/dark mode. No owl, no palette
+      // that can drift from the app. Both keys live-update via the storage
+      // event (this bar is app-origin, so the main UI's writes fire here).
       var ACCENTS = { indigo: "#667eea", amber: "#fbbf24", red: "#ef4444",
                       blue: "#3b82f6", emerald: "#10b981", slate: "#6b7280" };
+      // Surface palette per mode, mirroring styles.css (--bg-panel / --fg /
+      // --fg-muted / --border) for dark and light.
+      var MODES = {
+        dark:  { bg: "#0e1117", input: "#171c26", fg: "#e2e8f0", muted: "#8b95a7", border: "#232a38" },
+        light: { bg: "#f4f5f7", input: "#ffffff", fg: "#1a1f2c", muted: "#5a6270", border: "rgba(0,0,0,0.12)" },
+      };
+      var rootEl = document.documentElement;
       function applyAccent(key) {
-        var hex = ACCENTS[key] || ACCENTS.indigo;
-        document.documentElement.style.setProperty("--accent", hex);
+        rootEl.style.setProperty("--accent", ACCENTS[key] || ACCENTS.indigo);
       }
-      try { applyAccent(localStorage.getItem("owllm:theme:accent") || "indigo"); } catch (e) {}
+      function applyMode(mode) {
+        var p = MODES[mode === "light" ? "light" : "dark"];
+        rootEl.style.setProperty("--bg", p.bg);
+        rootEl.style.setProperty("--bg-input", p.input);
+        rootEl.style.setProperty("--fg", p.fg);
+        rootEl.style.setProperty("--fg-muted", p.muted);
+        rootEl.style.setProperty("--border", p.border);
+      }
+      try {
+        applyAccent(localStorage.getItem("owllm:theme:accent") || "indigo");
+        applyMode(localStorage.getItem("owllm:theme:mode") || "dark");
+      } catch (e) {}
       window.addEventListener("storage", function (e) {
         if (e.key === "owllm:theme:accent" && e.newValue) applyAccent(e.newValue);
+        if (e.key === "owllm:theme:mode" && e.newValue) applyMode(e.newValue);
       });
     </script>
   </body>

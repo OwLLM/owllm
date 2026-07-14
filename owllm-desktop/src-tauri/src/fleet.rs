@@ -102,6 +102,69 @@ fn safe_seg(s: &str) -> String {
         .collect()
 }
 
+/// Regenerable build-cache directories a fleet worktree accumulates once the app
+/// is built inside it. A Rust `target/` alone is 8-17 GB, so the pile of KEPT
+/// page/crashed worktrees (which the sweep never fully deletes because they hold
+/// unmerged edits) is what silently fills the disk. Reclaiming these loses
+/// nothing — they rebuild on demand.
+const BUILD_CACHE_DIR_NAMES: &[&str] = &["target", "node_modules", "dist"];
+
+/// Strip regenerable build caches from `worktree` in place, preserving all
+/// source. A directory is removed only when BOTH hold: its name is a known build
+/// cache, AND git confirms it is ignored (so it is provably not tracked source
+/// nor the user's uncommitted untracked work). A cache touched in the last hour
+/// is left alone in case a build is live in it right now. The walk is bounded to
+/// a shallow depth so a deep dependency tree is never fully traversed.
+/// Best-effort; returns the number of cache directories removed.
+fn reclaim_build_caches(worktree: &Path) -> u32 {
+    fn walk(root: &Path, dir: &Path, depth: u32, removed: &mut u32) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name();
+            let path = entry.path();
+            if name == ".git" {
+                continue;
+            }
+            let is_cache = name
+                .to_str()
+                .map(|n| BUILD_CACHE_DIR_NAMES.contains(&n))
+                .unwrap_or(false);
+            if !is_cache {
+                walk(root, &path, depth - 1, removed);
+                continue;
+            }
+            // Only delete a build-cache dir git actually ignores — guarantees it
+            // is an artifact, never source or the user's uncommitted work.
+            let ignored = git(root, &["check-ignore", "-q", &path.to_string_lossy()])
+                .map(|(ok, _, _)| ok)
+                .unwrap_or(false);
+            // Skip a cache modified within the last hour: a build may be live in
+            // it, and yanking target/ mid-compile forces a needless rebuild.
+            let recent = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .map(|e| e.as_secs() < 3600)
+                .unwrap_or(false);
+            if ignored && !recent && std::fs::remove_dir_all(&path).is_ok() {
+                *removed += 1;
+            }
+            // Never descend into a build-cache-named dir.
+        }
+    }
+    let mut removed = 0;
+    walk(worktree, worktree, 4, &mut removed);
+    removed
+}
+
 /// Suppresses the console window that a spawned `git` would otherwise FLASH on
 /// Windows. Without this every git call (and fleet_worktree_create makes ~6)
 /// pops a black CMD window — the storm of flashing the user hit when opening a
@@ -513,6 +576,10 @@ pub struct RemoveArgs {
 pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
     let cwd = PathBuf::from(&args.project_cwd);
     if args.keep {
+        // Keep the worktree (unmerged edits to inspect) but reclaim its
+        // regenerable build caches — otherwise every kept worktree hoards an
+        // 8-17 GB `target/` forever. Source + git state are left intact.
+        reclaim_build_caches(&PathBuf::from(&args.worktree_path));
         return Ok(());
     }
     // Best-effort: remove worktree, then delete the branch. Don't

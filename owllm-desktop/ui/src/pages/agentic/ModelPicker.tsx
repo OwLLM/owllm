@@ -46,6 +46,7 @@ export type AccountsStatusLite = {
   codex_cli: boolean;
   kimi_cli: boolean;
   gemini_cli: boolean;
+  grok_cli: boolean;
 };
 
 type Section =
@@ -243,11 +244,18 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
     if (m.sub) pushCloud("gemini", m, "sub", geminiSub, geminiSub ? undefined : "(gemini auth login)");
     if (m.api) pushCloud("gemini", m, "api", geminiApi, geminiApi ? undefined : "(set GEMINI_API_KEY)");
   }
+  // xAI: subscription via the Grok Build CLI (SuperGrok / X Premium+) +
+  // API via XAI_API_KEY — same two-row shape as kimi/gemini.
+  const grokSub = !!status?.grok_cli;
+  const xaiApi = !!status?.xai_api_key;
+  for (const m of cat.xai) {
+    if (m.sub) pushCloud("xai", m, "sub", grokSub, grokSub ? undefined : "(grok sign-in)");
+    if (m.api) pushCloud("xai", m, "api", xaiApi, xaiApi ? undefined : "(set XAI_API_KEY)");
+  }
   // API-only providers.
   type ApiOnly = { section: Section; models: CloudModel[]; available: boolean; envHint: string };
   const apiOnly: ApiOnly[] = [
     { section: "deepseek",   models: cat.deepseek,   available: !!status?.deepseek_api_key,   envHint: "DEEPSEEK_API_KEY" },
-    { section: "xai",        models: cat.xai,        available: !!status?.xai_api_key,        envHint: "XAI_API_KEY" },
     { section: "groq",       models: cat.groq,       available: !!status?.groq_api_key,       envHint: "GROQ_API_KEY" },
     { section: "perplexity", models: cat.perplexity, available: !!status?.perplexity_api_key, envHint: "PERPLEXITY_API_KEY" },
     { section: "mistral",    models: cat.mistral,    available: !!status?.mistral_api_key,    envHint: "MISTRAL_API_KEY" },

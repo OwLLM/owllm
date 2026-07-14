@@ -1383,7 +1383,7 @@ const _warmCli = new Map<string, WarmEntry>();
 // token as a side effect, so every long run keeps a fresh token well before the
 // ~1h expiry. The reactive 401 retry (clearCliWarm + retry) is the backstop.
 const WARM_TTL_MS = 25 * 60 * 1000; // 25 min — comfortably under the ~1h token TTL
-export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli";
+export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli" | "grok_cli";
 export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): Promise<void> {
   const now = Date.now();
   let entry = _warmCli.get(backend);
@@ -1478,7 +1478,7 @@ export function setCliAuthWaitHandler(handler: ((info: AuthWaitInfo) => void) | 
 /// errors are NOT retried here (they bubble straight up). Honors the run's
 /// AbortSignal during the wait.
 export async function withCliAuthRetry<T>(
-  backend: "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli",
+  backend: CliBackend,
   signal: AbortSignal,
   fn: () => Promise<T>,
   /// The cwd the CLI runs in. When the project is isolated, the re-warm also
@@ -2011,6 +2011,8 @@ export async function streamChatCompletion(
     reply = await streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
   } else if (provider === "gemini") {
     reply = await streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history);
+  } else if (provider === "xai") {
+    reply = await streamXai(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
   } else if (OPENAI_COMPAT_PROVIDERS[provider]) {
     const cfg = OPENAI_COMPAT_PROVIDERS[provider];
     reply = await streamOpenAICompatible({
@@ -2841,6 +2843,56 @@ async function streamMoonshot(
     apiUrl: "https://api.moonshot.ai/v1/chat/completions",
     keyName: "MOONSHOT_API_KEY",
     providerLabel: "Moonshot",
+  });
+}
+
+/// xAI Grok. Subscription → `grok -p` (Grok Build CLI, SuperGrok / X
+/// Premium+ auth) via ensureCliWarm + grok_cli_complete — the same
+/// dispatch idiom as the Kimi/Gemini subscription paths. API →
+/// OpenAI-compatible streaming against api.x.ai.
+async function streamXai(
+  modelId: string,
+  route: CloudRoute,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+  projectCwd?: string,
+  history?: HistoryItem[],
+  onThought?: ThoughtHandler,
+  images?: Attachment[],
+  allowedTools?: string[],
+): Promise<string> {
+  if (route.forceSub === true) {
+    await ensureCliWarm("grok_cli", projectCwd);
+    // grok -p has no image flag but reads files from its cwd — save pasted
+    // images into .owllm-inbox/ and reference them by relative path, the
+    // same way the Claude/Codex/Kimi subscription paths do.
+    const grokCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
+    const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], grokCwd);
+    const convo = (history ?? [])
+      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
+      .join("\n\n");
+    const prompt = convo ? `${convo}\n\nUser: ${cliUserMessage}` : cliUserMessage;
+    const reply = await withCliAuthRetry("grok_cli", signal, () =>
+      invoke<string>("grok_cli_complete", {
+        systemPrompt,
+        userMessage: prompt,
+        cwd: grokCwd ?? null,
+        model: modelId,
+      }),
+      grokCwd,
+    );
+    if (reply) onDelta(reply);
+    return reply;
+  }
+  const cfg = OPENAI_COMPAT_PROVIDERS.xai;
+  return streamOpenAICompatible({
+    url: cfg.url, keyName: cfg.keyName, modelId,
+    systemPrompt, userMessage, temperature,
+    signal, onDelta, history, onThought, images, providerLabel: cfg.label,
+    projectCwd, allowedTools,
   });
 }
 

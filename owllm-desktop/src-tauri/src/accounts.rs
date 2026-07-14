@@ -331,6 +331,9 @@ pub struct AccountsStatus {
     /// Google Gemini CLI (google-gemini/gemini-cli) is installed AND
     /// logged in (~/.gemini/ contains OAuth cache).
     pub gemini_cli: bool,
+    /// xAI Grok Build CLI (`grok`) is installed AND logged in
+    /// (~/.grok/ carries the sign-in state).
+    pub grok_cli: bool,
 }
 
 /// Probe what's connected right now. Cheap — runs on the AccountsPage
@@ -377,6 +380,7 @@ fn accounts_status_blocking() -> AccountsStatus {
         claude_cli: claude_cli_logged_in(),
         codex_cli: codex_cli_logged_in(),
         kimi_cli: kimi_cli_logged_in(),
+        grok_cli: grok_cli_logged_in(),
     }
 }
 
@@ -1073,6 +1077,17 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             )
             .await
         }
+        // xAI Grok Build CLI: `grok -p <prompt>` is the non-interactive
+        // one-shot shape (SuperGrok / X Premium+ subscription auth).
+        "grok_cli" => {
+            probe_cli_subscription(
+                find_grok_cli(),
+                vec!["-p".into(), "ok".into()],
+                "Grok",
+                None,
+            )
+            .await
+        }
 
         // -- API keys: HTTP GET the provider's /v1/models endpoint
         //    with the key in Authorization. 200 = valid. 401/403 =
@@ -1503,6 +1518,33 @@ fn find_kimi_cli() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Locate the `grok` executable (xAI's Grok Build CLI). Same resolution
+/// shape as the other subscription CLIs.
+fn find_grok_cli() -> Option<PathBuf> {
+    for name in ["grok.exe", "grok.cmd", "grok"] {
+        if let Some(path) = which_extended(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Grok Build keeps its sign-in state under ~/.grok (config.toml plus a
+/// credentials cache written by the first-run browser sign-in). Same
+/// lenient marker approach as kimi: any of the known files counts.
+fn grok_cli_logged_in() -> bool {
+    if find_grok_cli().is_none() {
+        return false;
+    }
+    let Some(home) = user_home_dir() else {
+        return false;
+    };
+    let grok = home.join(".grok");
+    grok.join("config.toml").is_file()
+        || grok.join("credentials.json").is_file()
+        || grok.join("auth.json").is_file()
 }
 
 fn which_in_path(name: &str) -> Result<PathBuf, ()> {
@@ -3791,6 +3833,10 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         "codex_cli" => (find_codex_cli, &["login"]),
         "kimi_cli" => (find_kimi_cli, &[]),
         "gemini_cli" => (find_gemini_cli, &[]),
+        // Grok Build (xAI): first interactive run opens the browser
+        // sign-in (X / SuperGrok account) — same no-args REPL flavour
+        // as claude/kimi/gemini.
+        "grok_cli" => (find_grok_cli, &[]),
         other => return Err(format!("unknown subscription backend: {other}")),
     };
     let exe = find_fn()
@@ -4244,6 +4290,94 @@ pub async fn gemini_cli_complete(
         // Exit-0 auth envelope — same check every other CLI path does: gemini
         // can print the auth failure as its "answer" and exit 0, which sailed
         // through as the agent's reply so the token-refresh retry never fired.
+        if looks_like_cli_auth_error(&reply) {
+            return Err(reply);
+        }
+        Ok(reply)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// One-shot completion via the `grok` CLI (xAI Grok Build — SuperGrok /
+/// X Premium+ subscription auth). `-p` is the non-interactive one-shot
+/// flag, `-m` selects the model. Same argv-limit fold as the gemini /
+/// kimi / claude paths: a large composed prompt goes on stdin with an
+/// empty `-p` so the spawn never dies on the Windows command-line cap.
+#[tauri::command]
+pub async fn grok_cli_complete(
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let composed = if system_prompt.trim().is_empty() {
+            user_message
+        } else {
+            format!("{system_prompt}\n\n---\n\n{user_message}")
+        };
+        const MAX_PROMPT_ARG: usize = 4000;
+        let fold_prompt_into_stdin = composed.len() > MAX_PROMPT_ARG;
+        let mut args: Vec<String> = Vec::new();
+        if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("-m".into());
+            args.push(m.to_string());
+        }
+        args.push("-p".into());
+        args.push(if fold_prompt_into_stdin { String::new() } else { composed.clone() });
+
+        // WSL-isolated project → run `grok` inside the distro; else Windows CLI.
+        let mut cmd = if let Some((exe, sargs)) =
+            crate::sandbox::program_argv(cwd.as_deref(), "grok", &args)
+        {
+            let mut c = Command::new(exe);
+            c.args(sargs);
+            c
+        } else {
+            let exe = find_grok_cli()
+                .ok_or_else(|| "grok CLI not found on PATH — install Grok Build (https://x.ai/news/grok-build-cli) first".to_string())?;
+            #[cfg(windows)]
+            let batch = is_batch_shim(&exe);
+            #[cfg(not(windows))]
+            let batch = false;
+            let mut c = Command::new(&exe);
+            for a in &args {
+                push_arg(&mut c, batch, a);
+            }
+            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let p = std::path::Path::new(dir);
+                if p.is_dir() {
+                    c.current_dir(p);
+                }
+            }
+            c
+        };
+        cmd.stdin(if fold_prompt_into_stdin { Stdio::piped() } else { Stdio::null() });
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn grok: {e}"))?;
+        let pid = register_cli_child(&child);
+        if fold_prompt_into_stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write as _;
+                let _ = stdin.write_all(composed.as_bytes());
+            }
+        }
+        let output = wait_cli_child(child, pid).map_err(|e| format!("wait grok: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            return Err(cli_exit_err("grok", output.status.code().unwrap_or(-1), &stdout, &stderr));
+        }
+        let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
+        let reply = stdout.trim().to_string();
+        // Exit-0 auth envelope — same check as every other CLI path.
         if looks_like_cli_auth_error(&reply) {
             return Err(reply);
         }

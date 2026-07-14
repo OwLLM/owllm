@@ -216,6 +216,8 @@ const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } |
   codex_cli:  { cli: "codex",  args: ["login"] },
   kimi_cli:   { cli: "kimi",   args: [], send: "/login\r" },
   gemini_cli: { cli: "gemini", args: [], send: "/auth\r" },
+  // Grok Build: the bare REPL opens the browser sign-in on first run.
+  grok_cli:   { cli: "grok",   args: [] },
 };
 
 const PAGE_BG = "var(--bg-panel)";
@@ -238,6 +240,7 @@ type AccountsStatus = {
   codex_cli: boolean;
   kimi_cli: boolean;
   gemini_cli: boolean;
+  grok_cli: boolean;
 };
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
 
@@ -346,7 +349,7 @@ const PROVIDERS: ProviderSpec[] = [
     accent: "#9aa0a6",
     accentTop: "#1a1c1f",
     routes: [
-      { key: "xai_subscription", kind: "subscription", routeLabel: "Subscription · SuperGrok / X Premium+", backend: "xai_web", webOnly: { url: "https://grok.com" } },
+      { key: "xai_subscription", kind: "subscription", routeLabel: "Subscription · Grok Build CLI (SuperGrok / X Premium+)", backend: "grok_cli" },
       { key: "xai_api",          kind: "api",          routeLabel: "API · XAI_API_KEY",                       backend: "xai_api", envName: "XAI_API_KEY" },
     ],
   },
@@ -953,6 +956,7 @@ export default function AccountsPage() {
       flag("codex_subscription",    status.codex_cli);
       flag("kimi_subscription",     status.kimi_cli);
       flag("gemini_subscription",   status.gemini_cli);
+      flag("xai_subscription",      status.grok_cli);
       return next;
     });
   }
@@ -1035,6 +1039,7 @@ export default function AccountsPage() {
         codex_cli:  "follow the OAuth URL that appears.",
         kimi_cli:   "auto-running /login — complete the browser sign-in.",
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",
+        grok_cli:   "first run opens the X / SuperGrok browser sign-in — complete it there.",
       };
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
       setActiveTerm({

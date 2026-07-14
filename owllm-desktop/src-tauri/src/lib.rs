@@ -45,6 +45,7 @@ mod fleet;
 mod frame_shape;
 mod git;
 mod github;
+mod gguf;
 mod hardware;
 mod huggingface;
 mod kvm;

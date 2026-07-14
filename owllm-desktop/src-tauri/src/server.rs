@@ -24,6 +24,13 @@ pub struct ServerStatus {
     pub model_id: Option<String>,
     pub port: Option<u16>,
     pub message: String,
+    /// Context window (`-c`) the server was actually started with. When this is
+    /// below what the user asked for, `context_notice` explains why so the cap
+    /// is never silent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_notice: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -117,6 +124,12 @@ struct Inner {
     /// port — `child` is None because we don't own the process. Lets many
     /// instances share one model server instead of fighting over the port.
     adopted: bool,
+    /// Context window the last start actually passed to `-c`, and a plain-language
+    /// notice when it was capped below the request (so the Server page can show
+    /// the user WHY they got fewer tokens than they picked). Persist across the
+    /// status transitions so the explanation stays visible while it runs.
+    ctx_granted: Option<u32>,
+    ctx_notice: Option<String>,
 }
 
 /// Is a llama-server reachable on this loopback port right now? True when the
@@ -255,11 +268,15 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
                 model_id: inner.model_id.clone(),
                 port,
                 message: inner.message.clone(),
+                context: inner.ctx_granted,
+                context_notice: inner.ctx_notice.clone(),
             });
         }
         inner.adopted = false;
         inner.model_id = None;
         inner.port = None;
+        inner.ctx_granted = None;
+        inner.ctx_notice = None;
         inner.message =
             "The shared model server stopped (the OwLLM instance that owned it closed)."
                 .to_string();
@@ -268,6 +285,8 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
             model_id: None,
             port: None,
             message: inner.message.clone(),
+            context: None,
+            context_notice: None,
         });
     }
     // Reap dead child so the "running" bit doesn't lie after a crash.
@@ -322,6 +341,8 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
         model_id: inner.model_id.clone(),
         port: inner.port,
         message: inner.message.clone(),
+        context: if alive { inner.ctx_granted } else { None },
+        context_notice: if alive { inner.ctx_notice.clone() } else { None },
     })
 }
 
@@ -503,14 +524,16 @@ pub async fn server_start(
     // specialist's reply + history and overflows ("Context size has been
     // exceeded"). The KV cache grows linearly with context, so a bigger card
     // affords a bigger window; a small card stays conservative so models load.
-    // Largest context whose KV cache fits on the GPU ALONGSIDE the model weights.
-    // The old code keyed -c off TOTAL VRAM (≥20 GB → 32768) and ignored the weights
-    // already in VRAM, so a big model (e.g. a 17–19 GB model on a 24 GB 4090) got a
-    // 32k window whose ~5–8 GB KV cache no longer fit — and with `-fit off -ngl 99`
-    // that overflow ran on the CPU, dropping to a few tok/s while VRAM LOOKED full.
-    // We compute the fitting size from headroom = VRAM − weights − reserve, and then
-    // CAP the requested/stored value to it: a stale 32768 default must not be allowed
-    // to silently spill to CPU. A SMALLER explicit value is still honoured.
+    // Size the context to what the model's KV cache actually needs on THIS GPU.
+    // The old code keyed -c off a coarse VRAM-headroom ladder that ASSUMED a
+    // full-attention cache. That floored modern models absurdly: a 4B Gemma with
+    // sliding-window attention needs only ~0.5 GB of KV at 16K, but the ladder
+    // saw "<1 GB headroom" and capped it to 2048 — the exact bug the user hit.
+    // We now read the real attention geometry (layers, per-layer GQA kv-heads,
+    // key/value lengths, sliding-window pattern) from the GGUF header and compute
+    // the EXACT KV bytes — the same arithmetic llama.cpp uses — so we honour the
+    // user's choice whenever it truly fits, and cap it HONESTLY (surfacing the
+    // real numbers via ctx_notice → the Server page) only when it genuinely won't.
     let budget = crate::hardware::gpu_memory_budget().await;
     let (vram, unified) = budget.map(|b| (b.gb, b.unified)).unwrap_or((8.0, false));
     let model_gb = std::fs::metadata(&base_model)
@@ -523,7 +546,9 @@ pub async fn server_start(
     // system (the inverse of the discrete-VRAM spill bug this formula fixed).
     let reserve = if unified { (vram * 0.25).max(4.0) } else { 2.0 };
     let headroom = (vram - model_gb - reserve).max(0.0);
-    let max_fit: u32 = if headroom >= 8.0 {
+    // Coarse fallback ladder — used ONLY when the GGUF geometry can't be read.
+    // It assumes full attention, so it stays deliberately conservative.
+    let coarse_max_fit: u32 = if headroom >= 8.0 {
         32768
     } else if headroom >= 5.0 {
         16384
@@ -536,43 +561,70 @@ pub async fn server_start(
     } else {
         2048
     };
-    let ctx_size = match ctx {
-        // Honour an explicit choice — but cap it to what physically fits so it can't
-        // spill the KV cache onto the CPU. (model_gb==0 → couldn't stat; trust the ask.)
-        Some(c) if c >= 512 => {
-            if model_gb > 0.0 && c > max_fit {
-                let _ = app.emit("server-log", ServerLogEvent {
-                    stream: "stdout".into(),
-                    line: format!(
-                        "[supervisor] context {c} would spill to CPU — capped to {max_fit} so the {:.1} GB model + KV fit your {:.1} GB {} (a stale 32k default was the cause of the slow tok/s). For a bigger window at full GPU speed, use a smaller model/quant.",
-                        model_gb, vram, if unified { "unified memory" } else { "VRAM" },
-                    ),
-                });
-                max_fit
-            } else {
-                c
-            }
-        }
-        _ => {
-            if model_gb > 0.0 {
-                let _ = app.emit("server-log", ServerLogEvent {
-                    stream: "stdout".into(),
-                    line: format!(
-                        "[supervisor] auto context {} — model {:.1} GB + KV must fit your {:.1} GB {} (headroom {:.1} GB). For a bigger context with full GPU speed, use a smaller model/quant.",
-                        max_fit, model_gb, vram,
-                        if unified { "unified memory (shared with the OS)" } else { "VRAM" },
-                        headroom,
-                    ),
-                });
-            }
-            max_fit
-        }
+    // What the user (or the auto policy) is asking for. Auto aims high (32K is
+    // the sweet spot for agentic teams) and lets the fit shrink it to reality.
+    let explicit = matches!(ctx, Some(c) if c >= 512);
+    let requested: u32 = match ctx {
+        Some(c) if c >= 512 => c,
+        _ => 32768,
     };
+    let mem = if unified { "unified memory" } else { "VRAM" };
+    let mut ctx_notice: Option<String> = None;
+    let ctx_size: u32 = if model_gb > 0.0 {
+        if let Some(geom) = crate::gguf::read_geometry(std::path::Path::new(&base_model)) {
+            let avail_bytes = ((vram - model_gb - reserve).max(0.0) * 1e9) as u64;
+            let (granted, kv_bytes) = geom.fit_context(requested, avail_bytes);
+            let kv_gb = kv_bytes as f64 / 1e9;
+            if explicit && granted < requested {
+                // A REAL cap — say so, with the numbers, so it's never silent.
+                let req_kv_gb = geom.kv_cache_bytes(requested) as f64 / 1e9;
+                ctx_notice = Some(format!(
+                    "Context capped to {granted} tokens — you asked for {requested}, but its KV cache (~{:.1} GB) plus the {:.1} GB model won't fit your {:.1} GB {mem} (≈{:.0} GB is reserved for compute). Free some {mem} or load a smaller quant to get the full window.",
+                    req_kv_gb, model_gb, vram, reserve,
+                ));
+            } else if !explicit {
+                ctx_notice = Some(format!(
+                    "Auto context {granted} tokens (KV ~{:.1} GB) — sized to fit the {:.1} GB model in your {:.1} GB {mem}. Pick a value on the Server page to override.",
+                    kv_gb, model_gb, vram,
+                ));
+            }
+            let _ = app.emit("server-log", ServerLogEvent {
+                stream: "stdout".into(),
+                line: format!(
+                    "[supervisor] context = {granted} tokens (real GGUF geometry: {} {} layers{}, KV ~{:.2} GB). model {:.1} GB in {:.1} GB {mem}{}.",
+                    if geom.arch.is_empty() { "model" } else { geom.arch.as_str() },
+                    geom.block_count,
+                    if geom.sliding_window.is_some() { ", sliding-window" } else { "" },
+                    kv_gb, model_gb, vram,
+                    if explicit && granted < requested { format!(" — CAPPED from {requested}") } else { String::new() },
+                ),
+            });
+            granted
+        } else {
+            // GGUF geometry unreadable → conservative ladder; honour a smaller ask.
+            let granted = if explicit { requested.min(coarse_max_fit) } else { coarse_max_fit };
+            if explicit && granted < requested {
+                ctx_notice = Some(format!(
+                    "Context capped to {granted} — you asked for {requested}. OwLLM couldn't read this model's KV geometry, so it sized conservatively to keep the {:.1} GB model + cache inside your {:.1} GB {mem}. Free some {mem} or use a smaller quant for more.",
+                    model_gb, vram,
+                ));
+            }
+            let _ = app.emit("server-log", ServerLogEvent {
+                stream: "stdout".into(),
+                line: format!(
+                    "[supervisor] context = {granted} tokens (heuristic — GGUF geometry unreadable; headroom {:.1} GB).",
+                    headroom,
+                ),
+            });
+            granted
+        }
+    } else {
+        // Couldn't stat the model file — trust the explicit ask, else a safe 8192.
+        if explicit { requested } else { 8192 }
+    };
+    inner.ctx_granted = Some(ctx_size);
+    inner.ctx_notice = ctx_notice;
     cmd.arg("-c").arg(ctx_size.to_string());
-    let _ = app.emit("server-log", ServerLogEvent {
-        stream: "stdout".into(),
-        line: format!("[supervisor] context window = {ctx_size} tokens (KV cache sized to this; raise it on the Server page if your GPU has room)."),
-    });
     // Let llama.cpp pick the slot count for concurrent local requests and keep
     // continuous batching enabled. OWLLM can fan out local agents in parallel;
     // this makes the server-side concurrency policy explicit instead of relying

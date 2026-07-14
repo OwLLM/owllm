@@ -1659,6 +1659,14 @@ fn extra_search_dirs() -> Vec<PathBuf> {
         if volta_bin.is_dir() {
             dirs.push(volta_bin);
         }
+        // xAI Grok Build installs `grok` (and `agent`) into ~/.grok/bin and
+        // adds it to the User PATH — but that PATH edit isn't visible to the
+        // already-running app, so search the dir directly for immediate
+        // discovery after the in-app installer finishes (no restart needed).
+        let grok_bin = PathBuf::from(h).join(".grok").join("bin");
+        if grok_bin.is_dir() {
+            dirs.push(grok_bin);
+        }
     }
 
     // Volta on Windows installs its shims under %LOCALAPPDATA%\Volta\bin.
@@ -3939,7 +3947,42 @@ pub async fn cli_install_stream(
     };
     let kimi_via_pip = backend == "kimi_cli" && kimi_uv.is_none();
 
-    let (tool_path, args): (PathBuf, Vec<String>) = if let Some(uv) = kimi_uv {
+    // Grok Build (xAI) ships platform installers, not an npm/pip package:
+    //   Windows      → official PowerShell installer (irm .../install.ps1 | iex)
+    //   macOS/Linux  → shell installer (curl -fsSL .../install.sh | bash)
+    // Both drop `grok` into ~/.grok/bin (which extra_search_dirs() now walks,
+    // so the card sees it without an app restart). On Windows we run the
+    // documented installer automatically rather than making the user do it by
+    // hand — same "one click, we handle it" flow as the npm/pip CLIs.
+    #[cfg(windows)]
+    let grok_native: Option<(PathBuf, Vec<String>)> = if backend == "grok_cli" {
+        let ps = which_extended("powershell.exe")
+            .or_else(|| which_extended("pwsh.exe"))
+            .ok_or_else(|| {
+                "PowerShell not found — can't run xAI's Grok Build installer. Use this card's 'API · XAI_API_KEY' route instead.".to_string()
+            })?;
+        Some((
+            ps,
+            [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "irm https://x.ai/cli/install.ps1 | iex",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        ))
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    let grok_native: Option<(PathBuf, Vec<String>)> = None;
+
+    let (tool_path, args): (PathBuf, Vec<String>) = if let Some(g) = grok_native {
+        g
+    } else if let Some(uv) = kimi_uv {
         // `uv tool install` puts the shim in ~/.local/bin, which
         // extra_search_dirs() already walks — no restart needed.
         (
@@ -3962,20 +4005,9 @@ pub async fn cli_install_stream(
             "codex_cli" => ("npm", vec!["install", "-g", "@openai/codex"]),
             "kimi_cli" => ("pip", vec!["install", "--upgrade", "kimi-cli"]),
             "gemini_cli" => ("npm", vec!["install", "-g", "@google/gemini-cli"]),
-            // Grok Build ships a shell-script installer (curl | bash), NOT an
-            // npm/pip package. xAI officially supports macOS/Linux only; on
-            // Windows the honest answer is WSL or the API-key route, so we
-            // don't fake a native install that would leave a broken binary.
-            "grok_cli" => {
-                #[cfg(windows)]
-                {
-                    return Err("Grok Build CLI isn't officially supported on Windows by xAI. Install it inside WSL with:  curl -fsSL https://x.ai/cli/install.sh | bash  — or use this card's 'API · XAI_API_KEY' route instead.".to_string());
-                }
-                #[cfg(not(windows))]
-                {
-                    ("sh", vec!["-c", "curl -fsSL https://x.ai/cli/install.sh | bash"])
-                }
-            }
+            // Grok Build's macOS/Linux installer is a curl|bash shell pipeline
+            // (the Windows PowerShell path is handled above in grok_native).
+            "grok_cli" => ("sh", vec!["-c", "curl -fsSL https://x.ai/cli/install.sh | bash"]),
             other => return Err(format!("unknown CLI backend: {other}")),
         };
 
@@ -4117,12 +4149,13 @@ pub fn cli_install(backend: String) -> Result<(), String> {
     //   * Codex:       @openai/codex (npm)
     //   * Kimi Code:   kimi-cli (pip)
     //   * Gemini CLI:  @google/gemini-cli (npm)
-    // Grok Build installs via a shell-script pipeline (curl | bash), which
-    // this legacy console launcher's whitespace-split runner can't execute
-    // safely — the in-app streaming installer (cli_install_stream) is the
-    // supported path. Point the caller there rather than mis-run the pipe.
+    // Grok Build installs via a platform installer (PowerShell on Windows,
+    // curl|bash on macOS/Linux), which this legacy console launcher's
+    // whitespace-split runner can't execute safely — the in-app streaming
+    // installer (cli_install_stream) runs the right one automatically. Point
+    // the caller there rather than mis-run the pipeline.
     if backend == "grok_cli" {
-        return Err("Use the card's Install button (streaming installer) for Grok Build — on macOS/Linux it runs  curl -fsSL https://x.ai/cli/install.sh | bash. Windows isn't officially supported by xAI; use WSL or the API · XAI_API_KEY route.".to_string());
+        return Err("Use the card's Install button (streaming installer) for Grok Build — it runs xAI's official installer for your OS automatically (PowerShell on Windows, curl|bash on macOS/Linux).".to_string());
     }
     let (tool, install_cmd) = match backend.as_str() {
         "claude_cli" => ("npm", "npm install -g @anthropic-ai/claude-code"),

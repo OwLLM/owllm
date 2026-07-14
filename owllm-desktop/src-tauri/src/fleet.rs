@@ -69,7 +69,7 @@ fn repo_create_lock(repo: &Path) -> Arc<Mutex<()>> {
 /// no fault of the user — which used to make EVERY `fleet_worktree_create` bounce
 /// with DirtyWorkingTree. The worktree is cut from HEAD regardless, so ignoring
 /// these in the guard changes nothing about what lands in the worktree.
-fn is_app_scratch(path: &str) -> bool {
+pub(crate) fn is_app_scratch(path: &str) -> bool {
     let p = path.trim().trim_start_matches("./").replace('\\', "/");
     p == ".owllm-inbox"
         || p == ".owllm"

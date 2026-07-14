@@ -353,6 +353,7 @@ pub fn run() {
             browser_vault::browser_vault_autofill,
             browser_import::browser_import_scan,
             browser_import::browser_import_run,
+            browser_import::browser_import_csv,
             git::git_status,
             git::git_branches,
             git::git_checkout,

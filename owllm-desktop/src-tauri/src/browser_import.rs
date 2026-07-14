@@ -277,6 +277,114 @@ pub fn browser_import_run(id: String) -> Result<String, String> {
     import_chromium(kind)
 }
 
+/// Import saved logins from a browser-exported CSV (Chrome/Edge/Brave: Settings
+/// → Passwords → ⋮ → Export passwords; Firefox: about:logins → Export). This is
+/// the reliable, cross-platform, cross-version path: unlike direct DB import it
+/// is unaffected by Chrome/Edge 127+ App-Bound Encryption, which OwLLM can't
+/// read. Columns are matched by header name (url/username/password + common
+/// aliases) so one parser handles every browser's export layout.
+#[tauri::command(async)]
+pub fn browser_import_csv(path: String) -> Result<String, String> {
+    let raw = std::fs::read_to_string(&path).map_err(|e| format!("could not read CSV: {e}"))?;
+    let text = raw.strip_prefix('\u{feff}').unwrap_or(&raw); // drop a UTF-8 BOM
+    let records = parse_csv(text);
+    let header = records.first().ok_or_else(|| "that CSV is empty".to_string())?;
+    let url_i = find_col(header, &["url", "website", "login_uri", "uri", "origin"])
+        .ok_or_else(|| "no 'url' column in that CSV — export it from your browser's password manager (Chrome/Edge: Settings → Passwords → ⋮ → Export passwords)".to_string())?;
+    let pass_i = find_col(header, &["password", "pass", "login_password"])
+        .ok_or_else(|| "no 'password' column in that CSV".to_string())?;
+    let user_i = find_col(header, &["username", "user", "login", "email", "login_username"]);
+
+    let now = now_ms();
+    let mut creds = Vec::new();
+    let mut skipped = 0usize;
+    for row in records.iter().skip(1) {
+        if row.iter().all(|f| f.trim().is_empty()) {
+            continue; // blank line
+        }
+        let cell = |i: usize| row.get(i).map(|s| s.trim().to_string()).unwrap_or_default();
+        let origin = crate::browser_vault::normalize_origin(&cell(url_i));
+        let password = cell(pass_i);
+        if origin.is_empty() || password.is_empty() {
+            skipped += 1;
+            continue;
+        }
+        let username = match user_i {
+            Some(i) => cell(i),
+            None => String::new(),
+        };
+        creds.push(crate::browser_vault::BrowserCred {
+            origin,
+            username,
+            password,
+            note: "imported from CSV".into(),
+            ts: now,
+        });
+    }
+    if creds.is_empty() {
+        return Err("no usable logins in that CSV (each row needs a url and a password)".into());
+    }
+    let n = crate::browser_vault::store_imported(creds)?;
+    if skipped > 0 {
+        return Ok(format!(
+            "Imported {n} login(s) from CSV. Skipped {skipped} row(s) with no url or password."
+        ));
+    }
+    Ok(format!("Imported {n} login(s) from CSV"))
+}
+
+/// Index of the first column whose header (trimmed, unquoted, lowercased) equals
+/// one of `names`.
+fn find_col(header: &[String], names: &[&str]) -> Option<usize> {
+    header.iter().position(|h| {
+        let h = h.trim().trim_matches('"').to_ascii_lowercase();
+        names.contains(&h.as_str())
+    })
+}
+
+/// Minimal RFC-4180 CSV parser: fields split on ',', records on newlines, with
+/// "..." quoting that allows embedded commas/newlines and "" -> " escapes.
+/// Passwords routinely contain those characters, so a naive line/comma split
+/// would corrupt them. Returns rows of fields.
+fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let mut records: Vec<Vec<String>> = Vec::new();
+    let mut record: Vec<String> = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    chars.next();
+                    field.push('"');
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                field.push(c);
+            }
+        } else {
+            match c {
+                '"' => in_quotes = true,
+                ',' => record.push(std::mem::take(&mut field)),
+                '\r' => {} // fold CRLF into the '\n' case
+                '\n' => {
+                    record.push(std::mem::take(&mut field));
+                    records.push(std::mem::take(&mut record));
+                }
+                _ => field.push(c),
+            }
+        }
+    }
+    // Flush a final line that lacked a trailing newline.
+    if !field.is_empty() || !record.is_empty() {
+        record.push(field);
+        records.push(record);
+    }
+    records
+}
+
 #[cfg(windows)]
 fn import_chromium(kind: BrowserKind) -> Result<String, String> {
     let (root, profile) =
@@ -451,5 +559,41 @@ mod tests {
     fn split_v10_rejects_short_or_untagged() {
         assert!(split_v10(b"v10short").is_none());
         assert!(split_v10(b"plaintextblobwithoutversiontag").is_none());
+    }
+
+    fn flat(r: &[Vec<String>]) -> Vec<Vec<&str>> {
+        r.iter()
+            .map(|row| row.iter().map(String::as_str).collect())
+            .collect()
+    }
+
+    #[test]
+    fn csv_parses_quotes_commas_and_crlf() {
+        let text = "url,username,password\r\nhttps://a.com,me,\"p,w\"\"x\"\r\n";
+        let r = parse_csv(text);
+        assert_eq!(
+            flat(&r),
+            vec![
+                vec!["url", "username", "password"],
+                vec!["https://a.com", "me", "p,w\"x"],
+            ]
+        );
+    }
+
+    #[test]
+    fn csv_last_line_without_newline() {
+        assert_eq!(flat(&parse_csv("a,b,c")), vec![vec!["a", "b", "c"]]);
+    }
+
+    #[test]
+    fn find_col_matches_aliases_case_insensitively() {
+        let h = vec![
+            "Name".to_string(),
+            "URL".to_string(),
+            "login_password".to_string(),
+        ];
+        assert_eq!(find_col(&h, &["url", "website"]), Some(1));
+        assert_eq!(find_col(&h, &["password", "login_password"]), Some(2));
+        assert_eq!(find_col(&h, &["username"]), None);
     }
 }

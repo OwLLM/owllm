@@ -616,6 +616,21 @@ function WebLoginsCard({
     finally { setBusy(false); }
   }
 
+  async function importCsv() {
+    setBusy(true);
+    try {
+      const path = await invoke<string | null>("pick_file", {
+        title: "Choose a passwords CSV exported from your browser",
+        filters: [["CSV", ["csv"]]],
+      });
+      if (!path) return;
+      const out = await invoke<string>("browser_import_csv", { path });
+      setMsg({ tone: "success", text: out });
+      await load(); await onChange();
+    } catch (e) { setMsg({ tone: "error", text: `CSV import failed: ${e}` }); }
+    finally { setBusy(false); }
+  }
+
   return (
     <section style={{ ...SURFACE.card, borderRadius: 10, padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -663,6 +678,13 @@ function WebLoginsCard({
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <div style={{ ...TEXT.strong, fontSize: 12.5, fontWeight: 700 }}>Import from your browsers</div>
           <button disabled={busy} onClick={scan} style={{ ...BUTTON.ghost, fontSize: 11, padding: "3px 10px" }}>Scan</button>
+          <div style={{ flex: 1 }} />
+          <button disabled={busy} onClick={importCsv} style={{ ...BUTTON.ghost, fontSize: 11, padding: "3px 10px" }}
+            title="Import a passwords CSV exported from any browser — works around Chrome/Edge 127+ App-Bound Encryption.">Import CSV…</button>
+        </div>
+        <div style={{ ...TEXT.subtle, fontSize: 11, lineHeight: 1.45 }}>
+          Chrome/Edge 127+ protect saved passwords with App-Bound Encryption, so direct import can't read them.
+          Export a CSV (browser Settings → Passwords → ⋮ → Export passwords) and use “Import CSV…”.
         </div>
         {detected && detected.length === 0 && (
           <div style={{ ...TEXT.subtle, fontSize: 11.5 }}>No browsers with saved passwords found.</div>

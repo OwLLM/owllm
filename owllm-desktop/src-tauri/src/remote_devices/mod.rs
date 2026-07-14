@@ -182,16 +182,22 @@ fn env_override() -> bool {
         .unwrap_or(false)
 }
 
-fn load_enabled() -> bool {
+/// Explicit on/off from the toggle file — `None` when the user never set it.
+fn enabled_explicit() -> Option<bool> {
     enabled_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v.get("enabled").and_then(Value::as_bool))
-        .unwrap_or(false)
 }
 
 fn feature_enabled() -> bool {
-    env_override() || load_enabled()
+    // On by default for a machine signed into the account that owns the private
+    // vault (same GitHub login) — a device that's provably one of your own is
+    // reachable without anyone toggling it on at that keyboard, which is the
+    // whole point of controlling your own PCs without interaction. Inbound is
+    // still fully gated: only vault-verified (same-account) controllers
+    // auto-trust; anyone else lands in Pending. An explicit toggle always wins.
+    env_override() || enabled_explicit().unwrap_or_else(|| github_login().is_some())
 }
 
 fn set_enabled(enabled: bool) -> Result<(), String> {
@@ -860,6 +866,13 @@ pub fn init(app: &AppHandle) {
     store_app(app);
     tauri::async_runtime::spawn(async {
         ensure_listener_started(tokio::runtime::Handle::current());
+        // Publish our record (endpoints + p2p node id) and pull peers right at
+        // boot, so an auto-enabled machine becomes discoverable without anyone
+        // clicking Discover on it. Fire-and-forget — the git round-trip must
+        // not stall startup, and it's a no-op when the feature is off.
+        if feature_enabled() {
+            let _ = crate::vault::vault_sync_devices().await;
+        }
     });
 }
 
@@ -1409,7 +1422,11 @@ mod tests {
         let _g = TEST_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("OWLLM_USER_DATA", dir.path());
-        std::env::remove_var("OWLLM_REMOTE_DEVICES"); // feature OFF
+        std::env::remove_var("OWLLM_REMOTE_DEVICES");
+        // Explicitly disable — an explicit toggle always wins over the
+        // signed-into-account default, so this holds regardless of whether the
+        // machine running the test happens to have a GitHub login.
+        set_enabled(false).unwrap();
 
         let target = identity::load_or_create().unwrap();
         let controller = crypto::DeviceSecrets::generate();

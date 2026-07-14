@@ -60,7 +60,7 @@ export default function SigningPage() {
 
   return (
     <div style={{ ...SURFACE.page, height: "100%", overflowY: "auto", padding: "18px 22px" }}>
-      <div style={{ maxWidth: 820, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
+      <div style={{ maxWidth: 1500, margin: "0 auto", display: "flex", flexDirection: "column", gap: 16 }}>
         <header style={{ display: "flex", flexDirection: "column", gap: 4 }}>
           <div style={{ ...TEXT.strong, fontSize: 20, fontWeight: 800 }}>🖊 Signing &amp; credentials</div>
           <div style={{ ...TEXT.muted, fontSize: 12.5, lineHeight: 1.55 }}>
@@ -75,9 +75,20 @@ export default function SigningPage() {
 
         {msg && <div style={banner(msg.tone)}>{msg.text}</div>}
 
-        <AppleCard apple={status?.apple ?? null} onChange={refresh} setMsg={setMsg} />
-        <WindowsCard win={status?.windows ?? null} hub={hub} onChange={refresh} setMsg={setMsg} />
-        <WebLoginsCard hub={hub} onChange={refresh} setMsg={setMsg} />
+        {/* Two full-width, auto-resizing columns: the tall Apple set on the left,
+            Windows + Web logins stacked on the right. Collapses to a single
+            column on narrow viewports via auto-fit. */}
+        <div style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(420px, 1fr))",
+          gap: 16, alignItems: "start",
+        }}>
+          <AppleCard apple={status?.apple ?? null} onChange={refresh} setMsg={setMsg} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            <WindowsCard win={status?.windows ?? null} hub={hub} onChange={refresh} setMsg={setMsg} />
+            <WebLoginsCard hub={hub} onChange={refresh} setMsg={setMsg} />
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -7,9 +7,11 @@ not a GitHub login. GitHub account matching helps **discovery**; a paired,
 signed device key is what grants **control**. WSL is just one execution
 environment *inside* a Windows target.
 
-Status: **shipped, WAN-capable.** Real cross-machine control works on the same
-LAN, across an overlay (Tailscale/WireGuard/VPN), to a public host you set, or
-through a self-hostable relay — so devices do NOT need to be on the same network.
+Status: **shipped, WAN-capable, zero-setup off-LAN.** Real cross-machine control
+works on the same LAN, from anywhere via the embedded P2P transport (iroh — no
+account, no VPN, no port-forward), across an overlay (Tailscale/WireGuard/VPN),
+to a public host you set, or through a self-hostable relay — so devices do NOT
+need to be on the same network.
 Module lives at `src-tauri/src/remote_devices/` (Rust) and
 `ui/src/pages/advanced/DevicesPage.tsx` (UI). The name `fleet` was already taken
 by git-worktree agent isolation (`fleet.rs`), so this module is `remote_devices`.
@@ -20,13 +22,21 @@ Control flows to whatever address the two machines can route to each other on.
 Each device publishes ALL its candidate addresses (most WAN-reachable first) and
 the controller tries each, then falls back to a relay:
 
-1. **Overlay (recommended)** — on a Tailscale/WireGuard/VPN, the device's overlay
+1. **Overlay** — on a Tailscale/WireGuard/VPN, the device's overlay
    IP (e.g. a Tailscale `100.x`) is auto-detected and published, so direct
    control works from anywhere with automatic NAT traversal and no config here.
 2. **Public endpoint** — set a per-device `host:port` (port-forward / DDNS /
    Tailscale MagicDNS); it's published as the first candidate.
 3. **LAN IP** — same-network direct.
-4. **Relay** — a self-hostable store-and-forward server (`relay.rs`, or an
+4. **Embedded P2P (recommended off-LAN — zero setup)** — iroh compiled into the
+   app (`p2p.rs`): QUIC with NAT hole-punching, falling back to n0's free public
+   relay fleet. No account, no login, no daemon. Each device has a dedicated
+   iroh keypair (separate from the identity keypair; DPAPI-wrapped) and publishes
+   its `p2p_node_id` in the device record; peers dial by id alone — and can even
+   *pair* by node id typed into the Pair box. iroh's own encryption is just an
+   extra shell: the frames it carries are the same sealed envelopes, so n0's
+   relays see ciphertext-in-ciphertext.
+5. **Relay** — a self-hostable store-and-forward server (`relay.rs`, or an
    always-on OwLLM instance via `device_relay_serve`). BOTH devices dial OUT to
    it, so it works behind any NAT. The relay only ever moves ciphertext and
    matches replies by correlation id — it can't read, forge, or replay anything.
@@ -72,6 +82,9 @@ src-tauri/src/remote_devices/
   executor.rs    Diagnostics / shell / WSL / FileWrite exec, timeout + cancellation
   transport.rs   Transport trait + LoopbackTransport (self) + LanDirectTransport (peer)
   lan.rs         tiny_http listener + reqwest client (the LAN-direct wire)
+  p2p.rs         Embedded P2P (iroh): hole-punching QUIC + public-relay fallback,
+                 dedicated keypair, dial/pair by p2p_node_id — zero-setup off-LAN
+  relay.rs       Self-hostable WAN relay: RelayTransport + client loop + serve()
   audit.rs       Redacted append-only JSONL, both sides (+ redaction tests)
 ```
 
@@ -122,8 +135,9 @@ peer has no address. **The vault is metadata-only
 and is never a command queue** — control never flows through git. Records are
 rejected on ingest unless their id matches their Ed25519 key.
 
-No vault? You can still **pair by IP**: type a peer's `ip:port` and the two
-devices exchange public records directly over the LAN.
+No vault? You can still **pair by address**: type a peer's `ip:port` (LAN) or
+its `p2p_node_id` (from anywhere, via the embedded P2P transport) and the two
+devices exchange public records directly.
 
 ## Transport abstraction
 
@@ -150,14 +164,18 @@ Every transport gets a fresh sealed reply, so the return path is encrypted too:
 the target seals the `CommandResult` back to the controller's authenticated
 static X25519 key (carried, signed, in the request frame).
 
-- **`RelayTransport`** — WAN store-and-forward for pure-NAT peers (see the WAN
-  section above). Implements the same trait; because the relay only sees frames,
-  it changes **nothing** about the security properties.
+- **`P2pTransport`** — embedded iroh (`p2p.rs`): dials the target's
+  `p2p_node_id` over hole-punched QUIC, with n0's public relays as fallback.
+  Zero setup, works behind NATs and AP isolation. Same trait, same opaque
+  frames — iroh's transport encryption is an *extra* layer, not a replacement.
+- **`RelayTransport`** — self-hosted WAN store-and-forward for pure-NAT peers
+  (see the WAN section above). Implements the same trait; because the relay only
+  sees frames, it changes **nothing** about the security properties.
 
 `route_command` picks automatically: loopback for self, then each direct
 candidate (public → overlay → LAN, dead ones fail fast on the connect timeout),
-then the relay. **SSH would be an optional compatibility mode** — a fourth
-`Transport` impl (deferred).
+then embedded P2P, then the self-hosted relay. **SSH would be an optional
+compatibility mode** — one more `Transport` impl (deferred).
 
 ## Sealed, signed envelope
 

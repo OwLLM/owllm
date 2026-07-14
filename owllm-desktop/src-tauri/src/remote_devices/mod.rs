@@ -25,6 +25,7 @@ mod crypto;
 mod executor;
 mod identity;
 mod lan;
+mod p2p;
 mod policy;
 mod registry;
 mod relay;
@@ -507,10 +508,14 @@ fn ensure_listener_started(rt: tokio::runtime::Handle) {
                 eprintln!("remote_devices: listener start failed: {e}");
             }
         }
-        ensure_relay_client(rt);
+        ensure_relay_client(rt.clone());
+        if !p2p::running() {
+            p2p::start(rt);
+        }
     } else {
         lan::stop();
         relay::stop_client();
+        p2p::stop();
     }
 }
 
@@ -621,6 +626,16 @@ fn target_endpoints(to_device: &str) -> Vec<String> {
     eps
 }
 
+/// The target's embedded-P2P endpoint id from the registry, if it has one.
+fn target_p2p_node(to_device: &str) -> Option<String> {
+    let self_pub = self_public_record().ok()?;
+    registry::list(&self_pub)
+        .into_iter()
+        .find(|d| d.public.device_id == to_device)
+        .and_then(|d| d.public.p2p_node_id)
+        .filter(|n| !n.trim().is_empty())
+}
+
 /// A single known endpoint for a target (first candidate) — for pairing dials.
 fn lookup_endpoint(to_device: &str) -> Option<String> {
     target_endpoints(to_device).into_iter().next()
@@ -643,26 +658,41 @@ async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandRe
         }
     }
 
-    // 2) Relay fallback (works behind any NAT — both peers dial the relay out).
+    // 2) Embedded P2P (iroh): QUIC hole-punch direct, n0 public relays as
+    //    fallback. Zero setup — works behind NATs and AP isolation.
+    if let Some(node) = target_p2p_node(to_device) {
+        match (p2p::P2pTransport { node_id: node }).deliver(env.clone()).await {
+            Ok(r) => return Ok(r),
+            Err(e) => last_err = e,
+        }
+    }
+
+    // 3) Self-hosted relay fallback (both peers dial the relay out).
     if let Some(url) = relay_url() {
         return (relay::RelayTransport { url }).deliver(env).await;
     }
 
-    if cands.is_empty() {
-        Err("target device has no known endpoint and no relay is configured (discover it, pair by IP, or set a relay)".into())
+    if cands.is_empty() && last_err.is_empty() {
+        Err("target device has no known endpoint or p2p id and no relay is configured (discover it, pair by IP, or set a relay)".into())
     } else {
-        Err(format!("no direct endpoint reachable (tried {}); last error: {last_err}. Configure a relay for off-LAN control.", cands.len()))
+        Err(format!("target unreachable (direct endpoints tried: {}); last error: {last_err}. If the target is off-LAN, make sure both sides run a version with embedded P2P and have re-synced discovery.", cands.len()))
     }
 }
 
-/// Build a signed pairing request for THIS device, POST it to a peer endpoint,
-/// and add the peer's returned record to the registry. Used by both "pair a
-/// known device" and "pair by IP".
+/// Build a signed pairing request for THIS device, send it to a peer address —
+/// "ip:port" (LAN-direct) or an iroh endpoint id (embedded P2P) — and add the
+/// peer's returned record to the registry. Used by both "pair a known device"
+/// and "pair by address".
 async fn pair_with_endpoint(endpoint: &str) -> Result<DevicePublic, String> {
     let me_pub = self_public_record()?;
     let me = identity::load_or_create()?;
     let sig = crypto::sign_detached(&me.secrets, &PairRequest::signed_bytes(&me_pub));
-    let peer = lan::send_pair(endpoint, PairRequest { from: me_pub, sig }).await?;
+    let pr = PairRequest { from: me_pub, sig };
+    let peer = if p2p::looks_like_node_id(endpoint) {
+        p2p::send_pair(endpoint, pr).await?
+    } else {
+        lan::send_pair(endpoint, pr).await?
+    };
     // Learn the peer's keys/id so we can later seal commands to it.
     registry::upsert(peer.clone(), false)?;
     Ok(peer)
@@ -780,6 +810,8 @@ pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
         "relay_url": relay_url(),
         "relay_client": relay::client_running(),
         "relay_serving": relay::serving(),
+        "p2p_node_id": rec.p2p_node_id,
+        "p2p_running": p2p::running(),
         "agents_allowed": agents_allowed(),
     }))
 }
@@ -898,28 +930,39 @@ pub async fn device_request_pairing(to_device: String) -> Result<(), String> {
             &me.x25519_pub,
         );
     }
-    let endpoint = match lookup_endpoint(&to_device) {
-        Some(ep) => ep,
-        None => {
-            // The registry copy may be stale (published before the peer enabled
-            // remote control). Pull the vault once before giving up.
-            let _ = crate::vault::vault_sync_devices().await;
-            lookup_endpoint(&to_device).ok_or_else(|| {
-                "that device hasn't published an address yet — on it, open Devices and enable remote control (its address then syncs here through your GitHub vault), or pair by ip:port".to_string()
-            })?
+    if lookup_endpoint(&to_device).is_none() && target_p2p_node(&to_device).is_none() {
+        // The registry copy may be stale (published before the peer enabled
+        // remote control). Pull the vault once before giving up.
+        let _ = crate::vault::vault_sync_devices().await;
+    }
+    // Prefer the LAN endpoint (fast path), then the embedded P2P id (works
+    // through NATs / AP isolation with zero setup).
+    let mut last_err = String::new();
+    if let Some(ep) = lookup_endpoint(&to_device) {
+        match pair_with_endpoint(&ep).await {
+            Ok(_) => return Ok(()),
+            Err(e) => last_err = e,
         }
-    };
-    pair_with_endpoint(&endpoint).await.map(|_| ())
+    }
+    if let Some(node) = target_p2p_node(&to_device) {
+        return pair_with_endpoint(&node).await.map(|_| ());
+    }
+    if last_err.is_empty() {
+        Err("that device hasn't published an address yet — on it, open Devices and enable remote control (its address then syncs here through your GitHub vault), or pair by ip:port / node id".to_string())
+    } else {
+        Err(last_err)
+    }
 }
 
-/// Pair by typing a peer's "ip:port" directly (no vault discovery needed). Sends
-/// this device's signed pairing request and adds the peer's returned record to
-/// the registry so it can then be controlled once IT approves us.
+/// Pair by typing a peer's "ip:port" (LAN) or p2p node id (works from anywhere)
+/// directly — no vault discovery needed. Sends this device's signed pairing
+/// request and adds the peer's returned record to the registry so it can then
+/// be controlled once IT approves us.
 #[tauri::command]
 pub async fn device_pair_by_address(endpoint: String) -> Result<DeviceRecord, String> {
     let endpoint = endpoint.trim().to_string();
     if endpoint.is_empty() {
-        return Err("enter the peer's ip:port".into());
+        return Err("enter the peer's ip:port or node id".into());
     }
     let peer = pair_with_endpoint(&endpoint).await?;
     Ok(DeviceRecord { public: peer, last_seen: Some(now_rfc3339()), is_self: false })

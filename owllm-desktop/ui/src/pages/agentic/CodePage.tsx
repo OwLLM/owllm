@@ -7,7 +7,7 @@
 // search, edit and create files and run shell commands in that folder.
 // Cline's card-based UX is inspiration for later phases (file tree, live
 // diffs, task Kanban); Phase 1 is the working agent core.
-import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
@@ -394,6 +394,10 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [ruleScope, setRuleScope] = useState<{ id: string; shared: boolean }>({ id: "", shared: false });
   const ruleScopeRef = useRef(ruleScope);
   ruleScopeRef.current = ruleScope;
+  // Last folder we resolved scope for — so a folder switch resets the notebook/
+  // rules SYNCHRONOUSLY (see the scope effect) instead of leaving the previous
+  // project's memory on screen while the async project lookup is in flight.
+  const lastScopeFolderRef = useRef<string>("");
   // Auto-feed identity of THIS Code page — the notebook blob is per project,
   // so this is what stops a second page on the same project from popping the
   // queue when its own (unrelated) turn finishes.
@@ -450,6 +454,25 @@ function CodeWorkspace({ pageId, onTitle }: {
   // every chat behaves the same. Sent with the next message, then cleared.
   const [codeImages, setCodeImages] = useState<Attachment[]>([]);
   const codeFileRef = useRef<HTMLInputElement | null>(null);
+  // Composer textareas — refs so "Forward" can drop the text into the target
+  // agent's draft and focus it for editing before Send (compose-then-send).
+  const codeDraftRef = useRef<HTMLTextAreaElement | null>(null);
+  const secondaryDraftRef = useRef<HTMLTextAreaElement | null>(null);
+  // Forward a reply into an agent's composer as an EDITABLE draft (not a
+  // committed message) — appends under any existing draft, then focuses the
+  // box with the cursor at the end so the user can add comments / tweak it
+  // before pressing Send.
+  const forwardToDraft = (
+    setter: (v: string | ((s: string) => string)) => void,
+    ref: RefObject<HTMLTextAreaElement | null>,
+    block: string,
+  ) => {
+    setter((d) => (d && d.trim() ? `${d.replace(/\s*$/, "")}\n\n${block}` : block));
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (el) { el.focus(); const end = el.value.length; el.setSelectionRange(end, end); }
+    });
+  };
   // Clicking a file in the tree OPENS it in a viewer (was: silently inserted an
   // @ref, which is why the tree felt "fake" — you couldn't see files). The viewer
   // is also editable: ✎ Edit turns the <pre> into a <textarea>, and once the text
@@ -567,6 +590,13 @@ function CodeWorkspace({ pageId, onTitle }: {
   // model when it hasn't chosen one (empty = "same as 1st agent").
   const secondaryModelEffective = secondaryModelId || modelId;
   const [secondaryBusy, setSecondaryBusy] = useState(false);
+  // One-step undo for per-agent "Clear history": each pane keeps its OWN
+  // snapshot of the transcript it last cleared, so clearing one agent never
+  // touches the other and each ↩ Undo restores exactly what that pane wiped.
+  // Transient (component state) — the undo is a safety net for the click that
+  // just happened, not a persisted feature.
+  const [primaryUndo, setPrimaryUndo] = useState<Msg[] | null>(null);
+  const [secondaryUndo, setSecondaryUndo] = useState<Msg[] | null>(null);
   // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
   const [termOpen, setTermOpen] = useState(false);
   // Terminal popup chrome: hide (— keeps the shell alive, just display:none)
@@ -629,19 +659,32 @@ function CodeWorkspace({ pageId, onTitle }: {
   // fall back to a stable per-folder key.
   useEffect(() => {
     const folder = (projectRoot || workspace || "").trim();
-    if (!folder) { setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
     const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+    if (!folder) { lastScopeFolderRef.current = ""; setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
+    const nf = norm(folder);
+    const fallbackId = `code:${nf}`;
+    // Folder switched → drop the previous project's scope IMMEDIATELY so its
+    // notebook and rules can never linger on screen while the async project
+    // lookup runs (or if it hangs). The lookup below only UPGRADES this to the
+    // shared team-project id when the folder matches a registered project —
+    // that shared id is what makes the Agent and Code pages load, update, and
+    // see one notebook + rule set for the same repo.
+    if (lastScopeFolderRef.current !== nf) {
+      lastScopeFolderRef.current = nf;
+      setRuleScope({ id: fallbackId, shared: false });
+      setDirectives([]);
+    }
     let alive = true;
     (async () => {
-      let id = `code:${norm(folder)}`;
+      let id = fallbackId;
       let shared = false;
       try {
         const rows = await invoke<{ id: string; location: string }[]>("list_projects");
-        const hit = (rows || []).find((r) => r.location && norm(r.location) === norm(folder));
+        const hit = (rows || []).find((r) => r.location && norm(r.location) === nf);
         if (hit) { id = hit.id; shared = true; }
       } catch { /* no projects table reachable — per-folder scope */ }
       if (!alive) return;
-      setRuleScope({ id, shared });
+      setRuleScope((prev) => (prev.id === id && prev.shared === shared ? prev : { id, shared }));
       try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: id })); }
       catch { setDirectives([]); }
     })();
@@ -701,6 +744,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // start, freeze runEndedAt on stop (only if a run was actually live, so a
   // double stop() doesn't move the frozen time).
   const setBusy = (v: boolean) => {
+    // A new primary turn supersedes any pending clear-undo, so ↩ Undo can't
+    // later clobber a fresh conversation with the pre-clear snapshot.
+    if (v) setPrimaryUndo(null);
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
       if (v) return { ...cur, busy: true, runStartedAt: Date.now(), runEndedAt: undefined };
@@ -1655,6 +1701,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
     if (fromComposer) { setSecondaryDraft(""); autoFeedHopsRef.current = 0; }
+    // A new second-agent turn supersedes its pending clear-undo (see setBusy).
+    setSecondaryUndo(null);
     setSecondaryBusy(true);
     const ctrl = new AbortController();
     secondaryAbortRef.current = ctrl;
@@ -1700,6 +1748,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const renderSecondaryComposer = () => (
     <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
       <textarea
+        ref={secondaryDraftRef}
         value={secondaryDraft}
         onChange={(e) => setSecondaryDraft(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
@@ -1913,20 +1962,31 @@ function CodeWorkspace({ pageId, onTitle }: {
       return { ...cur, tasks: [], draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
     });
   };
-  const clearChatHistory = () => {
-    if (busy || secondaryBusy) return;
-    if (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0) return;
-    if (window.confirm("Clear the chat window and all saved chat history? This cannot be undone.")) {
-      // The visible workspace transcripts — this is what the button promises.
-      setMessages([]);
-      setSecondaryMessages([]);
-      // …and the saved just-chat threads.
-      setChats([]);
-      setChatId("");
-      setChatDraft("");
-      setChatImages([]);
-      setShowHistory(false);
-    }
+  // Per-agent "Clear history": clears ONLY the pane it belongs to and stashes a
+  // snapshot for that pane's ↩ Undo. No confirm dialog — the undo is the safety
+  // net, and each agent is fully independent (clearing the Coder leaves the
+  // Second agent's transcript, and its undo, untouched, and vice versa).
+  const clearPrimaryHistory = () => {
+    if (busy || messages.length === 0) return;
+    setPrimaryUndo(messages);
+    setMessages([]);
+  };
+  const undoPrimaryHistory = () => {
+    const snap = primaryUndo;
+    if (!snap) return;
+    setMessages(snap);
+    setPrimaryUndo(null);
+  };
+  const clearSecondaryHistory = () => {
+    if (secondaryBusy || secondaryMessages.length === 0) return;
+    setSecondaryUndo(secondaryMessages);
+    setSecondaryMessages([]);
+  };
+  const undoSecondaryHistory = () => {
+    const snap = secondaryUndo;
+    if (!snap) return;
+    setSecondaryMessages(snap);
+    setSecondaryUndo(null);
   };
 
   // Clicking a file in the tree drops an @-reference into the composer so the
@@ -2417,7 +2477,8 @@ function CodeWorkspace({ pageId, onTitle }: {
           />
         </div>
         <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
-        <button onClick={clearChatHistory} disabled={busy || secondaryBusy || (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0)} title="Clear the chat window and all saved chat history" style={btn}>Clear history</button>
+        {/* Clear history is now PER AGENT — each pane's own button lives in that
+            pane's header (below), with an independent ↩ Undo. */}
       </div>
 
       {/* Phase 3: Kanban plan/act board (only while a plan is active) */}
@@ -2532,6 +2593,10 @@ function CodeWorkspace({ pageId, onTitle }: {
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
             <span style={{ flex: 1 }} />
+            {primaryUndo && (
+              <button onClick={undoPrimaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
+            )}
+            <button onClick={clearPrimaryHistory} disabled={busy || messages.length === 0} title="Clear this agent's conversation (undoable)" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>Clear history</button>
           </div>
       <div
         ref={transcriptSticky.ref}
@@ -2579,15 +2644,10 @@ function CodeWorkspace({ pageId, onTitle }: {
                   <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
                     <button
                       onClick={() => {
-                        const forwarded: Msg = {
-                          role: "user",
-                          content: `Forwarded from primary agent:\n\n${m.content}`,
-                          ts: Date.now(),
-                        };
-                        setSecondaryMessages((prev) => [...((prev as Msg[] | undefined) ?? []), forwarded]);
                         setSecondaryOpen(true);
+                        forwardToDraft(setSecondaryDraft, secondaryDraftRef, `Forwarded from primary agent:\n\n${m.content}`);
                       }}
-                      title="Forward this reply to the second agent"
+                      title="Forward this reply into the second agent's composer to edit before sending"
                       style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}
                     >
                       → Forward to second agent
@@ -2616,6 +2676,10 @@ function CodeWorkspace({ pageId, onTitle }: {
                 fallbackLabel="Same as 1st agent"
               />
               <span style={{ flex: 1 }} />
+              {secondaryUndo && (
+                <button onClick={undoSecondaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
+              )}
+              <button onClick={clearSecondaryHistory} disabled={secondaryBusy || secondaryMessages.length === 0} title="Clear this agent's conversation (undoable)" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>Clear history</button>
               <button onClick={() => setSecondaryOpen(false)} title="Close the second-agent pane" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>✕ Close</button>
             </div>
             {/* Transcript — its own scroll column, mirrors the primary chat so the
@@ -2649,14 +2713,9 @@ function CodeWorkspace({ pageId, onTitle }: {
                       <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
                         <button
                           onClick={() => {
-                            const forwarded: Msg = {
-                              role: "user",
-                              content: `Forwarded from second agent:\n\n${m.content}`,
-                              ts: Date.now(),
-                            };
-                            setMessages((prev) => [...prev, forwarded]);
+                            forwardToDraft(setDraft, codeDraftRef, `Forwarded from second agent:\n\n${m.content}`);
                           }}
-                          title="Forward this reply to the primary agent"
+                          title="Forward this reply into the primary agent's composer to edit before sending"
                           style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}
                         >
                           ← Forward to primary agent
@@ -2710,6 +2769,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
           <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
+            ref={codeDraftRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}

@@ -73,6 +73,10 @@ const hasLocalSettings = (repoDir: string) => {
   catch { return false; }
 };
 
+// The shared status line below the chatbox is a single ambient line — send it a
+// one-line summary; the full multi-line output lives in the output modal.
+const firstLine = (s: string) => { const i = s.indexOf("\n"); return i === -1 ? s : s.slice(0, i); };
+
 /** Merge project-card release defaults into local settings. Card values are used only
  *  when the user has NOT saved a local override (so per-machine certs can still differ). */
 function mergeCardDefaults(base: PublishSettings, card: ProjectCard | null, repoDir: string): PublishSettings {
@@ -142,6 +146,13 @@ export default function PublishCards({
   // no acknowledgement on click, only a result at the very end. This shows
   // ⏳ running / ✓ done / ✗ error in place.
   const [activity, setActivity] = useState<{ kind: "run" | "ok" | "err"; msg: string } | null>(null);
+  // Full command output (Commit/Push/Merge/Publish) — the possibly multi-line
+  // result or error. It used to expand the shared status line below the chatbox
+  // into a tall, undismissable block; now it lives in a closable modal so long
+  // build/publish logs and errors can be read then dismissed. `outputOpen`
+  // controls visibility so a dismissed log can be reopened from the rail chip.
+  const [output, setOutput] = useState<{ kind: "run" | "ok" | "err"; title: string; body: string } | null>(null);
+  const [outputOpen, setOutputOpen] = useState(false);
   const [pubNotes, setPubNotes] = useState("");
   const [settings, setSettings] = useState<PublishSettings>(() => loadSettings(repoDir));
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -226,21 +237,28 @@ export default function PublishCards({
 
   const run = async (label: string, fn: () => Promise<unknown>) => {
     setLoading(true);
-    // Immediate acknowledgement — both inline and on the shared status line —
-    // so a long host build (commit → tag → build → sign → publish) doesn't look
-    // frozen while it runs.
+    // Immediate acknowledgement on three surfaces — a compact rail chip, a
+    // one-line ambient note on the shared status line, and the full output in a
+    // closable modal — so a long host build (commit → tag → build → sign →
+    // publish) doesn't look frozen while it runs, and its multi-line log/error
+    // can be read then dismissed instead of permanently expanding the status
+    // line below the chatbox.
     setActivity({ kind: "run", msg: `${label}…` });
+    setOutput({ kind: "run", title: label, body: `${label}…` });
+    setOutputOpen(true);
     status(`⏳ ${label}…`);
     try {
       const out = await fn();
       const msg = String(out ?? "Done.");
       setActivity({ kind: "ok", msg });
-      status(msg);
+      setOutput({ kind: "ok", title: label, body: msg });
+      status(`✓ ${firstLine(msg)}`);
       refresh();
     } catch (e) {
       const msg = String((e as Error).message ?? e);
       setActivity({ kind: "err", msg });
-      status(msg);
+      setOutput({ kind: "err", title: label, body: msg });
+      status(`✗ ${firstLine(msg)}`);
     } finally {
       setLoading(false);
       fetchGit();
@@ -451,6 +469,13 @@ export default function PublishCards({
             >
               <span style={{ flexShrink: 0 }}>{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}</span>
               <span style={{ minWidth: 0 }}>{activity.msg}</span>
+              {output && !outputOpen && (
+                <button
+                  onClick={() => setOutputOpen(true)}
+                  title="Show full output"
+                  style={{ marginLeft: "auto", flexShrink: 0, background: "transparent", border: "none", color: "inherit", cursor: "pointer", padding: 0, fontSize: 10.5, textDecoration: "underline", fontFamily: "inherit" }}
+                >⤢</button>
+              )}
             </div>
           )}
           {/* Readiness summary — click to expand the per-check list, so "why
@@ -631,6 +656,48 @@ export default function PublishCards({
                 style={{ ...inputBase, resize: "vertical", minHeight: 56, padding: 6 }}
               />
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Command-output popup — Commit/Push/Merge/Publish output (and errors)
+          used to expand the shared status line below the chatbox into a tall,
+          undismissable block. Now the full, possibly multi-line output lives
+          here: click-outside or ✕ to dismiss; reopen from the rail chip's ⤢. */}
+      {outputOpen && output && (
+        <div
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setOutputOpen(false); }}
+          style={{
+            position: "fixed", inset: 0, zIndex: 100,
+            background: "rgba(0,0,0,0.45)", display: "flex",
+            alignItems: "center", justifyContent: "center", padding: 24,
+          }}
+        >
+          <div
+            style={{
+              width: "min(640px, 94vw)", maxHeight: "80vh", background: "var(--bg-panel)",
+              border: "1px solid var(--border-strong)", borderRadius: 10,
+              padding: 12, display: "flex", flexDirection: "column", gap: 10,
+              boxShadow: "0 10px 32px rgba(0,0,0,0.5)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ flexShrink: 0, fontSize: 14 }}>
+                {output.kind === "run" ? "⏳" : output.kind === "ok" ? "✓" : "✗"}
+              </span>
+              <span style={{
+                fontWeight: 700, fontSize: 13, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                color: output.kind === "err" ? "#ff8c8c" : output.kind === "ok" ? "#7ff0c5" : "var(--fg-strong)",
+              }}>{output.title}</span>
+              <span style={{ flex: 1 }} />
+              <button onClick={() => setOutputOpen(false)} title="Dismiss" style={{ ...chipBtn, width: 24, padding: 0 }}>✕</button>
+            </div>
+            <pre style={{
+              margin: 0, flex: 1, minHeight: 0, overflow: "auto",
+              background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8,
+              padding: 10, fontSize: 11.5, lineHeight: 1.5, fontFamily: "var(--font-mono, monospace)",
+              whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)",
+            }}>{output.body}</pre>
           </div>
         </div>
       )}

@@ -66,6 +66,7 @@
     "targets": "all",
     "resources": [
       "../scripts/finish-and-publish.sh",
+      "../scripts/lib/gh.sh",
       "../resources/runtime/whisper.cpp/*",
       "../resources/agents/roles/*",
       "../resources/agents/teams/*",

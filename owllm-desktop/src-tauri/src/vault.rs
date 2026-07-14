@@ -761,6 +761,19 @@ fn merge_team_memory(conn: &rusqlite::Connection, project_id: &str, entries: &[V
     }
 }
 
+/// Raw text of a device record from the LOCAL vault clone
+/// (`state/devices/<id>.json`), or None when the vault isn't set up or the
+/// device was never published. Only someone with push access to the
+/// account's private vault repo can put a record here — that's what makes
+/// it usable as a same-GitHub-account proof for device auto-trust.
+pub fn vault_device_record(device_id: &str) -> Option<String> {
+    let p = vault_dir()?
+        .join("state")
+        .join("devices")
+        .join(format!("{}.json", safe_id(device_id)));
+    std::fs::read_to_string(p).ok()
+}
+
 /// Keep a project id safe as a filename (ids are `{hex}_{hex}` already, but be
 /// defensive against anything hand-edited into the DB).
 fn safe_id(id: &str) -> String {

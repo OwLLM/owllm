@@ -47,7 +47,7 @@ use tokio::sync::oneshot;
 
 use protocol::{
     Authorization, CommandKind, CommandRequest, CommandResult, DevicePublic, DeviceRecord,
-    PairRequest, PermissionPolicy, SignedEnvelope, TrustedController,
+    PairRequest, PermissionPolicy, SignedEnvelope, TrustState, TrustedController,
 };
 use transport::{LanDirectTransport, LoopbackTransport, Transport};
 
@@ -401,16 +401,41 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
         return Ok(r);
     }
 
-    // Trust → policy. Unknown / pending / revoked / key-mismatch ⇒ None ⇒ refuse.
+    // Trust → policy. Unknown / pending / revoked / key-mismatch ⇒ None ⇒ refuse —
+    // UNLESS the controller is vault-verified (provably one of this GitHub
+    // account's own devices), in which case it is auto-trusted with the
+    // standard account policy right here, so an unattended machine never
+    // deadlocks waiting for an approval nobody can click.
     let policy = match trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub) {
         Some(p) => p,
         None => {
-            let r = deny(
-                &req.request_id,
-                "controller is not a trusted device — pair and approve it on this machine first",
-            );
-            audit_inbound(&frame, &req, &r);
-            return Ok(r);
+            let peer_name = registry::list(&self_public_record()?)
+                .into_iter()
+                .find(|d| d.public.device_id == frame.from_device)
+                .map(|d| d.public.name)
+                .unwrap_or_default();
+            if ensure_vault_autotrust(
+                &frame.from_device,
+                &peer_name,
+                &frame.from_ed25519_pub,
+                &frame.from_x25519_pub,
+            ) {
+                match trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub) {
+                    Some(p) => p,
+                    None => {
+                        let r = deny(&req.request_id, "auto-trust failed — approve this controller on the target machine");
+                        audit_inbound(&frame, &req, &r);
+                        return Ok(r);
+                    }
+                }
+            } else {
+                let r = deny(
+                    &req.request_id,
+                    "controller is not a trusted device — pair and approve it on this machine first",
+                );
+                audit_inbound(&frame, &req, &r);
+                return Ok(r);
+            }
         }
     };
 
@@ -447,13 +472,18 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
 
     // Authorized surface — show the banner while it runs, then execute. Dangerous
     // kinds (FileWrite/Admin) additionally require a LIVE per-action approval on
-    // this machine, even when the policy toggle is on.
+    // this machine — EXCEPT from a vault-verified controller (same GitHub
+    // account): its actions run with the standard grant, because the whole
+    // point of remote control is a machine with nobody at the keyboard to
+    // click approve.
     begin_control(&frame, &req);
     let result = match policy::authorize(req.kind, &policy) {
         Authorization::Denied => deny(&req.request_id, "permission denied by target policy"),
         Authorization::Allowed => executor::execute(&req, &policy).await,
         Authorization::RequiresApproval => {
-            if await_approval(&frame, &req).await {
+            if vault_verified(&frame.from_device, &frame.from_ed25519_pub)
+                || await_approval(&frame, &req).await
+            {
                 executor::execute_dangerous(&req).await
             } else {
                 deny(
@@ -561,6 +591,59 @@ pub fn self_vault_record() -> Result<(String, String), String> {
     let rec = self_public_record()?;
     let json = serde_json::to_string_pretty(&rec).map_err(|e| e.to_string())?;
     Ok((rec.device_id, json))
+}
+
+/// The standard same-account permission grant: everything on. Applied
+/// automatically to controllers proven to belong to this GitHub account
+/// (see `vault_verified`). Per-controller policy edits on the Devices
+/// page still override it afterwards.
+pub fn standard_account_policy() -> PermissionPolicy {
+    PermissionPolicy {
+        allow_shell: true,
+        allow_wsl: true,
+        allow_file_writes: true,
+        allow_admin: true,
+    }
+}
+
+/// Same-GitHub-account proof: the claimed device id + Ed25519 key match the
+/// device record synced through the account's PRIVATE vault repo. Only
+/// someone with push access to that repo (= signed into the same GitHub
+/// account) could have published the record, so a match means "this
+/// controller is one of the user's own machines". The id↔key binding is
+/// re-checked so a forged record with a mismatched key never verifies.
+pub fn vault_verified(device_id: &str, ed25519_pub: &str) -> bool {
+    let Some(txt) = crate::vault::vault_device_record(device_id) else {
+        return false;
+    };
+    let Ok(rec) = serde_json::from_str::<DevicePublic>(&txt) else {
+        return false;
+    };
+    rec.device_id == device_id
+        && rec.ed25519_pub == ed25519_pub
+        && crypto::device_id_from_ed_pub_b64(&rec.ed25519_pub).as_deref() == Some(device_id)
+}
+
+/// Auto-trust a vault-verified controller with the standard account policy.
+/// Called lazily from the pairing + inbound-command gates so a device that
+/// is provably ours never waits on a human at THIS keyboard (the exact
+/// remote-machine deadlock: you can't approve on a PC you can't reach).
+/// Never downgrades: an already-Trusted controller keeps its edited policy.
+pub fn ensure_vault_autotrust(device_id: &str, name: &str, ed25519_pub: &str, x25519_pub: &str) -> bool {
+    if !vault_verified(device_id, ed25519_pub) {
+        return false;
+    }
+    if let Some(c) = trust::find(device_id) {
+        if c.state == TrustState::Trusted && c.ed25519_pub == ed25519_pub {
+            return true; // already trusted — keep its (possibly edited) policy
+        }
+    }
+    let ok = trust::record_pairing_request(device_id, name, ed25519_pub, x25519_pub).is_ok()
+        && trust::approve(device_id, standard_account_policy()).is_ok();
+    if ok {
+        emit_pairing();
+    }
+    ok
 }
 
 /// Ingest a peer's public record (from the vault) into the local registry.

@@ -1000,10 +1000,27 @@ export default function AccountsPage() {
   function handleConnect(route: RouteSpec, provider: ProviderSpec) {
     if (route.kind === "subscription") {
       if (route.webOnly) {
-        logInfo(route.backend, `Opening ${route.webOnly.url} in your browser…`);
-        invoke("shell_open_url", { url: route.webOnly.url }).catch((e) => {
-          logInfo(route.backend, `[error] couldn't open browser: ${e}`);
-        });
+        // Open in the OwLLM in-app browser (NOT the system browser): its cookie
+        // store persists, so the sign-in survives and agents can use the session
+        // through the built-in browser. The old shell_open_url launched the
+        // EXTERNAL browser, whose login OwLLM never saw — "I log in but nothing
+        // happens". Falls back to the system browser only if ours won't start.
+        const url = route.webOnly.url;
+        logInfo(route.backend, `Opening ${url} in the OwLLM browser — sign in there; your session is saved and available to agents.`);
+        (async () => {
+          try {
+            await invoke("browser_ensure");
+            await invoke("browser_start");
+            await invoke("browser_cmd", { action: "navigate", params: { url } });
+            await invoke("browser_focus");
+            logInfo(route.backend, `${provider.name} opened in the OwLLM browser. Complete the sign-in there — the session stays logged in for agents that drive the browser.`);
+          } catch (e) {
+            logInfo(route.backend, `[warn] OwLLM browser unavailable (${e}); opening in your system browser instead.`);
+            invoke("shell_open_url", { url }).catch((e2) => {
+              logInfo(route.backend, `[error] couldn't open a browser: ${e2}`);
+            });
+          }
+        })();
         return;
       }
       // CLI-backed subscription: spawn the CLI inside our embedded

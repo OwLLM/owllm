@@ -3962,6 +3962,20 @@ pub async fn cli_install_stream(
             "codex_cli" => ("npm", vec!["install", "-g", "@openai/codex"]),
             "kimi_cli" => ("pip", vec!["install", "--upgrade", "kimi-cli"]),
             "gemini_cli" => ("npm", vec!["install", "-g", "@google/gemini-cli"]),
+            // Grok Build ships a shell-script installer (curl | bash), NOT an
+            // npm/pip package. xAI officially supports macOS/Linux only; on
+            // Windows the honest answer is WSL or the API-key route, so we
+            // don't fake a native install that would leave a broken binary.
+            "grok_cli" => {
+                #[cfg(windows)]
+                {
+                    return Err("Grok Build CLI isn't officially supported on Windows by xAI. Install it inside WSL with:  curl -fsSL https://x.ai/cli/install.sh | bash  — or use this card's 'API · XAI_API_KEY' route instead.".to_string());
+                }
+                #[cfg(not(windows))]
+                {
+                    ("sh", vec!["-c", "curl -fsSL https://x.ai/cli/install.sh | bash"])
+                }
+            }
             other => return Err(format!("unknown CLI backend: {other}")),
         };
 
@@ -4103,6 +4117,13 @@ pub fn cli_install(backend: String) -> Result<(), String> {
     //   * Codex:       @openai/codex (npm)
     //   * Kimi Code:   kimi-cli (pip)
     //   * Gemini CLI:  @google/gemini-cli (npm)
+    // Grok Build installs via a shell-script pipeline (curl | bash), which
+    // this legacy console launcher's whitespace-split runner can't execute
+    // safely — the in-app streaming installer (cli_install_stream) is the
+    // supported path. Point the caller there rather than mis-run the pipe.
+    if backend == "grok_cli" {
+        return Err("Use the card's Install button (streaming installer) for Grok Build — on macOS/Linux it runs  curl -fsSL https://x.ai/cli/install.sh | bash. Windows isn't officially supported by xAI; use WSL or the API · XAI_API_KEY route.".to_string());
+    }
     let (tool, install_cmd) = match backend.as_str() {
         "claude_cli" => ("npm", "npm install -g @anthropic-ai/claude-code"),
         "codex_cli" => ("npm", "npm install -g @openai/codex"),

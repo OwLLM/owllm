@@ -375,10 +375,10 @@ case "$HOST_OS" in
       sign_payload "$RELEASE_DIR/owllm-desktop.exe" "main exe"
       sign_payload "$RELEASE_DIR/WebView2Loader.dll" "WebView2 loader"
 
-      cp -f "$RELEASE_DIR/owllm-desktop.exe" "OwLLM Desktop.exe"
-      cp -f "$RELEASE_DIR/owllm-desktop.exe" "dist/OwLLM Desktop.exe"
-      [ -f "WebView2Loader.dll" ] || cp -f "$RELEASE_DIR/WebView2Loader.dll" "WebView2Loader.dll"
-      cp -f "$RELEASE_DIR/WebView2Loader.dll" "dist/WebView2Loader.dll"
+      cp -f "$RELEASE_DIR/owllm-desktop.exe" "OwLLM Desktop.exe" || echo "  warn: could not refresh root convenience exe"
+      cp -f "$RELEASE_DIR/owllm-desktop.exe" "dist/OwLLM Desktop.exe" || echo "  warn: could not refresh dist convenience exe"
+      [ -f "WebView2Loader.dll" ] || cp -f "$RELEASE_DIR/WebView2Loader.dll" "WebView2Loader.dll" || echo "  warn: could not seed root WebView2Loader.dll"
+      cp -f "$RELEASE_DIR/WebView2Loader.dll" "dist/WebView2Loader.dll" || echo "  warn: could not refresh dist WebView2Loader.dll"
 
       # Tauri's generated NSIS script reads MAINBINARYSRCPATH from RELEASE_DIR.
       # Rebuild it after force-signing the exe so the installer payload is signed

@@ -433,16 +433,15 @@ esac
 
 step "2/5 sign   (minisign — empty password, closed stdin)"
 export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-KEY_CONTENT="$(cat "$KEY_FILE")"
 case "$HOST_OS" in
   windows)
     NODE_RUNNER="${OWLLM_NODE:-}"
     [ -n "$NODE_RUNNER" ] || NODE_RUNNER="$(command -v node.exe 2>/dev/null || command -v node)"
     TAURI_CLI="$(to_windows_path "$APP/node_modules/@tauri-apps/cli/tauri.js")"
-    "$NODE_RUNNER" "$TAURI_CLI" signer sign --private-key "$KEY_CONTENT" "$(to_windows_path "$UPDATER_ARTIFACT")" < /dev/null
+    "$NODE_RUNNER" "$TAURI_CLI" signer sign --private-key-path "$(to_windows_path "$KEY_FILE")" --password= "$(to_windows_path "$UPDATER_ARTIFACT")" < /dev/null
     ;;
   *)
-    npx @tauri-apps/cli signer sign --private-key "$KEY_CONTENT" "$UPDATER_ARTIFACT" < /dev/null
+    npx @tauri-apps/cli signer sign --private-key-path "$KEY_FILE" --password= "$UPDATER_ARTIFACT" < /dev/null
     ;;
 esac
 SIG="$(cat "$UPDATER_ARTIFACT.sig")"

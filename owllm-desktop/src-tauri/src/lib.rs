@@ -27,6 +27,7 @@ mod accounts;
 mod agent_tools;
 mod agents;
 mod audio;
+mod autostart;
 mod bootstrap;
 mod bridges;
 mod browser;
@@ -181,6 +182,10 @@ pub fn run() {
             // launch-time vault sync publishes this device's record WITH its
             // dialable endpoints — lazy start left peers endpoint-less records.
             remote_devices::init(&app.handle());
+            // Launch-at-login: self-register on first run (idempotent, per-user,
+            // honors a prior explicit opt-out) so OwLLM comes back after a reboot
+            // without the user re-launching it. Failures are logged and swallowed.
+            autostart::ensure_default_enabled();
             // Module system (registry + per-user installed.json under
             // app_data_dir/modules/). Wizard reads from this; Server /
             // Train pages resolve binaries through it.
@@ -407,6 +412,8 @@ pub fn run() {
             server::server_status,
             server::server_start,
             server::server_stop,
+            autostart::autostart_get,
+            autostart::autostart_set,
             server::inference_expose_get,
             server::inference_expose_set,
             skill_library::list_skill_sources,

@@ -88,6 +88,25 @@ fn porcelain_path(line: &str) -> &str {
     }
 }
 
+fn user_conflict_files(conflicts: &str) -> Vec<String> {
+    conflicts
+        .lines()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && !is_app_scratch(s))
+        .collect()
+}
+
+fn drop_staged_app_scratch(cwd: &Path) -> Result<(), String> {
+    let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
+    for path in staged.lines().map(str::trim).filter(|p| is_app_scratch(p)) {
+        // Keep OWLLM-managed scratch out of merge commits. For tracked scratch,
+        // restore HEAD; for newly-added scratch, reset is enough to unstage it.
+        let _ = git(cwd, &["checkout", "HEAD", "--", path]);
+        let _ = git(cwd, &["reset", "--", path]);
+    }
+    Ok(())
+}
+
 /// Sanitize a string into a path-safe segment (used for repo names and
 /// agent names so weird characters in either don't break paths).
 fn safe_seg(s: &str) -> String {
@@ -514,26 +533,34 @@ pub async fn fleet_worktree_merge(
     // squash: keep all the agent's commits as one merge commit in the
     // project tree, preserving per-agent attribution but avoiding a
     // noisy linear-history merge of every single agent micro-commit.
-    let (ok, _, err) = git(&cwd, &["merge", "--squash", "--no-commit", &branch])?;
+    let (mut ok, _, mut err) = git(&cwd, &["merge", "--squash", "--no-commit", &branch])?;
     if !ok {
-        // Check for conflict — `merge --squash` exits non-zero on either
-        // a genuine conflict or a bad ref. Distinguish via diff --check.
         let (_, conflicts, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
-        let files: Vec<String> = conflicts
-            .lines()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-        // Reset the index so a failed merge doesn't leave staged junk
-        // in the user's project tree.
-        let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
-        if !files.is_empty() {
-            return Ok(MergeOutcome::Conflict { files });
+        let files = user_conflict_files(&conflicts);
+        if files.is_empty() && !conflicts.trim().is_empty() {
+            // Only OWLLM-managed scratch conflicted. Re-apply the squash using
+            // our side for those paths, then strip scratch from the index below.
+            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            let (retry_ok, _, retry_err) =
+                git(&cwd, &["merge", "--squash", "--no-commit", "-X", "ours", &branch])?;
+            ok = retry_ok;
+            err = retry_err;
         }
-        return Ok(MergeOutcome::Error {
-            message: format!("git merge --squash failed: {}", err.trim()),
-        });
+        if !ok {
+            let (_, conflicts, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
+            let files = user_conflict_files(&conflicts);
+            // Reset the index so a failed merge doesn't leave staged junk
+            // in the user's project tree.
+            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            if !files.is_empty() {
+                return Ok(MergeOutcome::Conflict { files });
+            }
+            return Ok(MergeOutcome::Error {
+                message: format!("git merge --squash failed: {}", err.trim()),
+            });
+        }
     }
+    drop_staged_app_scratch(&cwd)?;
     // If `merge --squash` succeeded but staged nothing, the agent's
     // branch is a fast-forward of HEAD (no new commits to apply).
     let (_, staged, _) = git(&cwd, &["diff", "--cached", "--name-only"])?;
@@ -556,7 +583,6 @@ pub async fn fleet_worktree_merge(
         files_changed,
     })
 }
-
 // ------------------------------------------------------------------
 // 5. REMOVE — drop the worktree (and its branch) once we're done
 // ------------------------------------------------------------------
@@ -681,7 +707,7 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 
 #[cfg(test)]
 mod tests {
-    use super::{is_app_scratch, porcelain_path};
+    use super::{is_app_scratch, porcelain_path, user_conflict_files};
 
     #[test]
     fn app_scratch_is_ignored_but_source_is_not() {
@@ -712,5 +738,14 @@ mod tests {
         assert_eq!(porcelain_path("?? untracked.txt"), "untracked.txt");
         // A source file next to a scratch change is still seen as source.
         assert!(!is_app_scratch(porcelain_path("M  Cargo.toml")));
+    }
+
+    #[test]
+    fn scratch_conflicts_are_hidden_from_user_conflicts() {
+        assert_eq!(
+            user_conflict_files(".owllm-inbox/image_1.png\nowllm-desktop/src-tauri/src/release.rs\n"),
+            vec!["owllm-desktop/src-tauri/src/release.rs".to_string()]
+        );
+        assert!(user_conflict_files(".owllm-inbox/image_1.png\n.owllm/project.json\n").is_empty());
     }
 }

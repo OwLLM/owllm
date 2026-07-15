@@ -341,17 +341,18 @@ export default function PublishCards({
   // remote involved, so a project without origin must still get its Merge.
   const showMerge = isRepo && ((isolated && !!projectRoot && !!branch) || hasRemote);
   const showPublish = isRepo && hasPublishScript;
-  const hasUncommittedReleaseChanges = (git?.total ?? 0) > 0;
-  const canPublish = (ready?.every((c) => c.ok) ?? false) && !hasUncommittedReleaseChanges;
+  // Dirtiness is NOT a hard block here — the authoritative check lives in the
+  // publish script (it fails fast, BEFORE any build, if real work under the
+  // stage path is uncommitted, and it ignores generated churn like Cargo.lock).
+  // Gating the button on the whole-repo dirty count (untracked files, lockfile
+  // version churn, changes outside the stage path) made Publish look dead even
+  // when the release could proceed. Keep it clickable; the "● N" pending badge
+  // above already signals uncommitted work, and clicking surfaces the script's
+  // precise "commit these first" message instead of a silent grey button.
+  const canPublish = ready?.every((c) => c.ok) ?? false;
   const readyFails = ready?.filter((c) => !c.ok) ?? [];
-  const dirtyPublishReason = hasUncommittedReleaseChanges
-    ? `Uncommitted changes: Commit/Merge first so What's New can list the real work instead of hiding it inside the version bump.`
-    : "";
-  const publishFailReason = [
-    ...readyFails.map((c) => `${c.label}: ${c.detail}`),
-    dirtyPublishReason,
-  ].filter(Boolean).join("\n");
-  const publishIssueCount = readyFails.length + (dirtyPublishReason ? 1 : 0);
+  const publishFailReason = readyFails.map((c) => `${c.label}: ${c.detail}`).join("\n");
+  const publishIssueCount = readyFails.length;
   if (!showCommit && !showPush && !showMerge && !showPublish) return null;
 
   const modeLabel = settings.visibility === "dry-run" ? "Dry run" : settings.visibility === "draft" ? "Draft" : "Publish";

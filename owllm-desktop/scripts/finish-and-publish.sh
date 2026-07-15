@@ -148,7 +148,12 @@ CONF="$REPO/$VERSION_FILE"
 # What's New), so those real changes would disappear from the release notes and
 # users would see "Maintenance release". Force the work to be committed first
 # with a human subject, then publish.
-PENDING_STAGE="$(git status --porcelain -- "$STAGE_PATH" 2>/dev/null || true)"
+# Cargo.lock is EXCLUDED: it's a generated file whose only churn here is the
+# version line, which a prior (often crashed) host build bumps and strands
+# uncommitted. That is never "real work" for What's New, and blocking on it
+# turns every release into a treadmill (build bumps lock → lock dirty → next
+# publish blocked). The bump commit still re-stages it via `git add $STAGE_PATH`.
+PENDING_STAGE="$(git status --porcelain -- "$STAGE_PATH" ':(exclude)*Cargo.lock' 2>/dev/null || true)"
 if [ -n "$PENDING_STAGE" ]; then
   echo "PUBLISH_FAILED: uncommitted release changes under '$STAGE_PATH' would be hidden inside the version-bump commit." >&2
   echo "Commit/merge those changes first with a meaningful message, then run Publish again." >&2

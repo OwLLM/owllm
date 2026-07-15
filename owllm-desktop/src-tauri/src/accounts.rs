@@ -219,28 +219,36 @@ pub fn cli_cancel_all() -> Result<u32, String> {
         .unwrap_or_default();
     let mut killed = 0u32;
     for pid in pids {
-        #[cfg(windows)]
-        let ok = {
-            let mut c = Command::new("taskkill");
-            c.args(["/PID", &pid.to_string(), "/T", "/F"]);
-            c.stdout(Stdio::null());
-            c.stderr(Stdio::null());
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(CREATE_NO_WINDOW);
-            c.status().map(|s| s.success()).unwrap_or(false)
-        };
-        #[cfg(not(windows))]
-        let ok = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let ok = terminate_cli_child(pid);
         if ok {
             killed += 1;
         }
         unregister_cli_child(pid);
     }
     Ok(killed)
+}
+
+/// Terminate a CLI process tree. On Windows the spawned npm shim owns the real
+/// `node`/`codex` descendants, so killing only the direct child is insufficient.
+fn terminate_cli_child(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("taskkill");
+        c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        c.stdout(Stdio::null());
+        c.stderr(Stdio::null());
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(CREATE_NO_WINDOW);
+        c.status().map(|s| s.success()).unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 /// Push an arg onto `cmd`, going through `raw_arg` + manual quoting
@@ -3175,6 +3183,61 @@ pub async fn codex_cli_stream(
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
         let child_pid = register_cli_child(&child);
+        // `codex exec --json` writes progress and diagnostics to stderr.  The
+        // old stream path did not read that pipe until *after* stdout closed;
+        // a verbose model turn could fill the OS pipe buffer, leaving Codex
+        // blocked and the WebView awaiting this invoke forever. Drain stderr
+        // concurrently, retaining only a bounded tail for a useful error.
+        const MAX_STDERR_CAPTURE: usize = 256 * 1024;
+        let started = Instant::now();
+        let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stream_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "no stderr pipe".to_string())?;
+        let stderr_buf_reader = std::sync::Arc::clone(&stderr_buf);
+        let stderr_activity = std::sync::Arc::clone(&last_activity);
+        let stderr_reader = std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut stderr = stderr;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut buf) = stderr_buf_reader.lock() {
+                            let keep = MAX_STDERR_CAPTURE.saturating_sub(buf.len()).min(n);
+                            buf.extend_from_slice(&chunk[..keep]);
+                        }
+                        stderr_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+        // Streaming calls used to have no liveness bound at all (unlike the
+        // one-shot CLI paths). The watchdog uses the same inactivity/absolute
+        // ceilings, so a genuinely stalled GPT-5.5 Codex turn returns control
+        // to the UI while a chatty long-running turn remains untouched.
+        let watchdog_done = std::sync::Arc::clone(&stream_done);
+        let watchdog_activity = std::sync::Arc::clone(&last_activity);
+        let watchdog_timed_out = std::sync::Arc::clone(&timed_out);
+        let watchdog = std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            while !watchdog_done.load(Ordering::Relaxed) {
+                let idle = started.elapsed().saturating_sub(Duration::from_millis(
+                    watchdog_activity.load(Ordering::Relaxed),
+                ));
+                if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+                    watchdog_timed_out.store(true, Ordering::Relaxed);
+                    let _ = terminate_cli_child(child_pid);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(prompt.as_bytes());
             // Drop closes the pipe (EOF) so the stdin-style codex proceeds.
@@ -3187,6 +3250,8 @@ pub async fn codex_cli_stream(
         let mut assembled = String::new();
 
         for line_res in reader.lines() {
+            use std::sync::atomic::Ordering;
+            last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
             let line = match line_res {
                 Ok(l) => l,
                 Err(e) => {
@@ -3341,17 +3406,27 @@ pub async fn codex_cli_stream(
             }
         }
         let wait_res = child.wait();
+        stream_done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watchdog.join();
+        let _ = stderr_reader.join();
         unregister_cli_child(child_pid);
         let status = wait_res.map_err(|e| format!("wait codex: {e}"))?;
         let asm = assembled.trim().to_string();
+        if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(format!(
+                "Codex CLI stopped after {} seconds with no output (or {} seconds total). Try the request again or use a lower effort.",
+                CLI_CHILD_TIMEOUT.as_secs(),
+                CLI_CHILD_ABS_TIMEOUT.as_secs(),
+            ));
+        }
         if !status.success() && asm.is_empty() {
             // Only an error if we got NO usable reply — codex can exit
             // nonzero after the read-only sandbox denies a write it tried,
             // even though it produced a perfectly good message.
-            let mut stderr_buf = String::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_string(&mut stderr_buf);
-            }
+            let stderr_buf = stderr_buf
+                .lock()
+                .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+                .unwrap_or_default();
             return Err(cli_exit_err(
                 "codex",
                 status.code().unwrap_or(-1),

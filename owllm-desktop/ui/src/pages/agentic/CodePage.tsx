@@ -169,6 +169,11 @@ function savePages(pages: CodePageMeta[]): void {
   try { localStorage.setItem(PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
 }
 
+const PSYCHEDELIC_AURA_STOPS = "#3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b";
+const PSYCHEDELIC_AURA_RING = `conic-gradient(from var(--owllm-aura-angle), ${PSYCHEDELIC_AURA_STOPS}) border-box`;
+const PSYCHEDELIC_AURA_DOT = `conic-gradient(from 0deg, ${PSYCHEDELIC_AURA_STOPS})`;
+const PSYCHEDELIC_AURA_HALO = "0 0 0 1px rgba(255,255,255,0.16), 0 0 30px rgba(176,124,255,0.60), 0 0 44px rgba(127,212,255,0.34), 0 8px 28px rgba(0,0,0,0.46)";
+
 // ---- Cross-page activity signal (tab-strip glow + "done" badge) -------------
 // Lets the tab strip show WHERE work is happening even when you've switched to
 // another page. The primary coder's `busy` already lives per-page in
@@ -2696,9 +2701,9 @@ function CodeWorkspace({ pageId, onTitle }: {
           // Solid fill on padding-box keeps the message/input area's background;
           // the rainbow ring paints border-box only, so the aura reads OUTSIDE
           // the chat container. Spins while the coder is running, static idle.
-          background: "var(--bg-input) padding-box, conic-gradient(from var(--owllm-aura-angle), #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box",
+          background: `var(--bg-input) padding-box, ${PSYCHEDELIC_AURA_RING}`,
           border: "2px solid transparent", borderRadius: 8,
-          boxShadow: "0 0 12px rgba(176,124,255,0.28), 0 0 22px rgba(127,212,255,0.16)",
+          boxShadow: PSYCHEDELIC_AURA_HALO,
           animation: busy ? "owllm-aura-spin 4s linear infinite" : undefined,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
@@ -2780,9 +2785,9 @@ function CodeWorkspace({ pageId, onTitle }: {
             // Same rainbow aura as the primary pane: rainbow ring on border-box,
             // solid var(--bg-input) fill on padding-box so the message/input
             // area stays solid. Spins while the second agent is running.
-            background: "var(--bg-input) padding-box, conic-gradient(from var(--owllm-aura-angle), #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box",
+            background: `var(--bg-input) padding-box, ${PSYCHEDELIC_AURA_RING}`,
             border: "2px solid transparent", borderRadius: 8,
-            boxShadow: "0 0 12px rgba(176,124,255,0.28), 0 0 22px rgba(127,212,255,0.16)",
+            boxShadow: PSYCHEDELIC_AURA_HALO,
             animation: secondaryBusy ? "owllm-aura-spin 4s linear infinite" : undefined,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
@@ -3212,8 +3217,18 @@ export default function CodePage() {
       {/* Keyframes for the working-tab glow pulse (parent is always mounted). */}
       <style>{`
         @keyframes owllm-tab-working {
-          0%, 100% { box-shadow: 0 0 0 rgba(var(--accent-rgb), 0); }
-          50% { box-shadow: 0 0 9px rgba(var(--accent-rgb), 0.65); }
+          0%, 100% {
+            box-shadow:
+              0 0 0 1px rgba(255,255,255,0.08),
+              0 0 8px rgba(176,124,255,0.28),
+              0 0 12px rgba(127,212,255,0.18);
+          }
+          50% {
+            box-shadow:
+              0 0 0 1px rgba(255,255,255,0.20),
+              0 0 18px rgba(176,124,255,0.90),
+              0 0 28px rgba(127,212,255,0.55);
+          }
         }
       `}</style>
       {/* Tab strip */}
@@ -3238,14 +3253,24 @@ export default function CodePage() {
                 animation: working ? "owllm-tab-working 1.4s ease-in-out infinite" : undefined,
               }}
             >
-              {/* Live dot while working (accent, pulsing via the tab glow). */}
+              {/* Live rainbow dot while working (matches the agentic aura). */}
               {working && (
-                <span title="Agent working" style={{ flexShrink: 0, width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", boxShadow: "0 0 6px var(--accent)" }} />
+                <span title="Agent working" style={{ flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: PSYCHEDELIC_AURA_DOT, boxShadow: "0 0 0 1px rgba(255,255,255,0.20), 0 0 8px rgba(176,124,255,0.85), 0 0 12px rgba(127,212,255,0.45)" }} />
               )}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title || "New page"}</span>
-              {/* Finished-while-away badge (green check) — cleared when you open the page. */}
+              {/* Finished-while-away badge (psychedelic check) — cleared when you open the page. */}
               {done && !working && (
-                <span title="Finished — click to view" style={{ flexShrink: 0, color: "var(--ok)", fontSize: 12, fontWeight: 800, lineHeight: 1 }}>✓</span>
+                <span title="Finished — click to view" style={{
+                  flexShrink: 0,
+                  fontSize: 12,
+                  fontWeight: 900,
+                  lineHeight: 1,
+                  color: "transparent",
+                  background: PSYCHEDELIC_AURA_DOT,
+                  WebkitBackgroundClip: "text",
+                  backgroundClip: "text",
+                  filter: "drop-shadow(0 0 5px rgba(176,124,255,0.85)) drop-shadow(0 0 8px rgba(127,212,255,0.45))",
+                }}>✓</span>
               )}
               <span
                 onClick={(e) => { e.stopPropagation(); void closePage(p.id); }}

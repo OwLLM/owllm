@@ -257,16 +257,19 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
 /// 30×/sec from this background thread drove re-entrancy into tao's non-reentrant
 /// window-callback `parking_lot` mutex and self-deadlocked the UI thread when an
 /// incoming synchronous `SendMessage` landed mid-pump — the whole app froze
-/// ("Not Responding", no repaint, no mouse). Win32 reads/writes the kernel window
-/// object directly, entirely off the event loop, so the loop can't deadlock it.
-/// Returns `Err` only when the main window can't be read (destroyed), so the
-/// caller's give-up counter still works.
+/// ("Not Responding", no repaint, no mouse). Win32 reads (`GetWindowRect`) are
+/// pure kernel-object queries off the event loop, so those can't deadlock. The
+/// WRITE (`SetWindowPos`) still targets a MAIN-thread-owned window, so it MUST
+/// carry `SWP_ASYNCWINDOWPOS` (see below) — otherwise it sends messages
+/// synchronously to the main thread and reintroduces the exact freeze (observed
+/// live at v0.8.56). Returns `Err` only when the main window can't be read
+/// (destroyed), so the caller's give-up counter still works.
 #[cfg(target_os = "windows")]
 fn sync_once_win32(main_hwnd: isize, overlay_hwnd: isize) -> Result<(), ()> {
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindow, SWP_NOACTIVATE,
-        SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+        GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindow, SWP_ASYNCWINDOWPOS,
+        SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
     };
     let main = main_hwnd as HWND;
     let overlay = overlay_hwnd as HWND;
@@ -286,6 +289,17 @@ fn sync_once_win32(main_hwnd: isize, overlay_hwnd: isize) -> Result<(), ()> {
         let y = r.top - CONTENT_OFFSET_Y;
         let w = (r.right - r.left) + OVERLAY_EXTRA_W as i32;
         let h = (r.bottom - r.top) + OVERLAY_EXTRA_H as i32;
+        // SWP_ASYNCWINDOWPOS is LOAD-BEARING: this runs on a background
+        // thread but the overlay window is owned by the MAIN (event-loop)
+        // thread. Without the async flag, SetWindowPos SENDS
+        // WM_WINDOWPOSCHANGING/CHANGED synchronously to the owning thread and
+        // BLOCKS until it pumps them — and that message gets dispatched
+        // re-entrantly into tao's non-reentrant window-callback parking_lot
+        // mutex, self-deadlocking the UI thread ("Not Responding" freeze, seen
+        // in v0.8.56 despite the earlier Win32-direct move: raw SetWindowPos is
+        // still a synchronous CROSS-THREAD call). The async flag POSTS the
+        // request to the main thread's queue instead, so this loop never
+        // blocks and never forces a re-entrant callback.
         SetWindowPos(
             overlay,
             std::ptr::null_mut(),
@@ -293,7 +307,7 @@ fn sync_once_win32(main_hwnd: isize, overlay_hwnd: isize) -> Result<(), ()> {
             y,
             w,
             h,
-            SWP_NOZORDER | SWP_NOACTIVATE,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
         );
 
         let visible = IsWindowVisible(main) != 0;

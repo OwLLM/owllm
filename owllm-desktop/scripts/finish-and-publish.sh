@@ -141,6 +141,22 @@ fi
 CONF="$REPO/$VERSION_FILE"
 [ -f "$CONF" ] || fail "version file '$VERSION_FILE' not found — set release.versionFile in .owllm/project.json"
 
+# Release commits must contain ONLY the deterministic version bump produced by
+# this script. If real app changes are already dirty, `git add $STAGE_PATH` would
+# fold them into the `vX.Y.Z` bump commit. The notes generator intentionally
+# drops release commits (to avoid old stale-app chat prompts leaking into
+# What's New), so those real changes would disappear from the release notes and
+# users would see "Maintenance release". Force the work to be committed first
+# with a human subject, then publish.
+PENDING_STAGE="$(git status --porcelain -- "$STAGE_PATH" 2>/dev/null || true)"
+if [ -n "$PENDING_STAGE" ]; then
+  echo "PUBLISH_FAILED: uncommitted release changes under '$STAGE_PATH' would be hidden inside the version-bump commit." >&2
+  echo "Commit/merge those changes first with a meaningful message, then run Publish again." >&2
+  echo "Pending changes:" >&2
+  printf '%s\n' "$PENDING_STAGE" | sed 's/^/  /' | head -40 >&2
+  exit 1
+fi
+
 # 1. Bump the patch version (string-replace to preserve formatting; rule-based rollover).
 CUR="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$CONF")"
 

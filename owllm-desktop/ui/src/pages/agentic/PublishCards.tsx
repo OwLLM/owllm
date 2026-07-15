@@ -341,9 +341,17 @@ export default function PublishCards({
   // remote involved, so a project without origin must still get its Merge.
   const showMerge = isRepo && ((isolated && !!projectRoot && !!branch) || hasRemote);
   const showPublish = isRepo && hasPublishScript;
-  const canPublish = ready?.every((c) => c.ok) ?? false;
+  const hasUncommittedReleaseChanges = (git?.total ?? 0) > 0;
+  const canPublish = (ready?.every((c) => c.ok) ?? false) && !hasUncommittedReleaseChanges;
   const readyFails = ready?.filter((c) => !c.ok) ?? [];
-  const publishFailReason = readyFails.map((c) => `${c.label}: ${c.detail}`).join("\n");
+  const dirtyPublishReason = hasUncommittedReleaseChanges
+    ? `Uncommitted changes: Commit/Merge first so What's New can list the real work instead of hiding it inside the version bump.`
+    : "";
+  const publishFailReason = [
+    ...readyFails.map((c) => `${c.label}: ${c.detail}`),
+    dirtyPublishReason,
+  ].filter(Boolean).join("\n");
+  const publishIssueCount = readyFails.length + (dirtyPublishReason ? 1 : 0);
   if (!showCommit && !showPush && !showMerge && !showPublish) return null;
 
   const modeLabel = settings.visibility === "dry-run" ? "Dry run" : settings.visibility === "draft" ? "Draft" : "Publish";
@@ -433,7 +441,7 @@ export default function PublishCards({
                   setActivity({
                     kind: "err",
                     msg: ready
-                      ? `Can't publish yet — ${readyFails.length} unmet check${readyFails.length > 1 ? "s" : ""}:\n${publishFailReason}`
+                      ? `Can't publish yet — ${publishIssueCount} unmet check${publishIssueCount > 1 ? "s" : ""}:\n${publishFailReason}`
                       : "Checking release readiness…",
                   });
                 }}
@@ -494,8 +502,8 @@ export default function PublishCards({
               {showPublish && <span>{settings.mode === "host" ? "Host build" : "CI / GitHub Actions"}</span>}
               {showPublish && <span>· {signed ? "Signed" : "Unsigned"}</span>}
               <span style={{ flex: 1 }} />
-              <span style={{ color: readyFails.length === 0 ? "#7ff0c5" : "#ffd97a", fontWeight: 700 }}>
-                {readyFails.length === 0 ? "READY" : `${readyFails.length} issue${readyFails.length > 1 ? "s" : ""}`}
+              <span style={{ color: publishIssueCount === 0 ? "#7ff0c5" : "#ffd97a", fontWeight: 700 }}>
+                {publishIssueCount === 0 ? "READY" : `${publishIssueCount} issue${publishIssueCount > 1 ? "s" : ""}`}
               </span>
               <span>{checksOpen ? "▾" : "▸"}</span>
             </button>

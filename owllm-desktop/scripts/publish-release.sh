@@ -74,16 +74,72 @@ TAG="v$VERSION"
 KEY_FILE=".tauri-keys/owllm-updater.key"
 LATEST="dist/latest.json"
 
+# ---- host/platform detection ---------------------------------------------
+UNAME_S="$(uname -s)"
+HOST_FLAVOR="$UNAME_S"
+is_wsl_windows=0
+if [ "$UNAME_S" = "Linux" ] && [ -r /proc/version ] && grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null && command -v cmd.exe >/dev/null 2>&1; then
+  is_wsl_windows=1
+  HOST_FLAVOR="WSL"
+fi
+
+to_windows_path() {
+  cygpath -w "$1" 2>/dev/null || wslpath -w "$1" 2>/dev/null || printf '%s' "$1"
+}
+
+to_posix_path() {
+  cygpath -u "$1" 2>/dev/null || wslpath -u "$1" 2>/dev/null || printf '%s' "$1"
+}
+
+find_windows_tool() {
+  local rel="$1" root
+  for root in "/mnt/c" "/c"; do
+    if [ -f "$root/$rel" ]; then
+      printf '%s' "$root/$rel"
+      return 0
+    fi
+  done
+  return 1
+}
+
+find_signtool() {
+  local found
+  found="$(command -v signtool.exe 2>/dev/null || true)"
+  if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+  for root in "/mnt/c/Program Files (x86)/Windows Kits/10/bin" "/c/Program Files (x86)/Windows Kits/10/bin"; do
+    found="$(ls -d "$root"/*/x64/signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+    if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+  done
+  return 1
+}
+
+find_makensis() {
+  local found local_appdata posix_local_appdata
+  found="$(command -v makensis.exe 2>/dev/null || command -v makensis 2>/dev/null || true)"
+  if [ -n "$found" ]; then printf '%s' "$found"; return 0; fi
+  local_appdata="${LOCALAPPDATA:-}"
+  if [ -z "$local_appdata" ] && command -v powershell.exe >/dev/null 2>&1; then
+    local_appdata="$(powershell.exe -NoProfile -Command "[Environment]::GetFolderPath('LocalApplicationData')" 2>/dev/null | tr -d '\r' | tail -1 || true)"
+  fi
+  if [ -n "$local_appdata" ]; then
+    posix_local_appdata="$(to_posix_path "$local_appdata")"
+    for found in "$posix_local_appdata/tauri/NSIS/makensis.exe" "$posix_local_appdata/tauri/NSIS/Bin/makensis.exe"; do
+      if [ -x "$found" ] || [ -f "$found" ]; then printf '%s' "$found"; return 0; fi
+    done
+  fi
+  return 1
+}
+
 # ---- per-platform artifact map -------------------------------------------
 # One script, three OSes. INSTALLER = the human-download asset (stable name),
 # UPDATER_ARTIFACT = what minisign signs and latest.json points at.
 # Windows keeps its historical /latest/ URL (unchanged behaviour); macOS and
 # Linux use VERSIONED URLs so a later Windows-only publish can never leave a
 # platform key pointing at an asset that no longer matches its signature.
-case "$(uname -s)" in
+case "$UNAME_S" in
   MINGW*|MSYS*|CYGWIN*) HOST_OS="windows" ;;
   Darwin)               HOST_OS="macos" ;;
-  *)                    HOST_OS="linux" ;;
+  *)                    if [ "$is_wsl_windows" = 1 ]; then HOST_OS="windows"; else HOST_OS="linux"; fi ;;
 esac
 ARCH="$(uname -m)"
 case "$ARCH" in arm64|aarch64) ARCH="aarch64" ;; *) ARCH="x86_64" ;; esac
@@ -188,11 +244,11 @@ fi
 # from $CERTUM_OTP_URI (never committed). No-op if the cert is already mounted (still
 # inside the 2h window). Security note: this stores your 2FA seed on the build box.
 if [ "${OWLLM_AUTO_SIMPLYSIGN:-}" = "1" ] && { [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; }; then
-  case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
+  case "$HOST_OS" in
+    windows)
       echo "  auto-connecting SimplySign (OWLLM_AUTO_SIMPLYSIGN=1)…"
       powershell.exe -NoProfile -ExecutionPolicy Bypass \
-        -File "$(cygpath -w "$APP/scripts/Connect-SimplySign.ps1")" \
+        -File "$(to_windows_path "$APP/scripts/Connect-SimplySign.ps1")" \
         ${SIGN_THUMBPRINT:+-Thumbprint "$SIGN_THUMBPRINT"} \
         || fail "SimplySign auto-connect failed — verify the seed with 'powershell -File scripts/Connect-SimplySign.ps1 -CodeOnly' (must match your phone), or log in manually"
       ;;
@@ -204,16 +260,15 @@ step "0b/5 payload sign — every exe/dll bundled under resources/ must be signe
 # Unsigned binaries INSIDE an EV-signed installer are a classic SmartScreen /
 # Defender heuristic trigger (bit us with the whisper.cpp runtime). Sign any
 # unsigned exe/dll the bundle will carry, with the same cert as the installer.
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*)
+case "$HOST_OS" in
+  windows)
     if [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; then
-      SIGNTOOL="$(command -v signtool.exe 2>/dev/null || true)"
-      [ -n "$SIGNTOOL" ] || SIGNTOOL="$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64/signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+      SIGNTOOL="$(find_signtool || true)"
       [ -n "$SIGNTOOL" ] || fail "signtool.exe not found — install the Windows 10/11 SDK (or put signtool on PATH)"
       if [ -n "$SIGN_THUMBPRINT" ]; then SEL=(/sha1 "$SIGN_THUMBPRINT"); else SEL=(/n "$SIGN_SUBJECT"); fi
       PAYLOAD_SIGNED=0
       while IFS= read -r bin; do
-        WBIN="$(cygpath -w "$bin")"
+        WBIN="$(to_windows_path "$bin")"
         # already signed (by us or upstream, e.g. Microsoft's WebView2Loader)? skip.
         if MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" verify /pa "$WBIN" >/dev/null 2>&1; then continue; fi
         echo "  signing payload: $bin"
@@ -263,8 +318,12 @@ case "$HOST_OS" in
   # cmd.exe needs the FULL Windows path to the .bat (a relative name or a POSIX
   # "/c/…" path gets mangled by MSYS and silently no-ops). cygpath -w resolves it.
   windows)
-    WINBAT="$(cygpath -w "$APP/build-release.bat")"
-    cmd.exe //c "$WINBAT" || fail "build-release.bat failed"
+    WINBAT="$(to_windows_path "$APP/build-release.bat")"
+    if [ "$HOST_FLAVOR" = "WSL" ]; then
+      cmd.exe /c "$WINBAT" || fail "build-release.bat failed"
+    else
+      cmd.exe //c "$WINBAT" || fail "build-release.bat failed"
+    fi
     ;;
   *)
     npm run tauri -- build || fail "tauri build failed"
@@ -292,18 +351,17 @@ esac
 [ -f "$UPDATER_ARTIFACT" ] || fail "no updater artifact at $UPDATER_ARTIFACT"
 
 step "1a/5 windows payload signing (exe/dll before installer)"
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*)
+case "$HOST_OS" in
+  windows)
     if [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; then
-      SIGNTOOL="$(command -v signtool.exe 2>/dev/null || true)"
-      [ -n "$SIGNTOOL" ] || SIGNTOOL="$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64/signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+      SIGNTOOL="$(find_signtool || true)"
       [ -n "$SIGNTOOL" ] || fail "signtool.exe not found — install the Windows 10/11 SDK (or put signtool on PATH) to Authenticode-sign payloads"
       if [ -n "$SIGN_THUMBPRINT" ]; then SEL=(/sha1 "$SIGN_THUMBPRINT"); else SEL=(/n "$SIGN_SUBJECT"); fi
 
       sign_payload() {
         local src="$1" label="$2" win_src
         [ -f "$src" ] || fail "payload missing: $src"
-        win_src="$(cygpath -w "$src")"
+        win_src="$(to_windows_path "$src")"
         if ! MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" verify /pa "$win_src" >/dev/null 2>&1; then
           echo "  signing $label: $src"
           MSYS2_ARG_CONV_EXCL="*" "$SIGNTOOL" sign "${SEL[@]}" /fd sha256 /tr "$SIGN_TSA" /td sha256 /d "OwLLM Desktop" "$win_src" \
@@ -328,9 +386,7 @@ case "$(uname -s)" in
       NSIS_DIR="$RELEASE_DIR/nsis/x64"
       NSIS_OUT="$NSIS_DIR/nsis-output.exe"
       BUNDLED_INSTALLER="$RELEASE_DIR/bundle/nsis/OwLLM Desktop_${VERSION}_x64-setup.exe"
-      MAKENSIS="$(command -v makensis.exe 2>/dev/null || command -v makensis 2>/dev/null || true)"
-      [ -n "$MAKENSIS" ] || [ ! -x "$HOME/AppData/Local/tauri/NSIS/makensis.exe" ] || MAKENSIS="$HOME/AppData/Local/tauri/NSIS/makensis.exe"
-      [ -n "$MAKENSIS" ] || [ ! -x "$HOME/AppData/Local/tauri/NSIS/Bin/makensis.exe" ] || MAKENSIS="$HOME/AppData/Local/tauri/NSIS/Bin/makensis.exe"
+      MAKENSIS="$(find_makensis || true)"
       [ -n "$MAKENSIS" ] || fail "makensis.exe not found — cannot rebuild installer with signed payload"
       [ -f "$NSIS_DIR/installer.nsi" ] || fail "generated NSIS script missing: $NSIS_DIR/installer.nsi"
       ( cd "$NSIS_DIR" && "$MAKENSIS" installer.nsi ) || fail "makensis failed while rebuilding signed installer"
@@ -354,13 +410,12 @@ step "1b/5 authenticode sign (SimplySign / Certum) — must run BEFORE minisign"
 # Unconfigured → SKIP (installer stays unsigned, today's behaviour). Configured
 # but signing fails → FAIL (never ship a "signed" release that isn't). Authenticode
 # MUST precede minisign: it rewrites the .exe, which would void the updater sig.
-case "$(uname -s)" in
-  MINGW*|MSYS*|CYGWIN*)
+case "$HOST_OS" in
+  windows)
     if [ -n "$SIGN_THUMBPRINT" ] || [ -n "$SIGN_SUBJECT" ]; then
-      SIGNTOOL="$(command -v signtool.exe 2>/dev/null || true)"
-      [ -n "$SIGNTOOL" ] || SIGNTOOL="$(ls -d "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64/signtool.exe 2>/dev/null | sort -r | head -1 || true)"
+      SIGNTOOL="$(find_signtool || true)"
       [ -n "$SIGNTOOL" ] || fail "signtool.exe not found — install the Windows 10/11 SDK (or put signtool on PATH) to Authenticode-sign"
-      WININ="$(cygpath -w "$INSTALLER")"
+      WININ="$(to_windows_path "$INSTALLER")"
       if [ -n "$SIGN_THUMBPRINT" ]; then SEL=(/sha1 "$SIGN_THUMBPRINT"); else SEL=(/n "$SIGN_SUBJECT"); fi
       echo "  signing '$INSTALLER'  (${SIGN_THUMBPRINT:+thumbprint ${SIGN_THUMBPRINT}}${SIGN_SUBJECT:+subject \"${SIGN_SUBJECT}\"}, tsa $SIGN_TSA)"
       # MSYS2_ARG_CONV_EXCL: Git Bash rewrites /fd, /tr, /sha1 into filesystem

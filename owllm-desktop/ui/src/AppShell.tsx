@@ -891,6 +891,24 @@ function resolveDeepLink(key: string): { mode: ActiveMode; activeKey: string } |
   return null;
 }
 
+// Vault sync can legitimately reload the webview once after it imports newer
+// state from another device. Keep the user's navigation separate from synced
+// state and restore it after that reload; otherwise an async boot task can
+// dump someone working in Code/Agents back onto Home without any action from
+// them. sessionStorage is intentionally used so this is per-window and never
+// leaks a machine-local navigation choice into the vault.
+const NAV_RESTORE_KEY = "owllm:nav-restore";
+function readSavedNavigation(): { mode: ActiveMode; activeKey: string } | null {
+  try {
+    const raw = sessionStorage.getItem(NAV_RESTORE_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw) as { activeKey?: unknown };
+    return typeof saved.activeKey === "string" ? resolveDeepLink(saved.activeKey) : null;
+  } catch {
+    return null;
+  }
+}
+
 function OverlayContentPanel({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
@@ -912,7 +930,11 @@ export default function AppShell() {
     const k = readPageFromUrl();
     return k ? resolveDeepLink(k) : null;
   }, []);
-  const [mode, setMode] = useState<ActiveMode>(initialDeep?.mode ?? "home");
+  const initialNavigation = useMemo(
+    () => initialDeep ?? readSavedNavigation() ?? { mode: "home" as ActiveMode, activeKey: CORE.firstTab },
+    [initialDeep],
+  );
+  const [mode, setMode] = useState<ActiveMode>(initialNavigation.mode);
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
   const [bridgesModalOpen, setBridgesModalOpen] = useState<boolean>(false);
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
@@ -1030,8 +1052,13 @@ export default function AppShell() {
     return mod?.firstTab ?? CORE.firstTab;
   };
   const [activeKey, setActiveKey] = useState<string>(
-    () => initialDeep?.activeKey ?? defaultKeyForMode("home"),
+    () => initialNavigation.activeKey,
   );
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(NAV_RESTORE_KEY, JSON.stringify({ mode, activeKey }));
+    } catch { /* storage unavailable: a reload falls back to Home as before */ }
+  }, [mode, activeKey]);
   // Local-only activity stats (P0-8 Slice 4): count page visits by KEY
   // (a product id, never content). Viewed/cleared inside The Watcher.
   useEffect(() => {

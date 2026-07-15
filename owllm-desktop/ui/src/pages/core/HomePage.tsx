@@ -473,7 +473,15 @@ export default function HomePage() {
   // this component when the shared cache changes.
   const [, forceReady] = useReducer((x: number) => x + 1, 0);
   useEffect(() => subscribeReadiness(forceReady), []);
-  useEffect(() => { fetchReadiness(false); }, []);
+  useEffect(() => {
+    // WSL/environment readiness can start several cold processes. Give the
+    // shell a brief chance to become interactive first; if the user immediately
+    // switches to work, unmounting Home cancels this queued probe entirely.
+    // System status remains available when they stay on Home, without making
+    // every launch compete with their first real action.
+    const timer = window.setTimeout(() => fetchReadiness(false), 1500);
+    return () => window.clearTimeout(timer);
+  }, []);
   const ready = getCachedReadiness();
   const readyLoading = isReadinessLoading();
   // Stable identity: this is passed as `onChanged` to WslSetupModal /

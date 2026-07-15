@@ -245,7 +245,13 @@ else
   if [ -z "$NODE_RUNNER" ]; then
     NODE_RUNNER="$(command -v node.exe 2>/dev/null || command -v node)"
   fi
-  "$NODE_RUNNER" "$APP/scripts/smoke-matrix.mjs" $SMOKE_ARGS \
+  SMOKE_MATRIX="$APP/scripts/smoke-matrix.mjs"
+  case "$NODE_RUNNER" in
+    *node.exe)
+      SMOKE_MATRIX="$(cygpath -w "$SMOKE_MATRIX" 2>/dev/null || wslpath -w "$SMOKE_MATRIX" 2>/dev/null || printf '%s' "$SMOKE_MATRIX")"
+      ;;
+  esac
+  "$NODE_RUNNER" "$SMOKE_MATRIX" $SMOKE_ARGS \
     || fail "smoke matrix red — not shippable. Fix the failing cell, or OWLLM_SKIP_SMOKE=1 for an emergency override."
 fi
 

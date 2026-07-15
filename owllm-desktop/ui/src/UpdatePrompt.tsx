@@ -104,6 +104,16 @@ export default function UpdateController() {
     setPhase("downloading");
     setError(null);
     try {
+      // Release our own child processes BEFORE the installer runs. The NSIS
+      // updater only terminates owllm-desktop.exe; a still-running llama-server
+      // (or other sidecar) can keep a handle on files under the install dir, so
+      // the passive installer stalls on a file-in-use overwrite retry that never
+      // gets answered — which is how stale "*-installer.exe" processes pile up in
+      // the background across updates. Best-effort: never block the update on it.
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        await invoke("server_stop").catch(() => {});
+      } catch { /* best effort — proceed with the install regardless */ }
       await update.downloadAndInstall((evt: any) => {
         // Tauri emits {event, data}: "Started" with contentLength,
         // "Progress" with chunkLength, "Finished".

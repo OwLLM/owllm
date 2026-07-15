@@ -243,10 +243,7 @@ else
   SMOKE_ARGS="--static-only"; [ "${OWLLM_SMOKE_FULL:-0}" = "1" ] && SMOKE_ARGS=""
   NODE_RUNNER="${OWLLM_NODE:-}"
   if [ -z "$NODE_RUNNER" ]; then
-    case "$HOST_OS" in
-      windows) NODE_RUNNER="$(command -v node.exe 2>/dev/null || command -v node)" ;;
-      *)       NODE_RUNNER="$(command -v node)" ;;
-    esac
+    NODE_RUNNER="$(command -v node.exe 2>/dev/null || command -v node)"
   fi
   "$NODE_RUNNER" "$APP/scripts/smoke-matrix.mjs" $SMOKE_ARGS \
     || fail "smoke matrix red — not shippable. Fix the failing cell, or OWLLM_SKIP_SMOKE=1 for an emergency override."

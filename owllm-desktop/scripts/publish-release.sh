@@ -112,6 +112,22 @@ esac
 step() { echo ""; echo "=== $* ==="; }
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
 
+MIN_HOST_RELEASE_FREE_KB=$((20 * 1024 * 1024))
+fmt_kb() {
+  awk -v kb="$1" 'BEGIN { printf "%.1f GB", kb / 1024 / 1024 }'
+}
+preflight_host_disk() {
+  local dir="$1" avail
+  avail="$(df -Pk "$dir" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+  [ -n "$avail" ] || fail "could not measure free disk space for '$dir' (host release requires at least $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB") free)"
+  if [ "$avail" -lt "$MIN_HOST_RELEASE_FREE_KB" ]; then
+    fail "only $(fmt_kb "$avail") free; host release requires at least $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB") before building. Free space or clean build caches first."
+  fi
+  echo "disk preflight: $(fmt_kb "$avail") free (minimum $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB"))"
+}
+
+preflight_host_disk "$APP"
+
 # No --notes → fall back to the OWLLM_RELEASE_NOTES env var (set by the
 # deterministic finish-and-publish.sh), then derive from git history.
 # finish-and-publish.sh stopped passing notes as a shell-quoted argument

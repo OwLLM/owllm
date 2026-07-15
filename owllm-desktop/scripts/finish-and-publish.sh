@@ -82,6 +82,20 @@ trap 'cp -f "$LIVE_LOG" "$LOG_DIR/publish-v${NEW:-unknown}.log" 2>/dev/null || t
 
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
 
+MIN_HOST_RELEASE_FREE_KB=$((20 * 1024 * 1024))
+fmt_kb() {
+  awk -v kb="$1" 'BEGIN { printf "%.1f GB", kb / 1024 / 1024 }'
+}
+preflight_host_disk() {
+  local dir="$1" avail
+  avail="$(df -Pk "$dir" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+  [ -n "$avail" ] || fail "could not measure free disk space for '$dir' (host release requires at least $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB") free)"
+  if [ "$avail" -lt "$MIN_HOST_RELEASE_FREE_KB" ]; then
+    fail "only $(fmt_kb "$avail") free; host release requires at least $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB") before building. Free space or clean build caches first."
+  fi
+  echo "disk preflight: $(fmt_kb "$avail") free (minimum $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB"))"
+}
+
 # --- Project Card (.owllm/project.json): per-project release config so this works
 #     for ANY project on ANY OS, not just this repo. Defaults preserve the OwLLM
 #     behaviour, so a card-less repo still publishes exactly as before. ---
@@ -140,6 +154,8 @@ fi
 [ -n "$VERSION_FILE" ] || fail "no version file found (tauri.conf.json / package.json) — set release.versionFile in .owllm/project.json"
 CONF="$REPO/$VERSION_FILE"
 [ -f "$CONF" ] || fail "version file '$VERSION_FILE' not found — set release.versionFile in .owllm/project.json"
+
+[ "$MODE" = "host" ] && preflight_host_disk "$REPO"
 
 # Release commits must contain ONLY the deterministic version bump produced by
 # this script. If real app changes are already dirty, `git add $STAGE_PATH` would

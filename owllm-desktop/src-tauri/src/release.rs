@@ -9,6 +9,8 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const MIN_HOST_RELEASE_FREE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
 /// Code-signing certificate selection for a release. Mirrors the Publisher card's
 /// code-signing fields and maps 1:1 onto publish-release.sh's OWLLM_SIGN_* env.
 #[derive(serde::Deserialize, serde::Serialize, Clone, Default)]
@@ -313,6 +315,50 @@ fn run_probe(name: &str, args: &[&str]) -> (bool, String) {
         }
         Err(e) => (false, format!("spawn {name}: {e}")),
     }
+}
+
+fn fmt_gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+}
+
+#[cfg(windows)]
+fn disk_free_bytes_for_path(path: &str) -> Option<(String, u64)> {
+    let full = std::fs::canonicalize(path).ok()?;
+    let s = full.to_string_lossy();
+    let drive = s.get(0..2).filter(|d| d.ends_with(':'))?.to_string();
+    let filter = format!("DeviceID='{drive}'");
+    let out = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            &format!(
+                "(Get-CimInstance Win32_LogicalDisk -Filter \"{}\").FreeSpace",
+                filter
+            ),
+        ])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let free = txt.trim().parse::<u64>().ok()?;
+    Some((drive, free))
+}
+
+#[cfg(not(windows))]
+fn disk_free_bytes_for_path(path: &str) -> Option<(String, u64)> {
+    let out = Command::new("df").args(["-Pk", path]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let line = txt.lines().last()?;
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let avail_kb = cols.get(3)?.parse::<u64>().ok()?;
+    Some((cols.first().unwrap_or(&"filesystem").to_string(), avail_kb * 1024))
 }
 
 /// Locate signtool.exe the same way the publish script does:
@@ -669,6 +715,30 @@ pub async fn publish_readiness(
 
         // Host-mode specific build / publish tooling probes.
         if host_mode {
+            let disk = disk_free_bytes_for_path(&host);
+            checks.push(ReadyCheck {
+                id: "disk".into(),
+                label: "Disk headroom (host release)".into(),
+                ok: disk
+                    .as_ref()
+                    .is_some_and(|(_, free)| *free >= MIN_HOST_RELEASE_FREE_BYTES),
+                detail: match disk {
+                    Some((where_, free)) if free >= MIN_HOST_RELEASE_FREE_BYTES => {
+                        format!("{} free on {where_} (minimum {})", fmt_gb(free), fmt_gb(MIN_HOST_RELEASE_FREE_BYTES))
+                    }
+                    Some((where_, free)) => {
+                        format!(
+                            "{} free on {where_}; host release requires at least {} before building",
+                            fmt_gb(free),
+                            fmt_gb(MIN_HOST_RELEASE_FREE_BYTES)
+                        )
+                    }
+                    None => format!(
+                        "could not measure free disk space; host release requires at least {} free",
+                        fmt_gb(MIN_HOST_RELEASE_FREE_BYTES)
+                    ),
+                },
+            });
             let (node_ok, node_out) = run_probe("node", &["--version"]);
             checks.push(ReadyCheck {
                 id: "node".into(),

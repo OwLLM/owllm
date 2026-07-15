@@ -22,7 +22,20 @@ _OWLLM_WSL_DISTRO=""
 
 # Path to a real host `gh` executable, or empty. `type -P` ignores the gh() function
 # we define below (it reports only an on-disk file), so this never self-recurses.
-_owllm_host_gh() { type -P gh 2>/dev/null | head -1; }
+_owllm_host_gh() {
+  local p
+  p="$(type -P gh 2>/dev/null | head -1)"
+  [ -n "$p" ] && { printf '%s' "$p"; return 0; }
+  for p in \
+    "/c/Program Files/GitHub CLI/gh.exe" \
+    "/mnt/c/Program Files/GitHub CLI/gh.exe" \
+    "${ProgramFiles:-}/GitHub CLI/gh.exe" \
+    "${ProgramW6432:-}/GitHub CLI/gh.exe"
+  do
+    [ -x "$p" ] && { printf '%s' "$p"; return 0; }
+  done
+  return 1
+}
 
 _owllm_wsl() { command -v wsl.exe >/dev/null 2>&1 && echo wsl.exe; }
 

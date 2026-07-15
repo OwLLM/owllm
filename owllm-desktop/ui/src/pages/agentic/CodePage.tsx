@@ -406,18 +406,10 @@ function probeSandboxOnce(): Promise<{ st: WslStatus; iso: WslIsolation; s: Sand
       const [st, iso0] = await Promise.all([wslStatus(), wslIsolationGet()]);
       // Retry while the sandbox reports "not available" — the first wsl.exe call
       // after boot can transiently miss the distro while the service warms up.
-      let s = await sandboxStatus();
-      for (let i = 0; i < 3 && !s.available; i++) {
-        await new Promise((r) => setTimeout(r, 800));
-        s = await sandboxStatus();
-      }
+      const s = await sandboxStatus();
       // Sandbox present + isolation off → enable it once (every new project is
       // isolated by default; the user can still opt out per project).
-      let iso = iso0;
-      if (s.available && !iso0.enabled) {
-        try { iso = await wslIsolationSet(true, s.defaultTarget ?? null); } catch { iso = iso0; }
-      }
-      return { st, iso, s };
+      return { st, iso: iso0, s };
     })();
     _sandboxProbe.catch(() => { _sandboxProbe = null; });
   }
@@ -641,6 +633,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   // model when it hasn't chosen one (empty = "same as 1st agent").
   const secondaryModelEffective = secondaryModelId || modelId;
   const [secondaryBusy, setSecondaryBusy] = useState(false);
+  const primaryAuraActive = busy || chatBusy;
   // One-step undo for per-agent "Clear history": each pane keeps its OWN
   // snapshot of the transcript it last cleared, so clearing one agent never
   // touches the other and each ↩ Undo restores exactly what that pane wiped.
@@ -1039,16 +1032,6 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
   // WSL/sandbox STATUS — from the app-wide cache, so a new page never re-pays
   // the cold wsl.exe probe (the 40s "opening a page" stall). See probeSandboxOnce.
-  useEffect(() => {
-    let dead = false;
-    probeSandboxOnce().then(({ st, iso, s }) => {
-      if (dead) return;
-      setWslStat(st);
-      setIsolation(iso);
-      setSbox(s);
-    }).catch(() => { /* leave UI in "checking" */ });
-    return () => { dead = true; };
-  }, []);
   // Onboarding lists (WSL/sandbox projects + toolchain) only populate the PICKER
   // screen, so fetch them ONLY when this page has no project — a page with one
   // open skips these extra wsl.exe calls.
@@ -1057,8 +1040,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     let dead = false;
     probeSandboxOnce().then(({ st, iso, s }) => {
       if (dead) return;
+      setWslStat(st);
+      setIsolation(iso);
+      setSbox(s);
       refreshWslProjects(iso, st);
-      refreshToolchain(st);
       refreshSboxProjects(iso, s);
     }).catch(() => { /* onboarding lists are best-effort */ });
     return () => { dead = true; };
@@ -1252,7 +1237,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const openNewProject = () => {
     setNpName("");
     setNpFolder("");
-    setNpIsolate(!!sbox?.available); // default isolated whenever an engine exists
+    setNpIsolate(false); // host folders are instant; isolation is an explicit choice
     setNpCreateRepo(false);
     setNpBusy(false);
     setNpOpen(true);
@@ -2453,6 +2438,10 @@ function CodeWorkspace({ pageId, onTitle }: {
       <style>{`
         @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
         @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+        @keyframes owllm-aura-pulse {
+          0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,.16), 0 0 18px rgba(60,242,107,.36), 0 0 32px rgba(176,124,255,.34), 0 8px 24px rgba(0,0,0,.42); }
+          50% { box-shadow: 0 0 0 1px rgba(255,255,255,.48), 0 0 38px rgba(255,92,138,.72), 0 0 62px rgba(127,212,255,.56), 0 8px 30px rgba(0,0,0,.52); }
+        }
       `}</style>
       {/* Header: workspace · model · status */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2701,10 +2690,10 @@ function CodeWorkspace({ pageId, onTitle }: {
           // Solid fill on padding-box keeps the message/input area's background;
           // the rainbow ring paints border-box only, so the aura reads OUTSIDE
           // the chat container. Spins while the coder is running, static idle.
-          background: `var(--bg-input) padding-box, ${PSYCHEDELIC_AURA_RING}`,
-          border: "2px solid transparent", borderRadius: 8,
-          boxShadow: PSYCHEDELIC_AURA_HALO,
-          animation: busy ? "owllm-aura-spin 4s linear infinite" : undefined,
+          background: primaryAuraActive ? `var(--bg-input) padding-box, ${PSYCHEDELIC_AURA_RING}` : "var(--bg-input)",
+          border: primaryAuraActive ? "2px solid transparent" : "1px solid var(--border)", borderRadius: 8,
+          boxShadow: primaryAuraActive ? PSYCHEDELIC_AURA_HALO : undefined,
+          animation: primaryAuraActive ? "owllm-aura-spin 2.8s linear infinite, owllm-aura-pulse 1.45s ease-in-out infinite" : undefined,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
@@ -2785,10 +2774,10 @@ function CodeWorkspace({ pageId, onTitle }: {
             // Same rainbow aura as the primary pane: rainbow ring on border-box,
             // solid var(--bg-input) fill on padding-box so the message/input
             // area stays solid. Spins while the second agent is running.
-            background: `var(--bg-input) padding-box, ${PSYCHEDELIC_AURA_RING}`,
-            border: "2px solid transparent", borderRadius: 8,
-            boxShadow: PSYCHEDELIC_AURA_HALO,
-            animation: secondaryBusy ? "owllm-aura-spin 4s linear infinite" : undefined,
+            background: secondaryBusy ? `var(--bg-input) padding-box, ${PSYCHEDELIC_AURA_RING}` : "var(--bg-input)",
+            border: secondaryBusy ? "2px solid transparent" : "1px solid var(--border)", borderRadius: 8,
+            boxShadow: secondaryBusy ? PSYCHEDELIC_AURA_HALO : undefined,
+            animation: secondaryBusy ? "owllm-aura-spin 2.8s linear infinite, owllm-aura-pulse 1.45s ease-in-out infinite" : undefined,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>

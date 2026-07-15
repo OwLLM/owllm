@@ -52,11 +52,10 @@ export const BUNDLED_CLOUD_CATALOGUE: CloudCatalogue = {
   openai: [
     // GPT-5.6 family — current flagship line (July 2026). Sol is the
     // frontier tier; Terra balances cost; Luna is the budget tier.
-    { id: "gpt-5.6-sol",   display: "GPT-5.6 Sol",    api: true, effort: ["low", "medium", "high", "extra_high"] },
-    { id: "gpt-5.6-terra", display: "GPT-5.6 Terra",  api: true, effort: ["low", "medium", "high", "extra_high"] },
-    { id: "gpt-5.6-luna",  display: "GPT-5.6 Luna",   api: true },
-    { id: "gpt-5.5-codex", display: "GPT-5.5 Codex",  sub: true, effort: ["low", "medium", "high", "extra_high"] },
-    { id: "gpt-5.5",       display: "GPT-5.5",        api: true, effort: ["low", "medium", "high", "extra_high"] },
+    { id: "gpt-5.6-sol",   display: "GPT-5.6 Sol",    sub: true, api: true, effort: ["low", "medium", "high", "extra_high"] },
+    { id: "gpt-5.6-terra", display: "GPT-5.6 Terra",  sub: true, api: true, effort: ["low", "medium", "high", "extra_high"] },
+    { id: "gpt-5.6-luna",  display: "GPT-5.6 Luna",   sub: true, api: true },
+    { id: "gpt-5.5",       display: "GPT-5.5 Codex",  sub: true, api: true, effort: ["low", "medium", "high", "extra_high"] },
     { id: "gpt-5.4",       display: "GPT-5.4",        api: true, effort: ["low", "medium", "high", "extra_high"] },
     { id: "gpt-5.4-mini",  display: "GPT-5.4 mini",   api: true },
     { id: "gpt-4o",        display: "GPT-4o",         api: true },

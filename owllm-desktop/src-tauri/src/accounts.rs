@@ -2143,6 +2143,8 @@ pub async fn codex_cli_complete(
     user_message: String,
     cwd: Option<String>,
     image_paths: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let prompt = if system_prompt.trim().is_empty() {
@@ -2168,6 +2170,14 @@ pub async fn codex_cli_complete(
             "--sandbox".into(),
             "read-only".into(),
         ];
+        if let Some(model) = model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            base_args.push("--model".into());
+            base_args.push(model.to_string());
+        }
+        if let Some(effort) = effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            base_args.push("-c".into());
+            base_args.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
         // Attach pasted images via codex's native `-i` flag (verified: codex
         // reads them as vision input). One flag per file so the variadic `-i`
         // doesn't swallow the positional prompt. Paths are relative to cwd.
@@ -2188,7 +2198,7 @@ pub async fn codex_cli_complete(
         } {
             let mut cmd = Command::new(exe);
             cmd.args(sargs);
-            cmd.stdin(Stdio::piped());
+            cmd.stdin(if pass_prompt_positionally { Stdio::null() } else { Stdio::piped() });
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
@@ -2198,8 +2208,10 @@ pub async fn codex_cli_complete(
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
             let pid = register_cli_child(&child);
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(prompt.as_bytes());
+            if !pass_prompt_positionally {
+                if let Some(mut stdin) = child.stdin.take() {
+                    let _ = stdin.write_all(prompt.as_bytes());
+                }
             }
             let output = wait_cli_child(child, pid).map_err(|e| format!("wait codex: {e}"))?;
             if !output.status.success() {
@@ -2252,7 +2264,7 @@ pub async fn codex_cli_complete(
                 cmd.current_dir(p);
             }
         }
-        cmd.stdin(Stdio::piped());
+        cmd.stdin(if pass_prompt_positionally { Stdio::null() } else { Stdio::piped() });
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         #[cfg(windows)]
@@ -2262,8 +2274,10 @@ pub async fn codex_cli_complete(
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
         let pid = register_cli_child(&child);
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes());
+        if !pass_prompt_positionally {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(prompt.as_bytes());
+            }
         }
         let output = wait_cli_child(child, pid).map_err(|e| format!("wait codex: {e}"))?;
         let from_file = std::fs::read_to_string(&out_file).ok();
@@ -3002,6 +3016,8 @@ pub async fn codex_cli_stream(
     user_message: String,
     cwd: Option<String>,
     image_paths: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
     // Per-role tool gate. Codex has no `--allowedTools` flag, so this is used
     // to detect the Browser role (its allowlist names browser_*, the same
     // capability-key the Publisher uses). Browser is the host-capable role
@@ -3109,6 +3125,14 @@ pub async fn codex_cli_stream(
             "--sandbox".into(),
             sandbox_mode.into(),
         ];
+        if let Some(model) = model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        if let Some(effort) = effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            args.push("-c".into());
+            args.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
         // Point Codex at the in-app MCP gateway (browser_* tools) + let its calls
         // actually execute (approval_policy=never — see the codex-quirk note).
         if gateway_wired {
@@ -3173,7 +3197,8 @@ pub async fn codex_cli_stream(
         if let Some(tok) = token_env.as_ref() {
             cmd.env(crate::mcp_gateway::CODEX_TOKEN_ENV, tok);
         }
-        cmd.stdin(Stdio::piped());
+        let pass_prompt_positionally = prompt.len() <= MAX_PROMPT_ARG;
+        cmd.stdin(if pass_prompt_positionally { Stdio::null() } else { Stdio::piped() });
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         #[cfg(windows)]
@@ -3238,9 +3263,11 @@ pub async fn codex_cli_stream(
                 std::thread::sleep(Duration::from_millis(250));
             }
         });
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes());
-            // Drop closes the pipe (EOF) so the stdin-style codex proceeds.
+        if !pass_prompt_positionally {
+            if let Some(mut stdin) = child.stdin.take() {
+                let _ = stdin.write_all(prompt.as_bytes());
+                // Drop closes the pipe (EOF) so the stdin-style Codex proceeds.
+            }
         }
         let stdout = child
             .stdout

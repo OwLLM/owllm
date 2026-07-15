@@ -7690,15 +7690,18 @@ async function streamOpenAI(
     let imageSaveNote = "";
     const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
     const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
+    const [pickedModel, pickedEffort] = modelId.split(":", 2);
+    const codexModel = pickedModel === "gpt-5.5-codex" ? "gpt-5.5" : pickedModel;
+    const codexEffort = pickedEffort === "extra_high" ? "xhigh" : pickedEffort || null;
     // Stream live activity (reasoning/commands/tools/web-search) into the
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, allowedTools, onDelta, onThought,
+        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools, onDelta, onThought,
       }), codexCwd);
     }
     const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
-      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths,
+      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort,
     }), codexCwd);
     if (reply) onDelta(reply);
     return reply;

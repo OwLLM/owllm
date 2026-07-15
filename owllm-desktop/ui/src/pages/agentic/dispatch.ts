@@ -169,6 +169,8 @@ async function runClaudeCliStream(args: {
 /// identical tagged JSON) so there's one handler for both CLIs.
 export async function runCodexCliStream(args: {
   imagePaths?: string[];
+  model?: string | null;
+  effort?: string | null;
   systemPrompt: string;
   userMessage: string;
   cwd?: string | null;
@@ -210,6 +212,8 @@ export async function runCodexCliStream(args: {
     userMessage: args.userMessage,
     cwd: args.cwd ?? null,
     imagePaths: args.imagePaths ?? null,
+    model: args.model ?? null,
+    effort: args.effort ?? null,
     allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
     onEvent: ch,
   });
@@ -2738,6 +2742,9 @@ async function streamOpenAI(
     let imageSaveNote = "";
     const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
     const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
+    const [pickedModel, pickedEffort] = modelId.split(":", 2);
+    const codexModel = pickedModel === "gpt-5.5-codex" ? "gpt-5.5" : pickedModel;
+    const codexEffort = pickedEffort === "extra_high" ? "xhigh" : pickedEffort || null;
     // Stream live activity (reasoning, commands, tools, web searches) when
     // the caller wants thought traffic — AgentsPage / ChatPage / CodePage.
     // Bridge callers (no Thought pane) fall back to the one-shot blob.
@@ -2747,6 +2754,8 @@ async function streamOpenAI(
         userMessage: codexPrompt,
         cwd: codexCwd ?? null,
         imagePaths: codexImagePaths,
+        model: codexModel,
+        effort: codexEffort,
         allowedTools,
         onDelta,
         onThought,
@@ -2757,6 +2766,8 @@ async function streamOpenAI(
       userMessage: codexPrompt,
       cwd: codexCwd ?? undefined,
       imagePaths: codexImagePaths,
+      model: codexModel,
+      effort: codexEffort,
     });
     if (reply) onDelta(reply);
     return reply;

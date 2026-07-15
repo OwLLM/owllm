@@ -1020,7 +1020,7 @@ fn status_impl() -> SandboxStatus {
     // then cached, so polling status is cheap.
     let confined = default_target
         .as_deref()
-        .map(ensure_sandbox)
+        .and_then(|distro| sandbox_cache().lock().ok().and_then(|c| c.get(distro).copied()))
         .unwrap_or(false);
     SandboxStatus {
         available: w.available,

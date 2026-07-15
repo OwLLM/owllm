@@ -264,7 +264,7 @@ async function runProviders() {
       // Mirrors codex_cli_complete: prompt as positional arg AND on stdin (EOF'd).
       const smallP = "Reply with exactly SMOKE_OK_CODEX and nothing else.";
       await cell("P", "codex · small prompt", async () =>
-        expectToken(await runCli(codex, ["exec", smallP], { stdinText: smallP }), "SMOKE_OK_CODEX"));
+        expectToken(await runCli(codex, ["exec", smallP]), "SMOKE_OK_CODEX"));
       await cell("P", "codex · 40KB prompt via stdin (arg dropped)", async () =>
         expectToken(await runCli(codex, ["exec"], { stdinText: bigPrompt("SMOKE_BIG_CODEX") }), "SMOKE_BIG_CODEX"));
       // Mirrors codex_http_config + the approval reality verified 2026-07-05:

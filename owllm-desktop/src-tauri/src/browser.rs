@@ -35,7 +35,9 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::mpsc;
+use std::sync::{Mutex, OnceLock};
+use std::thread;
 use std::time::{Duration, Instant};
 use tauri::webview::{Color, Webview, WebviewBuilder};
 use tauri::{
@@ -494,6 +496,102 @@ fn content_webview(app: &tauri::AppHandle) -> Option<Webview> {
         .or_else(|| app.get_webview(BROWSER_LABEL))
 }
 
+/// Native WebView callbacks run on the application's shared UI event thread on
+/// Windows (WebView2), macOS (WKWebView), and Linux (WebKitGTK). Calling any
+/// other Window/Webview method from inside one of those callbacks can re-enter
+/// the engine and deadlock that one thread, freezing the main app, overlay, and
+/// browser together. Keep callbacks enqueue-only; this worker performs every
+/// cross-window operation after the callback has returned to the event loop.
+#[derive(Debug)]
+enum BrowserUiEvent {
+    ChromeAction {
+        action: String,
+        data: String,
+    },
+    ChromeUpdate {
+        url: Option<String>,
+        title: Option<String>,
+    },
+    Layout {
+        width: u32,
+        height: u32,
+    },
+}
+
+#[derive(Default)]
+struct BrowserUiBatch {
+    actions: Vec<(String, String)>,
+    url: Option<String>,
+    title: Option<String>,
+    layout: Option<(u32, u32)>,
+}
+
+impl BrowserUiBatch {
+    fn absorb(&mut self, event: BrowserUiEvent) {
+        match event {
+            BrowserUiEvent::ChromeAction { action, data } => self.actions.push((action, data)),
+            BrowserUiEvent::ChromeUpdate { url, title } => {
+                if url.is_some() {
+                    self.url = url;
+                }
+                if title.is_some() {
+                    self.title = title;
+                }
+            }
+            BrowserUiEvent::Layout { width, height } => self.layout = Some((width, height)),
+        }
+    }
+}
+
+static BROWSER_UI_TX: OnceLock<Option<mpsc::Sender<BrowserUiEvent>>> = OnceLock::new();
+
+fn browser_ui_sender(app: &tauri::AppHandle) -> Option<&'static mpsc::Sender<BrowserUiEvent>> {
+    BROWSER_UI_TX
+        .get_or_init(|| {
+            let (tx, rx) = mpsc::channel();
+            let app = app.clone();
+            match thread::Builder::new()
+                .name("owllm-browser-ui-dispatch".to_string())
+                .spawn(move || browser_ui_worker(app, rx))
+            {
+                Ok(_) => Some(tx),
+                Err(e) => {
+                    eprintln!("[browser] could not start UI dispatcher: {e}");
+                    None
+                }
+            }
+        })
+        .as_ref()
+}
+
+fn queue_browser_ui(app: &tauri::AppHandle, event: BrowserUiEvent) {
+    if let Some(sender) = browser_ui_sender(app) {
+        let _ = sender.send(event);
+    }
+}
+
+fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) {
+    while let Ok(first) = rx.recv() {
+        let mut batch = BrowserUiBatch::default();
+        batch.absorb(first);
+        // Resize and title events arrive in bursts. Keep every user action but
+        // collapse presentation work to the newest values before dispatching
+        // back through Tauri, avoiding an unbounded main-thread queue.
+        for event in rx.try_iter() {
+            batch.absorb(event);
+        }
+        for (action, data) in batch.actions {
+            handle_chrome_event(&app, &action, &data);
+        }
+        if let Some((width, height)) = batch.layout {
+            layout_children(&app, tauri::PhysicalSize::new(width, height));
+        }
+        if batch.url.is_some() || batch.title.is_some() {
+            update_chrome_bar(&app, batch.url.as_deref(), batch.title.as_deref());
+        }
+    }
+}
+
 /// Chrome-bar → Rust events, carried on the same title channel as page
 /// replies but tagged EVT: SENTINEL + "EVT" + U+2063 + action + U+2063 + b64(data).
 fn parse_chrome_event(title: &str) -> Option<(String, String)> {
@@ -506,10 +604,8 @@ fn parse_chrome_event(title: &str) -> Option<(String, String)> {
     Some((action.to_string(), decode_b64(b64)))
 }
 
-/// Act on a chrome-bar event (window buttons / drag / URL entry). Runs inside
-/// the chrome webview's title-changed callback; window methods are
-/// thread-safe, and navigation is dispatched to a worker so the callback
-/// never blocks on a page load.
+/// Act on a chrome-bar event (window buttons / drag / URL entry). Always called
+/// by `browser_ui_worker`, never directly by a native WebView callback.
 fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
     let Some(win) = get_window(app) else { return };
     match action {
@@ -616,6 +712,9 @@ fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
 
 /// The app-styled browser: frameless Window + chrome-bar webview + page webview.
 fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
+    // Start the dispatcher before adding child webviews so even their very
+    // first load/title callback performs only a cheap channel send.
+    let _ = browser_ui_sender(app);
     let dev = current_device();
     let start_url = url.to_string();
     let win_w = dev.width;
@@ -649,7 +748,10 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         .background_color(OWLLM_BG)
         .on_document_title_changed(|wv, title| {
             if let Some((action, data)) = parse_chrome_event(&title) {
-                handle_chrome_event(&wv.app_handle().clone(), &action, &data);
+                queue_browser_ui(
+                    &wv.app_handle().clone(),
+                    BrowserUiEvent::ChromeAction { action, data },
+                );
             }
         });
 
@@ -665,14 +767,23 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         .on_document_title_changed(|wv, title| {
             capture_reply(&title);
             if !title.starts_with(SENTINEL) {
-                let app = wv.app_handle().clone();
-                let url = wv.url().map(|u| u.to_string()).unwrap_or_default();
-                update_chrome_bar(&app, Some(&url), Some(&title));
+                queue_browser_ui(
+                    &wv.app_handle().clone(),
+                    BrowserUiEvent::ChromeUpdate {
+                        url: None,
+                        title: Some(title),
+                    },
+                );
             }
         })
         .on_page_load(|wv, payload| {
-            let app = wv.app_handle().clone();
-            update_chrome_bar(&app, Some(payload.url().as_str()), None);
+            queue_browser_ui(
+                &wv.app_handle().clone(),
+                BrowserUiEvent::ChromeUpdate {
+                    url: Some(payload.url().to_string()),
+                    title: None,
+                },
+            );
         });
     if let Some(ua) = dev.ua {
         content = content.user_agent(ua);
@@ -703,12 +814,24 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
     let handle = app.clone();
     win.on_window_event(move |ev| {
         if let WindowEvent::Resized(size) = ev {
-            layout_children(&handle, *size);
+            queue_browser_ui(
+                &handle,
+                BrowserUiEvent::Layout {
+                    width: size.width,
+                    height: size.height,
+                },
+            );
         }
     });
 
     apply_chrome(&win);
-    update_chrome_bar(app, Some(&start_url), None);
+    queue_browser_ui(
+        app,
+        BrowserUiEvent::ChromeUpdate {
+            url: Some(start_url),
+            title: None,
+        },
+    );
     Ok(())
 }
 
@@ -723,10 +846,7 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     }
     if let Some(content) = app.get_webview(CONTENT_LABEL) {
         let _ = content.set_position(LogicalPosition::new(0.0, CHROME_H));
-        let _ = content.set_size(LogicalSize::new(
-            ls.width,
-            (ls.height - CHROME_H).max(50.0),
-        ));
+        let _ = content.set_size(LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)));
     }
 }
 
@@ -1103,6 +1223,42 @@ mod tests {
         assert_eq!(parse_chrome_event(&reply), None);
         assert_eq!(parse_chrome_event("GitHub — where software is built"), None);
         assert_eq!(parse_reply(&t), None);
+    }
+
+    #[test]
+    fn browser_ui_batch_coalesces_presentation_but_keeps_actions() {
+        let mut batch = BrowserUiBatch::default();
+        batch.absorb(BrowserUiEvent::ChromeUpdate {
+            url: Some("http://localhost:5173/first".into()),
+            title: None,
+        });
+        batch.absorb(BrowserUiEvent::Layout {
+            width: 800,
+            height: 600,
+        });
+        batch.absorb(BrowserUiEvent::ChromeAction {
+            action: "back".into(),
+            data: String::new(),
+        });
+        batch.absorb(BrowserUiEvent::ChromeUpdate {
+            url: Some("http://localhost:5173/final".into()),
+            title: Some("Final title".into()),
+        });
+        batch.absorb(BrowserUiEvent::Layout {
+            width: 1440,
+            height: 900,
+        });
+        batch.absorb(BrowserUiEvent::ChromeAction {
+            action: "reload".into(),
+            data: String::new(),
+        });
+
+        assert_eq!(batch.url.as_deref(), Some("http://localhost:5173/final"));
+        assert_eq!(batch.title.as_deref(), Some("Final title"));
+        assert_eq!(batch.layout, Some((1440, 900)));
+        assert_eq!(batch.actions.len(), 2);
+        assert_eq!(batch.actions[0].0, "back");
+        assert_eq!(batch.actions[1].0, "reload");
     }
 
     #[test]

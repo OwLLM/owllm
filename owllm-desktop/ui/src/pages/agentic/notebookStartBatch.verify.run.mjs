@@ -40,13 +40,10 @@ globalThis.localStorage = dom.window.localStorage;
 globalThis.CustomEvent = dom.window.CustomEvent;
 
 // ---- transpile the real RunNotebook.tsx to CJS, stub its siblings ----
-// Normalize CRLF→LF: on Windows, core.autocrlf checks these LF-committed
-// sources out as CRLF, which would break multi-line `\n` source-string checks.
-const readSrc = (p) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
-const src = readSrc(path.join(HERE, "RunNotebook.tsx"));
-const codePageSrc = readSrc(path.join(HERE, "CodePage.tsx"));
-const agentsPageSrc = readSrc(path.join(HERE, "AgentsPage.tsx"));
-const watcherSrc = readSrc(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"));
+const src = fs.readFileSync(path.join(HERE, "RunNotebook.tsx"), "utf8");
+const codePageSrc = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
+const agentsPageSrc = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
+const watcherSrc = fs.readFileSync(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"), "utf8");
 const js = ts.transpileModule(src, {
   compilerOptions: {
     module: ts.ModuleKind.CommonJS,

@@ -189,6 +189,29 @@
       window.addEventListener("storage", function (e) {
         if (e.key === "owllm:language") applyLanguage(e.newValue || "en");
       });
+
+      // This chrome is a separate webview, so it cannot consume React context.
+      // Keep its small static surface in sync through the same persisted locale.
+      var CHROME_COPY = {
+        "en": ["OwLLM Browser", "Back", "Reload", "Enter a URL and press Enter", "Minimize", "Maximize", "Close"],
+        "zh-CN": ["OwLLM 浏览器", "后退", "重新加载", "输入网址并按回车键", "最小化", "最大化", "关闭"],
+        "ko": ["OwLLM 브라우저", "뒤로", "새로고침", "URL을 입력하고 Enter 키를 누르세요", "최소화", "최대화", "닫기"],
+        "ja": ["OwLLM ブラウザー", "戻る", "再読み込み", "URLを入力して Enter キーを押す", "最小化", "最大化", "閉じる"],
+        "ar": ["متصفح OwLLM", "رجوع", "إعادة تحميل", "أدخل عنوان URL واضغط Enter", "تصغير", "تكبير", "إغلاق"],
+        "it": ["Browser OwLLM", "Indietro", "Ricarica", "Inserisci un URL e premi Invio", "Riduci a icona", "Ingrandisci", "Chiudi"]
+      };
+      function applyLanguage(language) {
+        var copy = CHROME_COPY[language] || CHROME_COPY.en;
+        document.documentElement.lang = language in CHROME_COPY ? language : "en";
+        document.documentElement.dir = language === "ar" ? "rtl" : "ltr";
+        if ($("ttl").textContent === "OwLLM Browser" || Object.keys(CHROME_COPY).some(function (key) { return $("ttl").textContent === CHROME_COPY[key][0]; })) $("ttl").textContent = copy[0];
+        $("back").title = copy[1]; $("reload").title = copy[2]; $("url").placeholder = copy[3];
+        $("min").title = copy[4]; $("max").title = copy[5]; $("close").title = copy[6];
+      }
+      try { applyLanguage(localStorage.getItem("owllm:language") || "en"); } catch (e) { applyLanguage("en"); }
+      window.addEventListener("storage", function (e) {
+        if (e.key === "owllm:language") applyLanguage(e.newValue || "en");
+      });
     </script>
   </body>
 </html>

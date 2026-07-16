@@ -9897,6 +9897,8 @@ export function AgentsPage({
       serverModelId: serverState.model_id,
       serverPort: serverState.port,
     });
+    const singleRunStartedAt = Date.now();
+    let singleRunCompletedCleanly = false;
     supSendBusyRef.current = true;
     setSupSendBusy(true);
     // Fresh abort controller for THIS run. Any owllm:dispatch-abort
@@ -10183,6 +10185,7 @@ export function AgentsPage({
         setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg, ts: Date.now(), seq: nextSeq() }]);
         appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
       }
+      singleRunCompletedCleanly = Boolean(cleanReply || cleanReturned);
     } catch (e: any) {
       // Loud, on-screen error — the user has been hitting silent
       // failures on the first message and missing the cause because
@@ -10225,6 +10228,17 @@ export function AgentsPage({
       if (supSendAbortRef.current === supSendAbort) {
         supSendAbortRef.current = null;
       }
+      const now = Date.now();
+      if (notebookStepRef.current) {
+        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        notebookStepRef.current = null;
+      }
+      setSupChat(prev => [...prev, { role: "system", color: "var(--fg-muted)", text: runTimingFooter(singleRunStartedAt, now), ts: now, seq: nextSeq() }]);
+      // The no-specialist/single-assistant path used to end here, so a Notebook
+      // queue could only process its first item. Continue from every clean run
+      // path, not only dispatchGoal's team/solo branches.
+      if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();
+      else notifyAutoFeedPaused("the run ended with an error");
     }
   };
   onSupSendRef.current = onSupSend; // the notebook helpers (declared earlier) dispatch through this

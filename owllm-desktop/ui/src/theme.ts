@@ -1,4 +1,4 @@
-// Theme — mode (dark/light) + accent (one of six named colours).
+// Theme — mode (dark/light) + accent (a named swatch or custom colour).
 //
 // The hook owns React state, persists to localStorage, and writes the
 // `data-theme` attribute + an `--accent` / `--accent-rgb` /
@@ -14,6 +14,11 @@ export type Mode = "dark" | "light";
 
 export type AccentKey =
   | "indigo" | "amber" | "red" | "blue" | "emerald" | "slate";
+
+// Named swatches stay stable for the compact selector, while the full-palette
+// control persists its concrete colour in the same key. Keeping one persisted
+// value means the main window, browser chrome, and overlay frame cannot drift.
+export type AccentSelection = AccentKey | `#${string}`;
 
 export type AccentDef = { key: AccentKey; label: string; color: string };
 
@@ -38,10 +43,15 @@ function readMode(): Mode {
   } catch { /* localStorage blocked */ }
   return "dark";
 }
-function readAccent(): AccentKey {
+function isHexAccent(value: string): value is `#${string}` {
+  return /^#[0-9a-f]{6}$/i.test(value);
+}
+
+function readAccent(): AccentSelection {
   try {
     const v = localStorage.getItem(LS_ACCENT);
     if (v && ACCENTS.some(a => a.key === v)) return v as AccentKey;
+    if (v && isHexAccent(v)) return v;
   } catch { /* ignore */ }
   return "indigo";
 }
@@ -145,9 +155,11 @@ function applyMode(mode: Mode) {
 
 export function useTheme() {
   const [mode, setModeState] = useState<Mode>(() => readMode());
-  const [accentKey, setAccentKeyState] = useState<AccentKey>(() => readAccent());
+  const [accentKey, setAccentKeyState] = useState<AccentSelection>(() => readAccent());
 
-  const accent = ACCENTS.find(a => a.key === accentKey) ?? ACCENTS[0];
+  const accent = isHexAccent(accentKey)
+    ? { key: accentKey, label: "Custom", color: accentKey }
+    : (ACCENTS.find(a => a.key === accentKey) ?? ACCENTS[0]);
 
   useEffect(() => {
     applyMode(mode);

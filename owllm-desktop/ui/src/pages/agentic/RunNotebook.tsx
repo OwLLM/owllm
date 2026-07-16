@@ -30,6 +30,8 @@ import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { formatDuration, formatClock } from "./RunTimer";
+import { translateUiText } from "../../localization";
+import ActionIcon from "../../components/ActionIcon";
 
 export type NotebookStep = {
   id: string;
@@ -117,6 +119,8 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
   next.status = "sent";
+  next.startedAt = Date.now();
+  next.finishedAt = undefined;
   if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
   saveNotebook(projectId, nb);
   return next;
@@ -139,7 +143,7 @@ export function markNotebookStepStarted(projectId: string | null | undefined, st
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], startedAt };
+  nb.steps[idx] = { ...nb.steps[idx], startedAt, finishedAt: undefined };
   saveNotebook(projectId, nb);
 }
 
@@ -158,9 +162,9 @@ function formatStepTiming(s: NotebookStep): string | null {
   if (s.startedAt == null) return null;
   const start = formatClock(s.startedAt);
   if (s.finishedAt != null) {
-    return `started ${start} • finished ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`;
+    return translateUiText(`started ${start} • finished ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`);
   }
-  return `started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`;
+  return translateUiText(`started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`);
 }
 
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -395,7 +399,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
     const now = Date.now();
-    setStep(s.id, { status: "sent", startedAt: now });
+    setStep(s.id, { status: "sent", startedAt: now, finishedAt: undefined });
     markNotebookStepStarted(projectId, s.id, now);
   };
   /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
@@ -497,9 +501,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   }, [nb.steps]);
   const queueTimingText = useMemo(() => {
     const parts: string[] = [];
-    if (queueTiming.finishedCount) parts.push(`${formatDuration(queueTiming.finishedMs)} done`);
-    if (queueTiming.runningCount) parts.push(`${formatDuration(queueTiming.runningMs)} running`);
-    return parts.length ? `⏱ ${parts.join(" · ")}` : "";
+    if (queueTiming.finishedCount) {
+      const doneText = `${formatDuration(queueTiming.finishedMs)} done`;
+      parts.push(translateUiText(doneText));
+    }
+    if (queueTiming.runningCount) {
+      const runningText = `${formatDuration(queueTiming.runningMs)} running`;
+      parts.push(translateUiText(runningText));
+    }
+    return parts.join(" · ");
   }, [queueTiming]);
   // The active feed shows only unfinished, actionable cards. Completed steps
   // drop out of the feed and are preserved in the collapsible history below.
@@ -513,7 +523,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   }, [modelId]);
   if (!inline && !open) return null;
 
-  const statusIcon = (s: NotebookStep) => (s.status === "done" ? "✓" : s.status === "sent" ? "⚡" : "○");
+  const statusIcon = (s: NotebookStep) => (
+    <ActionIcon name={s.status === "done" ? "check" : s.status === "sent" ? "bolt" : "circle"} size={15} />
+  );
   const statusColor = (s: NotebookStep) => (s.status === "done" ? "#7ff0c5" : s.status === "sent" ? "#ffd97a" : "var(--fg-muted)");
 
   const card: React.CSSProperties = {
@@ -568,7 +580,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               </label>
             );
           })()}
-          {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} style={{ height: 26, width: 28, padding: 0, fontSize: 13 }}>✕</button>}
+          {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} title="Close" aria-label="Close" style={{ height: 26, width: 28, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="close" size={14} /></button>}
         </div>
 
         {/* Body: scrollable column of cards */}
@@ -576,7 +588,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
           {/* Working notes and digest controls */}
           <div style={card}>
             <div style={sectionHeader}>
-              <span>💡</span>
+              <ActionIcon name="note" size={15} />
               <span>Working notes</span>
               <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>single source for digest</span>
             </div>
@@ -605,18 +617,19 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   onChange={(id) => update({ digestModel: id })}
                   models={models}
                   status={accountsStatus}
-                  fallbackLabel={`🪄 ${digestModelLabel}`}
+                  fallbackLabel={digestModelLabel}
                 />
               </div>
               {nb.digestModel && (
-                <button className="ghost-btn" onClick={() => update({ digestModel: undefined })} title="Back to the default team model" style={{ height: 28, width: 28, padding: 0, fontSize: 11, flexShrink: 0 }}>✕</button>
+                <button className="ghost-btn" onClick={() => update({ digestModel: undefined })} title="Back to the default team model" aria-label="Back to the default team model" style={{ height: 28, width: 28, padding: 0, display: "grid", placeItems: "center", flexShrink: 0 }}><ActionIcon name="close" size={13} /></button>
               )}
               <button
                 onClick={() => void runDigest()}
                 disabled={digestBusy}
+                aria-label={digestBusy ? "Digesting..." : "Digest notes"}
                 title="Digest the working notes, current plan, and existing steps"
-                style={{ height: 32, padding: "0 14px", border: "none", borderRadius: 7, background: digestBusy ? "var(--bg-surface)" : "rgba(var(--accent-rgb),0.2)", color: digestBusy ? "var(--fg-muted)" : "var(--accent)", fontSize: 12, fontWeight: 700, cursor: digestBusy ? "wait" : "pointer", flexShrink: 0 }}
-              >{digestBusy ? "Digesting..." : "🪄 Digest notes"}</button>
+                style={{ height: 32, padding: "0 14px", display: "inline-flex", alignItems: "center", gap: 7, border: digestBusy ? "1px solid var(--border)" : "1px solid var(--accent)", borderRadius: 7, background: digestBusy ? "var(--bg-surface)" : "linear-gradient(135deg, color-mix(in srgb, var(--accent) 82%, white), var(--accent))", color: digestBusy ? "var(--fg-muted)" : "var(--accent-fg)", boxShadow: digestBusy ? "none" : "0 2px 10px rgba(var(--accent-rgb),0.3)", fontSize: 12, fontWeight: 800, cursor: digestBusy ? "wait" : "pointer", opacity: digestBusy ? 0.62 : 1, flexShrink: 0 }}
+              ><ActionIcon name={digestBusy ? "loader" : "wand"} size={15} />{digestBusy ? "Digesting..." : "Digest notes"}</button>
               {nb.digest.length > 0 && (
                 <button className="ghost-btn" onClick={() => setDigestLogOpen((v) => !v)} title="Show or hide the raw digest transcript" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>
                   {digestLogOpen ? "Hide log" : "Show log"}
@@ -647,7 +660,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
           {(proposedPlan || proposed.length > 0) && (
             <div style={{ ...card, borderColor: "rgba(127,240,197,0.35)" }}>
               <div style={sectionHeader}>
-                <span>🪄</span>
+                <ActionIcon name="wand" size={15} />
                 <span>Proposed update</span>
                 <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>review before applying</span>
               </div>
@@ -710,7 +723,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
           {/* Kanban plan */}
           <div style={card}>
             <div style={sectionHeader}>
-              <span>📋</span>
+              <ActionIcon name="clipboard" size={15} />
               <span>Plan board</span>
               <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>Kanban</span>
             </div>
@@ -740,7 +753,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           disabled={!kanbanPlan.now.trim()}
                           title={running ? "Feed the whole NOW batch — steers the running team at its next boundary. The board keeps its cards." : "Start the whole NOW batch as a new goal. The board keeps its cards."}
                           style={{ height: 24, padding: "0 10px", border: "1px solid rgba(154,217,255,0.5)", borderRadius: 6, background: "rgba(14,28,40,0.6)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
-                        >⚡ Start batch</button>
+                        ><ActionIcon name="bolt" size={13} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start batch</button>
                         {laneNotice?.key === "now" && (
                           <span style={{
                             fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px",
@@ -761,10 +774,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
           {/* Next steps */}
           <div style={card}>
             <div style={{ ...sectionHeader, borderBottom: "none", paddingBottom: 0 }}>
-              <span>🎯</span>
+              <ActionIcon name="target" size={15} />
               <span>Next steps</span>
               {queueTimingText && (
-                <span title="Total queue time across started steps" style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: "#9ad9ff", border: "1px solid rgba(154,217,255,0.35)", borderRadius: 999, padding: "1px 8px" }}>{queueTimingText}</span>
+                <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "#9ad9ff", border: "1px solid rgba(154,217,255,0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
               )}
               <span style={{ fontSize: 10, fontWeight: 700, color: pendingCount ? "#7ff0c5" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
               {pendingCount > 0 && (
@@ -774,7 +787,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
                     : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
                   style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
-                >▶ Start queue</button>
+                ><ActionIcon name="play" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start queue</button>
               )}
             </div>
 
@@ -788,14 +801,14 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   placeholder="Write a step and press Enter…"
                   style={{ ...textareaBase, flex: 1, minHeight: 32 }}
                 />
-                <button className="ghost-btn" onClick={() => { addStep(newStep); setNewStep(""); }} style={{ height: 32, padding: "0 12px", fontSize: 12, flexShrink: 0 }}>＋ Add</button>
+                <button className="ghost-btn" onClick={() => { addStep(newStep); setNewStep(""); }} style={{ height: 32, padding: "0 12px", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, flexShrink: 0 }}><ActionIcon name="plus" size={14} />Add</button>
               </div>
 
               {activeSteps.length === 0 && (
                 <div style={{ padding: 14, textAlign: "center", fontSize: 12, color: "var(--fg-muted)", background: "var(--bg-input)", borderRadius: 8, border: "1px dashed var(--border)" }}>
                   {doneSteps.length > 0
                     ? "All steps done — reopen one from Completed below, or add a new step above."
-                    : "No steps yet — add one above, or 🪄 digest your notes below."}
+                    : "No steps yet — add one above, or digest your notes below."}
                 </div>
               )}
 
@@ -845,9 +858,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       {s.status !== "done" && (
                         <button
                           onClick={() => feedStep(s)}
+                          aria-label={s.status === "sent" ? "Re-feed" : "Feed"}
                           title={running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
-                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(255,217,122,0.5)", borderRadius: 6, background: "rgba(38,30,10,0.6)", color: "#ffd97a", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                        >{s.status === "sent" ? "⚡ Re-feed" : "⚡ Feed"}</button>
+                          style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid rgba(255,217,122,0.5)", borderRadius: 6, background: "rgba(38,30,10,0.6)", color: "#ffd97a", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                        ><ActionIcon name="bolt" size={12} />{s.status === "sent" ? "Re-feed" : "Feed"}</button>
                       )}
                       {feedNotice?.id === s.id && (
                         <span style={{
@@ -858,10 +872,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           {feedNotice.kind === "queued" ? "queued — steers the live run" : feedNotice.kind === "dispatched" ? "dispatched as a new goal" : "no team ready — pick a project & model"}
                         </span>
                       )}
-                      <button className="ghost-btn" onClick={() => moveStep(s.id, -1)} title="Move up" style={{ height: 24, width: 24, padding: 0, fontSize: 10 }}>▲</button>
-                      <button className="ghost-btn" onClick={() => moveStep(s.id, 1)} title="Move down" style={{ height: 24, width: 24, padding: 0, fontSize: 10 }}>▼</button>
+                      <button className="ghost-btn" onClick={() => moveStep(s.id, -1)} title="Move up" aria-label="Move up" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="chevron-up" size={14} /></button>
+                      <button className="ghost-btn" onClick={() => moveStep(s.id, 1)} title="Move down" aria-label="Move down" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="chevron-down" size={14} /></button>
                       <div style={{ flex: 1 }} />
-                      <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete step" style={{ height: 24, width: 24, padding: 0, fontSize: 11, color: "#ff8c8c" }}>🗑</button>
+                      <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete step" aria-label="Delete step" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center", color: "#ff8c8c" }}><ActionIcon name="trash" size={13} /></button>
                     </div>
                   </div>
                 ))}
@@ -875,18 +889,19 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   <button
                     className="ghost-btn"
                     onClick={() => setDoneOpen((v) => !v)}
+                    aria-expanded={doneOpen}
                     title="Show or hide completed steps"
-                    style={{ height: 26, alignSelf: "flex-start", padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}
-                  >{doneOpen ? "▾" : "▸"} Completed ({doneSteps.length})</button>
+                    style={{ height: 26, alignSelf: "flex-start", padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--fg-muted)" }}
+                  ><ActionIcon name={doneOpen ? "chevron-down" : "chevron-right"} size={13} />Completed ({doneSteps.length})</button>
                   {doneOpen && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                       {doneSteps.map((s) => (
                         <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 3, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
                           <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                            <span style={{ color: "#7ff0c5", fontSize: 13, lineHeight: "18px", flexShrink: 0 }}>✓</span>
+                            <ActionIcon name="check" size={13} style={{ color: "#7ff0c5", marginTop: 2 }} />
                             <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
-                            <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" style={{ height: 22, padding: "0 8px", fontSize: 10.5, flexShrink: 0 }}>↺ Reopen</button>
-                            <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" style={{ height: 22, width: 22, padding: 0, fontSize: 11, color: "#ff8c8c", flexShrink: 0 }}>🗑</button>
+                            <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
+                            <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" aria-label="Delete permanently" style={{ height: 22, width: 22, padding: 0, display: "grid", placeItems: "center", color: "#ff8c8c", flexShrink: 0 }}><ActionIcon name="trash" size={12} /></button>
                           </div>
                           {formatStepTiming(s) && (
                             <div style={{ paddingLeft: 22, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>{formatStepTiming(s)}</div>

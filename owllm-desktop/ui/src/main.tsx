@@ -6,12 +6,14 @@ import ErrorBoundary from "./ErrorBoundary";
 import UpdateController from "./UpdatePrompt";
 import { ChatRuntimeProvider } from "./runtime/ChatRuntimeProvider";
 import { bootstrapTheme } from "./theme";
+import { bootstrapLocalization, LocalizationProvider } from "./localization";
 import "./styles.css";
 
 // Apply the persisted theme BEFORE the first React render so the very
 // first frame paints with the correct background / accent. Otherwise
 // users on light mode would see a flash of the dark default.
 bootstrapTheme();
+bootstrapLocalization();
 
 // Detect whether we're inside the actual Tauri webview. When running
 // under `vite dev` in a plain browser (or under Playwright for
@@ -91,9 +93,11 @@ function BootCover() {
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ErrorBoundary>
-      <ChatRuntimeProvider>
-        <AppShell />
-      </ChatRuntimeProvider>
+      <LocalizationProvider>
+        <ChatRuntimeProvider>
+          <AppShell />
+        </ChatRuntimeProvider>
+      </LocalizationProvider>
     </ErrorBoundary>
     <UpdateController />
     <BootCover />

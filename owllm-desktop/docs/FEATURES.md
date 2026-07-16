@@ -368,6 +368,14 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 
 ## Support & UX
 
+- **Application-wide localization**: Settings switches English, Simplified
+  Chinese, Korean, Japanese, Arabic, or Italian live and persists the choice.
+  The shared catalogue covers page chrome, controls, menus, dialogs, empty
+  states, status copy, tooltips and accessibility labels; new/missing entries
+  fall back to English. Arabic switches the application shell to RTL while
+  code, terminals, paths and user/model-authored content keep their natural or
+  technical direction. The separate agent-browser chrome follows the same key.
+
 - **The Watcher**: in-app support agent — per-page docs (`PAGE_DOCS`), guided
   walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture
   works on Windows (PrintWindow) AND Linux (GDK readback, `support.rs`).

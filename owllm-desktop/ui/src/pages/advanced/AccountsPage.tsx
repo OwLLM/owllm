@@ -26,15 +26,7 @@ import {
 import PtyTerminal from "./PtyTerminal";
 import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
-
-const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
-const HOST_LABEL = HOST_IS_WINDOWS
-  ? "Windows"
-  : navigator.userAgent.includes("Mac")
-    ? "macOS"
-    : navigator.userAgent.includes("Linux")
-      ? "Linux"
-      : "Host";
+import { translateUiText } from "../../localization";
 
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
 // transcription pipeline (binary + ggml-base.bin model) and exposes an
@@ -1105,8 +1097,8 @@ export default function AccountsPage() {
         try {
           const { ask } = await import("@tauri-apps/plugin-dialog");
           const proceed = await ask(
-            `${provider.name} CLI needs Node.js, which isn't installed yet.\n\nInstall the bundled Node.js + uv toolchain now? (~47 MB, one-time download)\n\nAfter it finishes I'll retry the ${provider.name} CLI install automatically.`,
-            { title: "Install Node.js toolchain?", kind: "info" },
+            translateUiText(`${provider.name} CLI needs Node.js, which isn't installed yet.\n\nInstall the bundled Node.js + uv toolchain now? (~47 MB, one-time download)\n\nAfter it finishes I'll retry the ${provider.name} CLI install automatically.`),
+            { title: translateUiText("Install Node.js toolchain?"), kind: "info" },
           );
           if (!proceed) return;
           logInfo(route.backend, `Installing MCP Server Toolchain (Node.js 20 + uv)…`);

@@ -12,6 +12,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import MarkdownLink from "./MarkdownLink";
+import { readAppLanguage } from "../localization";
 
 // Resolve any image reference (markdown `![](…)` src OR an attachment) into a
 // URL the Tauri webview can actually load. A raw local path ("C:\…", "/…",
@@ -79,6 +80,13 @@ const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "S
 export function fmtTime(ts?: number): string {
   if (!ts) return "";
   const d = new Date(ts);
+  const language = readAppLanguage();
+  if (language !== "en") {
+    return d.toLocaleString(language, {
+      year: "numeric", month: "short", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hour12: false,
+    });
+  }
   const yyyy = d.getFullYear();
   const mon = MONTHS_SHORT[d.getMonth()];
   const dd = String(d.getDate()).padStart(2, "0");
@@ -93,7 +101,7 @@ export function fmtTime(ts?: number): string {
 // messages — the streaming one stays plain pre-wrap to preserve selection.
 export function ChatMarkdown({ text }: { text: string }) {
   return (
-    <div className="md-body" style={{ fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
+    <div className="md-body" data-no-localize dir="auto" style={{ fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -349,7 +357,7 @@ export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isU
         userSelect: "text",
         WebkitUserSelect: "text",
         cursor: "text",
-      }}>
+      }} data-no-localize dir="auto">
         {!isUser && !isStreaming && content
           ? <ChatMarkdown text={content} />
           : <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.55 }}>

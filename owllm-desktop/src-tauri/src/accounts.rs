@@ -266,6 +266,21 @@ fn push_arg(cmd: &mut Command, _batch: bool, arg: &str) {
     cmd.arg(arg);
 }
 
+/// Append Codex's initial-input arguments in the only unambiguous order:
+/// images first, then the explicit `-` stdin prompt marker. `--image/-i`
+/// accepts one-or-more values, so placing a positional prompt after the final
+/// image makes clap consume that prompt as another image path. Codex then sees
+/// no prompt, tries its closed stdin, and exits 1 with "Reading prompt from
+/// stdin... No prompt provided via stdin." Every Codex call uses this helper so
+/// the Accounts probe exercises the same transport as chat and agent streams.
+fn append_codex_input_args(args: &mut Vec<String>, image_paths: Option<&[String]>) {
+    for path in image_paths.unwrap_or_default() {
+        args.push("-i".into());
+        args.push(path.clone());
+    }
+    args.push("-".into());
+}
+
 /// Where API keys live on disk. Same path as the legacy Python store.
 /// Honors portable mode via the shared resolver (USB-portable Block 1).
 fn secrets_path() -> Option<PathBuf> {
@@ -1016,37 +1031,25 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             )
             .await
         }
-        // OpenAI Codex CLI: `codex exec <prompt>` is the non-interactive
-        // shape. There's no --print/--prompt; older docs to the contrary.
-        // Two things have to be right or it exits 1 with "Reading additional
-        // input from stdin...":
-        //   1. The prompt is fed BOTH as the positional arg AND on stdin —
-        //      older builds read the arg, newer ones read stdin; stdin is
-        //      closed right after the write (EOF) so the stdin-style codex
-        //      proceeds instead of hanging.
-        //   2. The SAME non-interactive flags codex_cli_complete uses must be
-        //      present. Without --skip-git-repo-check, codex run outside a git
-        //      repo stops to read a confirmation from stdin (that "Reading
-        //      additional input from stdin..." line) and exits 1 when it gets
-        //      the prompt instead of a yes/no. --sandbox read-only + --color
-        //      never keep the probe side-effect-free and unescaped. This is
-        //      why the chat path worked but Test didn't — Test was missing
-        //      the flags.
+        // OpenAI Codex CLI: exercise the same stdin-only invocation as real
+        // chat and agent runs. The explicit `-` marker also terminates a
+        // variadic image list, which is the attachment failure a positional
+        // prompt cannot represent safely.
         "codex_cli" => {
+            let mut args = vec![
+                "exec".into(),
+                "--skip-git-repo-check".into(),
+                "--color".into(),
+                "never".into(),
+                "--sandbox".into(),
+                "read-only".into(),
+                "--model".into(),
+                "gpt-5.5".into(),
+            ];
+            append_codex_input_args(&mut args, None);
             probe_cli_subscription(
                 find_codex_cli(),
-                [
-                    "exec",
-                    "--skip-git-repo-check",
-                    "--color",
-                    "never",
-                    "--sandbox",
-                    "read-only",
-                    "ok",
-                ]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+                args,
                 "Codex",
                 Some("ok"),
             )
@@ -1272,7 +1275,16 @@ fn wsl_probe(backend: &str) -> (bool, String) {
     };
     let script = match backend {
         "claude_cli" => cli_probe("claude", "[ -f ~/.claude/.credentials.json ]"),
-        "codex_cli" => cli_probe("codex", "[ -f ~/.codex/auth.json ]"),
+        "codex_cli" => {
+            // Run the same explicit-stdin contract as an isolated agent. A
+            // credentials file and binary can both exist while execution is
+            // broken, so presence alone must not produce a green result.
+            "if ! PATH=/usr/local/bin:/usr/bin:/bin command -v codex >/dev/null 2>&1; then echo NOBIN; \
+             elif ! [ -f ~/.codex/auth.json ]; then echo NOCRED; else \
+             out=$(printf '%s' 'Reply with exactly OWLLM_PROBE_OK and nothing else.' | timeout 45 codex exec --skip-git-repo-check --color never --sandbox read-only --model gpt-5.5 - 2>&1); rc=$?; \
+             if [ \"$rc\" -eq 0 ] && printf '%s' \"$out\" | grep -q 'OWLLM_PROBE_OK'; then echo YES; \
+             else echo RUNFAIL; printf '%s\n' \"$out\" | tail -n 12; fi; fi".to_string()
+        }
         // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
         // Accept a credential or config file in either home.
         "kimi_cli" => cli_probe(
@@ -1299,6 +1311,14 @@ fn wsl_probe(backend: &str) -> (bool, String) {
         }
     };
     match crate::wsl::run_in_distro(&distro, &script) {
+        Ok(o) if o.contains("RUNFAIL") => {
+            let detail = o
+                .split_once("RUNFAIL")
+                .map(|(_, tail)| tail.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Codex CLI round-trip failed");
+            (false, format!("Codex CLI failed inside WSL: {detail}"))
+        }
         Ok(o) if o.contains("YES") => (true, "Installed + logged in — an isolated agent can use it".to_string()),
         Ok(o) if o.contains("NOBIN") => (false,
             "CLI isn't installed where an isolated agent can reach it (the sandbox sees /usr/local, not ~/.local/bin) — re-run Install CLI for WSL.".to_string()),
@@ -1363,9 +1383,10 @@ async fn probe_cli_subscription(
             }
             let mut child = cmd.spawn().map_err(|e| e.to_string())?;
             if let Some(text) = &stdin_owned {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
+                let mut stdin = child.stdin.take().ok_or_else(|| "CLI stdin pipe missing".to_string())?;
+                stdin
+                    .write_all(text.as_bytes())
+                    .map_err(|e| format!("write CLI prompt to stdin: {e}"))?;
             }
             child.wait_with_output().map_err(|e| e.to_string())
         }),
@@ -1644,6 +1665,20 @@ fn extra_search_dirs() -> Vec<PathBuf> {
             "C:\\Program Files\\nodejs",
             "C:\\Program Files (x86)\\nodejs",
         ] {
+            let pp = PathBuf::from(p);
+            if pp.is_dir() {
+                dirs.push(pp);
+            }
+        }
+    }
+
+    // GUI apps on macOS/Linux frequently inherit a reduced PATH that omits
+    // Homebrew/MacPorts and /usr/local even though the same `codex` command is
+    // available in the user's terminal. Search the canonical POSIX locations
+    // directly so Accounts and real execution resolve the same binary.
+    #[cfg(not(windows))]
+    {
+        for p in ["/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"] {
             let pp = PathBuf::from(p);
             if pp.is_dir() {
                 dirs.push(pp);
@@ -2131,9 +2166,9 @@ fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
 ///
 /// `codex exec` is the non-interactive entry point. It has no `--system`
 /// flag, so the system prompt is folded into the prompt as a leading
-/// block. The prompt is passed BOTH as the positional arg AND on stdin so
-/// every codex version gets it (older builds read the arg, newer ones read
-/// stdin — same cross-version split that broke the Test probe). The final
+/// block. The prompt is passed once on stdin, with an explicit positional `-`
+/// after every image argument. This is the documented non-interactive shape
+/// and prevents variadic `-i` from consuming the prompt. The final
 /// assistant message is captured via `-o <file>` (clean text, no JSONL /
 /// agent-activity noise) and read back. Sandbox is forced read-only so a
 /// chat turn can never mutate the user's disk.
@@ -2152,14 +2187,9 @@ pub async fn codex_cli_complete(
         } else {
             format!("{}\n\n{}", system_prompt.trim(), user_message)
         };
-        // Windows caps a command line at ~32 KB. codex passes the prompt BOTH as a
-        // positional arg AND on stdin (cross-version); a large agentic prompt as
-        // the positional arg overflows ("filename or extension is too long, os
-        // 206") — the same crash the claude path hit. Newer codex reads the prompt
-        // from stdin (always piped below), so for a large prompt we DROP the
-        // positional arg and rely on stdin. Small prompts keep both (older codex).
-        const MAX_PROMPT_ARG: usize = 4000;
-        let pass_prompt_positionally = prompt.len() <= MAX_PROMPT_ARG;
+        // Keep prompts off argv entirely: Windows has a small command-line limit,
+        // and Codex's variadic image option can consume a following positional
+        // prompt. The explicit `-` added below makes stdin the single source.
         // Base args shared by both paths (no -o — see per-branch handling).
         let mut base_args: Vec<String> = vec![
             "exec".into(),
@@ -2178,27 +2208,17 @@ pub async fn codex_cli_complete(
             base_args.push("-c".into());
             base_args.push(format!("model_reasoning_effort=\"{effort}\""));
         }
-        // Attach pasted images via codex's native `-i` flag (verified: codex
-        // reads them as vision input). One flag per file so the variadic `-i`
-        // doesn't swallow the positional prompt. Paths are relative to cwd.
-        for p in image_paths.iter().flatten() {
-            base_args.push("-i".into());
-            base_args.push(p.clone());
-        }
-
         // Isolated project → run `codex` inside the sandbox and read the final
         // message from stdout (a Windows -o tempfile path is meaningless inside
         // the sandbox, so we omit -o on this path).
         if let Some((exe, sargs)) = {
             let mut args = base_args.clone();
-            if pass_prompt_positionally {
-                args.push(prompt.clone());
-            }
+            append_codex_input_args(&mut args, image_paths.as_deref());
             crate::sandbox::program_argv(cwd.as_deref(), "codex", &args)
         } {
             let mut cmd = Command::new(exe);
             cmd.args(sargs);
-            cmd.stdin(if pass_prompt_positionally { Stdio::null() } else { Stdio::piped() });
+            cmd.stdin(Stdio::piped());
             cmd.stdout(Stdio::piped());
             cmd.stderr(Stdio::piped());
             #[cfg(windows)]
@@ -2208,11 +2228,14 @@ pub async fn codex_cli_complete(
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
             let pid = register_cli_child(&child);
-            if !pass_prompt_positionally {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(prompt.as_bytes());
-                }
-            }
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "codex stdin pipe missing".to_string())?;
+            stdin
+                .write_all(prompt.as_bytes())
+                .map_err(|e| format!("write codex prompt to stdin: {e}"))?;
+            drop(stdin);
             let output = wait_cli_child(child, pid).map_err(|e| format!("wait codex: {e}"))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -2231,7 +2254,9 @@ pub async fn codex_cli_complete(
             return Ok(reply);
         }
 
-        // Windows path (unchanged): -o <tempfile> captures the clean final msg.
+        // Native host path (Windows, Linux, or macOS): -o <tempfile> captures
+        // the clean final message. Only Windows batch shims need special argv
+        // quoting; POSIX hosts receive these same arguments through Command.
         let exe = find_codex_cli().ok_or_else(|| {
             "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)"
                 .to_string()
@@ -2252,11 +2277,12 @@ pub async fn codex_cli_complete(
         }
         push_arg(&mut cmd, batch, "-o");
         push_arg(&mut cmd, batch, &out_file.to_string_lossy());
-        // Positional prompt (older codex reads it here); stdin carries it too.
-        // Skipped for a large prompt to stay under the ~32 KB command-line cap —
-        // stdin below still delivers it (see MAX_PROMPT_ARG note above).
-        if pass_prompt_positionally {
-            push_arg(&mut cmd, batch, &prompt);
+        // Images followed by `-`: force the initial instructions to come from
+        // the pipe and terminate the variadic image list unambiguously.
+        let mut input_args = Vec::new();
+        append_codex_input_args(&mut input_args, image_paths.as_deref());
+        for arg in &input_args {
+            push_arg(&mut cmd, batch, arg);
         }
         if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let p = std::path::Path::new(dir);
@@ -2264,7 +2290,7 @@ pub async fn codex_cli_complete(
                 cmd.current_dir(p);
             }
         }
-        cmd.stdin(if pass_prompt_positionally { Stdio::null() } else { Stdio::piped() });
+        cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         #[cfg(windows)]
@@ -2274,11 +2300,14 @@ pub async fn codex_cli_complete(
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
         let pid = register_cli_child(&child);
-        if !pass_prompt_positionally {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(prompt.as_bytes());
-            }
-        }
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "codex stdin pipe missing".to_string())?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| format!("write codex prompt to stdin: {e}"))?;
+        drop(stdin);
         let output = wait_cli_child(child, pid).map_err(|e| format!("wait codex: {e}"))?;
         let from_file = std::fs::read_to_string(&out_file).ok();
         let _ = std::fs::remove_file(&out_file);
@@ -3140,21 +3169,9 @@ pub async fn codex_cli_stream(
             args.push("-c".into());
             args.push("approval_policy=\"never\"".into());
         }
-        // Pasted images via codex's native `-i` flag (one per file so the
-        // positional prompt isn't swallowed). Relative paths (cwd-rooted).
-        for p in image_paths.iter().flatten() {
-            args.push("-i".into());
-            args.push(p.clone());
-        }
-        // Positional prompt (older codex reads it here); stdin carries it
-        // too (newer codex reads it there). A large agentic prompt as the
-        // positional arg overflows the Windows ~32 KB command line ("os error
-        // 206") — same crash the claude path hit — so for a large prompt we drop
-        // the positional and rely on stdin (written below).
-        const MAX_PROMPT_ARG: usize = 4000;
-        if prompt.len() <= MAX_PROMPT_ARG {
-            args.push(prompt.clone());
-        }
+        // Pasted images followed by the explicit stdin marker. `-i` is
+        // variadic, so a normal positional prompt here is parsed as an image.
+        append_codex_input_args(&mut args, image_paths.as_deref());
 
         // WSL-isolated project → run `codex` inside the distro; else Windows CLI.
         // BROWSER-ROLE JAIL EXCEPTION: the Browser role runs UNJAILED (plain WSL)
@@ -3197,8 +3214,7 @@ pub async fn codex_cli_stream(
         if let Some(tok) = token_env.as_ref() {
             cmd.env(crate::mcp_gateway::CODEX_TOKEN_ENV, tok);
         }
-        let pass_prompt_positionally = prompt.len() <= MAX_PROMPT_ARG;
-        cmd.stdin(if pass_prompt_positionally { Stdio::null() } else { Stdio::piped() });
+        cmd.stdin(Stdio::piped());
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
         #[cfg(windows)]
@@ -3263,12 +3279,15 @@ pub async fn codex_cli_stream(
                 std::thread::sleep(Duration::from_millis(250));
             }
         });
-        if !pass_prompt_positionally {
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(prompt.as_bytes());
-                // Drop closes the pipe (EOF) so the stdin-style Codex proceeds.
-            }
-        }
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "codex stdin pipe missing".to_string())?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| format!("write codex prompt to stdin: {e}"))?;
+        // Drop closes the pipe (EOF) so the stdin-style Codex proceeds.
+        drop(stdin);
         let stdout = child
             .stdout
             .take()
@@ -4857,10 +4876,32 @@ pub async fn kimi_cli_complete(
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_should_grant_browser, is_browser_role_allowlist, kimi_agent_yaml,
-        kimi_config_has_default, kimi_config_model_keys, kimi_output_auth_failed,
-        kimi_output_llm_unset, kimi_output_mcp_failed,
+        append_codex_input_args, codex_should_grant_browser, is_browser_role_allowlist,
+        kimi_agent_yaml, kimi_config_has_default, kimi_config_model_keys,
+        kimi_output_auth_failed, kimi_output_llm_unset, kimi_output_mcp_failed,
     };
+
+    #[test]
+    fn codex_images_are_terminated_by_the_stdin_prompt_marker() {
+        let images = vec![
+            ".owllm-inbox/image_1.png".to_string(),
+            ".owllm-inbox/image_2.jpg".to_string(),
+        ];
+        let mut args = vec!["exec".to_string(), "--json".to_string()];
+        append_codex_input_args(&mut args, Some(&images));
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--json",
+                "-i",
+                ".owllm-inbox/image_1.png",
+                "-i",
+                ".owllm-inbox/image_2.jpg",
+                "-",
+            ]
+        );
+    }
 
     // The exact kimi output that crashed a team run (reproduced live 2026-07-06,
     // ~/.kimi/logs/kimi.log): kimi aborts the turn when the browser gateway

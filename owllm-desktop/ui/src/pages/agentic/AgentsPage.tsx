@@ -8705,6 +8705,7 @@ export function AgentsPage({
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
   // top-level so it can be reused later (e.g. from NewProjectDialog).
   const [brainstormOpen, setBrainstormOpen] = useState(false);
+  const [brainstormSeed, setBrainstormSeed] = useState("");
   // Cached "does BRIEF.md exist for this project's location" — drives
   // the 🧠 button's green tint and the orchestrator's brief-prepend.
   // Re-checked whenever the project switches or the brainstormer
@@ -8833,7 +8834,10 @@ export function AgentsPage({
     }
   };
   const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
-  const onProjectCreated = async (row: ProjectRow) => {
+  const onProjectCreated = async (
+    row: ProjectRow,
+    kickoff: { kind: string; action: "brainstorm" | "goal" },
+  ) => {
     const rows = await reloadProjects();
     // Select the freshly-created project. Fall back to id from the
     // returned row if list_projects raced.
@@ -8842,6 +8846,16 @@ export function AgentsPage({
     setProjectLocationDraft(target.location, target.id);
     setPickedTeamId(null);
     setTrustWritesOverride(null);
+    if (kickoff.action === "brainstorm") {
+      setBrainstormSeed(target.description ?? "");
+      // Let the selected project and its workspace propagate before mounting
+      // the modal; otherwise it can briefly inherit the previous project cwd.
+      window.setTimeout(() => setBrainstormOpen(true), 0);
+    } else if (target.description?.trim()) {
+      // Goal-first recipes land with a real next action in the dock instead of
+      // creating a row and leaving the user at an empty, generic project page.
+      try { localStorage.setItem(`owllm:supdraft:${target.id}`, target.description.trim()); } catch { /* ignore */ }
+    }
   };
   const onRenameProject = async () => {
     if (!selectedProject) return;
@@ -12753,7 +12767,7 @@ export function AgentsPage({
         // settings so the user can set one (the folder field moved into that
         // popup in v0.5.26, so a bare "set a location" hint had nowhere to point).
         onBrainstorm={() => {
-          if (runCwd && runCwd.trim()) { setBrainstormOpen(true); }
+          if (runCwd && runCwd.trim()) { setBrainstormSeed(""); setBrainstormOpen(true); }
           else { setSettingsMode("edit"); setNewProjOpen(true); }
         }}
         brainstormReady={!!(runCwd && runCwd.trim())}
@@ -12879,7 +12893,7 @@ export function AgentsPage({
       />
       <BrainstormPanel
         open={brainstormOpen}
-        onClose={() => setBrainstormOpen(false)}
+        onClose={() => { setBrainstormOpen(false); setBrainstormSeed(""); }}
         projectCwd={runCwd}
         brainstormerRole={roleByName.get("brainstormer") ?? null}
         // Use the team's default model. Fallback to the orchestrator's
@@ -12889,6 +12903,8 @@ export function AgentsPage({
         modelId={(teamModelOverride || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "") || "").trim()}
         port={serverState.port ?? 0}
         models={models}
+        accountsStatus={accountsStatus}
+        initialIdea={brainstormSeed}
         onBriefSaved={() => setHasBriefForProject(true)}
         projectId={selectedProjectId}
         // Apply the assembled roster to THIS project (persists), then clear any

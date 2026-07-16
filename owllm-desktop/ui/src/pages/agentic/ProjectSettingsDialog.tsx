@@ -46,7 +46,7 @@ export type ProjectSettingsDialogProps = {
   resolvedTeamLabel?: string | null;
   // NEW mode
   defaultTeamName?: string | null;
-  onCreated: (row: ProjectRow) => void;
+  onCreated: (row: ProjectRow, kickoff: { kind: string; action: "brainstorm" | "goal" }) => void;
   // EDIT mode — the live project + the parent callbacks that already persist.
   project: ProjectRow | null;
   location: string;
@@ -77,6 +77,9 @@ const INPUT: React.CSSProperties = { height: 38, padding: "0 12px", borderRadius
 // the old controls stay reachable under Advanced / the Custom card.
 type ProjectKind = {
   key: string; icon: string; title: string; blurb: string;
+  lane: "new" | "existing" | "workspace";
+  folderMode: "create" | "existing";
+  kickoff: "brainstorm" | "goal";
   /// Preferred team template `name`s, in order; first available wins.
   teams: string[];
   namePh: string;
@@ -84,18 +87,18 @@ type ProjectKind = {
   descSeed: string;
 };
 const PROJECT_KINDS: ProjectKind[] = [
-  { key: "web", icon: "🌐", title: "Website / Web app", blurb: "Design, build and preview a site or web app — a Browser agent checks it live on localhost.", teams: ["dev_squad"], namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website / web app. Run it on a localhost dev server and verify pages render in the browser before calling anything done." },
-  { key: "mobile", icon: "📱", title: "Mobile app", blurb: "Build a mobile app — the Browser agent previews it with phone-sized viewports.", teams: ["dev_squad"], namePh: "e.g. fitness-app, todo-mobile", descSeed: "Build a mobile app. Preview web builds with a phone-sized viewport in the browser; keep layouts responsive and touch-friendly." },
-  { key: "software", icon: "🛠", title: "Software / tool", blurb: "General coding: CLIs, backends, libraries — plan, implement, review, verify.", teams: ["owllm_team", "dev_squad"], namePh: "e.g. esp-flash, csv-tool", descSeed: "Build software in this folder. Verify every change (build/tests) before reporting done." },
-  { key: "assistant", icon: "🤖", title: "Personal assistant", blurb: "A secretary team for daily work: notes, plans, mail drafts, reminders, files.", teams: ["secretary", "concierge"], namePh: "e.g. my-desk, daily-ops", descSeed: "Act as my personal assistant: organize notes and files, draft messages, plan tasks and keep track of follow-ups." },
-  { key: "bugfix", icon: "🐛", title: "Fix bugs", blurb: "Point it at an existing repo — hunts, reproduces and fixes bugs at the root.", teams: ["bug_hunter"], namePh: "e.g. fix-login, crash-hunt", descSeed: "Find, reproduce and fix bugs in this codebase. Always verify the fix with a build/test before reporting done." },
-  { key: "review", icon: "🧐", title: "Code review", blurb: "Multi-axis review of a repo or PR: correctness, security, performance, style.", teams: ["code_reviewer"], namePh: "e.g. review-pr42", descSeed: "Review the code in this folder: correctness, security, performance and maintainability. Report concrete findings with file:line references." },
-  { key: "research", icon: "🔬", title: "Research", blurb: "Deep research with sources: compare options, verify claims, write it up.", teams: ["research_lab"], namePh: "e.g. market-scan, paper-notes", descSeed: "Research the topic thoroughly, verify claims across sources, and produce a written summary with references." },
-  { key: "writing", icon: "✍️", title: "Writing & content", blurb: "Articles, docs, scripts, books — drafted, critiqued and polished by a writers room.", teams: ["writers_room"], namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content in this folder. Keep a consistent voice; critique and polish drafts before final." },
-  { key: "data", icon: "📊", title: "Data analysis", blurb: "Explore datasets, crunch numbers, chart findings and explain what they mean.", teams: ["data_analyst"], namePh: "e.g. sales-analysis", descSeed: "Analyze the data in this folder: clean it, extract insights, and present findings clearly." },
-  { key: "social", icon: "📣", title: "Social media", blurb: "Plan and draft posts, threads and campaigns across your channels.", teams: ["social_desk"], namePh: "e.g. launch-campaign", descSeed: "Plan and draft social media content. Match each platform's tone and format; prepare a posting schedule." },
-  { key: "product", icon: "🚀", title: "New product", blurb: "From idea to plan: brainstorm, spec, design and an execution roadmap.", teams: ["product_studio"], namePh: "e.g. saas-idea", descSeed: "Take this product idea from concept to an actionable plan: positioning, spec, milestones." },
-  { key: "custom", icon: "⚙️", title: "Custom…", blurb: "Pick any team template yourself and configure every setting by hand.", teams: [], namePh: "e.g. esp-flash, cleanup-pr, paper-draft", descSeed: "" },
+  { key: "product", icon: "🚀", title: "New product", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create the workspace, then start a model-selectable product brainstorm and design-to-build flow.", teams: ["product_studio"], namePh: "e.g. saas-idea", descSeed: "" },
+  { key: "web", icon: "🌐", title: "Website / Web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a real web workspace, scope it, then build and verify it in the live browser.", teams: ["dev_squad"], namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website or web application for " },
+  { key: "mobile", icon: "📱", title: "Responsive web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "A touch-friendly web/PWA workflow with phone viewports. Native mobile scaffolding is not claimed here.", teams: ["dev_squad"], namePh: "e.g. fitness-pwa", descSeed: "Build a responsive, touch-friendly web application for " },
+  { key: "software", icon: "🛠", title: "Software / tool", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a workspace for a CLI, backend, library or desktop tool, then scope and build it.", teams: ["owllm_team", "dev_squad"], namePh: "e.g. esp-flash, csv-tool", descSeed: "Build a software tool that " },
+  { key: "bugfix", icon: "🐛", title: "Fix bugs", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository; reproduce, root-cause, patch and add a regression test.", teams: ["bug_hunter"], namePh: "e.g. fix-login, crash-hunt", descSeed: "Bug to reproduce and fix: " },
+  { key: "review", icon: "🧐", title: "Code review", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository or checkout; reports concrete findings with file and line evidence.", teams: ["code_reviewer"], namePh: "e.g. review-pr42", descSeed: "Review this codebase for " },
+  { key: "assistant", icon: "🤖", title: "Personal assistant", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a durable workspace for notes, plans, drafts, reminders and follow-ups.", teams: ["secretary", "concierge"], namePh: "e.g. my-desk, daily-ops", descSeed: "Help me organize and manage " },
+  { key: "research", icon: "🔬", title: "Research", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a sourced research workspace, clarify the question and define the deliverable.", teams: ["research_lab"], namePh: "e.g. market-scan, paper-notes", descSeed: "Research and produce a sourced report about " },
+  { key: "writing", icon: "✍️", title: "Writing & content", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a writing workspace, establish audience and voice, then outline and draft.", teams: ["writers_room"], namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content for " },
+  { key: "data", icon: "📊", title: "Data analysis", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create an analysis workspace for datasets, notebooks, charts and findings.", teams: ["data_analyst"], namePh: "e.g. sales-analysis", descSeed: "Analyze data to answer " },
+  { key: "social", icon: "📣", title: "Social campaign", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a campaign workspace for drafts and approvals; publishing still requires configured connectors.", teams: ["social_desk"], namePh: "e.g. launch-campaign", descSeed: "Plan a draft-first social campaign for " },
+  { key: "custom", icon: "⚙️", title: "Existing folder / Custom…", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Open an existing folder and choose any team and permissions yourself.", teams: [], namePh: "e.g. cleanup-pr, paper-draft", descSeed: "" },
 ];
 /// First bundled template (by `name`) this kind prefers that actually exists.
 function kindTeam(kind: ProjectKind, teams: Team[]): Team | null {
@@ -257,14 +260,39 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     } catch (e: any) { setErr(`Folder pick failed: ${e?.message ?? e}`); }
   };
 
+  const browseNewLocation = async () => {
+    try {
+      const picked = await invoke<string | null>("pick_folder", {
+        title: PROJECT_KINDS.find(k => k.key === kindKey)?.folderMode === "create"
+          ? "Pick the parent folder for the new workspace"
+          : "Pick the existing project folder",
+      });
+      if (!picked) return;
+      const kind = PROJECT_KINDS.find(k => k.key === kindKey);
+      if (kind?.folderMode !== "create") { setNewLocation(picked); return; }
+      const leaf = name.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "new-project";
+      const sep = picked.includes("\\") ? "\\" : "/";
+      setNewLocation(`${picked.replace(/[\\/]+$/, "")}${sep}${leaf}`);
+    } catch (e: any) { setErr(`Folder pick failed: ${e?.message ?? e}`); }
+  };
+
   const onCreate = async () => {
     if (!name.trim()) { setErr("Project name is required."); return; }
     if (!team) { setErr("Pick a team template."); return; }
+    const kind = PROJECT_KINDS.find(k => k.key === kindKey);
+    if (!newLocation.trim()) {
+      setErr(kind?.folderMode === "existing"
+        ? "Select the existing project folder this workflow will work on."
+        : "Choose the workspace folder to create.");
+      return;
+    }
     setBusy(true); setErr(null);
     try {
       const row = await invoke<ProjectRow>("create_project", {
         input: {
           name: name.trim(), description: description.trim(), location: newLocation.trim(),
+          create_location: kind?.folderMode === "create",
+          project_kind: kind?.key ?? "custom",
           team: team.agents.map(a => a.name),
           // Persist the roster's roles (base) alongside the edges so a renamed
           // agent keeps its role on reload (the `team` field is names only).
@@ -275,7 +303,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
           team_default_model_id: "", trust_writes: newTrust, auto_approve_all: false,
         },
       });
-      onCreated(row); onClose();
+      onCreated(row, { kind: kind?.key ?? "custom", action: kind?.kickoff ?? "goal" }); onClose();
     } catch (e: any) { setErr(String(e?.message ?? e)); }
     finally { setBusy(false); }
   };
@@ -551,15 +579,17 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                   placeholder={(PROJECT_KINDS.find(k => k.key === kindKey)?.namePh) ?? "e.g. esp-flash, cleanup-pr, paper-draft"} style={INPUT} />
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <label style={LBL}>Folder / location</label>
+                <label style={LBL}>{PROJECT_KINDS.find(k => k.key === kindKey)?.folderMode === "create" ? "New workspace folder" : "Existing project folder"}</label>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <input value={newLocation} onChange={e => setNewLocation(e.target.value)} placeholder="/path/to/repo or any project folder — new or existing" style={{ ...INPUT, flex: 1 }} />
-                  <button onClick={() => browse(setNewLocation)} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
+                  <input value={newLocation} onChange={e => setNewLocation(e.target.value)}
+                    placeholder={PROJECT_KINDS.find(k => k.key === kindKey)?.folderMode === "create" ? "C:\\Projects\\new-project — created when you continue" : "C:\\path\\to\\existing-repo"}
+                    style={{ ...INPUT, flex: 1 }} />
+                  <button onClick={browseNewLocation} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
                 </div>
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                <label style={LBL}>Context for the team <span style={{ opacity: 0.6, textTransform: "none", letterSpacing: 0 }}>— editable, seeded by your pick</span></label>
-                <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="One line of context for the team to start with." rows={2} style={{ ...INPUT, height: "auto", padding: "8px 12px", resize: "vertical", minHeight: 40 }} />
+                <label style={LBL}>Goal / starting idea <span style={{ opacity: 0.6, textTransform: "none", letterSpacing: 0 }}>— this becomes the first real workflow input</span></label>
+                <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="What must this project accomplish?" rows={3} style={{ ...INPUT, height: "auto", padding: "8px 12px", resize: "vertical", minHeight: 58 }} />
               </div>
               {/* What you get — the precooked setup, stated honestly. */}
               {team && (
@@ -816,8 +846,8 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
           <button onClick={onClose} disabled={busy} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>{mode === "new" ? "Cancel" : "Done"}</button>
           <div style={{ flex: 1 }} />
           {mode === "new" && step === "form" && (
-            <button onClick={onCreate} disabled={busy || !name.trim() || !team}
-              style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: busy || !name.trim() || !team ? "rgba(var(--accent-rgb),0.30)" : "var(--accent)", color: busy || !name.trim() || !team ? "var(--fg-muted)" : "var(--accent-fg)", fontWeight: 700, fontSize: 14, cursor: busy || !name.trim() || !team ? "not-allowed" : "pointer" }}
+            <button onClick={onCreate} disabled={busy || !name.trim() || !newLocation.trim() || !team}
+              style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: busy || !name.trim() || !newLocation.trim() || !team ? "rgba(var(--accent-rgb),0.30)" : "var(--accent)", color: busy || !name.trim() || !newLocation.trim() || !team ? "var(--fg-muted)" : "var(--accent-fg)", fontWeight: 700, fontSize: 14, cursor: busy || !name.trim() || !newLocation.trim() || !team ? "not-allowed" : "pointer" }}
             >{busy ? "Creating…" : "Create project"}</button>
           )}
         </div>

@@ -15,6 +15,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
+import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import {
   type RoleData,
   type ModelInfo,
@@ -44,6 +45,9 @@ type Props = {
   /// Available models registry; lets providerFor route correctly when
   /// the model id is unprefixed (e.g. "local-qwen3-14b").
   models: ModelInfo[];
+  accountsStatus: AccountsStatusLite | null;
+  /// Seed supplied by goal-aware onboarding for a newly-created project.
+  initialIdea?: string;
   /// Called after BRIEF.md is verified on disk so the parent can
   /// refresh its UI (show "brief: ✓" badge, etc.). Optional.
   onBriefSaved?: () => void;
@@ -135,10 +139,11 @@ function parseProposedTeam(reply: string): ProposedAgent[] | null {
 }
 
 export default function BrainstormPanel(props: Props) {
-  const { open, onClose, projectCwd, brainstormerRole, modelId, port, models, onBriefSaved,
-    projectId, availableRoles, onTeamApplied } = props;
+  const { open, onClose, projectCwd, brainstormerRole, modelId, port, models, accountsStatus,
+    initialIdea, onBriefSaved, projectId, availableRoles, onTeamApplied } = props;
 
   const [idea, setIdea] = useState("");
+  const [selectedModelId, setSelectedModelId] = useState(modelId);
   const [running, setRunning] = useState(false);
   const [lines, setLines] = useState<LogLine[]>([]);
   const [done, setDone] = useState(false);
@@ -177,7 +182,11 @@ export default function BrainstormPanel(props: Props) {
     setChatInput("");
     setBriefText("");
     setBoardView(false);
-    setIdea("");
+    const modelKey = projectId ? `owllm:brainstorm-model:${projectId}` : "";
+    let savedModel = "";
+    try { if (modelKey) savedModel = localStorage.getItem(modelKey) ?? ""; } catch { /* ignore */ }
+    setSelectedModelId(savedModel || modelId);
+    setIdea(initialIdea ?? "");
     if (!projectCwd) return;
     let cancelled = false;
     (async () => {
@@ -209,9 +218,16 @@ export default function BrainstormPanel(props: Props) {
       }
     })();
     return () => { cancelled = true; };
-  }, [open, projectCwd]);
+  }, [open, projectCwd, projectId, initialIdea, modelId]);
 
   if (!open) return null;
+
+  const activeModelId = selectedModelId.trim();
+  const selectBrainstormModel = (next: string) => {
+    setSelectedModelId(next);
+    if (!projectId) return;
+    try { localStorage.setItem(`owllm:brainstorm-model:${projectId}`, next); } catch { /* ignore */ }
+  };
 
   const append = (kind: LogLine["kind"], text: string) =>
     setLines((prev) => {
@@ -276,7 +292,7 @@ export default function BrainstormPanel(props: Props) {
   // One conversational turn: stream the reply with full history, remember it,
   // and re-check whether BRIEF.md now exists on disk.
   const runTurn = async (userText: string) => {
-    if (!convSystemPrompt || !modelId || running) return;
+    if (!convSystemPrompt || !activeModelId || running) return;
     setRunning(true);
     setError(null);
     append("system", `\n🧑 ${userText}\n`);
@@ -290,7 +306,7 @@ export default function BrainstormPanel(props: Props) {
     const onDelta = (delta: string) => { reply += delta; append("text", delta); };
     try {
       await streamChatCompletion(
-        port, modelId, providerFor(modelId, models),
+        port, activeModelId, providerFor(activeModelId, models),
         convSystemPrompt, userText, brainstormerRole?.defaultTemperature ?? 0.4,
         ctrl.signal, onDelta, projectCwd,
         priorHistory, undefined, onThought,
@@ -331,10 +347,10 @@ export default function BrainstormPanel(props: Props) {
     if (!trimmed) { setError("Enter a generic idea first (one or two sentences is enough)."); return; }
     if (!projectCwd) { setError("This project has no location set. Pick a folder first so the brainstormer can save BRIEF.md."); return; }
     if (!brainstormerRole?.systemPrompt) { setError("Brainstormer role not loaded (resources/agents/roles/brainstormer.yaml)."); return; }
-    if (!modelId) { setError("No model picked. Set a team default model first."); return; }
+    if (!activeModelId) { setError("Pick the model the Brainstorm agent should use."); return; }
     setDone(false);
     setConvHistory([]);
-    setLines([{ kind: "system", text: `🧠 Brainstorm in ${projectCwd} using ${modelId}. I'll ask a couple of questions first — answer below, then say "go" when you want me to write the plan.` }]);
+    setLines([{ kind: "system", text: `🧠 Brainstorm in ${projectCwd} using ${activeModelId}. I'll ask a couple of questions first — answer below, then say "go" when you want me to write the plan.` }]);
     await runTurn([
       `Project location (BRIEF.md goes here; for a brand-new app, brainstorm/<png> screenshots too): ${projectCwd}`,
       "",
@@ -387,7 +403,7 @@ export default function BrainstormPanel(props: Props) {
       const ctrl = new AbortController();
       abortRef.current = ctrl;
       await streamChatCompletion(
-        port, modelId, providerFor(modelId, models),
+        port, activeModelId, providerFor(activeModelId, models),
         sys, user, 0.3, ctrl.signal,
         (d) => { reply += d; },
         projectCwd,
@@ -518,13 +534,30 @@ export default function BrainstormPanel(props: Props) {
             />
           </div>
 
+          <div>
+            <label style={{ color: "#cfd4e1", fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
+              Brainstorm model
+            </label>
+            <ModelPicker
+              value={activeModelId}
+              onChange={selectBrainstormModel}
+              models={models}
+              status={accountsStatus}
+              disabled={running}
+              fallbackLabel="Pick a model for this brainstorm"
+            />
+            <div style={{ marginTop: 5, color: "#747f95", fontSize: 11 }}>
+              Saved for this project. It can be different from the team and orchestrator models.
+            </div>
+          </div>
+
           {/* Status / context strip */}
           <div style={{
             fontSize: 11, color: "#8a92a3",
             display: "flex", gap: 12, flexWrap: "wrap",
           }}>
             <span>📂 {projectCwd || <em style={{ color: "#ff9f9f" }}>no project location set</em>}</span>
-            <span>🤖 {modelId || <em style={{ color: "#ff9f9f" }}>no model</em>}</span>
+            <span>🤖 {activeModelId || <em style={{ color: "#ff9f9f" }}>no model</em>}</span>
             <span>🔑 Brave Search key required (set in Accounts page)</span>
           </div>
 
@@ -533,14 +566,14 @@ export default function BrainstormPanel(props: Props) {
             {!running && convHistory.length === 0 && (
               <button
                 onClick={runBrainstorm}
-                disabled={!idea.trim() || !projectCwd || !modelId || !brainstormerRole?.systemPrompt}
+                disabled={!idea.trim() || !projectCwd || !activeModelId || !brainstormerRole?.systemPrompt}
                 style={{
                   padding: "8px 16px", fontSize: 13, fontWeight: 700,
                   background: "linear-gradient(180deg, #6b7fff, #4a5fd9)",
                   color: "#fff",
                   border: "none", borderRadius: 6,
-                  cursor: (idea.trim() && projectCwd && modelId) ? "pointer" : "not-allowed",
-                  opacity: (idea.trim() && projectCwd && modelId) ? 1 : 0.5,
+                  cursor: (idea.trim() && projectCwd && activeModelId) ? "pointer" : "not-allowed",
+                  opacity: (idea.trim() && projectCwd && activeModelId) ? 1 : 0.5,
                 }}
               >
                 🚀 Start brainstorm

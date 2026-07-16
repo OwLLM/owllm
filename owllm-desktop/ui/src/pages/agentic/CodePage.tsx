@@ -172,7 +172,12 @@ function savePages(pages: CodePageMeta[]): void {
 const PSYCHEDELIC_AURA_STOPS = "#3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b";
 const PSYCHEDELIC_AURA_RING = `conic-gradient(from var(--owllm-aura-angle), ${PSYCHEDELIC_AURA_STOPS}) border-box`;
 const PSYCHEDELIC_AURA_DOT = `conic-gradient(from 0deg, ${PSYCHEDELIC_AURA_STOPS})`;
-const PSYCHEDELIC_AURA_HALO = "0 0 0 1px rgba(255,255,255,0.16), 0 0 30px rgba(176,124,255,0.60), 0 0 44px rgba(127,212,255,0.34), 0 8px 28px rgba(0,0,0,0.46)";
+// A solid colour followed by `padding-box` is not a valid multi-layer CSS
+// background, so WebView dropped the rainbow layer and showed only the pale
+// shadow. Wrap the colour in a gradient, matching AgentChatTile's valid shape.
+const PSYCHEDELIC_AURA_FILL = "linear-gradient(var(--bg-input), var(--bg-input)) padding-box";
+const PSYCHEDELIC_AURA_BACKGROUND = `${PSYCHEDELIC_AURA_FILL}, ${PSYCHEDELIC_AURA_RING}`;
+const PSYCHEDELIC_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite, owllm-code-aura-breathe 1.8s ease-in-out infinite";
 
 // ---- Cross-page activity signal (tab-strip glow + "done" badge) -------------
 // Lets the tab strip show WHERE work is happening even when you've switched to
@@ -642,7 +647,10 @@ function CodeWorkspace({ pageId, onTitle }: {
   // model when it hasn't chosen one (empty = "same as 1st agent").
   const secondaryModelEffective = secondaryModelId || modelId;
   const [secondaryBusy, setSecondaryBusy] = useState(false);
-  const primaryAuraActive = busy || chatBusy;
+  // `chatBusy` belongs to the global no-project Just Chat surface. Including it
+  // here made every project chat glow while an unrelated chat was running (and
+  // could look permanently active after navigation). This pane is the coder.
+  const primaryAuraActive = busy;
   // One-step undo for per-agent "Clear history": each pane keeps its OWN
   // snapshot of the transcript it last cleared, so clearing one agent never
   // touches the other and each ↩ Undo restores exactly what that pane wiped.
@@ -2469,9 +2477,9 @@ function CodeWorkspace({ pageId, onTitle }: {
       <style>{`
         @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
         @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
-        @keyframes owllm-aura-pulse {
-          0%, 100% { box-shadow: 0 0 0 1px rgba(255,255,255,.16), 0 0 18px rgba(60,242,107,.36), 0 0 32px rgba(176,124,255,.34), 0 8px 24px rgba(0,0,0,.42); }
-          50% { box-shadow: 0 0 0 1px rgba(255,255,255,.48), 0 0 38px rgba(255,92,138,.72), 0 0 62px rgba(127,212,255,.56), 0 8px 30px rgba(0,0,0,.52); }
+        @keyframes owllm-code-aura-breathe {
+          0%, 100% { box-shadow: 0 0 0 1px rgba(60,242,107,.18), 0 0 22px rgba(176,124,255,.40), 0 0 34px rgba(127,212,255,.26), 0 8px 24px rgba(0,0,0,.42); }
+          50% { box-shadow: 0 0 0 1px rgba(255,92,138,.34), 0 0 38px rgba(176,124,255,.70), 0 0 58px rgba(127,212,255,.48), 0 8px 30px rgba(0,0,0,.52); }
         }
       `}</style>
       {/* Header: workspace · model · status */}
@@ -2720,11 +2728,11 @@ function CodeWorkspace({ pageId, onTitle }: {
           flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12,
           // Solid fill on padding-box keeps the message/input area's background;
           // the rainbow ring paints border-box only, so the aura reads OUTSIDE
-          // the chat container. Spins while the coder is running, static idle.
-          background: primaryAuraActive ? `var(--bg-input) padding-box, ${PSYCHEDELIC_AURA_RING}` : "var(--bg-input)",
+          // the chat container. It exists only while this coder is running.
+          background: primaryAuraActive ? PSYCHEDELIC_AURA_BACKGROUND : "var(--bg-input)",
           border: primaryAuraActive ? "2px solid transparent" : "1px solid var(--border)", borderRadius: 8,
-          boxShadow: primaryAuraActive ? PSYCHEDELIC_AURA_HALO : undefined,
-          animation: primaryAuraActive ? "owllm-aura-spin 2.8s linear infinite, owllm-aura-pulse 1.45s ease-in-out infinite" : undefined,
+          boxShadow: primaryAuraActive ? "0 0 22px rgba(176,124,255,.40), 0 0 34px rgba(127,212,255,.26)" : undefined,
+          animation: primaryAuraActive ? PSYCHEDELIC_AURA_ANIMATION : undefined,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
@@ -2805,10 +2813,10 @@ function CodeWorkspace({ pageId, onTitle }: {
             // Same rainbow aura as the primary pane: rainbow ring on border-box,
             // solid var(--bg-input) fill on padding-box so the message/input
             // area stays solid. Spins while the second agent is running.
-            background: secondaryBusy ? `var(--bg-input) padding-box, ${PSYCHEDELIC_AURA_RING}` : "var(--bg-input)",
+            background: secondaryBusy ? PSYCHEDELIC_AURA_BACKGROUND : "var(--bg-input)",
             border: secondaryBusy ? "2px solid transparent" : "1px solid var(--border)", borderRadius: 8,
-            boxShadow: secondaryBusy ? PSYCHEDELIC_AURA_HALO : undefined,
-            animation: secondaryBusy ? "owllm-aura-spin 2.8s linear infinite, owllm-aura-pulse 1.45s ease-in-out infinite" : undefined,
+            boxShadow: secondaryBusy ? "0 0 22px rgba(176,124,255,.40), 0 0 34px rgba(127,212,255,.26)" : undefined,
+            animation: secondaryBusy ? PSYCHEDELIC_AURA_ANIMATION : undefined,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>

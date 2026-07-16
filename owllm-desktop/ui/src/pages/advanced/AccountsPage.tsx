@@ -27,6 +27,15 @@ import PtyTerminal from "./PtyTerminal";
 import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
 
+const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
+const HOST_LABEL = HOST_IS_WINDOWS
+  ? "Windows"
+  : navigator.userAgent.includes("Mac")
+    ? "macOS"
+    : navigator.userAgent.includes("Linux")
+      ? "Linux"
+      : "Host";
+
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
 // transcription pipeline (binary + ggml-base.bin model) and exposes an
 // "Install voice runtime" button that fetches both from upstream into
@@ -1181,14 +1190,17 @@ export default function AccountsPage() {
       const prefix = r.ok ? "✓" : "✗";
       const line = `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`;
       setCardState(route.key, { testing: false, testText: line, testOk: r.ok });
-      logInfo(route.backend, `Windows: ${line}`);
+      logInfo(route.backend, `${HOST_LABEL}: ${line}`);
     } catch (e: any) {
       const line = `✗  ${String(e?.message ?? e)}`;
       setCardState(route.key, { testing: false, testText: line, testOk: false });
-      logInfo(route.backend, `Windows: ${line}`);
+      logInfo(route.backend, `${HOST_LABEL}: ${line}`);
     }
     // Also probe the WSL sandbox — tells the user whether ISOLATED agents can
-    // use this provider (creds mirrored into the distro). Non-fatal.
+    // use this provider (creds mirrored into the distro). Non-fatal. Native
+    // Linux/macOS have their own host/sandbox routing and must not show a fake
+    // red WSL result.
+    if (!HOST_IS_WINDOWS) return;
     try {
       const w = await invoke<ProbeResult>("accounts_test_probe_wsl", { backend: route.backend });
       const wline = `${w.ok ? "✓" : "✗"}  ${w.detail}`;

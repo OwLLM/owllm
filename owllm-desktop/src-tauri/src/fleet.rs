@@ -96,6 +96,29 @@ fn user_conflict_files(conflicts: &str) -> Vec<String> {
         .collect()
 }
 
+/// Resolve app-owned paths to the source worktree's HEAD before deciding
+/// whether a failed squash contains a real user conflict. Scratch conflicts can
+/// coexist with source conflicts; merely hiding their names from the response
+/// leaves the index unmerged and makes the card fail forever on every retry.
+fn resolve_app_scratch_conflicts(cwd: &Path, conflicts: &str) -> Result<(), String> {
+    for path in conflicts.lines().map(str::trim).filter(|p| is_app_scratch(p)) {
+        let head_path = format!("HEAD:{path}");
+        let (exists_in_head, _, _) = git(cwd, &["cat-file", "-e", &head_path])?;
+        let (ok, _, err) = if exists_in_head {
+            git(cwd, &["checkout", "HEAD", "--", path])?
+        } else {
+            git(cwd, &["rm", "-f", "--ignore-unmatch", "--", path])?
+        };
+        if !ok {
+            return Err(format!(
+                "could not resolve app-owned merge conflict {path}: {}",
+                err.trim()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn drop_staged_app_scratch(cwd: &Path) -> Result<(), String> {
     let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
     for path in staged.lines().map(str::trim).filter(|p| is_app_scratch(p)) {
@@ -519,6 +542,18 @@ pub async fn fleet_worktree_merge(
     agent_name: String,
     branch: String,
 ) -> Result<MergeOutcome, String> {
+    tokio::task::spawn_blocking(move || {
+        fleet_worktree_merge_blocking(project_cwd, agent_name, branch)
+    })
+    .await
+    .map_err(|e| format!("worktree merge task failed: {e}"))?
+}
+
+fn fleet_worktree_merge_blocking(
+    project_cwd: String,
+    agent_name: String,
+    branch: String,
+) -> Result<MergeOutcome, String> {
     let cwd = PathBuf::from(&project_cwd);
     if !cwd.is_dir() {
         return Ok(MergeOutcome::Error {
@@ -533,30 +568,33 @@ pub async fn fleet_worktree_merge(
     // squash: keep all the agent's commits as one merge commit in the
     // project tree, preserving per-agent attribution but avoiding a
     // noisy linear-history merge of every single agent micro-commit.
-    let (mut ok, _, mut err) = git(&cwd, &["merge", "--squash", "--no-commit", &branch])?;
+    let (ok, _, err) = git(&cwd, &["merge", "--squash", "--no-commit", &branch])?;
     if !ok {
         let (_, conflicts, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
-        let files = user_conflict_files(&conflicts);
-        if files.is_empty() && !conflicts.trim().is_empty() {
-            // Only OWLLM-managed scratch conflicted. Re-apply the squash using
-            // our side for those paths, then strip scratch from the index below.
+        if conflicts.trim().is_empty() {
             let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
-            let (retry_ok, _, retry_err) =
-                git(&cwd, &["merge", "--squash", "--no-commit", "-X", "ours", &branch])?;
-            ok = retry_ok;
-            err = retry_err;
-        }
-        if !ok {
-            let (_, conflicts, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
-            let files = user_conflict_files(&conflicts);
-            // Reset the index so a failed merge doesn't leave staged junk
-            // in the user's project tree.
-            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
-            if !files.is_empty() {
-                return Ok(MergeOutcome::Conflict { files });
-            }
             return Ok(MergeOutcome::Error {
                 message: format!("git merge --squash failed: {}", err.trim()),
+            });
+        }
+        if let Err(resolve_err) = resolve_app_scratch_conflicts(&cwd, &conflicts) {
+            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            return Ok(MergeOutcome::Error {
+                message: resolve_err,
+            });
+        }
+        let (_, remaining, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
+        let files = user_conflict_files(&remaining);
+        if !files.is_empty() {
+            // Reset the index so a failed merge doesn't leave staged junk in
+            // the user's project tree. The agent branch remains intact.
+            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            return Ok(MergeOutcome::Conflict { files });
+        }
+        if !remaining.trim().is_empty() {
+            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            return Ok(MergeOutcome::Error {
+                message: "app-owned merge conflicts remained unresolved".to_string(),
             });
         }
     }
@@ -707,7 +745,43 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 
 #[cfg(test)]
 mod tests {
-    use super::{is_app_scratch, porcelain_path, user_conflict_files};
+    use super::{
+        fleet_worktree_merge_blocking, is_app_scratch, porcelain_path, user_conflict_files,
+        MergeOutcome,
+    };
+    use std::{fs, path::Path, process::Command};
+
+    fn git_ok(cwd: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git should start");
+        assert!(
+            out.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_merge_repo() -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        git_ok(tmp.path(), &["init", "-b", "main"]);
+        git_ok(tmp.path(), &["config", "user.email", "fleet-test@owllm.local"]);
+        git_ok(tmp.path(), &["config", "user.name", "OwLLM Fleet Test"]);
+        fs::create_dir_all(tmp.path().join(".owllm-inbox")).unwrap();
+        fs::create_dir_all(tmp.path().join("owllm-desktop/src-tauri/src")).unwrap();
+        fs::write(tmp.path().join(".owllm-inbox/image_1.png"), b"base").unwrap();
+        fs::write(
+            tmp.path().join("owllm-desktop/src-tauri/src/release.rs"),
+            "base\n",
+        )
+        .unwrap();
+        git_ok(tmp.path(), &["add", "-A"]);
+        git_ok(tmp.path(), &["commit", "-m", "base"]);
+        tmp
+    }
 
     #[test]
     fn app_scratch_is_ignored_but_source_is_not() {
@@ -747,5 +821,67 @@ mod tests {
             vec!["owllm-desktop/src-tauri/src/release.rs".to_string()]
         );
         assert!(user_conflict_files(".owllm-inbox/image_1.png\n.owllm/project.json\n").is_empty());
+    }
+
+    #[test]
+    fn mixed_merge_reports_only_the_real_source_conflict() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent"]);
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"agent").unwrap();
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "agent\n",
+        )
+        .unwrap();
+        git_ok(root, &["commit", "-am", "agent changes"]);
+
+        git_ok(root, &["checkout", "main"]);
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"main").unwrap();
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "main\n",
+        )
+        .unwrap();
+        git_ok(root, &["commit", "-am", "main changes"]);
+
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "code".into(),
+            "agent".into(),
+        )
+        .unwrap();
+        match outcome {
+            MergeOutcome::Conflict { files } => assert_eq!(
+                files,
+                vec!["owllm-desktop/src-tauri/src/release.rs".to_string()]
+            ),
+            _ => panic!("mixed conflict should preserve and report the real source conflict"),
+        }
+    }
+
+    #[test]
+    fn scratch_only_conflict_does_not_block_real_nonconflicting_changes() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent"]);
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"agent").unwrap();
+        fs::write(root.join("feature.txt"), "agent feature\n").unwrap();
+        git_ok(root, &["add", "-A"]);
+        git_ok(root, &["commit", "-m", "agent feature"]);
+
+        git_ok(root, &["checkout", "main"]);
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"main").unwrap();
+        git_ok(root, &["commit", "-am", "refresh app inbox"]);
+
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "code".into(),
+            "agent".into(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        assert_eq!(fs::read_to_string(root.join("feature.txt")).unwrap(), "agent feature\n");
+        assert_eq!(fs::read(root.join(".owllm-inbox/image_1.png")).unwrap(), b"main");
     }
 }

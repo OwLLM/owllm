@@ -323,29 +323,37 @@ fn fmt_gb(bytes: u64) -> String {
 
 #[cfg(windows)]
 fn disk_free_bytes_for_path(path: &str) -> Option<(String, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
     let full = std::fs::canonicalize(path).ok()?;
-    let s = full.to_string_lossy();
-    let drive = s.get(0..2).filter(|d| d.ends_with(':'))?.to_string();
-    let filter = format!("DeviceID='{drive}'");
-    let out = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            &format!(
-                "(Get-CimInstance Win32_LogicalDisk -Filter \"{}\").FreeSpace",
-                filter
-            ),
-        ])
-        .output()
-        .ok()?;
-    if !out.status.success() {
+    let label = match full.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                format!("{}:", letter as char)
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                format!(r"\\{}\{}", server.to_string_lossy(), share.to_string_lossy())
+            }
+            _ => full.display().to_string(),
+        },
+        _ => full.display().to_string(),
+    };
+    let wide: Vec<u16> = full.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
         return None;
     }
-    let txt = String::from_utf8_lossy(&out.stdout);
-    let free = txt.trim().parse::<u64>().ok()?;
-    Some((drive, free))
+    Some((label, available))
 }
 
 #[cfg(not(windows))]
@@ -926,4 +934,17 @@ pub async fn repo_merge(repo_dir: String, target: Option<String>) -> Result<Stri
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(all(test, windows))]
+mod tests {
+    use super::disk_free_bytes_for_path;
+
+    #[test]
+    fn disk_probe_accepts_windows_canonical_paths() {
+        let (volume, available) = disk_free_bytes_for_path(".")
+            .expect("the native disk probe should accept a canonical Windows path");
+        assert!(!volume.trim().is_empty());
+        assert!(available > 0);
+    }
 }

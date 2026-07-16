@@ -41,9 +41,10 @@ globalThis.CustomEvent = dom.window.CustomEvent;
 
 // ---- transpile the real RunNotebook.tsx to CJS, stub its siblings ----
 const src = fs.readFileSync(path.join(HERE, "RunNotebook.tsx"), "utf8");
-const codePageSrc = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
-const agentsPageSrc = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
-const watcherSrc = fs.readFileSync(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"), "utf8");
+const normalizedSource = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+const codePageSrc = normalizedSource(path.join(HERE, "CodePage.tsx"));
+const agentsPageSrc = normalizedSource(path.join(HERE, "AgentsPage.tsx"));
+const watcherSrc = normalizedSource(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"));
 const js = ts.transpileModule(src, {
   compilerOptions: {
     module: ts.ModuleKind.CommonJS,

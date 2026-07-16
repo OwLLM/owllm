@@ -897,31 +897,38 @@ pub fn init(app: &AppHandle) {
 #[tauri::command]
 pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
     store_app(&app);
-    ensure_listener_started(tokio::runtime::Handle::current());
-    let rec = self_public_record()?;
-    Ok(json!({
-        "device_id": rec.device_id,
-        "name": rec.name,
-        "os": rec.os,
-        "arch": rec.arch,
-        "app_version": rec.app_version,
-        "ed25519_pub": rec.ed25519_pub,
-        "x25519_pub": rec.x25519_pub,
-        "github_login": rec.github_login,
-        "capabilities": rec.capabilities,
-        "enabled": feature_enabled(),
-        "env_override": env_override(),
-        "endpoint": rec.endpoint,
-        "endpoints": rec.endpoints,
-        "listening": lan::current_port().is_some(),
-        "public_endpoint": public_endpoint(),
-        "relay_url": relay_url(),
-        "relay_client": relay::client_running(),
-        "relay_serving": relay::serving(),
-        "p2p_node_id": rec.p2p_node_id,
-        "p2p_running": p2p::running(),
-        "agents_allowed": agents_allowed(),
-    }))
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        // This can create a listener and read several small config files. Keep
+        // even that setup away from the event loop so page navigation wins.
+        ensure_listener_started(runtime);
+        let rec = self_public_record()?;
+        Ok(json!({
+            "device_id": rec.device_id,
+            "name": rec.name,
+            "os": rec.os,
+            "arch": rec.arch,
+            "app_version": rec.app_version,
+            "ed25519_pub": rec.ed25519_pub,
+            "x25519_pub": rec.x25519_pub,
+            "github_login": rec.github_login,
+            "capabilities": rec.capabilities,
+            "enabled": feature_enabled(),
+            "env_override": env_override(),
+            "endpoint": rec.endpoint,
+            "endpoints": rec.endpoints,
+            "listening": lan::current_port().is_some(),
+            "public_endpoint": public_endpoint(),
+            "relay_url": relay_url(),
+            "relay_client": relay::client_running(),
+            "relay_serving": relay::serving(),
+            "p2p_node_id": rec.p2p_node_id,
+            "p2p_running": p2p::running(),
+            "agents_allowed": agents_allowed(),
+        }))
+    })
+    .await
+    .map_err(|e| format!("device identity task failed: {e}"))?
 }
 
 /// Rename this device (cosmetic; the keypair/id are unchanged).
@@ -1006,10 +1013,14 @@ pub fn device_listener_status() -> Value {
 
 /// "My OwLLM Devices" — known devices, with this machine always present.
 #[tauri::command]
-pub fn devices_list() -> Result<Vec<DeviceRecord>, String> {
-    let me = identity::public_record(github_login())?;
-    registry::upsert(me.clone(), true)?;
-    Ok(registry::list(&me))
+pub async fn devices_list() -> Result<Vec<DeviceRecord>, String> {
+    tokio::task::spawn_blocking(|| {
+        let me = identity::public_record(github_login())?;
+        registry::upsert(me.clone(), true)?;
+        Ok(registry::list(&me))
+    })
+    .await
+    .map_err(|e| format!("device registry task failed: {e}"))?
 }
 
 /// Remove a device from the local registry.
@@ -1020,8 +1031,10 @@ pub fn device_forget(device_id: String) -> Result<(), String> {
 
 /// Controllers this device knows about (pending / trusted / revoked).
 #[tauri::command]
-pub fn device_trust_list() -> Result<Vec<TrustedController>, String> {
-    Ok(trust::list())
+pub async fn device_trust_list() -> Result<Vec<TrustedController>, String> {
+    tokio::task::spawn_blocking(|| Ok(trust::list()))
+        .await
+        .map_err(|e| format!("device trust task failed: {e}"))?
 }
 
 /// Request pairing with a device. For THIS device (loopback) it records a local
@@ -1322,8 +1335,10 @@ pub fn device_set_agents_allowed(allowed: bool) -> Result<(), String> {
 
 /// The last `limit` audit lines (redacted), newest last.
 #[tauri::command]
-pub fn device_audit_tail(limit: Option<usize>) -> Vec<Value> {
-    audit::tail(limit.unwrap_or(200))
+pub async fn device_audit_tail(limit: Option<usize>) -> Vec<Value> {
+    tokio::task::spawn_blocking(move || audit::tail(limit.unwrap_or(200)))
+        .await
+        .unwrap_or_default()
 }
 
 /// End-to-end self-test: seals a diagnostics request self→self, opens it

@@ -235,3 +235,11 @@ tempfile = "3"
 [profile.release]
 lto = "thin"
 strip = "debuginfo"
+
+# The desktop crate changes on nearly every UI build because Tauri embeds the
+# frontend into Rust. Its incremental state cannot be reused after those changes
+# and Cargo retains every incompatible variant, which had grown past 9 GiB on a
+# single workstation. Keep dependency artifacts cached, but do not retain this
+# disposable per-revision state.
+[profile.dev]
+incremental = false

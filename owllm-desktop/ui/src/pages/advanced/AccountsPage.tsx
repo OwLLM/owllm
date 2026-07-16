@@ -984,11 +984,9 @@ export default function AccountsPage() {
     LOG_HUB.push({ ts: Date.now(), stream: "info", text, backend });
   }
 
-  // Mirror host logins/keys into the WSL sandbox so isolated agents are
-  // authenticated AUTOMATICALLY at registration — no manual "Sync" step. Runs
-  // after a CLI login terminal closes, after an API key is saved, and once on
-  // page load (to propagate anything already logged in). Best-effort: silently
-  // no-ops on a machine without WSL.
+  // Mirror host logins/keys into the WSL sandbox after a credential changes.
+  // Do not start WSL merely because Accounts was opened: a cold distro can take
+  // tens of seconds, and page navigation must stay instant.
   async function mirrorToSandbox(backend?: string) {
     try {
       const r = await sandboxSyncLogins(null);
@@ -997,9 +995,6 @@ export default function AccountsPage() {
       }
     } catch { /* no WSL on this machine — nothing to mirror into */ }
   }
-
-  // Propagate any already-connected accounts into the sandbox once on load.
-  useEffect(() => { mirrorToSandbox(); }, []);
 
   function handleConnect(route: RouteSpec, provider: ProviderSpec) {
     if (route.kind === "subscription") {

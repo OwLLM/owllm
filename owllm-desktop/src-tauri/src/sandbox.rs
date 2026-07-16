@@ -1881,8 +1881,13 @@ fn sync_logins_impl(_distro: Option<String>) -> Result<SyncResult, String> {
 /// Mirror host logins into the sandbox. Returns what synced AND what was
 /// found on the Windows host, so the UI can explain the outcome precisely.
 #[tauri::command]
-pub fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, String> {
-    sync_logins_impl(distro)
+pub async fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, String> {
+    // Starting a cold WSL distro can take tens of seconds. This command is
+    // called from Accounts and must never occupy Tauri's UI/event loop while
+    // WSL starts or copies credentials.
+    tokio::task::spawn_blocking(move || sync_logins_impl(distro))
+        .await
+        .map_err(|e| format!("sandbox login sync task failed: {e}"))?
 }
 
 /// Pre-flight for an isolated run: make sure WSL is warm and the project folder is

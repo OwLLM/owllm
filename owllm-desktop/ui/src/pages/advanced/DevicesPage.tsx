@@ -97,29 +97,42 @@ export default function DevicesPage() {
     }
   }, []);
 
-  const reload = useCallback(async () => {
+  const reloadCore = useCallback(async () => {
     if (!isTauri) return;
-    const [id, devs, tr, ctl, ap, au] = await Promise.all([
+    const [id, devs, tr, ctl, ap] = await Promise.all([
       rd.getIdentity(),
       rd.listDevices(),
       rd.listTrusted(),
       rd.controlState(),
       rd.pendingApprovals(),
-      rd.auditTail(200),
     ]);
     setIdentity(id);
     setDevices(devs);
     setTrusted(tr);
     setControl(ctl);
     setApprovals(ap.pending ?? []);
-    setAudit((au as AuditRow[]) ?? []);
     setNameDraft((prev) => (prev === "" ? id.name : prev));
     setTarget((prev) => (prev === "" ? id.device_id : prev));
   }, []);
 
+  const reloadAudit = useCallback(async () => {
+    if (!isTauri) return;
+    const au = await rd.auditTail(200);
+    setAudit((au as AuditRow[]) ?? []);
+  }, []);
+
+  const reload = useCallback(async () => {
+    await reloadCore();
+    await reloadAudit();
+  }, [reloadAudit, reloadCore]);
+
   useEffect(() => {
-    void guard(reload);
-  }, [guard, reload]);
+    // Render the page shell first. The audit trail is secondary context and
+    // must not compete with a navigation click.
+    const coreTimer = window.setTimeout(() => { void guard(reloadCore); }, 0);
+    const auditTimer = window.setTimeout(() => { void guard(reloadAudit); }, 250);
+    return () => { window.clearTimeout(coreTimer); window.clearTimeout(auditTimer); };
+  }, [guard, reloadAudit, reloadCore]);
 
   // Live updates: being-controlled, dangerous-action approvals, incoming pairing,
   // and vault-discovery refreshes.

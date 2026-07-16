@@ -259,6 +259,23 @@ if [ -f "$CARGO" ] && [ "$(basename "$CONF")" != "Cargo.toml" ]; then
     }'
 fi
 
+# Cargo.lock records the workspace package version too. Update that generated
+# entry before the release commit so the tag, Cargo metadata, and lockfile stay
+# aligned; otherwise the subsequent local build rewrites Cargo.lock and leaves
+# a misleading dirty tree after every publish.
+LOCK="$(dirname "$CONF")/Cargo.lock"
+if [ -f "$LOCK" ] && [ "$(basename "$CONF")" != "Cargo.lock" ]; then
+  NEW="$NEW" LOCK="$LOCK" node -e '
+    const fs=require("fs");
+    let s=fs.readFileSync(process.env.LOCK,"utf8");
+    const re=/(\[\[package\]\]\s+name = "owllm-desktop"\s+version = ")([^"]+)(")/;
+    if (re.test(s)) {
+      fs.writeFileSync(process.env.LOCK, s.replace(re, `$1${process.env.NEW}$3`));
+    } else {
+      console.error("WARN: Cargo.lock has no owllm-desktop package entry — left unchanged");
+    }'
+fi
+
 # Headline from the caller — but DROP a bare "publish it" / "ship" / "release"
 # command. The release body must describe what SHIPPED, not echo the chat message
 # the user typed to the agents (that was the old, useless behaviour).

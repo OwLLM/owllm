@@ -12,6 +12,16 @@ export function formatDuration(ms: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
 }
 
+/// Human-readable local clock time (e.g. "11:50:37").
+export function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+/// Footer appended after a run answer: duration + start/finish wall-clock times.
+export function runTimingFooter(startedAt: number, finishedAt: number = Date.now()): string {
+  return `⏱ ${formatDuration(finishedAt - startedAt)} — started ${formatClock(startedAt)}, finished ${formatClock(finishedAt)}`;
+}
+
 /// Force a 1-s re-render while `active` so a running stopwatch ticks live; stops
 /// the interval (no churn) once the clock freezes. Each timer ticks itself.
 export function useTick(active: boolean): void {

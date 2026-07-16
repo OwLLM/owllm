@@ -68,13 +68,21 @@ fs.writeFileSync(path.join(TMP, "LogBox.js"), `
   const React = require("react");
   module.exports = { __esModule: true, default: () => React.createElement("pre", null) };
 `);
+fs.writeFileSync(path.join(TMP, "RunTimer.js"), `
+  module.exports = {
+    __esModule: true,
+    formatDuration: (ms) => String(Math.floor(ms / 1000)) + "s",
+    formatClock: (ts) => new Date(ts).toLocaleTimeString(),
+  };
+`);
 // Rewrite relative imports in the transpiled output to the stubs.
 let out = fs.readFileSync(path.join(TMP, "RunNotebook.js"), "utf8");
 out = out
   .replace(/require\("\.\.\/\.\.\/hooks\/useAutoResize"\)/g, 'require("./hooks.js")')
   .replace(/require\("\.\.\/\.\.\/components\/LogBox"\)/g, 'require("./LogBox.js")')
   .replace(/require\("\.\/dispatch"\)/g, 'require("./dispatch.js")')
-  .replace(/require\("\.\/ModelPicker"\)/g, 'require("./ModelPicker.js")');
+  .replace(/require\("\.\/ModelPicker"\)/g, 'require("./ModelPicker.js")')
+  .replace(/require\("\.\/RunTimer"\)/g, 'require("./RunTimer.js")');
 fs.writeFileSync(path.join(TMP, "RunNotebook.js"), out);
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 fs.mkdirSync(path.join(TMP, "node_modules"), { recursive: true });
@@ -169,15 +177,30 @@ console.log("case 3: ▶ Start queue kicks off the step list");
 {
   seed();
   const fed = [];
-  const { root } = mount({ onFeed: (t) => { fed.push(t); return "dispatched"; } });
+  const ids = [];
+  const { root } = mount({ onFeed: (t, id) => { fed.push(t); ids.push(id); return "dispatched"; } });
   const btn = buttons().find((b) => textOf(b).includes("Start queue"));
   check("Start queue button exists when steps pending", !!btn);
   clickEl(btn);
   check("first pending step fed", fed.length === 1 && fed[0] === "first pending step");
+  check("step id is passed to onFeed", ids.length === 1 && ids[0] === "s1");
   const after = blob();
   check("first step marked sent", after.steps.find((s) => s.id === "s1")?.status === "sent");
+  check("first step has startedAt", typeof after.steps.find((s) => s.id === "s1")?.startedAt === "number");
   check("second step still pending", after.steps.find((s) => s.id === "s2")?.status === "pending");
   act(() => root.unmount());
+}
+
+// ---- 3b. notebook timing helpers stamp start/finish on the blob ----
+console.log("case 3b: markNotebookStepStarted / markNotebookStepFinished update the blob");
+{
+  seed();
+  const { markNotebookStepStarted, markNotebookStepFinished } = NB;
+  markNotebookStepStarted(PID, "s1", 1000);
+  check("startedAt is stamped", blob().steps.find((s) => s.id === "s1")?.startedAt === 1000);
+  markNotebookStepFinished(PID, "s1", 5000);
+  check("finishedAt is stamped", blob().steps.find((s) => s.id === "s1")?.finishedAt === 5000);
+  check("status is untouched by timing helpers", blob().steps.find((s) => s.id === "s1")?.status === "pending");
 }
 
 // ---- 4. no team ready → step NOT consumed, lane NOT consumed ----

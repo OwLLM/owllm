@@ -16,8 +16,8 @@ import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun } from "./RunNotebook";
-import { formatDuration, useTick, RunTimerChip } from "./RunTimer";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
 import IconPickerDialog, {
@@ -8442,25 +8442,35 @@ export function AgentsPage({
   // orchestrator boundary and feeds it in as a ⚡ USER (mid-run) turn. steerQueueRef
   // is the source of truth; pendingSteers just mirrors the count for the UI.
   const steerQueueRef = useRef<string[]>([]);
+  // 📓 Notebook step timing: which step started the current run, and which steps
+  // were queued as mid-run steers. Dispatched steps are marked finished at run end;
+  // queued steers are only marked finished once they have been drained (processed).
+  const notebookStepRef = useRef<string | null>(null);
+  const notebookSteerStepIdsRef = useRef<string[]>([]);
+  const notebookSteerInFlightIdsRef = useRef<string[]>([]);
   // Drain the queued steers into a single block (empty string when none). Called at
   // safe boundaries in the run loop. The user's feedback that a message was captured
   // is the "⚡ queued to steer the run →" echo pushed into the chat on enqueue.
   const drainSteers = (): string => {
     const q = steerQueueRef.current;
+    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
     if (!q.length) return "";
+    if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
     return q.splice(0, q.length).join("\n");
   };
   // 📓 Notebook feed: a step goes to the team NOW — as a live steer while a
   // run is active (picked up at the next agent boundary, or between tool
   // calls on local models), or as a fresh dispatch when idle.
-  const feedFromNotebook = (text: string): "queued" | "dispatched" | "no-team" => {
+  const feedFromNotebook = (text: string, stepId?: string): "queued" | "dispatched" | "no-team" => {
     const t = text.trim();
     if (!t) return "no-team";
     if (supSendBusyRef.current || dispatchInFlightRef.current) {
       steerQueueRef.current.push(t);
+      if (stepId) notebookSteerStepIdsRef.current.push(stepId);
       setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `📓⚡ notebook step queued to steer the run → ${t}`, ts: Date.now(), seq: nextSeq() }]);
       return "queued";
     }
+    notebookStepRef.current = stepId ?? null;
     void onSupSendRef.current?.(`📓 Next step from the Notebook:\n${t}`);
     return "dispatched";
   };
@@ -8483,7 +8493,10 @@ export function AgentsPage({
         return;
       }
       const step = takeNextAutoStep(pid, notebookSurfaceId);
-      if (step) void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
+      if (step) {
+        notebookStepRef.current = step.id;
+        void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
+      }
     };
     setTimeout(attempt, 800);
   };
@@ -12297,6 +12310,7 @@ export function AgentsPage({
             report += `\n   eval vs "${fx.note ?? fx.goal}": ${card.ok ? "✓ PASS" : "✗ FAIL"} (${card.passed}/${card.checks.length})${misses.length ? " — failed: " + misses.join(", ") : ""}`;
           }
           setSupChat(prev => [...prev, { role: "system", color: trace.done ? "#7ff0c5" : "#ffb74d", text: report, ts: Date.now(), seq: nextSeq() }]);
+          setSupChat(prev => [...prev, { role: "system", color: "var(--fg-muted)", text: runTimingFooter(rt.t0, Date.now()), ts: Date.now(), seq: nextSeq() }]);
           // Persist (append, keep last 200) for the node scorecard. Best-effort.
           try {
             let prior = "";
@@ -12330,6 +12344,16 @@ export function AgentsPage({
       setBusy(false);
       setRunning(false); // clear the store-backed in-flight flag (mirrors setBusy)
       setRunEndedAt(Date.now()); // freeze the team stopwatch on the final duration
+      // 📓 Stamp notebook step timing for the step that started this run and any
+      // notebook steps that were drained and processed as mid-run steers.
+      const now = Date.now();
+      if (notebookStepRef.current) {
+        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        notebookStepRef.current = null;
+      }
+      for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
+        markNotebookStepFinished(selectedProjectId, sid, now);
+      }
       clearActive();
       abortRef.current = null;
       agentRunAborts.delete(agentSessId);

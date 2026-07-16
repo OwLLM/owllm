@@ -4225,7 +4225,7 @@ dependencies = [
 
 [[package]]
 name = "owllm-desktop"
-version = "0.8.76"
+version = "0.8.77"
 dependencies = [
  "aes",
  "aes-gcm",

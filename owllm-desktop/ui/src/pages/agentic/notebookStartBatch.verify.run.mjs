@@ -41,10 +41,9 @@ globalThis.CustomEvent = dom.window.CustomEvent;
 
 // ---- transpile the real RunNotebook.tsx to CJS, stub its siblings ----
 const src = fs.readFileSync(path.join(HERE, "RunNotebook.tsx"), "utf8");
-const normalizedSource = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
-const codePageSrc = normalizedSource(path.join(HERE, "CodePage.tsx"));
-const agentsPageSrc = normalizedSource(path.join(HERE, "AgentsPage.tsx"));
-const watcherSrc = normalizedSource(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"));
+const codePageSrc = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
+const agentsPageSrc = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
+const watcherSrc = fs.readFileSync(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"), "utf8");
 const js = ts.transpileModule(src, {
   compilerOptions: {
     module: ts.ModuleKind.CommonJS,
@@ -253,6 +252,33 @@ console.log("case 5: Start queue hides with nothing pending");
   localStorage.setItem(KEY, JSON.stringify({ text: "", plan: PLAN, steps: [{ id: "s1", text: "done step", status: "done", ts: 1 }], autoFeed: true, digest: [] }));
   const { root } = mount({});
   check("no Start queue button", !buttons().some((b) => textOf(b).includes("Start queue")));
+  act(() => root.unmount());
+}
+
+// ---- 5b. done steps live ONLY on the Archive tab ----
+console.log("case 5b: done steps are hidden until the Archive tab is clicked");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [
+      { id: "s1", text: "still open step", status: "pending", ts: 1 },
+      { id: "s2", text: "finished archived step", status: "done", ts: 2 },
+    ],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  check("done step is NOT visible on the default Active tab", !textOf(document.body).includes("finished archived step"));
+  check("active step is visible", textOf(document.body).includes("still open step"));
+  const archiveTab = buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive"));
+  check("Archive tab shows the done count", !!archiveTab && textOf(archiveTab).includes("(1)"));
+  clickEl(archiveTab);
+  check("done step appears after clicking Archive", textOf(document.body).includes("finished archived step"));
+  check("active queue is hidden on the Archive tab", !textOf(document.body).includes("still open step"));
+  const reopen = buttons().find((b) => textOf(b).includes("Reopen"));
+  check("archived step can be reopened", !!reopen);
+  clickEl(reopen);
+  check("reopened step is pending again", blob().steps.find((s) => s.id === "s2")?.status === "pending");
+  check("archive shows its empty state once cleared", textOf(document.body).includes("No archived steps yet"));
   act(() => root.unmount());
 }
 

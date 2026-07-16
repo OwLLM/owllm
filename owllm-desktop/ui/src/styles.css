@@ -13,6 +13,7 @@
   --accent-strong: rgba(92, 240, 255, 0.55);
   --accent-glow-soft: rgba(92, 240, 255, 0.35);
   --accent-glow-strong: rgba(92, 240, 255, 0.65);
+  --text-color-selected: #e6e8eb;
 
   /* Universal status colours — same in both modes. */
   --ok: #22c55e;
@@ -213,6 +214,10 @@ button { font-family: inherit; cursor: pointer; font-weight: bold; }
 
 input, select, textarea {
   color: inherit;
+}
+input::placeholder, textarea::placeholder {
+  color: var(--fg-subtle);
+  opacity: 1;
 }
 
 /* Scrollbar styling for both themes — defaults look glaring in light

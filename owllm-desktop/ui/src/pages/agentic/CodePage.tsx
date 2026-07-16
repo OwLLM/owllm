@@ -824,9 +824,6 @@ function CodeWorkspace({ pageId, onTitle }: {
     // Keep the imperative send gate in sync immediately; waiting for the
     // chatRuntime update to trigger a React render can strand auto-follow-ups.
     busySendRef.current = v;
-    // A new primary turn supersedes a pending clear-history undo. Preserve the
-    // newer main-branch safety rule alongside the page's synchronous send lock.
-    if (v) setPrimaryUndo(null);
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
       if (v) return { ...cur, busy: true, runStartedAt: Date.now(), runEndedAt: undefined };

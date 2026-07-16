@@ -26,7 +26,7 @@ import {
   ModeId,
   PageDef,
 } from "./core/modules";
-import { ACCENTS, AccentSelection, Mode, useTheme } from "./theme";
+import { ACCENTS, AccentSelection, Mode, TextColorSelection, useTheme } from "./theme";
 import { headerPill } from "./theme/styles";
 import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
 import DiscordBridgeRunner from "./bridges/DiscordBridgeRunner";
@@ -44,6 +44,7 @@ import GenSpeedBadge from "./components/GenSpeedBadge";
 import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
+import { readKeepFrameVisible, saveKeepFrameVisible } from "./framePreferences";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -61,14 +62,9 @@ function isTauri(): boolean {
   return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__ || w.__TAURI_METADATA__);
 }
 
-const KEEP_FRAME_VISIBLE_KEY = "owllm:window-frame:keep-visible";
 const FRAME_VISIBILITY_STATE_KEY = "owllm:window-frame:visibility";
 const FRAME_IDLE_HIDE_MS = 1800;
 const FRAME_LEAVE_HIDE_MS = 700;
-export function readKeepFrameVisible(): boolean {
-  try { return localStorage.getItem(KEEP_FRAME_VISIBLE_KEY) === "1"; }
-  catch { return false; }
-}
 
 function startDrag(e: React.MouseEvent) {
   if (e.button !== 0) return;
@@ -307,12 +303,10 @@ const FRAME_BG     = "var(--bg-header)";
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
 
-function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }: {
-  children: React.ReactNode; outerW: number; outerH: number;
-  /// Periodic "The Watcher" satellite label around the owl (until first open).
-  showWatcherHint?: boolean;
-  frameVisible: boolean;
-}) {
+// Shared by HybridFrame (the real full-window chrome) and
+// MiniFrameReplica (the Settings "Keep frame" control) so the miniature
+// is a true scaled copy of the live frame rather than a drifting sketch.
+function computeFrameGeometry(outerW: number, outerH: number) {
   // Invert the legacy formula: with `outerW = parent_w + EXTRA_RIGHT
   // + 2*so + 2*CORNER_OUTSET`, solve for parent_w given the live
   // viewport. Clamped to MIN_PARENT_* so frame edges never overlap.
@@ -365,6 +359,34 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
   // peeking out into the EXTRA_TOP headroom, half overlapping the
   // ModeBar inside the inner content.
   const badgeY = parent_y - BADGE_H / 2;
+  return {
+    parent_x, parent_y, parent_w, parent_h,
+    outerL, outerT, outerW2, outerH2, outerR, outerB,
+    innerL, innerT, innerW, innerH,
+    topBar, botBar, leftBar, rightBar,
+    brkL, bxL, bxR, byT, byB,
+    tckL, tckI, midx, midy,
+    cnTL, cnTR, cnBL, cnBR,
+    badgeX, badgeY,
+  };
+}
+
+function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }: {
+  children: React.ReactNode; outerW: number; outerH: number;
+  /// Periodic "The Watcher" satellite label around the owl (until first open).
+  showWatcherHint?: boolean;
+  frameVisible: boolean;
+}) {
+  const {
+    parent_x, parent_y, parent_w, parent_h,
+    outerL, outerT, outerW2, outerH2, outerR, outerB,
+    innerL, innerT, innerW, innerH,
+    topBar, botBar, leftBar, rightBar,
+    brkL, bxL, bxR, byT, byB,
+    tckL, tckI, midx, midy,
+    cnTL, cnTR, cnBL, cnBR,
+    badgeX, badgeY,
+  } = computeFrameGeometry(outerW, outerH);
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
@@ -446,6 +468,76 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
 }
 
 // ---------------------------------------------------------------------
+// MiniFrameReplica — the Settings "Keep frame" control: a miniature of
+// the real HybridFrame drawn from the SAME computeFrameGeometry() at the
+// app's reference 1600×960 window, scaled down through an SVG viewBox so
+// proportions, bars, corner art, and the owl badge match the live frame.
+// Children (the keep-visible checkbox + label) render inside the mini
+// content panel, exactly where the real app content sits.
+// ---------------------------------------------------------------------
+const MINI_FRAME_REF_W = 1600;
+const MINI_FRAME_REF_H = 960;
+
+function MiniFrameReplica({ width, active, children }: {
+  width: number;
+  /// Mirrors the real frame's fade: chrome at full strength while the
+  /// user keeps the frame visible, dimmed like the idle fade when not.
+  active: boolean;
+  children: React.ReactNode;
+}) {
+  const g = computeFrameGeometry(MINI_FRAME_REF_W, MINI_FRAME_REF_H);
+  const height = Math.round(width * MINI_FRAME_REF_H / MINI_FRAME_REF_W);
+  // viewBox-unit stroke that renders as a crisp 1px line at mini scale.
+  const hairline = MINI_FRAME_REF_W / width;
+  const px = (v: number) => `${(v / MINI_FRAME_REF_W) * 100}%`;
+  const py = (v: number) => `${(v / MINI_FRAME_REF_H) * 100}%`;
+  return (
+    <span data-ui="MiniFrameReplica" style={{ position: "relative", width, height, display: "block", flex: "none" }}>
+      <svg viewBox={`0 0 ${MINI_FRAME_REF_W} ${MINI_FRAME_REF_H}`} width={width} height={height} aria-hidden="true" style={{ position: "absolute", inset: 0, display: "block" }}>
+        <rect x={g.parent_x} y={g.parent_y} width={g.parent_w} height={g.parent_h} fill="var(--bg-panel)" />
+        <g opacity={active ? 1 : 0.3} style={{ transition: "opacity 220ms ease" }}>
+          <rect x={g.topBar.x}   y={g.topBar.y}   width={g.topBar.w}   height={g.topBar.h}   fill={FRAME_BG} />
+          <rect x={g.botBar.x}   y={g.botBar.y}   width={g.botBar.w}   height={g.botBar.h}   fill={FRAME_BG} />
+          <rect x={g.leftBar.x}  y={g.leftBar.y}  width={g.leftBar.w}  height={g.leftBar.h}  fill={FRAME_BG} />
+          <rect x={g.rightBar.x} y={g.rightBar.y} width={g.rightBar.w} height={g.rightBar.h} fill={FRAME_BG} />
+          <rect x={g.outerL + 1} y={g.outerT + 1} width={g.outerW2 - 2} height={g.outerH2 - 2} rx={14} ry={14} fill="none" stroke={FRAME_COLOR} strokeWidth={hairline} />
+          <rect x={g.innerL} y={g.innerT} width={g.innerW} height={g.innerH} rx={10} ry={10} fill="none" stroke={FRAME_ACCENT} strokeWidth={hairline} />
+          <g stroke={FRAME_ACCENT} strokeWidth={hairline}>
+            <line x1={g.bxL} y1={g.byT} x2={g.bxL + g.brkL} y2={g.byT} />
+            <line x1={g.bxL} y1={g.byT} x2={g.bxL} y2={g.byT + g.brkL} />
+            <line x1={g.bxR} y1={g.byT} x2={g.bxR - g.brkL} y2={g.byT} />
+            <line x1={g.bxR} y1={g.byT} x2={g.bxR} y2={g.byT + g.brkL} />
+            <line x1={g.bxL} y1={g.byB} x2={g.bxL + g.brkL} y2={g.byB} />
+            <line x1={g.bxL} y1={g.byB} x2={g.bxL} y2={g.byB - g.brkL} />
+            <line x1={g.bxR} y1={g.byB} x2={g.bxR - g.brkL} y2={g.byB} />
+            <line x1={g.bxR} y1={g.byB} x2={g.bxR} y2={g.byB - g.brkL} />
+          </g>
+          <g stroke={FRAME_ACCENT} strokeWidth={hairline}>
+            <line x1={g.midx - g.tckL / 2} y1={g.outerT + g.tckI} x2={g.midx + g.tckL / 2} y2={g.outerT + g.tckI} />
+            <line x1={g.midx - g.tckL / 2} y1={g.outerB - g.tckI} x2={g.midx + g.tckL / 2} y2={g.outerB - g.tckI} />
+            <line x1={g.outerL + g.tckI}   y1={g.midy - g.tckL / 2} x2={g.outerL + g.tckI} y2={g.midy + g.tckL / 2} />
+            <line x1={g.outerR - g.tckI}   y1={g.midy - g.tckL / 2} x2={g.outerR - g.tckI} y2={g.midy + g.tckL / 2} />
+          </g>
+          <image href={`${CORNERS}/corner_ul.png`} x={g.cnTL.x} y={g.cnTL.y} width={CORNER_PNG_W} height={CORNER_PNG_H_TL} />
+          <image href={`${CORNERS}/corner_ur.png`} x={g.cnTR.x} y={g.cnTR.y} width={CORNER_PNG_W} height={CORNER_PNG_H_TR} />
+          <image href={`${CORNERS}/corner_bl.png`} x={g.cnBL.x} y={g.cnBL.y} width={CORNER_PNG_W} height={CORNER_PNG_H_BL} />
+          <image href={`${CORNERS}/corner_br.png`} x={g.cnBR.x} y={g.cnBR.y} width={CORNER_PNG_W} height={CORNER_PNG_H_BR} />
+          <image href={`${ICONS}/owl_studio_square.png`} x={g.badgeX} y={g.badgeY} width={BADGE_W} height={BADGE_H} />
+        </g>
+      </svg>
+      <span style={{
+        position: "absolute",
+        left: px(g.parent_x), top: py(g.parent_y),
+        width: px(g.parent_w), height: py(g.parent_h),
+        display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2,
+      }}>
+        {children}
+      </span>
+    </span>
+  );
+}
+
+// ---------------------------------------------------------------------
 // ModeBar — top dark-blue header with theme controls, mode toggles,
 // title, and SysInfo. Mode toggles drive the active mode state.
 // ---------------------------------------------------------------------
@@ -453,7 +545,7 @@ type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 
 function ModeBar({
   mode, setMode, installed,
-  themeMode, onToggleThemeMode, accentKey, onPickAccent, onOpenServer,
+  themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
   onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
   onFrameWatcherEnter, onFrameWatcherLeave,
 }: {
@@ -464,6 +556,9 @@ function ModeBar({
   onToggleThemeMode: () => void;
   accentKey: AccentSelection;
   onPickAccent: (k: AccentSelection) => void;
+  textColorKey: TextColorSelection;
+  textColor: string;
+  onPickTextColor: (color: TextColorSelection) => void;
   onOpenServer: () => void;
   /// The Watcher (P0-8): in overlay-frame mode the decorative owl window is
   /// click-through, so the centered OWLLM title (directly beneath the owl)
@@ -558,14 +653,14 @@ function ModeBar({
               role="dialog"
               aria-label="Appearance and language settings"
               style={{
-                position: "absolute", left: 0, top: 58, width: 270,
+                position: "absolute", left: 0, top: 58, width: 330,
                 padding: 12, borderRadius: 10,
                 background: "var(--bg-panel)", color: "var(--fg)",
                 border: "1px solid rgba(var(--accent-rgb),0.65)",
                 boxShadow: "0 12px 32px rgba(0,0,0,0.48)",
               }}
             >
-              <div data-ui="SettingsRow1" style={{ display: "flex", gap: 8 }}>
+              <div data-ui="SettingsRow1" style={{ display: "flex", justifyContent: "center", gap: 8 }}>
                 <button
                   data-ui="DarkModeBtn"
                   onClick={onToggleThemeMode}
@@ -609,22 +704,21 @@ function ModeBar({
                 </div>
 
                 <label
-                  data-ui="FullPalettePicker"
-                  title="Choose any accent color"
+                  data-ui="GuiColorPalette"
+                  title="Choose GUI color"
                   style={{
                     position: "relative", width: 70, height: 50, borderRadius: 6,
                     boxSizing: "border-box", overflow: "hidden", cursor: "pointer",
-                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
                     background: "conic-gradient(from 45deg, #ef4444, #fbbf24, #10b981, #3b82f6, #8b5cf6, #ef4444)",
-                    border: accentKey.startsWith("#") ? "2px solid #fff" : "1px solid var(--border-strong)",
-                    boxShadow: accentKey.startsWith("#") ? "0 0 0 1px var(--accent), 0 0 7px var(--accent)" : "none",
+                    border: "2px solid var(--accent)", boxShadow: "0 0 0 1px var(--border-strong), 0 0 7px rgba(var(--accent-rgb),0.45)",
                   }}
                 >
-                  <span style={{ fontSize: 21, color: "#fff", textShadow: "0 1px 3px #000" }}>🎨</span>
-                  <span style={{ fontSize: 10, fontWeight: 800, color: "#fff", textShadow: "0 1px 3px #000" }}>Palette</span>
+                  <span aria-hidden="true" style={{ width: 18, height: 18, borderRadius: 4, background: "var(--accent)", border: "2px solid #fff", boxShadow: "0 1px 4px #000" }} />
+                  <span style={{ fontSize: 9, fontWeight: 800, color: "#fff", textShadow: "0 1px 3px #000" }}>GUI color</span>
                   <input
                     type="color"
-                    aria-label="Full accent color palette"
+                    aria-label="GUI color palette"
                     value={accentKey.startsWith("#")
                       ? accentKey
                       : (ACCENTS.find(accent => accent.key === accentKey)?.color ?? ACCENTS[0].color)}
@@ -632,6 +726,29 @@ function ModeBar({
                     style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
                   />
                 </label>
+
+                <label
+                  data-ui="TextColorPalette"
+                  title="Choose text color"
+                  style={{
+                    position: "relative", width: 70, height: 50, borderRadius: 6,
+                    boxSizing: "border-box", overflow: "hidden", cursor: "pointer",
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 3,
+                    background: "conic-gradient(from 45deg, #ef4444, #fbbf24, #10b981, #3b82f6, #8b5cf6, #ef4444)",
+                    border: "2px solid var(--text-color-selected)", boxShadow: "0 0 0 1px var(--border-strong)",
+                  }}
+                >
+                  <span aria-hidden="true" style={{ width: 18, height: 18, borderRadius: 4, background: "var(--text-color-selected)", border: "2px solid #fff", boxShadow: "0 1px 4px #000" }} />
+                  <span style={{ fontSize: 9, fontWeight: 800, color: "#fff", textShadow: "0 1px 3px #000" }}>Text color</span>
+                  <input
+                    type="color"
+                    aria-label="Text color palette"
+                    value={textColorKey === "auto" ? textColor : textColorKey}
+                    onChange={(event) => onPickTextColor(event.target.value as `#${string}`)}
+                    style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
+                  />
+                </label>
+
               </div>
 
               <div data-ui="SettingsRow2" style={{
@@ -669,25 +786,21 @@ function ModeBar({
                   data-ui="KeepFrameVisible"
                   title="Prevent the decorative window frame from fading while you work"
                   style={{
-                    flex: 1, minWidth: 82, borderRadius: 6,
-                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5,
+                    flex: 1, minWidth: 110, borderRadius: 6,
+                    display: "flex", alignItems: "center", justifyContent: "center",
                     background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
                     color: "var(--fg)", fontSize: 9, fontWeight: 700, cursor: "pointer", textAlign: "center",
                   }}
                 >
-                  <span aria-hidden="true" style={{
-                    width: 30, height: 20, boxSizing: "border-box", border: "3px solid var(--accent)", borderRadius: 3,
-                    display: "block", boxShadow: "inset 0 0 0 1px rgba(var(--accent-rgb),0.35)",
-                  }} />
-                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                  <MiniFrameReplica width={104} active={keepFrameVisible}>
                     <input
                       type="checkbox"
                       checked={keepFrameVisible}
                       onChange={(event) => onKeepFrameVisible(event.target.checked)}
                       style={{ width: 12, height: 12, margin: 0, accentColor: "var(--accent)" }}
                     />
-                    Keep frame
-                  </span>
+                    <span style={{ lineHeight: 1.1 }}>Keep frame</span>
+                  </MiniFrameReplica>
                 </label>
               </div>
 
@@ -1128,8 +1241,7 @@ export default function AppShell() {
   };
 
   useEffect(() => {
-    try { localStorage.setItem(KEEP_FRAME_VISIBLE_KEY, keepFrameVisible ? "1" : "0"); }
-    catch { /* localStorage blocked */ }
+    saveKeepFrameVisible(keepFrameVisible);
     if (keepFrameVisible) revealFrame();
     else hideFrameAfter(FRAME_IDLE_HIDE_MS);
     return clearFrameHideTimer;
@@ -1402,6 +1514,9 @@ export default function AppShell() {
             onToggleThemeMode={theme.toggleMode}
             accentKey={theme.accentKey}
             onPickAccent={theme.setAccentKey}
+            textColorKey={theme.textColorKey}
+            textColor={theme.textColor}
+            onPickTextColor={theme.setTextColor}
             onOpenServer={() => setServerModalOpen(true)}
             onWatcher={openWatcher}
             watcherHint={watcherHint && overlayFrame}

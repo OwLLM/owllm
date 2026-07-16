@@ -178,7 +178,10 @@ const PSYCHEDELIC_AURA_DOT = `conic-gradient(from 0deg, ${PSYCHEDELIC_AURA_STOPS
 // shadow. Wrap the colour in a gradient, matching AgentChatTile's valid shape.
 const PSYCHEDELIC_AURA_FILL = "linear-gradient(var(--bg-input), var(--bg-input)) padding-box";
 const PSYCHEDELIC_AURA_BACKGROUND = `${PSYCHEDELIC_AURA_FILL}, ${PSYCHEDELIC_AURA_RING}`;
-const PSYCHEDELIC_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite, owllm-code-aura-breathe 1.8s ease-in-out infinite";
+// Colour-cycling spin only — the halo itself is a constant soft box-shadow
+// (no breathe pulse), so the aura reads as a subtle shifting glow.
+const PSYCHEDELIC_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
+const PSYCHEDELIC_AURA_HALO = "0 0 12px rgba(176,124,255,.22), 0 0 20px rgba(127,212,255,.14)";
 
 // ---- Cross-page activity signal (tab-strip glow + "done" badge) -------------
 // Lets the tab strip show WHERE work is happening even when you've switched to
@@ -2481,10 +2484,6 @@ function CodeWorkspace({ pageId, onTitle }: {
       <style>{`
         @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
         @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
-        @keyframes owllm-code-aura-breathe {
-          0%, 100% { box-shadow: 0 0 0 1px rgba(60,242,107,.18), 0 0 22px rgba(176,124,255,.40), 0 0 34px rgba(127,212,255,.26), 0 8px 24px rgba(0,0,0,.42); }
-          50% { box-shadow: 0 0 0 1px rgba(255,92,138,.34), 0 0 38px rgba(176,124,255,.70), 0 0 58px rgba(127,212,255,.48), 0 8px 30px rgba(0,0,0,.52); }
-        }
       `}</style>
       {/* Header: workspace · model · status */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -2735,7 +2734,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           // the chat container. It exists only while this coder is running.
           background: primaryAuraActive ? PSYCHEDELIC_AURA_BACKGROUND : "var(--bg-input)",
           border: primaryAuraActive ? "2px solid transparent" : "1px solid var(--border)", borderRadius: 8,
-          boxShadow: primaryAuraActive ? "0 0 22px rgba(176,124,255,.40), 0 0 34px rgba(127,212,255,.26)" : undefined,
+          boxShadow: primaryAuraActive ? PSYCHEDELIC_AURA_HALO : undefined,
           animation: primaryAuraActive ? PSYCHEDELIC_AURA_ANIMATION : undefined,
         }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
@@ -2819,7 +2818,7 @@ function CodeWorkspace({ pageId, onTitle }: {
             // area stays solid. Spins while the second agent is running.
             background: secondaryBusy ? PSYCHEDELIC_AURA_BACKGROUND : "var(--bg-input)",
             border: secondaryBusy ? "2px solid transparent" : "1px solid var(--border)", borderRadius: 8,
-            boxShadow: secondaryBusy ? "0 0 22px rgba(176,124,255,.40), 0 0 34px rgba(127,212,255,.26)" : undefined,
+            boxShadow: secondaryBusy ? PSYCHEDELIC_AURA_HALO : undefined,
             animation: secondaryBusy ? PSYCHEDELIC_AURA_ANIMATION : undefined,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>

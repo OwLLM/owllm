@@ -64,18 +64,73 @@ type Props = {
 
 type LogLine = { kind: "text" | "tool" | "system"; text: string };
 type ProposedAgent = { name: string; base: string; why?: string };
+type ConversationTurn = { role: "user" | "assistant"; content: string };
 
 // Where a brainstorm's co-founder conversation is checkpointed on disk so a
 // session that stops for any reason (crash, close, refresh) can be resumed
 // instead of lost. Lives next to BRIEF.md, under the project's .owllm/ dir.
 const BRAINSTORM_STATE_PATH = ".owllm/brainstorm.json";
 type BrainstormState = {
-  v: 1;
+  v: 2;
   idea: string;
-  convHistory: { role: "user" | "assistant"; content: string }[];
+  selectedModelId: string;
+  convHistory: ConversationTurn[];
+  chatInput: string;
+  lines: LogLine[];
   done: boolean;
+  proposedTeam: ProposedAgent[] | null;
+  teamApplied: boolean;
+  briefText: string;
+  boardView: boolean;
+  error: string | null;
+  activeOperation: "brainstorm" | "team" | "apply" | null;
+  updatedAt: number;
 };
 type BriefFeature = { feature: string; priority: "v1" | "v2" | "opportunity" | "drop" };
+
+function brainstormStorageKey(projectId?: string, projectCwd?: string): string {
+  return `owllm:brainstorm-state:${projectId || projectCwd || "unsaved-project"}`;
+}
+
+function parseSavedBrainstorm(raw: string | null): BrainstormState | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<Omit<BrainstormState, "v">> & { v?: number };
+    if (!value || (value.v !== 1 && value.v !== 2)) return null;
+    const convHistory = Array.isArray(value.convHistory)
+      ? value.convHistory.filter((turn): turn is ConversationTurn =>
+          !!turn && (turn.role === "user" || turn.role === "assistant") && typeof turn.content === "string")
+      : [];
+    const lines = Array.isArray(value.lines)
+      ? value.lines.filter((line): line is LogLine =>
+          !!line && (line.kind === "text" || line.kind === "tool" || line.kind === "system") && typeof line.text === "string")
+      : [];
+    const proposedTeam = Array.isArray(value.proposedTeam)
+      ? value.proposedTeam.filter((agent): agent is ProposedAgent =>
+          !!agent && typeof agent.name === "string" && typeof agent.base === "string")
+      : null;
+    return {
+      v: 2,
+      idea: typeof value.idea === "string" ? value.idea : "",
+      selectedModelId: typeof value.selectedModelId === "string" ? value.selectedModelId : "",
+      convHistory,
+      chatInput: typeof value.chatInput === "string" ? value.chatInput : "",
+      lines,
+      done: value.done === true,
+      proposedTeam,
+      teamApplied: value.teamApplied === true,
+      briefText: typeof value.briefText === "string" ? value.briefText : "",
+      boardView: value.boardView === true,
+      error: typeof value.error === "string" ? value.error : null,
+      activeOperation: value.activeOperation === "brainstorm" || value.activeOperation === "team" || value.activeOperation === "apply"
+        ? value.activeOperation
+        : null,
+      updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : 0,
+    };
+  } catch {
+    return null;
+  }
+}
 
 // Parse the "## Feature Priority" table out of BRIEF.md into structured rows so
 // the board view can show features as columns. Forgiving: returns [] when the
@@ -154,17 +209,71 @@ export default function BrainstormPanel(props: Props) {
   const [applying, setApplying] = useState(false);
   const [teamApplied, setTeamApplied] = useState(false);
   // Conversational co-founder (step 3): a back-and-forth before/around the brief.
-  const [convHistory, setConvHistory] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
+  const [convHistory, setConvHistory] = useState<ConversationTurn[]>([]);
   const [chatInput, setChatInput] = useState("");
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   // Living visual brief (step 4): the current BRIEF.md text + a board/log toggle.
   const [briefText, setBriefText] = useState("");
   const [boardView, setBoardView] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const [hydrated, setHydrated] = useState(false);
+  const hydratedRef = useRef(false);
+  const loadedTargetRef = useRef("");
+  const persistTimerRef = useRef<number | null>(null);
+  const writeChainRef = useRef<Promise<void>>(Promise.resolve());
+  const checkpointRef = useRef<{
+    targetKey: string;
+    storageKey: string;
+    cwd: string;
+    state: BrainstormState;
+  } | null>(null);
+  const targetKey = `${projectId ?? ""}\n${projectCwd}`;
+  const storageKey = brainstormStorageKey(projectId, projectCwd);
   // Sticky auto-scroll: land at the bottom when the panel (re)opens (openKey =
   // open) and follow new log lines only while the user is near the bottom
   // (contentKey = line count) — never yank a user who scrolled up to read.
   const logSticky = useStickyScroll(lines.length, open);
+
+  const liveState: BrainstormState = {
+    v: 2,
+    idea,
+    selectedModelId,
+    convHistory,
+    chatInput,
+    lines,
+    done,
+    proposedTeam,
+    teamApplied,
+    briefText,
+    boardView,
+    error,
+    activeOperation: running ? "brainstorm" : proposing ? "team" : applying ? "apply" : null,
+    updatedAt: Date.now(),
+  };
+  if (hydratedRef.current && loadedTargetRef.current === targetKey) {
+    checkpointRef.current = { targetKey, storageKey, cwd: projectCwd, state: liveState };
+  }
+
+  // localStorage is synchronous, so even a fast page switch preserves the
+  // latest draft. Project-disk writes are serialized to prevent an older,
+  // slower write from overwriting a newer checkpoint.
+  const queueCheckpoint = (checkpoint = checkpointRef.current): Promise<void> => {
+    if (!checkpoint) return Promise.resolve();
+    try { localStorage.setItem(checkpoint.storageKey, JSON.stringify(checkpoint.state)); } catch { /* best effort */ }
+    if (!checkpoint.cwd) return Promise.resolve();
+    writeChainRef.current = writeChainRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        try {
+          await invoke("tool_write_file", {
+            path: BRAINSTORM_STATE_PATH,
+            content: JSON.stringify(checkpoint.state, null, 2),
+            cwd: checkpoint.cwd,
+          });
+        } catch { /* best-effort checkpoint */ }
+      });
+    return writeChainRef.current;
+  };
 
   // Match the other chat composers: start compact, grow with multiline input,
   // shrink again after Send, and cap the height before enabling inner scroll.
@@ -175,11 +284,22 @@ export default function BrainstormPanel(props: Props) {
     ta.style.height = `${Math.max(38, Math.min(ta.scrollHeight, 180))}px`;
   }, [chatInput]);
 
-  // Reset when reopened, then restore any checkpointed brainstorm from disk so
-  // a session that stopped mid-way (crash, close, refresh) resumes where it left
-  // off instead of losing the whole co-founder conversation.
+  // Reset when reopened, then restore the newest local/disk checkpoint. Version
+  // 1 checkpoints are accepted, while version 2 restores every editable and
+  // generated field even when no conversation turn has been completed yet.
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      if (hydratedRef.current) void queueCheckpoint();
+      hydratedRef.current = false;
+      loadedTargetRef.current = "";
+      setHydrated(false);
+      return;
+    }
+    if (hydratedRef.current && loadedTargetRef.current !== targetKey) void queueCheckpoint();
+    hydratedRef.current = false;
+    loadedTargetRef.current = "";
+    setHydrated(false);
+    if (persistTimerRef.current !== null) window.clearTimeout(persistTimerRef.current);
     setRunning(false);
     setDone(false);
     setError(null);
@@ -197,38 +317,97 @@ export default function BrainstormPanel(props: Props) {
     try { if (modelKey) savedModel = localStorage.getItem(modelKey) ?? ""; } catch { /* ignore */ }
     setSelectedModelId(savedModel || modelId);
     setIdea(initialIdea ?? "");
-    if (!projectCwd) return;
     let cancelled = false;
     (async () => {
-      let st: BrainstormState | null = null;
-      try {
-        const raw = await invoke<string>("tool_read_file", { path: BRAINSTORM_STATE_PATH, cwd: projectCwd });
-        st = JSON.parse(raw) as BrainstormState;
-      } catch { /* no checkpoint yet — fresh start */ }
-      if (cancelled || !st || !Array.isArray(st.convHistory) || st.convHistory.length === 0) return;
-      setIdea(typeof st.idea === "string" ? st.idea : "");
-      setConvHistory(st.convHistory);
-      // Rebuild the visible log from the saved turns so the user sees the prior
-      // exchange, matching how runTurn renders it live.
-      const restored: LogLine[] = [{
-        kind: "system",
-        text: "↩ Resumed your saved brainstorm — pick up below, or 🆕 start fresh to begin a new idea.",
-      }];
-      for (const m of st.convHistory) {
-        if (m.role === "user") restored.push({ kind: "system", text: `\n🧑 ${m.content}\n` });
-        else restored.push({ kind: "text", text: m.content });
+      let localState: BrainstormState | null = null;
+      try { localState = parseSavedBrainstorm(localStorage.getItem(storageKey)); } catch { /* ignore */ }
+      let diskState: BrainstormState | null = null;
+      if (projectCwd) {
+        try {
+          const raw = await invoke<string>("tool_read_file", { path: BRAINSTORM_STATE_PATH, cwd: projectCwd });
+          diskState = parseSavedBrainstorm(raw);
+        } catch { /* no checkpoint yet — fresh start */ }
       }
-      setLines(restored);
-      if (st.done) {
-        setDone(true);
+      if (cancelled) return;
+      let st = localState;
+      if (diskState && (!st || diskState.updatedAt > st.updatedAt)) st = diskState;
+
+      const restoredHistory = st?.convHistory ?? [];
+      let restoredLines = st?.lines ?? [];
+      if (restoredLines.length === 0 && restoredHistory.length > 0) {
+        restoredLines = [{
+          kind: "system",
+          text: "↩ Resumed your saved brainstorm — pick up below, or 🆕 start fresh to begin a new idea.",
+        }];
+        for (const turn of restoredHistory) {
+          if (turn.role === "user") restoredLines.push({ kind: "system", text: `\n🧑 ${turn.content}\n` });
+          else restoredLines.push({ kind: "text", text: turn.content });
+        }
+      }
+      if (st?.activeOperation) {
+        restoredLines = [...restoredLines, {
+          kind: "system",
+          text: "\n↩ The previous operation stopped when this page closed. Its input and partial output were saved; you can continue from here.",
+        }];
+      }
+
+      let restoredBrief = st?.briefText ?? "";
+      if (projectCwd && st?.done) {
         try {
           const brief = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd: projectCwd });
-          if (!cancelled && brief.trim()) setBriefText(brief);
-        } catch { /* brief gone — chat still resumable */ }
+          if (brief.trim()) restoredBrief = brief;
+        } catch { /* saved brief text remains available */ }
       }
+      if (cancelled) return;
+      setIdea(st?.idea ?? initialIdea ?? "");
+      setSelectedModelId(st?.selectedModelId || savedModel || modelId);
+      setConvHistory(restoredHistory);
+      setChatInput(st?.chatInput ?? "");
+      setLines(restoredLines);
+      setDone(st?.done ?? false);
+      setProposedTeam(st?.proposedTeam ?? null);
+      setTeamApplied(st?.teamApplied ?? false);
+      setBriefText(restoredBrief);
+      setBoardView(st?.boardView ?? false);
+      setError(st?.error ?? null);
+      loadedTargetRef.current = targetKey;
+      hydratedRef.current = true;
+      setHydrated(true);
     })();
     return () => { cancelled = true; };
-  }, [open, projectCwd, projectId, initialIdea, modelId]);
+  }, [open, projectCwd, projectId, initialIdea, modelId, storageKey, targetKey]);
+
+  // Debounce normal edits, while the unmount cleanup and close buttons flush
+  // synchronously to localStorage before navigation can destroy the component.
+  useEffect(() => {
+    if (!open || !hydrated || loadedTargetRef.current !== targetKey) return;
+    if (persistTimerRef.current !== null) window.clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = window.setTimeout(() => {
+      persistTimerRef.current = null;
+      void queueCheckpoint();
+    }, 300);
+    return () => {
+      if (persistTimerRef.current !== null) {
+        window.clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+    };
+  }, [open, hydrated, targetKey, idea, selectedModelId, convHistory, chatInput, lines, done,
+    proposedTeam, teamApplied, briefText, boardView, error, running, proposing, applying]);
+
+  useEffect(() => () => {
+    if (persistTimerRef.current !== null) window.clearTimeout(persistTimerRef.current);
+    if (hydratedRef.current) void queueCheckpoint();
+  }, []);
+
+  const closeAndSave = () => {
+    if (persistTimerRef.current !== null) {
+      window.clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+    void queueCheckpoint();
+    onClose();
+  };
 
   if (!open) return null;
 
@@ -251,19 +430,6 @@ export default function BrainstormPanel(props: Props) {
       return out;
     });
 
-  // Checkpoint the co-founder conversation to disk so it survives a stop of any
-  // kind. Best-effort: a write failure must never block or break the chat.
-  const persistState = async (next: Omit<BrainstormState, "v">) => {
-    if (!projectCwd) return;
-    try {
-      await invoke("tool_write_file", {
-        path: BRAINSTORM_STATE_PATH,
-        content: JSON.stringify({ v: 1, ...next } satisfies BrainstormState, null, 2),
-        cwd: projectCwd,
-      });
-    } catch { /* best-effort checkpoint */ }
-  };
-
   // Clear the current conversation AND its on-disk checkpoint so the next open
   // starts blank instead of resuming. (BRIEF.md is left alone — it's the brief,
   // not the transcript.)
@@ -275,7 +441,28 @@ export default function BrainstormPanel(props: Props) {
     setTeamApplied(false);
     setError(null);
     setIdea("");
-    await persistState({ idea: "", convHistory: [], done: false });
+    setChatInput("");
+    setBriefText("");
+    setBoardView(false);
+    const fresh: BrainstormState = {
+      v: 2,
+      idea: "",
+      selectedModelId,
+      convHistory: [],
+      chatInput: "",
+      lines: [],
+      done: false,
+      proposedTeam: null,
+      teamApplied: false,
+      briefText: "",
+      boardView: false,
+      error: null,
+      activeOperation: null,
+      updatedAt: Date.now(),
+    };
+    const checkpoint = { targetKey, storageKey, cwd: projectCwd, state: fresh };
+    checkpointRef.current = checkpoint;
+    await queueCheckpoint(checkpoint);
   };
 
   // Conversational co-founder (step 3): wrap the brainstormer role so it FIRST
@@ -307,6 +494,13 @@ export default function BrainstormPanel(props: Props) {
     setError(null);
     append("system", `\n🧑 ${userText}\n`);
     const priorHistory = convHistory;
+    const historyWithUser: ConversationTurn[] = [
+      ...priorHistory,
+      { role: "user", content: userText },
+    ];
+    // Save the user's turn before starting the provider. If the page changes or
+    // the provider fails, the prompt and any subsequently streamed text remain.
+    setConvHistory(historyWithUser);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const onThought = (channel: string, role: string, _delta: string) => {
@@ -326,7 +520,7 @@ export default function BrainstormPanel(props: Props) {
         // permission mode and silently blocks writing BRIEF.md.
         brainstormerRole?.toolAllowlist,
       );
-      const newHistory = [...priorHistory, { role: "user" as const, content: userText }, { role: "assistant" as const, content: reply }];
+      const newHistory: ConversationTurn[] = [...historyWithUser, { role: "assistant", content: reply }];
       setConvHistory(newHistory);
       // Did the brief land (or get refined) this turn?
       let briefOnDisk = false;
@@ -335,15 +529,13 @@ export default function BrainstormPanel(props: Props) {
         briefOnDisk = text.trim().length > 0;
         if (briefOnDisk) setBriefText(text);   // keep the live board in sync each turn
       } catch { /* not yet */ }
-      const nowDone = done || briefOnDisk;
       if (briefOnDisk && !done) {
         setDone(true);
         append("system", `\n✓ BRIEF.md saved. Keep chatting to refine it (the board updates live), or 🤝 Assemble a team below.`);
         onBriefSaved?.();
       }
-      // Checkpoint the conversation so it's never lost if the next turn stops.
-      await persistState({ idea, convHistory: newHistory, done: nowDone });
     } catch (e: any) {
+      if (reply) setConvHistory([...historyWithUser, { role: "assistant", content: reply }]);
       if (e?.name === "AbortError") append("system", "\n⏹ Cancelled.");
       else setError(String(e?.message ?? e));
     } finally {
@@ -472,7 +664,7 @@ export default function BrainstormPanel(props: Props) {
         display: "flex", alignItems: "center", justifyContent: "center",
         padding: 24,
       }}
-      onClick={(e) => { if (e.target === e.currentTarget && !running) onClose(); }}
+      onClick={(e) => { if (e.target === e.currentTarget && !running) closeAndSave(); }}
     >
       <div
         style={{
@@ -502,7 +694,7 @@ export default function BrainstormPanel(props: Props) {
             </div>
           </div>
           <button
-            onClick={onClose}
+            onClick={closeAndSave}
             disabled={running}
             style={{
               padding: "6px 12px", fontSize: 12,
@@ -633,7 +825,7 @@ export default function BrainstormPanel(props: Props) {
                   >{proposing ? "🤝 Assembling team…" : "🤝 Assemble team from brief"}</button>
                 )}
                 <button
-                  onClick={onClose}
+                  onClick={closeAndSave}
                   style={{
                     padding: "8px 16px", fontSize: 13, fontWeight: 700,
                     background: "rgba(80, 200, 120, 0.18)", color: "#a0f0c0",
@@ -644,7 +836,7 @@ export default function BrainstormPanel(props: Props) {
             )}
             {teamApplied && (
               <button
-                onClick={onClose}
+                onClick={closeAndSave}
                 style={{
                   padding: "8px 16px", fontSize: 13, fontWeight: 700,
                   background: "rgba(80, 200, 120, 0.18)", color: "#a0f0c0",

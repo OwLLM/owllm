@@ -25,6 +25,7 @@ import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
+import { translateUiText } from "../../localization";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
 import {
@@ -710,6 +711,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // start, freeze runEndedAt on stop (only if a run was actually live, so a
   // double stop() doesn't move the frozen time).
   const setBusy = (v: boolean) => {
+    // Keep the imperative send gate in sync immediately; waiting for the
+    // chatRuntime update to trigger a React render can strand auto-follow-ups.
+    busySendRef.current = v;
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
       if (v) return { ...cur, busy: true, runStartedAt: Date.now(), runEndedAt: undefined };
@@ -870,7 +874,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (busy) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const dir = await open({ directory: true, multiple: false, title: "Pick a project folder" });
+      const dir = await open({ directory: true, multiple: false, title: translateUiText("Pick a project folder") });
       if (typeof dir === "string" && dir) openWorkspace(dir);
     } catch (e) {
       setStatus(`Folder picker failed: ${e}`);
@@ -885,8 +889,8 @@ function CodeWorkspace({ pageId, onTitle }: {
       try {
         const { confirm } = await import("@tauri-apps/plugin-dialog");
         const ok = await confirm(
-          `Close this project? Unmerged changes in its worktree (${stx.branch}) will be discarded. Merge to main first to keep them.`,
-          { title: "Close project", kind: "warning" },
+          translateUiText(`Close this project? Unmerged changes in its worktree (${stx.branch}) will be discarded. Merge to main first to keep them.`),
+          { title: translateUiText("Close project"), kind: "warning" },
         );
         if (!ok) return;
       } catch { /* dialog unavailable — proceed */ }
@@ -1541,7 +1545,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     const text = (textOverride ?? draft).trim();
     const images = fromComposer ? imageAttachments(codeImages) : [];
     if (!text && images.length === 0) return;
-    if (busy) {
+    if (busySendRef.current) {
       // Coder is mid-turn → the message becomes a ⚡ steer (VS Code-style),
       // injected between tool calls on local models, at turn end otherwise —
       // never silently dropped. (Images can't ride a steer — text only.)
@@ -2960,8 +2964,8 @@ export default function CodePage() {
       try {
         const { confirm } = await import("@tauri-apps/plugin-dialog");
         const ok = await confirm(
-          `Close this page? Its private worktree (${st.branch}) and any unmerged changes are removed. Merge first to keep them.`,
-          { title: "Close page", kind: "warning" },
+          translateUiText(`Close this page? Its private worktree (${st.branch}) and any unmerged changes are removed. Merge first to keep them.`),
+          { title: translateUiText("Close page"), kind: "warning" },
         );
         if (!ok) return;
       } catch { /* dialog unavailable — proceed */ }

@@ -13,8 +13,9 @@
 // self-contained installable feature. Adding/removing a page does
 // not touch this file. Adding a brand-new mode = one entry in
 // modules.ts plus a directory under pages/.
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ALL_MODULES,
@@ -25,7 +26,7 @@ import {
   ModeId,
   PageDef,
 } from "./core/modules";
-import { ACCENTS, AccentKey, Mode, useTheme } from "./theme";
+import { ACCENTS, AccentSelection, Mode, useTheme } from "./theme";
 import { headerPill } from "./theme/styles";
 import TelegramBridgeRunner from "./bridges/TelegramBridgeRunner";
 import DiscordBridgeRunner from "./bridges/DiscordBridgeRunner";
@@ -42,6 +43,7 @@ import WatcherDrawer from "./support/WatcherDrawer";
 import GenSpeedBadge from "./components/GenSpeedBadge";
 import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
+import { APP_LANGUAGES, useLocalization } from "./localization";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -59,9 +61,18 @@ function isTauri(): boolean {
   return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__ || w.__TAURI_METADATA__);
 }
 
+const KEEP_FRAME_VISIBLE_KEY = "owllm:window-frame:keep-visible";
+const FRAME_VISIBILITY_STATE_KEY = "owllm:window-frame:visibility";
+const FRAME_IDLE_HIDE_MS = 1800;
+const FRAME_LEAVE_HIDE_MS = 700;
+export function readKeepFrameVisible(): boolean {
+  try { return localStorage.getItem(KEEP_FRAME_VISIBLE_KEY) === "1"; }
+  catch { return false; }
+}
+
 function startDrag(e: React.MouseEvent) {
   if (e.button !== 0) return;
-  if ((e.target as HTMLElement).closest("button, input, select, textarea, a")) return;
+  if ((e.target as HTMLElement).closest("button, input, select, textarea, a, [data-no-drag]")) return;
   if (!isTauri()) return; // dev / TwinForge: no native window to drag
   e.preventDefault();
   getCurrentWindow().startDragging().catch(() => { /* not in Tauri ctx */ });
@@ -296,10 +307,11 @@ const FRAME_BG     = "var(--bg-header)";
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
 
-function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
+function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }: {
   children: React.ReactNode; outerW: number; outerH: number;
   /// Periodic "The Watcher" satellite label around the owl (until first open).
   showWatcherHint?: boolean;
+  frameVisible: boolean;
 }) {
   // Invert the legacy formula: with `outerW = parent_w + EXTRA_RIGHT
   // + 2*so + 2*CORNER_OUTSET`, solve for parent_w given the live
@@ -356,11 +368,16 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
-      <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
-      <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />
-      <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:FRAME_BG }} />
-      <div style={{ position:"absolute", left:rightBar.x, top:rightBar.y, width:rightBar.w, height:rightBar.h, background:FRAME_BG }} />
-      <svg width={outerW} height={outerH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
+      <div data-ui="DecorativeWindowFrame" style={{
+        position: "absolute", inset: 0, pointerEvents: "none",
+        opacity: frameVisible ? 1 : 0,
+        transition: `opacity ${frameVisible ? 220 : 360}ms ease`,
+      }}>
+        <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
+        <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />
+        <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:FRAME_BG }} />
+        <div style={{ position:"absolute", left:rightBar.x, top:rightBar.y, width:rightBar.w, height:rightBar.h, background:FRAME_BG }} />
+        <svg width={outerW} height={outerH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
         <rect x={outerL + 1} y={outerT + 1} width={outerW2 - 2} height={outerH2 - 2} rx={14} ry={14} fill="none" stroke={FRAME_COLOR} strokeWidth={1} />
         <rect x={innerL} y={innerT} width={innerW} height={innerH} rx={10} ry={10} fill="none" stroke={FRAME_ACCENT} strokeWidth={1} />
         <g stroke={FRAME_ACCENT} strokeWidth={1}>
@@ -379,24 +396,24 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
           <line x1={outerL + tckI}   y1={midy - tckL / 2} x2={outerL + tckI} y2={midy + tckL / 2} />
           <line x1={outerR - tckI}   y1={midy - tckL / 2} x2={outerR - tckI} y2={midy + tckL / 2} />
         </g>
-      </svg>
-      <img src={`${CORNERS}/corner_br.png`} style={{ position:"absolute", left:cnBR.x, top:cnBR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BR, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TL, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TR, pointerEvents:"none" }} />
-      <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BL, pointerEvents:"none" }} />
+        </svg>
+        <img src={`${CORNERS}/corner_br.png`} style={{ position:"absolute", left:cnBR.x, top:cnBR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BR, pointerEvents:"none" }} />
+        <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TL, pointerEvents:"none" }} />
+        <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TR, pointerEvents:"none" }} />
+        <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BL, pointerEvents:"none" }} />
       {/* The Watcher (P0-8): the owl art is DECORATIVE here, exactly like the
           overlay-window owl on Windows — its full 300×195 rect used to be
           clickable, which swallowed clicks over the header center ("the
           watcher clickable area is too large"). The summon point is the
           compact ModeBar hotspot beneath the owl's body in BOTH modes. */}
-      <img
-        src={`${ICONS}/owl_studio_square.png`}
-        style={{
-          position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H,
-          pointerEvents: "none",
-        }}
-      />
-      {showWatcherHint && (
+        <img
+          src={`${ICONS}/owl_studio_square.png`}
+          style={{
+            position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H,
+            pointerEvents: "none",
+          }}
+        />
+        {showWatcherHint && (
         <>
           <style>{`
             @keyframes owllm-watcher-orbit {
@@ -422,7 +439,8 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
             The Watcher
           </div>
         </>
-      )}
+        )}
+      </div>
     </div>
   );
 }
@@ -436,22 +454,46 @@ type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, onOpenServer,
-  onWatcher, watcherHint,
+  onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
+  onFrameWatcherEnter, onFrameWatcherLeave,
 }: {
   mode: ActiveMode;
   setMode: (m: ActiveMode) => void;
   installed: ModeId[];
   themeMode: Mode;
   onToggleThemeMode: () => void;
-  accentKey: AccentKey;
-  onPickAccent: (k: AccentKey) => void;
+  accentKey: AccentSelection;
+  onPickAccent: (k: AccentSelection) => void;
   onOpenServer: () => void;
   /// The Watcher (P0-8): in overlay-frame mode the decorative owl window is
   /// click-through, so the centered OWLLM title (directly beneath the owl)
   /// doubles as the summon point.
   onWatcher?: () => void;
   watcherHint?: boolean;
+  keepFrameVisible: boolean;
+  onKeepFrameVisible: (checked: boolean) => void;
+  onFrameWatcherEnter: () => void;
+  onFrameWatcherLeave: () => void;
 }) {
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const { language, setLanguage } = useLocalization();
+  const settingsRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!settingsOpen) return;
+    const onPointerDown = (event: PointerEvent) => {
+      if (!settingsRef.current?.contains(event.target as Node)) setSettingsOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setSettingsOpen(false);
+    };
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [settingsOpen]);
   // The header is always the dark blue band so the cyan frame +
   // OWLLM title read consistently across themes. Buttons therefore
   // stay light-on-dark regardless of mode — we don't drive their
@@ -482,7 +524,7 @@ function ModeBar({
 
   return (
     <div data-ui="AppHeader" onMouseDown={startDrag} style={{
-      position: "relative",
+      position: "relative", zIndex: 50,
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
@@ -493,58 +535,167 @@ function ModeBar({
       cursor: "default",
     }}>
       <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-        {/* Dark/Light toggle. Persists via theme.ts. */}
-        <button
-          data-ui="DarkModeBtn"
-          onClick={onToggleThemeMode}
-          title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
-          style={{
-            width: 70, height: 50, borderRadius: 6,
-            // Theme-aware (was a fixed dark gradient → looked like a dark blob
-            // with dark text on the LIGHT-mode header). --header-pill-base is
-            // dark in dark mode, light-grey in light mode, exactly like the nav
-            // pills — so this button now matches the header band in both.
-            background: "linear-gradient(180deg, color-mix(in srgb, var(--header-pill-base) 82%, var(--accent)), var(--header-pill-base))",
-            border: "1px solid var(--border-strong)",
-            display: "flex", flexDirection: "column",
-            alignItems: "center", justifyContent: "center", lineHeight: 1.0,
-            cursor: "pointer", padding: 0,
-          }}
-        >
-          <div style={{ fontSize: 29, color: "var(--bg-header-fg)" }}>{themeMode === "dark" ? "🌙" : "☀"}</div>
-          <div style={{ fontSize: 15, fontWeight: 700, color: "var(--bg-header-fg)" }}>
-            {themeMode === "dark" ? "Dark" : "Light"}
-          </div>
-        </button>
-        {/* Six accent-colour squares. Active square gets a white ring. */}
-        <div data-ui="ColorSelector" style={{
-          width: 70, height: 50, padding: 4,
-          display: "grid", gridTemplateColumns: "repeat(3, 18px)", gridTemplateRows: "repeat(2, 18px)",
-          gap: 3,
-          // Theme-aware to match the toggle button (was fixed dark).
-          background: "color-mix(in srgb, var(--header-pill-base) 60%, transparent)",
-          borderRadius: 6,
-        }}>
-          {ACCENTS.map(a => {
-            const selected = a.key === accentKey;
-            return (
-              <button
-                key={a.key}
-                onClick={() => onPickAccent(a.key)}
-                title={a.label}
-                style={{
-                  width: 18, height: 18, borderRadius: 3,
-                  background: a.color,
-                  border: selected ? "2px solid #fff" : "1px solid rgba(255,255,255,0.15)",
-                  boxShadow: selected ? `0 0 0 1px ${a.color}, 0 0 6px ${a.color}` : "none",
-                  padding: 0,
-                  cursor: "pointer",
-                  transition: "transform 0.08s",
-                  transform: selected ? "scale(1.08)" : "scale(1)",
-                }}
-              />
-            );
-          })}
+        <div ref={settingsRef} data-no-drag style={{ position: "relative" }}>
+          <button
+            data-ui="HeaderSettingsBtn"
+            aria-expanded={settingsOpen}
+            aria-haspopup="dialog"
+            onClick={() => setSettingsOpen(open => !open)}
+            title="Appearance and language settings"
+            style={{
+              width: 50, height: 50, borderRadius: 7, padding: 0,
+              display: "grid", placeItems: "center",
+              background: "linear-gradient(180deg, color-mix(in srgb, var(--header-pill-base) 82%, var(--accent)), var(--header-pill-base))",
+              border: settingsOpen ? "1px solid var(--accent)" : "1px solid var(--border-strong)",
+              color: "var(--bg-header-fg)", fontSize: 25, cursor: "pointer",
+              boxShadow: settingsOpen ? "0 0 0 2px rgba(var(--accent-rgb),0.2)" : "none",
+            }}
+          >⚙</button>
+
+          {settingsOpen && (
+            <div
+              data-ui="HeaderSettingsPopup"
+              role="dialog"
+              aria-label="Appearance and language settings"
+              style={{
+                position: "absolute", left: 0, top: 58, width: 270,
+                padding: 12, borderRadius: 10,
+                background: "var(--bg-panel)", color: "var(--fg)",
+                border: "1px solid rgba(var(--accent-rgb),0.65)",
+                boxShadow: "0 12px 32px rgba(0,0,0,0.48)",
+              }}
+            >
+              <div data-ui="SettingsRow1" style={{ display: "flex", gap: 8 }}>
+                <button
+                  data-ui="DarkModeBtn"
+                  onClick={onToggleThemeMode}
+                  title={themeMode === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+                  style={{
+                    width: 70, height: 50, borderRadius: 6, padding: 0,
+                    background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                    color: "var(--fg)", cursor: "pointer", lineHeight: 1,
+                  }}
+                >
+                  <span style={{ fontSize: 24 }}>{themeMode === "dark" ? "🌙" : "☀"}</span>
+                  <span style={{ fontSize: 11, fontWeight: 700 }}>{themeMode === "dark" ? "Dark" : "Light"}</span>
+                </button>
+
+                <div data-ui="ColorSelector" style={{
+                  width: 70, height: 50, padding: 4, boxSizing: "border-box",
+                  display: "grid", gridTemplateColumns: "repeat(3, 18px)", gridTemplateRows: "repeat(2, 18px)",
+                  placeContent: "center", gap: 3, background: "var(--bg-elevated)",
+                  border: "1px solid var(--border-strong)", borderRadius: 6,
+                }}>
+                  {ACCENTS.map(accent => {
+                    const selected = accent.key === accentKey;
+                    return (
+                      <button
+                        key={accent.key}
+                        aria-label={accent.label}
+                        aria-pressed={selected}
+                        onClick={() => onPickAccent(accent.key)}
+                        title={accent.label}
+                        style={{
+                          width: 18, height: 18, borderRadius: 3, padding: 0,
+                          background: accent.color,
+                          border: selected ? "2px solid #fff" : "1px solid rgba(255,255,255,0.15)",
+                          boxShadow: selected ? `0 0 0 1px ${accent.color}, 0 0 6px ${accent.color}` : "none",
+                          cursor: "pointer", transform: selected ? "scale(1.08)" : "scale(1)",
+                        }}
+                      />
+                    );
+                  })}
+                </div>
+
+                <label
+                  data-ui="FullPalettePicker"
+                  title="Choose any accent color"
+                  style={{
+                    position: "relative", width: 70, height: 50, borderRadius: 6,
+                    boxSizing: "border-box", overflow: "hidden", cursor: "pointer",
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+                    background: "conic-gradient(from 45deg, #ef4444, #fbbf24, #10b981, #3b82f6, #8b5cf6, #ef4444)",
+                    border: accentKey.startsWith("#") ? "2px solid #fff" : "1px solid var(--border-strong)",
+                    boxShadow: accentKey.startsWith("#") ? "0 0 0 1px var(--accent), 0 0 7px var(--accent)" : "none",
+                  }}
+                >
+                  <span style={{ fontSize: 21, color: "#fff", textShadow: "0 1px 3px #000" }}>🎨</span>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: "#fff", textShadow: "0 1px 3px #000" }}>Palette</span>
+                  <input
+                    type="color"
+                    aria-label="Full accent color palette"
+                    value={accentKey.startsWith("#")
+                      ? accentKey
+                      : (ACCENTS.find(accent => accent.key === accentKey)?.color ?? ACCENTS[0].color)}
+                    onChange={(event) => onPickAccent(event.target.value as `#${string}`)}
+                    style={{ position: "absolute", inset: 0, width: "100%", height: "100%", opacity: 0, cursor: "pointer" }}
+                  />
+                </label>
+              </div>
+
+              <div data-ui="SettingsRow2" style={{
+                display: "flex", alignItems: "stretch", gap: 10,
+                marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)",
+              }}>
+                <div data-ui="LanguageSelector" style={{
+                  display: "grid", gridTemplateColumns: "repeat(3, 46px)", gridTemplateRows: "repeat(2, 29px)", gap: 4,
+                }}>
+                  {APP_LANGUAGES.map(option => {
+                    const selected = language === option.code;
+                    return (
+                      <button
+                        key={option.code}
+                        aria-label={option.label}
+                        aria-pressed={selected}
+                        onClick={() => setLanguage(option.code)}
+                        title={option.label}
+                        style={{
+                          width: 46, height: 29, padding: "0 3px", borderRadius: 5,
+                          display: "flex", alignItems: "center", justifyContent: "center", gap: 2,
+                          background: selected ? "rgba(var(--accent-rgb),0.2)" : "var(--bg-elevated)",
+                          border: selected ? "1px solid var(--accent)" : "1px solid var(--border-strong)",
+                          color: "var(--fg)", cursor: "pointer",
+                        }}
+                      >
+                        <span style={{ fontSize: 15 }}>{option.flag}</span>
+                        <span style={{ fontSize: 8, fontWeight: 800 }}>{option.short}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <label
+                  data-ui="KeepFrameVisible"
+                  title="Prevent the decorative window frame from fading while you work"
+                  style={{
+                    flex: 1, minWidth: 82, borderRadius: 6,
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 5,
+                    background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                    color: "var(--fg)", fontSize: 9, fontWeight: 700, cursor: "pointer", textAlign: "center",
+                  }}
+                >
+                  <span aria-hidden="true" style={{
+                    width: 30, height: 20, boxSizing: "border-box", border: "3px solid var(--accent)", borderRadius: 3,
+                    display: "block", boxShadow: "inset 0 0 0 1px rgba(var(--accent-rgb),0.35)",
+                  }} />
+                  <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                    <input
+                      type="checkbox"
+                      checked={keepFrameVisible}
+                      onChange={(event) => onKeepFrameVisible(event.target.checked)}
+                      style={{ width: 12, height: 12, margin: 0, accentColor: "var(--accent)" }}
+                    />
+                    Keep frame
+                  </span>
+                </label>
+              </div>
+
+              <div data-ui="SettingsRow3" aria-hidden="true" style={{
+                minHeight: 42, marginTop: 10, borderTop: "1px solid var(--border)",
+              }} />
+            </div>
+          )}
         </div>
 
         {/* Advanced toggle removed — MCP/Accounts are always visible in the
@@ -586,6 +737,8 @@ function ModeBar({
           // the click never fires (that was why the owl "did nothing").
           onMouseDown={(e) => e.stopPropagation()}
           onClick={(e) => { e.stopPropagation(); onWatcher(); }}
+          onMouseEnter={onFrameWatcherEnter}
+          onMouseLeave={onFrameWatcherLeave}
           title="The Watcher — OWLLM's support assistant"
           className="owllm-watcher-summon"
           style={{
@@ -603,11 +756,13 @@ function ModeBar({
       )}
       <style>{`.owllm-watcher-summon:hover { background: radial-gradient(ellipse at 50% 0%, rgba(var(--accent-rgb),0.30), transparent 72%) !important; }`}</style>
 
-      {/* OWLLM title — purely decorative text. The Watcher summon lives on
-          the owl icon above (the compact hotspot), NOT on this broad text,
-          so hovering/clicking the title does nothing. */}
+      {/* The OWLLM title stays a drag surface, and hovering it restores the
+          decorative frame. Clicking the compact owl hotspot above still
+          summons the Watcher drawer. */}
       <div
         data-ui="AppTitle"
+        onMouseEnter={onFrameWatcherEnter}
+        onMouseLeave={onFrameWatcherLeave}
         style={{
           position: "absolute",
           left: "50%",
@@ -618,7 +773,7 @@ function ModeBar({
           fontSize: 35, fontWeight: 700, color: "var(--bg-header-fg)",
           letterSpacing: 2, lineHeight: "54px",
           textAlign: "center",
-          pointerEvents: "none",
+          pointerEvents: "auto",
         }}
       >OWLLM</div>
       {watcherHint && (
@@ -904,6 +1059,16 @@ function OverlayContentPanel({ children }: { children: React.ReactNode }) {
   );
 }
 
+function WindowAccentEdge() {
+  return (
+    <div data-ui="WindowAccentEdge" aria-hidden="true" style={{
+      position: "fixed", inset: 0, zIndex: 9999,
+      border: "3px solid var(--accent)", boxSizing: "border-box",
+      pointerEvents: "none",
+    }} />
+  );
+}
+
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
   // Resolve the URL's ?page= once on mount so TwinForge can deep-link
@@ -917,6 +1082,46 @@ export default function AppShell() {
   const [bridgesModalOpen, setBridgesModalOpen] = useState<boolean>(false);
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
   const theme = useTheme();
+  const [keepFrameVisible, setKeepFrameVisible] = useState<boolean>(() => readKeepFrameVisible());
+  const [frameVisible, setFrameVisible] = useState<boolean>(true);
+  const frameHideTimer = useRef<number | undefined>(undefined);
+
+  const clearFrameHideTimer = () => {
+    if (frameHideTimer.current !== undefined) {
+      window.clearTimeout(frameHideTimer.current);
+      frameHideTimer.current = undefined;
+    }
+  };
+  const revealFrame = () => {
+    clearFrameHideTimer();
+    setFrameVisible(true);
+  };
+  const hideFrameAfter = (delay: number) => {
+    clearFrameHideTimer();
+    if (keepFrameVisible) return;
+    frameHideTimer.current = window.setTimeout(() => {
+      setFrameVisible(false);
+      frameHideTimer.current = undefined;
+    }, delay);
+  };
+
+  useEffect(() => {
+    try { localStorage.setItem(KEEP_FRAME_VISIBLE_KEY, keepFrameVisible ? "1" : "0"); }
+    catch { /* localStorage blocked */ }
+    if (keepFrameVisible) revealFrame();
+    else hideFrameAfter(FRAME_IDLE_HIDE_MS);
+    return clearFrameHideTimer;
+  }, [keepFrameVisible]);
+
+  // Windows draws the decorative art in a separate click-through webview.
+  // Broadcast the same visibility state there; the storage message is a
+  // reliable cross-webview fallback and the Tauri event handles it instantly.
+  useEffect(() => {
+    const payload = { visible: frameVisible, nonce: Date.now() };
+    try { localStorage.setItem(FRAME_VISIBILITY_STATE_KEY, JSON.stringify(payload)); }
+    catch { /* localStorage blocked */ }
+    if (isTauri()) emit("owllm:frame-visibility", frameVisible).catch(() => {});
+  }, [frameVisible]);
 
   // The Watcher (P0-8): summoned from the top-center owl. A small animated
   // "The Watcher" satellite label appears periodically around the owl to
@@ -1141,6 +1346,10 @@ export default function AppShell() {
             onOpenServer={() => setServerModalOpen(true)}
             onWatcher={openWatcher}
             watcherHint={watcherHint && overlayFrame}
+            keepFrameVisible={keepFrameVisible}
+            onKeepFrameVisible={setKeepFrameVisible}
+            onFrameWatcherEnter={revealFrame}
+            onFrameWatcherLeave={() => hideFrameAfter(FRAME_LEAVE_HIDE_MS)}
           />
           {/* SubTabs always render — Qt's page list is unconditional.
               The earlier `mode !== 'finetuning'` guard hid the row when
@@ -1185,9 +1394,15 @@ export default function AppShell() {
       <EmailBridgeRunner />
       <WebhookBridgeRunner />
       <ResizeEdges />
+      <WindowAccentEdge />
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
-        : <HybridFrame outerW={vp.w} outerH={vp.h} showWatcherHint={watcherHint}>{appContent}</HybridFrame>}
+        : <HybridFrame
+            outerW={vp.w}
+            outerH={vp.h}
+            showWatcherHint={watcherHint}
+            frameVisible={frameVisible}
+          >{appContent}</HybridFrame>}
       <WatcherDrawer
         open={watcherOpen}
         onClose={() => setWatcherOpen(false)}

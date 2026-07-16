@@ -31,6 +31,16 @@
         inset: 0;
         pointer-events: none;
         user-select: none;
+        opacity: 1;
+        transition: opacity 360ms ease;
+      }
+
+      #frame.frame-visible {
+        transition-duration: 220ms;
+      }
+
+      #frame.frame-hidden {
+        opacity: 0;
       }
 
       .bar {
@@ -143,6 +153,26 @@
       window.addEventListener("resize", layout);
       layout();
 
+      // The main webview owns the auto-hide timer and persisted preference.
+      // This window only paints, so applying a class keeps the Windows overlay
+      // animation in lockstep with the in-page frame used on other platforms.
+      const FRAME_VISIBILITY_STATE_KEY = "owllm:window-frame:visibility";
+      function setFrameVisible(visible) {
+        const frame = el("frame");
+        frame.classList.toggle("frame-visible", visible);
+        frame.classList.toggle("frame-hidden", !visible);
+      }
+      window.addEventListener("storage", (event) => {
+        if (event.key !== FRAME_VISIBILITY_STATE_KEY || !event.newValue) return;
+        try { setFrameVisible(JSON.parse(event.newValue).visible !== false); }
+        catch { /* ignore malformed state from older builds */ }
+      });
+      if (window.__TAURI__?.event) {
+        window.__TAURI__.event.listen("owllm:frame-visibility", (event) => {
+          setFrameVisible(event.payload !== false);
+        });
+      }
+
       // ─ Accent integration ─────────────────────────────────────────
       // The overlay frame is a SEPARATE Tauri webview, so the React
       // app's runtime applyAccent() doesn't reach it. We read the
@@ -209,7 +239,9 @@
       }
 
       function applyOverlayAccent(accentKey) {
-        const hex = ACCENTS[accentKey] || ACCENTS.indigo;
+        const hex = /^#[0-9a-f]{6}$/i.test(accentKey || "")
+          ? accentKey
+          : (ACCENTS[accentKey] || ACCENTS.indigo);
         const h = hex.replace("#", "");
         const aR = parseInt(h.slice(0, 2), 16);
         const aG = parseInt(h.slice(2, 4), 16);

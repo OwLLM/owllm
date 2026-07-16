@@ -15,6 +15,7 @@
 // modules.ts plus a directory under pages/.
 import React, { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ALL_MODULES,
@@ -296,8 +297,12 @@ const FRAME_BG     = "var(--bg-header)";
 const ICONS = "/Page_icons";
 const CORNERS = `${ICONS}/CornersNew`;
 
-function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
+function HybridFrame({ children, outerW, outerH, showFrame, showOwl, showWatcherHint }: {
   children: React.ReactNode; outerW: number; outerH: number;
+  /// The complete decorative chrome is an opening flourish, not permanent UI.
+  showFrame: boolean;
+  /// After the flourish, only the owl returns near its Watcher hotspot.
+  showOwl: boolean;
   /// Periodic "The Watcher" satellite label around the owl (until first open).
   showWatcherHint?: boolean;
 }) {
@@ -356,6 +361,11 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
+      <div aria-hidden="true" style={{
+        position: "absolute", inset: 0, pointerEvents: "none",
+        opacity: showFrame ? 1 : 0,
+        transition: "opacity 320ms ease-out",
+      }}>
       <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
       <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />
       <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:FRAME_BG }} />
@@ -384,6 +394,7 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
       <img src={`${CORNERS}/corner_ul.png`} style={{ position:"absolute", left:cnTL.x, top:cnTL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TL, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_ur.png`} style={{ position:"absolute", left:cnTR.x, top:cnTR.y, width:CORNER_PNG_W, height:CORNER_PNG_H_TR, pointerEvents:"none" }} />
       <img src={`${CORNERS}/corner_bl.png`} style={{ position:"absolute", left:cnBL.x, top:cnBL.y, width:CORNER_PNG_W, height:CORNER_PNG_H_BL, pointerEvents:"none" }} />
+      </div>
       {/* The Watcher (P0-8): the owl art is DECORATIVE here, exactly like the
           overlay-window owl on Windows — its full 300×195 rect used to be
           clickable, which swallowed clicks over the header center ("the
@@ -394,6 +405,9 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint }: {
         style={{
           position:"absolute", left:badgeX, top:badgeY, width:BADGE_W, height:BADGE_H,
           pointerEvents: "none",
+          opacity: showOwl ? 1 : 0,
+          transform: showOwl ? "translateY(0) scale(1)" : "translateY(-5px) scale(0.96)",
+          transition: "opacity 180ms ease-out, transform 220ms ease-out",
         }}
       />
       {showWatcherHint && (
@@ -945,6 +959,38 @@ export default function AppShell() {
   // suggest the click — and stops forever once the user has opened it.
   const [watcherOpen, setWatcherOpen] = useState<boolean>(false);
   const [watcherHint, setWatcherHint] = useState<boolean>(false);
+  const [frameIntroVisible, setFrameIntroVisible] = useState<boolean>(true);
+  const [watcherNear, setWatcherNear] = useState<boolean>(false);
+
+  // Show the complete decorative frame as a short opening flourish. It then
+  // gets out of the way; moving near the compact top-centre Watcher target
+  // reveals only the owl. The generous proximity zone makes discovery easy
+  // without restoring the old oversized clickable region.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setFrameIntroVisible(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, []);
+  useEffect(() => {
+    const update = (e: PointerEvent) => {
+      const near = Math.abs(e.clientX - window.innerWidth / 2) <= 210 && e.clientY <= 135;
+      setWatcherNear(current => current === near ? current : near);
+    };
+    const leave = () => setWatcherNear(false);
+    window.addEventListener("pointermove", update, { passive: true });
+    window.addEventListener("blur", leave);
+    document.documentElement.addEventListener("pointerleave", leave);
+    return () => {
+      window.removeEventListener("pointermove", update);
+      window.removeEventListener("blur", leave);
+      document.documentElement.removeEventListener("pointerleave", leave);
+    };
+  }, []);
+  useEffect(() => {
+    if (!isTauri()) return;
+    // The Windows frame is a separate click-through webview, so it cannot
+    // sense the pointer itself. Broadcast only state transitions to it.
+    emit("owllm:watcher-proximity", watcherNear).catch(() => {});
+  }, [watcherNear]);
   useEffect(() => {
     try { if (localStorage.getItem("owllm:watcher:discovered") === "1") return; } catch { return; }
     let hideTimer: number | undefined;
@@ -1167,7 +1213,7 @@ export default function AppShell() {
             onPickAccent={theme.setAccentKey}
             onOpenServer={() => setServerModalOpen(true)}
             onWatcher={openWatcher}
-            watcherHint={watcherHint && overlayFrame}
+            watcherHint={watcherHint && watcherNear && overlayFrame}
           />
           {/* SubTabs always render — Qt's page list is unconditional.
               The earlier `mode !== 'finetuning'` guard hid the row when
@@ -1214,7 +1260,13 @@ export default function AppShell() {
       <ResizeEdges />
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
-        : <HybridFrame outerW={vp.w} outerH={vp.h} showWatcherHint={watcherHint}>{appContent}</HybridFrame>}
+        : <HybridFrame
+            outerW={vp.w}
+            outerH={vp.h}
+            showFrame={frameIntroVisible}
+            showOwl={frameIntroVisible || watcherNear}
+            showWatcherHint={watcherHint && watcherNear}
+          >{appContent}</HybridFrame>}
       <WatcherDrawer
         open={watcherOpen}
         onClose={() => setWatcherOpen(false)}

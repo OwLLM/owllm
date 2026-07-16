@@ -8970,6 +8970,14 @@ export function AgentsPage({
         }]);
         return;
       }
+      if (info.kind === "upgrade") {
+        setSupChat(prev => [...prev, {
+          role: "system", color: "#ffb74d",
+          text: `↻ ${cli} is too old for this model — upgrading the CLI in the project's execution environment, then retrying automatically. The GUI remains available.`,
+          ts: Date.now(), seq: nextSeq(),
+        }]);
+        return;
+      }
       const secs = Math.round(info.waitMs / 1000);
       const human = secs >= 60 ? `${Math.round(secs / 60)} min` : `${secs}s`;
       const why = info.reason === "network"

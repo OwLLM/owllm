@@ -57,6 +57,33 @@
         pointer-events: none;
       }
 
+      .frame-chrome {
+        opacity: 1;
+        transition: opacity 320ms ease-out;
+      }
+
+      #badge {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+        transition: opacity 180ms ease-out, transform 220ms ease-out;
+      }
+
+      /* The complete frame is an opening flourish. Once settled, it stays
+         invisible and only the owl returns near the real Watcher hotspot. */
+      html.frame-settled .frame-chrome {
+        opacity: 0;
+      }
+
+      html.frame-settled #badge {
+        opacity: 0;
+        transform: translateY(-5px) scale(0.96);
+      }
+
+      html.frame-settled.watcher-near #badge {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+
       .corner {
         width: var(--corner-w);
         height: auto;
@@ -70,17 +97,17 @@
   </head>
   <body>
     <div id="frame" aria-hidden="true">
-      <div id="top" class="bar"></div>
-      <div id="bottom" class="bar"></div>
-      <div id="left" class="bar"></div>
-      <div id="right" class="bar"></div>
-      <div id="outerLine" class="line"></div>
-      <div id="innerLine" class="inner-line"></div>
+      <div id="top" class="bar frame-chrome"></div>
+      <div id="bottom" class="bar frame-chrome"></div>
+      <div id="left" class="bar frame-chrome"></div>
+      <div id="right" class="bar frame-chrome"></div>
+      <div id="outerLine" class="line frame-chrome"></div>
+      <div id="innerLine" class="inner-line frame-chrome"></div>
 
-      <img id="cornerBr" class="corner" src="/Page_icons/CornersNew/corner_br.png" />
-      <img id="cornerTl" class="corner" src="/Page_icons/CornersNew/corner_ul.png" />
-      <img id="cornerTr" class="corner" src="/Page_icons/CornersNew/corner_ur.png" />
-      <img id="cornerBl" class="corner" src="/Page_icons/CornersNew/corner_bl.png" />
+      <img id="cornerBr" class="corner frame-chrome" src="/Page_icons/CornersNew/corner_br.png" />
+      <img id="cornerTl" class="corner frame-chrome" src="/Page_icons/CornersNew/corner_ul.png" />
+      <img id="cornerTr" class="corner frame-chrome" src="/Page_icons/CornersNew/corner_ur.png" />
+      <img id="cornerBl" class="corner frame-chrome" src="/Page_icons/CornersNew/corner_bl.png" />
       <img id="badge" class="badge" src="/Page_icons/owl_studio_square.png" />
     </div>
 
@@ -142,6 +169,16 @@
 
       window.addEventListener("resize", layout);
       layout();
+
+      // Keep the full frame for the startup flourish, then let it fade. This
+      // webview is click-through on Windows, so the main webview sends pointer
+      // proximity changes for the owl hotspot through Tauri events.
+      window.setTimeout(() => document.documentElement.classList.add("frame-settled"), 3000);
+      if (window.__TAURI__?.event) {
+        window.__TAURI__.event.listen("owllm:watcher-proximity", (ev) => {
+          document.documentElement.classList.toggle("watcher-near", ev.payload === true);
+        });
+      }
 
       // ─ Accent integration ─────────────────────────────────────────
       // The overlay frame is a SEPARATE Tauri webview, so the React

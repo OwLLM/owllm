@@ -1281,7 +1281,7 @@ fn wsl_probe(backend: &str) -> (bool, String) {
             // broken, so presence alone must not produce a green result.
             "if ! PATH=/usr/local/bin:/usr/bin:/bin command -v codex >/dev/null 2>&1; then echo NOBIN; \
              elif ! [ -f ~/.codex/auth.json ]; then echo NOCRED; else \
-             out=$(printf '%s' 'Reply with exactly OWLLM_PROBE_OK and nothing else.' | timeout 45 codex exec --skip-git-repo-check --color never --sandbox read-only --model gpt-5.5 - 2>&1); rc=$?; \
+             out=$(printf '%s' 'Reply with exactly OWLLM_PROBE_OK and nothing else.' | timeout 45 codex exec --skip-git-repo-check --color never --sandbox read-only --model gpt-5.6-sol - 2>&1); rc=$?; \
              if [ \"$rc\" -eq 0 ] && printf '%s' \"$out\" | grep -q 'OWLLM_PROBE_OK'; then echo YES; \
              else echo RUNFAIL; printf '%s\n' \"$out\" | tail -n 12; fi; fi".to_string()
         }
@@ -2149,13 +2149,18 @@ fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
     if looks_like_cli_auth_error(stderr) {
         return stderr.to_string();
     }
+    // JSON/streaming CLIs increasingly report every fatal error on stdout and
+    // leave stderr empty. Never erase a real diagnostic merely because it was
+    // written to the other pipe.
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !body.is_empty() {
+        body
+    } else {
+        "no stdout or stderr"
+    };
     format!(
-        "{cli} CLI exited {code} — {}",
-        if stderr.is_empty() {
-            "no stderr".to_string()
-        } else {
-            stderr.to_string()
-        }
+        "{cli} CLI exited {code} — {detail}"
     )
 }
 
@@ -2336,6 +2341,71 @@ pub async fn codex_cli_complete(
             return Err(reply);
         }
         Ok(reply)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Upgrade the Codex CLI that will actually execute a project run.
+///
+/// On Windows, WSL projects do not use the green Windows Accounts binary;
+/// they use the distro's independent `/usr/local/bin/codex`. Provisioning used
+/// npm's mutable default prefix, which could install a newer copy under `/usr`
+/// while an older `/usr/local` copy kept winning PATH. Pin the destination and
+/// run as WSL root (WSL supports this without an interactive sudo prompt).
+#[tauri::command]
+pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, String> {
+    #[cfg(windows)]
+    if let Some((distro, _)) = cwd
+        .as_deref()
+        .and_then(crate::wsl::parse_wsl_unc)
+    {
+        return tokio::task::spawn_blocking(move || {
+            crate::wsl::run_in_distro_script_user(
+                &distro,
+                Some("root"),
+                "set -e; command -v npm >/dev/null 2>&1 || { echo 'npm is missing in WSL'; exit 1; }; \
+                 npm install -g --prefix /usr/local @openai/codex@latest; \
+                 PATH=/usr/local/bin:/usr/bin:/bin codex --version",
+            )
+        })
+        .await
+        .map_err(|e| format!("join error: {e}"))?;
+    }
+
+    // Native Windows/Linux/macOS project: update the npm installation owned by
+    // that host. If permissions block the global prefix, preserve npm's exact
+    // diagnostic so the UI can tell the user what needs intervention.
+    tokio::task::spawn_blocking(move || {
+        let npm = ["npm.cmd", "npm.exe", "npm"]
+            .iter()
+            .find_map(|name| which_extended(name))
+            .ok_or_else(|| "npm not found — install the Node.js runtime first".to_string())?;
+        #[cfg(windows)]
+        let batch = is_batch_shim(&npm);
+        #[cfg(not(windows))]
+        let batch = false;
+        let mut cmd = Command::new(&npm);
+        for arg in ["install", "-g", "@openai/codex@latest"] {
+            push_arg(&mut cmd, batch, arg);
+        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd.output().map_err(|e| format!("start npm: {e}"))?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            return Err(format!(
+                "Codex CLI upgrade failed: {}",
+                if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+            ));
+        }
+        Ok(stdout.trim().to_string())
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -3294,6 +3364,12 @@ pub async fn codex_cli_stream(
             .ok_or_else(|| "no stdout pipe".to_string())?;
         let reader = BufReader::new(stdout);
         let mut assembled = String::new();
+        // Codex emits structured failures on STDOUT in --json mode (for
+        // example "model requires a newer version of Codex") and commonly
+        // leaves stderr empty. Retain those messages for the final Result;
+        // previously we sent them transiently to the UI channel, discarded
+        // them here, and replaced the real cause with "exited 1 — no stderr".
+        let mut stream_errors: Vec<String> = Vec::new();
 
         for line_res in reader.lines() {
             use std::sync::atomic::Ordering;
@@ -3426,6 +3502,7 @@ pub async fn codex_cli_stream(
                         // Non-fatal item warning.
                         "error" => {
                             if let Some(m) = item.get("message").and_then(|c| c.as_str()) {
+                                stream_errors.push(m.to_string());
                                 let _ = on_event
                                     .send(CodexStreamEvent::Error { message: m.to_string() });
                             }
@@ -3436,6 +3513,7 @@ pub async fn codex_cli_stream(
                 // Stream-level / turn-level failures.
                 "error" => {
                     if let Some(m) = v.get("message").and_then(|t| t.as_str()) {
+                        stream_errors.push(m.to_string());
                         let _ = on_event.send(CodexStreamEvent::Error { message: m.to_string() });
                     }
                 }
@@ -3445,6 +3523,7 @@ pub async fn codex_cli_stream(
                         .and_then(|e| e.get("message"))
                         .and_then(|t| t.as_str())
                     {
+                        stream_errors.push(m.to_string());
                         let _ = on_event.send(CodexStreamEvent::Error { message: m.to_string() });
                     }
                 }
@@ -3476,7 +3555,7 @@ pub async fn codex_cli_stream(
             return Err(cli_exit_err(
                 "codex",
                 status.code().unwrap_or(-1),
-                "",
+                &stream_errors.join("\n"),
                 &stderr_buf,
             ));
         }
@@ -4017,7 +4096,10 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
 /// find_claude_cli / find_kimi_cli — npm-installed, lives in the
 /// npm-global dir on Windows.
 fn find_codex_cli() -> Option<PathBuf> {
-    for name in ["codex.exe", "codex.cmd", "codex"] {
+    // Prefer the user-upgradeable npm shim over a bundled editor executable.
+    // VS Code's Codex binary can lag behind npm and reject newly available
+    // subscription models even when `npm install -g` already updated Codex.
+    for name in ["codex.cmd", "codex.exe", "codex"] {
         if let Some(path) = which_extended(name) {
             return Some(path);
         }
@@ -4876,7 +4958,7 @@ pub async fn kimi_cli_complete(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_codex_input_args, codex_should_grant_browser, is_browser_role_allowlist,
+        append_codex_input_args, cli_exit_err, codex_should_grant_browser, is_browser_role_allowlist,
         kimi_agent_yaml, kimi_config_has_default, kimi_config_model_keys,
         kimi_output_auth_failed, kimi_output_llm_unset, kimi_output_mcp_failed,
     };
@@ -4901,6 +4983,18 @@ mod tests {
                 "-",
             ]
         );
+    }
+
+    #[test]
+    fn cli_exit_preserves_stdout_error_when_stderr_is_empty() {
+        let err = cli_exit_err(
+            "codex",
+            1,
+            "The model requires a newer version of Codex.",
+            "",
+        );
+        assert!(err.contains("requires a newer version of Codex"));
+        assert!(!err.contains("no stderr"));
     }
 
     // The exact kimi output that crashed a team run (reproduced live 2026-07-06,

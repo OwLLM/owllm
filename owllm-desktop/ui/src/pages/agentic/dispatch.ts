@@ -1456,6 +1456,10 @@ export function isTransientNetError(msg: string): boolean {
   return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|timed out|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
 }
 
+export function isCodexUpgradeError(msg: string): boolean {
+  return /requires a newer version of codex|upgrade to the latest (?:app or )?cli/i.test(msg);
+}
+
 /// Sleep that rejects immediately if the run is cancelled mid-wait.
 export function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -1471,6 +1475,7 @@ export function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
 /// Module-level to avoid threading a callback through every call site.
 export type AuthWaitInfo =
   | { kind: "wait"; attempt: number; total: number; waitMs: number; backend: string; reason: "auth" | "network" }
+  | { kind: "upgrade"; backend: string }
   | { kind: "recovered"; backend: string };
 let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;
 export function setCliAuthWaitHandler(handler: ((info: AuthWaitInfo) => void) | null): void {
@@ -1490,6 +1495,7 @@ export async function withCliAuthRetry<T>(
   /// 401 fix) — otherwise the host re-warm never reaches the in-distro copy.
   cwd?: string | null,
 ): Promise<T> {
+  let codexUpgradeAttempted = false;
   for (let attempt = 0; ; attempt++) {
     try {
       const result = await fn();
@@ -1498,6 +1504,21 @@ export async function withCliAuthRetry<T>(
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       if (signal.aborted) throw e;
+      // A WSL project executes its own distro-local Codex, independently of
+      // the green Windows Accounts binary. New subscription models can reject
+      // that older CLI on stdout. Upgrade the CLI in the actual execution
+      // environment once and retry the original turn automatically.
+      if (backend === "codex_cli" && !codexUpgradeAttempted && isCodexUpgradeError(msg)) {
+        codexUpgradeAttempted = true;
+        _authWaitHandler?.({ kind: "upgrade", backend });
+        try {
+          await invoke<string>("codex_cli_upgrade_for_cwd", { cwd: cwd ?? null });
+        } catch (upgradeError: any) {
+          const detail = upgradeError?.message ?? String(upgradeError);
+          throw new Error(`${msg}\nAutomatic Codex CLI upgrade failed: ${detail}`);
+        }
+        continue;
+      }
       // Retry on auth (token expired) OR a transient network blip. Different
       // schedules: auth refresh is slow (10s/30s/2min); a network blip clears
       // fast (1.5s/4s/8s).
@@ -2726,7 +2747,7 @@ async function streamOpenAI(
   if (route.forceSub === true) {
     // Refresh the Codex CLI token once per session (same cold-start 401
     // fix as Claude — see ensureCliWarm).
-    await ensureCliWarm("codex_cli");
+    await ensureCliWarm("codex_cli", projectCwd);
     // Fold prior turns into the prompt so the CLI has conversation context.
     const convo = (history ?? [])
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
@@ -2749,7 +2770,7 @@ async function streamOpenAI(
     // the caller wants thought traffic — AgentsPage / ChatPage / CodePage.
     // Bridge callers (no Thought pane) fall back to the one-shot blob.
     if (onThought) {
-      return await runCodexCliStream({
+      return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
         systemPrompt,
         userMessage: codexPrompt,
         cwd: codexCwd ?? null,
@@ -2759,16 +2780,16 @@ async function streamOpenAI(
         allowedTools,
         onDelta,
         onThought,
-      });
+      }), codexCwd);
     }
-    const reply = await invoke<string>("codex_cli_complete", {
+    const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
       systemPrompt,
       userMessage: codexPrompt,
       cwd: codexCwd ?? undefined,
       imagePaths: codexImagePaths,
       model: codexModel,
       effort: codexEffort,
-    });
+    }), codexCwd);
     if (reply) onDelta(reply);
     return reply;
   }

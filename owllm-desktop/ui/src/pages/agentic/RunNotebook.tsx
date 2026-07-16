@@ -288,7 +288,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const [newStep, setNewStep] = useState("");
   const [digestBusy, setDigestBusy] = useState(false);
   const [digestLogOpen, setDigestLogOpen] = useState(false);
-  const [doneOpen, setDoneOpen] = useState(false);
+  /// Which steps tab is shown: the actionable queue or the archive of done
+  /// steps. Done steps are ONLY visible on the archive tab.
+  const [stepsTab, setStepsTab] = useState<"active" | "archive">("active");
   const [digestError, setDigestError] = useState("");
   /// Transient per-step outcome of the last Feed click — the onFeed result
   /// ("queued" into a live run vs "dispatched" as a new goal vs "no-team")
@@ -792,6 +794,29 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {/* Active/Archive tabs — done steps live ONLY on the archive tab
+                  so the queue never shows finished work unless asked. */}
+              <div role="tablist" aria-label="Steps" style={{ display: "flex", gap: 2, borderBottom: "1px solid var(--border)" }}>
+                {([
+                  { key: "active" as const, label: "Active", count: activeSteps.length },
+                  { key: "archive" as const, label: "Archive", count: doneSteps.length },
+                ]).map((t) => (
+                  <button
+                    key={t.key}
+                    role="tab"
+                    aria-selected={stepsTab === t.key}
+                    onClick={() => setStepsTab(t.key)}
+                    style={{
+                      height: 28, padding: "0 12px", border: "none", background: "transparent",
+                      borderBottom: stepsTab === t.key ? "2px solid var(--accent)" : "2px solid transparent",
+                      color: stepsTab === t.key ? "var(--fg-strong)" : "var(--fg-muted)",
+                      fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                    }}
+                  >{t.label} ({t.count})</button>
+                ))}
+              </div>
+
+              {stepsTab === "active" && (<>
               <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                 <textarea
                   ref={newStepRef}
@@ -807,7 +832,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               {activeSteps.length === 0 && (
                 <div style={{ padding: 14, textAlign: "center", fontSize: 12, color: "var(--fg-muted)", background: "var(--bg-input)", borderRadius: 8, border: "1px dashed var(--border)" }}>
                   {doneSteps.length > 0
-                    ? "All steps done — reopen one from Completed below, or add a new step above."
+                    ? "All steps done — reopen one from the Archive tab, or add a new step above."
                     : "No steps yet — add one above, or digest your notes below."}
                 </div>
               )}
@@ -880,37 +905,32 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   </div>
                 ))}
               </div>
+              </>)}
 
-              {/* Completed history — done steps leave the active feed but are
-                  kept here (collapsed by default) so nothing is lost and the
-                  user can reopen a step or clear it for good. */}
-              {doneSteps.length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  <button
-                    className="ghost-btn"
-                    onClick={() => setDoneOpen((v) => !v)}
-                    aria-expanded={doneOpen}
-                    title="Show or hide completed steps"
-                    style={{ height: 26, alignSelf: "flex-start", padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, color: "var(--fg-muted)" }}
-                  ><ActionIcon name={doneOpen ? "chevron-down" : "chevron-right"} size={13} />Completed ({doneSteps.length})</button>
-                  {doneOpen && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {doneSteps.map((s) => (
-                        <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 3, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
-                          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                            <ActionIcon name="check" size={13} style={{ color: "#7ff0c5", marginTop: 2 }} />
-                            <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
-                            <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
-                            <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" aria-label="Delete permanently" style={{ height: 22, width: 22, padding: 0, display: "grid", placeItems: "center", color: "#ff8c8c", flexShrink: 0 }}><ActionIcon name="trash" size={12} /></button>
-                          </div>
-                          {formatStepTiming(s) && (
-                            <div style={{ paddingLeft: 22, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>{formatStepTiming(s)}</div>
-                          )}
+              {/* Archive — done steps leave the active feed and live only on
+                  this tab, where each can be reopened or cleared for good. */}
+              {stepsTab === "archive" && (
+                doneSteps.length === 0 ? (
+                  <div style={{ padding: 14, textAlign: "center", fontSize: 12, color: "var(--fg-muted)", background: "var(--bg-input)", borderRadius: 8, border: "1px dashed var(--border)" }}>
+                    No archived steps yet — steps marked done move here.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {doneSteps.map((s) => (
+                      <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 3, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                          <ActionIcon name="check" size={13} style={{ color: "#7ff0c5", marginTop: 2 }} />
+                          <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
+                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
+                          <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" aria-label="Delete permanently" style={{ height: 22, width: 22, padding: 0, display: "grid", placeItems: "center", color: "#ff8c8c", flexShrink: 0 }}><ActionIcon name="trash" size={12} /></button>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                        {formatStepTiming(s) && (
+                          <div style={{ paddingLeft: 22, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>{formatStepTiming(s)}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )
               )}
             </div>
           </div>

@@ -9,52 +9,24 @@
 
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import {
+  ACCENTS,
+  AccentSelection,
+  Mode,
+  TextColorSelection,
+  buildTextThemeTokens,
+  readGuiColor,
+  readMode,
+  readTextColor,
+  resolveGuiColor,
+  resolveTextColor,
+  saveGuiColor,
+  saveMode,
+  saveTextColor,
+} from "./themePreferences";
 
-export type Mode = "dark" | "light";
-
-export type AccentKey =
-  | "indigo" | "amber" | "red" | "blue" | "emerald" | "slate";
-
-// Named swatches stay stable for the compact selector, while the full-palette
-// control persists its concrete colour in the same key. Keeping one persisted
-// value means the main window, browser chrome, and overlay frame cannot drift.
-export type AccentSelection = AccentKey | `#${string}`;
-
-export type AccentDef = { key: AccentKey; label: string; color: string };
-
-// The six squares in the header. The first is the canonical default
-// (matches the old `#5cf0ff` cyan vibe in feel, just slightly muted).
-export const ACCENTS: AccentDef[] = [
-  { key: "indigo",  label: "Indigo",  color: "#667eea" },
-  { key: "amber",   label: "Amber",   color: "#fbbf24" },
-  { key: "red",     label: "Red",     color: "#ef4444" },
-  { key: "blue",    label: "Blue",    color: "#3b82f6" },
-  { key: "emerald", label: "Emerald", color: "#10b981" },
-  { key: "slate",   label: "Slate",   color: "#6b7280" },
-];
-
-const LS_MODE = "owllm:theme:mode";
-const LS_ACCENT = "owllm:theme:accent";
-
-function readMode(): Mode {
-  try {
-    const v = localStorage.getItem(LS_MODE);
-    if (v === "dark" || v === "light") return v;
-  } catch { /* localStorage blocked */ }
-  return "dark";
-}
-function isHexAccent(value: string): value is `#${string}` {
-  return /^#[0-9a-f]{6}$/i.test(value);
-}
-
-function readAccent(): AccentSelection {
-  try {
-    const v = localStorage.getItem(LS_ACCENT);
-    if (v && ACCENTS.some(a => a.key === v)) return v as AccentKey;
-    if (v && isHexAccent(v)) return v;
-  } catch { /* ignore */ }
-  return "indigo";
-}
+export { ACCENTS } from "./themePreferences";
+export type { AccentSelection, Mode, TextColorSelection } from "./themePreferences";
 
 function hexToRgb(hex: string): string {
   const h = hex.replace("#", "");
@@ -153,22 +125,37 @@ function applyMode(mode: Mode) {
   document.documentElement.setAttribute("data-theme", mode);
 }
 
+function applyTextColor(selection: TextColorSelection, mode: Mode, guiColor: string) {
+  const root = document.documentElement;
+  const preferred = resolveTextColor(selection, mode);
+  const tokens = buildTextThemeTokens(preferred, mode, guiColor);
+  root.style.setProperty("--text-color-selected", preferred);
+  root.style.setProperty("--fg", tokens.base);
+  root.style.setProperty("--fg-strong", tokens.strong);
+  root.style.setProperty("--fg-muted", tokens.muted);
+  root.style.setProperty("--fg-subtle", tokens.subtle);
+  root.style.setProperty("--fg-dim", tokens.dim);
+  root.style.setProperty("--ghost-fg", tokens.base);
+  root.style.setProperty("--ghost-hover-fg", tokens.strong);
+}
+
 export function useTheme() {
   const [mode, setModeState] = useState<Mode>(() => readMode());
-  const [accentKey, setAccentKeyState] = useState<AccentSelection>(() => readAccent());
+  const [accentKey, setAccentKeyState] = useState<AccentSelection>(() => readGuiColor());
+  const [textColorKey, setTextColorState] = useState<TextColorSelection>(() => readTextColor());
 
-  const accent = isHexAccent(accentKey)
-    ? { key: accentKey, label: "Custom", color: accentKey }
-    : (ACCENTS.find(a => a.key === accentKey) ?? ACCENTS[0]);
+  const guiColor = resolveGuiColor(accentKey);
+  const textColor = resolveTextColor(textColorKey, mode);
+  const accent = { key: accentKey, label: accentKey.startsWith("#") ? "Custom" : (ACCENTS.find(a => a.key === accentKey)?.label ?? "Custom"), color: guiColor };
 
   useEffect(() => {
     applyMode(mode);
-    try { localStorage.setItem(LS_MODE, mode); } catch { /* ignore */ }
+    saveMode(mode);
   }, [mode]);
 
   useEffect(() => {
-    applyAccent(accent.color);
-    try { localStorage.setItem(LS_ACCENT, accentKey); } catch { /* ignore */ }
+    applyAccent(guiColor);
+    saveGuiColor(accentKey);
     // Push to the overlay-frame webview so its cyan corners flip
     // immediately on a picker click (cold-boot is handled by the
     // overlay's own localStorage read).
@@ -178,12 +165,18 @@ export function useTheme() {
         tauri.event.emit("owllm:accent-changed", accentKey);
       }
     } catch { /* not in Tauri ctx */ }
-  }, [accentKey, accent.color]);
+  }, [accentKey, guiColor]);
+
+  useEffect(() => {
+    applyTextColor(textColorKey, mode, guiColor);
+    saveTextColor(textColorKey);
+  }, [textColorKey, mode, guiColor]);
 
   return {
-    mode, accentKey, accent,
+    mode, accentKey, accent, textColorKey, textColor,
     setMode: setModeState,
     setAccentKey: setAccentKeyState,
+    setTextColor: setTextColorState,
     toggleMode: () => setModeState(m => m === "dark" ? "light" : "dark"),
   };
 }
@@ -192,8 +185,9 @@ export function useTheme() {
 // frame paints with the correct theme (no flash of unstyled content).
 export function bootstrapTheme() {
   const mode = readMode();
-  const accentKey = readAccent();
-  const accent = ACCENTS.find(a => a.key === accentKey) ?? ACCENTS[0];
+  const guiColor = resolveGuiColor(readGuiColor());
+  const textColor = readTextColor();
   applyMode(mode);
-  applyAccent(accent.color);
+  applyAccent(guiColor);
+  applyTextColor(textColor, mode, guiColor);
 }

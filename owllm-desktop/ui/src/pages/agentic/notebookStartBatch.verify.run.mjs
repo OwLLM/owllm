@@ -255,6 +255,33 @@ console.log("case 5: Start queue hides with nothing pending");
   act(() => root.unmount());
 }
 
+// ---- 5b. done steps live ONLY on the Archive tab ----
+console.log("case 5b: done steps are hidden until the Archive tab is clicked");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [
+      { id: "s1", text: "still open step", status: "pending", ts: 1 },
+      { id: "s2", text: "finished archived step", status: "done", ts: 2 },
+    ],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  check("done step is NOT visible on the default Active tab", !textOf(document.body).includes("finished archived step"));
+  check("active step is visible", textOf(document.body).includes("still open step"));
+  const archiveTab = buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive"));
+  check("Archive tab shows the done count", !!archiveTab && textOf(archiveTab).includes("(1)"));
+  clickEl(archiveTab);
+  check("done step appears after clicking Archive", textOf(document.body).includes("finished archived step"));
+  check("active queue is hidden on the Archive tab", !textOf(document.body).includes("still open step"));
+  const reopen = buttons().find((b) => textOf(b).includes("Reopen"));
+  check("archived step can be reopened", !!reopen);
+  clickEl(reopen);
+  check("reopened step is pending again", blob().steps.find((s) => s.id === "s2")?.status === "pending");
+  check("archive shows its empty state once cleared", textOf(document.body).includes("No archived steps yet"));
+  act(() => root.unmount());
+}
+
 // ---- 6. auto-feed ownership: only the owning surface pops the queue ----
 console.log("case 6: takeNextAutoStep is gated per surface");
 {

@@ -368,7 +368,6 @@ fn disk_free_bytes_for_path(path: &str) -> Option<(String, u64)> {
     let avail_kb = cols.get(3)?.parse::<u64>().ok()?;
     Some((cols.first().unwrap_or(&"filesystem").to_string(), avail_kb * 1024))
 }
-
 /// Locate signtool.exe the same way the publish script does:
 /// first via PATH, then the standard Windows SDK install layout.
 /// Returns the newest x64 signtool when multiple SDK versions are present.

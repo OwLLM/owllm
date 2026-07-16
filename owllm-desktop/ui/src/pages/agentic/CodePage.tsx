@@ -23,8 +23,8 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun } from "./RunNotebook";
-import { RunTimerChip } from "./RunTimer";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
 import TeamMemoryModal from "./TeamMemoryModal";
@@ -453,7 +453,16 @@ function CodeWorkspace({ pageId, onTitle }: {
   // busy are drained between tool calls on local models (getSteer), or at the
   // end of the turn on CLI/API paths.
   const steerRef = useRef<string[]>([]);
-  const drainSteer = () => steerRef.current.splice(0, steerRef.current.length).join("\n\n");
+  const notebookStepRef = useRef<string | null>(null);
+  const notebookSteerStepIdsRef = useRef<string[]>([]);
+  const notebookSteerInFlightIdsRef = useRef<string[]>([]);
+  const drainSteer = () => {
+    const q = steerRef.current;
+    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
+    if (!q.length) return "";
+    if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
+    return q.splice(0, q.length).join("\n\n");
+  };
   const busySendRef = useRef(false);
   // Live port for the notebook's digest agent (refreshed when the notebook opens).
   const [srvPort, setSrvPort] = useState(0);
@@ -1684,6 +1693,20 @@ function CodeWorkspace({ pageId, onTitle }: {
       });
       setBusy(false);
       abortRef.current = null;
+      // 📓 Stamp notebook step timing and append a concise run timing footer
+      // after the agent's answer so the user sees start/finish for every run.
+      const now = Date.now();
+      const payload = chatRuntime.getSnapshot(SID).payload as CodeState | undefined;
+      if (notebookStepRef.current) {
+        markNotebookStepFinished(ruleScopeRef.current.id, notebookStepRef.current, now);
+        notebookStepRef.current = null;
+      }
+      for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
+        markNotebookStepFinished(ruleScopeRef.current.id, sid, now);
+      }
+      if (payload?.runStartedAt) {
+        setMessages((msgs) => [...msgs, { role: "assistant", content: runTimingFooter(payload.runStartedAt!, now), ts: now }]);
+      }
       // After state settles: steers queued on a path that can't inject
       // mid-turn (CLI/API) land as a follow-up turn — never silently dropped
       // (unless the user hit Stop). Then, on a clean finish, auto-feed the
@@ -1697,7 +1720,10 @@ function CodeWorkspace({ pageId, onTitle }: {
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
         if (ok) {
           const st = takeNextAutoStep(ruleScopeRef.current.id, notebookSurfaceId);
-          if (st) void sendRef.current?.(st.text);
+          if (st) {
+            notebookStepRef.current = st.id;
+            void sendRef.current?.(st.text);
+          }
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
           setMessages((msgs) => [...msgs, { role: "assistant", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }
@@ -1824,9 +1850,14 @@ function CodeWorkspace({ pageId, onTitle }: {
 
   // Notebook → coder: idle = dispatch now; busy = mid-run steer (drained
   // between tool calls on local models, at turn end otherwise).
-  const feedFromNotebook = (text: string): "queued" | "dispatched" | "no-team" => {
+  const feedFromNotebook = (text: string, stepId?: string): "queued" | "dispatched" | "no-team" => {
     if (!workspace || !modelId) return "no-team";
-    if (busySendRef.current) { steerRef.current.push(text); return "queued"; }
+    if (busySendRef.current) {
+      steerRef.current.push(text);
+      if (stepId) notebookSteerStepIdsRef.current.push(stepId);
+      return "queued";
+    }
+    notebookStepRef.current = stepId ?? null;
     void sendRef.current?.(text);
     return "dispatched";
   };

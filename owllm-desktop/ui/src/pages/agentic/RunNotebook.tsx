@@ -29,6 +29,7 @@ import { useAutoResize } from "../../hooks/useAutoResize";
 import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
+import { formatDuration, formatClock } from "./RunTimer";
 
 export type NotebookStep = {
   id: string;
@@ -36,6 +37,10 @@ export type NotebookStep = {
   /// pending = written, not fed yet · sent = fed to the team · done = user checked it off
   status: "pending" | "sent" | "done";
   ts: number;
+  /// When this step was fed to the team (started as a job).
+  startedAt?: number;
+  /// When the run that processed this step finished.
+  finishedAt?: number;
 };
 
 export type NotebookState = {
@@ -75,7 +80,13 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
     return {
       text: typeof p.text === "string" ? p.text : "",
       plan: typeof p.plan === "string" ? p.plan : "",
-      steps: Array.isArray(p.steps) ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string") : [],
+      steps: Array.isArray(p.steps)
+        ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string").map((s: NotebookStep) => ({
+            ...s,
+            startedAt: typeof s.startedAt === "number" ? s.startedAt : undefined,
+            finishedAt: typeof s.finishedAt === "number" ? s.finishedAt : undefined,
+          }))
+        : [],
       autoFeed: p.autoFeed === true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
@@ -119,6 +130,37 @@ export function autoFeedWouldRun(projectId: string | null | undefined, surfaceId
   if (!nb.autoFeed) return false;
   if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return false;
   return nb.steps.some((s) => s.status === "pending");
+}
+
+/// Stamp when a notebook step was fed to the team. Safe to call from any surface;
+/// the blob is shared per project and the event re-syncs open surfaces.
+export function markNotebookStepStarted(projectId: string | null | undefined, stepId: string, startedAt: number = Date.now()): void {
+  if (!projectId || !stepId) return;
+  const nb = loadNotebook(projectId);
+  const idx = nb.steps.findIndex((s) => s.id === stepId);
+  if (idx < 0) return;
+  nb.steps[idx] = { ...nb.steps[idx], startedAt };
+  saveNotebook(projectId, nb);
+}
+
+/// Stamp when the run that processed a notebook step finished. Idempotent.
+export function markNotebookStepFinished(projectId: string | null | undefined, stepId: string, finishedAt: number = Date.now()): void {
+  if (!projectId || !stepId) return;
+  const nb = loadNotebook(projectId);
+  const idx = nb.steps.findIndex((s) => s.id === stepId);
+  if (idx < 0) return;
+  nb.steps[idx] = { ...nb.steps[idx], finishedAt };
+  saveNotebook(projectId, nb);
+}
+
+/// Format a step's timing line: started → finished, duration, or still running.
+function formatStepTiming(s: NotebookStep): string | null {
+  if (s.startedAt == null) return null;
+  const start = formatClock(s.startedAt);
+  if (s.finishedAt != null) {
+    return `started ${start} • finished ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`;
+  }
+  return `started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`;
 }
 
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -213,7 +255,9 @@ type Props = {
   /// Is a team run in progress right now (steers queue vs new dispatch).
   running: boolean;
   /// Feed one step to the team. Returns what happened so the UI can say it.
-  onFeed: (text: string) => "queued" | "dispatched" | "no-team";
+  /// The optional stepId lets the surface correlate a run back to the step
+  /// that started it for start/finish timing.
+  onFeed: (text: string, stepId?: string) => "queued" | "dispatched" | "no-team";
   /// Digest model routing (same trio the BrainstormPanel takes).
   modelId: string;
   port: number;
@@ -346,11 +390,13 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       return { ...prev, steps };
     });
   const feedStep = (s: NotebookStep) => {
-    const res = onFeed(s.text);
+    const res = onFeed(s.text, s.id);
     setFeedNotice({ id: s.id, kind: res });
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
-    setStep(s.id, { status: "sent" });
+    const now = Date.now();
+    setStep(s.id, { status: "sent", startedAt: now });
+    markNotebookStepStarted(projectId, s.id, now);
   };
   /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
   /// the lane content is NEVER cleared or consumed — only read.
@@ -441,6 +487,20 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
 
   const pendingCount = useMemo(() => nb.steps.filter((s) => s.status === "pending").length, [nb.steps]);
+  // Total queue timing: sum of finished durations plus currently-running time.
+  const queueTiming = useMemo(() => {
+    const finished = nb.steps.filter((s) => s.startedAt != null && s.finishedAt != null);
+    const running = nb.steps.filter((s) => s.startedAt != null && s.finishedAt == null);
+    const finishedMs = finished.reduce((a, s) => a + (s.finishedAt! - s.startedAt!), 0);
+    const runningMs = running.reduce((a, s) => a + (Date.now() - s.startedAt!), 0);
+    return { finishedMs, runningMs, finishedCount: finished.length, runningCount: running.length };
+  }, [nb.steps]);
+  const queueTimingText = useMemo(() => {
+    const parts: string[] = [];
+    if (queueTiming.finishedCount) parts.push(`${formatDuration(queueTiming.finishedMs)} done`);
+    if (queueTiming.runningCount) parts.push(`${formatDuration(queueTiming.runningMs)} running`);
+    return parts.length ? `⏱ ${parts.join(" · ")}` : "";
+  }, [queueTiming]);
   // The active feed shows only unfinished, actionable cards. Completed steps
   // drop out of the feed and are preserved in the collapsible history below.
   const activeSteps = useMemo(() => nb.steps.filter((s) => s.status !== "done"), [nb.steps]);
@@ -703,7 +763,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             <div style={{ ...sectionHeader, borderBottom: "none", paddingBottom: 0 }}>
               <span>🎯</span>
               <span>Next steps</span>
-              <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: pendingCount ? "#7ff0c5" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
+              {queueTimingText && (
+                <span title="Total queue time across started steps" style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: "#9ad9ff", border: "1px solid rgba(154,217,255,0.35)", borderRadius: 999, padding: "1px 8px" }}>{queueTimingText}</span>
+              )}
+              <span style={{ fontSize: 10, fontWeight: 700, color: pendingCount ? "#7ff0c5" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
               {pendingCount > 0 && (
                 <button
                   onClick={startQueue}
@@ -772,6 +835,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         </div>
                       )}
                     </div>
+                    {formatStepTiming(s) && (
+                      <div style={{ paddingLeft: 28, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>
+                        {formatStepTiming(s)}
+                      </div>
+                    )}
 
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", paddingLeft: 28 }}>
                       {s.status !== "done" && (
@@ -813,11 +881,16 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   {doneOpen && (
                     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                       {doneSteps.map((s) => (
-                        <div key={s.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
-                          <span style={{ color: "#7ff0c5", fontSize: 13, lineHeight: "18px", flexShrink: 0 }}>✓</span>
-                          <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
-                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" style={{ height: 22, padding: "0 8px", fontSize: 10.5, flexShrink: 0 }}>↺ Reopen</button>
-                          <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" style={{ height: 22, width: 22, padding: 0, fontSize: 11, color: "#ff8c8c", flexShrink: 0 }}>🗑</button>
+                        <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 3, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
+                          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                            <span style={{ color: "#7ff0c5", fontSize: 13, lineHeight: "18px", flexShrink: 0 }}>✓</span>
+                            <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
+                            <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" style={{ height: 22, padding: "0 8px", fontSize: 10.5, flexShrink: 0 }}>↺ Reopen</button>
+                            <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" style={{ height: 22, width: 22, padding: 0, fontSize: 11, color: "#ff8c8c", flexShrink: 0 }}>🗑</button>
+                          </div>
+                          {formatStepTiming(s) && (
+                            <div style={{ paddingLeft: 22, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>{formatStepTiming(s)}</div>
+                          )}
                         </div>
                       ))}
                     </div>

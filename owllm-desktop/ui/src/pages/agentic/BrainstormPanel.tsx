@@ -12,7 +12,7 @@
 // streams the brainstormer's progress live, and closes when BRIEF.md
 // is on disk.
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
@@ -156,6 +156,7 @@ export default function BrainstormPanel(props: Props) {
   // Conversational co-founder (step 3): a back-and-forth before/around the brief.
   const [convHistory, setConvHistory] = useState<{ role: "user" | "assistant"; content: string }[]>([]);
   const [chatInput, setChatInput] = useState("");
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
   // Living visual brief (step 4): the current BRIEF.md text + a board/log toggle.
   const [briefText, setBriefText] = useState("");
   const [boardView, setBoardView] = useState(false);
@@ -164,6 +165,15 @@ export default function BrainstormPanel(props: Props) {
   // open) and follow new log lines only while the user is near the bottom
   // (contentKey = line count) — never yank a user who scrolled up to read.
   const logSticky = useStickyScroll(lines.length, open);
+
+  // Match the other chat composers: start compact, grow with multiline input,
+  // shrink again after Send, and cap the height before enabling inner scroll.
+  useLayoutEffect(() => {
+    const ta = chatInputRef.current;
+    if (!ta) return;
+    ta.style.height = "auto";
+    ta.style.height = `${Math.max(38, Math.min(ta.scrollHeight, 180))}px`;
+  }, [chatInput]);
 
   // Reset when reopened, then restore any checkpointed brainstorm from disk so
   // a session that stopped mid-way (crash, close, refresh) resumes where it left
@@ -763,14 +773,23 @@ export default function BrainstormPanel(props: Props) {
           {/* Conversational input — appears once the co-founder chat has started.
               The user answers questions, refines, or says "go" to research. */}
           {convHistory.length > 0 && (
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
+            <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+              <textarea
+                ref={chatInputRef}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendFollowup(); } }}
                 disabled={running}
+                rows={1}
                 placeholder={running ? "Co-founder is thinking…" : (done ? "Refine the brief, or assemble a team above…" : "Answer, push back, or say ‘go’ to research + write the brief…")}
-                style={{ flex: 1, padding: "9px 12px", background: "rgba(10,14,22,0.8)", color: "#e6ebf7", border: "1px solid rgba(255,255,255,0.12)", borderRadius: 6, fontSize: 13 }}
+                style={{
+                  flex: 1, minWidth: 0, minHeight: 38, maxHeight: 180,
+                  padding: "9px 12px", background: "rgba(10,14,22,0.8)",
+                  color: "#e6ebf7", border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: 6, fontSize: 13, lineHeight: 1.45,
+                  fontFamily: "inherit", resize: "none", outline: "none",
+                  overflowY: "auto",
+                }}
               />
               <button
                 onClick={sendFollowup}

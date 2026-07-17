@@ -148,6 +148,11 @@ pub fn run() {
             // install ships with a rich, equippable skill set. Gated by a
             // sentinel; retries on a later launch if git/network is unavailable.
             bootstrap::provision_curated_skills_first_run();
+            // Safe, no-risk disk housekeeping: if a WSL sandbox is already running
+            // with large regenerable caches, trim them so the .vhdx doesn't balloon
+            // unattended. Background + best-effort — never cold-starts WSL, never
+            // blocks startup, no admin, no sparse (which modern WSL flags unsafe).
+            std::thread::spawn(sandbox::auto_housekeep_startup);
             // Diagnostic: log the resolved paths on startup so missing
             // models / disappeared user state can be triaged from the
             // log file without F12 console acrobatics. Tries three
@@ -538,6 +543,8 @@ pub fn run() {
             sandbox::sandbox_disk_usage,
             sandbox::sandbox_clear_caches,
             sandbox::sandbox_reclaim_disk,
+            sandbox::sandbox_enable_sparse,
+            sandbox::sandbox_trim,
             sandbox::sandbox_create_project,
             sandbox::sandbox_list_projects,
             sandbox::sandbox_provision,

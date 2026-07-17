@@ -7,11 +7,73 @@
 //
 // Extracted verbatim from the ChatPage template (don't fork it — reuse).
 
-import { memo, type CSSProperties } from "react";
+import { memo, useEffect, useState, type CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import MarkdownLink from "./MarkdownLink";
 import { readAppLanguage } from "../localization";
+
+// Resolve any image reference (markdown `![](…)` src OR an attachment) into a
+// URL the Tauri webview can actually load. A raw local path ("C:\…", "/…",
+// "file://…") renders as a BROKEN IMAGE ICON — Tauri only serves local files
+// through the asset protocol (convertFileSrc). data:/blob:/http(s):/asset: are
+// already loadable and pass straight through. Relative/bare names can't be
+// resolved at the view layer (no base dir), so they're returned unchanged.
+export function resolveImageSrc(raw?: string): string {
+  const s = (raw || "").trim();
+  if (!s) return s;
+  if (/^(data:|blob:|https?:|asset:|tauri:)/i.test(s)) return s;
+  let path = s;
+  if (/^file:\/\//i.test(s)) {
+    try { path = decodeURIComponent(s.replace(/^file:\/\//i, "")); } catch { path = s.replace(/^file:\/\//i, ""); }
+    if (/^\/[a-zA-Z]:/.test(path)) path = path.slice(1); // "/C:/x" → "C:/x"
+  }
+  const isAbs = /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith("/") || path.startsWith("\\\\");
+  if (!isAbs) return s;
+  try { return convertFileSrc(path); } catch { return s; }
+}
+
+// Shared image renderer: bounded thumbnail that opens a full-screen lightbox on
+// click (Esc / click to close), and a visible fallback chip when the source
+// can't load — so a missing screenshot says so instead of showing a mystery
+// broken icon. Used both as the markdown `img` component and for uploaded
+// attachment thumbnails, so images work identically in EVERY chat surface.
+export function SmartImage({ src, alt, thumb }: { src?: string; alt?: string; thumb?: boolean }) {
+  const [zoom, setZoom] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const resolved = resolveImageSrc(src);
+  useEffect(() => {
+    if (!zoom) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setZoom(false); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [zoom]);
+  if (failed || !resolved) {
+    return (
+      <span title={src || undefined} style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 8px", margin: "4px 0", border: "1px dashed var(--border-strong)", borderRadius: 6, color: "var(--fg-muted)", fontSize: 11 }}>
+        🖼 image unavailable{alt ? ` — ${alt}` : ""}
+      </span>
+    );
+  }
+  return (
+    <>
+      <img
+        src={resolved}
+        alt={alt || ""}
+        title={alt || undefined}
+        onClick={() => setZoom(true)}
+        onError={() => setFailed(true)}
+        style={{ maxWidth: thumb ? 168 : "100%", maxHeight: thumb ? 168 : 360, width: thumb ? undefined : "auto", borderRadius: 6, border: "1px solid var(--border)", cursor: "zoom-in", objectFit: thumb ? "cover" : "contain", display: thumb ? "inline-block" : "block", margin: thumb ? 0 : "6px 0", verticalAlign: "top" }}
+      />
+      {zoom && (
+        <div onClick={() => setZoom(false)} style={{ position: "fixed", inset: 0, zIndex: 9999, background: "rgba(0,0,0,0.86)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "zoom-out" }}>
+          <img src={resolved} alt={alt || ""} style={{ maxWidth: "94vw", maxHeight: "94vh", objectFit: "contain", boxShadow: "0 8px 40px rgba(0,0,0,0.6)", borderRadius: 8 }} />
+        </div>
+      )}
+    </>
+  );
+}
 
 // Full timestamp next to each turn: "2026/Jun/01 14:32".
 const MONTHS_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];

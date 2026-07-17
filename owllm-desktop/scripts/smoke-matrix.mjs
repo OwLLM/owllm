@@ -102,6 +102,31 @@ function runHarnesses() {
   }
 }
 
+// ---------------------------------------- T: undefined-identifier sweep ----
+// The [merge:code] squash merges have repeatedly kept a symbol's USAGES while
+// dropping its DEFINITION (SmartImage ×2, LINUX_TRANSPARENT_WINDOW,
+// HOST_LABEL). Rollup treats a bare undefined identifier as a runtime global,
+// so `npm run build` passes and the app crashes at MOUNT — v0.8.92 shipped a
+// Latest that white-screened on launch exactly this way. tsc is the only tool
+// that sees the whole class (TS2304/2305/2306/2552), so run it and fail the
+// gate on any cannot-find-name error. The AppShell_PATCH_* scratch files are
+// excluded: they are committed debris, never imported, never bundled.
+function runUndefinedIdentifiers() {
+  console.log("\nT) Undefined-identifier sweep (tsc cannot-find-name family)");
+  const t0 = Date.now();
+  const tscBin = path.join(APP, "node_modules/typescript/bin/tsc");
+  if (!fs.existsSync(tscBin)) {
+    record("T", "tsc undefined-identifier sweep", "SKIP", "node_modules/typescript missing — run npm install in owllm-desktop first");
+    return;
+  }
+  const r = spawnSync(process.execPath, [tscBin, "--noEmit", "-p", path.join(APP, "ui/tsconfig.json")], { encoding: "utf8", timeout: 240_000, cwd: APP });
+  const bad = ((r.stdout || "") + (r.stderr || "")).split(/\r?\n/)
+    .filter((l) => /error TS(2304|2305|2306|2552):/.test(l))
+    .filter((l) => !/AppShell_PATCH/.test(l));
+  record("T", "tsc undefined-identifier sweep", bad.length ? "FAIL" : "PASS",
+    bad.length ? bad.slice(0, 3).join(" | ").slice(0, 200) : "no merge-dropped definitions", Date.now() - t0);
+}
+
 // -------------------------------------------------- mock MCP gateway -------
 // Minimal MCP streamable-HTTP server speaking the same dialect the in-app
 // gateway does (plain-JSON replies — verified live against claude/codex/kimi).
@@ -348,6 +373,7 @@ function runWsl() {
 console.log(`OWLLM smoke matrix — ${new Date().toISOString()} — ${APP}`);
 runStatic();
 runHarnesses();
+runUndefinedIdentifiers();
 if (!STATIC_ONLY) { await runProviders(); runWsl(); }
 else console.log("\n(—static-only: provider + WSL sections skipped)");
 

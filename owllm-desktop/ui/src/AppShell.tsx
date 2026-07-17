@@ -1363,6 +1363,16 @@ function WindowAccentEdge() {
   );
 }
 
+// The accent edge hugs the WINDOW boundary, which is only the visible app
+// edge when the window is opaque (Windows/macOS, or overlay-frame mode).
+// Linux ships a TRANSPARENT window that is LARGER than the in-page
+// HybridFrame (owl headroom + see-through margins) — there the border drew
+// a floating orange rectangle in mid-air around the invisible window rect,
+// slicing through the owl badge. Same UA check index.html uses for the
+// boot splash: only webkit2gtk on Linux reports "Linux".
+const LINUX_TRANSPARENT_WINDOW =
+  typeof navigator !== "undefined" && navigator.userAgent.indexOf("Linux") !== -1;
+
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
   // Resolve the URL's ?page= once on mount so TwinForge can deep-link
@@ -1741,7 +1751,7 @@ export default function AppShell() {
       <EmailBridgeRunner />
       <WebhookBridgeRunner />
       <ResizeEdges />
-      <WindowAccentEdge />
+      {(overlayFrame || !LINUX_TRANSPARENT_WINDOW) && <WindowAccentEdge />}
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
         : <HybridFrame

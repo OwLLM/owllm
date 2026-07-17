@@ -113,7 +113,7 @@ import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isola
 import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { clearRunActivity, setRunActivity } from "../../runtime/runActivity";
-import { ChatBubble, ChatMarkdown, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
+import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 

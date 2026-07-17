@@ -15,4 +15,7 @@ export const ACTION_CATALOG: string[][] = [
   ["All steps done — reopen one from the Archive tab, or add a new step above.", "所有步骤完成——从存档标签页重新打开一个，或在上方添加一个新步骤。", "모든 단계가 완료되었습니다 — 보관 탭에서 하나를 다시 열거나 위에 새 단계를 추가하세요.", "すべてのステップが完了しました — アーカイブタブから1つを再開するか、上に新しいステップを追加してください。", "تمت جميع الخطوات — أعد فتح واحدة من تبويب الأرشيف، أو أضف خطوة جديدة أعلاه.", "Tutti i passaggi completati — riaprine uno dalla scheda Archivio, oppure aggiungi un nuovo passaggio sopra."],
   ["No archived steps yet — steps marked done move here.", "尚无已存档的步骤——标记为完成的步骤会移到这里。", "아직 보관된 단계가 없습니다 — 완료로 표시된 단계가 여기로 이동합니다.", "アーカイブされたステップはまだありません — 完了にしたステップはここに移動します。", "لا توجد خطوات مؤرشفة بعد — تنتقل الخطوات المكتملة إلى هنا.", "Nessun passaggio archiviato — i passaggi contrassegnati come completati vengono spostati qui."],
   ["No steps yet — add one above, or digest your notes below.", "尚无步骤 — 在上方添加一个，或在下方消化您的笔记。", "아직 단계가 없습니다 — 위에서 추가하거나, 아래에서 메모를 요약하세요.", "まだステップはありません — 上に追加するか、下のメモを処理してください。", "لا توجد خطوات بعد — أضف واحدة أعلاه، أو عالج ملاحظاتك أدناه.", "Nessun passaggio ancora — aggiungine uno sopra, o elabora le tue note qui sotto."],
+  ["Chat text size", "聊天文字大小", "채팅 글자 크기", "チャット文字サイズ", "حجم نص الدردشة", "Dimensione testo chat"],
+  ["Increase chat text size", "增大聊天文字", "채팅 글자 크게", "チャット文字を大きく", "تكبير نص الدردشة", "Aumenta dimensione testo chat"],
+  ["Decrease chat text size", "减小聊天文字", "채팅 글자 작게", "チャット文字を小さく", "تصغير نص الدردشة", "Riduci dimensione testo chat"],
 ];

@@ -39,7 +39,7 @@ export function fmtTime(ts?: number): string {
 // messages — the streaming one stays plain pre-wrap to preserve selection.
 export function ChatMarkdown({ text }: { text: string }) {
   return (
-    <div className="md-body" data-no-localize dir="auto" style={{ fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
+    <div className="md-body" data-no-localize dir="auto" style={{ fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, color: "var(--fg)" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -293,7 +293,7 @@ export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isU
       }} data-no-localize dir="auto">
         {!isUser && !isStreaming && content
           ? <ChatMarkdown text={content} />
-          : <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.55 }}>
+          : <span style={{ whiteSpace: "pre-wrap", lineHeight: 1.55, fontSize: "var(--chat-font-size, 13px)" }}>
               {content}{isStreaming ? <span className="owl-cursor">▍</span> : null}
             </span>}
       </div>

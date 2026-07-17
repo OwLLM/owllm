@@ -4760,7 +4760,7 @@ function isCodeFile(path: string): boolean {
 // renderer; this is for prose (replies + thinking blocks).
 function MarkdownBody({ text }: { text: string }) {
   return (
-    <div className="md-body" style={{ fontFamily: "Segoe UI, sans-serif", fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
+    <div className="md-body" style={{ fontFamily: "Segoe UI, sans-serif", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, color: "var(--fg)" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{

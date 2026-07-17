@@ -45,6 +45,11 @@ import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
 import { readKeepFrameVisible, saveKeepFrameVisible } from "./framePreferences";
+import {
+  CHAT_FONT_MIN_STEP, chatFontSizePx, clampChatFontStep,
+  readChatFontStep, saveChatFontStep,
+} from "./chatFontPreferences";
+import ActionIcon from "./components/ActionIcon";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -547,6 +552,7 @@ function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
   onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
+  chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
 }: {
   mode: ActiveMode;
@@ -567,6 +573,8 @@ function ModeBar({
   watcherHint?: boolean;
   keepFrameVisible: boolean;
   onKeepFrameVisible: (checked: boolean) => void;
+  chatFontStep: number;
+  onChatFontStep: (step: number) => void;
   onFrameWatcherEnter: () => void;
   onFrameWatcherLeave: () => void;
 }) {
@@ -804,9 +812,45 @@ function ModeBar({
                 </label>
               </div>
 
-              <div data-ui="SettingsRow3" aria-hidden="true" style={{
-                minHeight: 42, marginTop: 10, borderTop: "1px solid var(--border)",
-              }} />
+              <div data-ui="SettingsRow3" style={{
+                display: "flex", alignItems: "center", gap: 10,
+                minHeight: 42, marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)",
+              }}>
+                <span style={{ fontSize: 11, fontWeight: 700 }}>Chat text size</span>
+                {(() => {
+                  const stepBtn = (delta: number, name: "text-smaller" | "text-larger", label: string) => {
+                    const next = clampChatFontStep(chatFontStep + delta);
+                    const disabled = next === chatFontStep;
+                    return (
+                      <button
+                        aria-label={label}
+                        title={label}
+                        onClick={() => onChatFontStep(next)}
+                        disabled={disabled}
+                        style={{
+                          width: 42, height: 32, borderRadius: 6, padding: 0,
+                          display: "grid", placeItems: "center",
+                          background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                          color: "var(--fg)", cursor: disabled ? "default" : "pointer",
+                          opacity: disabled ? 0.4 : 1,
+                        }}
+                      >
+                        <ActionIcon name={name} size={20} label={label} />
+                      </button>
+                    );
+                  };
+                  return (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginLeft: "auto" }}>
+                      {stepBtn(-1, "text-smaller", "Decrease chat text size")}
+                      <span aria-hidden="true" style={{
+                        minWidth: 26, textAlign: "center", fontSize: 11, fontWeight: 800,
+                        fontVariantNumeric: "tabular-nums", color: "var(--fg-muted)",
+                      }}>{chatFontStep > CHAT_FONT_MIN_STEP ? `+${chatFontStep}` : "A"}</span>
+                      {stepBtn(+1, "text-larger", "Increase chat text size")}
+                    </div>
+                  );
+                })()}
+              </div>
             </div>
           )}
         </div>
@@ -1196,6 +1240,7 @@ export default function AppShell() {
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
   const theme = useTheme();
   const [keepFrameVisible, setKeepFrameVisible] = useState<boolean>(() => readKeepFrameVisible());
+  const [chatFontStep, setChatFontStep] = useState<number>(() => readChatFontStep());
   const [frameVisible, setFrameVisible] = useState<boolean>(true);
   const frameHideTimer = useRef<number | undefined>(undefined);
 
@@ -1224,6 +1269,13 @@ export default function AppShell() {
     else hideFrameAfter(FRAME_IDLE_HIDE_MS);
     return clearFrameHideTimer;
   }, [keepFrameVisible]);
+
+  // Chat body font size — persist the step and expose it as the
+  // `--chat-font-size` CSS variable the shared chat renderers read.
+  useEffect(() => {
+    saveChatFontStep(chatFontStep);
+    document.documentElement.style.setProperty("--chat-font-size", `${chatFontSizePx(chatFontStep)}px`);
+  }, [chatFontStep]);
 
   // Windows draws the decorative art in a separate click-through webview.
   // Broadcast the same visibility state there; the storage message is a
@@ -1463,6 +1515,8 @@ export default function AppShell() {
             watcherHint={watcherHint && overlayFrame}
             keepFrameVisible={keepFrameVisible}
             onKeepFrameVisible={setKeepFrameVisible}
+            chatFontStep={chatFontStep}
+            onChatFontStep={setChatFontStep}
             onFrameWatcherEnter={revealFrame}
             onFrameWatcherLeave={() => hideFrameAfter(FRAME_LEAVE_HIDE_MS)}
           />

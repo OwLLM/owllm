@@ -401,12 +401,12 @@ export default function PublishCards({
   // One click hands the failure to the coder agent instead of making the user
   // copy-paste PUBLISH_FAILED output into the chat. Carries BOTH the last
   // failed action's full output and any unmet readiness checks.
-  const hasFixableIssue = output?.kind === "err" || readyFails.length > 0;
+  const hasFixableIssue = activity?.kind === "err" || readyFails.length > 0;
   const fixWithAgent = () => {
     if (!onFixIssues) return;
     const parts: string[] = [];
-    if (output?.kind === "err") {
-      parts.push(`The last release action failed with this output:\n\n${output.body}`);
+    if (activity?.kind === "err") {
+      parts.push(`The last release action failed with this output:\n\n${activity.msg}`);
     }
     if (readyFails.length > 0) {
       parts.push(`Publish readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);
@@ -639,7 +639,7 @@ export default function PublishCards({
             <button
               onClick={doCommit}
               disabled={disabled || loading || !commitMsg.trim()}
-              style={{ ...chipBtn, justifyContent: "center", background: "var(--accent)", color: "#06080d", border: "none", opacity: commitMsg.trim() ? 1 : 0.5 }}
+              style={{ ...chipBtn, justifyContent: "center", background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: commitMsg.trim() ? 1 : 0.5 }}
             >
               Commit all
             </button>

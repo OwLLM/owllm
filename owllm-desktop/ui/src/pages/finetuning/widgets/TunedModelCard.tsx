@@ -274,8 +274,8 @@ export default function TunedModelCard(props: TunedModelCardProps) {
         )}
       </>}
       subline={
-        <div style={{ fontSize: 11, color: "#9aa0aa", marginTop: 4 }}>
-          base: <span style={{ color: "#d6d8de" }}>{baseModel}</span>
+        <div style={{ fontSize: 11, color: "var(--fg-muted)", marginTop: 4 }}>
+          base: <span style={{ color: "var(--fg)" }}>{baseModel}</span>
         </div>
       }
       compat={compat}
@@ -284,16 +284,16 @@ export default function TunedModelCard(props: TunedModelCardProps) {
       ribbon={<CornerRibbon text={isGguf ? "GGUF" : "TUNED"} bg={isGguf ? "#9C27B0" : "#667eea"} />}
       body={<>
         {(steps !== undefined || finalLoss !== undefined || createdAt) && (
-          <div style={{ display: "flex", gap: 16, fontSize: 11, color: "#9aa0aa", flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 16, fontSize: 11, color: "var(--fg-muted)", flexWrap: "wrap" }}>
             {steps !== undefined     && <span>🔁 {steps} steps</span>}
             {finalLoss !== undefined && <span>📉 loss {finalLoss.toFixed(4)}</span>}
             {createdAt               && <span>🕓 {createdAt}</span>}
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center" }}>
-          {size && <span style={{ fontSize: 13, color: "#fafafa" }}>📦 {size}</span>}
+          {size && <span style={{ fontSize: 13, color: "var(--fg-strong)" }}>📦 {size}</span>}
         </div>
-        <div style={{ fontSize: 11, color: "#9aa0aa", wordBreak: "break-all", lineHeight: 1.3 }}>
+        <div style={{ fontSize: 11, color: "var(--fg-muted)", wordBreak: "break-all", lineHeight: 1.3 }}>
           📂 <a
             href={`file:///${adapterPath.replace(/\\/g, "/")}`}
             style={{ color: "#667eea", textDecoration: "none" }}
@@ -308,7 +308,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
             border: "1px solid rgba(var(--accent-rgb),0.35)",
             borderRadius: 6,
             fontSize: 11,
-            color: "#dcdfe7",
+            color: "var(--fg)",
             display: "flex", flexDirection: "column", gap: 6,
           }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
@@ -382,12 +382,12 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                 padding: 6,
               }}
             >
-              <div style={{ padding: "6px 8px", fontSize: 10, color: "#9aa0aa", lineHeight: 1.4 }}>
+              <div style={{ padding: "6px 8px", fontSize: 10, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                 Pick a quantization, then click Export.
                 {vramGb ? (
                   <> Detected GPU:{" "}
-                    <b style={{ color: "#cfd4e1" }}>{gpuName || "GPU"}</b>{" "}
-                    <span style={{ color: "#cfd4e1" }}>({vramGb.toFixed(1)} GB)</span>;
+                    <b style={{ color: "var(--fg)" }}>{gpuName || "GPU"}</b>{" "}
+                    <span style={{ color: "var(--fg)" }}>({vramGb.toFixed(1)} GB)</span>;
                     ❌ rows won't fit, ⚠ rows are tight (will fit but no headroom for context).
                   </>
                 ) : (
@@ -398,8 +398,8 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                   </span>
                 )}
                 {loadingSize ? " · scanning…" : null}
-                <div style={{ marginTop: 4, color: "#7a8094" }}>
-                  Output: <code style={{ color: "#c8cde0" }}>{adapterName}-&lt;QUANT&gt;.gguf</code> next to the source. Each quant lands as its own card so you can keep several at once.
+                <div style={{ marginTop: 4, color: "var(--fg-subtle)" }}>
+                  Output: <code style={{ color: "var(--fg)" }}>{adapterName}-&lt;QUANT&gt;.gguf</code> next to the source. Each quant lands as its own card so you can keep several at once.
                 </div>
               </div>
               <div style={{ maxHeight: 320, overflowY: "auto" }}>
@@ -518,7 +518,7 @@ export default function TunedModelCard(props: TunedModelCardProps) {
                   style={{
                     minHeight: 30, padding: "0 12px",
                     background: "transparent",
-                    color: "#9aa0a6",
+                    color: "var(--fg-muted)",
                     border: "1px solid rgba(255,255,255,0.08)",
                     borderRadius: 6,
                     fontSize: 11,

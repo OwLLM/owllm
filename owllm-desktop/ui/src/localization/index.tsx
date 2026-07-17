@@ -31,10 +31,7 @@ export function readAppLanguage(): AppLanguage {
 export function bootstrapLocalization() {
   const language = readAppLanguage();
   document.documentElement.lang = language;
-  // Locale controls text shaping, not the physical application geometry.
-  // Root RTL reverses every flex/grid row and can send anchored popups outside
-  // the native window. Arabic text is shaped by the Unicode bidi algorithm.
-  document.documentElement.dir = "ltr";
+  document.documentElement.dir = language === "ar" ? "rtl" : "ltr";
 }
 
 type TemplateTranslation = { regex: RegExp; translated: string };
@@ -113,7 +110,7 @@ function useDocumentLocalization(language: AppLanguage) {
 
   useEffect(() => {
     document.documentElement.lang = language;
-    document.documentElement.dir = "ltr";
+    document.documentElement.dir = language === "ar" ? "rtl" : "ltr";
     document.title = `OWLLM — ${translateUiText("Agentic Team", language)}`;
     try { localStorage.setItem(APP_LANGUAGE_KEY, language); }
     catch { /* localStorage blocked */ }

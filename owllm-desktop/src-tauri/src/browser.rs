@@ -55,14 +55,59 @@ const OWLLM_BG: Color = Color(14, 17, 23, 255);
 const BROWSER_LABEL: &str = "owllm-browser";
 
 /// Child-webview labels of the framed (app-styled) browser window: an OwLLM
-/// chrome bar on top, the actual page below. The legacy single-webview
+/// chrome bar on top, the actual page below. Tab webviews are labelled
+/// `owllm-browser-page-{id}` (see `tab_label`). The legacy single-webview
 /// fallback keeps BROWSER_LABEL as its webview label, so `content_webview`
 /// resolves the page in either shape.
 const CONTENT_LABEL: &str = "owllm-browser-page";
 const CHROME_LABEL: &str = "owllm-browser-chrome";
 
-/// Height of the OwLLM chrome bar (logical px) in the framed window.
-const CHROME_H: f64 = 38.0;
+/// Height of the OwLLM chrome bar (logical px) in the framed window:
+/// a 28px tab strip over a 38px nav (back/reload/URL) row.
+const CHROME_H: f64 = 66.0;
+
+/// X where parked (inactive) tab webviews live. Tauri has no cross-platform
+/// hide() for child webviews, so inactive tabs are simply moved far offscreen
+/// and slid back on activation — works identically on all three platforms.
+const PARK_X: f64 = -20000.0;
+
+/// Open tabs of the framed browser window, strip order + the active id.
+/// Each tab is its own content webview; they all share the same profile
+/// data dir, so cookies/logins span tabs like a normal browser.
+struct Tabs {
+    order: Vec<u64>,
+    active: u64,
+    titles: HashMap<u64, String>,
+}
+
+static TABS: Mutex<Option<Tabs>> = Mutex::new(None);
+static NEXT_TAB: AtomicU64 = AtomicU64::new(1);
+
+fn tab_label(id: u64) -> String {
+    format!("{CONTENT_LABEL}-{id}")
+}
+
+fn is_active_tab(id: u64) -> bool {
+    TABS.lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|t| t.active == id)
+        .unwrap_or(false)
+}
+
+/// Which tab becomes active after `closed` closes: the active tab if a
+/// different one closed, else the next tab in strip order, else the previous
+/// one, else None (the last tab closed → the window goes with it).
+fn next_active_after_close(order: &[u64], closed: u64, active: u64) -> Option<u64> {
+    if closed != active {
+        return Some(active);
+    }
+    let idx = order.iter().position(|t| *t == closed)?;
+    order
+        .get(idx + 1)
+        .copied()
+        .or_else(|| idx.checked_sub(1).and_then(|i| order.get(i).copied()))
+}
 
 /// The app's chrome colour (resolved `--bg-header`), pushed by the UI via
 /// `browser_set_chrome` on boot and on every accent change. The agent-browser
@@ -474,6 +519,39 @@ const BRIDGE_JS: &str = r##"
       }
     } catch (e) { report(reqId, "ERROR: " + (e && e.message ? e.message : e)); }
   };
+  // --- typed-login capture → OwLLM vault ---------------------------------
+  // When the user submits a form with a filled password field (or leaves the
+  // page with one still filled), report origin+username+password to Rust on
+  // the EVT title channel; Rust upserts it into the encrypted browser vault
+  // (browser_vault.rs) so the login autofills next time. Same transient
+  // base64 title mechanics as every other message on this channel.
+  var credSent = "";
+  function grabCred() {
+    var pws = document.querySelectorAll("input[type=password]");
+    var pw = null;
+    for (var i = 0; i < pws.length; i++) if (pws[i].value) { pw = pws[i]; break; }
+    if (!pw) return null;
+    var user = "";
+    var ins = document.querySelectorAll("input");
+    for (var j = 0; j < ins.length; j++) {
+      if (ins[j] === pw) break;
+      var ty = (ins[j].type || "text").toLowerCase();
+      if ((ty === "text" || ty === "email" || ty === "tel") && ins[j].value) user = ins[j].value;
+    }
+    return { origin: location.origin, username: user, password: pw.value };
+  }
+  function reportCred() {
+    var c = grabCred();
+    if (!c) return;
+    var key = c.origin + "" + c.username + "" + c.password;
+    if (key === credSent) return; // same login already reported on this page
+    credSent = key;
+    if (document.title.indexOf(SENT) !== 0) window.__owllmTitle0 = document.title;
+    document.title = SENT + "EVT" + Z + "cred" + Z + b64(JSON.stringify(c));
+    setTimeout(function () { try { document.title = window.__owllmTitle0 || ""; } catch (e) {} }, 60);
+  }
+  document.addEventListener("submit", reportCred, true);
+  window.addEventListener("pagehide", reportCred);
 })();
 "##;
 
@@ -488,10 +566,20 @@ fn get_window(app: &tauri::AppHandle) -> Option<Window> {
     app.get_window(BROWSER_LABEL)
 }
 
-/// The webview that shows the actual page: the content child of the framed
+/// The webview that shows the actual page: the ACTIVE tab of the framed
 /// window, or the single webview of the legacy fallback (same label as the
-/// window there).
+/// window there). Agent commands always drive the active tab.
 fn content_webview(app: &tauri::AppHandle) -> Option<Webview> {
+    let active = TABS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .map(|t| t.active);
+    if let Some(id) = active {
+        if let Some(wv) = app.get_webview(&tab_label(id)) {
+            return Some(wv);
+        }
+    }
     app.get_webview(CONTENT_LABEL)
         .or_else(|| app.get_webview(BROWSER_LABEL))
 }
@@ -642,8 +730,225 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
                 let _ = browser_cmd(app, "navigate".to_string(), json!({ "url": url }));
             });
         }
+        // Tab strip events. All spawned off the title-changed callback (same
+        // reason as "nav": webview creation/teardown must never block the
+        // callback or the main event loop).
+        "tabnew" => {
+            let app = app.clone();
+            std::thread::spawn(move || {
+                if let Err(e) = new_tab(&app, "about:blank") {
+                    eprintln!("[browser] new tab failed: {e}");
+                }
+            });
+        }
+        "tabsel" => {
+            if let Ok(id) = data.trim().parse::<u64>() {
+                let app = app.clone();
+                std::thread::spawn(move || activate_tab(&app, id));
+            }
+        }
+        "tabclose" => {
+            if let Ok(id) = data.trim().parse::<u64>() {
+                let app = app.clone();
+                std::thread::spawn(move || close_tab(&app, id));
+            }
+        }
         _ => {}
     }
+}
+
+/// Build + attach one content (page) webview as a new tab. Active tabs sit
+/// under the chrome bar; inactive ones are parked offscreen. All tabs share
+/// the same profile data dir, so logins/cookies span tabs.
+fn attach_tab(
+    app: &tauri::AppHandle,
+    win: &Window,
+    url: tauri::Url,
+    id: u64,
+    active: bool,
+) -> Result<(), String> {
+    let dev = current_device();
+    #[allow(unused_mut)]
+    let mut content = WebviewBuilder::new(tab_label(id), WebviewUrl::External(url))
+        .initialization_script(BRIDGE_JS)
+        // Dark OwLLM base so the blank / loading webview is OwLLM's surface,
+        // not the bare white "window colour" a fresh webview shows.
+        .background_color(OWLLM_BG)
+        .on_document_title_changed(move |wv, title| {
+            // Typed-login capture rides the EVT channel from BRIDGE_JS.
+            if let Some((action, data)) = parse_chrome_event(&title) {
+                if action == "cred" {
+                    if let Err(e) = crate::browser_vault::store_typed_login(&data) {
+                        eprintln!("[browser] could not save typed login: {e}");
+                    }
+                }
+                return;
+            }
+            capture_reply(&title);
+            if !title.starts_with(SENTINEL) {
+                let app = wv.app_handle().clone();
+                on_tab_title(&app, id, &title);
+            }
+        })
+        .on_page_load(move |wv, payload| {
+            let app = wv.app_handle().clone();
+            if is_active_tab(id) {
+                update_chrome_bar(&app, Some(payload.url().as_str()), None);
+            }
+        });
+    if let Some(ua) = dev.ua {
+        content = content.user_agent(ua);
+    }
+    // A stable, isolated data dir so agent-browser logins persist across runs.
+    // The builder method is only present on Windows/Linux; macOS WKWebView uses
+    // the app's default per-app store (logins still persist there).
+    #[cfg(any(windows, target_os = "linux"))]
+    if let Some(dir) = browser_data_dir() {
+        let _ = std::fs::create_dir_all(&dir);
+        content = content.data_directory(dir);
+    }
+    let scale = win.scale_factor().unwrap_or(1.0);
+    let ls = win
+        .inner_size()
+        .map(|s| s.to_logical::<f64>(scale))
+        .unwrap_or_else(|_| LogicalSize::new(dev.width, dev.height + CHROME_H));
+    let x = if active { 0.0 } else { PARK_X };
+    win.add_child(
+        content,
+        LogicalPosition::new(x, CHROME_H),
+        LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
+    )
+    .map_err(|e| format!("page webview: {e}"))?;
+    Ok(())
+}
+
+/// Open a fresh tab (chrome-bar "+" / tabnew event) and make it active.
+fn new_tab(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
+    let win = get_window(app).ok_or_else(|| "browser not running".to_string())?;
+    if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
+        return Err("legacy browser window has no tabs".to_string());
+    }
+    let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
+    let id = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
+    attach_tab(app, &win, parsed, id, true)?;
+    {
+        let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tabs) = guard.as_mut() {
+            tabs.order.push(id);
+            tabs.active = id;
+        }
+    }
+    // Relayout parks the previously active tab and seats the new one.
+    if let Ok(size) = win.inner_size() {
+        layout_children(app, size);
+    }
+    update_chrome_bar(app, Some(""), Some(""));
+    push_tabs(app);
+    Ok(())
+}
+
+/// Bring `id` into view, park the rest, sync the URL bar + tab strip.
+fn activate_tab(app: &tauri::AppHandle, id: u64) {
+    {
+        let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tabs) = guard.as_mut() else { return };
+        if !tabs.order.contains(&id) {
+            return;
+        }
+        tabs.active = id;
+    }
+    if let Some(win) = get_window(app) {
+        if let Ok(size) = win.inner_size() {
+            layout_children(app, size);
+        }
+    }
+    let url = app
+        .get_webview(&tab_label(id))
+        .and_then(|wv| wv.url().ok())
+        .map(|u| u.to_string())
+        .unwrap_or_default();
+    let title = TABS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .as_ref()
+        .and_then(|t| t.titles.get(&id).cloned())
+        .unwrap_or_default();
+    update_chrome_bar(app, Some(&url), Some(&title));
+    push_tabs(app);
+}
+
+/// Close one tab; closing the last tab closes the whole window.
+fn close_tab(app: &tauri::AppHandle, id: u64) {
+    let next = {
+        let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tabs) = guard.as_mut() else { return };
+        if !tabs.order.contains(&id) {
+            return;
+        }
+        let Some(next) = next_active_after_close(&tabs.order, id, tabs.active) else {
+            *guard = None;
+            drop(guard);
+            if let Some(win) = get_window(app) {
+                let _ = win.destroy();
+            }
+            return;
+        };
+        tabs.order.retain(|t| *t != id);
+        tabs.titles.remove(&id);
+        tabs.active = next;
+        next
+    };
+    if let Some(wv) = app.get_webview(&tab_label(id)) {
+        let _ = wv.close();
+    }
+    activate_tab(app, next);
+}
+
+/// A tab's page set a real title: remember it for the strip, forward the
+/// active tab's to the chrome bar, and refresh the tab pills.
+fn on_tab_title(app: &tauri::AppHandle, id: u64, title: &str) {
+    {
+        let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tabs) = guard.as_mut() {
+            tabs.titles.insert(id, title.to_string());
+        }
+    }
+    if is_active_tab(id) {
+        let url = app
+            .get_webview(&tab_label(id))
+            .and_then(|wv| wv.url().ok())
+            .map(|u| u.to_string())
+            .unwrap_or_default();
+        update_chrome_bar(app, Some(&url), Some(title));
+    }
+    push_tabs(app);
+}
+
+/// Push the live tab list into the chrome bar's tab strip.
+fn push_tabs(app: &tauri::AppHandle) {
+    let Some(chrome) = app.get_webview(CHROME_LABEL) else {
+        return;
+    };
+    let json = {
+        let guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tabs) = guard.as_ref() else { return };
+        let list: Vec<Value> = tabs
+            .order
+            .iter()
+            .map(|id| {
+                json!({
+                    "id": id,
+                    "title": tabs.titles.get(id).cloned().unwrap_or_default(),
+                    "active": *id == tabs.active,
+                })
+            })
+            .collect();
+        Value::Array(list).to_string()
+    };
+    let _ = chrome.eval(&format!(
+        "try{{window.__owllmTabsSet&&window.__owllmTabsSet({})}}catch(e){{}}",
+        serde_json::to_string(&json).unwrap_or_else(|_| "\"[]\"".into())
+    ));
 }
 
 /// Push the page's live url/title into the chrome bar (best-effort).
@@ -742,8 +1047,8 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         .map_err(|e| format!("browser window: {e}"))?;
 
     // Chrome bar — app origin (shares the UI's localStorage theme). Its
-    // buttons/drag/URL box report through the same title channel the page
-    // bridge uses; no IPC grant to any webview is needed.
+    // buttons/drag/URL box/tab strip report through the same title channel the
+    // page bridge uses; no IPC grant to any webview is needed.
     let chrome = WebviewBuilder::new(CHROME_LABEL, WebviewUrl::App("browser-chrome.html".into()))
         .background_color(OWLLM_BG)
         .on_document_title_changed(|wv, title| {
@@ -753,89 +1058,47 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
                     BrowserUiEvent::ChromeAction { action, data },
                 );
             }
-        });
-
-    // Page webview — the engine pushes every document.title change here;
-    // sentinel-tagged ones are the bridge's replies (read half of the channel),
-    // real ones are forwarded to the chrome bar.
-    #[allow(unused_mut)]
-    let mut content = WebviewBuilder::new(CONTENT_LABEL, WebviewUrl::External(url))
-        .initialization_script(BRIDGE_JS)
-        // Dark OwLLM base so the blank / loading webview is OwLLM's surface,
-        // not the bare white "window colour" a fresh webview shows.
-        .background_color(OWLLM_BG)
-        .on_document_title_changed(|wv, title| {
-            capture_reply(&title);
-            if !title.starts_with(SENTINEL) {
-                queue_browser_ui(
-                    &wv.app_handle().clone(),
-                    BrowserUiEvent::ChromeUpdate {
-                        url: None,
-                        title: Some(title),
-                    },
-                );
-            }
         })
-        .on_page_load(|wv, payload| {
-            queue_browser_ui(
-                &wv.app_handle().clone(),
-                BrowserUiEvent::ChromeUpdate {
-                    url: Some(payload.url().to_string()),
-                    title: None,
-                },
-            );
+        // The strip renders from Rust pushes — seed it once the bar exists.
+        .on_page_load(|wv, _payload| {
+            let app = wv.app_handle().clone();
+            push_tabs(&app);
         });
-    if let Some(ua) = dev.ua {
-        content = content.user_agent(ua);
-    }
-    // A stable, isolated data dir so agent-browser logins persist across runs.
-    // The builder method is only present on Windows/Linux; macOS WKWebView uses
-    // the app's default per-app store (logins still persist there).
-    #[cfg(any(windows, target_os = "linux"))]
-    if let Some(dir) = browser_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        content = content.data_directory(dir);
-    }
-
     win.add_child(
         chrome,
         LogicalPosition::new(0.0, 0.0),
         LogicalSize::new(win_w, CHROME_H),
     )
     .map_err(|e| format!("chrome bar webview: {e}"))?;
-    win.add_child(
-        content,
-        LogicalPosition::new(0.0, CHROME_H),
-        LogicalSize::new(win_w, dev.height),
-    )
-    .map_err(|e| format!("page webview: {e}"))?;
 
-    // Keep both children glued to the window on resize/maximize.
+    // First tab. Further tabs come from the chrome bar's "+" (tabnew event).
+    let first = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
+    *TABS.lock().unwrap_or_else(|p| p.into_inner()) = Some(Tabs {
+        order: vec![first],
+        active: first,
+        titles: HashMap::new(),
+    });
+    attach_tab(app, &win, url, first, true)?;
+
+    // Keep the children glued to the window on resize/maximize, and drop the
+    // tab state when the window goes away (✕, browser_stop, device rebuild).
     let handle = app.clone();
-    win.on_window_event(move |ev| {
-        if let WindowEvent::Resized(size) = ev {
-            queue_browser_ui(
-                &handle,
-                BrowserUiEvent::Layout {
-                    width: size.width,
-                    height: size.height,
-                },
-            );
+    win.on_window_event(move |ev| match ev {
+        WindowEvent::Resized(size) => layout_children(&handle, *size),
+        WindowEvent::Destroyed => {
+            *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
         }
+        _ => {}
     });
 
     apply_chrome(&win);
-    queue_browser_ui(
-        app,
-        BrowserUiEvent::ChromeUpdate {
-            url: Some(start_url),
-            title: None,
-        },
-    );
+    update_chrome_bar(app, Some(&start_url), None);
+    push_tabs(app);
     Ok(())
 }
 
-/// Re-fit the chrome bar + page webviews to a new window size.
+/// Re-fit the chrome bar + page webviews to a new window size. The active
+/// tab is seated under the chrome bar; the rest stay parked offscreen.
 fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
     let Some(win) = get_window(app) else { return };
     let scale = win.scale_factor().unwrap_or(1.0);
@@ -844,9 +1107,25 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
         let _ = chrome.set_position(LogicalPosition::new(0.0, 0.0));
         let _ = chrome.set_size(LogicalSize::new(ls.width, CHROME_H));
     }
+    let page = LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0));
+    let (order, active) = {
+        let guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
+        match guard.as_ref() {
+            Some(t) => (t.order.clone(), t.active),
+            None => (Vec::new(), 0),
+        }
+    };
+    for id in order {
+        if let Some(content) = app.get_webview(&tab_label(id)) {
+            let x = if id == active { 0.0 } else { PARK_X };
+            let _ = content.set_position(LogicalPosition::new(x, CHROME_H));
+            let _ = content.set_size(page);
+        }
+    }
+    // Legacy single-webview shape (no tab state).
     if let Some(content) = app.get_webview(CONTENT_LABEL) {
         let _ = content.set_position(LogicalPosition::new(0.0, CHROME_H));
-        let _ = content.set_size(LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)));
+        let _ = content.set_size(page);
     }
 }
 
@@ -858,7 +1137,18 @@ fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         .title("OwLLM — Agent Browser")
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
-        .on_document_title_changed(|_win, title| capture_reply(&title))
+        .on_document_title_changed(|_win, title| {
+            // Typed-login capture works in this shape too (same EVT channel).
+            if let Some((action, data)) = parse_chrome_event(&title) {
+                if action == "cred" {
+                    if let Err(e) = crate::browser_vault::store_typed_login(&data) {
+                        eprintln!("[browser] could not save typed login: {e}");
+                    }
+                }
+                return;
+            }
+            capture_reply(&title);
+        })
         .background_color(OWLLM_BG)
         .theme(Some(tauri::Theme::Dark))
         .decorations(true)
@@ -903,6 +1193,8 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 /// Switch device emulation (desktop / iphone / android / tablet). The UA can
 /// only be set at build time, so if the window is open we rebuild it in place
 /// and re-navigate to the page it was on. Logins survive (stable profile dir).
+/// A rebuild keeps only the ACTIVE tab's page — background tabs close with
+/// the old window, like a fresh browser session.
 #[tauri::command(async)]
 pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<String, String> {
     let dev = device_by_name(&device).ok_or_else(|| {
@@ -1226,39 +1518,35 @@ mod tests {
     }
 
     #[test]
-    fn browser_ui_batch_coalesces_presentation_but_keeps_actions() {
-        let mut batch = BrowserUiBatch::default();
-        batch.absorb(BrowserUiEvent::ChromeUpdate {
-            url: Some("http://localhost:5173/first".into()),
-            title: None,
-        });
-        batch.absorb(BrowserUiEvent::Layout {
-            width: 800,
-            height: 600,
-        });
-        batch.absorb(BrowserUiEvent::ChromeAction {
-            action: "back".into(),
-            data: String::new(),
-        });
-        batch.absorb(BrowserUiEvent::ChromeUpdate {
-            url: Some("http://localhost:5173/final".into()),
-            title: Some("Final title".into()),
-        });
-        batch.absorb(BrowserUiEvent::Layout {
-            width: 1440,
-            height: 900,
-        });
-        batch.absorb(BrowserUiEvent::ChromeAction {
-            action: "reload".into(),
-            data: String::new(),
-        });
+    fn tab_close_picks_neighbor() {
+        // Closing the ACTIVE tab activates the next one, else the previous.
+        assert_eq!(next_active_after_close(&[1, 2, 3], 2, 2), Some(3));
+        assert_eq!(next_active_after_close(&[1, 2, 3], 3, 3), Some(2));
+        assert_eq!(next_active_after_close(&[1, 2, 3], 1, 1), Some(2));
+        // Closing a BACKGROUND tab keeps the current active tab.
+        assert_eq!(next_active_after_close(&[1, 2, 3], 1, 3), Some(3));
+        // Closing the last tab → None (the window closes with it).
+        assert_eq!(next_active_after_close(&[7], 7, 7), None);
+    }
 
-        assert_eq!(batch.url.as_deref(), Some("http://localhost:5173/final"));
-        assert_eq!(batch.title.as_deref(), Some("Final title"));
-        assert_eq!(batch.layout, Some((1440, 900)));
-        assert_eq!(batch.actions.len(), 2);
-        assert_eq!(batch.actions[0].0, "back");
-        assert_eq!(batch.actions[1].0, "reload");
+    #[test]
+    fn tab_labels_are_stable_and_distinct() {
+        assert_eq!(tab_label(1), "owllm-browser-page-1");
+        assert_ne!(tab_label(1), tab_label(2));
+        // The base content label stays reserved for the legacy fallback.
+        assert!(tab_label(1).starts_with(CONTENT_LABEL));
+        assert_ne!(tab_label(1), CONTENT_LABEL);
+    }
+
+    #[test]
+    fn bridge_reports_typed_logins() {
+        // The cred capture must ride the EVT channel with action "cred" so the
+        // content webview's title handler routes it into the vault.
+        assert!(BRIDGE_JS.contains("reportCred"));
+        assert!(BRIDGE_JS.contains("input[type=password]"));
+        assert!(BRIDGE_JS.contains("\"cred\""));
+        assert!(BRIDGE_JS.contains("addEventListener(\"submit\", reportCred, true)"));
+        assert!(BRIDGE_JS.contains("addEventListener(\"pagehide\", reportCred)"));
     }
 
     #[test]

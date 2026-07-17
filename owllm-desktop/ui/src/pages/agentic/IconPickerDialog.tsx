@@ -224,10 +224,10 @@ export default function IconPickerDialog({
           display: "flex", alignItems: "center", gap: 12,
         }}>
           <div style={{ flex: 1 }}>
-            <div style={{ color: "#fff", fontWeight: 700, fontSize: 15 }}>
+            <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 15 }}>
               Pick an icon for <span style={{ color: "#ffd97a" }}>{agentName}</span>
             </div>
-            <div style={{ color: "#aab2c8", fontSize: 11, marginTop: 2 }}>
+            <div style={{ color: "var(--fg-muted)", fontSize: 11, marginTop: 2 }}>
               Override is saved per-project. Click 🔄 Reset to restore the role's default.
             </div>
           </div>
@@ -259,7 +259,7 @@ export default function IconPickerDialog({
             onClick={onCancel}
             style={{
               padding: "6px 12px", fontSize: 12,
-              background: "transparent", color: "#cfd4e1",
+              background: "transparent", color: "var(--fg)",
               border: "1px solid rgba(255,255,255,0.15)", borderRadius: 6,
               cursor: "pointer",
             }}

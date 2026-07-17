@@ -138,7 +138,7 @@ export type StatusKind = "idle" | "running" | "paused" | "error" | "done";
 export type StatusPillProps = { status: StatusKind; detail?: string };
 export function StatusPill({ status, detail }: StatusPillProps) {
   const styles: Record<StatusKind, { color: string; bg: string; label: string }> = {
-    idle:    { color: "#9aa0aa", bg: "rgba(154,160,170,0.12)", label: "Idle" },
+    idle:    { color: "var(--fg-muted)", bg: "rgba(154,160,170,0.12)", label: "Idle" },
     running: { color: "#4CAF50", bg: "rgba(76,175,80,0.18)",   label: "Training" },
     paused:  { color: "#FF9800", bg: "rgba(255,152,0,0.18)",   label: "Paused" },
     error:   { color: "#f44336", bg: "rgba(244,67,54,0.18)",   label: "Error" },

@@ -340,7 +340,7 @@ export default function DatasetBuilderPage() {
             {busy ? (
               <button onClick={stop} style={{ ...btn, flex: 1, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 38 }}>■ Stop</button>
             ) : (
-              <button onClick={generate} disabled={sources.length === 0 || !modelId} style={{ ...btn, flex: 1, height: 38, background: "var(--accent)", color: "#06080d", border: "none", fontWeight: 700, opacity: (sources.length && modelId) ? 1 : 0.5 }}>⚙ Generate dataset</button>
+              <button onClick={generate} disabled={sources.length === 0 || !modelId} style={{ ...btn, flex: 1, height: 38, background: "var(--accent)", color: "var(--accent-fg)", border: "none", fontWeight: 700, opacity: (sources.length && modelId) ? 1 : 0.5 }}>⚙ Generate dataset</button>
             )}
           </div>
           <LogBox lines={log} title="Dataset Builder log" height={120} placeholder="Extraction + generation progress appears here." />

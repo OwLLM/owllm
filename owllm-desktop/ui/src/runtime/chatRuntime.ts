@@ -22,6 +22,8 @@
 //     persister, debounce timer). React never reads these, so they never
 //     trigger renders and survive page unmount.
 
+import { setRunActivity } from "./runActivity";
+
 export type ChatStreamStatus =
   | "idle"
   | "loading"      // cold-load / slot warmup
@@ -223,6 +225,8 @@ export class ChatRuntimeStore {
     handles.abort = abort;
     handles.reader = null;
     handles.busy = true;
+    // Header "running" aura: every streamed chat counts as run activity.
+    setRunActivity(`stream:${id}`, true);
     this.replaceSnapshot(id, { status: "streaming", error: null });
     const controls: StreamRunnerControls = {
       signal: abort.signal,
@@ -243,6 +247,7 @@ export class ChatRuntimeStore {
       });
     } finally {
       handles.busy = false;
+      setRunActivity(`stream:${id}`, false);
       handles.abort = null;
       handles.reader = null;
       this.setLoadingBanner(id, null);

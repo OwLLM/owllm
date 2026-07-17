@@ -39,20 +39,21 @@ function makeStorage(initial = {}) {
   };
 }
 
-// Defaults + bounds.
-check(pref.CHAT_FONT_MIN_STEP === 0 && pref.CHAT_FONT_MAX_STEP === 4 && pref.CHAT_FONT_BASE_PX === 13,
-  "smallest step is the current 13px size, up to +4 in +1 steps");
-check(pref.readChatFontStep(makeStorage()) === 0, "missing preference falls back to the smallest size");
+// Defaults + bounds. Range now runs -1 (one step smaller) up to +6.
+check(pref.CHAT_FONT_MIN_STEP === -1 && pref.CHAT_FONT_MAX_STEP === 6 && pref.CHAT_FONT_BASE_PX === 13,
+  "range is -1..+6 around the current 13px size, in +1 steps");
+check(pref.readChatFontStep(makeStorage()) === 0 && pref.CHAT_FONT_DEFAULT_STEP === 0,
+  "missing preference falls back to the default (0 = shipped) size");
 check(pref.readChatFontStep(makeStorage({ [pref.CHAT_FONT_STEP_KEY]: "not-a-number" })) === 0,
-  "corrupt preference fails safely to the smallest size");
+  "corrupt preference fails safely to the default size");
 
 // Clamp both ends and round fractional values.
-check(pref.clampChatFontStep(-3) === 0 && pref.clampChatFontStep(9) === 4 && pref.clampChatFontStep(2.4) === 2,
-  "steps clamp to [0,4] and snap to whole increments");
+check(pref.clampChatFontStep(-3) === -1 && pref.clampChatFontStep(9) === 6 && pref.clampChatFontStep(2.4) === 2,
+  "steps clamp to [-1,6] and snap to whole increments");
 
-// px mapping: 13,14,15,16,17.
-check(pref.chatFontSizePx(0) === 13 && pref.chatFontSizePx(4) === 17 && pref.chatFontSizePx(99) === 17,
-  "each step maps to +1px (13..17), never past the +4 ceiling");
+// px mapping: 12 (at -1) .. 19 (at +6).
+check(pref.chatFontSizePx(-1) === 12 && pref.chatFontSizePx(0) === 13 && pref.chatFontSizePx(6) === 19 && pref.chatFontSizePx(99) === 19,
+  "each step maps to +1px (12..19), never past the +6 ceiling or -1 floor");
 
 // Round-trip + persisted restore.
 const saved = makeStorage();
@@ -60,7 +61,9 @@ pref.saveChatFontStep(3, saved);
 check(saved.dump()[pref.CHAT_FONT_STEP_KEY] === "3" && pref.readChatFontStep(saved) === 3,
   "the selected step persists and restores at startup");
 pref.saveChatFontStep(50, saved);
-check(pref.readChatFontStep(saved) === 4, "an out-of-range saved value restores clamped to the ceiling");
+check(pref.readChatFontStep(saved) === 6, "an out-of-range saved value restores clamped to the ceiling");
+pref.saveChatFontStep(-9, saved);
+check(pref.readChatFontStep(saved) === -1, "an under-range saved value restores clamped to the floor");
 
 // Chat renderers read the CSS variable (with a 13px fallback) — every chat
 // surface reuses these shared bodies.
@@ -70,6 +73,20 @@ check((bubble.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
 const agents = readSource("pages/agentic/AgentsPage.tsx");
 check(agents.includes("var(--chat-font-size, 13px)"),
   "AgentsPage markdown body applies --chat-font-size");
+
+// The setting must ALSO scale the notebook step text and the user input boxes,
+// not only chat message bubbles (user spec 2026-07-17).
+const notebook = readSource("pages/agentic/RunNotebook.tsx");
+check((notebook.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
+  "RunNotebook step text (active + archived) applies --chat-font-size");
+check((agents.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
+  "AgentsPage user composer input applies --chat-font-size");
+const codePage = readSource("pages/agentic/CodePage.tsx");
+check((codePage.match(/fontSize: "var\(--chat-font-size, 13px\)"|fontSize:"var\(--chat-font-size, 13px\)"/g) || []).length >= 3,
+  "CodePage user input boxes apply --chat-font-size");
+const ftChat = readSource("pages/finetuning/ChatPage.tsx");
+check((ftChat.match(/var\(--chat-font-size, 13px\)/g) || []).length >= 2,
+  "fine-tuning ChatPage composers apply --chat-font-size");
 
 // Icons + Settings control.
 const icons = readSource("components/ActionIcon.tsx");

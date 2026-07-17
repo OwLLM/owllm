@@ -34,12 +34,7 @@ const browserChrome = read("../../public/browser-chrome.html");
 check(main.includes("<LocalizationProvider>"), "the provider wraps the full application");
 check(shell.includes("useLocalization()"), "Settings switches the provider locale live");
 check(localization.includes("localStorage.setItem(APP_LANGUAGE_KEY, language)"), "the selected locale is persisted");
-check((localization.match(/document\.documentElement\.dir = "ltr"/g) ?? []).length >= 2
-  && !localization.includes('language === "ar" ? "rtl" : "ltr"')
-  && styles.includes('html[lang="ar"]')
-  && styles.includes("unicode-bidi: plaintext")
-  && shell.includes('direction: "ltr"'),
-  "Arabic shapes RTL text without mirroring application geometry");
+check(localization.includes('language === "ar" ? "rtl" : "ltr"') && styles.includes('html[dir="rtl"]'), "Arabic enables RTL application layout");
 check(localization.includes('const LOCALIZED_ATTRIBUTES = ["title", "aria-label", "placeholder", "alt"]'), "tooltips and accessibility/input labels are localized");
 check(localization.includes("MutationObserver") && localization.includes("window.confirm ="), "lazy UI/status nodes and native dialogs are localized");
 check(localization.includes("return source;") && localization.includes("guaranteed fallback"), "missing translations fall back to canonical English");

@@ -73,7 +73,7 @@ const SECTION_META: Record<Section, { label: string; color: string }> = {
   kimi:       { label: "KIMI",          color: "#d36bff" },
   gemini:     { label: "GEMINI",        color: "#4285f4" },
   deepseek:   { label: "DEEPSEEK",      color: "#2563eb" },
-  xai:        { label: "xAI · GROK",    color: "#9aa0a6" },
+  xai:        { label: "xAI · GROK",    color: "var(--fg-muted)" },
   groq:       { label: "GROQ",          color: "#ff5d11" },
   perplexity: { label: "PERPLEXITY",    color: "#20b2aa" },
   mistral:    { label: "MISTRAL",       color: "#ff7a00" },

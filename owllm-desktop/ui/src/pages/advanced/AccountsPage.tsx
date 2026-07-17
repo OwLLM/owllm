@@ -501,7 +501,7 @@ function ApiKeyDialog({
         }}
       >
         <div style={{ color: "var(--fg-strong)", fontSize: 14, fontWeight: 700 }}>Set {envName}</div>
-        <div style={{ color: "#bbb", fontSize: 11, lineHeight: 1.55 }}>
+        <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.55 }}>
           Paste your <b>{envName}</b> below. It will be stored in{" "}
           <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 3 }}>
             ~/.owllm/agent_secrets.json
@@ -534,7 +534,7 @@ function ApiKeyDialog({
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button
             onClick={onCancel}
-            style={{ minHeight: 30, padding: "0 14px", background: "var(--bg-surface)", color: "#ddd", border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+            style={{ minHeight: 30, padding: "0 14px", background: "var(--bg-surface)", color: "var(--fg)", border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
           >Cancel</button>
           <button
             onClick={commit}
@@ -595,11 +595,11 @@ function RouteRow({
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatusDot connected={connected} />
-        <div style={{ flex: 1, color: "#dcdfe7", fontSize: 12 }}>
+        <div style={{ flex: 1, color: "var(--fg)", fontSize: 12 }}>
           {route.routeLabel}
         </div>
       </div>
-      <div style={{ fontSize: 11, color: "#9aa0a6", marginLeft: 17 }}>
+      <div style={{ fontSize: 11, color: "var(--fg-muted)", marginLeft: 17 }}>
         {statusText}
       </div>
       {state.testText && (
@@ -775,7 +775,7 @@ function RightRail({
         {tab === "log" && (
           <button
             onClick={() => LOG_HUB.clear()}
-            style={{ background: "transparent", border: "none", color: "#9aa0a6", fontSize: 11, padding: "0 12px", cursor: "pointer", textDecoration: "underline" }}
+            style={{ background: "transparent", border: "none", color: "var(--fg-muted)", fontSize: 11, padding: "0 12px", cursor: "pointer", textDecoration: "underline" }}
           >clear</button>
         )}
         {tab === "terminal" && activeTerm && (
@@ -792,7 +792,7 @@ function RightRail({
       <div style={{ flex: 1, minHeight: 0, display: tab === "terminal" ? "block" : "none" }}>
         {activeTerm
           ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} autoSend={activeTerm.send} />
-          : <div style={{ padding: 14, color: "#5a6376", fontSize: 11, fontStyle: "italic" }}>
+          : <div style={{ padding: 14, color: "var(--fg-dim)", fontSize: 11, fontStyle: "italic" }}>
               Click Connect on any CLI-backed subscription to open a live terminal here.
             </div>}
       </div>
@@ -855,12 +855,12 @@ function InstallLogPanel({ stacked = false, embedded = false }: { stacked?: bool
           padding: "10px 14px",
           borderBottom: "1px solid rgba(255,255,255,0.06)",
         }}>
-          <div style={{ color: "#dcdfe7", fontSize: 12, fontWeight: 700 }}>
+          <div style={{ color: "var(--fg)", fontSize: 12, fontWeight: 700 }}>
             Install / login log
           </div>
           <button
             onClick={() => LOG_HUB.clear()}
-            style={{ background: "transparent", border: "none", color: "#9aa0a6", fontSize: 11, cursor: "pointer", textDecoration: "underline" }}
+            style={{ background: "transparent", border: "none", color: "var(--fg-muted)", fontSize: 11, cursor: "pointer", textDecoration: "underline" }}
           >clear</button>
         </div>
       )}
@@ -872,12 +872,12 @@ function InstallLogPanel({ stacked = false, embedded = false }: { stacked?: bool
           padding: "8px 12px",
           fontFamily: "ui-monospace, Menlo, Consolas, monospace",
           fontSize: 11, lineHeight: 1.5,
-          color: "#cfd4e1",
+          color: "var(--fg)",
           whiteSpace: "pre-wrap", wordBreak: "break-word",
         }}
       >
         {lines.length === 0 && (
-          <div style={{ color: "#5a6376", fontStyle: "italic" }}>
+          <div style={{ color: "var(--fg-dim)", fontStyle: "italic" }}>
             No activity yet. Click Install or Connect on any provider to
             see the live output here instead of a pop-out console.
           </div>

@@ -46,6 +46,7 @@ import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
 import { readKeepFrameVisible, saveKeepFrameVisible } from "./framePreferences";
+import { isRunActive, subscribeRunActivity } from "./runtime/runActivity";
 import {
   CHAT_FONT_MIN_STEP, chatFontSizePx, clampChatFontStep,
   readChatFontStep, saveChatFontStep,
@@ -558,6 +559,22 @@ function MiniFrameReplica({ width, active, children }: {
 // ---------------------------------------------------------------------
 type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 
+// True while ANY run is in flight anywhere in the app (team dispatch, code
+// run, chat stream). Drives the header bars' "running" aura — the same
+// rotating conic-gradient border the active agent tiles show.
+function useRunActive(): boolean {
+  return React.useSyncExternalStore(subscribeRunActivity, isRunActive);
+}
+
+// The header aura reuses the agent tiles' rainbow ring verbatim (same stops,
+// same 4s linear spin) but anchors its start/end stop on the SELECTED GUI
+// accent so the effect visibly carries the user's colour instead of a
+// hardcoded green. Painted padding-box/border-box exactly like the tiles.
+const HEADER_AURA_GRADIENT =
+  `conic-gradient(from var(--owllm-aura-angle),`
+  + ` var(--accent), #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, var(--accent))`;
+const HEADER_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
+
 function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
@@ -591,6 +608,7 @@ function ModeBar({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { language, setLanguage } = useLocalization();
   const settingsRef = useRef<HTMLDivElement>(null);
+  const runActive = useRunActive();
 
   // GitHub / sync account state for the Settings sign-in row (relocated here
   // from the Home page). Reloads on mount, on the in-window `github-changed`
@@ -657,7 +675,11 @@ function ModeBar({
   return (
     <div data-ui="AppHeader" onMouseDown={startDrag} style={{
       position: "relative", zIndex: 50,
-      height: 80,
+      // Geometry is constant across idle/running: border-box height equals
+      // the old 80px content + 20px padding, and the 2px aura border is
+      // always present (transparent when idle) so a run starting never
+      // shifts the layout below.
+      height: 100, boxSizing: "border-box",
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
       // Language changes text, never the physical header/control order.
@@ -665,9 +687,23 @@ function ModeBar({
       // Header surface — now uses --bg-header so the accent picker
       // visibly repaints the band (amber → golden header, red → red
       // header, emerald → green header). Was hardcoded #1c2244.
-      background: "var(--bg-header)",
+      // RUNNING: the band keeps its accent-driven fill (padding-box) while
+      // the rotating aura gradient paints the border ring (border-box) —
+      // the same technique as the active agent tiles.
+      background: runActive
+        ? `linear-gradient(var(--bg-header), var(--bg-header)) padding-box, ${HEADER_AURA_GRADIENT} border-box`
+        : "var(--bg-header)",
+      border: "2px solid transparent",
+      animation: runActive ? HEADER_AURA_ANIMATION : undefined,
       cursor: "default",
     }}>
+      {/* @property makes the conic angle animatable (Houdini); non-supporting
+          browsers fall back to a static rainbow ring — same as the tiles.
+          Declared here (ModeBar never unmounts) for BOTH header bars. */}
+      <style>{`
+        @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+        @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+      `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
         <div ref={settingsRef} data-no-drag style={{ position: "relative" }}>
           <button
@@ -876,15 +912,16 @@ function ModeBar({
                       <span aria-hidden="true" style={{
                         minWidth: 26, textAlign: "center", fontSize: 11, fontWeight: 800,
                         fontVariantNumeric: "tabular-nums", color: "var(--fg-muted)",
-                      }}>{chatFontStep > CHAT_FONT_MIN_STEP ? `+${chatFontStep}` : "A"}</span>
+                      }}>{chatFontStep === 0 ? "A" : chatFontStep > 0 ? `+${chatFontStep}` : `${chatFontStep}`}</span>
                       {stepBtn(+1, "text-larger", "Increase chat text size")}
                     </div>
                   );
                 })()}
               </div>
 
-              {/* GitHub account / sync — relocated here from the Home page.
-                  Shows the connected login (or a sign-in prompt) and opens the
+              {/* GitHub account / sync — relocated here from the Home page and
+                  given a highlighted card (accent-tinted container, badge icon,
+                  bigger label, CTA pill) so signing in stands out. Opens the
                   global AccountSyncModal, which owns the actual login / vault /
                   disconnect flow. */}
               <button
@@ -892,26 +929,36 @@ function ModeBar({
                 onClick={() => { setSettingsOpen(false); openSyncOnboarding(); }}
                 title={account.connected ? "Manage sync / account" : "Sign in to sync your chats & settings across devices"}
                 style={{
-                  display: "flex", alignItems: "center", gap: 10, width: "100%",
-                  marginTop: 10, paddingTop: 10, paddingBottom: 2,
-                  borderTop: "1px solid var(--border)",
-                  background: "none", border: "none", borderTopStyle: "solid",
+                  display: "flex", alignItems: "center", gap: 12, width: "100%",
+                  marginTop: 14, padding: "12px 14px", borderRadius: 12, boxSizing: "border-box",
+                  background: account.connected
+                    ? "linear-gradient(135deg, rgba(34,197,94,0.16), rgba(34,197,94,0.04))"
+                    : "linear-gradient(135deg, var(--accent-soft), rgba(var(--accent-rgb), 0.04))",
+                  border: `1px solid ${account.connected ? "rgba(34,197,94,0.45)" : "var(--accent-strong)"}`,
+                  boxShadow: account.connected ? "0 2px 14px rgba(34,197,94,0.18)" : "0 2px 14px var(--accent-glow-soft)",
                   cursor: "pointer", textAlign: "left", color: "var(--fg)",
                 }}
               >
-                <span style={{ fontSize: 18, lineHeight: 1, flexShrink: 0 }}>
+                <span style={{
+                  width: 38, height: 38, flexShrink: 0, borderRadius: "50%",
+                  display: "grid", placeItems: "center", fontSize: 20,
+                  background: account.connected ? "rgba(34,197,94,0.18)" : "rgba(var(--accent-rgb), 0.18)",
+                  border: `1px solid ${account.connected ? "rgba(34,197,94,0.5)" : "var(--accent-strong)"}`,
+                }}>
                   {account.connected ? "☁️" : "🐙"}
                 </span>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, lineHeight: 1.3 }}>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
                   {account.connected ? (
-                    <span style={{ fontWeight: 800, color: "#22c55e" }}>Synced as @{account.login}</span>
+                    <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--ok)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Synced as @{account.login}</span>
                   ) : (
-                    <span style={{ fontWeight: 800, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
+                    <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
                   )}
                 </span>
                 <span style={{
-                  fontSize: 11.5, fontWeight: 800, flexShrink: 0,
-                  color: account.connected ? "#22c55e" : "var(--accent)",
+                  fontSize: 12.5, fontWeight: 800, flexShrink: 0,
+                  padding: "6px 12px", borderRadius: 999,
+                  background: account.connected ? "rgba(34,197,94,0.18)" : "var(--accent)",
+                  color: account.connected ? "#22c55e" : "var(--accent-fg)",
                 }}>{account.connected ? "Manage →" : "Sign in →"}</span>
               </button>
             </div>
@@ -1102,6 +1149,7 @@ function SubTabs({
   activeKey: string;
   onChange: (key: string) => void;
 }) {
+  const runActive = useRunActive();
   const renderTab = (p: PageDef) => {
     const active = p.key === activeKey;
     return (
@@ -1136,11 +1184,19 @@ function SubTabs({
   ];
 
   return (
-    <div style={{
-      height: 48, background: "var(--bg-card)",
+    <div data-ui="SubTabsBar" style={{
+      // Constant geometry: border-box height covers the old 48px + 1px
+      // separator, and the 2px aura border is always reserved so the bar
+      // doesn't jump when a run starts. Idle keeps the bottom separator
+      // (drawn by the transparent border's bottom colour).
+      height: 49, boxSizing: "border-box", background: runActive
+        ? `linear-gradient(var(--bg-card), var(--bg-card)) padding-box, ${HEADER_AURA_GRADIENT} border-box`
+        : "var(--bg-card)",
       display: "flex", alignItems: "center",
       padding: "0 24px", gap: 6, fontSize: 15, color: "var(--fg)",
-      borderBottom: "1px solid var(--border)",
+      border: "2px solid transparent",
+      borderBottomColor: runActive ? "transparent" : "var(--border)",
+      animation: runActive ? HEADER_AURA_ANIMATION : undefined,
     }}>
       {leftTabs.map(renderTab)}
       <div style={{ flex: 1 }} />
@@ -1306,16 +1362,6 @@ function WindowAccentEdge() {
     }} />
   );
 }
-
-// The accent edge hugs the WINDOW boundary, which is only the visible app
-// edge when the window is opaque (Windows/macOS, or overlay-frame mode).
-// Linux ships a TRANSPARENT window that is LARGER than the in-page
-// HybridFrame (owl headroom + see-through margins) — there the border drew
-// a floating orange rectangle in mid-air around the invisible window rect,
-// slicing through the owl badge. Same UA check index.html uses for the
-// boot splash: only webkit2gtk on Linux reports "Linux".
-const LINUX_TRANSPARENT_WINDOW =
-  typeof navigator !== "undefined" && navigator.userAgent.indexOf("Linux") !== -1;
 
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
@@ -1695,7 +1741,7 @@ export default function AppShell() {
       <EmailBridgeRunner />
       <WebhookBridgeRunner />
       <ResizeEdges />
-      {(overlayFrame || !LINUX_TRANSPARENT_WINDOW) && <WindowAccentEdge />}
+      <WindowAccentEdge />
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
         : <HybridFrame

@@ -196,7 +196,7 @@ function LossChart({ data }: { data: { step: number; loss: number }[] }) {
     return (
       <div style={{
         flex: 1, display: "flex", alignItems: "center", justifyContent: "center",
-        color: "#888", fontSize: 11, padding: "20px 0",
+        color: "var(--fg-subtle)", fontSize: 11, padding: "20px 0",
       }}>
         No loss data yet — start a run to see the curve.
       </div>
@@ -320,13 +320,13 @@ function TrainingHistory() {
         overflow: "auto",
         maxHeight: 240,
       }}>
-        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "#e8eef7" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11, color: "var(--fg-strong)" }}>
           <thead>
             <tr>
               {["When", "Adapter", "Base", "Epochs", "Steps", "Final loss", "Status", "Actions"].map((h) => (
                 <th key={h} style={{
                   background: "rgba(var(--accent-rgb),0.2)",
-                  color: "#fafafa",
+                  color: "var(--fg-strong)",
                   padding: 6,
                   border: "none",
                   fontWeight: 700,
@@ -339,7 +339,7 @@ function TrainingHistory() {
           </thead>
           <tbody>
             {rows.length === 0 ? (
-              <tr><td colSpan={8} style={{ padding: 14, textAlign: "center", color: "#6b7280" }}>
+              <tr><td colSpan={8} style={{ padding: 14, textAlign: "center", color: "var(--fg-subtle)" }}>
                 {loading ? "Loading…" : "No past runs found in fine_tuned/."}
               </td></tr>
             ) : rows.map((r, i) => (
@@ -875,7 +875,7 @@ export default function TrainPage() {
                     : "rgba(76,175,80,0.18)",
                   border: "1px solid rgba(76,175,80,0.45)",
                   borderRadius: 6,
-                  color: "#fafafa",
+                  color: "var(--fg-strong)",
                   fontSize: 12,
                   fontWeight: 600,
                   padding: "6px 10px",
@@ -954,7 +954,7 @@ export default function TrainPage() {
           gap: 5,
           minHeight: 220,
         }}>
-          <div style={{ color: "#fff", fontSize: 13, fontWeight: 800 }}>📉 Loss Over Time</div>
+          <div style={{ color: "var(--fg-strong)", fontSize: 13, fontWeight: 800 }}>📉 Loss Over Time</div>
           <LossChart data={status.lossHistory ?? []} />
         </div>
 
@@ -1164,13 +1164,13 @@ function AbliterateSection({ baseModel }: { baseModel: string }) {
           }}
         >ⓘ</button>
       </div>
-      <div style={{ fontSize: 11, color: "#9aa0aa", lineHeight: 1.4 }}>
+      <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
         Strip refusal directions from the base model above. Output goes
         to a new transformers-format directory — quantize to GGUF or
         run directly afterward.
       </div>
       <div style={{ fontSize: 10, color: "#8595ad", wordBreak: "break-all" }}>
-        Output: <span style={{ color: "#cfd4e1" }}>{outputDir || "(no model selected)"}</span>
+        Output: <span style={{ color: "var(--fg)" }}>{outputDir || "(no model selected)"}</span>
       </div>
       <button
         onClick={start}
@@ -1251,17 +1251,17 @@ function AbliterateInfoModal({ onClose }: { onClose: () => void }) {
       >
         <div style={{ padding: "14px 18px", borderBottom: "1px solid rgba(244,67,54,0.3)" }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>🚫 What is abliteration?</div>
-          <div style={{ fontSize: 11, color: "#9aa0aa", marginTop: 4 }}>
+          <div style={{ fontSize: 11, color: "var(--fg-muted)", marginTop: 4 }}>
             FailSpy's refusal-direction stripping recipe
           </div>
         </div>
-        <div style={{ padding: "14px 18px", overflowY: "auto", flex: 1, fontSize: 12.5, lineHeight: 1.55, color: "#d6d8de" }}>
+        <div style={{ padding: "14px 18px", overflowY: "auto", flex: 1, fontSize: 12.5, lineHeight: 1.55, color: "var(--fg)" }}>
           <p>
             Abliteration finds and deletes the single direction in the
             model's residual stream that's most responsible for refusal
             ("Sorry, I can't help with that") behaviour, without retraining.
           </p>
-          <p style={{ fontWeight: 700, color: "#fafafa", marginTop: 12 }}>How it works:</p>
+          <p style={{ fontWeight: 700, color: "var(--fg-strong)", marginTop: 12 }}>How it works:</p>
           <ol style={{ paddingLeft: 22, margin: "6px 0" }}>
             <li>Loads the target model in transformers (HF format, fp16 on CUDA).</li>
             <li>Runs ~32 "harmful" + ~32 "harmless" prompts through it.</li>
@@ -1274,7 +1274,7 @@ function AbliterateInfoModal({ onClose }: { onClose: () => void }) {
               directory — runnable / quantizable / fine-tunable like any
               other model.</li>
           </ol>
-          <p style={{ fontWeight: 700, color: "#fafafa", marginTop: 12 }}>
+          <p style={{ fontWeight: 700, color: "var(--fg-strong)", marginTop: 12 }}>
             Runtime (RTX 4090-class GPU):
           </p>
           <ul style={{ paddingLeft: 22, margin: "6px 0" }}>
@@ -1282,7 +1282,7 @@ function AbliterateInfoModal({ onClose }: { onClose: () => void }) {
             <li>7-8B model: ~10-20 min</li>
             <li>13B+ model: 30-60+ min (depends on VRAM headroom for fp16 forward passes)</li>
           </ul>
-          <p style={{ marginTop: 12, color: "#9aa0aa" }}>
+          <p style={{ marginTop: 12, color: "var(--fg-muted)" }}>
             This is the same technique that produced models like
             DavidAU's abliterated Gemma, NousResearch's variants, and
             the "supergemma4-abliterated" entry in your downloaded list.
@@ -1339,7 +1339,7 @@ function InfoTip({ children }: { children: React.ReactNode }) {
           position: "absolute", top: "130%", left: 0, zIndex: 50, width: 280,
           background: "var(--bg-elevated)", border: "1px solid rgba(var(--accent-rgb),0.45)",
           borderRadius: 8, padding: "10px 12px", boxShadow: "0 12px 32px rgba(0,0,0,0.5)",
-          color: "#c4ccda", fontSize: 11, lineHeight: 1.5, fontWeight: 400, letterSpacing: 0,
+          color: "var(--fg)", fontSize: 11, lineHeight: 1.5, fontWeight: 400, letterSpacing: 0,
           opacity: hover ? 1 : 0, pointerEvents: "none",
           transform: hover ? "translateY(0)" : "translateY(-4px)",
           transition: "opacity 0.15s ease, transform 0.15s ease",

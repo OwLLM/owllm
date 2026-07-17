@@ -60,7 +60,9 @@ check(shell.includes('window.addEventListener("focus", load)'),
 
 // The row's click opens the modal (which owns login + disconnect) and closes
 // the popup so the modal isn't hidden behind it.
-const rowSlice = shell.slice(rowAt, rowAt + 1400);
+// Window spans the whole card button (the highlighted container with badge +
+// CTA pill is larger than a bare row, so this is generously sized).
+const rowSlice = shell.slice(rowAt, rowAt + 2600);
 check(rowSlice.includes("openSyncOnboarding()"), "clicking the account row opens the sign-in/out modal");
 check(rowSlice.includes("setSettingsOpen(false)"), "opening the modal first closes the Settings popup");
 
@@ -69,6 +71,15 @@ check(rowSlice.includes("account.connected"), "the row branches on the connected
 check(rowSlice.includes("Synced as @") && rowSlice.includes("{account.login}"),
   "when connected, the row shows the logged-in GitHub login");
 check(rowSlice.includes("Sign in with GitHub"), "when signed out, the row prompts to sign in with GitHub");
+
+// ── 4. Highlighted container (user spec 2026-07-17: bigger fonts + pretty
+//       container so the sign-in stands out) ──────────────────────────────
+check(rowSlice.includes("borderRadius: 12") && rowSlice.includes("linear-gradient"),
+  "the account row is a rounded, accent-tinted highlighted container");
+check(rowSlice.includes("fontSize: 14.5"),
+  "the account label uses a larger, prominent font");
+check(rowSlice.includes('borderRadius: 999') && (rowSlice.includes('"Manage →"') || rowSlice.includes("Manage →")),
+  "the call-to-action renders as a pill button");
 
 // The globally-mounted modal (the actual auth surface) is still rendered.
 check(shell.includes("<AccountSyncModal />"), "the AccountSyncModal remains mounted so the auth flow still works");

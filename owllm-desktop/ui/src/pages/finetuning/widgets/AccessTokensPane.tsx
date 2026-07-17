@@ -299,7 +299,7 @@ function InfoTab(p: { selectedModel: SelectedModelInfo | null }) {
       )}
 
       {m.description && (
-        <div style={{ fontSize: 12, color: "#d6d8de", lineHeight: 1.4 }}>{m.description}</div>
+        <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.4 }}>{m.description}</div>
       )}
 
       <div style={{ borderTop: "1px solid var(--border-strong)", marginTop: 4, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>

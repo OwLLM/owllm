@@ -497,7 +497,7 @@ const styles: Record<string, React.CSSProperties> = {
   title: { margin: 0, fontSize: 20, fontWeight: 600 },
   hwLine: {
     fontSize: 12,
-    color: "#7e8aa0",
+    color: "var(--fg-subtle)",
     marginTop: 4,
     fontFamily: "ui-monospace, Menlo, Consolas, monospace",
   },
@@ -505,7 +505,7 @@ const styles: Record<string, React.CSSProperties> = {
   section: { marginBottom: 18 },
   sectionTitle: {
     fontSize: 11,
-    color: "#5d6b80",
+    color: "var(--fg-dim)",
     textTransform: "uppercase",
     letterSpacing: 1,
     margin: "16px 0 8px 0",
@@ -515,8 +515,8 @@ const styles: Record<string, React.CSSProperties> = {
   rowMain: { flex: 1, minWidth: 0 },
   rowHeader: { display: "flex", alignItems: "center", gap: 8 },
   rowName: { fontSize: 14, fontWeight: 500 },
-  rowSize: { fontSize: 12, color: "#7e8aa0" },
-  rowDesc: { fontSize: 12, color: "#9aa5b8", marginTop: 4, lineHeight: 1.4 },
+  rowSize: { fontSize: 12, color: "var(--fg-subtle)" },
+  rowDesc: { fontSize: 12, color: "var(--fg-muted)", marginTop: 4, lineHeight: 1.4 },
   rowDeps: { fontSize: 11, color: "#6b7896", marginTop: 4, fontStyle: "italic" },
   rowErr: { fontSize: 11, color: "#c87878", marginTop: 4, lineHeight: 1.4 },
   checkbox: { marginTop: 4, width: 16, height: 16, accentColor: "#3ec5d8" },
@@ -555,7 +555,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: "#3ec5d8",
     transition: "width 0.2s",
   },
-  progressText: { fontSize: 11, color: "#7e8aa0", marginTop: 4, fontFamily: "ui-monospace, monospace" },
+  progressText: { fontSize: 11, color: "var(--fg-subtle)", marginTop: 4, fontFamily: "ui-monospace, monospace" },
   footer: {
     padding: "14px 24px",
     borderTop: "1px solid #1a2030",
@@ -564,7 +564,7 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: "space-between",
     gap: 12,
   },
-  totalLine: { fontSize: 12, color: "#7e8aa0" },
+  totalLine: { fontSize: 12, color: "var(--fg-subtle)" },
   btnRow: { display: "flex", gap: 8 },
   btnPrimary: {
     background: "#3ec5d8",
@@ -578,7 +578,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   btnSecondary: {
     background: "transparent",
-    color: "#9aa5b8",
+    color: "var(--fg-muted)",
     border: "1px solid #2a3245",
     padding: "8px 16px",
     borderRadius: 4,
@@ -587,7 +587,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   btnLink: {
     background: "transparent",
-    color: "#7e8aa0",
+    color: "var(--fg-subtle)",
     border: "none",
     fontSize: 11,
     padding: "4px 0",
@@ -595,7 +595,7 @@ const styles: Record<string, React.CSSProperties> = {
     textDecoration: "underline",
     marginTop: 4,
   },
-  spinner: { color: "#7e8aa0", fontSize: 13, fontFamily: "ui-monospace, monospace" },
+  spinner: { color: "var(--fg-subtle)", fontSize: 13, fontFamily: "ui-monospace, monospace" },
   err: {
     background: "#1a0d0d",
     color: "#d87878",

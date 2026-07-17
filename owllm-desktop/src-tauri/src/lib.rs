@@ -452,6 +452,7 @@ pub fn run() {
             huggingface::delete_model_weight,
             recommendations::models_recommended,
             paths::shell_open_url,
+            paths::update_install_mode,
             paths::paths_debug,
             paths::llama_server_path,
             readiness::app_readiness,

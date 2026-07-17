@@ -13,8 +13,14 @@
 // the modal, which is the right failure mode.
 
 import React, { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 const ICONS = "/Page_icons";
+
+// Where package-managed installs (Linux deb/rpm) are sent to fetch the new
+// version by hand — the public dist repo's latest release, same target as
+// the download page cards.
+const RELEASES_URL = "https://github.com/OwLLM/owllm/releases/latest";
 
 type Phase = "hidden" | "prompt" | "downloading" | "installing" | "error";
 
@@ -65,6 +71,11 @@ export default function UpdateController() {
   const [downloaded, setDownloaded] = useState(0);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
+  // "auto" = the updater can swap this install in place (Windows NSIS,
+  // macOS .app, Linux AppImage). "manual" = Linux deb/rpm — in-place
+  // install is impossible (plugin errors with "invalid updater binary
+  // format"), so we offer the download page instead.
+  const [installMode, setInstallMode] = useState<"auto" | "manual">("auto");
 
   // One-shot check on mount. We don't poll — Tauri's updater is
   // designed for once-per-launch checks. Users who keep the app
@@ -83,6 +94,10 @@ export default function UpdateController() {
           try {
             if (sessionStorage.getItem("owllm:update:dismissed") === (u as any).version) return;
           } catch { /* storage blocked — show as normal */ }
+          try {
+            const mode = await invoke<string>("update_install_mode");
+            if (mode === "manual") setInstallMode("manual");
+          } catch { /* older backend without the command — assume auto */ }
           setUpdate(u as unknown as Update);
           setPhase("prompt");
         }
@@ -97,6 +112,15 @@ export default function UpdateController() {
   const dismiss = () => {
     setPhase("hidden");
     try { sessionStorage.setItem("owllm:update:dismissed", update?.version ?? ""); } catch { /* best effort */ }
+  };
+
+  // Manual-mode path (Linux deb/rpm): open the releases page in the
+  // default browser and dismiss — there is nothing we can install in place.
+  const onDownload = () => {
+    invoke("shell_open_url", { url: RELEASES_URL }).catch(() => {
+      try { window.open(RELEASES_URL, "_blank", "noopener,noreferrer"); } catch { /* ignore */ }
+    });
+    dismiss();
   };
 
   const onInstall = async () => {
@@ -244,6 +268,23 @@ export default function UpdateController() {
 
         {/* Phase-specific body */}
         {phase === "prompt" && (
+          <div>
+            {installMode === "manual" && (
+              <div style={{
+                fontSize: 12,
+                lineHeight: 1.5,
+                color: "rgba(255,255,255,0.65)",
+                background: "rgba(255,255,255,0.04)",
+                border: "1px solid rgba(255,255,255,0.08)",
+                borderRadius: 8,
+                padding: "9px 12px",
+                marginBottom: 14,
+              }}>
+                This copy was installed from a system package (deb/rpm), which can't
+                update itself. Grab the new package from the releases page and install
+                it with your package manager.
+              </div>
+            )}
           <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
             <button
               onClick={dismiss}
@@ -264,7 +305,7 @@ export default function UpdateController() {
               Later
             </button>
             <button
-              onClick={onInstall}
+              onClick={installMode === "manual" ? onDownload : onInstall}
               style={{
                 background: "linear-gradient(180deg, rgba(var(--accent-rgb),0.85), rgba(var(--accent-rgb),0.65))",
                 border: "1px solid rgba(var(--accent-rgb),0.95)",
@@ -280,8 +321,9 @@ export default function UpdateController() {
               onMouseEnter={(e) => { (e.currentTarget as HTMLButtonElement).style.transform = "translateY(-1px)"; }}
               onMouseLeave={(e) => { (e.currentTarget as HTMLButtonElement).style.transform = "translateY(0)"; }}
             >
-              Install now
+              {installMode === "manual" ? "Download update ↗" : "Install now"}
             </button>
+          </div>
           </div>
         )}
 

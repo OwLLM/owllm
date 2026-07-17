@@ -66,6 +66,31 @@ pub fn shell_open_url(url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// How this install can take updates.
+///   "auto"   — tauri-plugin-updater can swap the binary in place
+///              (Windows NSIS, macOS .app bundle, Linux AppImage).
+///   "manual" — package-managed install (deb/rpm): the updater plugin
+///              cannot replace it (it fails with "invalid updater binary
+///              format"), so the UI must send the user to the download
+///              page instead of offering an in-place install.
+#[tauri::command]
+pub fn update_install_mode() -> &'static str {
+    #[cfg(target_os = "linux")]
+    {
+        // Tauri's Linux updater only handles AppImage, detected via the
+        // APPIMAGE env var the AppImage runtime sets. Absent → deb/rpm.
+        if std::env::var_os("APPIMAGE").is_some() {
+            "auto"
+        } else {
+            "manual"
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        "auto"
+    }
+}
+
 /// Root of the legacy runtime-data tree (the dir formerly known as
 /// `LLM/`, renamed in Phase 5 to `runtime-data/`). Contains
 /// `models/`, `runtime/`, `python_runtime/`, `.envs/`, etc. Returns

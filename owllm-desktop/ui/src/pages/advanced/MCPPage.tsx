@@ -588,7 +588,7 @@ function ServerCard({
           Auto-start
         </label>
         <span style={{
-          background: badgeColor, color: "#fff",
+          background: badgeColor, color: "var(--fg-strong)",
           padding: "4px 12px", borderRadius: 4,
           fontSize: 11, fontWeight: 700,
         }}>{badgeText}</span>
@@ -728,7 +728,7 @@ function ServerCard({
                       }}>SANITIZED</span>
                   )}
                   {off && (
-                    <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#9E9E9E" }}>OFF</span>
+                    <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "var(--fg-muted)" }}>OFF</span>
                   )}
                   {t.description && (
                     <span style={{ color: "var(--fg-subtle)" }}> — {t.description}</span>

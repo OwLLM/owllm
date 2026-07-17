@@ -208,7 +208,7 @@ export default function InfoPage() {
               <Row label="GPUs" value={hw.gpus.length === 0 ? "(none detected)" : `${hw.gpus.length}`} />
             </>
           ) : (
-            <div style={{ fontSize: 12, color: "#7a7f87" }}>Probing…</div>
+            <div style={{ fontSize: 12, color: "var(--fg-subtle)" }}>Probing…</div>
           )}
         </Card>
 
@@ -228,7 +228,7 @@ export default function InfoPage() {
                           {"  "}·  {(live.used_mib / 1024).toFixed(1)} / {(live.total_mib / 1024).toFixed(1)} GiB live
                         </span>
                       ) : (
-                        <span style={{ color: "#7a7f87" }}>{"  "}·  {g.vram_gb.toFixed(1)} GiB</span>
+                        <span style={{ color: "var(--fg-subtle)" }}>{"  "}·  {g.vram_gb.toFixed(1)} GiB</span>
                       )}
                     </span>
                   }
@@ -236,7 +236,7 @@ export default function InfoPage() {
               );
             })
           ) : (
-            <div style={{ fontSize: 12, color: "#7a7f87" }}>No GPUs visible — nvidia-smi unreachable.</div>
+            <div style={{ fontSize: 12, color: "var(--fg-subtle)" }}>No GPUs visible — nvidia-smi unreachable.</div>
           )}
         </Card>
 

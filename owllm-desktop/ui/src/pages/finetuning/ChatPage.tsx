@@ -1511,7 +1511,7 @@ export default function ChatPage() {
                   background: COLUMN_GRADIENT[col.id],
                   borderRadius: 6,
                   display: "flex", alignItems: "center", gap: 6,
-                  color: "#fff",
+                  color: "var(--fg-strong)",
                 }}>
                   <span style={{ fontSize: 16, fontWeight: 700 }}>
                     {col.emoji} Model {col.id}
@@ -1522,7 +1522,7 @@ export default function ChatPage() {
                   {(() => {
                     const prov = providerFor(col.selectedModel, availableModels);
                     if (prov === "local" || prov === "tuned") {
-                      return <span style={{ fontSize: 16, color: "#000" }}>(Port: {status.port ?? "-"})</span>;
+                      return <span style={{ fontSize: 16, color: "var(--fg)" }}>(Port: {status.port ?? "-"})</span>;
                     }
                     if (!col.selectedModel) return null;
                     const tag = col.selectedModel.startsWith("sub/") ? "subscription"
@@ -1561,7 +1561,7 @@ export default function ChatPage() {
                   }}
                 >
                   {colMsgs(col.id).length === 0 ? (
-                    <div style={{ fontSize: 11, color: "#7a7f87" }}>
+                    <div style={{ fontSize: 11, color: "var(--fg-subtle)" }}>
                       {status.running
                         ? "Send a message below — this column will reply."
                         : autoStarting
@@ -1874,7 +1874,7 @@ export default function ChatPage() {
                   style={{
                     flex: 1, padding: "8px 12px",
                     background: COLUMN_GRADIENT[id],
-                    color: "#fff",
+                    color: "var(--fg-strong)",
                     border: `1px solid ${isActive ? "rgba(255,255,255,0.55)" : "rgba(255,255,255,0.12)"}`,
                     borderRadius: 6,
                     fontSize: 13, fontWeight: 700,
@@ -1980,7 +1980,7 @@ export default function ChatPage() {
                     </ParamRow>
                   </fieldset>
 
-                  <div style={{ fontSize: 10, color: "#bbb" }}>Tokens: 0</div>
+                  <div style={{ fontSize: 10, color: "var(--fg-muted)" }}>Tokens: 0</div>
                 </>
               );
             })()}
@@ -2054,7 +2054,7 @@ const panelLegendStyle: React.CSSProperties = {
   padding: "0 8px",
   fontSize: 12,
   fontWeight: 700,
-  color: "#fff",
+  color: "var(--fg-strong)",
 };
 
 const smallActionBtn: React.CSSProperties = {
@@ -2081,8 +2081,8 @@ const paramInputStyle: React.CSSProperties = {
 function ParamRow(p: { label: string; value: string; children: React.ReactNode }) {
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 8, padding: "3px 0" }}>
-      <span style={{ fontSize: 11, color: "#fff" }}>{p.label}</span>
-      <span style={{ fontSize: 11, color: "#fff", minWidth: 40, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{p.value}</span>
+      <span style={{ fontSize: 11, color: "var(--fg-strong)" }}>{p.label}</span>
+      <span style={{ fontSize: 11, color: "var(--fg-strong)", minWidth: 40, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{p.value}</span>
       {p.children}
     </div>
   );

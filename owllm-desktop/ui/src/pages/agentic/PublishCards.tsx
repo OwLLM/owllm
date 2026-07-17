@@ -563,7 +563,7 @@ export default function PublishCards({
             <button
               onClick={doCommit}
               disabled={disabled || loading || !commitMsg.trim()}
-              style={{ ...chipBtn, justifyContent: "center", background: "var(--accent)", color: "#06080d", border: "none", opacity: commitMsg.trim() ? 1 : 0.5 }}
+              style={{ ...chipBtn, justifyContent: "center", background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: commitMsg.trim() ? 1 : 0.5 }}
             >
               Commit all
             </button>

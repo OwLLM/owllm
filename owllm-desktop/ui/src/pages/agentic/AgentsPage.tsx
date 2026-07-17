@@ -5282,9 +5282,9 @@ function ChatInputDock({
             onClick={() => setPaletteOpen(v => !v)}
             title="Slash commands"
             style={{
-              width:28, height:28, background: showPalette ? "rgba(255,217,122,0.18)" : "transparent",
+              width:28, height:28, background: showPalette ? "rgba(var(--accent-rgb),0.18)" : "transparent",
               border:"1px solid var(--border)", borderRadius:6,
-              color: showPalette ? "#ffd97a" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
+              color: showPalette ? "var(--accent)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
               display:"flex", alignItems:"center", justifyContent:"center",
             }}
           >/</button>
@@ -5296,10 +5296,10 @@ function ChatInputDock({
             style={{
               height:28, padding:"0 10px",
               display:"flex", alignItems:"center", gap:6,
-              background: autoApprove ? "rgba(255,217,122,0.18)" : "transparent",
-              border: `1px solid ${autoApprove ? "rgba(255,217,122,0.55)" : "var(--border)"}`,
+              background: autoApprove ? "rgba(var(--accent-rgb),0.18)" : "transparent",
+              border: `1px solid ${autoApprove ? "rgba(var(--accent-rgb),0.55)" : "var(--border)"}`,
               borderRadius:6,
-              color: autoApprove ? "#ffd97a" : "var(--fg-muted)",
+              color: autoApprove ? "var(--accent)" : "var(--fg-muted)",
               cursor:"pointer", fontSize:11, fontWeight:600,
             }}
           >
@@ -5319,9 +5319,9 @@ function ChatInputDock({
                   : (draft.trim() ? "Send message" : "Type something to send")}
             style={{
               width: (needsLoad || loadingModel) ? 76 : 32, height:28,
-              background: busy ? "#ff8c4a" : loadingModel ? "rgba(255,217,122,0.40)" : needsLoad ? "#3cf26b" : (draft.trim() ? "#ffd97a" : "rgba(255,217,122,0.18)"),
-              color: busy ? "#1a0e04" : (loadingModel || needsLoad) ? "#0a1505" : (draft.trim() ? "#1a1404" : "#7d6f4b"),
-              border:"1px solid " + (busy ? "#ff8c4a" : needsLoad ? "#3cf26b" : "rgba(255,217,122,0.55)"),
+              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
+              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() ? "var(--accent-fg)" : "var(--fg-muted)"),
+              border:"1px solid " + (busy ? "var(--warn)" : needsLoad ? "var(--ok)" : "rgba(var(--accent-rgb),0.55)"),
               borderRadius:6,
               cursor: (busy || loadingModel || draft.trim()) ? "pointer" : "not-allowed",
               fontSize: (needsLoad || loadingModel) ? 11 : 14, fontWeight:800,
@@ -11559,7 +11559,7 @@ export function AgentsPage({
         } else if (res.status === "notAGitRepo") {
           worktreeBySpec.set(spec.name, null);
           appendThought(orch.name, {
-            role: "fleet", color: "#8a92a3",
+            role: "fleet", color: "var(--fg-muted)",
             text: `🗂 ${spec.name}: project is not a git repo — running shared in ${projectCwd || "(no cwd)"}`,
           });
         } else if (res.status === "dirtyWorkingTree") {
@@ -11917,7 +11917,7 @@ export function AgentsPage({
                 text: `📦 committed ${finalize.commitSha.slice(0,7)} · ${finalize.filesChanged} file${finalize.filesChanged === 1 ? "" : "s"}\n${finalize.files.slice(0, 12).join("\n")}`,
               });
             } else if (finalize.status === "noChanges") {
-              appendThought(startSpec.name, { role: "fleet", color: "#8a92a3", text: "📦 no changes to commit" });
+              appendThought(startSpec.name, { role: "fleet", color: "var(--fg-muted)", text: "📦 no changes to commit" });
             } else {
               appendThought(startSpec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize failed: ${finalize.message}` });
             }
@@ -12166,7 +12166,7 @@ export function AgentsPage({
             text: `⚠ conflict merging ${o.name} (branch ${o.worktree.branch} kept on disk for resolution):\n${merge.files.join("\n")}`,
           });
         } else if (merge.status === "noChanges") {
-          appendThought(orch.name, { role: "fleet", color: "#8a92a3", text: `🔀 ${o.name}: nothing to merge` });
+          appendThought(orch.name, { role: "fleet", color: "var(--fg-muted)", text: `🔀 ${o.name}: nothing to merge` });
         } else {
           keepOnDisk.add(o.name);
           appendThought(orch.name, { role: "fleet", color: "#ff8c8c", text: `⚠ merge ${o.name} failed: ${merge.message}` });
@@ -12786,7 +12786,7 @@ export function AgentsPage({
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
               🔒 File outside the workspace
             </div>
-            <div style={{ fontSize: 13, lineHeight: 1.5, color: "#b6c4d8" }}>
+            <div style={{ fontSize: 13, lineHeight: 1.5, color: "var(--fg)" }}>
               <b>{fileConsent.agent}</b> tried to read a file{" "}
               {fileConsent.path ? <>outside the project folder:</> : <>outside the project folder.</>}
               {fileConsent.path && (
@@ -12839,7 +12839,7 @@ export function AgentsPage({
                   onClick={() => setFileConsent(null)}
                   style={{
                     flex: "0 0 auto", padding: "10px 14px", borderRadius: 8,
-                    border: "1px solid #2a3a52", background: "transparent", color: "#9fb0c6",
+                    border: "1px solid #2a3a52", background: "transparent", color: "var(--fg-muted)",
                     fontSize: 13, cursor: "pointer",
                   }}
                 >
@@ -12847,7 +12847,7 @@ export function AgentsPage({
                 </button>
               </div>
             )}
-            <div style={{ marginTop: 12, fontSize: 11, color: "#6f7f96" }}>
+            <div style={{ marginTop: 12, fontSize: 11, color: "var(--fg-subtle)" }}>
               Recommended: <b>Copy into workspace</b> — the file is duplicated inside the project and
               the sandbox stays intact. “Grant home” widens access to your whole user profile for this
               run only and resets automatically next run.

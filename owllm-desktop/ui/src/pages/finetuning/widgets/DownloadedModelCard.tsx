@@ -145,7 +145,7 @@ export default function DownloadedModelCard(props: DownloadedModelCardProps) {
           <span style={{ flex: 1 }} />
           {icons && <span style={{ fontSize: 18, letterSpacing: 2 }}>{icons}</span>}
         </div>
-        <div style={{ fontSize: 11, color: "#9aa0aa", wordBreak: "break-all", lineHeight: 1.3 }}>
+        <div style={{ fontSize: 11, color: "var(--fg-muted)", wordBreak: "break-all", lineHeight: 1.3 }}>
           📂 <a
             href={`file:///${modelPath.replace(/\\/g, "/")}`}
             style={{ color: "#667eea", textDecoration: "none" }}

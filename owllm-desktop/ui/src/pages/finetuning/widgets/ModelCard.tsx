@@ -103,11 +103,11 @@ export function ModelCard(props: ModelCardProps) {
                 // Iconic brand glyph (🐋 DeepSeek, 🦙 Meta, 🤗 HF …) — no chip.
                 <span style={{ fontSize: 14, lineHeight: 1 }}>{org.glyph}</span>
               )}
-              <span style={{ color: "#c7cad1", fontSize: 11, fontWeight: 600 }}>{org.name}</span>
+              <span style={{ color: "var(--fg)", fontSize: 11, fontWeight: 600 }}>{org.name}</span>
             </span>
           )}
-          {downloads && <span style={{ color: "#9aa0aa", fontSize: 11 }}>📥 {downloads} downloads</span>}
-          {likes     && <span style={{ color: "#9aa0aa", fontSize: 11 }}>❤️ {likes} likes</span>}
+          {downloads && <span style={{ color: "var(--fg-muted)", fontSize: 11 }}>📥 {downloads} downloads</span>}
+          {likes     && <span style={{ color: "var(--fg-muted)", fontSize: 11 }}>❤️ {likes} likes</span>}
         </div>
       ) : null}
       compat={compatibilityBadge}
@@ -116,7 +116,7 @@ export function ModelCard(props: ModelCardProps) {
       onClick={onClick ? () => onClick(modelId) : undefined}
       body={<>
         {description && (
-          <div style={{ fontSize: 13, color: "#d6d8de", lineHeight: 1.35 }}>{description}</div>
+          <div style={{ fontSize: 13, color: "var(--fg)", lineHeight: 1.35 }}>{description}</div>
         )}
         {tagChips && tagChips.length > 0 && (
           // Informational tag pills (GGUF / Instruct / LoRA / …). These describe
@@ -142,11 +142,11 @@ export function ModelCard(props: ModelCardProps) {
           </div>
         )}
         <div style={{ display: "flex", alignItems: "center" }}>
-          {size && <span style={{ fontSize: 13, color: "#fafafa" }}>📦 {size}</span>}
+          {size && <span style={{ fontSize: 13, color: "var(--fg-strong)" }}>📦 {size}</span>}
           <span style={{ flex: 1 }} />
           {icons && <span style={{ fontSize: 18, letterSpacing: 2 }}>{icons}</span>}
         </div>
-        <div style={{ fontSize: 11, color: "#888", wordBreak: "break-word", lineHeight: 1.3 }}>
+        <div style={{ fontSize: 11, color: "var(--fg-subtle)", wordBreak: "break-word", lineHeight: 1.3 }}>
           📂 {modelIdDisplay}
         </div>
       </>}

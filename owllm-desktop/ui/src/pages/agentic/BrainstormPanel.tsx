@@ -469,8 +469,8 @@ export default function BrainstormPanel(props: Props) {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <span style={{ fontSize: 22 }}>🧠</span>
             <div>
-              <div style={{ color: "#fff", fontWeight: 700, fontSize: 15 }}>Project Brainstorm</div>
-              <div style={{ color: "#aab2c8", fontSize: 11, marginTop: 2 }}>
+              <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 15 }}>Project Brainstorm</div>
+              <div style={{ color: "var(--fg-muted)", fontSize: 11, marginTop: 2 }}>
                 Co-founder chat → research (competitors, OSS, real pain) → BRIEF.md → assemble a team
               </div>
             </div>
@@ -495,7 +495,7 @@ export default function BrainstormPanel(props: Props) {
         <div style={{ padding: 18, display: "flex", flexDirection: "column", gap: 14, flex: 1, minHeight: 0 }}>
           {/* Idea input */}
           <div>
-            <label style={{ color: "#cfd4e1", fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
+            <label style={{ color: "var(--fg)", fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
               Your idea (one or two sentences — be generic, the brainstormer fills in the rest)
             </label>
             <textarea
@@ -520,7 +520,7 @@ export default function BrainstormPanel(props: Props) {
 
           {/* Status / context strip */}
           <div style={{
-            fontSize: 11, color: "#8a92a3",
+            fontSize: 11, color: "var(--fg-muted)",
             display: "flex", gap: 12, flexWrap: "wrap",
           }}>
             <span>📂 {projectCwd || <em style={{ color: "#ff9f9f" }}>no project location set</em>}</span>
@@ -567,7 +567,7 @@ export default function BrainstormPanel(props: Props) {
                 style={{
                   padding: "8px 16px", fontSize: 13, fontWeight: 700,
                   background: "transparent",
-                  color: "#cfd4e1",
+                  color: "var(--fg)",
                   border: "1px solid rgba(255,255,255,0.15)", borderRadius: 6,
                   cursor: "pointer",
                 }}
@@ -620,15 +620,15 @@ export default function BrainstormPanel(props: Props) {
               <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
                 {proposedTeam.map((a, i) => (
                   <div key={i} style={{ minWidth: 160, flex: "1 1 200px", padding: "8px 10px", background: "rgba(8,11,18,0.85)", border: `1px solid ${a.base === "orchestrator" ? "rgba(255,210,120,0.55)" : "rgba(255,255,255,0.12)"}`, borderRadius: 6 }}>
-                    <div style={{ color: "#fff", fontWeight: 700, fontSize: 12.5 }}>{a.base === "orchestrator" ? "⭐ " : ""}{a.name}</div>
+                    <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 12.5 }}>{a.base === "orchestrator" ? "⭐ " : ""}{a.name}</div>
                     <div style={{ color: "#8aa0c0", fontSize: 11, fontFamily: "Consolas, monospace" }}>{a.base}</div>
-                    {a.why && <div style={{ color: "#9aa6bc", fontSize: 11, marginTop: 2 }}>{a.why}</div>}
+                    {a.why && <div style={{ color: "var(--fg-muted)", fontSize: 11, marginTop: 2 }}>{a.why}</div>}
                   </div>
                 ))}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
                 <button onClick={applyTeam} disabled={applying} style={{ padding: "7px 14px", fontSize: 12.5, fontWeight: 700, background: "linear-gradient(180deg, #6b7fff, #4a5fd9)", color: "#fff", border: "none", borderRadius: 6, cursor: applying ? "wait" : "pointer", opacity: applying ? 0.7 : 1 }}>{applying ? "Applying…" : "✅ Apply to project & open"}</button>
-                <button onClick={assembleTeam} disabled={proposing || applying} style={{ padding: "7px 14px", fontSize: 12.5, fontWeight: 600, background: "transparent", color: "#cfd4e1", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 6, cursor: (proposing || applying) ? "wait" : "pointer" }}>🔄 Re-propose</button>
+                <button onClick={assembleTeam} disabled={proposing || applying} style={{ padding: "7px 14px", fontSize: 12.5, fontWeight: 600, background: "transparent", color: "var(--fg)", border: "1px solid rgba(255,255,255,0.18)", borderRadius: 6, cursor: (proposing || applying) ? "wait" : "pointer" }}>🔄 Re-propose</button>
               </div>
             </div>
           )}
@@ -648,10 +648,10 @@ export default function BrainstormPanel(props: Props) {
           {/* View toggle — conversation log vs the living feature board. */}
           {done && (
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-              <span style={{ color: "#8a92a3", fontSize: 11 }}>View:</span>
+              <span style={{ color: "var(--fg-muted)", fontSize: 11 }}>View:</span>
               <button onClick={() => setBoardView(false)} style={{ padding: "3px 10px", fontSize: 11, borderRadius: 5, border: "1px solid rgba(255,255,255,0.15)", background: boardView ? "transparent" : "rgba(107,127,255,0.25)", color: "#cfd4e1", cursor: "pointer" }}>📄 Conversation</button>
               <button onClick={() => setBoardView(true)} style={{ padding: "3px 10px", fontSize: 11, borderRadius: 5, border: "1px solid rgba(255,255,255,0.15)", background: boardView ? "rgba(107,127,255,0.25)" : "transparent", color: "#cfd4e1", cursor: "pointer" }}>📋 Board</button>
-              {boardView && <span style={{ color: "#5a6175", fontSize: 10.5 }}>live — refine the brief in chat and it updates</span>}
+              {boardView && <span style={{ color: "var(--fg-dim)", fontSize: 10.5 }}>live — refine the brief in chat and it updates</span>}
             </div>
           )}
 
@@ -661,19 +661,19 @@ export default function BrainstormPanel(props: Props) {
             const cols = [
               { key: "v1", title: "🟢 v1 — must have", color: "#36d27a", items: features.filter(f => f.priority === "v1") },
               { key: "opportunity", title: "💡 opportunity", color: "#ffd97a", items: features.filter(f => f.priority === "opportunity") },
-              { key: "v2", title: "🟡 v2 — later", color: "#9aa6bc", items: features.filter(f => f.priority === "v2") },
+              { key: "v2", title: "🟡 v2 — later", color: "var(--fg-muted)", items: features.filter(f => f.priority === "v2") },
             ];
             return (
               <div style={{ flex: 1, minHeight: 200, maxHeight: "50vh", overflowY: "auto", display: "flex", gap: 10 }}>
                 {features.length === 0 ? (
-                  <div style={{ color: "#8a92a3", fontSize: 12, padding: 12 }}>
+                  <div style={{ color: "var(--fg-muted)", fontSize: 12, padding: 12 }}>
                     No Feature Priority table in BRIEF.md yet — ask the co-founder to add one, or use the Conversation view.
                   </div>
                 ) : cols.map(col => (
                   <div key={col.key} style={{ flex: 1, minWidth: 0, background: "rgba(8,11,18,0.92)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 6 }}>
                     <div style={{ color: col.color, fontSize: 12, fontWeight: 700 }}>{col.title} · {col.items.length}</div>
                     {col.items.length === 0
-                      ? <div style={{ color: "#5a6175", fontSize: 11, fontStyle: "italic" }}>—</div>
+                      ? <div style={{ color: "var(--fg-dim)", fontSize: 11, fontStyle: "italic" }}>—</div>
                       : col.items.map((f, i) => (
                         <div key={i} style={{ background: "rgba(20,26,40,0.9)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 6, padding: "7px 9px", fontSize: 12, color: "#e6ebf7" }}>{f.feature}</div>
                       ))}
@@ -702,7 +702,7 @@ export default function BrainstormPanel(props: Props) {
             }}
           >
             {lines.length === 0 && !running ? (
-              <div style={{ color: "#5a6175", fontStyle: "italic" }}>
+              <div style={{ color: "var(--fg-dim)", fontStyle: "italic" }}>
                 Output will appear here once you click Run Brainstorm.
               </div>
             ) : (

@@ -288,7 +288,7 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
     if (transitioning) return { text: running ? "● Stopping..." : "● Starting...", color: "#FF9800" };
     return running
       ? { text: "● Running", color: "#4CAF50" }
-      : { text: "● Stopped", color: "#888888" };
+      : { text: "● Stopped", color: "var(--fg-subtle)" };
   }
 
   function onGenerateToken() {
@@ -509,7 +509,7 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
 
       {/* Config-path indicator (server_page.py:670-674, 9pt gray) */}
       <div style={{
-        fontSize: 11, color: "#7a7f87",
+        fontSize: 11, color: "var(--fg-subtle)",
         marginTop: 2, wordBreak: "break-all",
       }}
         title="Path to the JSON file where these settings are persisted.">
@@ -543,7 +543,7 @@ function llmStatusDecor(kind: LlmStatusKind, detail?: string): { text: string; c
     case "port_in_use": return { text: `● Port in use by ${detail ?? ""}`, color: "#FF9800" };
     case "error":       return { text: "● Error",                         color: "#f44336" };
     case "not_running":
-    default:            return { text: "● Not running",                   color: "#888888" };
+    default:            return { text: "● Not running",                   color: "var(--fg-subtle)" };
   }
 }
 
@@ -891,7 +891,7 @@ function LLMServerColumn({
         padding: 4,
       }}>
         {activeRows.length === 0 ? (
-          <div style={{ fontSize: 11, color: "#7a7f87", padding: 6 }}>
+          <div style={{ fontSize: 11, color: "var(--fg-subtle)", padding: 6 }}>
             (no active inference servers)
           </div>
         ) : activeRows.map((r, i) => {

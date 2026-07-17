@@ -301,7 +301,7 @@ export default function DevicesPage() {
           <button
             className="btn"
             onClick={() => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "home" } }))}
-            style={{ background: "var(--accent)", color: "#fff", fontWeight: 700, padding: "7px 12px", flexShrink: 0 }}
+            style={{ background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 700, padding: "7px 12px", flexShrink: 0 }}
           >Connect GitHub →</button>
         </div>
       )}
@@ -498,7 +498,7 @@ function MyDeviceCard({
       {!identity.enabled && !identity.env_override && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 4 }}>
           <button className="btn" onClick={() => onToggle(true)}
-            style={{ background: "var(--accent)", color: "#fff", fontWeight: 700, padding: "7px 14px", alignSelf: "flex-start" }}>
+            style={{ background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 700, padding: "7px 14px", alignSelf: "flex-start" }}>
             ▶ Enable remote control on this PC
           </button>
           <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>

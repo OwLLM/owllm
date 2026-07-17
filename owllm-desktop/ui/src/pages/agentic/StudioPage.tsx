@@ -301,7 +301,7 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
       alignItems: "center",
       gap: 10,
     }}>
-      <span style={{ color: "#dde3ff", fontSize: 12, flex: 1 }}>
+      <span style={{ color: "var(--fg)", fontSize: 12, flex: 1 }}>
         👋 <b>New here?</b> Install Anthropic's official skill pack
         (PDF, Excel, Word helpers — drop-in compatible) to give your
         agents pro-grade capabilities out of the box.
@@ -318,7 +318,7 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
         onClick={onDismiss}
         title="Don't show again"
         style={{
-          background: "transparent", color: "#dde3ff",
+          background: "transparent", color: "var(--fg)",
           border: "none", fontSize: 14, cursor: "pointer",
           width: 28, height: 28,
         }}
@@ -503,7 +503,7 @@ function CreateTeamCard({ onClick }: { onClick: () => void }) {
       }}
     >
       <div style={{ color: "#a8b8ff", fontSize: 36, fontWeight: 700, lineHeight: 1 }}>＋</div>
-      <div style={{ color: "#dde3ff", fontSize: 12, fontWeight: 700 }}>Create your own team</div>
+      <div style={{ color: "var(--fg)", fontSize: 12, fontWeight: 700 }}>Create your own team</div>
       <div style={{ color: "var(--fg-muted)", fontSize: 11 }}>Pick agents, name it, save it as a template.</div>
     </div>
   );
@@ -652,7 +652,7 @@ function AgentMiniCard({ spec }: { spec: AgentSpec }) {
         />
       </div>
       <div style={{
-        color: "#dde3ff", fontSize: 11, fontWeight: 700,
+        color: "var(--fg)", fontSize: 11, fontWeight: 700,
         textAlign: "center",
         overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
       }} title={spec.name}>
@@ -997,7 +997,7 @@ const SKILL_CATEGORIES: { key: string; label: string; color: string; match: RegE
   { key: "docs",          label: "📄 Documents & Content",      color: "#fbbf24", match: /\bdocx?\b|pdf|pptx|xlsx|word|excel|powerpoint|spreadsheet|writ|content|comms|slack|report|markdown|co-?author/i },
   { key: "execution",     label: "⚙ Execution & Verification",  color: "#34d399", match: /execut|verif|finish|complete|ship|release/i },
 ];
-const SKILL_CATEGORY_OTHER = { key: "other", label: "📦 Other", color: "#94a3b8" };
+const SKILL_CATEGORY_OTHER = { key: "other", label: "📦 Other", color: "var(--fg-muted)" };
 function categorizeSkill(name: string, description: string): string {
   const hay = `${name} ${description}`.toLowerCase();
   for (const c of SKILL_CATEGORIES) if (c.match.test(hay)) return c.key;

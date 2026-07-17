@@ -525,7 +525,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                       if (!name.trim()) setName(newLocation.trim().replace(/[\\/]+$/, "").replace(/^.*[\\/]/, ""));
                       setStep("form");
                     }}
-                    style={{ height: 38, padding: "0 14px", borderRadius: 8, border: "none", background: "var(--accent)", color: "#06080d", fontSize: 12.5, fontWeight: 700, cursor: newLocation.trim() ? "pointer" : "not-allowed", opacity: newLocation.trim() ? 1 : 0.5 }}
+                    style={{ height: 38, padding: "0 14px", borderRadius: 8, border: "none", background: "var(--accent)", color: "var(--accent-fg)", fontSize: 12.5, fontWeight: 700, cursor: newLocation.trim() ? "pointer" : "not-allowed", opacity: newLocation.trim() ? 1 : 0.5 }}
                   >Continue →</button>
                 </div>
               </div>

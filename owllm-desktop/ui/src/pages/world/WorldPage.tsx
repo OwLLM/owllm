@@ -550,7 +550,7 @@ export default function WorldPage() {
             title="Play a scripted demo using the SAME event stream a real run emits"
             style={{
               marginLeft: 4, padding: "2px 10px", borderRadius: 999, border: `1px solid ${glow}88`,
-              background: `${glow}22`, color: "#fff", fontSize: 11, fontWeight: 800, cursor: "pointer",
+              background: `${glow}22`, color: "var(--fg-strong)", fontSize: 11, fontWeight: 800, cursor: "pointer",
             }}
           >▶ Demo</button>
         )}

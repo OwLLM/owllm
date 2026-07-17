@@ -15,10 +15,15 @@
   --accent-glow-strong: rgba(92, 240, 255, 0.65);
   --text-color-selected: #e6e8eb;
 
-  /* Universal status colours — same in both modes. */
+  /* Universal status colours — same in both modes. The -rgb triplets
+     let chips/borders build translucent tints via rgba(var(--ok-rgb), a)
+     instead of hardcoding per-component pastel hexes. */
   --ok: #22c55e;
+  --ok-rgb: 34, 197, 94;
   --warn: #FF9800;
+  --warn-rgb: 255, 152, 0;
   --error: #ef4444;
+  --error-rgb: 239, 68, 68;
 }
 
 /* Agent chat panes sit beside draggable graph/canvas surfaces that use

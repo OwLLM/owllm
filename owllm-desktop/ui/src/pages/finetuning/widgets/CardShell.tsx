@@ -137,7 +137,7 @@ export default function CardShell(props: CardShellProps) {
           <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
             <div style={{
               fontSize: 14, fontWeight: "bold",
-              color: "#fafafa",
+              color: "var(--fg-strong)",
               maxWidth: 350,
               wordBreak: "break-word",
               lineHeight: 1.25,

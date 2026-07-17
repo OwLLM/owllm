@@ -28,6 +28,15 @@ import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
 
+const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
+const HOST_LABEL = HOST_IS_WINDOWS
+  ? "Windows"
+  : navigator.userAgent.includes("Mac")
+    ? "macOS"
+    : navigator.userAgent.includes("Linux")
+      ? "Linux"
+      : "Host";
+
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
 // transcription pipeline (binary + ggml-base.bin model) and exposes an
 // "Install voice runtime" button that fetches both from upstream into

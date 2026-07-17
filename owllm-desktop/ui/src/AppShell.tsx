@@ -394,6 +394,15 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
     cnTL, cnTR, cnBL, cnBR,
     badgeX, badgeY,
   } = computeFrameGeometry(outerW, outerH);
+  // The 18px fill bands give the neon frame a solid chrome backing on the
+  // OPAQUE Windows/macOS window. On Linux the window is TRANSPARENT and the
+  // bands straddle the panel edge (SHIFT_OUT px hang OUTSIDE the content into
+  // the see-through margin), so FRAME_BG (var(--bg-header), opaque dark) paints
+  // solid black bars over the desktop every time the frame reveals — that IS
+  // the "becomes solid black sometimes" flash. Drop the fill on Linux so only
+  // the neon strokes + corner art remain (the intended glass look); the bands
+  // stay on opaque platforms where they read as chrome, not black.
+  const bandBg = LINUX_TRANSPARENT_WINDOW ? "transparent" : FRAME_BG;
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
@@ -402,10 +411,10 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
         opacity: frameVisible ? 1 : 0,
         transition: `opacity ${frameVisible ? 220 : 360}ms ease`,
       }}>
-        <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:FRAME_BG }} />
-        <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:FRAME_BG }} />
-        <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:FRAME_BG }} />
-        <div style={{ position:"absolute", left:rightBar.x, top:rightBar.y, width:rightBar.w, height:rightBar.h, background:FRAME_BG }} />
+        <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:bandBg }} />
+        <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:bandBg }} />
+        <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:bandBg }} />
+        <div style={{ position:"absolute", left:rightBar.x, top:rightBar.y, width:rightBar.w, height:rightBar.h, background:bandBg }} />
         <svg width={outerW} height={outerH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
         <rect x={outerL + 1} y={outerT + 1} width={outerW2 - 2} height={outerH2 - 2} rx={14} ry={14} fill="none" stroke={FRAME_COLOR} strokeWidth={1} />
         <rect x={innerL} y={innerT} width={innerW} height={innerH} rx={10} ry={10} fill="none" stroke={FRAME_ACCENT} strokeWidth={1} />
@@ -1334,6 +1343,16 @@ function WindowAccentEdge() {
   );
 }
 
+// The accent edge hugs the WINDOW boundary, which is only the visible app
+// edge when the window is opaque (Windows/macOS, or overlay-frame mode).
+// Linux ships a TRANSPARENT window that is LARGER than the in-page
+// HybridFrame (owl headroom + see-through margins) — there the border drew
+// a floating orange rectangle in mid-air around the invisible window rect,
+// slicing through the owl badge. Same UA check index.html uses for the
+// boot splash: only webkit2gtk on Linux reports "Linux".
+const LINUX_TRANSPARENT_WINDOW =
+  typeof navigator !== "undefined" && navigator.userAgent.indexOf("Linux") !== -1;
+
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
   // Resolve the URL's ?page= once on mount so TwinForge can deep-link
@@ -1671,7 +1690,7 @@ export default function AppShell() {
       <EmailBridgeRunner />
       <WebhookBridgeRunner />
       <ResizeEdges />
-      <WindowAccentEdge />
+      {(overlayFrame || !LINUX_TRANSPARENT_WINDOW) && <WindowAccentEdge />}
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
         : <HybridFrame

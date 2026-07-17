@@ -865,15 +865,16 @@ function ModeBar({
                       <span aria-hidden="true" style={{
                         minWidth: 26, textAlign: "center", fontSize: 11, fontWeight: 800,
                         fontVariantNumeric: "tabular-nums", color: "var(--fg-muted)",
-                      }}>{chatFontStep > CHAT_FONT_MIN_STEP ? `+${chatFontStep}` : "A"}</span>
+                      }}>{chatFontStep === 0 ? "A" : chatFontStep > 0 ? `+${chatFontStep}` : `${chatFontStep}`}</span>
                       {stepBtn(+1, "text-larger", "Increase chat text size")}
                     </div>
                   );
                 })()}
               </div>
 
-              {/* GitHub account / sync — relocated here from the Home page.
-                  Shows the connected login (or a sign-in prompt) and opens the
+              {/* GitHub account / sync — relocated here from the Home page and
+                  given a highlighted card (accent-tinted container, badge icon,
+                  bigger label, CTA pill) so signing in stands out. Opens the
                   global AccountSyncModal, which owns the actual login / vault /
                   disconnect flow. */}
               <button
@@ -881,26 +882,36 @@ function ModeBar({
                 onClick={() => { setSettingsOpen(false); openSyncOnboarding(); }}
                 title={account.connected ? "Manage sync / account" : "Sign in to sync your chats & settings across devices"}
                 style={{
-                  display: "flex", alignItems: "center", gap: 10, width: "100%",
-                  marginTop: 10, paddingTop: 10, paddingBottom: 2,
-                  borderTop: "1px solid var(--border)",
-                  background: "none", border: "none", borderTopStyle: "solid",
+                  display: "flex", alignItems: "center", gap: 12, width: "100%",
+                  marginTop: 14, padding: "12px 14px", borderRadius: 12, boxSizing: "border-box",
+                  background: account.connected
+                    ? "linear-gradient(135deg, rgba(34,197,94,0.16), rgba(34,197,94,0.04))"
+                    : "linear-gradient(135deg, var(--accent-soft), rgba(var(--accent-rgb), 0.04))",
+                  border: `1px solid ${account.connected ? "rgba(34,197,94,0.45)" : "var(--accent-strong)"}`,
+                  boxShadow: account.connected ? "0 2px 14px rgba(34,197,94,0.18)" : "0 2px 14px var(--accent-glow-soft)",
                   cursor: "pointer", textAlign: "left", color: "var(--fg)",
                 }}
               >
-                <span style={{ fontSize: 18, lineHeight: 1, flexShrink: 0 }}>
+                <span style={{
+                  width: 38, height: 38, flexShrink: 0, borderRadius: "50%",
+                  display: "grid", placeItems: "center", fontSize: 20,
+                  background: account.connected ? "rgba(34,197,94,0.18)" : "rgba(var(--accent-rgb), 0.18)",
+                  border: `1px solid ${account.connected ? "rgba(34,197,94,0.5)" : "var(--accent-strong)"}`,
+                }}>
                   {account.connected ? "☁️" : "🐙"}
                 </span>
-                <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, lineHeight: 1.3 }}>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
                   {account.connected ? (
-                    <span style={{ fontWeight: 800, color: "#22c55e" }}>Synced as @{account.login}</span>
+                    <span style={{ fontWeight: 800, fontSize: 14.5, color: "#22c55e", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Synced as @{account.login}</span>
                   ) : (
-                    <span style={{ fontWeight: 800, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
+                    <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
                   )}
                 </span>
                 <span style={{
-                  fontSize: 11.5, fontWeight: 800, flexShrink: 0,
-                  color: account.connected ? "#22c55e" : "var(--accent)",
+                  fontSize: 12.5, fontWeight: 800, flexShrink: 0,
+                  padding: "6px 12px", borderRadius: 999,
+                  background: account.connected ? "rgba(34,197,94,0.18)" : "var(--accent)",
+                  color: account.connected ? "#22c55e" : "var(--accent-fg)",
                 }}>{account.connected ? "Manage →" : "Sign in →"}</span>
               </button>
             </div>

@@ -1640,7 +1640,7 @@ export default function ChatPage() {
                 background: "var(--bg-input)",
                 color: "var(--fg)",
                 border: "1px solid var(--border-strong)",
-                fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
+                fontFamily: "inherit", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5,
                 outline: "none",
               }}
             />
@@ -1802,7 +1802,7 @@ export default function ChatPage() {
                 width: "100%", minHeight: 74, maxHeight: 140, resize: "vertical",
                 padding: "10px 12px", border: "none", outline: "none",
                 background: "transparent", color: "var(--fg)",
-                fontFamily: "inherit", fontSize: 13, lineHeight: 1.5,
+                fontFamily: "inherit", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5,
               }}
             />
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderTop: "1px solid var(--border)" }}>

@@ -1736,7 +1736,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         placeholder="Message the second agent… (same workspace, its own conversation & model)"
         rows={2}
         disabled={secondaryBusy}
-        style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
+        style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
       />
       {secondaryBusy ? (
         <button
@@ -2098,7 +2098,7 @@ function CodeWorkspace({ pageId, onTitle }: {
               onPaste={onChatPaste}
               placeholder="Message…  (paste or attach an image, Enter to send, Shift+Enter for newline)"
               rows={1}
-              style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: 13.5, padding: "9px 12px", lineHeight: 1.5 }}
+              style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "9px 12px", lineHeight: 1.5 }}
             />
             {chatBusy ? (
               <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
@@ -2754,7 +2754,7 @@ function CodeWorkspace({ pageId, onTitle }: {
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
             placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
             rows={3}
-            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
+            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
           />
           {busy ? (
             <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>

@@ -882,7 +882,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <div
                           onClick={() => startEdit(s)}
                           title="Click to edit"
-                          style={{ flex: 1, fontSize: 12.5, lineHeight: 1.5, color: "var(--fg)", textDecoration: s.status === "done" ? "line-through" : "none", whiteSpace: "pre-wrap", wordBreak: "break-word", cursor: "text" }}
+                          style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, color: "var(--fg)", textDecoration: s.status === "done" ? "line-through" : "none", whiteSpace: "pre-wrap", wordBreak: "break-word", cursor: "text" }}
                         >
                           {s.text}
                           {s.status === "sent" && <span style={{ display: "inline-block", marginLeft: 8, fontSize: 10, color: "#ffd97a", border: "1px solid rgba(255,217,122,0.45)", borderRadius: 999, padding: "1px 7px" }}>fed to team</span>}
@@ -936,7 +936,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 3, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                           <ActionIcon name="check" size={13} style={{ color: "#7ff0c5", marginTop: 2 }} />
-                          <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
+                          <div style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
                           <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending", startedAt: undefined, finishedAt: undefined })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
                           <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" aria-label="Delete permanently" style={{ height: 22, width: 22, padding: 0, display: "grid", placeItems: "center", color: "#ff8c8c", flexShrink: 0 }}><ActionIcon name="trash" size={12} /></button>
                         </div>

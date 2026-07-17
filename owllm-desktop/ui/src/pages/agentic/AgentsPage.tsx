@@ -5231,7 +5231,7 @@ function ChatInputDock({
               background:"transparent",
               color:"var(--fg)",
               border:"none",
-              fontSize:13, lineHeight:1.45,
+              fontSize:"var(--chat-font-size, 13px)", lineHeight:1.45,
               fontFamily:"Segoe UI, sans-serif",
               resize:"none",
               outline:"none",

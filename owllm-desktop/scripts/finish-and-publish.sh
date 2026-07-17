@@ -227,6 +227,23 @@ if [ -n "$PENDING_STAGE" ]; then
   exit 1
 fi
 
+# 1a. Sync with origin BEFORE bumping. The version math below already respects the
+# public release floor, but the push at step 2 is rejected outright if
+# origin/<branch> moved (this shared tree IS pushed to by concurrent sessions —
+# v0.8.88 stranded exactly this way when a parallel v0.8.87 release landed
+# mid-publish). Rebase local work onto the remote now, while no release commit
+# exists yet; --autostash carries the tolerated dirty Cargo.lock across. A
+# conflict here is real divergent work — fail cleanly before bumping anything.
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if git fetch -q origin "$BRANCH" 2>/dev/null; then
+  if ! git rebase --autostash "origin/$BRANCH" >/dev/null 2>&1; then
+    git rebase --abort >/dev/null 2>&1 || true
+    fail "origin/$BRANCH has diverged with conflicts — reconcile it (merge/rebase), then run Publish again"
+  fi
+else
+  echo "WARN: could not fetch origin/$BRANCH — publishing from the local view only"
+fi
+
 # 1. Bump the patch version (string-replace to preserve formatting; rule-based rollover).
 CUR="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$CONF")"
 
@@ -345,7 +362,21 @@ else
   echo "nothing new to commit — publishing current tree at v$NEW"
 fi
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-git push -q origin "$BRANCH" || fail "git push failed (branch $BRANCH)"
+# The push can still race a session that pushed AFTER the 1a sync. The bump
+# commit is deterministic and version-file-scoped, so rebase it onto the fresh
+# remote and retry instead of dying on "fetch first". A conflict means the
+# remote grew its own release commit — that needs eyes, so fail cleanly.
+_PUSH_OK=""
+for _try in 1 2 3; do
+  if git push -q origin "$BRANCH"; then _PUSH_OK=1; break; fi
+  echo "push rejected (attempt $_try/3): origin/$BRANCH moved — rebasing the release commit and retrying"
+  git fetch -q origin "$BRANCH" 2>/dev/null || true
+  if ! git rebase --autostash "origin/$BRANCH" >/dev/null 2>&1; then
+    git rebase --abort >/dev/null 2>&1 || true
+    fail "git push failed (branch $BRANCH): remote moved and the release commit does not rebase cleanly"
+  fi
+done
+[ -n "$_PUSH_OK" ] || fail "git push failed (branch $BRANCH) after 3 attempts"
 
 # 2b. Build a HUMAN release changelog from the actual commit subjects (what really
 #     shipped), not the chat message and NOT git file-plumbing. PREV_TAG = the

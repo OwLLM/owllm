@@ -173,37 +173,14 @@ console.log("case 0b: Digest Notes is visibly enabled whenever clickable");
   act(() => root.unmount());
 }
 
-// ---- 1. NOW column has a Start batch button; feeding sends the lane and
-//         leaves the board untouched ----
-console.log("case 1: ⚡ Start batch feeds the NOW lane without consuming it");
+// ---- 1. The Kanban plan board is hidden (kept in code, gated off) ----
+console.log("case 1: the Kanban plan board is hidden");
 {
   seed();
-  const fed = [];
-  const { root } = mount({ onFeed: (t) => { fed.push(t); return "dispatched"; } });
-  const btn = buttons().find((b) => textOf(b).includes("Start batch"));
-  check("Start batch button exists", !!btn);
-  clickEl(btn);
-  check("onFeed called once", fed.length === 1);
-  check("feed text carries the NOW cards", fed[0]?.includes("fix the frame") && fed[0]?.includes("fix the hit area"));
-  check("feed text names the NOW batch", /NOW batch/i.test(fed[0] ?? ""));
-  check("feed text does NOT include other lanes", !fed[0]?.includes("linux screenshots") && !fed[0]?.includes("parity pass"));
-  const after = blob();
-  check("plan board content is unchanged", after.plan.includes("fix the frame") && after.plan.includes("linux screenshots") && after.plan.includes("parity pass"));
-  check("steps are unchanged", after.steps.length === 2 && after.steps.every((s) => s.status === "pending"));
-  check("dispatched notice shows", textOf(document.body).includes("dispatched as a new goal"));
-  act(() => root.unmount());
-}
-
-// ---- 2. empty NOW lane → button disabled, nothing fed ----
-console.log("case 2: empty NOW lane disables Start batch");
-{
-  localStorage.setItem(KEY, JSON.stringify({ text: "", plan: "NOW:\n\nNEXT:\n- x\n\nLATER:", steps: [], autoFeed: false, digest: [] }));
-  const fed = [];
-  const { root } = mount({ onFeed: (t) => { fed.push(t); return "dispatched"; } });
-  const btn = buttons().find((b) => textOf(b).includes("Start batch"));
-  check("button present but disabled", !!btn && btn.disabled);
-  clickEl(btn);
-  check("nothing fed", fed.length === 0);
+  const { root } = mount({});
+  check("no Start batch button (board hidden)", !buttons().some((b) => textOf(b).includes("Start batch")));
+  check("Plan board heading is not rendered", !textOf(document.body).includes("Plan board"));
+  check("SHOW_KANBAN flag is present so the board can be restored", src.includes("const SHOW_KANBAN"));
   act(() => root.unmount());
 }
 
@@ -238,15 +215,13 @@ console.log("case 3b: markNotebookStepStarted / markNotebookStepFinished update 
   check("status is untouched by timing helpers", blob().steps.find((s) => s.id === "s1")?.status === "pending");
 }
 
-// ---- 4. no team ready → step NOT consumed, lane NOT consumed ----
+// ---- 4. no team ready → step NOT consumed ----
 console.log("case 4: no-team result consumes nothing");
 {
   seed();
   const { root } = mount({ onFeed: () => "no-team" });
   clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
   check("step stays pending on no-team", blob().steps.find((s) => s.id === "s1")?.status === "pending");
-  clickEl(buttons().find((b) => textOf(b).includes("Start batch")));
-  check("board unchanged on no-team", blob().plan === PLAN.replace(/\n\n/g, "\n\n"));
   check("no-team notice shows", textOf(document.body).includes("no team ready"));
   act(() => root.unmount());
 }
@@ -284,6 +259,34 @@ console.log("case 5b: done steps are hidden until the Archive tab is clicked");
   clickEl(reopen);
   check("reopened step is pending again", blob().steps.find((s) => s.id === "s2")?.status === "pending");
   check("archive shows its empty state once cleared", textOf(document.body).includes("No archived steps yet"));
+  act(() => root.unmount());
+}
+
+// ---- 5c. a fed-and-finished step auto-archives out of Active (no manual
+//          check-off needed) — the reported bug: finished steps stayed Active ----
+console.log("case 5c: a finished (sent + finishedAt) step leaves Active for Archive");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [
+      { id: "s1", text: "open pending step", status: "pending", ts: 1 },
+      { id: "s2", text: "completed run step", status: "sent", ts: 2, startedAt: 1000, finishedAt: 5000 },
+    ],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  check("finished step is NOT on the Active tab", !textOf(document.body).includes("completed run step"));
+  check("pending step remains on Active", textOf(document.body).includes("open pending step"));
+  const archiveTab = buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive"));
+  check("Archive tab counts the finished step", !!archiveTab && textOf(archiveTab).includes("(1)"));
+  clickEl(archiveTab);
+  check("finished step shows under Archive", textOf(document.body).includes("completed run step"));
+  const reopen = buttons().find((b) => textOf(b).includes("Reopen"));
+  check("finished step can be reopened", !!reopen);
+  clickEl(reopen);
+  const s2 = blob().steps.find((s) => s.id === "s2");
+  check("reopened finished step returns to pending", s2?.status === "pending");
+  check("reopening clears the finish/start stamps", s2?.finishedAt == null && s2?.startedAt == null);
   act(() => root.unmount());
 }
 

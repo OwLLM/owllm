@@ -40,15 +40,10 @@ globalThis.localStorage = dom.window.localStorage;
 globalThis.CustomEvent = dom.window.CustomEvent;
 
 // ---- transpile the real RunNotebook.tsx to CJS, stub its siblings ----
-// Normalize CRLF -> LF on read: on Windows the tree is checked out CRLF, but the
-// source-string checks below use literal "\n". Without this they false-fail on a
-// correct file (the busySendRef gate check regressed exactly this way). Keeps
-// every check's intent; only removes line-ending fragility.
-const readLF = (p) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
-const src = readLF(path.join(HERE, "RunNotebook.tsx"));
-const codePageSrc = readLF(path.join(HERE, "CodePage.tsx"));
-const agentsPageSrc = readLF(path.join(HERE, "AgentsPage.tsx"));
-const watcherSrc = readLF(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"));
+const src = fs.readFileSync(path.join(HERE, "RunNotebook.tsx"), "utf8");
+const codePageSrc = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
+const agentsPageSrc = fs.readFileSync(path.join(HERE, "AgentsPage.tsx"), "utf8");
+const watcherSrc = fs.readFileSync(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"), "utf8");
 const js = ts.transpileModule(src, {
   compilerOptions: {
     module: ts.ModuleKind.CommonJS,

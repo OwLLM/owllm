@@ -5,7 +5,7 @@ export type ActionIconName =
   | "chevron-right" | "chevron-up" | "circle" | "clipboard" | "clock" | "close"
   | "code" | "copy" | "external-link" | "help" | "link" | "loader" | "monitor"
   | "note" | "play" | "plus" | "rotate" | "send" | "shield-off" | "sliders"
-  | "target" | "trash" | "wand" | "workflow";
+  | "target" | "text-larger" | "text-smaller" | "trash" | "wand" | "workflow";
 
 type ActionIconProps = {
   name: ActionIconName;
@@ -46,6 +46,10 @@ export default function ActionIcon({ name, size = 16, label, className, style }:
     "shield-off": <><path d="M12 22s8-4 8-10V5l-8-3-5 1.9M4 5v7c0 4.4 4.7 7.7 7 9" /><path d="m3 3 18 18" /></>,
     sliders: <><path d="M4 6h8m4 0h4M4 12h3m4 0h9M4 18h10m4 0h2" /><circle cx="14" cy="6" r="2" /><circle cx="9" cy="12" r="2" /><circle cx="16" cy="18" r="2" /></>,
     target: <><circle cx="12" cy="12" r="9" /><circle cx="12" cy="12" r="4" /><path d="M12 3V1m0 22v-2M3 12H1m22 0h-2" /></>,
+    // Text-size controls (CAD/office convention): a capital "A" plus an up
+    // arrow to grow the size, a down arrow to shrink it.
+    "text-larger": <><path d="M3 18 8 5l5 13M5 13.5h6" /><path d="M18 18V7m-3 3 3-3 3 3" /></>,
+    "text-smaller": <><path d="M3 18 8 5l5 13M5 13.5h6" /><path d="M18 7v11m-3-3 3 3 3-3" /></>,
     trash: <><path d="M4 7h16m-10 4v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3" /></>,
     wand: <><path d="m4 20 11-11 4 4L8 24 4 20Z" /><path d="m14 4 1-3 1 3 3 1-3 1-1 3-1-3-3-1 3-1Zm6 12 .7-2 .7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7Z" /></>,
     workflow: <><rect x="3" y="3" width="6" height="6" rx="1" /><rect x="15" y="15" width="6" height="6" rx="1" /><path d="M9 6h4a3 3 0 0 1 3 3v6M8 18H6a3 3 0 0 1-3-3v-2" /></>,

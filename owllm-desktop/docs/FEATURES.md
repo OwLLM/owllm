@@ -128,15 +128,32 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   IPC capability is needed.
 - **OwLLM chrome (app-styled window)**: the browser is a FRAMELESS multi-webview
   window that looks like the app, not a stock OS window — an OwLLM chrome-bar
-  webview (`ui/public/browser-chrome.html`: title, back/reload, URL box,
-  min/max/close, accent-aware via the shared localStorage theme key) sits above
-  the page webview (`Window::builder` + `add_child`, tauri `unstable` feature),
-  so the bar never overlays site content. The bar's buttons/drag/URL entry
-  report over the same title channel tagged `EVT` (`parse_chrome_event`) — no
-  IPC grant to any webview. If the multi-webview build fails on some platform,
-  it falls back to the previous decorated single-webview window
-  (`build_legacy`) so agent browsing never breaks. `browser_set_chrome` still
-  paints the DWM border (and the fallback's caption) in the app accent.
+  webview (`ui/public/browser-chrome.html`: launcher app icon + title, tab
+  strip, back/reload, URL box, min/max/close) sits above the page webviews
+  (`Window::builder` + `add_child`, tauri `unstable` feature), so the bar never
+  overlays site content. The bar wears the app header's colour — the same
+  `--bg-header` recipe (70% accent over `#1c2244`) resolved live from the
+  shared localStorage accent key. Its buttons/drag/URL entry/tab events report
+  over the same title channel tagged `EVT` (`parse_chrome_event`) — no IPC
+  grant to any webview. If the multi-webview build fails on some platform, it
+  falls back to the previous decorated single-webview window (`build_legacy`)
+  so agent browsing never breaks. `browser_set_chrome` still paints the DWM
+  border (and the fallback's caption) in the app accent.
+- **Tabs (multiple pages at once)**: the chrome bar's tab strip opens any
+  number of pages side by side, like a normal browser — `+` for a new tab,
+  pills to switch, `✕` to close (closing the last tab closes the window). Each
+  tab is its own content webview labelled `owllm-browser-page-{id}`; they all
+  share one profile dir, so logins/cookies span tabs. Only the active tab sits
+  in view — inactive ones are parked offscreen (`PARK_X`), the cross-platform
+  substitute for a child-webview `hide()`. Agent `browser_*` tools always drive
+  the ACTIVE tab (`content_webview`), so the tool contract is unchanged.
+  Switching device emulation rebuilds the window and keeps the active tab.
+- **Typed-login auto-capture**: submitting a form with a filled password field
+  (or leaving a page with one) reports origin/username/password over the EVT
+  title channel; Rust upserts it into the encrypted vault
+  (`browser_vault::store_typed_login`), so anything the user types to log in
+  autofills next time. Blank passwords are ignored; dedupe is per (origin,
+  username), same merge path as manual and imported creds.
 - **Local dev servers**: scheme-less localhost-family URLs (`localhost:5173`,
   `127.0.0.1:3000`, `[::1]`, `192.168.*`, `10.*`, `*.localhost`) default to
   `http://` instead of `https://`, so agents can open and test a web app they

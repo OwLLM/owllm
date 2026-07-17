@@ -2498,7 +2498,7 @@ function CodeWorkspace({ pageId, onTitle }: {
             onClick={() => { if (!termOpen) { setTermOpen(true); setTermHidden(false); } else setTermHidden((h) => !h); }}
             title={!termOpen ? `Open a terminal in ${wsShort}` : (termHidden ? "Show the terminal" : "Hide the terminal (shell keeps running)")}
             style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap",
-              ...(termOpen && !termHidden ? { background: "var(--accent)", color: "#06080d", border: "none", fontWeight: 700 } : { color: "var(--fg-muted)" }) }}
+              ...(termOpen && !termHidden ? { background: "var(--accent)", color: "var(--accent-fg)", border: "none", fontWeight: 700 } : { color: "var(--fg-muted)" }) }}
           >
             ⌨ Terminal
           </button>

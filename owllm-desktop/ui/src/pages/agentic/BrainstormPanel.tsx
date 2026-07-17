@@ -737,7 +737,7 @@ export default function BrainstormPanel(props: Props) {
           </div>
 
           <div>
-            <label style={{ color: "#cfd4e1", fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
+            <label style={{ color: "var(--fg)", fontSize: 12, fontWeight: 600, display: "block", marginBottom: 6 }}>
               Brainstorm model
             </label>
             <ModelPicker
@@ -748,7 +748,7 @@ export default function BrainstormPanel(props: Props) {
               disabled={running}
               fallbackLabel="Pick a model for this brainstorm"
             />
-            <div style={{ marginTop: 5, color: "#747f95", fontSize: 11 }}>
+            <div style={{ marginTop: 5, color: "var(--fg-muted)", fontSize: 11 }}>
               Saved for this project. It can be different from the team and orchestrator models.
             </div>
           </div>

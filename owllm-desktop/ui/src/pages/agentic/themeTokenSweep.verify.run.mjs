@@ -72,7 +72,9 @@ check(darkFam.base !== lightFam.base,
 // a `color:` position is a defect UNLESS its enclosing object also pins the
 // fill (hex/rgb/gradient or a fixed --ok/--warn/--error/--bg-header fill) —
 // fixed fg/bg pairs stay legible in every theme by construction.
-const SKIP = /catalog\.generated|\.verify\.run\.|AppShell\.tsx|localization[\/\\]|themePreferences\.ts|theme[\/\\]styles\.ts/;
+// _PATCH_ scratch files are gitignored session leftovers (owllm-desktop/.gitignore)
+// — never compiled or shipped, so they are not part of the sweep surface.
+const SKIP = /catalog\.generated|\.verify\.run\.|AppShell\.tsx|localization[\/\\]|themePreferences\.ts|theme[\/\\]styles\.ts|_PATCH_/;
 const HARD_BG = /background(Color)?\s*:[^;,}\n]*(#[0-9a-fA-F]{3,8}|rgba?\(\s*\d|linear-gradient|conic-gradient|radial-gradient)/;
 const FIXED_FILL = /background(Color)?\s*:[^;,}\n]*var\(--(ok|warn|error|bg-header)\b/;
 const ACCENT_BG = /background(Color)?\s*:[^;,}\n]*var\(--accent\)/;

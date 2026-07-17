@@ -604,6 +604,19 @@ enum BrowserUiEvent {
         width: u32,
         height: u32,
     },
+    /// A tab's document title changed (multi-tab shape): store it, refresh the
+    /// chrome bar if that tab is active, re-push the strip — all off-callback.
+    TabTitle {
+        id: u64,
+        title: String,
+    },
+    /// Re-push the live tab list into the chrome strip (chrome page load).
+    PushTabs,
+    /// Typed-login capture from BRIDGE_JS. Vault I/O must stay off the native
+    /// callback thread just like window work.
+    TypedLogin {
+        data: String,
+    },
 }
 
 #[derive(Default)]
@@ -612,6 +625,9 @@ struct BrowserUiBatch {
     url: Option<String>,
     title: Option<String>,
     layout: Option<(u32, u32)>,
+    tab_titles: HashMap<u64, String>,
+    push_tabs: bool,
+    creds: Vec<String>,
 }
 
 impl BrowserUiBatch {
@@ -627,6 +643,11 @@ impl BrowserUiBatch {
                 }
             }
             BrowserUiEvent::Layout { width, height } => self.layout = Some((width, height)),
+            BrowserUiEvent::TabTitle { id, title } => {
+                self.tab_titles.insert(id, title);
+            }
+            BrowserUiEvent::PushTabs => self.push_tabs = true,
+            BrowserUiEvent::TypedLogin { data } => self.creds.push(data),
         }
     }
 }
@@ -671,8 +692,19 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
         for (action, data) in batch.actions {
             handle_chrome_event(&app, &action, &data);
         }
+        for data in batch.creds {
+            if let Err(e) = crate::browser_vault::store_typed_login(&data) {
+                eprintln!("[browser] could not save typed login: {e}");
+            }
+        }
         if let Some((width, height)) = batch.layout {
             layout_children(&app, tauri::PhysicalSize::new(width, height));
+        }
+        for (id, title) in batch.tab_titles {
+            on_tab_title(&app, id, &title);
+        }
+        if batch.push_tabs {
+            push_tabs(&app);
         }
         if batch.url.is_some() || batch.title.is_some() {
             update_chrome_bar(&app, batch.url.as_deref(), batch.title.as_deref());
@@ -775,25 +807,31 @@ fn attach_tab(
         // not the bare white "window colour" a fresh webview shows.
         .background_color(OWLLM_BG)
         .on_document_title_changed(move |wv, title| {
-            // Typed-login capture rides the EVT channel from BRIDGE_JS.
+            // Typed-login capture rides the EVT channel from BRIDGE_JS. The
+            // vault write is queued — no I/O on the native callback thread.
             if let Some((action, data)) = parse_chrome_event(&title) {
                 if action == "cred" {
-                    if let Err(e) = crate::browser_vault::store_typed_login(&data) {
-                        eprintln!("[browser] could not save typed login: {e}");
-                    }
+                    queue_browser_ui(&wv.app_handle().clone(), BrowserUiEvent::TypedLogin { data });
                 }
                 return;
             }
             capture_reply(&title);
             if !title.starts_with(SENTINEL) {
-                let app = wv.app_handle().clone();
-                on_tab_title(&app, id, &title);
+                queue_browser_ui(
+                    &wv.app_handle().clone(),
+                    BrowserUiEvent::TabTitle { id, title },
+                );
             }
         })
         .on_page_load(move |wv, payload| {
-            let app = wv.app_handle().clone();
             if is_active_tab(id) {
-                update_chrome_bar(&app, Some(payload.url().as_str()), None);
+                queue_browser_ui(
+                    &wv.app_handle().clone(),
+                    BrowserUiEvent::ChromeUpdate {
+                        url: Some(payload.url().to_string()),
+                        title: None,
+                    },
+                );
             }
         });
     if let Some(ua) = dev.ua {
@@ -1061,8 +1099,7 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         })
         // The strip renders from Rust pushes — seed it once the bar exists.
         .on_page_load(|wv, _payload| {
-            let app = wv.app_handle().clone();
-            push_tabs(&app);
+            queue_browser_ui(&wv.app_handle().clone(), BrowserUiEvent::PushTabs);
         });
     win.add_child(
         chrome,
@@ -1082,13 +1119,21 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
 
     // Keep the children glued to the window on resize/maximize, and drop the
     // tab state when the window goes away (✕, browser_stop, device rebuild).
+    // Resize work is QUEUED — layout_children does set_position/set_size,
+    // which must never run inside a native window callback (UI-thread gate).
     let handle = app.clone();
-    win.on_window_event(move |ev| match ev {
-        WindowEvent::Resized(size) => layout_children(&handle, *size),
-        WindowEvent::Destroyed => {
-            *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    win.on_window_event(move |ev| {
+        match ev {
+            WindowEvent::Resized(size) => queue_browser_ui(
+                &handle,
+                BrowserUiEvent::Layout { width: size.width, height: size.height },
+            ),
+            WindowEvent::Destroyed => {
+                // Pure state drop — no window/webview work.
+                *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            }
+            _ => {}
         }
-        _ => {}
     });
 
     apply_chrome(&win);
@@ -1137,13 +1182,12 @@ fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         .title("OwLLM — Agent Browser")
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
-        .on_document_title_changed(|_win, title| {
-            // Typed-login capture works in this shape too (same EVT channel).
+        .on_document_title_changed(|win, title| {
+            // Typed-login capture works in this shape too (same EVT channel);
+            // the vault write is queued off the native callback thread.
             if let Some((action, data)) = parse_chrome_event(&title) {
                 if action == "cred" {
-                    if let Err(e) = crate::browser_vault::store_typed_login(&data) {
-                        eprintln!("[browser] could not save typed login: {e}");
-                    }
+                    queue_browser_ui(&win.app_handle().clone(), BrowserUiEvent::TypedLogin { data });
                 }
                 return;
             }

@@ -38,7 +38,8 @@ import { setLocalServerKey } from "./pages/agentic/inferenceEndpoint";
 import BridgesPage from "./pages/agentic/BridgesPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
-import AccountSyncModal from "./pages/core/AccountSyncModal";
+import AccountSyncModal, { openSyncOnboarding } from "./pages/core/AccountSyncModal";
+import { githubStatus, GITHUB_CHANGED_EVENT } from "./pages/agentic/github";
 import WatcherDrawer from "./support/WatcherDrawer";
 import GenSpeedBadge from "./components/GenSpeedBadge";
 import { installScopedSelectAll } from "./utils/scopedSelectAll";
@@ -582,6 +583,25 @@ function ModeBar({
   const { language, setLanguage } = useLocalization();
   const settingsRef = useRef<HTMLDivElement>(null);
 
+  // GitHub / sync account state for the Settings sign-in row (relocated here
+  // from the Home page). Reloads on mount, on the in-window `github-changed`
+  // broadcast (immediate after a connect from any surface), and on window
+  // focus (out-of-window browser device-flow). The sign-in / sign-out flow
+  // itself lives in the globally-mounted AccountSyncModal, opened below.
+  const [account, setAccount] = useState<{ connected: boolean; login: string | null }>({ connected: false, login: null });
+  useEffect(() => {
+    let dead = false;
+    const load = () => { githubStatus().then((s) => { if (!dead) setAccount(s); }).catch(() => {}); };
+    load();
+    window.addEventListener("focus", load);
+    window.addEventListener(GITHUB_CHANGED_EVENT, load);
+    return () => {
+      dead = true;
+      window.removeEventListener("focus", load);
+      window.removeEventListener(GITHUB_CHANGED_EVENT, load);
+    };
+  }, []);
+
   useEffect(() => {
     if (!settingsOpen) return;
     const onPointerDown = (event: PointerEvent) => {
@@ -851,6 +871,38 @@ function ModeBar({
                   );
                 })()}
               </div>
+
+              {/* GitHub account / sync — relocated here from the Home page.
+                  Shows the connected login (or a sign-in prompt) and opens the
+                  global AccountSyncModal, which owns the actual login / vault /
+                  disconnect flow. */}
+              <button
+                data-ui="SettingsAccountRow"
+                onClick={() => { setSettingsOpen(false); openSyncOnboarding(); }}
+                title={account.connected ? "Manage sync / account" : "Sign in to sync your chats & settings across devices"}
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, paddingTop: 10, paddingBottom: 2,
+                  borderTop: "1px solid var(--border)",
+                  background: "none", border: "none", borderTopStyle: "solid",
+                  cursor: "pointer", textAlign: "left", color: "var(--fg)",
+                }}
+              >
+                <span style={{ fontSize: 18, lineHeight: 1, flexShrink: 0 }}>
+                  {account.connected ? "☁️" : "🐙"}
+                </span>
+                <span style={{ flex: 1, minWidth: 0, fontSize: 11.5, lineHeight: 1.3 }}>
+                  {account.connected ? (
+                    <span style={{ fontWeight: 800, color: "#22c55e" }}>Synced as @{account.login}</span>
+                  ) : (
+                    <span style={{ fontWeight: 800, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
+                  )}
+                </span>
+                <span style={{
+                  fontSize: 11.5, fontWeight: 800, flexShrink: 0,
+                  color: account.connected ? "#22c55e" : "var(--accent)",
+                }}>{account.connected ? "Manage →" : "Sign in →"}</span>
+              </button>
             </div>
           )}
         </div>

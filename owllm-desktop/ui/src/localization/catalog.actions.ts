@@ -18,4 +18,7 @@ export const ACTION_CATALOG: string[][] = [
   ["Chat text size", "聊天文字大小", "채팅 글자 크기", "チャット文字サイズ", "حجم نص الدردشة", "Dimensione testo chat"],
   ["Increase chat text size", "增大聊天文字", "채팅 글자 크게", "チャット文字を大きく", "تكبير نص الدردشة", "Aumenta dimensione testo chat"],
   ["Decrease chat text size", "减小聊天文字", "채팅 글자 작게", "チャット文字を小さく", "تصغير نص الدردشة", "Riduci dimensione testo chat"],
+  ["Fix with agent", "让智能体修复", "에이전트로 수정", "エージェントで修正", "إصلاح بواسطة الوكيل", "Correggi con l'agente"],
+  ["Send these failures to the coder agent to diagnose and fix", "将这些失败发送给编码智能体进行诊断和修复", "이 실패를 코더 에이전트에게 보내 진단하고 수정하게 합니다", "これらの失敗をコーダーエージェントに送信して診断・修正します", "أرسل هذه الإخفاقات إلى وكيل البرمجة لتشخيصها وإصلاحها", "Invia questi errori all'agente coder per diagnosticarli e correggerli"],
+  ["Sent to the coder agent — watch the chat for the fix.", "已发送给编码智能体——请在聊天中查看修复进展。", "코더 에이전트에게 전송되었습니다 — 채팅에서 수정 내용을 확인하세요.", "コーダーエージェントに送信しました — チャットで修正を確認してください。", "تم الإرسال إلى وكيل البرمجة — تابع الدردشة لمشاهدة الإصلاح.", "Inviato all'agente coder — segui la chat per la correzione."],
 ];

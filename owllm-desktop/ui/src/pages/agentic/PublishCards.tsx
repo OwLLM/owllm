@@ -129,6 +129,7 @@ export default function PublishCards({
   isolated,
   disabled,
   onStatus,
+  onFixIssues,
 }: {
   repoDir: string;
   gitDir: string;
@@ -137,6 +138,10 @@ export default function PublishCards({
   isolated?: boolean;
   disabled?: boolean;
   onStatus?: (msg: string) => void;
+  /** Hands a ready-made "diagnose and fix this" task to the page's coder agent
+   *  (queued as a steer if a run is in flight). Renders the Fix-with-agent
+   *  button only when provided AND there is a failure to act on. */
+  onFixIssues?: (task: string) => void;
 }) {
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
   const [git, setGit] = useState<GitStatusInfo | null>(null);
@@ -358,6 +363,27 @@ export default function PublishCards({
   const modeColor = settings.visibility === "publish" ? "#7ff0c5" : settings.visibility === "draft" ? "#7aa2ff" : "#ffd97a";
   const signed = !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
 
+  // One click hands the failure to the coder agent instead of making the user
+  // copy-paste PUBLISH_FAILED output into the chat. Carries BOTH the last
+  // failed action's full output and any unmet readiness checks.
+  const hasFixableIssue = activity?.kind === "err" || readyFails.length > 0;
+  const fixWithAgent = () => {
+    if (!onFixIssues) return;
+    const parts: string[] = [];
+    if (activity?.kind === "err") {
+      parts.push(`The last release action failed with this output:\n\n${activity.msg}`);
+    }
+    if (readyFails.length > 0) {
+      parts.push(`Publish readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);
+    }
+    onFixIssues(
+      "The rule-based release buttons (Commit / Merge / Push / Publish) hit a problem in this repository. " +
+      "Diagnose the root cause, fix it, and verify the fix — do not just describe it.\n\n" +
+      parts.join("\n\n"),
+    );
+    setActivity({ kind: "run", msg: "Sent to the coder agent — watch the chat for the fix." });
+  };
+
   return (
     <>
       <div ref={rootRef} style={{ marginTop: "auto", padding: 6 }}>
@@ -485,6 +511,18 @@ export default function PublishCards({
                 >⤢</button>
               )}
             </div>
+          )}
+          {/* Fix with agent — hands failed-action output + unmet readiness
+              checks to the page's coder as a real task (steer-safe mid-run). */}
+          {onFixIssues && hasFixableIssue && (
+            <button
+              onClick={fixWithAgent}
+              disabled={disabled}
+              title="Send these failures to the coder agent to diagnose and fix"
+              style={{ ...chipBtn, width: "100%", color: "#ffd97a", borderColor: "rgba(255,217,122,0.45)" }}
+            >
+              🛠 Fix with agent
+            </button>
           )}
           {/* Readiness summary — click to expand the per-check list, so "why
               is Publish greyed out" is readable in place, not just a tooltip

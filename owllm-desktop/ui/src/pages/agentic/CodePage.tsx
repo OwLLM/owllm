@@ -2709,6 +2709,9 @@ function CodeWorkspace({ pageId, onTitle }: {
               isolated={isolated}
               disabled={busy}
               onStatus={setStatus}
+              // Failed release actions become a coder task; send() queues it
+              // as a ⚡ steer when a run is already in flight.
+              onFixIssues={(task) => { void sendRef.current?.(task); }}
             />
           </div>
         )}

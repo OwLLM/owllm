@@ -1948,11 +1948,11 @@ export const UI_CATALOG = [
   ],
   [
     "⏬ Resume download",
-    "⏬ 下载简历",
-    "⏬ 이력서 다운로드",
-    "⏬ 履歴書をダウンロード",
-    "⏬ تنزيل السيرة الذاتية",
-    "⏬ Scarica curriculum"
+    "⏬ 继续下载",
+    "⏬ 다운로드 재개",
+    "⏬ ダウンロードを再開",
+    "⏬ استئناف التنزيل",
+    "⏬ Riprendi download"
   ],
   [
     "⏱ {0} — started {1}, finished {2}",
@@ -2260,11 +2260,11 @@ export const UI_CATALOG = [
   ],
   [
     "★ Tokens",
-    "★ 代币",
+    "★ 令牌",
     "★ 토큰",
     "★ トークン",
     "★ الرموز",
-    "★ Gettoni"
+    "★ Token"
   ],
   [
     "♥ Health",
@@ -3140,10 +3140,10 @@ export const UI_CATALOG = [
   ],
   [
     "⭐ Unsloth",
-    "⭐ 不懒惰",
-    "⭐ 언슬로스",
-    "⭐ アンスロース",
-    "⭐ إلغاء الكسل",
+    "⭐ Unsloth",
+    "⭐ Unsloth",
+    "⭐ Unsloth",
+    "⭐ Unsloth",
     "⭐ Unsloth"
   ],
   [
@@ -3221,7 +3221,7 @@ export const UI_CATALOG = [
   [
     "🎓 Patient tutor",
     "🎓 耐心导师",
-    "🎓 환자 튜터",
+    "🎓 인내심 있는 튜터",
     "🎓 忍耐強いチューター",
     "🎓 معلم صبور",
     "🎓 Tutor paziente"
@@ -3296,7 +3296,7 @@ export const UI_CATALOG = [
     "🏠 홈",
     "🏠 ホーム",
     "🏠 الصفحة الرئيسية",
-    "🏠 Casa"
+    "🏠 Home"
   ],
   [
     "🏷 Tag",
@@ -3632,7 +3632,7 @@ export const UI_CATALOG = [
     "📊 데이터셋",
     "📊 データセット",
     "📊 مجموعة البيانات",
-    "📊 INSIEME DI DATI"
+    "📊 DATASET"
   ],
   [
     "📋 Board",
@@ -4479,7 +4479,7 @@ export const UI_CATALOG = [
     "🧩 LoRA",
     "🧩 LoRA",
     "🧩 LoRA",
-    "🧩 لورا",
+    "🧩 LoRA",
     "🧩 LoRA"
   ],
   [

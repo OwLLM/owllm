@@ -268,8 +268,8 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
 fn sync_once_win32(main_hwnd: isize, overlay_hwnd: isize) -> Result<(), ()> {
     use windows_sys::Win32::Foundation::{HWND, RECT};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindow, SWP_ASYNCWINDOWPOS,
-        SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+        GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindowAsync,
+        SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
     };
     let main = main_hwnd as HWND;
     let overlay = overlay_hwnd as HWND;
@@ -312,11 +312,22 @@ fn sync_once_win32(main_hwnd: isize, overlay_hwnd: isize) -> Result<(), ()> {
 
         let visible = IsWindowVisible(main) != 0;
         let minimized = IsIconic(main) != 0;
+        // ShowWindowAsync, NOT ShowWindow — for the SAME reason SetWindowPos above
+        // carries SWP_ASYNCWINDOWPOS. The overlay window is owned by the MAIN
+        // (event-loop) thread; a plain ShowWindow from this background thread SENDS
+        // WM_SHOWWINDOW SYNCHRONOUSLY to the main thread, which Windows dispatches
+        // re-entrantly into tao's non-reentrant window-callback parking_lot mutex
+        // while it's mid-keyboard-pump — self-deadlocking the UI thread ("Not
+        // Responding" freeze while typing; SWP_ASYNCWINDOWPOS on SetWindowPos fixed
+        // the move path in v0.8.56 but this show/hide path kept sending). Confirmed
+        // via a live gdb dump of a frozen instance: main thread parked on this exact
+        // mutex under a re-entrant SendMessageTimeoutW. ShowWindowAsync POSTS the
+        // request to the main thread's queue instead, so it never blocks or re-enters.
         if !visible || minimized {
-            ShowWindow(overlay, SW_HIDE);
+            ShowWindowAsync(overlay, SW_HIDE);
         } else if OVERLAY_READY.load(Ordering::Acquire) {
             // Ready-gated: an unpainted transparent webview flashes white.
-            ShowWindow(overlay, SW_SHOWNOACTIVATE);
+            ShowWindowAsync(overlay, SW_SHOWNOACTIVATE);
         }
     }
     Ok(())

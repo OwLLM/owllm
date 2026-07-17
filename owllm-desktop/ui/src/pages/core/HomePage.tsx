@@ -19,8 +19,6 @@
 import React, { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import WslSetupModal from "./WslSetupModal";
-import { openSyncOnboarding } from "./AccountSyncModal";
-import { githubStatus, GITHUB_CHANGED_EVENT } from "../agentic/github";
 import {
   fetchReadiness,
   getCachedReadiness,
@@ -494,22 +492,9 @@ export default function HomePage() {
     }
   }, [ready]);
 
-  // GitHub / sync account state for the top sign-in bar. Reloads on mount, on
-  // the in-window `github-changed` broadcast (immediate after a connect from
-  // any surface), and on window focus (out-of-window browser device-flow).
-  const [account, setAccount] = useState<{ connected: boolean; login: string | null }>({ connected: false, login: null });
-  useEffect(() => {
-    let dead = false;
-    const load = () => { githubStatus().then((s) => { if (!dead) setAccount(s); }).catch(() => {}); };
-    load();
-    window.addEventListener("focus", load);
-    window.addEventListener(GITHUB_CHANGED_EVENT, load);
-    return () => {
-      dead = true;
-      window.removeEventListener("focus", load);
-      window.removeEventListener(GITHUB_CHANGED_EVENT, load);
-    };
-  }, []);
+  // The GitHub account / sync sign-in control now lives in the header
+  // Settings popup (⚙ → final row), not on this page. See ModeBar in
+  // AppShell.tsx. The AccountSyncModal it opens is still mounted globally.
   // Guided WSL setup modal — opened from the WSL row when it's not ready,
   // and from other pages (e.g. the Environment popup) via the
   // `owllm:open-wsl-setup` event after they navigate Home.
@@ -567,56 +552,6 @@ export default function HomePage() {
           gap: 28,
         }}
       >
-        {/* Account / sync bar — sign in with GitHub so chats & settings
-            follow you across devices. Opens the onboarding popup. */}
-        <button
-          data-ui="SyncAccountBar"
-          onClick={openSyncOnboarding}
-          title={account.connected ? "Manage sync / account" : "Sign in to sync your chats & settings across devices"}
-          style={{
-            display: "flex", alignItems: "center", gap: 12,
-            padding: "12px 18px", borderRadius: 14, cursor: "pointer", textAlign: "left",
-            border: `1px solid ${account.connected ? "rgba(34,197,94,0.45)" : "var(--accent-strong)"}`,
-            background: account.connected ? "rgba(34,197,94,0.08)" : "var(--bg-elevated)",
-            color: "var(--fg)",
-          }}
-        >
-          {account.connected
-            ? <span style={{ fontSize: 22, lineHeight: 1 }}>☁️</span>
-            : <img src={`${ICONS}/owllm_main.png`} alt="OWLLM" style={{ height: 26, width: "auto", flexShrink: 0 }} />}
-          <span style={{ flex: 1 }}>
-            {account.connected ? (
-              <>
-                <span style={{ fontWeight: 800, color: "#22c55e" }}>Synced as @{account.login}</span>
-                <span style={{ color: "var(--fg-muted)", fontSize: 12.5 }}> — your chats &amp; settings follow you across devices</span>
-              </>
-            ) : (
-              <>
-                <span style={{ fontWeight: 800, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
-                <span style={{ color: "var(--fg-muted)", fontSize: 12.5 }}> — take your chats, settings &amp; agent teams to every device</span>
-              </>
-            )}
-          </span>
-          <span style={{
-            fontSize: 12.5, fontWeight: 800,
-            color: account.connected ? "#22c55e" : "var(--accent)",
-          }}>{account.connected ? "Manage →" : "Sign in →"}</span>
-        </button>
-
-        {/* "Why?" teaser — opens the same popup, for users who want to read the
-            benefits before committing to sign-in. Hidden once connected. */}
-        {!account.connected && (
-          <button
-            onClick={openSyncOnboarding}
-            title="See everything you unlock with a free GitHub account"
-            style={{
-              alignSelf: "flex-start", marginLeft: 6, marginTop: -2,
-              background: "none", border: "none", cursor: "pointer",
-              color: "var(--accent)", fontSize: 12, fontWeight: 700, padding: "2px 2px",
-            }}
-          >✨ Why connect GitHub? — see what you unlock</button>
-        )}
-
         {/* Square, image-only launcher tiles. Three equal columns that
             stretch to the full window width (1fr each) so the row never
             leaves dead space on the sides; each tile stays square via

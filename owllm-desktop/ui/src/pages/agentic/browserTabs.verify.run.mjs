@@ -54,7 +54,8 @@ check(browserRs.includes("function reportCred()") &&
       browserRs.includes('addEventListener("submit", reportCred, true)') &&
       browserRs.includes('addEventListener("pagehide", reportCred)'),
   "bridge reports typed logins on form submit and page leave");
-check((browserRs.match(/store_typed_login/g) || []).length >= 2,
+check((browserRs.match(/BrowserUiEvent::TypedLogin \{ data \}/g) || []).length >= 2 &&
+      /for data in batch\.creds[\s\S]{0,200}store_typed_login/.test(browserRs),
   "both window shapes (framed tabs + legacy fallback) route creds to the vault");
 check(vaultRs.includes("pub fn store_typed_login"),
   "vault exposes store_typed_login");

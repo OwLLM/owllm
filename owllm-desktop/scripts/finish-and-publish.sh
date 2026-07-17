@@ -408,6 +408,18 @@ fi
 echo "release notes:"; printf '%s\n' "$NOTES_BODY" | sed 's/^/  | /'
 
 # 3. Tag + push the tag.
+# Any pre-existing v$NEW tag (local or on origin) is debris from a crashed
+# publish: when the published floor is known, NEW is computed strictly ABOVE
+# every published release tag, so v$NEW can never name a shipped release.
+# Clear both copies, else the re-tag or the tag push collides and strands the
+# release AGAIN (v0.8.88 died at "git push tag": origin still held the same
+# tag from the previous crashed run, pointing at the abandoned commit).
+# Guarded on PUBLISHED_TAGS: without the public floor the above-all-releases
+# proof doesn't hold, so never touch remote tags in gh-less/offline runs.
+if [ -n "$PUBLISHED_TAGS" ]; then
+  git tag -d "v$NEW" >/dev/null 2>&1 || true
+  git push -q origin ":refs/tags/v$NEW" >/dev/null 2>&1 || true
+fi
 git tag -a "v$NEW" -m "$MSG" || fail "git tag v$NEW failed (already exists?)"
 git push -q origin "v$NEW" || fail "git push tag v$NEW failed"
 echo "tagged v$NEW"

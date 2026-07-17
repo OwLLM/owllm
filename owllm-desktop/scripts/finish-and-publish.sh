@@ -70,6 +70,51 @@ else
 fi
 cd "$REPO"
 
+# One app process already has a backend lease, but separate OwLLM windows (or a
+# direct script invocation) are separate processes. Use the repository's common
+# Git directory so every worktree and every app instance shares one atomic lock.
+GIT_COMMON="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+PUBLISH_LOCK="$GIT_COMMON/owllm-publish.lock"
+PUBLISH_LOCK_OWNER="$PUBLISH_LOCK/owner"
+claim_publish_lock() {
+  if mkdir "$PUBLISH_LOCK" 2>/dev/null; then
+    printf '%s\n%s\n' "$$" "$(date +%s)" > "$PUBLISH_LOCK_OWNER"
+    return
+  fi
+
+  local owner=""
+  [ -f "$PUBLISH_LOCK_OWNER" ] && owner="$(sed -n '1p' "$PUBLISH_LOCK_OWNER" 2>/dev/null || true)"
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    echo "PUBLISH_FAILED: another publish is already running for this repository (pid $owner)." >&2
+    exit 1
+  fi
+
+  # The prior publisher died without running its EXIT trap. Rename the stale
+  # directory atomically; only one contender can recover it and claim the lock.
+  local stale="${PUBLISH_LOCK}.stale.$$"
+  if ! mv "$PUBLISH_LOCK" "$stale" 2>/dev/null; then
+    echo "PUBLISH_FAILED: another publish is already starting for this repository." >&2
+    exit 1
+  fi
+  rm -f "$stale/owner"
+  rmdir "$stale" 2>/dev/null || true
+  if ! mkdir "$PUBLISH_LOCK" 2>/dev/null; then
+    echo "PUBLISH_FAILED: another publish won the repository lock." >&2
+    exit 1
+  fi
+  printf '%s\n%s\n' "$$" "$(date +%s)" > "$PUBLISH_LOCK_OWNER"
+}
+release_publish_lock() {
+  local owner=""
+  [ -f "$PUBLISH_LOCK_OWNER" ] && owner="$(sed -n '1p' "$PUBLISH_LOCK_OWNER" 2>/dev/null || true)"
+  if [ "$owner" = "$$" ]; then
+    rm -f "$PUBLISH_LOCK_OWNER"
+    rmdir "$PUBLISH_LOCK" 2>/dev/null || true
+  fi
+}
+claim_publish_lock
+trap release_publish_lock EXIT
+
 # Stream a verbatim copy of this run to a log so a failure can be diagnosed
 # without relying on the app's log view (which truncates or may be closed).
 # OwLLM keeps its historical location; any other repo logs under .owllm/.
@@ -78,7 +123,11 @@ mkdir -p "$LOG_DIR"
 LIVE_LOG="$LOG_DIR/publish-latest.log"
 : > "$LIVE_LOG"
 exec > >(tee -a "$LIVE_LOG") 2>&1
-trap 'cp -f "$LIVE_LOG" "$LOG_DIR/publish-v${NEW:-unknown}.log" 2>/dev/null || true' EXIT
+on_publish_exit() {
+  cp -f "$LIVE_LOG" "$LOG_DIR/publish-v${NEW:-unknown}.log" 2>/dev/null || true
+  release_publish_lock
+}
+trap on_publish_exit EXIT
 
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
 

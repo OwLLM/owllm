@@ -651,6 +651,8 @@ function ModeBar({
       height: 80,
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
+      // Language changes text, never the physical header/control order.
+      direction: "ltr",
       // Header surface — now uses --bg-header so the accent picker
       // visibly repaints the band (amber → golden header, red → red
       // header, emerald → green header). Was hardcoded #1c2244.

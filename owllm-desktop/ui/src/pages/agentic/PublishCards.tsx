@@ -76,6 +76,10 @@ const hasLocalSettings = (repoDir: string) => {
 // The shared status line below the chatbox is a single ambient line — send it a
 // one-line summary; the full multi-line output lives in the output modal.
 const firstLine = (s: string) => { const i = s.indexOf("\n"); return i === -1 ? s : s.slice(0, i); };
+const elapsedClock = (seconds: number) => {
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+};
 
 /** Merge project-card release defaults into local settings. Card values are used only
  *  when the user has NOT saved a local override (so per-machine certs can still differ). */
@@ -146,6 +150,7 @@ export default function PublishCards({
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
   const [git, setGit] = useState<GitStatusInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   // Inline, right-by-the-buttons progress. The shared `status` line lives in the
   // center column, far from this left-rail card, so an action there felt dead:
   // no acknowledgement on click, only a result at the very end. This shows
@@ -166,6 +171,9 @@ export default function PublishCards({
   const [commitMsg, setCommitMsg] = useState("");
   const mergeTarget = "main";
   const mounted = useRef(true);
+  // State disables the button on the next render. This synchronous latch
+  // closes the double-click window before that render happens.
+  const runningRef = useRef(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   // The Code page stays mounted (keep-alive, hidden via display:none) — skip
   // polling while it isn't visible so background pages don't probe forever.
@@ -221,6 +229,21 @@ export default function PublishCards({
     return () => window.clearInterval(id);
   }, [fetchGit]);
 
+  // A host Rust build can legitimately take several minutes. Keep a cheap
+  // elapsed clock moving in the card so "working" cannot look like "frozen".
+  useEffect(() => {
+    if (!loading) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setElapsedSeconds(0);
+    const id = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [loading]);
+
   // Seed mode + signing from the committed Project Card when there is no local override.
   // This keeps the project's release rules in sync across machines and teammates.
   useEffect(() => {
@@ -240,7 +263,16 @@ export default function PublishCards({
 
   const status = (msg: string) => { if (onStatus) onStatus(msg); };
 
-  const run = async (label: string, fn: () => Promise<unknown>) => {
+  const run = async (
+    label: string,
+    fn: () => Promise<unknown>,
+    { openOutput = true }: { openOutput?: boolean } = {},
+  ) => {
+    if (runningRef.current) {
+      setActivity({ kind: "err", msg: "An action is already running for this project." });
+      return;
+    }
+    runningRef.current = true;
     setLoading(true);
     // Immediate acknowledgement on three surfaces — a compact rail chip, a
     // one-line ambient note on the shared status line, and the full output in a
@@ -250,21 +282,24 @@ export default function PublishCards({
     // line below the chatbox.
     setActivity({ kind: "run", msg: `${label}…` });
     setOutput({ kind: "run", title: label, body: `${label}…` });
-    setOutputOpen(true);
+    // Host publishing takes minutes. Do not place a full-screen modal over the
+    // app for that whole period; its output remains available from the rail.
+    setOutputOpen(openOutput);
     status(`⏳ ${label}…`);
     try {
       const out = await fn();
       const msg = String(out ?? "Done.");
-      setActivity({ kind: "ok", msg });
+      setActivity({ kind: "ok", msg: firstLine(msg) });
       setOutput({ kind: "ok", title: label, body: msg });
       status(`✓ ${firstLine(msg)}`);
       refresh();
     } catch (e) {
       const msg = String((e as Error).message ?? e);
-      setActivity({ kind: "err", msg });
+      setActivity({ kind: "err", msg: firstLine(msg) });
       setOutput({ kind: "err", title: label, body: msg });
       status(`✗ ${firstLine(msg)}`);
     } finally {
+      runningRef.current = false;
       setLoading(false);
       fetchGit();
     }
@@ -332,7 +367,7 @@ export default function PublishCards({
       draft: visibility === "draft",
       sign: signPayload,
     });
-  });
+  }, { openOutput: false });
 
   // The local git_status answers "is this a repo" instantly and offline; the
   // readiness probe (network) only gates the remote-dependent buttons.
@@ -366,12 +401,12 @@ export default function PublishCards({
   // One click hands the failure to the coder agent instead of making the user
   // copy-paste PUBLISH_FAILED output into the chat. Carries BOTH the last
   // failed action's full output and any unmet readiness checks.
-  const hasFixableIssue = activity?.kind === "err" || readyFails.length > 0;
+  const hasFixableIssue = output?.kind === "err" || readyFails.length > 0;
   const fixWithAgent = () => {
     if (!onFixIssues) return;
     const parts: string[] = [];
-    if (activity?.kind === "err") {
-      parts.push(`The last release action failed with this output:\n\n${activity.msg}`);
+    if (output?.kind === "err") {
+      parts.push(`The last release action failed with this output:\n\n${output.body}`);
     }
     if (readyFails.length > 0) {
       parts.push(`Publish readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);
@@ -503,6 +538,14 @@ export default function PublishCards({
             >
               <span style={{ flexShrink: 0 }}>{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}</span>
               <span style={{ minWidth: 0 }}>{activity.msg}</span>
+              {activity.kind === "run" && (
+                <span
+                  aria-label={`Elapsed ${elapsedClock(elapsedSeconds)}`}
+                  style={{ flexShrink: 0, color: "var(--accent)", fontVariantNumeric: "tabular-nums" }}
+                >
+                  · {elapsedClock(elapsedSeconds)}
+                </span>
+              )}
               {output && !outputOpen && (
                 <button
                   onClick={() => setOutputOpen(true)}

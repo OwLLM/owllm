@@ -238,6 +238,36 @@ pub fn store_imported(incoming: Vec<BrowserCred>) -> Result<usize, String> {
     Ok(n)
 }
 
+/// Auto-save a login the user TYPED into the agent browser. `payload` is the
+/// bridge's JSON {origin, username, password} (see BRIDGE_JS reportCred in
+/// browser.rs). Blank origins/passwords are silently ignored — there is
+/// nothing worth saving and typing continues undisturbed.
+pub fn store_typed_login(payload: &str) -> Result<(), String> {
+    let v: serde_json::Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
+    let str_of = |k: &str| {
+        v.get(k)
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    let origin = normalize_origin(str_of("origin").trim());
+    let password = str_of("password");
+    if origin.is_empty() || password.is_empty() {
+        return Ok(());
+    }
+    let merged = upsert(
+        load(),
+        BrowserCred {
+            origin,
+            username: str_of("username").trim().to_string(),
+            password,
+            note: "typed in browser".to_string(),
+            ts: now_ms(),
+        },
+    );
+    save(&merged)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

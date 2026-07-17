@@ -136,8 +136,11 @@ export default function PublishCards({
   onStatus?: (msg: string) => void;
   /** Hands a ready-made "diagnose and fix this" task to the page's coder agent
    *  (queued as a steer if a run is in flight). Renders the Fix-with-agent
-   *  button only when provided AND there is a failure to act on. */
-  onFixIssues?: (task: string) => void;
+   *  button only when provided AND there is a failure to act on. Returns what
+   *  actually happened so the card can tell the truth — send() has guards
+   *  (no model picked, no workspace) that otherwise drop the task silently
+   *  while the card claims the agent is on it. */
+  onFixIssues?: (task: string) => "sent" | "queued" | "no-model" | "no-workspace" | void;
 }) {
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
   const [git, setGit] = useState<GitStatusInfo | null>(null);
@@ -350,12 +353,20 @@ export default function PublishCards({
     if (readyFails.length > 0) {
       parts.push(`Publish readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);
     }
-    onFixIssues(
+    const outcome = onFixIssues(
       "The rule-based release buttons (Commit / Merge / Push / Publish) hit a problem in this repository. " +
       "Diagnose the root cause, fix it, and verify the fix — do not just describe it.\n\n" +
       parts.join("\n\n"),
-    );
-    setActivity({ kind: "run", msg: "Sent to the coder agent — watch the chat for the fix." });
+    ) ?? "sent";
+    if (outcome === "no-model") {
+      setActivity({ kind: "err", msg: "Can't start the fix — no model is selected in the Coder pane. Pick a model above the chat, then press 🛠 Fix with agent again." });
+    } else if (outcome === "no-workspace") {
+      setActivity({ kind: "err", msg: "Can't start the fix — no workspace is connected on this page." });
+    } else if (outcome === "queued") {
+      setActivity({ kind: "run", msg: "Coder is mid-run — the fix task is queued as a ⚡ steer and will run next." });
+    } else {
+      setActivity({ kind: "run", msg: "Sent to the coder agent — watch the chat for the fix." });
+    }
   };
 
   return (

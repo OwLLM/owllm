@@ -1560,8 +1560,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       }
       return;
     }
-    if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { setStatus("No model selected — pick one above."); return; }
+    // Guard failures on PROGRAMMATIC sends (fix-with-agent, notebook auto-feed,
+    // pane cross-feed) get a visible transcript bubble — a status-line note is
+    // invisible when the user isn't watching the composer, and a silently
+    // dropped task looks like "the agent ignored me".
+    const blockSend = (why: string) => {
+      setStatus(why);
+      if (!fromComposer) setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${why}\n\nDropped task:\n${text.length > 400 ? text.slice(0, 400) + "…" : text}`, ts: Date.now() }]);
+    };
+    if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { blockSend("No model selected — pick one above."); return; }
     if (fromComposer) { setDraft(""); setCodeImages([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
@@ -2553,8 +2561,16 @@ function CodeWorkspace({ pageId, onTitle }: {
               disabled={busy}
               onStatus={setStatus}
               // Failed release actions become a coder task; send() queues it
-              // as a ⚡ steer when a run is already in flight.
-              onFixIssues={(task) => { void sendRef.current?.(task); }}
+              // as a ⚡ steer when a run is already in flight. Pre-check the
+              // guards send() would trip so the card reports the truth instead
+              // of claiming "sent" while the task was silently dropped.
+              onFixIssues={(task) => {
+                if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
+                if (!workspace) return "no-workspace";
+                if (!modelId) { setStatus("No model selected — pick one above."); return "no-model"; }
+                void sendRef.current?.(task);
+                return "sent";
+              }}
             />
           </div>
         )}

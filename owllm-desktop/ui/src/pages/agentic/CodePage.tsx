@@ -16,6 +16,7 @@ import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { getSetting, setSetting, scope, SettingKey } from "../../state/pageSettings";
 import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
+import { setRunActivity } from "../../runtime/runActivity";
 import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
@@ -714,6 +715,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     // Keep the imperative send gate in sync immediately; waiting for the
     // chatRuntime update to trigger a React render can strand auto-follow-ups.
     busySendRef.current = v;
+    // Header "running" aura: code runs (incl. CLI paths that never touch
+    // chatRuntime.startStream) count as run activity too.
+    setRunActivity(`code:${SID}`, v);
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
       if (v) return { ...cur, busy: true, runStartedAt: Date.now(), runEndedAt: undefined };

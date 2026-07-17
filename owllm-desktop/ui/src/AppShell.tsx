@@ -46,6 +46,7 @@ import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
 import { readKeepFrameVisible, saveKeepFrameVisible } from "./framePreferences";
+import { isRunActive, subscribeRunActivity } from "./runtime/runActivity";
 import {
   CHAT_FONT_MIN_STEP, chatFontSizePx, clampChatFontStep,
   readChatFontStep, saveChatFontStep,
@@ -549,6 +550,22 @@ function MiniFrameReplica({ width, active, children }: {
 // ---------------------------------------------------------------------
 type ActiveMode = "home" | "finetuning" | "agentic" | "gamify";
 
+// True while ANY run is in flight anywhere in the app (team dispatch, code
+// run, chat stream). Drives the header bars' "running" aura — the same
+// rotating conic-gradient border the active agent tiles show.
+function useRunActive(): boolean {
+  return React.useSyncExternalStore(subscribeRunActivity, isRunActive);
+}
+
+// The header aura reuses the agent tiles' rainbow ring verbatim (same stops,
+// same 4s linear spin) but anchors its start/end stop on the SELECTED GUI
+// accent so the effect visibly carries the user's colour instead of a
+// hardcoded green. Painted padding-box/border-box exactly like the tiles.
+const HEADER_AURA_GRADIENT =
+  `conic-gradient(from var(--owllm-aura-angle),`
+  + ` var(--accent), #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, var(--accent))`;
+const HEADER_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
+
 function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
@@ -582,6 +599,7 @@ function ModeBar({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const { language, setLanguage } = useLocalization();
   const settingsRef = useRef<HTMLDivElement>(null);
+  const runActive = useRunActive();
 
   // GitHub / sync account state for the Settings sign-in row (relocated here
   // from the Home page). Reloads on mount, on the in-window `github-changed`
@@ -648,15 +666,33 @@ function ModeBar({
   return (
     <div data-ui="AppHeader" onMouseDown={startDrag} style={{
       position: "relative", zIndex: 50,
-      height: 80,
+      // Geometry is constant across idle/running: border-box height equals
+      // the old 80px content + 20px padding, and the 2px aura border is
+      // always present (transparent when idle) so a run starting never
+      // shifts the layout below.
+      height: 100, boxSizing: "border-box",
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
       // Header surface — now uses --bg-header so the accent picker
       // visibly repaints the band (amber → golden header, red → red
       // header, emerald → green header). Was hardcoded #1c2244.
-      background: "var(--bg-header)",
+      // RUNNING: the band keeps its accent-driven fill (padding-box) while
+      // the rotating aura gradient paints the border ring (border-box) —
+      // the same technique as the active agent tiles.
+      background: runActive
+        ? `linear-gradient(var(--bg-header), var(--bg-header)) padding-box, ${HEADER_AURA_GRADIENT} border-box`
+        : "var(--bg-header)",
+      border: "2px solid transparent",
+      animation: runActive ? HEADER_AURA_ANIMATION : undefined,
       cursor: "default",
     }}>
+      {/* @property makes the conic angle animatable (Houdini); non-supporting
+          browsers fall back to a static rainbow ring — same as the tiles.
+          Declared here (ModeBar never unmounts) for BOTH header bars. */}
+      <style>{`
+        @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+        @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+      `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
         <div ref={settingsRef} data-no-drag style={{ position: "relative" }}>
           <button
@@ -1102,6 +1138,7 @@ function SubTabs({
   activeKey: string;
   onChange: (key: string) => void;
 }) {
+  const runActive = useRunActive();
   const renderTab = (p: PageDef) => {
     const active = p.key === activeKey;
     return (
@@ -1136,11 +1173,19 @@ function SubTabs({
   ];
 
   return (
-    <div style={{
-      height: 48, background: "var(--bg-card)",
+    <div data-ui="SubTabsBar" style={{
+      // Constant geometry: border-box height covers the old 48px + 1px
+      // separator, and the 2px aura border is always reserved so the bar
+      // doesn't jump when a run starts. Idle keeps the bottom separator
+      // (drawn by the transparent border's bottom colour).
+      height: 49, boxSizing: "border-box", background: runActive
+        ? `linear-gradient(var(--bg-card), var(--bg-card)) padding-box, ${HEADER_AURA_GRADIENT} border-box`
+        : "var(--bg-card)",
       display: "flex", alignItems: "center",
       padding: "0 24px", gap: 6, fontSize: 15, color: "var(--fg)",
-      borderBottom: "1px solid var(--border)",
+      border: "2px solid transparent",
+      borderBottomColor: runActive ? "transparent" : "var(--border)",
+      animation: runActive ? HEADER_AURA_ANIMATION : undefined,
     }}>
       {leftTabs.map(renderTab)}
       <div style={{ flex: 1 }} />

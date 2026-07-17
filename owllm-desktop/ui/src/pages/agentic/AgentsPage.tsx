@@ -112,6 +112,7 @@ import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIs
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
 import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
+import { clearRunActivity, setRunActivity } from "../../runtime/runActivity";
 import { ChatBubble, ChatMarkdown, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
@@ -8357,6 +8358,9 @@ export function AgentsPage({
   const [agentTiming, setAgentTiming] = useState<Map<string, AgentTiming>>(new Map());
   const addActive = (name: string) => {
     worldEmit({ kind: "agent-start", agent: name }); // 2.5D HQ tap (P0-1)
+    // Header "running" aura rides the SAME signal as the tile aura, so the
+    // ModeBar/SubTabs bars light exactly when any agent tile does.
+    setRunActivity(`agents:${name}`, true);
     setActiveAgents(prev => {
       if (prev.has(name)) return prev;
       const next = new Set(prev);
@@ -8374,6 +8378,7 @@ export function AgentsPage({
   };
   const removeActive = (name: string) => {
     worldEmit({ kind: "agent-end", agent: name }); // 2.5D HQ tap (P0-1)
+    setRunActivity(`agents:${name}`, false);
     setActiveAgents(prev => {
       if (!prev.has(name)) return prev;
       const next = new Set(prev);
@@ -8389,7 +8394,12 @@ export function AgentsPage({
       return next;
     });
   };
-  const clearActive = () => setActiveAgents(new Set());
+  const clearActive = () => {
+    // Wholesale clear (run end / stop) — also sweep the header-aura tags so a
+    // missed per-agent removal can't leave the header bars spinning forever.
+    clearRunActivity("agents:");
+    setActiveAgents(new Set());
+  };
   // OrchestratorPane focus needs a single "primary" — pick whichever
   // agent went active most recently (Sets preserve insertion order in
   // modern JS, so .values().next() gives the oldest, but for the
@@ -8401,7 +8411,11 @@ export function AgentsPage({
   // Phase setter wrapped so the 2.5D HQ hears run completion through the
   // SAME stream this page already drives (P0-1 — never a second stream).
   const setPhase = (p: DispatchPhase) => {
-    if (p === "done") worldEmit({ kind: "run-finish" });
+    if (p === "done") {
+      worldEmit({ kind: "run-finish" });
+      // Run over — sweep any straggler header-aura tags with it.
+      clearRunActivity("agents:");
+    }
     setPhaseRaw(p);
   };
 

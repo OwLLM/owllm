@@ -30,6 +30,7 @@ check(catalog.every((row) => {
 const localization = read("index.tsx");
 const main = read("../main.tsx");
 const shell = read("../AppShell.tsx");
+const modules = read("../core/modules.ts");
 const styles = read("../styles.css");
 const browserChrome = read("../../public/browser-chrome.html");
 check(main.includes("<LocalizationProvider>"), "the provider wraps the full application");
@@ -40,6 +41,7 @@ check(localization.includes('const LOCALIZED_ATTRIBUTES = ["title", "aria-label"
 check(localization.includes("MutationObserver") && localization.includes("window.confirm ="), "lazy UI/status nodes and native dialogs are localized");
 check(localization.includes("return source;") && localization.includes("guaranteed fallback"), "missing translations fall back to canonical English");
 check(browserChrome.includes("CHROME_COPY") && browserChrome.includes('owllm:language'), "the separate browser chrome follows the application locale");
+check(modules.includes('key: "code",    label: "💻 Coding"'), 'the application navigation names the page "Coding" at its source');
 
 // ── Flag-only language selector ────────────────────────────────────────────
 // All eight languages render as bundled flag icons (icons/App_icons), no text.
@@ -81,14 +83,23 @@ check(
 );
 
 // Page names must be what native devs call the page, not dictionary translations.
-// (User-reported: it "Codice" for the Code page, "Firmando" for Signing,
-//  "Informazioni" for Info — all wrong; the loanword is the convention.)
+// (User-reported: it "Codice" for the Coding page, "Firmando" for Signing,
+//  "Informazioni" for Info — all wrong; developer-facing loanwords are conventional.)
 for (const row of catalog) {
   const en = row[0];
-  if (/^[^A-Za-z]*Code$/.test(en)) check(row[5] === en, `Italian Code page stays "Code" (${JSON.stringify(en)})`);
+  if (/^[^A-Za-z]*Coding$/.test(en)) check(row[5] === en, `Italian Coding page stays "Coding" (${JSON.stringify(en)})`);
   if (/^[^A-Za-z]*Signing$/.test(en)) check(row[5] === en, `Italian Signing page stays "Signing" (${JSON.stringify(en)})`);
   if (/^[^A-Za-z]*Info$/.test(en)) check(row[5] === en, `Italian Info stays "Info" (${JSON.stringify(en)})`);
 }
+check(cell("💻 Coding", "zh-CN") === "💻 编程", 'Chinese Coding page uses the programming term "编程"');
+check(cell("💻 Coding", "ko") === "💻 코딩", 'Korean Coding page uses the conventional loanword "코딩"');
+check(cell("💻 Coding", "ja") === "💻 コーディング", 'Japanese Coding page uses the conventional loanword "コーディング"');
+check(cell("💻 Coding", "ar") === "💻 البرمجة", 'Arabic Coding page means software programming');
+check(cell("💻 Coding", "hi") === "💻 कोडिंग", 'Hindi Coding page uses the conventional developer loanword');
+check(cell("💻 Coding", "pt") === "💻 Coding", 'Portuguese Coding page keeps the developer-facing product label');
+check(cell("📜 About OwLLM", "it") === "📜 Info su OwLLM", 'Italian About card uses idiomatic "Info", not "Informazioni"');
+check(cell("Coding agent", "it") === "Agente di programmazione", 'Italian "Coding agent" means software programming, not encoding');
+check(cell("Coding in {0}", "it") === "Programmazione in {0}", 'Italian "Coding in" uses "Programmazione", not "Codifica"');
 
 // Git/GitHub operations are commands, not prose — never translated in the
 // Romance locales (it/pt keep the English command words; zh/ko/ja use their

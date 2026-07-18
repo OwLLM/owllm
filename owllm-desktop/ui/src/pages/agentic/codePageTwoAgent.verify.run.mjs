@@ -32,3 +32,26 @@ try {
 } finally {
   fs.rmSync(ROOT, { recursive: true, force: true });
 }
+
+// ---- Source pins (CRLF-normalized reads — Windows checkouts are CRLF) ------
+// Guard the meta-notice wiring in the REAL CodePage.tsx so a merge can't
+// silently revert the timing footer back into a forwardable assistant answer.
+const readLF = (p) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
+const codePageSrc = readLF(path.join(HERE, "CodePage.tsx"));
+let pinFailures = 0;
+const pin = (label, cond) => {
+  if (cond) console.log(`  ✓ ${label}`);
+  else { pinFailures++; console.error(`  ✗ ${label}`); }
+};
+console.log("\nCodePage meta-notice source pins:\n");
+pin("timing footer is appended as kind meta",
+  codePageSrc.includes('kind: "meta", content: runTimingFooter('));
+pin("auto-feed pause note is appended as kind meta",
+  codePageSrc.includes('kind: "meta", content: `📓 Auto-feed paused'));
+pin("forward control skips trailing meta notices",
+  codePageSrc.includes('messages.slice(i + 1).every((n) => n.kind === "meta")'));
+pin("legacy sessions are migrated at hydration",
+  codePageSrc.includes("stampLegacyMetaNotices(loadPageSession(pageId)"));
+if (pinFailures > 0) {
+  throw new Error(`FAILED: ${pinFailures} source pin(s) failed.`);
+}

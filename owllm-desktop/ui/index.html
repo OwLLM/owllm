@@ -9,28 +9,13 @@
     <!-- Startup cover: the instant the HTML parses, this splash fills the
          viewport with the app's dark canvas color. When ReactDOM renders,
          it replaces #root's children, so the splash naturally disappears
-         the moment the React tree mounts.
-
-         Windows/macOS ship an OPAQUE window (tauri.conf.json transparent:false)
-         so the dark cover is correct — it masks the overlay-frame flash until
-         React paints. Linux ships a TRANSPARENT window (tauri.linux.conf.json
-         transparent:true) with the frame drawn in-page: an opaque cover paints
-         over the see-through margins and produces the "solid at start → flips to
-         transparent" flicker. So on Linux we make the cover transparent at parse
-         time, before first paint, so the very first frame is already see-through. -->
+         the moment the React tree mounts. All platforms ship an OPAQUE
+         window (Linux went opaque with the Jetson stale-pixel fix — see
+         AppShell's opaque-Linux comment), so the dark cover is correct
+         everywhere. -->
     <div id="root">
       <div id="boot-splash" style="position:fixed;inset:0;background:#06080d;"></div>
     </div>
-    <script>
-      // Runs synchronously at parse, before the first paint (mirrors the
-      // overlay-frame.html inline-accent seed). WebView2 (Windows) and WKWebView
-      // (macOS) never report "Linux"; only webkit2gtk on Linux does.
-      try {
-        if (navigator.userAgent.indexOf("Linux") !== -1) {
-          document.getElementById("boot-splash").style.background = "transparent";
-        }
-      } catch (e) {}
-    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

@@ -43,7 +43,6 @@ mod email;
 mod env_manager;
 mod finetuning;
 mod fleet;
-mod frame_shape;
 mod git;
 mod github;
 mod gguf;
@@ -399,7 +398,6 @@ pub fn run() {
             models::list_models,
             overlay_frame::overlay_frame_enabled,
             overlay_frame::overlay_frame_capture_geometry,
-            frame_shape::frame_input_region,
             projects::list_projects,
             projects::create_project,
             projects::update_project,

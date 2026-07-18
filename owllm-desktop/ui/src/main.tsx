@@ -27,26 +27,16 @@ function isTauriContext(): boolean {
   return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__ || w.__TAURI_METADATA__);
 }
 
-// webkit2gtk (Linux) is the only Tauri webview whose UA reports "Linux";
-// WebView2 (Windows) and WKWebView (macOS) never do.
-function isLinuxWebview(): boolean {
-  if (typeof navigator === "undefined") return false;
-  return navigator.userAgent.indexOf("Linux") !== -1;
-}
-
 function BootCover() {
-  // The cover masks the WINDOWS overlay-frame startup flash on the OPAQUE
-  // window. Linux ships a TRANSPARENT window (tauri.linux.conf.json) with the
-  // frame drawn in-page and NO overlay window, so an opaque cover there just
-  // paints a solid dark rectangle over the see-through window until it lifts —
-  // that IS the "solid at start → flips transparent / semi-transparent dark"
-  // flicker (the lift is gated on owllm:shown + timers, hence the racey end
-  // state). On Linux we render no cover at all; on non-Tauri contexts (vite
-  // dev, Playwright/TwinForge) we also skip it so screenshots see real content.
-  const [visible, setVisible] = React.useState(() => isTauriContext() && !isLinuxWebview());
+  // The cover masks the startup flash until the first real frame paints.
+  // All three platforms now ship an OPAQUE window (Linux went opaque with
+  // the Jetson stale-pixel fix — see AppShell's opaque-Linux comment), so
+  // the dark cover is correct everywhere. On non-Tauri contexts (vite dev,
+  // Playwright/TwinForge) we skip it so screenshots see real content.
+  const [visible, setVisible] = React.useState(() => isTauriContext());
 
   React.useEffect(() => {
-    if (!isTauriContext() || isLinuxWebview()) return; // no cover, no listener
+    if (!isTauriContext()) return; // no cover, no listener
     let alive = true;
     // Shorter fallback (was 3000 ms) so even Tauri builds reveal within
     // any reasonable screenshot window if `owllm:shown` happens to be

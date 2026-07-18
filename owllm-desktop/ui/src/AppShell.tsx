@@ -394,20 +394,19 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
     cnTL, cnTR, cnBL, cnBR,
     badgeX, badgeY,
   } = computeFrameGeometry(outerW, outerH);
-  // The 18px fill bands give the neon frame a solid chrome backing on the
-  // OPAQUE Windows/macOS window. On Linux the window is TRANSPARENT and the
-  // bands straddle the panel edge (SHIFT_OUT px hang OUTSIDE the content into
-  // the see-through margin), so FRAME_BG (var(--bg-header), opaque dark) paints
-  // solid black bars over the desktop every time the frame reveals — that IS
-  // the "becomes solid black sometimes" flash. Drop the fill on Linux so only
-  // the neon strokes + corner art remain (the intended glass look); the bands
-  // stay on opaque platforms where they read as chrome, not black.
-  const bandBg = LINUX_TRANSPARENT_WINDOW ? "transparent" : FRAME_BG;
+  const bandBg = FRAME_BG;
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
       <div data-ui="DecorativeWindowFrame" style={{
         position: "absolute", inset: 0, pointerEvents: "none",
+        // Must out-rank AppHeader's zIndex:50 — the header would otherwise
+        // paint OVER the frame's top band / inner neon line / owl lower half
+        // ("frame under the window at the top, over at the bottom"), since
+        // neither this layer nor the content panel forms a stacking context.
+        // The overlay-frame webview on Windows is always-on-top, so frame-
+        // above-header is the intended look. Modals (zIndex 9000+) stay above.
+        zIndex: 60,
         opacity: frameVisible ? 1 : 0,
         transition: `opacity ${frameVisible ? 220 : 360}ms ease`,
       }}>
@@ -1370,15 +1369,15 @@ function WindowAccentEdge() {
   );
 }
 
-// The accent edge hugs the WINDOW boundary, which is only the visible app
-// edge when the window is opaque (Windows/macOS, or overlay-frame mode).
-// Linux ships a TRANSPARENT window that is LARGER than the in-page
-// HybridFrame (owl headroom + see-through margins) — there the border drew
-// a floating orange rectangle in mid-air around the invisible window rect,
-// slicing through the owl badge. Same UA check index.html uses for the
-// boot splash: only webkit2gtk on Linux reports "Linux".
-const LINUX_TRANSPARENT_WINDOW =
-  typeof navigator !== "undefined" && navigator.userAgent.indexOf("Linux") !== -1;
+// Linux ships an OPAQUE window (tauri.linux.conf.json transparent:false),
+// same as the macOS HybridFrame mode. It USED to be transparent with
+// see-through margins, but webkit2gtk's GL present on NVIDIA/Jetson never
+// clears once-painted pixels in alpha-0 regions (verified with a minimal
+// repro: fade-out/display:none/DOM-removal/XShape/XClearArea all leave the
+// old pixels on screen; only unmapping the window clears them). That one
+// driver bug was the entire Linux frame family: the frame never fading,
+// black margin flashes, and frame art stuck "under" the panel. Do not
+// re-enable transparency on Linux without re-testing that repro.
 
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
@@ -1674,24 +1673,6 @@ export default function AppShell() {
   }, [activeKey, keepAliveActive]);
 
   const vp = useViewportSize();
-  // Linux in-page chrome (no overlay window there): the window is transparent
-  // and LARGER than the visible frame — the EXTRA_TOP band above the frame is
-  // see-through headroom for the peeking owl. Shape the window's INPUT region
-  // to frame + owl so clicks in the empty band fall through to whatever is
-  // behind the app instead of being swallowed (they used to block underlying
-  // windows' close buttons). The command is a no-op on Windows/macOS.
-  useEffect(() => {
-    if (!isTauri() || overlayFrame) return;
-    invoke("frame_input_region", {
-      rects: [
-        // Everything from the frame's top edge down stays interactive; the
-        // EXTRA_TOP band above it (owl headroom) is click-through, exactly
-        // like the Windows overlay window. The owl summon is the compact
-        // ModeBar hotspot, which sits inside the frame body.
-        { x: 0, y: EXTRA_TOP, w: vp.w, h: Math.max(0, vp.h - EXTRA_TOP) },
-      ],
-    }).catch(() => { /* backend predates the command — harmless */ });
-  }, [overlayFrame, vp.w, vp.h]);
   const appContent = (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <ModeBar
@@ -1758,7 +1739,7 @@ export default function AppShell() {
       <EmailBridgeRunner />
       <WebhookBridgeRunner />
       <ResizeEdges />
-      {(overlayFrame || !LINUX_TRANSPARENT_WINDOW) && <WindowAccentEdge />}
+      <WindowAccentEdge />
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
         : <HybridFrame

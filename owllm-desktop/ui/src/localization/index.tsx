@@ -4,20 +4,24 @@ import { ACTION_CATALOG } from "./catalog.actions";
 
 export const APP_LANGUAGE_KEY = "owllm:language";
 
-export type AppLanguage = "en" | "zh-CN" | "ko" | "ja" | "ar" | "it";
-export type LanguageOption = { code: AppLanguage; flag: string; label: string; short: string };
+export type AppLanguage = "en" | "zh-CN" | "ko" | "ja" | "ar" | "it" | "hi" | "pt";
+// flagSrc points at the bundled cross-platform flag icons (icons/App_icons →
+// served at /App_icons/* by vite.config.ts, same mechanism as /Page_icons).
+export type LanguageOption = { code: AppLanguage; flagSrc: string; label: string };
 
 export const APP_LANGUAGES: LanguageOption[] = [
-  { code: "en",    flag: "🇬🇧", label: "English",  short: "EN" },
-  { code: "zh-CN", flag: "🇨🇳", label: "Chinese",  short: "中文" },
-  { code: "ko",    flag: "🇰🇷", label: "Korean",   short: "한국" },
-  { code: "ja",    flag: "🇯🇵", label: "Japanese", short: "日本" },
-  { code: "ar",    flag: "🇸🇦", label: "Arabic",   short: "AR" },
-  { code: "it",    flag: "🇮🇹", label: "Italian",  short: "IT" },
+  { code: "en",    flagSrc: "/App_icons/usa_flag.webp",    label: "English" },
+  { code: "zh-CN", flagSrc: "/App_icons/china_flag.webp",  label: "Chinese" },
+  { code: "ko",    flagSrc: "/App_icons/korea_flag.webp",  label: "Korean" },
+  { code: "ja",    flagSrc: "/App_icons/japan_flag.webp",  label: "Japanese" },
+  { code: "ar",    flagSrc: "/App_icons/saudi_flag.webp",  label: "Arabic" },
+  { code: "it",    flagSrc: "/App_icons/italy_flag.webp",  label: "Italian" },
+  { code: "hi",    flagSrc: "/App_icons/india_flag.webp",  label: "Hindi" },
+  { code: "pt",    flagSrc: "/App_icons/brazil_flag.webp", label: "Portuguese" },
 ];
 
 const localeColumn: Record<AppLanguage, number> = {
-  en: 0, "zh-CN": 1, ko: 2, ja: 3, ar: 4, it: 5,
+  en: 0, "zh-CN": 1, ko: 2, ja: 3, ar: 4, it: 5, hi: 6, pt: 7,
 };
 
 export function readAppLanguage(): AppLanguage {

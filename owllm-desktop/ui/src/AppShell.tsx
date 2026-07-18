@@ -728,7 +728,7 @@ function ModeBar({
               role="dialog"
               aria-label="Appearance and language settings"
               style={{
-                position: "absolute", left: 0, top: 58, width: 330,
+                position: "absolute", left: 0, top: 58, width: 344,
                 padding: 12, borderRadius: 10,
                 background: "var(--bg-panel)", color: "var(--fg)",
                 border: "1px solid rgba(var(--accent-rgb),0.65)",
@@ -831,7 +831,7 @@ function ModeBar({
                 marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)",
               }}>
                 <div data-ui="LanguageSelector" style={{
-                  display: "grid", gridTemplateColumns: "repeat(3, 46px)", gridTemplateRows: "repeat(2, 29px)", gap: 4,
+                  display: "grid", gridTemplateColumns: "repeat(4, 46px)", gridTemplateRows: "repeat(2, 29px)", gap: 4,
                 }}>
                   {APP_LANGUAGES.map(option => {
                     const selected = language === option.code;
@@ -843,15 +843,22 @@ function ModeBar({
                         onClick={() => setLanguage(option.code)}
                         title={option.label}
                         style={{
-                          width: 46, height: 29, padding: "0 3px", borderRadius: 5,
-                          display: "flex", alignItems: "center", justifyContent: "center", gap: 2,
+                          width: 46, height: 29, padding: 2, borderRadius: 5,
+                          display: "flex", alignItems: "center", justifyContent: "center",
                           background: selected ? "rgba(var(--accent-rgb),0.2)" : "var(--bg-elevated)",
                           border: selected ? "1px solid var(--accent)" : "1px solid var(--border-strong)",
-                          color: "var(--fg)", cursor: "pointer",
+                          cursor: "pointer",
                         }}
                       >
-                        <span style={{ fontSize: 15 }}>{option.flag}</span>
-                        <span style={{ fontSize: 8, fontWeight: 800 }}>{option.short}</span>
+                        <img
+                          src={option.flagSrc}
+                          alt={option.label}
+                          data-no-localize
+                          style={{
+                            width: "100%", height: "100%", objectFit: "cover", borderRadius: 3,
+                            opacity: selected ? 1 : 0.82, display: "block",
+                          }}
+                        />
                       </button>
                     );
                   })}

@@ -32,7 +32,9 @@ export default defineConfig({
             if (err || !stat.isFile()) return next();
             res.setHeader(
               "Content-Type",
-              candidate.endsWith(".svg") ? "image/svg+xml" : "image/png",
+              candidate.endsWith(".svg") ? "image/svg+xml"
+                : candidate.endsWith(".webp") ? "image/webp"
+                : "image/png",
             );
             fs.createReadStream(candidate).pipe(res);
           });
@@ -42,7 +44,7 @@ export default defineConfig({
         // vite.config.ts lives in apps/owllm-desktop/ui/; `root: "ui"`
         // makes the build output land in apps/owllm-desktop/ui/dist/.
         const distDir = path.resolve(__dirname, "dist");
-        const want = ["Page_icons", "Backgrounds", "3d"];
+        const want = ["Page_icons", "Backgrounds", "3d", "App_icons"];
         for (const sub of want) {
           const src = path.join(ICONS_DIR, sub);
           const dst = path.join(distDir, sub);

@@ -322,6 +322,9 @@ fn write_secrets(map: &BTreeMap<String, String>) -> Result<(), String> {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AccountsStatus {
+    /// Backend-authoritative host OS. WebView user-agent strings can be
+    /// overridden/emulated and are not a reliable platform signal.
+    pub host_os: String,
     /// ANTHROPIC_API_KEY is set + non-empty.
     pub anthropic_api_key: bool,
     /// OPENAI_API_KEY is set + non-empty.
@@ -379,6 +382,7 @@ pub async fn accounts_status() -> AccountsStatus {
 fn accounts_status_blocking() -> AccountsStatus {
     let map = load_secrets();
     AccountsStatus {
+        host_os: std::env::consts::OS.to_string(),
         anthropic_api_key: map
             .get("ANTHROPIC_API_KEY")
             .map(|s| !s.trim().is_empty())
@@ -1560,9 +1564,10 @@ fn find_grok_cli() -> Option<PathBuf> {
     None
 }
 
-/// Grok Build keeps its sign-in state under ~/.grok (config.toml plus a
-/// credentials cache written by the first-run browser sign-in). Same
-/// lenient marker approach as kimi: any of the known files counts.
+/// Grok Build keeps actual sign-in state in ~/.grok/auth.json. config.toml is
+/// created by the installer before authentication, so treating it as a login
+/// marker makes a brand-new install appear connected while every request fails
+/// with "Not signed in".
 fn grok_cli_logged_in() -> bool {
     if find_grok_cli().is_none() {
         return false;
@@ -1571,9 +1576,7 @@ fn grok_cli_logged_in() -> bool {
         return false;
     };
     let grok = home.join(".grok");
-    grok.join("config.toml").is_file()
-        || grok.join("credentials.json").is_file()
-        || grok.join("auth.json").is_file()
+    grok.join("auth.json").is_file() || grok.join("credentials.json").is_file()
 }
 
 fn which_in_path(name: &str) -> Result<PathBuf, ()> {

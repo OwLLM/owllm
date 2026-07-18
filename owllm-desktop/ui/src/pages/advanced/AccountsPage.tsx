@@ -29,15 +29,6 @@ import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
 import { openWebUrl } from "../../utils/openWebUrl";
 
-const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
-const HOST_LABEL = HOST_IS_WINDOWS
-  ? "Windows"
-  : navigator.userAgent.includes("Mac")
-    ? "macOS"
-    : navigator.userAgent.includes("Linux")
-      ? "Linux"
-      : "Host";
-
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
 // transcription pipeline (binary + ggml-base.bin model) and exposes an
 // "Install voice runtime" button that fetches both from upstream into
@@ -218,17 +209,20 @@ function VoiceRuntimePanel() {
 /// what we hand portable-pty's CommandBuilder — PATH resolution
 /// happens there (or in Rust's which_extended fallback). Args mirror
 /// what subscription_cli_login used to pass when opening CMD:
-///   * claude/kimi: bare REPL — we auto-type `send` once it boots so
-///     Connect logs you in without you typing /login yourself.
-///   * codex: `login` subcommand (one-shot OAuth) — no REPL command.
+///   * claude: bare REPL — auto-type /login once it boots.
+///   * codex/kimi/grok: dedicated device-login command; PtyTerminal opens the
+///     emitted verification URL in OwLLM's browser.
 ///   * gemini: bare REPL + `/auth`, matching the official CLI flow.
 const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } | undefined> = {
   claude_cli: { cli: "claude", args: [], send: "/login\r" },
-  codex_cli:  { cli: "codex",  args: ["login"] },
-  kimi_cli:   { cli: "kimi",   args: [], send: "/login\r" },
+  // Device-code auth avoids localhost callbacks and system-browser launches.
+  // PtyTerminal opens the emitted URL in OwLLM's persistent browser instead.
+  codex_cli:  { cli: "codex",  args: ["login", "--device-auth"] },
+  // Current kimi-cli has a dedicated login command. The old bare-REPL +
+  // auto-typed /login recipe entered an agent shell instead of authenticating.
+  kimi_cli:   { cli: "kimi",   args: ["login", "--json"] },
   gemini_cli: { cli: "gemini", args: [], send: "/auth\r" },
-  // Grok Build: the bare REPL opens the browser sign-in on first run.
-  grok_cli:   { cli: "grok",   args: [] },
+  grok_cli:   { cli: "grok",   args: ["login", "--device-auth"] },
 };
 
 const PAGE_BG = "var(--bg-panel)";
@@ -237,6 +231,7 @@ const PAGE_BG = "var(--bg-panel)";
 // Backend types
 // -----------------------------------------------------------------------
 type AccountsStatus = {
+  host_os: string;
   anthropic_api_key: boolean;
   openai_api_key: boolean;
   moonshot_api_key: boolean;
@@ -939,6 +934,15 @@ export default function AccountsPage() {
   // its pty_kill in PtyTerminal's cleanup effect).
   const [activeTerm, setActiveTerm] = useState<ActiveTerminal | null>(null);
   const [railTab, setRailTab] = useState<RailTab>("log");
+  const [hostOs, setHostOs] = useState("");
+  const hostIsWindows = hostOs === "windows";
+  const hostLabel = hostOs === "windows"
+    ? "Windows"
+    : hostOs === "macos"
+      ? "macOS"
+      : hostOs === "linux"
+        ? "Linux"
+        : "Host";
 
   function reconcile(status: AccountsStatus) {
     setCards((prev) => {
@@ -977,7 +981,10 @@ export default function AccountsPage() {
     const tick = async () => {
       try {
         const s = await invoke<AccountsStatus>("accounts_status");
-        if (!dead) reconcile(s);
+        if (!dead) {
+          setHostOs(s.host_os);
+          reconcile(s);
+        }
       } catch (e) {
         console.error("accounts_status failed", e);
       }
@@ -1035,10 +1042,10 @@ export default function AccountsPage() {
       }
       const hint: Record<string, string> = {
         claude_cli: "auto-running /login — complete the browser sign-in.",
-        codex_cli:  "follow the OAuth URL that appears.",
-        kimi_cli:   "auto-running /login — complete the browser sign-in.",
+        codex_cli:  "the device page opens in OwLLM's browser; enter the code shown here.",
+        kimi_cli:   "the authorization page opens in OwLLM's browser automatically.",
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",
-        grok_cli:   "first run opens the X / SuperGrok browser sign-in — complete it there.",
+        grok_cli:   "the xAI device page opens in OwLLM's browser; confirm the code shown here.",
       };
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
       setActiveTerm({
@@ -1185,17 +1192,17 @@ export default function AccountsPage() {
       const prefix = r.ok ? "✓" : "✗";
       const line = `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`;
       setCardState(route.key, { testing: false, testText: line, testOk: r.ok });
-      logInfo(route.backend, `${HOST_LABEL}: ${line}`);
+      logInfo(route.backend, `${hostLabel}: ${line}`);
     } catch (e: any) {
       const line = `✗  ${String(e?.message ?? e)}`;
       setCardState(route.key, { testing: false, testText: line, testOk: false });
-      logInfo(route.backend, `${HOST_LABEL}: ${line}`);
+      logInfo(route.backend, `${hostLabel}: ${line}`);
     }
     // Also probe the WSL sandbox — tells the user whether ISOLATED agents can
     // use this provider (creds mirrored into the distro). Non-fatal. Native
     // Linux/macOS have their own host/sandbox routing and must not show a fake
     // red WSL result.
-    if (!HOST_IS_WINDOWS) return;
+    if (!hostIsWindows) return;
     try {
       const w = await invoke<ProbeResult>("accounts_test_probe_wsl", { backend: route.backend });
       const wline = `${w.ok ? "✓" : "✗"}  ${w.detail}`;

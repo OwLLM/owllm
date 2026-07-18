@@ -57,8 +57,8 @@ anchor("PublishCards.tsx", cards, "network probe interval is 30s (not 8s)", "ref
 anchor("PublishCards.tsx", cards, "header shows ahead / behind / dirty facts", "↑{git.ahead}");
 anchor("PublishCards.tsx", cards, "Commit button carries the live change count",
   "Commit{git && git.total > 0 ? ` (${git.total})` : \"\"}");
-anchor("PublishCards.tsx", cards, "Push button carries the live ahead count",
-  "Push{git && git.ahead > 0 ? ` (${git.ahead})` : \"\"}");
+anchor("PublishCards.tsx", cards, "Push button carries the live ahead count on normal pages and the merged-project label on isolated pages",
+  "Push{isolated ? \" merged\" : (git && git.ahead > 0 ? ` (${git.ahead})` : \"\")}");
 anchor("PublishCards.tsx", cards, "readiness summary renders READY / N issues",
   'readyFails.length === 0 ? "READY" : `${readyFails.length} issue');
 anchor("PublishCards.tsx", cards, "expanded checklist shows the actionable detail per failing check",

@@ -386,15 +386,16 @@ pub fn init_portable_mode() {
     );
 }
 
-/// Give every non-installed Windows copy its own WebView2 process/profile.
+/// Give every Windows copy its own explicit WebView2 process/profile.
 ///
 /// WebView2 keys its process group by the user-data folder, not by the path of
 /// the executable. Consequently a release exe copied into checkout B used to
 /// join the browser process owned by checkout A (or by the installed app). If
 /// that browser process stalled, both otherwise-independent builds appeared to
-/// freeze. Installed builds deliberately keep WebView2's normal app profile so
-/// upgrades retain localStorage/cookies. Source checkouts and loose/portable
-/// copies are keyed by their folder. Portable mode and explicit overrides win.
+/// freeze. Installed builds also need an explicit profile: once the default
+/// installed `EBWebView` profile is poisoned, every upgrade can freeze at start
+/// before the UI has a chance to recover. Source checkouts and loose copies are
+/// keyed by their folder. Portable mode and explicit overrides win.
 #[cfg(windows)]
 pub fn init_isolated_webview_profile() {
     if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")
@@ -451,31 +452,7 @@ fn webview_profile_scope(exe: &Path) -> Option<PathBuf> {
     if let Some(checkout) = checkout_root_for_exe(exe) {
         return Some(checkout);
     }
-    let dir = exe.parent()?.to_path_buf();
-    // Preserve the long-lived default WebView profile for the two normal
-    // installer destinations. Everything else is a side-by-side/loose copy
-    // and must not be coupled to that installed process.
-    let normalized = dir.to_string_lossy().replace('/', "\\").to_lowercase();
-    for base in [
-        std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .map(|p| p.join("Programs").join("OwLLM Desktop")),
-        std::env::var_os("ProgramFiles")
-            .map(PathBuf::from)
-            .map(|p| p.join("OwLLM Desktop")),
-        std::env::var_os("ProgramFiles(x86)")
-            .map(PathBuf::from)
-            .map(|p| p.join("OwLLM Desktop")),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        let installed = base.to_string_lossy().replace('/', "\\").to_lowercase();
-        if normalized == installed || normalized.starts_with(&(installed + "\\")) {
-            return None;
-        }
-    }
-    Some(dir)
+    exe.parent().map(Path::to_path_buf)
 }
 
 /// Path to `llama-quantize.exe` — used by the GGUF export pipeline to
@@ -1239,7 +1216,7 @@ mod webview_profile_tests {
     }
 
     #[test]
-    fn normal_per_user_install_keeps_the_existing_profile() {
+    fn normal_per_user_install_gets_an_explicit_isolated_profile() {
         let Some(local) = std::env::var_os("LOCALAPPDATA") else {
             return;
         };
@@ -1247,6 +1224,9 @@ mod webview_profile_tests {
             .join("Programs")
             .join("OwLLM Desktop")
             .join("owllm-desktop.exe");
-        assert_eq!(webview_profile_scope(&exe), None);
+        assert_eq!(
+            webview_profile_scope(&exe),
+            exe.parent().map(std::path::Path::to_path_buf)
+        );
     }
 }

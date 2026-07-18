@@ -59,6 +59,7 @@ const TRIPWIRES = [
   ["src-tauri/src/accounts.rs", /CLI_CHILD_TIMEOUT[\s\S]*20 \* 60/, "one-shot CLI providers cannot keep Agents page busy forever (v0.8.21)"],
   ["src-tauri/src/accounts.rs", /is_browser_role_allowlist/, "browser gateway gated to Browser role, not every agent (v0.7.84)"],
   ["src-tauri/src/browser.rs", /browser_start_inner\(&app\)\?/, "serialized browser tool first-call auto-start — snapshot/get_text no longer fail on closed window (v0.8.18/v0.8.96)"],
+  ["src-tauri/src/paths.rs", /fn webview_profile_scope[\s\S]*exe\.parent\(\)\.map\(Path::to_path_buf\)/, "installed app never reuses poisoned default EBWebView profile (v0.8.97)"],
   ["src-tauri/src/mcp_gateway.rs", /cli_safe_path/, "spaced 'OwLLM Desktop' --mcp-config path split → 8.3 short path (v0.7.62)"],
   ["src-tauri/src/mcp_gateway.rs", /bearer_token_env_var/, "codex MCP wiring via -c overrides + env token (v0.7.72)"],
   ["src-tauri/src/directives.rs", /directives_seed_marks/, "project rules re-seeded 11x into every prompt (v0.7.91)"],

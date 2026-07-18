@@ -78,9 +78,9 @@ check(chromeHtml.includes("__owllmTabsSet"),
 check(chromeHtml.includes('evt("tabnew")') && chromeHtml.includes('evt("tabsel", t.id)') &&
       chromeHtml.includes('evt("tabclose", t.id)'),
   "tab pills + New tab button emit the tab events");
-const copyRows = chromeHtml.match(/"(en|zh-CN|ko|ja|ar|it)":\s*\[[^\]]+\]/g) || [];
-check(copyRows.length === 6 && copyRows.every((r) => (r.match(/"/g) || []).length >= 2 * 9 + 2),
-  "all six languages localize the chrome incl. New tab / Close tab");
+const copyRows = chromeHtml.match(/"(en|zh-CN|ko|ja|ar|it|hi|pt)":\s*\[[^\]]+\]/g) || [];
+check(copyRows.length === 8 && copyRows.every((r) => (r.match(/"/g) || []).length >= 2 * 9 + 2),
+  "all eight languages localize the chrome incl. New tab / Close tab");
 
 console.log(failures === 0 ? "\nall checks passed" : `\n${failures} FAILURES`);
 process.exit(failures === 0 ? 0 : 1);

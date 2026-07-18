@@ -108,12 +108,12 @@ check(shell.includes("setProperty(\"--chat-font-size\"") && shell.includes("save
 check(shell.includes("onChatFontStep={setChatFontStep}"),
   "the header control is wired to the persisted step state");
 
-// Localization coverage for the new labels (all six columns present).
+// Localization coverage for the new labels (all eight columns present).
 const actions = readSource("localization/catalog.actions.ts");
 for (const label of ["Chat text size", "Increase chat text size", "Decrease chat text size"]) {
   const row = actions.split("\n").find(line => line.includes(`["${label}"`));
-  check(Boolean(row) && (row.match(/"/g) || []).length >= 12,
-    `"${label}" has all six localized columns`);
+  check(Boolean(row) && (row.match(/"/g) || []).length >= 16,
+    `"${label}" has all eight localized columns`);
 }
 
 fs.rmSync(temp, { recursive: true, force: true });

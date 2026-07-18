@@ -383,10 +383,15 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 ## Support & UX
 
 - **Application-wide localization**: Settings switches English, Simplified
-  Chinese, Korean, Japanese, Arabic, or Italian live and persists the choice.
-  The shared catalogue covers page chrome, controls, menus, dialogs, empty
+  Chinese, Korean, Japanese, Arabic, Italian, Hindi, or Portuguese (pt-BR)
+  live and persists the choice; the selector is a 4×2 grid of flag icons
+  (bundled webp assets in `icons/App_icons/`, no OS-dependent emoji). The
+  shared catalogue covers page chrome, controls, menus, dialogs, empty
   states, status copy, tooltips and accessibility labels; new/missing entries
-  fall back to English. Arabic switches the application shell to RTL while
+  fall back to English. Terminology follows native software conventions —
+  git/GitHub command words (commit, push, merge, branch…), CLI commands, and
+  established dev loanwords (Code, Info, Signing, token, prompt…) are never
+  literally translated. Arabic switches the application shell to RTL while
   code, terminals, paths and user/model-authored content keep their natural or
   technical direction. The separate agent-browser chrome follows the same key.
 

@@ -1290,10 +1290,10 @@ fn wsl_probe(backend: &str) -> (bool, String) {
              else echo RUNFAIL; printf '%s\n' \"$out\" | tail -n 12; fi; fi".to_string()
         }
         // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
-        // Accept a credential or config file in either home.
+        // config.toml is created before authentication and is not a credential.
         "kimi_cli" => cli_probe(
             "kimi",
-            "{ [ -f ~/.kimi-code/credentials/kimi-code.json ] || [ -f ~/.kimi-code/config.toml ] || [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }",
+            "{ [ -f ~/.kimi-code/credentials/kimi-code.json ] || [ -f ~/.kimi/credentials/kimi-code.json ]; }",
         ),
         "gemini_cli" => cli_probe("gemini", "[ -f ~/.gemini/oauth_creds.json ]"),
         other => {
@@ -3637,13 +3637,12 @@ fn kimi_is_new_flavor() -> bool {
         .unwrap_or(true)
 }
 
-/// Kimi Code CLI marks a login in `credentials/kimi-code.json` (modern) or
-/// directly in `config.toml` (legacy). Accept either marker in either home.
+/// Kimi Code CLI stores OAuth tokens in `credentials/kimi-code.json`.
+/// config.toml exists before login and must never count as authentication.
 fn kimi_cli_logged_in() -> bool {
-    kimi_home_candidates().iter().any(|kimi| {
-        kimi.join("credentials").join("kimi-code.json").is_file()
-            || kimi.join("config.toml").exists()
-    })
+    kimi_home_candidates()
+        .iter()
+        .any(|kimi| kimi.join("credentials").join("kimi-code.json").is_file())
 }
 
 /// Raw text of the active Kimi config.toml (None when absent/unreadable).
@@ -3952,7 +3951,7 @@ fn generic_api_probe(
 /// `*_cli_logged_in()` detector):
 ///   * claude: ~/.claude/.credentials.json
 ///   * codex:  ~/.codex/auth.json + ~/.openai/auth.json (old path)
-///   * kimi:   ~/.kimi/credentials/kimi-code.json (modern) + ~/.kimi/config.toml (old)
+///   * kimi:   ~/.kimi[-code]/credentials/kimi-code.json
 ///   * gemini: ~/.gemini/oauth_creds.json + ~/.gemini/credentials.json
 ///             only. settings.json is configuration, not auth.
 ///
@@ -3988,13 +3987,13 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
         }
         "kimi_cli" => {
             // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
-            // Remove from BOTH so Disconnect actually clears the real token.
+            // Remove credentials from BOTH. Preserve config.toml: it contains
+            // model/provider configuration and is not proof of authentication.
             for kimi in kimi_home_candidates() {
                 try_remove(
                     &kimi.join("credentials").join("kimi-code.json"),
                     &mut removed,
                 );
-                try_remove(&kimi.join("config.toml"), &mut removed);
             }
         }
         "gemini_cli" => {

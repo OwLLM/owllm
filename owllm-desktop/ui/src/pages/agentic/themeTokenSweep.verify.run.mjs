@@ -56,6 +56,15 @@ const blackOnBlack = theme.buildTextThemeTokens("#000000", "dark", "#000000");
 check(theme.minimumThemeContrast(blackOnBlack.base, "dark", "#000000") >= 4.5,
   "black-on-black is contrast-corrected to a readable foreground");
 
+const blackAccentInk = theme.buildAccentInk("#000000", "dark");
+check(theme.minimumThemeContrast(blackAccentInk, "dark", "#000000") >= 4.5,
+  "near-black accent text is lifted to readable contrast in dark mode");
+check(blackAccentInk !== "#000000",
+  "near-black accent text does not remain invisible on dark surfaces");
+const readableAccentInk = theme.buildAccentInk("#fbbf24", "dark");
+check(readableAccentInk === "#fbbf24",
+  "already-readable accent text keeps the user's selected hue");
+
 // Light-mode inverse: near-white text on the white-ish light theme.
 const whiteOnLight = theme.buildTextThemeTokens("#ffffff", "light", "#f0f0f0");
 check(theme.minimumThemeContrast(whiteOnLight.base, "light", "#f0f0f0") >= 4.5,
@@ -162,6 +171,15 @@ check(!codePage.includes('background: "var(--accent)", color: "#06080d"'),
 const css = readLF(path.join(SRC, "styles.css"));
 check(css.includes("--ok-rgb:") && css.includes("--warn-rgb:") && css.includes("--error-rgb:"),
   "styles.css publishes rgb triplets for translucent status tints");
+check(css.includes("--accent-ink-dark") && css.includes("--accent-ink-light"),
+  "styles.css routes the adaptive accent foreground by theme mode");
+
+const studio = readLF(path.join(SRC, "pages/agentic/StudioPage.tsx"));
+check(!studio.includes('background: "var(--accent)", color: "var(--fg-strong)"'),
+  "accent-filled Studio buttons use the readable on-accent foreground");
+const server = readLF(path.join(SRC, "pages/core/ServerPage.tsx"));
+check(server.includes('fg: "var(--accent-fg)"'),
+  "accent-filled server controls use the readable on-accent foreground");
 
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`OK theme token sweep: all ${passed} checks passed`);

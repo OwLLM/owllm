@@ -411,5 +411,5 @@ const ghostBtn: React.CSSProperties = {
 const stepBtn: React.CSSProperties = {
   width: "100%", padding: "9px 12px", borderRadius: 9,
   border: "1px solid rgba(var(--accent-rgb),0.45)", background: "rgba(var(--accent-rgb),0.10)",
-  color: "var(--accent)", fontSize: 13, fontWeight: 700, cursor: "pointer", textAlign: "left",
+  color: "var(--accent-ink)", fontSize: 13, fontWeight: 700, cursor: "pointer", textAlign: "left",
 };

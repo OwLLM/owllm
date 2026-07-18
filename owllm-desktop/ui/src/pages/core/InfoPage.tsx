@@ -260,11 +260,11 @@ export default function InfoPage() {
           <Row label="Total on disk" value={`${totalGgufGiB.toFixed(1)} GiB`} />
           <Row
             label="Root"
-            value={<code style={{ color: "var(--accent)", fontSize: 11, wordBreak: "break-all" }}>{modelsRoot}</code>}
+            value={<code style={{ color: "var(--accent-ink)", fontSize: 11, wordBreak: "break-all" }}>{modelsRoot}</code>}
           />
           <Row
             label="Runtime"
-            value={<code style={{ color: "var(--accent)", fontSize: 11, wordBreak: "break-all" }}>{llamaRuntime}</code>}
+            value={<code style={{ color: "var(--accent-ink)", fontSize: 11, wordBreak: "break-all" }}>{llamaRuntime}</code>}
           />
         </Card>
 
@@ -276,10 +276,10 @@ export default function InfoPage() {
             fine-tuning workflow and per-model virtualenv bootstrap.
           </div>
           <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6, marginTop: 10 }}>
-            <strong style={{ color: "var(--accent)" }}>Server</strong> — start / stop a model.<br />
-            <strong style={{ color: "var(--accent)" }}>Models</strong> (under Fine Tuning) — browse discovered GGUFs.<br />
-            <strong style={{ color: "var(--accent)" }}>Chat</strong> (under Fine Tuning) — talk to the running model.<br />
-            <strong style={{ color: "var(--accent)" }}>Advanced ⚙</strong> — MCP, Environment, Accounts, Logs.
+            <strong style={{ color: "var(--accent-ink)" }}>Server</strong> — start / stop a model.<br />
+            <strong style={{ color: "var(--accent-ink)" }}>Models</strong> (under Fine Tuning) — browse discovered GGUFs.<br />
+            <strong style={{ color: "var(--accent-ink)" }}>Chat</strong> (under Fine Tuning) — talk to the running model.<br />
+            <strong style={{ color: "var(--accent-ink)" }}>Advanced ⚙</strong> — MCP, Environment, Accounts, Logs.
           </div>
         </Card>
         </div>

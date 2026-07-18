@@ -180,7 +180,7 @@ const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36)
 type KanbanPlan = { now: string; next: string; later: string };
 const EMPTY_KANBAN: KanbanPlan = { now: "", next: "", later: "" };
 const KANBAN_COLUMNS: Array<{ key: keyof KanbanPlan; label: string; hint: string; color: string }> = [
-  { key: "now", label: "Now", hint: "active implementation batch", color: "var(--accent)" },
+  { key: "now", label: "Now", hint: "active implementation batch", color: "var(--accent-ink)" },
   { key: "next", label: "Next", hint: "queued after Now", color: "var(--ok)" },
   { key: "later", label: "Later", hint: "parked / optional", color: "var(--warn)" },
 ];
@@ -682,12 +682,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               </div>
               {SHOW_KANBAN && proposedPlan && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, background: "rgba(var(--accent-rgb),0.08)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 8 }}>
-                  <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>Proposed plan</div>
+                  <div style={{ fontSize: 11, color: "var(--accent-ink)", fontWeight: 700 }}>Proposed plan</div>
                   <div style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)" }}>{proposedPlan}</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
                       onClick={() => update({ plan: normalizeKanbanPlan(proposedPlan), text: "", proposedPlan: "" })}
-                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(var(--accent-rgb),0.45)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(var(--accent-rgb),0.45)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent-ink)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                     >Save plan + clear notes</button>
                     <button className="ghost-btn" onClick={() => update({ proposedPlan: "" })} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
                   </div>
@@ -769,7 +769,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           onClick={() => feedLane("now")}
                           disabled={!kanbanPlan.now.trim()}
                           title={running ? "Feed the whole NOW batch — steers the running team at its next boundary. The board keeps its cards." : "Start the whole NOW batch as a new goal. The board keeps its cards."}
-                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--accent-rgb),0.5)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
+                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--accent-rgb),0.5)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent-ink)", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
                         ><ActionIcon name="bolt" size={13} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start batch</button>
                         {laneNotice?.key === "now" && (
                           <span style={{
@@ -795,7 +795,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               <ActionIcon name="target" size={15} />
               <span>Next steps</span>
               {queueTimingText && (
-                <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
+                <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent-ink)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
               )}
               <span style={{ fontSize: 10, fontWeight: 700, color: pendingCount ? "var(--ok)" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
               {pendingCount > 0 && (
@@ -824,7 +824,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     onClick={() => setStepsTab(t.key)}
                     style={{
                       height: 28, padding: "0 12px", border: "none", background: "transparent",
-                      borderBottom: stepsTab === t.key ? "2px solid var(--accent)" : "2px solid transparent",
+                      borderBottom: stepsTab === t.key ? "2px solid var(--accent-ink)" : "2px solid transparent",
                       color: stepsTab === t.key ? "var(--fg-strong)" : "var(--fg-muted)",
                       fontSize: 11.5, fontWeight: 700, cursor: "pointer",
                     }}

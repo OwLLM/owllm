@@ -156,6 +156,16 @@ function ensureContrast(preferred: string, surfaces: string[], targetRatio: numb
   return anchor;
 }
 
+// Adaptive readable accent — for accent-coloured TEXT/icons sitting on app
+// surfaces (timers, active tabs, toggle labels, links). Keeps the exact accent
+// whenever it clears contrast (for example amber on dark); otherwise it is
+// pulled toward the mode's contrast anchor only as far as needed to reach
+// 4.5:1 on every themed surface.
+// Fills keep using --accent + --accent-fg; this token is for foregrounds.
+export function buildAccentInk(guiColor: string, mode: Mode): `#${string}` {
+  return ensureContrast(guiColor, themeSurfaces(mode, guiColor), 4.5, mode);
+}
+
 // Derive the semantic foreground family from the user's preferred colour.
 // The preference (and therefore its hue) is retained whenever it is readable;
 // otherwise it is moved only as far as necessary toward the mode's contrast

@@ -135,7 +135,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
         border: "1px solid " + (tab === t ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
         borderBottom: "none", borderRadius: "8px 8px 0 0",
         background: tab === t ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-        color: tab === t ? "var(--accent)" : "var(--fg-muted)",
+        color: tab === t ? "var(--accent-ink)" : "var(--fg-muted)",
       }}
     >{label}</button>
   );
@@ -219,7 +219,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
                 style={{
                   height: 26, padding: "0 9px", fontSize: 11, fontWeight: 700, cursor: "pointer", border: "none",
                   background: mode === m.id ? "rgba(var(--accent-rgb),0.22)" : "transparent",
-                  color: mode === m.id ? "var(--accent)" : "var(--fg-muted)",
+                  color: mode === m.id ? "var(--accent-ink)" : "var(--fg-muted)",
                 }}
               >{m.label}</button>
             ))}
@@ -229,13 +229,13 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
             className="btn"
             onClick={onToggleBrowser}
             title="View + drive the agents' shared web browser (browser_* tools) — see the live page, open URLs, stop the daemon."
-            style={{ fontSize: 11, padding: "3px 10px", ...(browserOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+            style={{ fontSize: 11, padding: "3px 10px", ...(browserOpen ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
           >🌐 Browser</button>
           <button
             className="btn"
             onClick={onToggleTerminal}
             title="Open a terminal in the workspace folder — floats above the app (this app only). Drag its title bar to move it; — hides it without killing the shell."
-            style={{ fontSize: 11, padding: "3px 10px", ...(terminalOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+            style={{ fontSize: 11, padding: "3px 10px", ...(terminalOpen ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
           >🖥 Terminal</button>
         </div>
       </div>

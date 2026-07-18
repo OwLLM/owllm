@@ -180,7 +180,7 @@ export default function UpdateController() {
             style={{ width: 48, height: 48, objectFit: "contain", flexShrink: 0 }}
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.4, color: "var(--accent)", textTransform: "uppercase" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.4, color: "var(--accent-ink)", textTransform: "uppercase" }}>
               OwLLM Desktop · Update available
             </div>
             <div style={{ fontSize: 22, fontWeight: 700, color: "var(--fg-strong)" }}>
@@ -222,7 +222,7 @@ export default function UpdateController() {
                 <ul style={{ margin: 0, padding: 0, listStyle: "none", display: "flex", flexDirection: "column", gap: 7 }}>
                   {bullets.map((b, i) => (
                     <li key={i} style={{ display: "flex", gap: 9, fontSize: 13, lineHeight: 1.5, color: "rgba(255,255,255,0.85)" }}>
-                      <span style={{ color: "var(--accent)", flexShrink: 0, fontWeight: 700, lineHeight: 1.5 }}>▸</span>
+                      <span style={{ color: "var(--accent-ink)", flexShrink: 0, fontWeight: 700, lineHeight: 1.5 }}>▸</span>
                       <span>{b}</span>
                     </li>
                   ))}

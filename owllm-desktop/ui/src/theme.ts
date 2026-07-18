@@ -14,6 +14,7 @@ import {
   AccentSelection,
   Mode,
   TextColorSelection,
+  buildAccentInk,
   buildTextThemeTokens,
   readGuiColor,
   readMode,
@@ -98,6 +99,14 @@ function applyAccent(hex: string) {
   root.style.setProperty("--accent", hex);
   root.style.setProperty("--accent-rgb", rgb);
   root.style.setProperty("--accent-fg", pickAccentFg(hex));
+  // Adaptive readable accent for accent-coloured TEXT on app surfaces
+  // (timers, active tabs, toggle labels). Mode-dependent, but applyAccent
+  // doesn't know the mode — set BOTH and let styles.css route --accent-ink
+  // via data-theme, same pattern as --bg-header-fg. Keeps the accent hue
+  // when it already reads; a black pick in dark mode gets lifted just far
+  // enough to stay legible instead of vanishing.
+  root.style.setProperty("--accent-ink-dark", buildAccentInk(hex, "dark"));
+  root.style.setProperty("--accent-ink-light", buildAccentInk(hex, "light"));
   root.style.setProperty("--accent-soft", `rgba(${rgb}, 0.18)`);
   root.style.setProperty("--accent-strong", `rgba(${rgb}, 0.55)`);
   root.style.setProperty("--accent-glow-soft", `rgba(${rgb}, 0.35)`);

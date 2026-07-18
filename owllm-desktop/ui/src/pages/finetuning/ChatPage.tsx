@@ -1663,7 +1663,7 @@ export default function ChatPage() {
                   style={{
                     height: 40,
                     background: "linear-gradient(180deg, var(--accent), var(--accent))",
-                    color: "#fff",
+                    color: "var(--accent-fg)",
                     border: "none", borderRadius: 8,
                     fontSize: 12, fontWeight: 700,
                     cursor: !draft.trim() ? "not-allowed" : "pointer",
@@ -1724,7 +1724,7 @@ export default function ChatPage() {
                       background: "transparent", color: "var(--fg)", textAlign: "left",
                       cursor: "pointer", fontSize: 12,
                     }}>
-                      <span style={{ width: 70, color: "var(--accent)", fontFamily: "Consolas, monospace", fontWeight: 800 }}>{cmd.name}</span>
+                      <span style={{ width: 70, color: "var(--accent-ink)", fontFamily: "Consolas, monospace", fontWeight: 800 }}>{cmd.name}</span>
                       <span style={{ color: "var(--fg-muted)", fontWeight: 500 }}>{cmd.desc}</span>
                     </button>
                   ))}
@@ -1736,7 +1736,7 @@ export default function ChatPage() {
                   height: 26, padding: "0 10px", borderRadius: 6,
                   border: chatMode === m ? "1px solid rgba(var(--accent-rgb),0.55)" : "1px solid transparent",
                   background: chatMode === m ? "rgba(var(--accent-rgb),0.16)" : "transparent",
-                  color: chatMode === m ? "var(--accent)" : "var(--fg-muted)",
+                  color: chatMode === m ? "var(--accent-ink)" : "var(--fg-muted)",
                   fontSize: 12, fontWeight: 700, textTransform: "capitalize",
                 }}>{m}</button>
               ))}
@@ -1770,7 +1770,7 @@ export default function ChatPage() {
                   <span key={`${t}-${i}`} style={{
                     border: "1px solid rgba(var(--accent-rgb),0.35)",
                     background: "rgba(var(--accent-rgb),0.10)",
-                    color: "var(--accent)", borderRadius: 12,
+                    color: "var(--accent-ink)", borderRadius: 12,
                     padding: "2px 8px", fontSize: 11, fontWeight: 700,
                   }}>{t}</span>
                 ))}

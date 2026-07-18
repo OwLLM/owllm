@@ -151,7 +151,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
         border: "1px solid " + (tab === id ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
         borderBottom: "none", borderRadius: "7px 7px 0 0",
         background: tab === id ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-        color: tab === id ? "var(--accent)" : "var(--fg-muted)",
+        color: tab === id ? "var(--accent-ink)" : "var(--fg-muted)",
       }}
     >{label}</button>
   );
@@ -228,7 +228,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                     fontSize: 10.5, padding: "2px 8px",
                     border: "1px solid " + (status?.device === id ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
                     background: status?.device === id ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-                    color: status?.device === id ? "var(--accent)" : "var(--fg-muted)",
+                    color: status?.device === id ? "var(--accent-ink)" : "var(--fg-muted)",
                   }}>{label}</button>
               ))}
             </div>
@@ -245,7 +245,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                 Local dev servers work too (localhost:5173 opens as http), and the DEVICE chips preview mobile layouts.
               </div>
             )}
-            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)" }}>{scanMsg}</div>}
+            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent-ink)" }}>{scanMsg}</div>}
           </>
         )}
 
@@ -294,7 +294,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
               ))}
               {detected.length === 0 && <div style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>Press Rescan to detect browsers.</div>}
             </div>
-            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)" }}>{scanMsg}</div>}
+            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent-ink)" }}>{scanMsg}</div>}
           </>
         )}
 

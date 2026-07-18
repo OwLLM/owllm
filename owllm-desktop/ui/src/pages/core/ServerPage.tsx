@@ -228,7 +228,7 @@ function PrimaryButton({
   variant?: "neutral" | "start" | "stop";
 }) {
   const colors = {
-    neutral: { bg: "linear-gradient(180deg, var(--accent), var(--accent))", fg: "#fff", border: "none" },
+    neutral: { bg: "linear-gradient(180deg, var(--accent), var(--accent))", fg: "var(--accent-fg)", border: "none" },
     start:   { bg: "linear-gradient(180deg, #4CAF50, #388E3C)", fg: "#fff", border: "none" },
     stop:    { bg: "linear-gradient(180deg, #f44336, #d32f2f)", fg: "#fff", border: "none" },
   }[variant];
@@ -788,7 +788,7 @@ function LLMServerColumn({
       <div
         style={{
           fontSize: 11,
-          color: "var(--accent)",
+          color: "var(--accent-ink)",
           padding: "6px 10px",
           background: "var(--bg-elevated)",
           borderRadius: 6,

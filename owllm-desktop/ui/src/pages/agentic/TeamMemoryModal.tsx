@@ -183,7 +183,7 @@ export default function TeamMemoryModal({
                 style={{
                   height: 28, padding: "0 11px", border: "none", cursor: "pointer", fontSize: 12, fontWeight: 600,
                   background: view === v ? "rgba(var(--accent-rgb),0.18)" : "transparent",
-                  color: view === v ? "var(--accent)" : "var(--fg-muted)",
+                  color: view === v ? "var(--accent-ink)" : "var(--fg-muted)",
                 }}
               >{v === "graph" ? "🌐 Graph" : "☰ List"}</button>
             ))}
@@ -217,7 +217,7 @@ export default function TeamMemoryModal({
                     border: "1px solid " + (tab === t ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
                     borderBottom: "none", borderRadius: "8px 8px 0 0",
                     background: tab === t ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-                    color: tab === t ? "var(--accent)" : "var(--fg-muted)",
+                    color: tab === t ? "var(--accent-ink)" : "var(--fg-muted)",
                   }}
                 >{label}</button>
               ))}
@@ -232,7 +232,7 @@ export default function TeamMemoryModal({
                       height: 22, padding: "0 9px", borderRadius: 11, cursor: "pointer", fontSize: 10.5, fontWeight: 600,
                       border: "1px solid " + (tagFilter === t ? "rgba(var(--accent-rgb),0.5)" : "var(--border-strong)"),
                       background: tagFilter === t ? "rgba(var(--accent-rgb),0.16)" : "var(--bg-surface)",
-                      color: tagFilter === t ? "var(--accent)" : "var(--fg-muted)",
+                      color: tagFilter === t ? "var(--accent-ink)" : "var(--fg-muted)",
                     }}
                   >🏷 {t} <span style={{ opacity: 0.65 }}>{n}</span></button>
                 ))}
@@ -268,7 +268,7 @@ export default function TeamMemoryModal({
           {shown.map((e) => (
             <div key={e.id} style={{ display: "flex", gap: 8, padding: "8px 0", borderBottom: "1px solid var(--border)" }}>
               <div style={{ flex: 1, minWidth: 0 }}>
-                {e.key && <span style={{ display: "inline-block", fontSize: 10, fontWeight: 700, color: "var(--accent)", background: "rgba(var(--accent-rgb),0.12)", borderRadius: 5, padding: "1px 6px", marginRight: 6 }}>{e.key}</span>}
+                {e.key && <span style={{ display: "inline-block", fontSize: 10, fontWeight: 700, color: "var(--accent-ink)", background: "rgba(var(--accent-rgb),0.12)", borderRadius: 5, padding: "1px 6px", marginRight: 6 }}>{e.key}</span>}
                 <span style={{ fontSize: 12.5, color: tab === "worklog" ? "var(--fg-muted)" : "var(--fg)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{e.content}</span>
                 <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 3, opacity: 0.85 }}>
                   {tab === "facts" && e.tags ? `🏷 ${e.tags}  ·  ` : ""}
@@ -277,7 +277,7 @@ export default function TeamMemoryModal({
                 </div>
               </div>
               {tab === "worklog" && (
-                <button onClick={() => void promote(e.id)} title="Promote to a durable fact (kept forever, synced across your PCs)" style={{ width: 24, height: 24, padding: 0, border: "none", borderRadius: 5, background: "transparent", color: "var(--accent)", fontSize: 12, cursor: "pointer", flexShrink: 0 }}>📌</button>
+                <button onClick={() => void promote(e.id)} title="Promote to a durable fact (kept forever, synced across your PCs)" style={{ width: 24, height: 24, padding: 0, border: "none", borderRadius: 5, background: "transparent", color: "var(--accent-ink)", fontSize: 12, cursor: "pointer", flexShrink: 0 }}>📌</button>
               )}
               <button onClick={() => void remove(e.id)} title="Delete this memory" style={{ width: 24, height: 24, padding: 0, border: "none", borderRadius: 5, background: "transparent", color: "#ff8c8c", fontSize: 12, cursor: "pointer", flexShrink: 0 }}>🗑</button>
             </div>

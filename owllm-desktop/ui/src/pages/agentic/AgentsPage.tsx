@@ -9290,8 +9290,13 @@ export function AgentsPage({
       // bleed into the new project's pane.
       setAgentThoughts(new Map());
     }
+  // Re-run when a project reload supplies its preserved DB transcript too.
+  // Folder rebinding keeps the same project id, so depending on id alone left
+  // an already-created empty runtime session blank even though chat_json and
+  // agent_logs_json were still intact. The sessionEmpty guard above prevents
+  // a reload from clobbering a live/non-empty conversation.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProject?.id]);
+  }, [selectedProject?.id, selectedProject?.chat_json, selectedProject?.agent_logs_json]);
 
   // Active team: pickedTeamId wins; else project roster; else first
   // built-in template so the canvas is never empty.

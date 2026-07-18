@@ -401,12 +401,6 @@ pub fn init_portable_mode() {
 /// their folder. Portable mode and explicit overrides win.
 #[cfg(windows)]
 pub fn init_isolated_webview_profile() {
-    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        return;
-    }
     let Some(exe) = std::env::current_exe().ok() else {
         return;
     };
@@ -425,6 +419,22 @@ pub fn init_isolated_webview_profile() {
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
     let app_root = PathBuf::from(local).join("com.localllm.owllm-desktop");
+
+    // A user-supplied profile override must win. The in-app updater also
+    // inherits this environment variable from the process it replaces,
+    // however, and v0.8.97 set it to our generation-1 `isolated-webview`
+    // directory. Treat only that OWLLM-owned v1 path as stale so the first
+    // post-update relaunch can perform the v2 memory migration immediately;
+    // otherwise recovery would happen only after the user fully exited and
+    // cold-started the app.
+    if let Some(configured) =
+        std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").filter(|v| !v.is_empty())
+    {
+        let inherited_v1 = installed && is_owllm_v1_profile(Path::new(&configured), &app_root);
+        if !inherited_v1 {
+            return;
+        }
+    }
 
     if installed {
         let profile = app_root.join("isolated-webview-v2").join(&key);
@@ -502,6 +512,13 @@ fn is_normal_windows_install(exe: &Path) -> bool {
 #[cfg(windows)]
 fn normalize_windows_path(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+
+#[cfg(windows)]
+fn is_owllm_v1_profile(path: &Path, app_root: &Path) -> bool {
+    let configured = normalize_windows_path(path);
+    let v1_root = normalize_windows_path(&app_root.join("isolated-webview"));
+    configured == v1_root || configured.starts_with(&(v1_root + "\\"))
 }
 
 #[cfg(windows)]
@@ -1346,8 +1363,8 @@ pub fn fine_tuned_dir_write() -> Option<PathBuf> {
 #[cfg(all(test, windows))]
 mod webview_profile_tests {
     use super::{
-        checkout_root_for_exe, is_normal_windows_install, prepare_installed_webview_profile,
-        webview_profile_scope,
+        checkout_root_for_exe, is_normal_windows_install, is_owllm_v1_profile,
+        prepare_installed_webview_profile, webview_profile_scope,
     };
 
     #[test]
@@ -1387,6 +1404,24 @@ mod webview_profile_tests {
             exe.parent().map(std::path::Path::to_path_buf)
         );
         assert!(is_normal_windows_install(&exe));
+    }
+
+    #[test]
+    fn updater_inherited_v1_profile_is_migrated_but_explicit_overrides_win() {
+        let app_root =
+            std::path::PathBuf::from(r"C:\Users\test\AppData\Local\com.localllm.owllm-desktop");
+        assert!(is_owllm_v1_profile(
+            &app_root.join("isolated-webview").join("scope"),
+            &app_root,
+        ));
+        assert!(!is_owllm_v1_profile(
+            &app_root.join("isolated-webview-v2").join("scope"),
+            &app_root,
+        ));
+        assert!(!is_owllm_v1_profile(
+            std::path::Path::new(r"D:\Explicit\OwLLM-WebView"),
+            &app_root,
+        ));
     }
 
     fn write_state(root: &std::path::Path, relative: &str, bytes: usize) {

@@ -105,6 +105,7 @@ pub enum PtyEvent {
 struct Slot {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
+    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
 }
 
 static SESSIONS: Lazy<Mutex<HashMap<String, Slot>>> = Lazy::new(|| Mutex::new(HashMap::new()));
@@ -215,6 +216,7 @@ pub fn pty_spawn(
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("spawn {cli}: {e}"))?;
+    let killer = child.clone_killer();
     // We don't need the slave end here; dropping it closes the
     // child-side fd so EOF on the master end propagates correctly
     // when the child exits.
@@ -230,7 +232,17 @@ pub fn pty_spawn(
         .map_err(|e| format!("clone_reader: {e}"))?;
 
     let session_id = uuid::Uuid::new_v4().to_string();
+    let session_for_exit = session_id.clone();
     let event_for_data = on_event.clone();
+
+    SESSIONS.lock().unwrap().insert(
+        session_id.clone(),
+        Slot {
+            writer,
+            master: pair.master,
+            killer,
+        },
+    );
 
     // Reader thread: pump pty output into the Channel.
     std::thread::spawn(move || {
@@ -257,15 +269,8 @@ pub fn pty_spawn(
             Err(_) => -1,
         };
         let _ = event_for_data.send(PtyEvent::Exit { code: Some(code) });
+        SESSIONS.lock().unwrap().remove(&session_for_exit);
     });
-
-    SESSIONS.lock().unwrap().insert(
-        session_id.clone(),
-        Slot {
-            writer,
-            master: pair.master,
-        },
-    );
     Ok(session_id)
 }
 
@@ -309,12 +314,13 @@ pub fn pty_resize(session_id: String, cols: u16, rows: u16) -> Result<(), String
 #[tauri::command]
 pub fn pty_kill(session_id: String) -> Result<(), String> {
     let mut sessions = SESSIONS.lock().unwrap();
-    if let Some(_slot) = sessions.remove(&session_id) {
-        // Dropping the master closes its read+write ends, which sends
-        // SIGHUP / closes ConPTY on Windows. The child then exits.
-        // We don't have a stored Child reference here (it's owned by
-        // the reader thread); that's fine — the thread will see EOF,
-        // wait on the child, and emit PtyEvent::Exit.
+    if let Some(mut slot) = sessions.remove(&session_id) {
+        // The reader thread owns the waitable Child, so retain an independent
+        // killer. Dropping the master alone does not stop a child while the
+        // reader clone still holds the PTY open.
+        slot.killer
+            .kill()
+            .map_err(|e| format!("pty_kill: {e}"))?;
     }
     Ok(())
 }

@@ -203,9 +203,13 @@ pub fn pty_spawn(
         cmd.env_remove(key);
     }
     // The UI captures login URLs from PTY output and opens them in OwLLM's
-    // persistent browser. Prevent Python's webbrowser module (Kimi) from also
-    // launching a system browser.
-    cmd.env("BROWSER", "owllm-internal-browser");
+    // persistent browser. Give Python's webbrowser module (Kimi) a real
+    // successful no-op: an invalid command makes it fall through to xdg-open,
+    // which can hand an HTTPS URL to LibreOffice on Linux.
+    #[cfg(windows)]
+    cmd.env("BROWSER", "cmd.exe /c exit 0");
+    #[cfg(not(windows))]
+    cmd.env("BROWSER", "/usr/bin/true");
 
     let mut child = pair
         .slave

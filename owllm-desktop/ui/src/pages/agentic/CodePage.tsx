@@ -47,7 +47,10 @@ type Msg = {
   role: "user" | "assistant" | "tool";
   content: string;
   thinking?: string;
-  kind?: "tool" | "terminal";
+  /// "meta" = page-generated notice (run timing footer, auto-feed pause note):
+  /// rendered as a muted line, never sent to the model as history, and never
+  /// treated as the agent's answer (no Forward button).
+  kind?: "tool" | "terminal" | "meta";
   title?: string;
   status?: "ok" | "error" | "running";
   /// Which agent conversation owns this message. Stamped automatically at the
@@ -146,6 +149,17 @@ const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
   status: "Pick a folder and a local model, then describe what to build or fix.",
 };
+// Hydration migration: older sessions saved page notices (the run timing
+// footer, the auto-feed pause note) as plain assistant answers, which let them
+// own the Forward button and re-enter the model's history. Stamp them as meta.
+function stampLegacyMetaNotices(s: CodeState | null): CodeState | null {
+  if (!s?.messages?.length) return s;
+  const fix = (list?: Msg[]) => list?.map((m) =>
+    m.role === "assistant" && !m.kind && (m.content.startsWith("⏱ ") || m.content.startsWith("📓 Auto-feed paused"))
+      ? { ...m, kind: "meta" as const }
+      : m);
+  return { ...s, messages: fix(s.messages) ?? [], secondaryMessages: fix(s.secondaryMessages) };
+}
 
 // Worktree command outcomes — serde-tagged "status", camelCase. Mirror of the
 // Rust enum for fleet_worktree_create, reused AS-IS for the Code page.
@@ -610,8 +624,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     // open page and survives the worktree path changing underneath it. On first
     // launch after upgrading, the default page also adopts the LEGACY per-folder
     // session so existing users don't see their Code history vanish.
-    const restored = loadPageSession(pageId)
-      ?? (pageId === "main" ? loadCodeSession(getLastCodeProject()) : null);
+    const restored = stampLegacyMetaNotices(loadPageSession(pageId)
+      ?? (pageId === "main" ? loadCodeSession(getLastCodeProject()) : null));
     chatRuntime.hydrateIfIdle(SID, restored ?? DEFAULT_CODE_STATE);
     // Persist EVERY mutation (debounced) under this page id, with a final flush
     // after unmount / stream-end — the "coded for an hour, closed the app,
@@ -1729,7 +1743,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         markNotebookStepFinished(ruleScopeRef.current.id, sid, now);
       }
       if (payload?.runStartedAt) {
-        setMessages((msgs) => [...msgs, { role: "assistant", content: runTimingFooter(payload.runStartedAt!, now), ts: now }]);
+        setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: runTimingFooter(payload.runStartedAt!, now), ts: now }]);
       }
       // After state settles: steers queued on a path that can't inject
       // mid-turn (CLI/API) land as a follow-up turn — never silently dropped
@@ -1749,7 +1763,7 @@ function CodeWorkspace({ pageId, onTitle }: {
             void sendRef.current?.(st.text);
           }
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
-          setMessages((msgs) => [...msgs, { role: "assistant", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
+          setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }
       }, 80);
     }
@@ -2789,12 +2803,23 @@ function CodeWorkspace({ pageId, onTitle }: {
           )
         ) : (
           messages.map((m, i) => {
+            // Page-generated notices (timing footer, auto-feed pause) are not
+            // agent answers: muted line, no bubble, no Forward button.
+            if (m.kind === "meta") {
+              return (
+                <div key={i} style={{ alignSelf: "center", textAlign: "center", color: "var(--fg-muted)", fontSize: 11.5, padding: "2px 8px" }}>
+                  {m.content}
+                </div>
+              );
+            }
             if (m.role === "tool") {
               return <ToolEventCard key={i} kind={m.kind ?? "tool"} title={m.title ?? "tool"} status={m.status} content={m.content} />;
             }
             const isUser = m.role === "user";
             const isStreaming = busy && i === messages.length - 1 && m.role === "assistant";
-            const canForward = m.role === "assistant" && i === messages.length - 1 && !isStreaming && !!m.content?.trim();
+            // Forward targets the last real answer — trailing meta notices
+            // (e.g. the run timing footer) must not steal the button.
+            const canForward = m.role === "assistant" && !m.kind && !isStreaming && !!m.content?.trim() && messages.slice(i + 1).every((n) => n.kind === "meta");
             return (
               <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <ChatBubble
@@ -2868,6 +2893,13 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
             ) : (
               secondaryMessages.map((m, i) => {
+                if (m.kind === "meta") {
+                  return (
+                    <div key={i} style={{ alignSelf: "center", textAlign: "center", color: "var(--fg-muted)", fontSize: 11.5, padding: "2px 8px" }}>
+                      {m.content}
+                    </div>
+                  );
+                }
                 if (m.role === "tool") {
                   return <ToolEventCard key={i} kind={m.kind ?? "tool"} title={m.title ?? "tool"} status={m.status} content={m.content} />;
                 }

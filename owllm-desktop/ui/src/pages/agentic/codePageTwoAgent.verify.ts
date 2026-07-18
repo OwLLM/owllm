@@ -20,6 +20,7 @@ type Msg = {
   ts: number;
   owner?: "primary" | "secondary";
   placeholder?: boolean;
+  kind?: "tool" | "terminal" | "meta";
 };
 
 // Mirror of the persisted CodeState subset relevant to the two-agent flow.
@@ -157,7 +158,10 @@ const canForwardToSecondary = (messages: Msg[], i: number, busy: boolean) => {
   const m = messages[i];
   if (!m) return false;
   const isStreaming = busy && i === messages.length - 1 && m.role === "assistant";
-  return m.role === "assistant" && i === messages.length - 1 && !isStreaming && !!m.content?.trim();
+  // Forward targets the last real answer — trailing meta notices (the run
+  // timing footer) must not steal the button or become the forwarded content.
+  return m.role === "assistant" && !m.kind && !isStreaming && !!m.content?.trim()
+    && messages.slice(i + 1).every((n) => n.kind === "meta");
 };
 
 const lastIdx = state.messages.length - 1;
@@ -226,6 +230,43 @@ check("restored primary history matches", restored?.messages.map((m) => m.conten
 check("restored secondary history matches", restored?.secondaryMessages.map((m) => m.content).join("\n") === state.secondaryMessages.map((m) => m.content).join("\n"));
 check("restored secondary model selection matches", restored?.secondaryModelId === state.secondaryModelId);
 check("restored state keeps both owner tags", !!(restored?.messages.every((m) => m.owner === "primary") && restored?.secondaryMessages.every((m) => m.owner === "secondary")));
+
+// --------------------------------------------------------------------------
+// 7) Run timing footer is a meta notice — never the agent's answer
+// --------------------------------------------------------------------------
+const withFooter: Msg[] = [
+  { role: "user", content: "do the thing", ts: 1 },
+  { role: "assistant", content: "Real answer with the actual work.", ts: 2 },
+  { role: "assistant", kind: "meta", content: "⏱ 0:42 — started 11:50:37, finished 11:51:19", ts: 3 },
+];
+check("forward control NOT available on the trailing timing footer", !canForwardToSecondary(withFooter, 2, false));
+check("forward control targets the answer BEFORE the timing footer", canForwardToSecondary(withFooter, 1, false));
+check("forward control skips multiple trailing meta notices", canForwardToSecondary(
+  [...withFooter, { role: "assistant", kind: "meta", content: "📓 Auto-feed paused — the turn ended with an error.", ts: 4 }], 1, false));
+
+// Mirror of the model-history filter (CodePage send): meta notices never
+// re-enter the model's conversation as fake assistant answers.
+const toHistory = (list: Msg[]) => list
+  .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
+  .map((m) => ({ role: m.role, content: m.content }));
+const hist = toHistory(withFooter);
+check("timing footer is excluded from model history", hist.length === 2 && !hist.some((h) => h.content.startsWith("⏱")));
+
+// Mirror of stampLegacyMetaNotices: sessions saved BEFORE this fix carry the
+// footer as a plain assistant message — hydration stamps it as meta.
+const stampLegacyMeta = (list: Msg[]) => list.map((m) =>
+  m.role === "assistant" && !m.kind && (m.content.startsWith("⏱ ") || m.content.startsWith("📓 Auto-feed paused"))
+    ? { ...m, kind: "meta" as const }
+    : m);
+const migrated = stampLegacyMeta([
+  { role: "assistant", content: "Real answer with the actual work.", ts: 1 },
+  { role: "assistant", content: "⏱ 6:47 — started 18:41:51, finished 18:48:39", ts: 2 },
+  { role: "assistant", content: "📓 Auto-feed paused — the turn was stopped.", ts: 3 },
+]);
+check("legacy timing footer is stamped meta on hydration", migrated[1].kind === "meta");
+check("legacy auto-feed pause note is stamped meta on hydration", migrated[2].kind === "meta");
+check("real answers are NOT stamped meta on hydration", migrated[0].kind === undefined);
+check("after migration, forward targets the real answer", canForwardToSecondary(migrated, 0, false) && !canForwardToSecondary(migrated, 1, false));
 
 if (failures > 0) {
   throw new Error(`FAILED: ${failures} assertion(s) failed.`);

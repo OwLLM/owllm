@@ -28,6 +28,9 @@
 
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
+
 /// Open a URL in the user's default browser. Used by the AccessTokens
 /// pane to launch huggingface.co/settings/tokens and the HF model page.
 /// Refuses anything that isn't http(s) so a compromised React side
@@ -412,6 +415,98 @@ pub fn init_portable_mode() {
         "WEBVIEW2_USER_DATA_FOLDER",
         root.join(".owllm").join("webview2"),
     );
+}
+
+/// Give every non-installed Windows copy its own WebView2 process/profile.
+///
+/// WebView2 keys its process group by the user-data folder, not by the path of
+/// the executable. Consequently a release exe copied into checkout B used to
+/// join the browser process owned by checkout A (or by the installed app). If
+/// that browser process stalled, both otherwise-independent builds appeared to
+/// freeze. Installed builds deliberately keep WebView2's normal app profile so
+/// upgrades retain localStorage/cookies. Source checkouts and loose/portable
+/// copies are keyed by their folder. Portable mode and explicit overrides win.
+#[cfg(windows)]
+pub fn init_isolated_webview_profile() {
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Some(exe) = std::env::current_exe().ok() else {
+        return;
+    };
+    let Some(scope) = webview_profile_scope(&exe) else {
+        return;
+    };
+    let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+        return;
+    };
+    let canonical = scope.canonicalize().unwrap_or(scope);
+    let normalized = canonical.to_string_lossy().to_lowercase();
+    let digest = Sha256::digest(normalized.as_bytes());
+    let key = digest[..10]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let profile = PathBuf::from(local)
+        .join("com.localllm.owllm-desktop")
+        .join("isolated-webview")
+        .join(key);
+    let _ = std::fs::create_dir_all(&profile);
+    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", profile);
+}
+
+#[cfg(not(windows))]
+pub fn init_isolated_webview_profile() {}
+
+#[cfg(windows)]
+fn checkout_root_for_exe(exe: &Path) -> Option<PathBuf> {
+    let start = exe.parent()?;
+    start.ancestors().take(8).find_map(|dir| {
+        let app = if dir.join("src-tauri").join("tauri.conf.json").is_file()
+            && dir.join("package.json").is_file()
+            && dir.join("ui").is_dir()
+        {
+            Some(dir)
+        } else {
+            None
+        };
+        app.map(Path::to_path_buf)
+    })
+}
+
+#[cfg(windows)]
+fn webview_profile_scope(exe: &Path) -> Option<PathBuf> {
+    if let Some(checkout) = checkout_root_for_exe(exe) {
+        return Some(checkout);
+    }
+    let dir = exe.parent()?.to_path_buf();
+    // Preserve the long-lived default WebView profile for the two normal
+    // installer destinations. Everything else is a side-by-side/loose copy
+    // and must not be coupled to that installed process.
+    let normalized = dir.to_string_lossy().replace('/', "\\").to_lowercase();
+    for base in [
+        std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .map(|p| p.join("Programs").join("OwLLM Desktop")),
+        std::env::var_os("ProgramFiles")
+            .map(PathBuf::from)
+            .map(|p| p.join("OwLLM Desktop")),
+        std::env::var_os("ProgramFiles(x86)")
+            .map(PathBuf::from)
+            .map(|p| p.join("OwLLM Desktop")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let installed = base.to_string_lossy().replace('/', "\\").to_lowercase();
+        if normalized == installed || normalized.starts_with(&(installed + "\\")) {
+            return None;
+        }
+    }
+    Some(dir)
 }
 
 /// Path to `llama-quantize.exe` — used by the GGUF export pipeline to
@@ -1145,4 +1240,44 @@ pub fn fine_tuned_dir_write() -> Option<PathBuf> {
         return Some(r.join("fine_tuned"));
     }
     llm_root().map(|r| r.join("fine_tuned"))
+}
+
+#[cfg(all(test, windows))]
+mod webview_profile_tests {
+    use super::{checkout_root_for_exe, webview_profile_scope};
+
+    #[test]
+    fn source_checkout_and_loose_copy_get_distinct_scopes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = tmp.path().join("checkout").join("owllm-desktop");
+        std::fs::create_dir_all(app.join("src-tauri").join("target").join("debug")).unwrap();
+        std::fs::create_dir_all(app.join("ui")).unwrap();
+        std::fs::write(app.join("src-tauri").join("tauri.conf.json"), "{}").unwrap();
+        std::fs::write(app.join("package.json"), "{}").unwrap();
+        let nested_exe = app
+            .join("src-tauri")
+            .join("target")
+            .join("debug")
+            .join("owllm-desktop.exe");
+        assert_eq!(checkout_root_for_exe(&nested_exe), Some(app.clone()));
+        assert_eq!(webview_profile_scope(&nested_exe), Some(app));
+
+        let loose = tmp.path().join("loose-copy").join("OwLLM Desktop.exe");
+        assert_eq!(
+            webview_profile_scope(&loose),
+            loose.parent().map(std::path::Path::to_path_buf)
+        );
+    }
+
+    #[test]
+    fn normal_per_user_install_keeps_the_existing_profile() {
+        let Some(local) = std::env::var_os("LOCALAPPDATA") else {
+            return;
+        };
+        let exe = std::path::PathBuf::from(local)
+            .join("Programs")
+            .join("OwLLM Desktop")
+            .join("owllm-desktop.exe");
+        assert_eq!(webview_profile_scope(&exe), None);
+    }
 }

@@ -124,6 +124,10 @@ pub fn run() {
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.
     paths::init_portable_mode();
+    // WebView2 groups processes by profile rather than executable. A copied
+    // local build must not join (and inherit a hang from) the installed app or
+    // another checkout. Installed and portable profiles remain unchanged.
+    paths::init_isolated_webview_profile();
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())

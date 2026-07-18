@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::webview::{Color, Webview, WebviewBuilder};
@@ -181,6 +181,16 @@ const SENTINEL: &str = "\u{2063}OWLLM\u{2063}";
 /// mistaken for the current reply.
 static REQ: AtomicU64 = AtomicU64::new(1);
 
+/// The visible agent browser is one shared, stateful page. Parallel agents
+/// therefore have to queue their DOM actions instead of navigating/evaluating
+/// the same WebView concurrently. The command runs on Tauri's async worker
+/// pool, so waiting here never occupies the native UI/event thread.
+static BROWSER_OPERATION: Mutex<()> = Mutex::new(());
+
+fn lock_browser_operation() -> std::sync::MutexGuard<'static, ()> {
+    BROWSER_OPERATION.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// A reply being assembled from one-or-more title-channel chunks.
 /// `document.title` can't reliably carry a large payload in a single write (a
 /// long page's base64 gets truncated in transit → decode failure → the agent
@@ -217,7 +227,15 @@ fn capture_reply(title: &str) {
     let Some((id, k, total, payload)) = parse_reply(title) else {
         return;
     };
-    let mut guard = REPLIES.lock().unwrap_or_else(|p| p.into_inner());
+    // This runs in WebView2/WKWebView/WebKitGTK's native callback. It must
+    // never wait for a Rust worker holding REPLIES: a missed title is harmless
+    // because eval_until_reply re-emits/retries it, while a blocked callback
+    // freezes every OwLLM window sharing the event thread.
+    let mut guard = match REPLIES.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
     let map = guard.get_or_insert_with(HashMap::new);
     let acc = map.entry(id).or_insert_with(|| ReplyAcc {
         total,
@@ -559,6 +577,16 @@ const BRIDGE_JS: &str = r##"
 /// runs and are isolated from the app UI's own webview storage.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn browser_data_dir() -> Option<std::path::PathBuf> {
+    // A side-by-side Windows build receives its own WebView2 root before Tauri
+    // starts (paths::init_isolated_webview_profile). Keep the agent-browser
+    // child WebViews under that same isolated root too; otherwise their
+    // explicit data_directory would silently reconnect the builds again.
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("WEBVIEW2_USER_DATA_FOLDER") {
+        if !root.is_empty() {
+            return Some(std::path::PathBuf::from(root).join("agent-browser"));
+        }
+    }
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
@@ -596,10 +624,6 @@ enum BrowserUiEvent {
         action: String,
         data: String,
     },
-    ChromeUpdate {
-        url: Option<String>,
-        title: Option<String>,
-    },
     Layout {
         width: u32,
         height: u32,
@@ -610,8 +634,16 @@ enum BrowserUiEvent {
         id: u64,
         title: String,
     },
+    /// A tab finished loading. Active-tab lookup is deliberately deferred so
+    /// the native page-load callback never waits on the TABS mutex.
+    TabLoaded {
+        id: u64,
+        url: String,
+    },
     /// Re-push the live tab list into the chrome strip (chrome page load).
     PushTabs,
+    /// Clear browser tab state after the native window-destroyed callback.
+    DropTabs,
     /// Typed-login capture from BRIDGE_JS. Vault I/O must stay off the native
     /// callback thread just like window work.
     TypedLogin {
@@ -622,11 +654,11 @@ enum BrowserUiEvent {
 #[derive(Default)]
 struct BrowserUiBatch {
     actions: Vec<(String, String)>,
-    url: Option<String>,
-    title: Option<String>,
     layout: Option<(u32, u32)>,
     tab_titles: HashMap<u64, String>,
+    tab_loads: HashMap<u64, String>,
     push_tabs: bool,
+    drop_tabs: bool,
     creds: Vec<String>,
 }
 
@@ -634,19 +666,15 @@ impl BrowserUiBatch {
     fn absorb(&mut self, event: BrowserUiEvent) {
         match event {
             BrowserUiEvent::ChromeAction { action, data } => self.actions.push((action, data)),
-            BrowserUiEvent::ChromeUpdate { url, title } => {
-                if url.is_some() {
-                    self.url = url;
-                }
-                if title.is_some() {
-                    self.title = title;
-                }
-            }
             BrowserUiEvent::Layout { width, height } => self.layout = Some((width, height)),
             BrowserUiEvent::TabTitle { id, title } => {
                 self.tab_titles.insert(id, title);
             }
+            BrowserUiEvent::TabLoaded { id, url } => {
+                self.tab_loads.insert(id, url);
+            }
             BrowserUiEvent::PushTabs => self.push_tabs = true,
+            BrowserUiEvent::DropTabs => self.drop_tabs = true,
             BrowserUiEvent::TypedLogin { data } => self.creds.push(data),
         }
     }
@@ -697,17 +725,22 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
                 eprintln!("[browser] could not save typed login: {e}");
             }
         }
+        if batch.drop_tabs {
+            *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        }
         if let Some((width, height)) = batch.layout {
             layout_children(&app, tauri::PhysicalSize::new(width, height));
+        }
+        for (id, url) in batch.tab_loads {
+            if is_active_tab(id) {
+                update_chrome_bar(&app, Some(&url), None);
+            }
         }
         for (id, title) in batch.tab_titles {
             on_tab_title(&app, id, &title);
         }
         if batch.push_tabs {
             push_tabs(&app);
-        }
-        if batch.url.is_some() || batch.title.is_some() {
-            update_chrome_bar(&app, batch.url.as_deref(), batch.title.as_deref());
         }
     }
 }
@@ -793,7 +826,6 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
 /// under the chrome bar; inactive ones are parked offscreen. All tabs share
 /// the same profile data dir, so logins/cookies span tabs.
 fn attach_tab(
-    app: &tauri::AppHandle,
     win: &Window,
     url: tauri::Url,
     id: u64,
@@ -824,15 +856,13 @@ fn attach_tab(
             }
         })
         .on_page_load(move |wv, payload| {
-            if is_active_tab(id) {
-                queue_browser_ui(
-                    &wv.app_handle().clone(),
-                    BrowserUiEvent::ChromeUpdate {
-                        url: Some(payload.url().to_string()),
-                        title: None,
-                    },
-                );
-            }
+            queue_browser_ui(
+                &wv.app_handle().clone(),
+                BrowserUiEvent::TabLoaded {
+                    id,
+                    url: payload.url().to_string(),
+                },
+            );
         });
     if let Some(ua) = dev.ua {
         content = content.user_agent(ua);
@@ -868,7 +898,7 @@ fn new_tab(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
     let id = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
-    attach_tab(app, &win, parsed, id, true)?;
+    attach_tab(&win, parsed, id, true)?;
     {
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tabs) = guard.as_mut() {
@@ -1115,7 +1145,7 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         active: first,
         titles: HashMap::new(),
     });
-    attach_tab(app, &win, url, first, true)?;
+    attach_tab(&win, url, first, true)?;
 
     // Keep the children glued to the window on resize/maximize, and drop the
     // tab state when the window goes away (✕, browser_stop, device rebuild).
@@ -1126,12 +1156,12 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         match ev {
             WindowEvent::Resized(size) => queue_browser_ui(
                 &handle,
-                BrowserUiEvent::Layout { width: size.width, height: size.height },
+                BrowserUiEvent::Layout {
+                    width: size.width,
+                    height: size.height,
+                },
             ),
-            WindowEvent::Destroyed => {
-                // Pure state drop — no window/webview work.
-                *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
-            }
+            WindowEvent::Destroyed => queue_browser_ui(&handle, BrowserUiEvent::DropTabs),
             _ => {}
         }
     });
@@ -1224,13 +1254,18 @@ fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
 /// Create the agent-browser window if it isn't already open. Idempotent.
 #[tauri::command(async)]
 pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
+    let _operation = lock_browser_operation();
+    browser_start_inner(&app)
+}
+
+fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
         return Ok("browser already running".to_string());
     }
     let start_url = "about:blank"
         .parse()
         .map_err(|e| format!("bad start url: {e}"))?;
-    build_window(&app, start_url)?;
+    build_window(app, start_url)?;
     Ok("browser started".to_string())
 }
 
@@ -1241,6 +1276,7 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 /// the old window, like a fresh browser session.
 #[tauri::command(async)]
 pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<String, String> {
+    let _operation = lock_browser_operation();
     let dev = device_by_name(&device).ok_or_else(|| {
         format!("unknown device {device:?} — use desktop, iphone, android or tablet")
     })?;
@@ -1298,8 +1334,9 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
 /// eval __owllmRun directly. Read-back is via the sentinel title channel.
 #[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
+    let _operation = lock_browser_operation();
     if get_window(&app).is_none() {
-        browser_start(app.clone())?;
+        browser_start_inner(&app)?;
     }
     let win = content_webview(&app).ok_or_else(|| "browser did not start".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
@@ -1437,6 +1474,7 @@ pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
 /// Panel view: current URL + title as JSON (the window itself is the live view).
 #[tauri::command(async)]
 pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
+    let _operation = lock_browser_operation();
     let win = content_webview(&app).ok_or_else(|| "browser not running".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
     eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(6))

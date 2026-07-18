@@ -46,7 +46,7 @@ const callbacks = [...chromeTitle, ...chromeLoad, ...tabTitle, ...tabLoad, ...wi
 // on_tab_title/push_tabs eval into the chrome webview and store_typed_login
 // does vault I/O — all must be reached only via the dispatcher, never called
 // from inside a native callback.
-const forbidden = /handle_chrome_event|update_chrome_bar|layout_children|on_tab_title|push_tabs\s*\(|store_typed_login|\.eval\s*\(|\.navigate\s*\(|\.destroy\s*\(|\.set_(?:position|size|focus)\s*\(/;
+const forbidden = /handle_chrome_event|update_chrome_bar|layout_children|on_tab_title|push_tabs\s*\(|store_typed_login|\.eval\s*\(|\.navigate\s*\(|\.destroy\s*\(|\.set_(?:position|size|focus)\s*\(|\.lock\s*\(/;
 for (const [index, body] of callbacks.entries()) {
   if (!body.includes("queue_browser_ui")) fail(`callback ${index + 1} does not enqueue its work`);
   if (forbidden.test(body)) fail(`callback ${index + 1} directly performs native window/webview work`);
@@ -57,10 +57,19 @@ if (!tabTitle[0].includes("capture_reply")) {
 if (!source.includes("for event in rx.try_iter()") || !source.includes("batch.layout")) {
   fail("resize/title burst coalescing is missing");
 }
+if (!source.includes("REPLIES.try_lock()") || !source.includes("BrowserUiEvent::DropTabs") ||
+    !source.includes("BrowserUiEvent::TabLoaded")) {
+  fail("native callbacks can still wait on shared Rust state");
+}
 // The dispatcher must actually perform the queued tab work.
 if (!/for \(id, title\) in batch\.tab_titles/.test(source) || !/batch\.push_tabs/.test(source) ||
     !/for data in batch\.creds/.test(source)) {
   fail("the dispatcher does not drain tab-title / push-tabs / typed-login events");
 }
+if (!source.includes("static BROWSER_OPERATION: Mutex<()>") ||
+    !/pub fn browser_cmd[\s\S]*?lock_browser_operation\(\)/.test(source) ||
+    !/pub fn browser_view[\s\S]*?lock_browser_operation\(\)/.test(source)) {
+  fail("parallel browser commands are not serialized");
+}
 
-console.log("PASS browser callbacks are enqueue-only and cross-platform UI work is coalesced off-thread");
+console.log("PASS browser callbacks never block, UI work is coalesced off-thread, and agent actions serialize");

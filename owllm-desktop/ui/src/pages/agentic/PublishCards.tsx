@@ -315,7 +315,11 @@ export default function PublishCards({
     return out;
   });
 
-  const doPush = () => run("Pushing to origin", () => invoke("repo_push", { repoDir: gitDir }));
+  // Merge writes an isolated page's squash commit into the real project
+  // checkout. Push that checkout, not the page branch again. The old routing
+  // let Commit + Merge + Push all report success while origin/main never moved.
+  const pushDir = isolated && projectRoot ? projectRoot : gitDir;
+  const doPush = () => run("Pushing to origin", () => invoke("repo_push", { repoDir: pushDir }));
 
   const doMerge = () => run(isolated ? "Merging worktree" : `Merging to ${mergeTarget}`, async () => {
     if (isolated && projectRoot && branch && gitDir) {
@@ -493,12 +497,14 @@ export default function PublishCards({
               <button
                 onClick={doPush}
                 disabled={disabled || loading}
-                title={git && git.ahead > 0
-                  ? `Push ${git.ahead} commit(s) on ${git.branch || branch || "current"} to origin`
-                  : `Push ${git?.branch || branch || "current"} to origin`}
+                title={isolated && projectRoot
+                  ? `Push the merged project checkout (${projectRoot.replace(/^.*[\\/]/, "")}) to origin`
+                  : git && git.ahead > 0
+                    ? `Push ${git.ahead} commit(s) on ${git.branch || branch || "current"} to origin`
+                    : `Push ${git?.branch || branch || "current"} to origin`}
                 style={{ ...chipBtn, flex: 1 }}
               >
-                {loading ? "⏳" : "↑"} Push{git && git.ahead > 0 ? ` (${git.ahead})` : ""}
+                {loading ? "⏳" : "↑"} Push{isolated ? " merged" : (git && git.ahead > 0 ? ` (${git.ahead})` : "")}
               </button>
             )}
             {showPublish && (

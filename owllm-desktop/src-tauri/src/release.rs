@@ -899,6 +899,7 @@ pub async fn repo_commit(
         if !add_ok {
             return Err(format!("git add failed:\n{add_out}"));
         }
+        crate::fleet::unstage_app_scratch(Path::new(&host))?;
         let msg = if message.trim().is_empty() {
             "Checkpoint from Publisher card".to_string()
         } else {

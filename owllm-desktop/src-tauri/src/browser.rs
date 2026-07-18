@@ -1207,10 +1207,8 @@ fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
 /// Previous shape (decorated single-webview window) — kept as the fallback.
 fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
     let dev = current_device();
-    let start_url = url.to_string();
-    let win_w = dev.width;
-    let win_h = dev.height + CHROME_H;
-    let mut builder = Window::builder(app, BROWSER_LABEL)
+    #[allow(unused_mut)]
+    let mut builder = WebviewWindowBuilder::new(app, BROWSER_LABEL, WebviewUrl::External(url))
         .title("OwLLM — Agent Browser")
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
@@ -1225,78 +1223,6 @@ fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
             }
             capture_reply(&title);
         })
-        .background_color(OWLLM_BG)
-        .theme(Some(tauri::Theme::Dark))
-        .resizable(true)
-        .visible(true);
-    if let Some(ua) = dev.ua {
-        builder = builder.user_agent(ua);
-    }
-    if let Ok(Some(m)) = app.primary_monitor() {
-        let ls = m.size().to_logical::<f64>(m.scale_factor());
-        let x = ((ls.width - win_w) / 2.0).max(0.0);
-        let y = ((ls.height - win_h) / 2.0).max(12.0);
-        builder = builder.position(x, y);
-    }
-    #[cfg(any(windows, target_os = "linux"))]
-    if let Some(dir) = browser_data_dir() {
-        let _ = std::fs::create_dir_all(&dir);
-        content = content.data_directory(dir);
-    }
-
-    win.add_child(
-        chrome,
-        LogicalPosition::new(0.0, 0.0),
-        LogicalSize::new(win_w, CHROME_H),
-    )
-    .map_err(|e| format!("chrome bar webview: {e}"))?;
-    win.add_child(
-        content,
-        LogicalPosition::new(0.0, CHROME_H),
-        LogicalSize::new(win_w, dev.height),
-    )
-    .map_err(|e| format!("page webview: {e}"))?;
-
-    // Keep both children glued to the window on resize/maximize.
-    let handle = app.clone();
-    win.on_window_event(move |ev| {
-        if let WindowEvent::Resized(size) = ev {
-            layout_children(&handle, *size);
-        }
-    });
-
-    apply_chrome(&win);
-    update_chrome_bar(app, Some(&start_url), None);
-    Ok(())
-}
-
-/// Re-fit the chrome bar + page webviews to a new window size.
-fn layout_children(app: &tauri::AppHandle, size: tauri::PhysicalSize<u32>) {
-    let Some(win) = get_window(app) else { return };
-    let scale = win.scale_factor().unwrap_or(1.0);
-    let ls = size.to_logical::<f64>(scale);
-    if let Some(chrome) = app.get_webview(CHROME_LABEL) {
-        let _ = chrome.set_position(LogicalPosition::new(0.0, 0.0));
-        let _ = chrome.set_size(LogicalSize::new(ls.width, CHROME_H));
-    }
-    if let Some(content) = app.get_webview(CONTENT_LABEL) {
-        let _ = content.set_position(LogicalPosition::new(0.0, CHROME_H));
-        let _ = content.set_size(LogicalSize::new(
-            ls.width,
-            (ls.height - CHROME_H).max(50.0),
-        ));
-    }
-}
-
-/// Previous shape (decorated single-webview window) — kept as the fallback.
-fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
-    let dev = current_device();
-    #[allow(unused_mut)]
-    let mut builder = WebviewWindowBuilder::new(app, BROWSER_LABEL, WebviewUrl::External(url))
-        .title("OwLLM — Agent Browser")
-        .inner_size(dev.width, dev.height)
-        .initialization_script(BRIDGE_JS)
-        .on_document_title_changed(|_win, title| capture_reply(&title))
         .background_color(OWLLM_BG)
         .theme(Some(tauri::Theme::Dark))
         .decorations(true)

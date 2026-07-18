@@ -153,15 +153,80 @@ fn resolve_user_conflicts_from_branch(
     Ok(())
 }
 
+pub(crate) fn unstage_app_scratch(cwd: &Path) -> Result<(), String> {
+    let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
+    for path in staged.lines().map(str::trim).filter(|p| is_app_scratch(p)) {
+        // Keep OWLLM-managed scratch out of user commits without deleting the
+        // live runtime file. `git reset` restores only the index entry.
+        let _ = git(cwd, &["reset", "--", path]);
+    }
+    Ok(())
+}
+
 fn drop_staged_app_scratch(cwd: &Path) -> Result<(), String> {
     let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
     for path in staged.lines().map(str::trim).filter(|p| is_app_scratch(p)) {
-        // Keep OWLLM-managed scratch out of merge commits. For tracked scratch,
-        // restore HEAD; for newly-added scratch, reset is enough to unstage it.
+        // A squash merge may have applied the branch's runtime scratch into the
+        // project checkout. Restore HEAD there as well as clearing the index.
         let _ = git(cwd, &["checkout", "HEAD", "--", path]);
         let _ = git(cwd, &["reset", "--", path]);
     }
     Ok(())
+}
+
+/// Bring the checked-out project branch up to its remote tip before cutting or
+/// merging an isolated worktree. The Code page keeps worktrees open for a long
+/// time, so the source checkout can otherwise remain hundreds of commits behind
+/// `origin` while Merge still reports success locally. Only a safe fast-forward
+/// is automatic: local-ahead branches are preserved, and genuine divergence is
+/// surfaced instead of rebasing or overwriting user history.
+fn sync_current_branch_from_origin(cwd: &Path) -> Result<(), String> {
+    let (has_origin, _, _) = git(cwd, &["remote", "get-url", "origin"])?;
+    if !has_origin {
+        return Ok(());
+    }
+
+    let (branch_ok, branch, branch_err) = git(cwd, &["symbolic-ref", "--short", "HEAD"])?;
+    if !branch_ok || branch.trim().is_empty() {
+        return Err(format!(
+            "project checkout is detached; check out its target branch before using an isolated Code page: {}",
+            branch_err.trim()
+        ));
+    }
+    let branch = branch.trim();
+    let remote_ref = format!("origin/{branch}");
+    let (fetch_ok, _, fetch_err) = git(cwd, &["fetch", "origin", "--prune"])?;
+    if !fetch_ok {
+        return Err(format!(
+            "could not refresh {remote_ref} before worktree integration: {}",
+            fetch_err.trim()
+        ));
+    }
+    let (remote_exists, _, _) = git(cwd, &["rev-parse", "--verify", &remote_ref])?;
+    if !remote_exists {
+        return Ok(());
+    }
+
+    let (local_is_behind, _, _) = git(cwd, &["merge-base", "--is-ancestor", "HEAD", &remote_ref])?;
+    if local_is_behind {
+        let (ff_ok, _, ff_err) = git(cwd, &["merge", "--ff-only", &remote_ref])?;
+        if !ff_ok {
+            return Err(format!(
+                "could not fast-forward the project checkout to {remote_ref}: {}",
+                ff_err.trim()
+            ));
+        }
+        return Ok(());
+    }
+
+    let (remote_is_behind, _, _) = git(cwd, &["merge-base", "--is-ancestor", &remote_ref, "HEAD"])?;
+    if remote_is_behind {
+        return Ok(()); // Local commits are waiting to be pushed; preserve them.
+    }
+
+    Err(format!(
+        "the project checkout and {remote_ref} have diverged. Sync that checkout first; OWLLM will not rewrite or silently publish divergent history."
+    ))
 }
 
 /// Identical untracked files can still make `git merge` abort before it starts.
@@ -516,6 +581,9 @@ pub async fn fleet_worktree_create(
             details: dirty.into_iter().take(20).collect::<Vec<_>>().join("\n"),
         });
     }
+    if let Err(message) = sync_current_branch_from_origin(&cwd) {
+        return Ok(CreateOutcome::Error { message });
+    }
     // Resolve the current HEAD SHA so the merge step later can squash
     // from exactly this base.
     let (ok, base_sha, err) = git(&cwd, &["rev-parse", "HEAD"])?;
@@ -620,6 +688,9 @@ pub async fn fleet_worktree_finalize(
         return Ok(FinalizeOutcome::Error {
             message: format!("git add failed: {}", err.trim()),
         });
+    }
+    if let Err(message) = unstage_app_scratch(&wt) {
+        return Ok(FinalizeOutcome::Error { message });
     }
     // Check if anything to commit.
     let (_, staged, _) = git(&wt, &["status", "--porcelain"])?;
@@ -742,6 +813,9 @@ fn fleet_worktree_merge_blocking(
     // failures or interleaving one page's staged squash with another's.
     let lock = repo_git_lock(&cwd);
     let _merge_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    if let Err(message) = sync_current_branch_from_origin(&cwd) {
+        return Ok(MergeOutcome::Error { message });
+    }
     let untracked_backup = match prepare_identical_untracked_collisions(&cwd, &branch) {
         Ok(backup) => backup,
         Err(message) => return Ok(MergeOutcome::Error { message }),
@@ -941,8 +1015,8 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 #[cfg(test)]
 mod tests {
     use super::{
-        fleet_worktree_merge_blocking, is_app_scratch, porcelain_path, user_conflict_files,
-        MergeOutcome,
+        fleet_worktree_merge_blocking, is_app_scratch, porcelain_path,
+        sync_current_branch_from_origin, unstage_app_scratch, user_conflict_files, MergeOutcome,
     };
     use std::{fs, path::Path, process::Command};
 
@@ -1011,6 +1085,72 @@ mod tests {
         assert_eq!(porcelain_path("?? untracked.txt"), "untracked.txt");
         // A source file next to a scratch change is still seen as source.
         assert!(!is_app_scratch(porcelain_path("M  Cargo.toml")));
+    }
+
+    #[test]
+    fn staged_app_scratch_is_removed_before_commit() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"runtime refresh").unwrap();
+        fs::write(root.join("feature.txt"), b"user change").unwrap();
+        git_ok(root, &["add", "-A"]);
+
+        unstage_app_scratch(root).unwrap();
+
+        let out = Command::new("git")
+            .args(["diff", "--cached", "--name-only"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let staged = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(staged.trim(), "feature.txt");
+        assert_eq!(
+            fs::read(root.join(".owllm-inbox/image_1.png")).unwrap(),
+            b"runtime refresh"
+        );
+    }
+
+    #[test]
+    fn project_checkout_fast_forwards_to_remote_source_of_truth() {
+        let source = init_merge_repo();
+        let remote = tempfile::tempdir().unwrap();
+        git_ok(remote.path(), &["init", "--bare"]);
+        git_ok(
+            source.path(),
+            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+        );
+        git_ok(source.path(), &["push", "-u", "origin", "main"]);
+
+        let peer = tempfile::tempdir().unwrap();
+        git_ok(
+            peer.path(),
+            &["clone", &remote.path().to_string_lossy(), "."],
+        );
+        git_ok(peer.path(), &["config", "user.email", "peer@owllm.local"]);
+        git_ok(peer.path(), &["config", "user.name", "OwLLM Peer"]);
+        git_ok(peer.path(), &["checkout", "main"]);
+        fs::write(peer.path().join("remote.txt"), b"published elsewhere").unwrap();
+        git_ok(peer.path(), &["add", "remote.txt"]);
+        git_ok(peer.path(), &["commit", "-m", "remote advance"]);
+        git_ok(peer.path(), &["push", "origin", "main"]);
+
+        sync_current_branch_from_origin(source.path()).unwrap();
+
+        assert_eq!(
+            fs::read(source.path().join("remote.txt")).unwrap(),
+            b"published elsewhere"
+        );
+        let local = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(source.path())
+            .output()
+            .unwrap();
+        let remote_head = Command::new("git")
+            .args(["rev-parse", "origin/main"])
+            .current_dir(source.path())
+            .output()
+            .unwrap();
+        assert_eq!(local.stdout, remote_head.stdout);
     }
 
     #[test]

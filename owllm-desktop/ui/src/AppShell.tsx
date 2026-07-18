@@ -213,6 +213,18 @@ type ServerStatusLite = {
 };
 type VramGpu = { index: number; used_mib: number; total_mib: number };
 type VramStatusLite = { gpus: VramGpu[] };
+
+// Model ids commonly include the organisation, fine-tune recipe and quant.
+// Keeping the tail is useful because it usually carries the quant, while a
+// middle ellipsis prevents one unusually descriptive id from taking over the
+// header. The full id remains available on hover in SysInfoBlock.
+function abbreviateModelId(modelId: string, maxLength = 42): string {
+  if (modelId.length <= maxLength) return modelId;
+  const tailLength = Math.min(14, Math.floor((maxLength - 1) / 2));
+  const headLength = maxLength - tailLength - 1;
+  return `${modelId.slice(0, headLength)}…${modelId.slice(-tailLength)}`;
+}
+
 function useLiveSysInfo() {
   const [server, setServer] = useState<ServerStatusLite>({
     running: false, model_id: null, port: null, message: "",
@@ -1094,8 +1106,9 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
   // Mirrors Qt main.py:28564/28573 — pluralised "Servers", count-based.
   // Stopped → "🟢 Servers: 0"; running → "🟢 Servers: N (modelSummary)".
   // ServerStatusLite carries only one server, so N is 0 or 1.
+  const fullModelId = server.model_id ?? "?";
   const serverLine = server.running
-    ? `🟢 Servers: 1 (${server.model_id ?? "?"})`
+    ? `🟢 Servers: 1 (${abbreviateModelId(fullModelId)})`
     : "🟢 Servers: 0";
   const vramLine = vram.gpus.length === 0
     ? "VRAM: N/A"
@@ -1109,9 +1122,11 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
     <div
       data-ui="SysInfoBlock"
       onClick={onOpenServer}
-      title="Open Server Control"
+      title={server.running
+        ? `Model: ${fullModelId}\nOpen Server Control`
+        : "Open Server Control"}
       style={{
-        maxWidth: 420, height: 60,
+        width: "min(420px, 31vw)", minWidth: 0, height: 60,
         display: "flex", flexDirection: "column",
         alignItems: "stretch", justifyContent: "center", gap: 3,
         fontSize: 12, fontWeight: 700, color: "var(--bg-header-fg)", textAlign: "right",
@@ -1123,15 +1138,15 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
         cursor: "pointer",
       }}
     >
-      <div data-ui="HeaderServersLabel">
+      <div data-ui="HeaderServersLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {serverLine}
       </div>
-      <div data-ui="HeaderApiKeyLabel">
+      <div data-ui="HeaderApiKeyLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ marginRight: 4 }}>🔑</span>
         API key: owllm-local
         <GenSpeedBadge variant="header" />
       </div>
-      <div data-ui="HeaderVramLabel" title={server.message || undefined}>
+      <div data-ui="HeaderVramLabel" title={server.message || undefined} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ marginRight: 4 }}>💾</span>{vramLine}
       </div>
     </div>
@@ -1441,7 +1456,17 @@ export default function AppShell() {
     const payload = { visible: frameVisible, nonce: Date.now() };
     try { localStorage.setItem(FRAME_VISIBILITY_STATE_KEY, JSON.stringify(payload)); }
     catch { /* localStorage blocked */ }
-    if (isTauri()) emit("owllm:frame-visibility", frameVisible).catch(() => {});
+    if (isTauri()) {
+      // Linux uses a separate transparent overlay just like Windows, but its
+      // NVIDIA/WebKitGTK compositor cannot erase already-painted alpha pixels.
+      // Tell the overlay page first, then physically map/unmap its native
+      // window. Unmapping is the only reliable clear on Jetson and also means
+      // the opaque main window never needs transparent frame margins.
+      void (async () => {
+        await emit("owllm:frame-visibility", frameVisible).catch(() => {});
+        await invoke("overlay_frame_set_visible", { visible: frameVisible }).catch(() => {});
+      })();
+    }
   }, [frameVisible]);
 
   // The Watcher (P0-8): summoned from the top-center owl. A small animated

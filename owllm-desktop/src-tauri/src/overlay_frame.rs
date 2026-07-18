@@ -15,6 +15,12 @@ use tauri::{App, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Windo
 
 const OVERLAY_LABEL: &str = "owllm-overlay-frame";
 static OVERLAY_READY: AtomicBool = AtomicBool::new(false);
+// Linux/Jetson cannot reliably repaint an already-drawn pixel back to alpha
+// zero. The frame therefore clears by unmapping the WHOLE overlay window,
+// which the compositor handles correctly. Windows keeps its CSS fade and
+// leaves the native overlay mapped.
+#[cfg(target_os = "linux")]
+static LINUX_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(true);
 const BORDER_T: i32 = 18;
 const CORNER_OUTSET: i32 = 10;
 const SHIFT_OUT: i32 = BORDER_T / 2;
@@ -47,17 +53,18 @@ pub fn disable_window_ghosting() {
 pub fn disable_window_ghosting() {}
 
 pub fn enabled() -> bool {
-    // The overlay frame is Windows-only decorative chrome: the owner-window
-    // wiring is a no-op stub off Windows, and the click-through path aborts on
-    // GTK (tao `CursorIgnoreEvents` unwraps a not-yet-realized GDK window,
-    // SIGABRT on launch). Default it off everywhere except Windows; opt-in only.
-    #[cfg(not(target_os = "windows"))]
+    // Windows and Linux use the same split-window architecture: an opaque,
+    // content-sized main window plus a transparent decorative overlay. Linux
+    // used to draw the chrome inside one oversized opaque window, which made
+    // every frame margin a solid slab. GTK click-through is configured with an
+    // empty native input region below, avoiding tao's pre-realize panic.
+    #[cfg(target_os = "macos")]
     {
         return std::env::var("OWLLM_OVERLAY_FRAME")
             .map(|v| v == "1")
             .unwrap_or(false);
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         std::env::var("OWLLM_OVERLAY_FRAME")
             .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
@@ -110,8 +117,11 @@ pub fn install(app: &mut App) {
         eprintln!("[overlay-frame] initial sync failed: {e}");
     }
 
-    // The overlay is decorative only. Clicks pass through to the real
-    // app window, which avoids focus/input regressions while testing.
+    // The overlay is decorative only. Clicks pass through to the real app.
+    // tao's GTK set_ignore_cursor_events path can panic before the GDK window
+    // is realized, so Linux uses a native empty input region in
+    // set_owner_to_main instead.
+    #[cfg(target_os = "windows")]
     let _ = overlay.set_ignore_cursor_events(true);
 
     // Make main the OWNER so the chrome rides with our app instead of
@@ -185,11 +195,81 @@ fn set_owner_to_main(overlay: &WebviewWindow, main: &WebviewWindow) -> tauri::Re
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn set_owner_to_main(overlay: &WebviewWindow, main: &WebviewWindow) -> tauri::Result<()> {
+    use gtk::prelude::*;
+
+    let overlay_gtk = overlay.gtk_window()?;
+    let main_gtk = main.gtk_window()?;
+    overlay_gtk.set_transient_for(Some(&main_gtk));
+    overlay_gtk.set_destroy_with_parent(true);
+    overlay_gtk.set_accept_focus(false);
+    overlay_gtk.set_focus_on_map(false);
+
+    // An empty input region makes the entire overlay click-through while
+    // leaving its visual alpha channel intact. Apply it after realization too:
+    // some GTK window managers discard a shape assigned before the GDK window
+    // exists, which was the source of the old pre-realize tao panic.
+    if overlay_gtk.is_realized() {
+        let empty = gtk::cairo::Region::create_rectangles(&[]);
+        overlay_gtk.input_shape_combine_region(Some(&empty));
+    } else {
+        overlay_gtk.connect_realize(|window| {
+            let empty = gtk::cairo::Region::create_rectangles(&[]);
+            window.input_shape_combine_region(Some(&empty));
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn set_owner_to_main(_overlay: &WebviewWindow, _main: &WebviewWindow) -> tauri::Result<()> {
-    // Non-Windows builds don't ship the overlay frame today; if they
-    // ever do, equivalent owner/parent wiring goes here. The empty
-    // impl keeps the call site cfg-free.
+    Ok(())
+}
+
+fn should_map_overlay() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return LINUX_OVERLAY_VISIBLE.load(Ordering::Acquire);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Map/unmap the Linux overlay as a unit. Jetson's WebKitGTK compositor leaves
+/// stale pixels behind when CSS fades to transparent; unmapping the native
+/// window is the reliable clear. Windows keeps its smoother CSS fade.
+#[tauri::command]
+pub fn overlay_frame_set_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    if !enabled() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        LINUX_OVERLAY_VISIBLE.store(visible, Ordering::Release);
+        let Some(overlay) = app.get_webview_window(OVERLAY_LABEL) else {
+            return Ok(());
+        };
+        if visible {
+            if let Some(main) = app.get_webview_window("main") {
+                sync_geometry(
+                    main.outer_position().map_err(|e| e.to_string())?,
+                    main.outer_size().map_err(|e| e.to_string())?,
+                    &overlay,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            overlay.show().map_err(|e| e.to_string())?;
+        } else {
+            overlay.hide().map_err(|e| e.to_string())?;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, visible);
+    }
     Ok(())
 }
 
@@ -204,7 +284,7 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
     // Never show the overlay before its page painted — a not-yet-ready
     // transparent WebView2 window flashes WHITE over the app. If the 700ms
     // startup wait timed out, the sync loop shows it once mark_ready fires.
-    if OVERLAY_READY.load(Ordering::Acquire) {
+    if OVERLAY_READY.load(Ordering::Acquire) && should_map_overlay() {
         overlay.show()?;
     }
     Ok(())
@@ -235,10 +315,15 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
 
     if !main.is_visible()? {
         let _ = overlay.hide();
-    } else if !main.is_minimized()? && OVERLAY_READY.load(Ordering::Acquire) {
+    } else if !main.is_minimized()?
+        && OVERLAY_READY.load(Ordering::Acquire)
+        && should_map_overlay()
+    {
         // Ready-gated for the same reason as prepare_and_show_for_main:
         // an unpainted transparent webview shows as a white sheet.
         let _ = overlay.show();
+    } else if !should_map_overlay() {
+        let _ = overlay.hide();
     }
 
     if main.is_minimized()? {
@@ -414,25 +499,12 @@ fn start_sync_loop(main: WebviewWindow, overlay: WebviewWindow) {
             }
         });
     }
-    // Overlay frame is Windows-only (enabled() is false elsewhere); this arm
-    // exists only so the module compiles cross-platform.
+    // Linux is event-driven: RunEvent::Moved/Resized calls sync_now, and GTK's
+    // transient-parent relationship handles stacking/minimize. A 30Hz
+    // dispatcher loop here would needlessly contend with WebKitGTK's UI thread.
     #[cfg(not(target_os = "windows"))]
     {
-        std::thread::spawn(move || {
-            let mut consecutive_err: u32 = 0;
-            loop {
-                match sync_once(&main, &overlay) {
-                    Ok(()) => consecutive_err = 0,
-                    Err(_) => {
-                        consecutive_err += 1;
-                        if consecutive_err > 150 {
-                            break;
-                        }
-                    }
-                }
-                std::thread::sleep(Duration::from_millis(33));
-            }
-        });
+        let _keep = (main, overlay);
     }
 }
 

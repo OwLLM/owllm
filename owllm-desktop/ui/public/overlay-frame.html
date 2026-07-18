@@ -17,6 +17,14 @@
         --frame-accent: rgba(48, 68, 190, 0.76);
       }
 
+      /* Linux's frame is a separate transparent overlay around an opaque,
+         content-sized main window. Opaque bar fills would recreate the solid
+         slab regression in that transparent margin; keep only the neon lines,
+         corners and owl there. Windows retains its solid chrome backing. */
+      html.linux-overlay {
+        --frame-bg: transparent;
+      }
+
       html,
       body {
         margin: 0;
@@ -106,6 +114,11 @@
     </style>
   </head>
   <body>
+    <script>
+      if (navigator.userAgent.includes("Linux")) {
+        document.documentElement.classList.add("linux-overlay");
+      }
+    </script>
     <div id="frame" aria-hidden="true">
       <div id="top" class="bar frame-chrome"></div>
       <div id="bottom" class="bar frame-chrome"></div>
@@ -281,7 +294,9 @@
         root.style.setProperty("--frame-accent", `rgba(${accentR}, ${accentG}, ${accentB}, 0.68)`);
         // Darken in HSL instead of mixing with navy; this keeps the
         // selected hue strong instead of turning it grey or muddy.
-        root.style.setProperty("--frame-bg", `rgba(${mR}, ${mG}, ${mB}, 0.95)`);
+        if (!root.classList.contains("linux-overlay")) {
+          root.style.setProperty("--frame-bg", `rgba(${mR}, ${mG}, ${mB}, 0.95)`);
+        }
       }
       try {
         applyOverlayAccent(localStorage.getItem("owllm:theme:accent") || "indigo");

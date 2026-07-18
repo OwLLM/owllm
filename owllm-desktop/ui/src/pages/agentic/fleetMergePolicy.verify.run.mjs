@@ -33,6 +33,17 @@ if (!fleet.includes("text_conflict_keeps_page_hunk_and_nonoverlapping_main_edit"
 if (!fleet.includes("let _merge_guard = lock.lock()") || !fleet.includes("fn repo_git_lock")) {
   fail("same-repository merges are not serialized against index races");
 }
+if (!fleet.includes("fn prepare_identical_untracked_collisions") ||
+    !fleet.includes('["hash-object", "--", path]') ||
+    !fleet.includes("branch_blob.trim() == disk_blob.trim()") ||
+    !fleet.includes("backup.discard()")) {
+  fail("identical untracked branch additions are not safely adopted before merge");
+}
+if (!fleet.includes("contents differ from the page branch") ||
+    !fleet.includes("differing_untracked_branch_addition_is_preserved_and_blocks_merge") ||
+    !fleet.includes("identical_untracked_branch_addition_is_adopted_by_merge")) {
+  fail("untracked collision safety or regression coverage is missing");
+}
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-merge-policy-"));
 const git = (...args) => execFileSync("git", args, { cwd: tmp, stdio: "pipe" });

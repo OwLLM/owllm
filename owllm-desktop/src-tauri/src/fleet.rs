@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Per-run scratch root for OWLLM-managed worktrees.
 ///   Windows: %LOCALAPPDATA%\owllm\fleet
@@ -161,6 +162,149 @@ fn drop_staged_app_scratch(cwd: &Path) -> Result<(), String> {
         let _ = git(cwd, &["reset", "--", path]);
     }
     Ok(())
+}
+
+/// Identical untracked files can still make `git merge` abort before it starts.
+/// Keep them recoverable outside the checkout while the branch adds the same
+/// blobs. The guard restores them on an early return; a successful merge
+/// discards only the verified-identical backup.
+struct IdenticalUntrackedBackup {
+    cwd: PathBuf,
+    root: PathBuf,
+    paths: Vec<String>,
+    restore_on_drop: bool,
+}
+
+impl IdenticalUntrackedBackup {
+    fn discard(mut self) {
+        self.restore_on_drop = false;
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Drop for IdenticalUntrackedBackup {
+    fn drop(&mut self) {
+        if !self.restore_on_drop {
+            return;
+        }
+        for path in &self.paths {
+            let from = self.root.join(path);
+            let to = self.cwd.join(path);
+            if !from.exists() || to.exists() {
+                continue;
+            }
+            if let Some(parent) = to.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::rename(from, to);
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Move only byte-identical untracked files that the branch is about to add.
+/// A differing file is user content, so leave every path untouched and return
+/// an actionable error instead of Git's generic "would be overwritten" block.
+fn prepare_identical_untracked_collisions(
+    cwd: &Path,
+    branch: &str,
+) -> Result<Option<IdenticalUntrackedBackup>, String> {
+    let (ok, added, err) = git(
+        cwd,
+        &[
+            "diff",
+            "--name-only",
+            "--diff-filter=A",
+            "-z",
+            "HEAD",
+            branch,
+        ],
+    )?;
+    if !ok {
+        return Err(format!(
+            "could not inspect branch additions before merge: {}",
+            err.trim()
+        ));
+    }
+
+    let mut identical = Vec::new();
+    let mut differing = Vec::new();
+    for path in added.split('\0').filter(|p| !p.is_empty()) {
+        let disk_path = cwd.join(path);
+        if !disk_path.is_file() {
+            continue;
+        }
+        let (tracked, _, _) = git(cwd, &["ls-files", "--error-unmatch", "--", path])?;
+        if tracked {
+            continue;
+        }
+        let branch_path = format!("{branch}:{path}");
+        let (branch_ok, branch_blob, _) = git(cwd, &["rev-parse", &branch_path])?;
+        let (disk_ok, disk_blob, _) = git(cwd, &["hash-object", "--", path])?;
+        if branch_ok && disk_ok && branch_blob.trim() == disk_blob.trim() {
+            identical.push(path.to_string());
+        } else {
+            differing.push(path.to_string());
+        }
+    }
+
+    if !differing.is_empty() {
+        return Err(format!(
+            "merge would overwrite untracked files whose contents differ from the page branch; move or commit them first: {}",
+            differing.join(", ")
+        ));
+    }
+    if identical.is_empty() {
+        return Ok(None);
+    }
+
+    let (git_dir_ok, git_dir, git_dir_err) = git(cwd, &["rev-parse", "--absolute-git-dir"])?;
+    if !git_dir_ok {
+        return Err(format!(
+            "could not locate the repository metadata for untracked-file backup: {}",
+            git_dir_err.trim()
+        ));
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    // Keep the backup under Git metadata: it stays on the repository's own
+    // filesystem (so rename remains atomic), is invisible to status/merge, and
+    // works for ordinary clones and linked worktrees on every platform.
+    let root = PathBuf::from(git_dir.trim()).join(format!(
+        "owllm-merge-untracked-{}-{nonce}",
+        std::process::id()
+    ));
+    let mut moved = Vec::new();
+    for path in &identical {
+        let from = cwd.join(path);
+        let to = root.join(path);
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("could not prepare untracked-file backup for {path}: {e}"))?;
+        }
+        if let Err(e) = std::fs::rename(&from, &to) {
+            let guard = IdenticalUntrackedBackup {
+                cwd: cwd.to_path_buf(),
+                root,
+                paths: moved,
+                restore_on_drop: true,
+            };
+            drop(guard);
+            return Err(format!(
+                "could not preserve identical untracked file {path} before merge: {e}"
+            ));
+        }
+        moved.push(path.clone());
+    }
+
+    Ok(Some(IdenticalUntrackedBackup {
+        cwd: cwd.to_path_buf(),
+        root,
+        paths: moved,
+        restore_on_drop: true,
+    }))
 }
 
 /// Sanitize a string into a path-safe segment (used for repo names and
@@ -598,6 +742,10 @@ fn fleet_worktree_merge_blocking(
     // failures or interleaving one page's staged squash with another's.
     let lock = repo_git_lock(&cwd);
     let _merge_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let untracked_backup = match prepare_identical_untracked_collisions(&cwd, &branch) {
+        Ok(backup) => backup,
+        Err(message) => return Ok(MergeOutcome::Error { message }),
+    };
     // Squash keeps the page's checkpoints as one project commit. Worktrees can
     // remain open across many releases, so ordinary three-way conflicts are
     // expected rather than exceptional. Keep current-main edits outside the
@@ -660,6 +808,9 @@ fn fleet_worktree_merge_blocking(
     let commit_sha = sha.trim().to_string();
     let (_, show, _) = git(&cwd, &["show", "--name-only", "--format=", &commit_sha])?;
     let files_changed = show.lines().filter(|l| !l.trim().is_empty()).count() as u32;
+    if let Some(backup) = untracked_backup {
+        backup.discard();
+    }
     Ok(MergeOutcome::Merged {
         commit_sha,
         files_changed,
@@ -871,6 +1022,76 @@ mod tests {
             vec!["owllm-desktop/src-tauri/src/release.rs".to_string()]
         );
         assert!(user_conflict_files(".owllm-inbox/image_1.png\n.owllm/project.json\n").is_empty());
+    }
+
+    #[test]
+    fn identical_untracked_branch_addition_is_adopted_by_merge() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent-icons"]);
+        fs::create_dir_all(root.join("icons/App_icons")).unwrap();
+        fs::write(root.join("icons/App_icons/india_flag.webp"), b"same flag").unwrap();
+        git_ok(root, &["add", "icons/App_icons/india_flag.webp"]);
+        git_ok(root, &["commit", "-m", "add flag"]);
+
+        git_ok(root, &["checkout", "main"]);
+        fs::create_dir_all(root.join("icons/App_icons")).unwrap();
+        fs::write(root.join("icons/App_icons/india_flag.webp"), b"same flag").unwrap();
+
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "code".into(),
+            "agent-icons".into(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            fs::read(root.join("icons/App_icons/india_flag.webp")).unwrap(),
+            b"same flag"
+        );
+        let tracked = Command::new("git")
+            .args([
+                "ls-files",
+                "--error-unmatch",
+                "icons/App_icons/india_flag.webp",
+            ])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(tracked.success());
+    }
+
+    #[test]
+    fn differing_untracked_branch_addition_is_preserved_and_blocks_merge() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent-icons"]);
+        fs::create_dir_all(root.join("icons/App_icons")).unwrap();
+        fs::write(root.join("icons/App_icons/india_flag.webp"), b"branch flag").unwrap();
+        git_ok(root, &["add", "icons/App_icons/india_flag.webp"]);
+        git_ok(root, &["commit", "-m", "add flag"]);
+
+        git_ok(root, &["checkout", "main"]);
+        fs::create_dir_all(root.join("icons/App_icons")).unwrap();
+        fs::write(root.join("icons/App_icons/india_flag.webp"), b"user flag").unwrap();
+
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "code".into(),
+            "agent-icons".into(),
+        )
+        .unwrap();
+        match outcome {
+            MergeOutcome::Error { message } => {
+                assert!(message.contains("contents differ"));
+                assert!(message.contains("icons/App_icons/india_flag.webp"));
+            }
+            _ => panic!("differing untracked content must block the merge"),
+        }
+        assert_eq!(
+            fs::read(root.join("icons/App_icons/india_flag.webp")).unwrap(),
+            b"user flag"
+        );
     }
 
     #[test]

@@ -130,6 +130,11 @@ fn pty_child_path() -> Option<OsString> {
         dirs.extend(std::env::split_paths(&existing));
     }
     dirs.retain(|dir| dir.is_dir());
+    // AppImage prepends executables from its temporary mount. Those are for
+    // OwLLM itself, not external CLIs, and disappear when the app exits.
+    if let Some(app_dir) = std::env::var_os("APPDIR").map(PathBuf::from) {
+        dirs.retain(|dir| !dir.starts_with(&app_dir));
+    }
     dirs.dedup();
     std::env::join_paths(dirs).ok()
 }
@@ -182,6 +187,20 @@ pub fn pty_spawn(
     // that resolve_cli_command searches.
     if let Some(path) = pty_child_path() {
         cmd.env("PATH", path);
+    }
+    #[cfg(target_os = "linux")]
+    for key in [
+        "APPDIR",
+        "APPIMAGE",
+        "ARGV0",
+        "LD_LIBRARY_PATH",
+        "PYTHONHOME",
+        "PYTHONPATH",
+    ] {
+        // AppRun exports these for OwLLM's bundled runtime. Passing them to a
+        // user's Python/native CLI makes it load modules and libraries from
+        // OwLLM's temporary AppImage mount instead of its own installation.
+        cmd.env_remove(key);
     }
     // The UI captures login URLs from PTY output and opens them in OwLLM's
     // persistent browser. Prevent Python's webbrowser module (Kimi) from also

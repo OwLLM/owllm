@@ -17,6 +17,8 @@ import {
   setLeanRun,
   getTeamMemorySnapshot,
   getBrowserStateLine,
+  getDeviceGroundTruthLine,
+  refreshDeviceGroundTruth,
   refreshTeamMemorySnapshot,
   harvestMemoryWrites,
   harvestPublishRequest,
@@ -167,6 +169,8 @@ async function runClaudeCliStream(args: {
 /// identical tagged JSON) so there's one handler for both CLIs.
 export async function runCodexCliStream(args: {
   imagePaths?: string[];
+  model?: string | null;
+  effort?: string | null;
   systemPrompt: string;
   userMessage: string;
   cwd?: string | null;
@@ -208,6 +212,8 @@ export async function runCodexCliStream(args: {
     userMessage: args.userMessage,
     cwd: args.cwd ?? null,
     imagePaths: args.imagePaths ?? null,
+    model: args.model ?? null,
+    effort: args.effort ?? null,
     allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
     onEvent: ch,
   });
@@ -1049,6 +1055,7 @@ export function buildOrchestratorPrompt(
     "",
     projectWorkspaceBlock(projectCwd),
     "  - Put the project root in each specialist's instruction when the task touches files, so they don't go looking elsewhere.",
+    getDeviceGroundTruthLine(),
     "",
     TEAM_OPERATING_CONTRACT,
     "",
@@ -1100,6 +1107,8 @@ export function buildSpecialistPrompt(
     layers.push(directivesBlock);
   }
   layers.push(projectWorkspaceBlock(projectCwd));
+  const deviceLine = getDeviceGroundTruthLine();
+  if (deviceLine) layers.push(deviceLine);
   layers.push(TEAM_OPERATING_CONTRACT);
   layers.push(lean ? TEAM_MEMORY_HINT_LEAN : TEAM_MEMORY_HINT);
   const memSnapshot = getTeamMemorySnapshot();
@@ -1378,7 +1387,7 @@ const _warmCli = new Map<string, WarmEntry>();
 // token as a side effect, so every long run keeps a fresh token well before the
 // ~1h expiry. The reactive 401 retry (clearCliWarm + retry) is the backstop.
 const WARM_TTL_MS = 25 * 60 * 1000; // 25 min — comfortably under the ~1h token TTL
-export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli";
+export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli" | "grok_cli";
 export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): Promise<void> {
   const now = Date.now();
   let entry = _warmCli.get(backend);
@@ -1447,6 +1456,10 @@ export function isTransientNetError(msg: string): boolean {
   return /failed to fetch|fetch failed|fetch error|\bnetwork\b|getaddrinfo|\bdns\b|econnreset|econnrefused|enotfound|etimedout|\btimeout\b|timed out|socket hang up|stream disconnected|connection (error|reset|refused|closed)|\bterminated\b|tls|handshake|overloaded|\b529\b|\b503\b|\b502\b|service unavailable|\b429\b|rate.?limit|too many requests/i.test(msg);
 }
 
+export function isCodexUpgradeError(msg: string): boolean {
+  return /requires a newer version of codex|upgrade to the latest (?:app or )?cli/i.test(msg);
+}
+
 /// Sleep that rejects immediately if the run is cancelled mid-wait.
 export function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -1462,6 +1475,7 @@ export function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
 /// Module-level to avoid threading a callback through every call site.
 export type AuthWaitInfo =
   | { kind: "wait"; attempt: number; total: number; waitMs: number; backend: string; reason: "auth" | "network" }
+  | { kind: "upgrade"; backend: string }
   | { kind: "recovered"; backend: string };
 let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;
 export function setCliAuthWaitHandler(handler: ((info: AuthWaitInfo) => void) | null): void {
@@ -1473,7 +1487,7 @@ export function setCliAuthWaitHandler(handler: ((info: AuthWaitInfo) => void) | 
 /// errors are NOT retried here (they bubble straight up). Honors the run's
 /// AbortSignal during the wait.
 export async function withCliAuthRetry<T>(
-  backend: "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli",
+  backend: CliBackend,
   signal: AbortSignal,
   fn: () => Promise<T>,
   /// The cwd the CLI runs in. When the project is isolated, the re-warm also
@@ -1481,6 +1495,7 @@ export async function withCliAuthRetry<T>(
   /// 401 fix) — otherwise the host re-warm never reaches the in-distro copy.
   cwd?: string | null,
 ): Promise<T> {
+  let codexUpgradeAttempted = false;
   for (let attempt = 0; ; attempt++) {
     try {
       const result = await fn();
@@ -1489,6 +1504,21 @@ export async function withCliAuthRetry<T>(
     } catch (e: any) {
       const msg = e?.message ?? String(e);
       if (signal.aborted) throw e;
+      // A WSL project executes its own distro-local Codex, independently of
+      // the green Windows Accounts binary. New subscription models can reject
+      // that older CLI on stdout. Upgrade the CLI in the actual execution
+      // environment once and retry the original turn automatically.
+      if (backend === "codex_cli" && !codexUpgradeAttempted && isCodexUpgradeError(msg)) {
+        codexUpgradeAttempted = true;
+        _authWaitHandler?.({ kind: "upgrade", backend });
+        try {
+          await invoke<string>("codex_cli_upgrade_for_cwd", { cwd: cwd ?? null });
+        } catch (upgradeError: any) {
+          const detail = upgradeError?.message ?? String(upgradeError);
+          throw new Error(`${msg}\nAutomatic Codex CLI upgrade failed: ${detail}`);
+        }
+        continue;
+      }
       // Retry on auth (token expired) OR a transient network blip. Different
       // schedules: auth refresh is slow (10s/30s/2min); a network blip clears
       // fast (1.5s/4s/8s).
@@ -2006,6 +2036,8 @@ export async function streamChatCompletion(
     reply = await streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
   } else if (provider === "gemini") {
     reply = await streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history);
+  } else if (provider === "xai") {
+    reply = await streamXai(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
   } else if (OPENAI_COMPAT_PROVIDERS[provider]) {
     const cfg = OPENAI_COMPAT_PROVIDERS[provider];
     reply = await streamOpenAICompatible({
@@ -2715,7 +2747,7 @@ async function streamOpenAI(
   if (route.forceSub === true) {
     // Refresh the Codex CLI token once per session (same cold-start 401
     // fix as Claude — see ensureCliWarm).
-    await ensureCliWarm("codex_cli");
+    await ensureCliWarm("codex_cli", projectCwd);
     // Fold prior turns into the prompt so the CLI has conversation context.
     const convo = (history ?? [])
       .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
@@ -2731,26 +2763,33 @@ async function streamOpenAI(
     let imageSaveNote = "";
     const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
     const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
+    const [pickedModel, pickedEffort] = modelId.split(":", 2);
+    const codexModel = pickedModel === "gpt-5.5-codex" ? "gpt-5.5" : pickedModel;
+    const codexEffort = pickedEffort === "extra_high" ? "xhigh" : pickedEffort || null;
     // Stream live activity (reasoning, commands, tools, web searches) when
     // the caller wants thought traffic — AgentsPage / ChatPage / CodePage.
     // Bridge callers (no Thought pane) fall back to the one-shot blob.
     if (onThought) {
-      return await runCodexCliStream({
+      return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
         systemPrompt,
         userMessage: codexPrompt,
         cwd: codexCwd ?? null,
         imagePaths: codexImagePaths,
+        model: codexModel,
+        effort: codexEffort,
         allowedTools,
         onDelta,
         onThought,
-      });
+      }), codexCwd);
     }
-    const reply = await invoke<string>("codex_cli_complete", {
+    const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
       systemPrompt,
       userMessage: codexPrompt,
       cwd: codexCwd ?? undefined,
       imagePaths: codexImagePaths,
-    });
+      model: codexModel,
+      effort: codexEffort,
+    }), codexCwd);
     if (reply) onDelta(reply);
     return reply;
   }
@@ -2836,6 +2875,56 @@ async function streamMoonshot(
     apiUrl: "https://api.moonshot.ai/v1/chat/completions",
     keyName: "MOONSHOT_API_KEY",
     providerLabel: "Moonshot",
+  });
+}
+
+/// xAI Grok. Subscription → `grok -p` (Grok Build CLI, SuperGrok / X
+/// Premium+ auth) via ensureCliWarm + grok_cli_complete — the same
+/// dispatch idiom as the Kimi/Gemini subscription paths. API →
+/// OpenAI-compatible streaming against api.x.ai.
+async function streamXai(
+  modelId: string,
+  route: CloudRoute,
+  systemPrompt: string,
+  userMessage: string,
+  temperature: number,
+  signal: AbortSignal,
+  onDelta: StreamHandler,
+  projectCwd?: string,
+  history?: HistoryItem[],
+  onThought?: ThoughtHandler,
+  images?: Attachment[],
+  allowedTools?: string[],
+): Promise<string> {
+  if (route.forceSub === true) {
+    await ensureCliWarm("grok_cli", projectCwd);
+    // grok -p has no image flag but reads files from its cwd — save pasted
+    // images into .owllm-inbox/ and reference them by relative path, the
+    // same way the Claude/Codex/Kimi subscription paths do.
+    const grokCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
+    const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], grokCwd);
+    const convo = (history ?? [])
+      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
+      .join("\n\n");
+    const prompt = convo ? `${convo}\n\nUser: ${cliUserMessage}` : cliUserMessage;
+    const reply = await withCliAuthRetry("grok_cli", signal, () =>
+      invoke<string>("grok_cli_complete", {
+        systemPrompt,
+        userMessage: prompt,
+        cwd: grokCwd ?? null,
+        model: modelId,
+      }),
+      grokCwd,
+    );
+    if (reply) onDelta(reply);
+    return reply;
+  }
+  const cfg = OPENAI_COMPAT_PROVIDERS.xai;
+  return streamOpenAICompatible({
+    url: cfg.url, keyName: cfg.keyName, modelId,
+    systemPrompt, userMessage, temperature,
+    signal, onDelta, history, onThought, images, providerLabel: cfg.label,
+    projectCwd, allowedTools,
   });
 }
 
@@ -3411,6 +3500,10 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // them serially — memory snapshot (bounded: per-invoke timeout inside) and
   // the skill mirror don't depend on each other.
   hooks.onPhase("preparing");
+  // Warm this device's ground-truth line (static per session) so the orchestrator
+  // + specialists know WHICH machine they run on and can't be misled by a
+  // device-specific fact synced from another PC. Best-effort; never blocks a run.
+  const deviceReady = refreshDeviceGroundTruth();
   const memReady = refreshTeamMemorySnapshot();
   // Mirror the skill library into <project>/.owllm/skills/ so agents on ANY
   // provider can self-load a skill by reading it with their native file tool
@@ -3425,9 +3518,10 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       hooks.onSystemWarning?.(`⚠ Skill sync failed — agents can't self-load skills this run: ${String(e?.message ?? e)}`);
     }
   }
-  // Snapshot must be resolved before prompts are built below (they read it
-  // synchronously via getTeamMemorySnapshot).
+  // Snapshot + device line must be resolved before prompts are built below (they
+  // read both synchronously via getTeamMemorySnapshot / getDeviceGroundTruthLine).
   await memReady;
+  await deviceReady;
   const tempFor = (spec: AgentSpec, fallback: number) =>
     roleByName.get(spec.base)?.defaultTemperature ?? fallback;
   // Local mutable history — when the Critic answers a [NEED_USER_INPUT]

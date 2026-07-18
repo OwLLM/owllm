@@ -121,6 +121,18 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
     try { setScanMsg(await invoke<string>("browser_import_run", { id: d.id })); await loadCreds(); }
     catch (e) { setErr(String(e)); } finally { setBusy(false); }
   };
+  const importCsv = async () => {
+    setBusy(true); setErr(""); setScanMsg("");
+    try {
+      const path = await invoke<string | null>("pick_file", {
+        title: "Choose a passwords CSV exported from your browser",
+        filters: [["CSV", ["csv"]]],
+      });
+      if (!path) return;
+      setScanMsg(await invoke<string>("browser_import_csv", { path }));
+      await loadCreds();
+    } catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
 
   const onDragStart = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("button, input")) return;
@@ -293,6 +305,12 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                 </div>
               ))}
               {detected.length === 0 && <div style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>Press Rescan to detect browsers.</div>}
+            </div>
+            <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8 }}>
+              <div style={{ flex: 1, fontSize: 10.5, color: "var(--fg-muted)", lineHeight: 1.45 }}>
+                Chrome/Edge 127+ protect saved passwords with App-Bound Encryption, which can't be read directly. Export a CSV from the browser (Settings → Passwords → ⋮ → Export) and import it here.
+              </div>
+              <button className="btn" disabled={busy} onClick={() => void importCsv()} style={{ fontSize: 11, padding: "3px 10px", whiteSpace: "nowrap" }}>Import CSV…</button>
             </div>
             {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)" }}>{scanMsg}</div>}
           </>

@@ -11,7 +11,7 @@
 //
 // Backend contract unchanged: accounts_status / accounts_save_api_key /
 // accounts_delete_secret / accounts_test_probe / subscription_cli_login /
-// cli_install_stream / shell_open_url. The CardState shape is per-route
+// cli_install_stream / browser_open_url. The CardState shape is per-route
 // now (one CardState entry per subscription OR api spec).
 
 import { useEffect, useRef, useState } from "react";
@@ -26,6 +26,17 @@ import {
 import PtyTerminal from "./PtyTerminal";
 import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
+import { translateUiText } from "../../localization";
+import { openWebUrl } from "../../utils/openWebUrl";
+
+const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
+const HOST_LABEL = HOST_IS_WINDOWS
+  ? "Windows"
+  : navigator.userAgent.includes("Mac")
+    ? "macOS"
+    : navigator.userAgent.includes("Linux")
+      ? "Linux"
+      : "Host";
 
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
 // transcription pipeline (binary + ggml-base.bin model) and exposes an
@@ -216,6 +227,8 @@ const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } |
   codex_cli:  { cli: "codex",  args: ["login"] },
   kimi_cli:   { cli: "kimi",   args: [], send: "/login\r" },
   gemini_cli: { cli: "gemini", args: [], send: "/auth\r" },
+  // Grok Build: the bare REPL opens the browser sign-in on first run.
+  grok_cli:   { cli: "grok",   args: [] },
 };
 
 const PAGE_BG = "var(--bg-panel)";
@@ -238,6 +251,7 @@ type AccountsStatus = {
   codex_cli: boolean;
   kimi_cli: boolean;
   gemini_cli: boolean;
+  grok_cli: boolean;
 };
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
 
@@ -346,7 +360,7 @@ const PROVIDERS: ProviderSpec[] = [
     accent: "#9aa0a6",
     accentTop: "#1a1c1f",
     routes: [
-      { key: "xai_subscription", kind: "subscription", routeLabel: "Subscription · SuperGrok / X Premium+", backend: "xai_web", webOnly: { url: "https://grok.com" } },
+      { key: "xai_subscription", kind: "subscription", routeLabel: "Subscription · Grok Build CLI (SuperGrok / X Premium+)", backend: "grok_cli" },
       { key: "xai_api",          kind: "api",          routeLabel: "API · XAI_API_KEY",                       backend: "xai_api", envName: "XAI_API_KEY" },
     ],
   },
@@ -497,7 +511,7 @@ function ApiKeyDialog({
         }}
       >
         <div style={{ color: "var(--fg-strong)", fontSize: 14, fontWeight: 700 }}>Set {envName}</div>
-        <div style={{ color: "#bbb", fontSize: 11, lineHeight: 1.55 }}>
+        <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.55 }}>
           Paste your <b>{envName}</b> below. It will be stored in{" "}
           <code style={{ background: "var(--bg-surface)", padding: "1px 4px", borderRadius: 3 }}>
             ~/.owllm/agent_secrets.json
@@ -530,7 +544,7 @@ function ApiKeyDialog({
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 4 }}>
           <button
             onClick={onCancel}
-            style={{ minHeight: 30, padding: "0 14px", background: "var(--bg-surface)", color: "#ddd", border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
+            style={{ minHeight: 30, padding: "0 14px", background: "var(--bg-surface)", color: "var(--fg)", border: "none", borderRadius: 6, fontSize: 12, cursor: "pointer" }}
           >Cancel</button>
           <button
             onClick={commit}
@@ -591,11 +605,11 @@ function RouteRow({
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <StatusDot connected={connected} />
-        <div style={{ flex: 1, color: "#dcdfe7", fontSize: 12 }}>
+        <div style={{ flex: 1, color: "var(--fg)", fontSize: 12 }}>
           {route.routeLabel}
         </div>
       </div>
-      <div style={{ fontSize: 11, color: "#9aa0a6", marginLeft: 17 }}>
+      <div style={{ fontSize: 11, color: "var(--fg-muted)", marginLeft: 17 }}>
         {statusText}
       </div>
       {state.testText && (
@@ -771,7 +785,7 @@ function RightRail({
         {tab === "log" && (
           <button
             onClick={() => LOG_HUB.clear()}
-            style={{ background: "transparent", border: "none", color: "#9aa0a6", fontSize: 11, padding: "0 12px", cursor: "pointer", textDecoration: "underline" }}
+            style={{ background: "transparent", border: "none", color: "var(--fg-muted)", fontSize: 11, padding: "0 12px", cursor: "pointer", textDecoration: "underline" }}
           >clear</button>
         )}
         {tab === "terminal" && activeTerm && (
@@ -788,7 +802,7 @@ function RightRail({
       <div style={{ flex: 1, minHeight: 0, display: tab === "terminal" ? "block" : "none" }}>
         {activeTerm
           ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} autoSend={activeTerm.send} />
-          : <div style={{ padding: 14, color: "#5a6376", fontSize: 11, fontStyle: "italic" }}>
+          : <div style={{ padding: 14, color: "var(--fg-dim)", fontSize: 11, fontStyle: "italic" }}>
               Click Connect on any CLI-backed subscription to open a live terminal here.
             </div>}
       </div>
@@ -851,12 +865,12 @@ function InstallLogPanel({ stacked = false, embedded = false }: { stacked?: bool
           padding: "10px 14px",
           borderBottom: "1px solid rgba(255,255,255,0.06)",
         }}>
-          <div style={{ color: "#dcdfe7", fontSize: 12, fontWeight: 700 }}>
+          <div style={{ color: "var(--fg)", fontSize: 12, fontWeight: 700 }}>
             Install / login log
           </div>
           <button
             onClick={() => LOG_HUB.clear()}
-            style={{ background: "transparent", border: "none", color: "#9aa0a6", fontSize: 11, cursor: "pointer", textDecoration: "underline" }}
+            style={{ background: "transparent", border: "none", color: "var(--fg-muted)", fontSize: 11, cursor: "pointer", textDecoration: "underline" }}
           >clear</button>
         </div>
       )}
@@ -868,12 +882,12 @@ function InstallLogPanel({ stacked = false, embedded = false }: { stacked?: bool
           padding: "8px 12px",
           fontFamily: "ui-monospace, Menlo, Consolas, monospace",
           fontSize: 11, lineHeight: 1.5,
-          color: "#cfd4e1",
+          color: "var(--fg)",
           whiteSpace: "pre-wrap", wordBreak: "break-word",
         }}
       >
         {lines.length === 0 && (
-          <div style={{ color: "#5a6376", fontStyle: "italic" }}>
+          <div style={{ color: "var(--fg-dim)", fontStyle: "italic" }}>
             No activity yet. Click Install or Connect on any provider to
             see the live output here instead of a pop-out console.
           </div>
@@ -953,6 +967,7 @@ export default function AccountsPage() {
       flag("codex_subscription",    status.codex_cli);
       flag("kimi_subscription",     status.kimi_cli);
       flag("gemini_subscription",   status.gemini_cli);
+      flag("xai_subscription",      status.grok_cli);
       return next;
     });
   }
@@ -980,11 +995,9 @@ export default function AccountsPage() {
     LOG_HUB.push({ ts: Date.now(), stream: "info", text, backend });
   }
 
-  // Mirror host logins/keys into the WSL sandbox so isolated agents are
-  // authenticated AUTOMATICALLY at registration — no manual "Sync" step. Runs
-  // after a CLI login terminal closes, after an API key is saved, and once on
-  // page load (to propagate anything already logged in). Best-effort: silently
-  // no-ops on a machine without WSL.
+  // Mirror host logins/keys into the WSL sandbox after a credential changes.
+  // Do not start WSL merely because Accounts was opened: a cold distro can take
+  // tens of seconds, and page navigation must stay instant.
   async function mirrorToSandbox(backend?: string) {
     try {
       const r = await sandboxSyncLogins(null);
@@ -994,16 +1007,23 @@ export default function AccountsPage() {
     } catch { /* no WSL on this machine — nothing to mirror into */ }
   }
 
-  // Propagate any already-connected accounts into the sandbox once on load.
-  useEffect(() => { mirrorToSandbox(); }, []);
-
   function handleConnect(route: RouteSpec, provider: ProviderSpec) {
     if (route.kind === "subscription") {
       if (route.webOnly) {
-        logInfo(route.backend, `Opening ${route.webOnly.url} in your browser…`);
-        invoke("shell_open_url", { url: route.webOnly.url }).catch((e) => {
-          logInfo(route.backend, `[error] couldn't open browser: ${e}`);
-        });
+        // Open in the OwLLM in-app browser (NOT the system browser): its cookie
+        // store persists, so the sign-in survives and agents can use the session
+        // through the built-in browser. External-browser logins are deliberately
+        // forbidden because OwLLM and its browser tools cannot reuse them.
+        const url = route.webOnly.url;
+        logInfo(route.backend, `Opening ${url} in the OwLLM browser — sign in there; your session is saved and available to agents.`);
+        (async () => {
+          try {
+            await openWebUrl(url);
+            logInfo(route.backend, `${provider.name} opened in the OwLLM browser. Complete the sign-in there — the session stays logged in for agents that drive the browser.`);
+          } catch (e) {
+            logInfo(route.backend, `[error] OwLLM browser unavailable: ${e}`);
+          }
+        })();
         return;
       }
       // CLI-backed subscription: spawn the CLI inside our embedded
@@ -1018,6 +1038,7 @@ export default function AccountsPage() {
         codex_cli:  "follow the OAuth URL that appears.",
         kimi_cli:   "auto-running /login — complete the browser sign-in.",
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",
+        grok_cli:   "first run opens the X / SuperGrok browser sign-in — complete it there.",
       };
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
       setActiveTerm({
@@ -1079,8 +1100,8 @@ export default function AccountsPage() {
         try {
           const { ask } = await import("@tauri-apps/plugin-dialog");
           const proceed = await ask(
-            `${provider.name} CLI needs Node.js, which isn't installed yet.\n\nInstall the bundled Node.js + uv toolchain now? (~47 MB, one-time download)\n\nAfter it finishes I'll retry the ${provider.name} CLI install automatically.`,
-            { title: "Install Node.js toolchain?", kind: "info" },
+            translateUiText(`${provider.name} CLI needs Node.js, which isn't installed yet.\n\nInstall the bundled Node.js + uv toolchain now? (~47 MB, one-time download)\n\nAfter it finishes I'll retry the ${provider.name} CLI install automatically.`),
+            { title: translateUiText("Install Node.js toolchain?"), kind: "info" },
           );
           if (!proceed) return;
           logInfo(route.backend, `Installing MCP Server Toolchain (Node.js 20 + uv)…`);
@@ -1164,14 +1185,17 @@ export default function AccountsPage() {
       const prefix = r.ok ? "✓" : "✗";
       const line = `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`;
       setCardState(route.key, { testing: false, testText: line, testOk: r.ok });
-      logInfo(route.backend, `Windows: ${line}`);
+      logInfo(route.backend, `${HOST_LABEL}: ${line}`);
     } catch (e: any) {
       const line = `✗  ${String(e?.message ?? e)}`;
       setCardState(route.key, { testing: false, testText: line, testOk: false });
-      logInfo(route.backend, `Windows: ${line}`);
+      logInfo(route.backend, `${HOST_LABEL}: ${line}`);
     }
     // Also probe the WSL sandbox — tells the user whether ISOLATED agents can
-    // use this provider (creds mirrored into the distro). Non-fatal.
+    // use this provider (creds mirrored into the distro). Non-fatal. Native
+    // Linux/macOS have their own host/sandbox routing and must not show a fake
+    // red WSL result.
+    if (!HOST_IS_WINDOWS) return;
     try {
       const w = await invoke<ProbeResult>("accounts_test_probe_wsl", { backend: route.backend });
       const wline = `${w.ok ? "✓" : "✗"}  ${w.detail}`;

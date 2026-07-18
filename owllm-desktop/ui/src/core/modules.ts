@@ -115,7 +115,7 @@ export const AGENTIC: ModuleDef = {
   toggleLabel: "🎭\nAgentic Team",
   toggleIconPng: "/Page_icons/owl_AgenticTeam.png",
   pages: [
-    { key: "code",    label: "💻 Code",    component: CodePage    },
+    { key: "code",    label: "💻 Coding",  component: CodePage    },
     { key: "agents",  label: "🤖 Agents",  component: AgentsPage  },
     { key: "studio",  label: "🎭 Studio",  component: StudioPage  },
     { key: "assets",  label: "🖼 Assets",  component: AssetsPage  },

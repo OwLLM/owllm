@@ -162,7 +162,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
       >
         <div style={{ padding: "14px 18px", borderBottom: "1px solid rgba(var(--accent-rgb),0.3)" }}>
           <div style={{ fontSize: 16, fontWeight: 700 }}>Choose weights to download</div>
-          <div style={{ fontSize: 12, color: "#9aa0aa", marginTop: 4 }}>
+          <div style={{ fontSize: 12, color: "var(--fg-muted)", marginTop: 4 }}>
             {p.vramGb != null
               ? <><b>{p.modelId}</b> · Green = fits your {p.vramGb.toFixed(1)} GB VRAM · Red = won't load</>
               : <><b>{p.modelId}</b> · Pick the quant that fits your GPU</>}
@@ -170,7 +170,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
         </div>
 
         <div style={{ padding: "10px 18px", overflowY: "auto", flex: 1 }}>
-          {loading && <div style={{ color: "#9aa0aa", padding: 20 }}>Loading file list…</div>}
+          {loading && <div style={{ color: "var(--fg-muted)", padding: 20 }}>Loading file list…</div>}
           {error && (
             <div style={{
               background: "rgba(244,67,54,0.1)", border: "1px solid rgba(244,67,54,0.4)",
@@ -178,7 +178,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
             }}>{error}</div>
           )}
           {!loading && !error && files.length === 0 && (
-            <div style={{ color: "#9aa0aa", padding: 20 }}>
+            <div style={{ color: "var(--fg-muted)", padding: 20 }}>
               No quantization variants found — this repo ships a single weight set, just hit "Download all".
             </div>
           )}
@@ -201,7 +201,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
                 />
                 <span style={{ fontWeight: 700 }}>📥 Download all weights</span>
                 <span style={{ flex: 1 }} />
-                <span style={{ fontSize: 11, color: "#9aa0aa" }}>{files.length} files</span>
+                <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{files.length} files</span>
               </label>
 
               <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -242,7 +242,7 @@ export default function WeightPickerDialog(p: WeightPickerDialogProps) {
                         background: "rgba(var(--accent-rgb),0.18)",
                         color: "#9cc3ff",
                       }}>{quant}</span>
-                      <span style={{ fontSize: 11, color: "#9aa0aa", minWidth: 70, textAlign: "right" }}>
+                      <span style={{ fontSize: 11, color: "var(--fg-muted)", minWidth: 70, textAlign: "right" }}>
                         {fmtSize(f.size)}
                       </span>
                     </label>

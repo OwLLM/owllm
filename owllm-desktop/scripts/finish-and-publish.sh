@@ -17,6 +17,17 @@
 # commit it still bumps+tags+publishes the current tree.
 set -euo pipefail
 
+# gh resolver: host `gh` → WSL sandbox `gh` (the host often has no gh; it lives in the
+# provisioned distro). Defines gh()/have_gh(). Falls back to a plain check if the lib
+# isn't alongside (e.g. an older bundle, or a foreign repo's own copy of this script).
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_SCRIPT_DIR/lib/gh.sh" ]; then
+  # shellcheck source=lib/gh.sh
+  . "$_SCRIPT_DIR/lib/gh.sh"
+else
+  have_gh() { command -v gh >/dev/null 2>&1; }
+fi
+
 NOTES=""
 PRERELEASE=""
 REPO_DIR=""
@@ -59,6 +70,51 @@ else
 fi
 cd "$REPO"
 
+# One app process already has a backend lease, but separate OwLLM windows (or a
+# direct script invocation) are separate processes. Use the repository's common
+# Git directory so every worktree and every app instance shares one atomic lock.
+GIT_COMMON="$(cd "$(git rev-parse --git-common-dir)" && pwd)"
+PUBLISH_LOCK="$GIT_COMMON/owllm-publish.lock"
+PUBLISH_LOCK_OWNER="$PUBLISH_LOCK/owner"
+claim_publish_lock() {
+  if mkdir "$PUBLISH_LOCK" 2>/dev/null; then
+    printf '%s\n%s\n' "$$" "$(date +%s)" > "$PUBLISH_LOCK_OWNER"
+    return
+  fi
+
+  local owner=""
+  [ -f "$PUBLISH_LOCK_OWNER" ] && owner="$(sed -n '1p' "$PUBLISH_LOCK_OWNER" 2>/dev/null || true)"
+  if [ -n "$owner" ] && kill -0 "$owner" 2>/dev/null; then
+    echo "PUBLISH_FAILED: another publish is already running for this repository (pid $owner)." >&2
+    exit 1
+  fi
+
+  # The prior publisher died without running its EXIT trap. Rename the stale
+  # directory atomically; only one contender can recover it and claim the lock.
+  local stale="${PUBLISH_LOCK}.stale.$$"
+  if ! mv "$PUBLISH_LOCK" "$stale" 2>/dev/null; then
+    echo "PUBLISH_FAILED: another publish is already starting for this repository." >&2
+    exit 1
+  fi
+  rm -f "$stale/owner"
+  rmdir "$stale" 2>/dev/null || true
+  if ! mkdir "$PUBLISH_LOCK" 2>/dev/null; then
+    echo "PUBLISH_FAILED: another publish won the repository lock." >&2
+    exit 1
+  fi
+  printf '%s\n%s\n' "$$" "$(date +%s)" > "$PUBLISH_LOCK_OWNER"
+}
+release_publish_lock() {
+  local owner=""
+  [ -f "$PUBLISH_LOCK_OWNER" ] && owner="$(sed -n '1p' "$PUBLISH_LOCK_OWNER" 2>/dev/null || true)"
+  if [ "$owner" = "$$" ]; then
+    rm -f "$PUBLISH_LOCK_OWNER"
+    rmdir "$PUBLISH_LOCK" 2>/dev/null || true
+  fi
+}
+claim_publish_lock
+trap release_publish_lock EXIT
+
 # Stream a verbatim copy of this run to a log so a failure can be diagnosed
 # without relying on the app's log view (which truncates or may be closed).
 # OwLLM keeps its historical location; any other repo logs under .owllm/.
@@ -67,9 +123,27 @@ mkdir -p "$LOG_DIR"
 LIVE_LOG="$LOG_DIR/publish-latest.log"
 : > "$LIVE_LOG"
 exec > >(tee -a "$LIVE_LOG") 2>&1
-trap 'cp -f "$LIVE_LOG" "$LOG_DIR/publish-v${NEW:-unknown}.log" 2>/dev/null || true' EXIT
+on_publish_exit() {
+  cp -f "$LIVE_LOG" "$LOG_DIR/publish-v${NEW:-unknown}.log" 2>/dev/null || true
+  release_publish_lock
+}
+trap on_publish_exit EXIT
 
 fail() { echo "PUBLISH_FAILED: $*" >&2; exit 1; }
+
+MIN_HOST_RELEASE_FREE_KB=$((20 * 1024 * 1024))
+fmt_kb() {
+  awk -v kb="$1" 'BEGIN { printf "%.1f GB", kb / 1024 / 1024 }'
+}
+preflight_host_disk() {
+  local dir="$1" avail
+  avail="$(df -Pk "$dir" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+  [ -n "$avail" ] || fail "could not measure free disk space for '$dir' (host release requires at least $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB") free)"
+  if [ "$avail" -lt "$MIN_HOST_RELEASE_FREE_KB" ]; then
+    fail "only $(fmt_kb "$avail") free; host release requires at least $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB") before building. Free space or clean build caches first."
+  fi
+  echo "disk preflight: $(fmt_kb "$avail") free (minimum $(fmt_kb "$MIN_HOST_RELEASE_FREE_KB"))"
+}
 
 # --- Project Card (.owllm/project.json): per-project release config so this works
 #     for ANY project on ANY OS, not just this repo. Defaults preserve the OwLLM
@@ -130,23 +204,143 @@ fi
 CONF="$REPO/$VERSION_FILE"
 [ -f "$CONF" ] || fail "version file '$VERSION_FILE' not found — set release.versionFile in .owllm/project.json"
 
+[ "$MODE" = "host" ] && preflight_host_disk "$REPO"
+
+# Release commits must contain ONLY the deterministic version bump produced by
+# this script. If real app changes are already dirty, `git add $STAGE_PATH` would
+# fold them into the `vX.Y.Z` bump commit. The notes generator intentionally
+# drops release commits (to avoid old stale-app chat prompts leaking into
+# What's New), so those real changes would disappear from the release notes and
+# users would see "Maintenance release". Force the work to be committed first
+# with a human subject, then publish.
+# Cargo.lock is EXCLUDED: it's a generated file whose only churn here is the
+# version line, which a prior (often crashed) host build bumps and strands
+# uncommitted. That is never "real work" for What's New, and blocking on it
+# turns every release into a treadmill (build bumps lock → lock dirty → next
+# publish blocked). The bump commit still re-stages it via `git add $STAGE_PATH`.
+PENDING_STAGE="$(git status --porcelain -- "$STAGE_PATH" ':(exclude)*Cargo.lock' 2>/dev/null || true)"
+if [ -n "$PENDING_STAGE" ]; then
+  echo "PUBLISH_FAILED: uncommitted release changes under '$STAGE_PATH' would be hidden inside the version-bump commit." >&2
+  echo "Commit/merge those changes first with a meaningful message, then run Publish again." >&2
+  echo "Pending changes:" >&2
+  printf '%s\n' "$PENDING_STAGE" | sed 's/^/  /' | head -40 >&2
+  exit 1
+fi
+
+# 1a. Sync with origin BEFORE bumping. The version math below already respects the
+# public release floor, but the push at step 2 is rejected outright if
+# origin/<branch> moved (this shared tree IS pushed to by concurrent sessions —
+# v0.8.88 stranded exactly this way when a parallel v0.8.87 release landed
+# mid-publish). Rebase local work onto the remote now, while no release commit
+# exists yet; --autostash carries the tolerated dirty Cargo.lock across. A
+# conflict here is real divergent work — fail cleanly before bumping anything.
+BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+if git fetch -q origin "$BRANCH" 2>/dev/null; then
+  if ! git rebase --autostash "origin/$BRANCH" >/dev/null 2>&1; then
+    git rebase --abort >/dev/null 2>&1 || true
+    fail "origin/$BRANCH has diverged with conflicts — reconcile it (merge/rebase), then run Publish again"
+  fi
+else
+  echo "WARN: could not fetch origin/$BRANCH — publishing from the local view only"
+fi
+
 # 1. Bump the patch version (string-replace to preserve formatting; rule-based rollover).
 CUR="$(node -e 'process.stdout.write(require(process.argv[1]).version)' "$CONF")"
-NEW="$(CUR="$CUR" node -e '
-  let [a,b,p] = process.env.CUR.split(".").map(Number);
+
+# The PUBLIC release chronology is the source of truth for the version floor, not
+# just this checkout's file. A stale checkout (e.g. one whose tauri.conf.json still
+# says 0.8.43 while 0.8.48 is already public) must NEVER regress or re-issue a
+# number — so we take max(local, latest published) and bump from there. Pull the
+# published release tags from release.repo (OWLLM_RELEASE_REPO). Non-fatal if gh is
+# missing/unauthed or the repo has no releases yet: we warn and fall back to the
+# local file, preserving the previous behaviour for card-less / offline runs.
+PUBLISHED_TAGS=""
+if [ -n "${OWLLM_RELEASE_REPO:-}" ] && have_gh; then
+  PUBLISHED_TAGS="$(gh release list --repo "$OWLLM_RELEASE_REPO" --limit 100 \
+    --json tagName --jq '.[].tagName' 2>/dev/null || true)"
+  if [ -n "$PUBLISHED_TAGS" ]; then
+    echo "published-release floor: newest tag on $OWLLM_RELEASE_REPO = $(printf '%s\n' "$PUBLISHED_TAGS" | head -1)"
+  else
+    echo "WARN: no published releases on $OWLLM_RELEASE_REPO (or gh not authed) — bumping from local file '$VERSION_FILE' only"
+  fi
+else
+  echo "WARN: OWLLM_RELEASE_REPO unset or gh missing — bumping from local file '$VERSION_FILE' only"
+fi
+
+# Base = max(local file, every published tag); then rule-based rollover (+1 patch,
+# rolls at 100 → minor, at 10 → major), matching the odometer-100 scheme.
+_BUMP="$(CUR="$CUR" PUBLISHED_TAGS="$PUBLISHED_TAGS" node -e '
+  const parse = v => { const m = String(v).trim().replace(/^v/,"").match(/^(\d+)\.(\d+)\.(\d+)/); return m ? [ +m[1], +m[2], +m[3] ] : null; };
+  const cmp = (x,y) => x[0]-y[0] || x[1]-y[1] || x[2]-y[2];
+  let base = parse(process.env.CUR);
+  if (!base) { console.error("bad local version: " + process.env.CUR); process.exit(3); }
+  for (const line of (process.env.PUBLISHED_TAGS || "").split("\n")) {
+    const v = parse(line); if (v && cmp(v, base) > 0) base = v;
+  }
+  let [a,b,p] = base;
   p += 1; if (p >= 100) { p = 0; b += 1; } if (b >= 10) { b = 0; a += 1; }
-  process.stdout.write(`${a}.${b}.${p}`);')"
+  process.stdout.write(`${base.join(".")} ${a}.${b}.${p}`);')"
+# read from a herestring (always newline-terminated) — a process substitution
+# whose node ends with a newline-less stdout.write makes `read` return 1 at EOF
+# even though it populated the vars, which `set -e` then treats as fatal. The
+# $() capture above still surfaces a genuine node failure (exit 3) as a hard error.
+read -r BASE NEW <<< "$_BUMP"
 [ -n "$NEW" ] || fail "version bump produced empty result from '$CUR'"
+[ "$BASE" != "$CUR" ] && echo "NOTE: local file '$VERSION_FILE' was $CUR but public floor is $BASE — bumping from the public floor"
 TAG="v$NEW"
-CUR="$CUR" NEW="$NEW" CONF="$CONF" node -e '
+
+# Set the PRIMARY version file to NEW. Absolute-set (match whatever version is
+# currently there) so it heals even if the file had drifted below the public floor.
+NEW="$NEW" CONF="$CONF" node -e '
   const fs=require("fs");
   let s=fs.readFileSync(process.env.CONF,"utf8");
   // Whitespace-tolerant: "version": "x", "version":"x", etc. — a compact
   // package.json is as valid as a pretty-printed tauri.conf.json.
-  const re=new RegExp(`("version"\\s*:\\s*")${process.env.CUR.replace(/\./g,"\\.")}(")`);
+  const re=/("version"\s*:\s*")([^"]+)(")/;
   if (!re.test(s)) { console.error("version line not found"); process.exit(3); }
-  fs.writeFileSync(process.env.CONF, s.replace(re,`$1${process.env.NEW}$2`));'
+  fs.writeFileSync(process.env.CONF, s.replace(re,`$1${process.env.NEW}$3`));'
 echo "version $CUR -> $NEW"
+
+# Keep sibling version files in lockstep so NO tool ever reads a stale number.
+# The bumper historically touched only tauri.conf.json, leaving the Rust crate's
+# Cargo.toml to drift (it sat at 0.8.47 while the app shipped 0.8.48) — every
+# `cargo metadata`/grep then reported the wrong version and looked like the repo
+# "wasn't on" the released version. Heal it here: set the [package] version to NEW
+# regardless of what it currently says. Only the [package] section is touched, so
+# dependency versions are never affected.
+CARGO="$(dirname "$CONF")/Cargo.toml"
+if [ -f "$CARGO" ] && [ "$(basename "$CONF")" != "Cargo.toml" ]; then
+  NEW="$NEW" CARGO="$CARGO" node -e '
+    const fs=require("fs");
+    let s=fs.readFileSync(process.env.CARGO,"utf8");
+    // Anchor to the [package] table, then its first version key; [^\[]*? keeps the
+    // match inside that table (never crosses into another [section]).
+    const re=/(\[package\][^\[]*?\bversion\s*=\s*")([^"]+)(")/;
+    const m=s.match(re);
+    if (m) {
+      fs.writeFileSync(process.env.CARGO, s.replace(re, `$1${process.env.NEW}$3`));
+      console.error(`Cargo.toml [package] version ${m[2]} -> ${process.env.NEW}`);
+    } else {
+      console.error("WARN: Cargo.toml has no [package] version — left unchanged");
+    }'
+fi
+
+# Cargo.lock records the workspace package version too. Update that generated
+# entry before the release commit so the tag, Cargo metadata, and lockfile stay
+# aligned; otherwise the subsequent local build rewrites Cargo.lock and leaves
+# a misleading dirty tree after every publish.
+LOCK="$(dirname "$CONF")/Cargo.lock"
+if [ -f "$LOCK" ] && [ "$(basename "$CONF")" != "Cargo.lock" ]; then
+  NEW="$NEW" LOCK="$LOCK" node -e '
+    const fs=require("fs");
+    let s=fs.readFileSync(process.env.LOCK,"utf8");
+    const re=/(\[\[package\]\]\s+name = "owllm-desktop"\s+version = ")([^"]+)(")/;
+    if (re.test(s)) {
+      fs.writeFileSync(process.env.LOCK, s.replace(re, `$1${process.env.NEW}$3`));
+    } else {
+      console.error("WARN: Cargo.lock has no owllm-desktop package entry — left unchanged");
+    }'
+fi
 
 # Headline from the caller — but DROP a bare "publish it" / "ship" / "release"
 # command. The release body must describe what SHIPPED, not echo the chat message
@@ -168,7 +362,21 @@ else
   echo "nothing new to commit — publishing current tree at v$NEW"
 fi
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-git push -q origin "$BRANCH" || fail "git push failed (branch $BRANCH)"
+# The push can still race a session that pushed AFTER the 1a sync. The bump
+# commit is deterministic and version-file-scoped, so rebase it onto the fresh
+# remote and retry instead of dying on "fetch first". A conflict means the
+# remote grew its own release commit — that needs eyes, so fail cleanly.
+_PUSH_OK=""
+for _try in 1 2 3; do
+  if git push -q origin "$BRANCH"; then _PUSH_OK=1; break; fi
+  echo "push rejected (attempt $_try/3): origin/$BRANCH moved — rebasing the release commit and retrying"
+  git fetch -q origin "$BRANCH" 2>/dev/null || true
+  if ! git rebase --autostash "origin/$BRANCH" >/dev/null 2>&1; then
+    git rebase --abort >/dev/null 2>&1 || true
+    fail "git push failed (branch $BRANCH): remote moved and the release commit does not rebase cleanly"
+  fi
+done
+[ -n "$_PUSH_OK" ] || fail "git push failed (branch $BRANCH) after 3 attempts"
 
 # 2b. Build a HUMAN release changelog from the actual commit subjects (what really
 #     shipped), not the chat message and NOT git file-plumbing. PREV_TAG = the
@@ -200,6 +408,18 @@ fi
 echo "release notes:"; printf '%s\n' "$NOTES_BODY" | sed 's/^/  | /'
 
 # 3. Tag + push the tag.
+# Any pre-existing v$NEW tag (local or on origin) is debris from a crashed
+# publish: when the published floor is known, NEW is computed strictly ABOVE
+# every published release tag, so v$NEW can never name a shipped release.
+# Clear both copies, else the re-tag or the tag push collides and strands the
+# release AGAIN (v0.8.88 died at "git push tag": origin still held the same
+# tag from the previous crashed run, pointing at the abandoned commit).
+# Guarded on PUBLISHED_TAGS: without the public floor the above-all-releases
+# proof doesn't hold, so never touch remote tags in gh-less/offline runs.
+if [ -n "$PUBLISHED_TAGS" ]; then
+  git tag -d "v$NEW" >/dev/null 2>&1 || true
+  git push -q origin ":refs/tags/v$NEW" >/dev/null 2>&1 || true
+fi
 git tag -a "v$NEW" -m "$MSG" || fail "git tag v$NEW failed (already exists?)"
 git push -q origin "v$NEW" || fail "git push tag v$NEW failed"
 echo "tagged v$NEW"
@@ -226,7 +446,7 @@ export OWLLM_SIGN_THUMBPRINT OWLLM_SIGN_SUBJECT OWLLM_SIGN_TSA
 # attach real artifacts. NB: --repo is only meaningful for split-source/release
 # setups whose target repo shares the tag — those should use a custom command.
 if [ -z "$PUBLISH_CMD" ]; then
-  command -v gh >/dev/null 2>&1 || fail "gh not on PATH — needed for the generic release (or set release.command on the Project Card)"
+  have_gh || fail "gh not on PATH — needed for the generic release (or set release.command on the Project Card)"
   CHANNEL_FLAG="--latest"
   [ -n "$PRERELEASE" ] && CHANNEL_FLAG="--prerelease"
   gh release create "$TAG" ${OWLLM_RELEASE_REPO:+--repo "$OWLLM_RELEASE_REPO"} \

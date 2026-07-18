@@ -2,6 +2,7 @@
 // run) and the Code page (agent turn). One source of truth so the two surfaces
 // tick, format, and freeze identically. h:mm:ss past an hour, else m:ss.
 import { useEffect, useState } from "react";
+import { readAppLanguage, translateUiText } from "../../localization";
 
 export function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));
@@ -10,6 +11,16 @@ export function formatDuration(ms: number): string {
   const s = total % 60;
   const pad = (n: number) => String(n).padStart(2, "0");
   return h > 0 ? `${h}:${pad(m)}:${pad(s)}` : `${m}:${pad(s)}`;
+}
+
+/// Human-readable local clock time (e.g. "11:50:37").
+export function formatClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString(readAppLanguage(), { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+}
+
+/// Footer appended after a run answer: duration + start/finish wall-clock times.
+export function runTimingFooter(startedAt: number, finishedAt: number = Date.now()): string {
+  return translateUiText(`⏱ ${formatDuration(finishedAt - startedAt)} — started ${formatClock(startedAt)}, finished ${formatClock(finishedAt)}`);
 }
 
 /// Force a 1-s re-render while `active` so a running stopwatch ticks live; stops

@@ -23,6 +23,7 @@ import { streamChatCompletion, providerFor, type ModelInfo } from "../agentic/di
 import { LogBox } from "../../components/LogBox";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
+import { translateUiText } from "../../localization";
 
 type Source = { id: string; kind: "file" | "url"; value: string; name: string };
 type Pair = { instruction: string; output: string; source?: string };
@@ -140,8 +141,8 @@ export default function DatasetBuilderPage() {
       const { open } = await import("@tauri-apps/plugin-dialog");
       const picked = await open({
         multiple: true,
-        title: "Add documents",
-        filters: [{ name: "Documents", extensions: ["pdf", "docx", "txt", "md", "markdown", "text"] }],
+        title: translateUiText("Add documents"),
+        filters: [{ name: translateUiText("Documents"), extensions: ["pdf", "docx", "txt", "md", "markdown", "text"] }],
       });
       const list = Array.isArray(picked) ? picked : picked ? [picked] : [];
       if (list.length === 0) return;
@@ -264,7 +265,7 @@ export default function DatasetBuilderPage() {
       try { defaultDir = await invoke<string>("dataset_default_dir"); } catch { /* no default */ }
       const stamp = new Date().toISOString().slice(0, 10);
       const defPath = defaultDir ? `${defaultDir}/dataset_${stamp}.jsonl` : `dataset_${stamp}.jsonl`;
-      const target = await save({ title: "Save dataset (JSONL)", defaultPath: defPath, filters: [{ name: "JSONL", extensions: ["jsonl"] }] });
+      const target = await save({ title: translateUiText("Save dataset (JSONL)"), defaultPath: defPath, filters: [{ name: "JSONL", extensions: ["jsonl"] }] });
       if (!target) return;
       const jsonl = pairs.map((p) => JSON.stringify({ instruction: p.instruction, output: p.output })).join("\n") + "\n";
       const written = await invoke<string>("dataset_save", { path: target, content: jsonl });
@@ -339,7 +340,7 @@ export default function DatasetBuilderPage() {
             {busy ? (
               <button onClick={stop} style={{ ...btn, flex: 1, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 38 }}>■ Stop</button>
             ) : (
-              <button onClick={generate} disabled={sources.length === 0 || !modelId} style={{ ...btn, flex: 1, height: 38, background: "var(--accent)", color: "#06080d", border: "none", fontWeight: 700, opacity: (sources.length && modelId) ? 1 : 0.5 }}>⚙ Generate dataset</button>
+              <button onClick={generate} disabled={sources.length === 0 || !modelId} style={{ ...btn, flex: 1, height: 38, background: "var(--accent)", color: "var(--accent-fg)", border: "none", fontWeight: 700, opacity: (sources.length && modelId) ? 1 : 0.5 }}>⚙ Generate dataset</button>
             )}
           </div>
           <LogBox lines={log} title="Dataset Builder log" height={120} placeholder="Extraction + generation progress appears here." />

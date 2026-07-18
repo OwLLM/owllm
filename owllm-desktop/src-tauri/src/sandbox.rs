@@ -1020,7 +1020,7 @@ fn status_impl() -> SandboxStatus {
     // then cached, so polling status is cheap.
     let confined = default_target
         .as_deref()
-        .map(ensure_sandbox)
+        .and_then(|distro| sandbox_cache().lock().ok().and_then(|c| c.get(distro).copied()))
         .unwrap_or(false);
     SandboxStatus {
         available: w.available,
@@ -1147,6 +1147,9 @@ pub struct SandboxDisk {
     pub copies_bytes: u64,
     /// Meaningful only where there's a managed VM disk (Windows/WSL today).
     pub available: bool,
+    /// `.wslconfig` has `sparseVhd=true`, so freed space auto-returns to Windows
+    /// and the disk never balloons (the preventive fix — see sandbox_enable_sparse).
+    pub sparse_config: bool,
 }
 
 #[derive(Serialize, Clone, Debug, Default)]
@@ -1250,12 +1253,317 @@ fn disk_usage_impl(distro: Option<String>) -> SandboxDisk {
         cache_bytes,
         copies_bytes,
         available: true,
+        sparse_config: wslconfig_has_sparse(),
     }
 }
 
 #[cfg(not(windows))]
 fn disk_usage_impl(_distro: Option<String>) -> SandboxDisk {
     SandboxDisk::default()
+}
+
+// ---- prevent inflation: sparse WSL disk (the OPTIMAL fix) ------------------
+//
+// The reactive commands above shrink the .vhdx AFTER it has already ballooned.
+// The real cure is to stop it ballooning at all: a SPARSE virtual disk hands
+// freed blocks back to Windows automatically, so deleting caches/builds inside
+// the distro immediately reclaims host space — no manual compaction, no UAC, no
+// restart. Two levers, applied together:
+//   1. `%USERPROFILE%\.wslconfig` → `[experimental] sparseVhd=true`. Zero-
+//      disruption global default: EVERY WSL disk (existing on next start + all
+//      future ones) becomes sparse. This is the "never happens again" fix.
+//   2. `wsl --manage <distro> --set-sparse true` converts an ALREADY-inflated
+//      distro in place (needs it stopped, so we terminate it first — brief).
+// Cross-platform: Linux runs agents via bubblewrap on the host filesystem and
+// macOS via Lima (which manages its own disk), so neither has this managed,
+// ever-growing vhdx — the command is a reported no-op there.
+
+/// Merge `sparseVhd=true` into a `.wslconfig`'s `[experimental]` section.
+/// Returns the new file text, or `None` when it is ALREADY `true` (so the
+/// caller skips the write). Preserves every other setting/section. Pure +
+/// unit-tested (compiled on every OS).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn merge_sparse_into_wslconfig(existing: &str) -> Option<String> {
+    let is_sparse_line = |l: &str| l.trim_start().to_ascii_lowercase().starts_with("sparsevhd");
+    // Already enabled? (value is case/space-insensitive)
+    for l in existing.lines() {
+        if is_sparse_line(l) {
+            if let Some((_, v)) = l.split_once('=') {
+                if v.trim().eq_ignore_ascii_case("true") {
+                    return None;
+                }
+            }
+        }
+    }
+    let mut lines: Vec<String> = existing.lines().map(|s| s.to_string()).collect();
+    // A non-true sparseVhd line already exists → flip it in place.
+    for l in lines.iter_mut() {
+        if is_sparse_line(l) && l.contains('=') {
+            *l = "sparseVhd=true".to_string();
+            let mut out = lines.join("\n");
+            out.push('\n');
+            return Some(out);
+        }
+    }
+    // An [experimental] section exists → add the key just under its header.
+    if let Some(i) = lines
+        .iter()
+        .position(|l| l.trim().eq_ignore_ascii_case("[experimental]"))
+    {
+        lines.insert(i + 1, "sparseVhd=true".to_string());
+        let mut out = lines.join("\n");
+        out.push('\n');
+        return Some(out);
+    }
+    // No section at all → append a fresh one, keeping any existing content.
+    let mut out = existing.trim_end().to_string();
+    if !out.is_empty() {
+        out.push_str("\n\n");
+    }
+    out.push_str("[experimental]\nsparseVhd=true\n");
+    Some(out)
+}
+
+#[cfg(windows)]
+fn wslconfig_path() -> Option<std::path::PathBuf> {
+    std::env::var_os("USERPROFILE").map(|h| std::path::PathBuf::from(h).join(".wslconfig"))
+}
+
+/// True when `%USERPROFILE%\.wslconfig` already enables sparse disks — read
+/// cheaply by reusing the pure merge helper (it returns None iff already `true`).
+#[cfg(windows)]
+fn wslconfig_has_sparse() -> bool {
+    wslconfig_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .map(|s| merge_sparse_into_wslconfig(&s).is_none())
+        .unwrap_or(false)
+}
+
+/// Ensure the `.wslconfig` global default has `sparseVhd=true`. No WSL restart —
+/// it takes effect on the next natural start. Ok(true) if it wrote a change.
+#[cfg(windows)]
+pub(crate) fn ensure_sparse_config() -> Result<bool, String> {
+    let p = wslconfig_path().ok_or_else(|| "no USERPROFILE".to_string())?;
+    let existing = std::fs::read_to_string(&p).unwrap_or_default();
+    match merge_sparse_into_wslconfig(&existing) {
+        None => Ok(false),
+        Some(updated) => {
+            std::fs::write(&p, updated).map_err(|e| format!("write {}: {e}", p.display()))?;
+            Ok(true)
+        }
+    }
+}
+
+/// Convert an existing distro's disk to sparse in place. `--set-sparse` needs the
+/// distro stopped, so terminate it first (brief — same trick ensure_user uses).
+///
+/// ⚠ Modern WSL DISABLES sparse by default "due to potential data corruption" and
+/// rejects the plain command, so this passes `--allow-unsafe` — which is why the
+/// whole sparse path is an EXPLICIT, warned opt-in (never auto-applied). Idempotent;
+/// surfaces wsl.exe's (UTF-16LE) error text on failure.
+#[cfg(windows)]
+fn set_distro_sparse(distro: &str) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let _ = std::process::Command::new("wsl.exe")
+        .args(["--terminate", distro])
+        .creation_flags(CREATE_NO_WINDOW)
+        .status();
+    let out = std::process::Command::new("wsl.exe")
+        .args(["--manage", distro, "--set-sparse", "true", "--allow-unsafe"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("run wsl --manage: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let raw: Vec<u8> = out
+        .stderr
+        .into_iter()
+        .chain(out.stdout)
+        .filter(|&b| b != 0)
+        .collect();
+    Err(format!(
+        "wsl --manage --set-sparse failed: {}",
+        String::from_utf8_lossy(&raw).trim()
+    ))
+}
+
+/// Outcome of enabling sparse — mirrored to the UI so the result is self-explaining.
+#[derive(Serialize, Clone, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct SparseResult {
+    /// `.wslconfig` now has sparseVhd=true (written this call or already present).
+    pub config_enabled: bool,
+    /// The existing distro's disk was converted to sparse this call.
+    pub distro_converted: bool,
+    /// Whether this OS has a managed vhdx to make sparse (Windows/WSL only).
+    pub applicable: bool,
+    /// Human-readable outcome for the card.
+    pub detail: String,
+}
+
+#[cfg(windows)]
+fn enable_sparse_impl(distro: Option<String>, convert_existing: bool) -> Result<SparseResult, String> {
+    // ADVANCED opt-in only (the UI gates this behind an explicit data-corruption
+    // warning) — Microsoft disables sparse by default for safety, so we never
+    // auto-apply it. Set the global default first (covers future distros, no restart).
+    let wrote = ensure_sparse_config()?;
+    let mut r = SparseResult {
+        config_enabled: true,
+        distro_converted: false,
+        applicable: true,
+        detail: if wrote {
+            "Sparse disks enabled — freed space now returns to Windows automatically (advanced; Microsoft flags a small data-corruption risk).".to_string()
+        } else {
+            "Sparse disks were already enabled.".to_string()
+        },
+    };
+    if convert_existing {
+        // Convert the disk they ALREADY have. If this can't run (old WSL without
+        // --set-sparse, or no distro), don't fail — the `.wslconfig` default above
+        // still makes every disk sparse on the next WSL restart / after a WSL update.
+        match resolve_linux_distro(distro) {
+            Ok(distro) => match set_distro_sparse(&distro) {
+                Ok(()) => {
+                    r.distro_converted = true;
+                    r.detail = format!(
+                        "Auto-shrink is on and the existing sandbox disk ({distro}) was converted — freed space now returns to Windows automatically, so it won't balloon again."
+                    );
+                }
+                Err(e) => {
+                    r.detail = format!(
+                        "Auto-shrink is set as the default (it applies on the next WSL restart). Converting the current disk now didn't run — likely an older WSL: {e}"
+                    );
+                }
+            },
+            Err(e) => {
+                r.detail =
+                    format!("Auto-shrink default is set, but no Linux distro was found to convert: {e}");
+            }
+        }
+    }
+    Ok(r)
+}
+
+#[cfg(not(windows))]
+fn enable_sparse_impl(_distro: Option<String>, _convert_existing: bool) -> Result<SparseResult, String> {
+    // No managed, ever-growing vhdx off Windows: bubblewrap (Linux) runs on the
+    // host filesystem and Lima (macOS) manages its own disk. Report not-applicable
+    // so the UI can hide the control rather than offer a no-op button.
+    Ok(SparseResult {
+        applicable: false,
+        detail: "The sandbox on this OS uses the host filesystem (no virtual disk), so there's nothing to make sparse.".to_string(),
+        ..Default::default()
+    })
+}
+
+/// Make the WSL sandbox disk sparse so freed space auto-returns to Windows and
+/// it never inflates. Always writes the `.wslconfig` default (no restart); when
+/// `convertExisting` is true it also converts the current distro's disk (brief
+/// WSL restart). No-op (reported) on Linux/macOS.
+#[tauri::command]
+pub async fn sandbox_enable_sparse(
+    distro: Option<String>,
+    convert_existing: bool,
+) -> Result<SparseResult, String> {
+    tokio::task::spawn_blocking(move || enable_sparse_impl(distro, convert_existing))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
+// ---- SAFE default: automatic cache-trim (no sparse, no admin, no risk) ------
+//
+// Sparse is off by default (unsafe), so the DEFAULT anti-inflation measure is
+// plain housekeeping: when the regenerable caches (uv/npm/pip) inside the distro
+// have grown large, clear them, then `fstrim` so the freed blocks are ready for
+// the next compaction. Caches are the main thing that balloons a build sandbox;
+// dropping them keeps logical usage — and thus the .vhdx's growth — in check
+// without ever touching project files, credentials, or models. Nothing here can
+// corrupt data or needs elevation.
+
+/// Caches above this get cleared by the automatic pass. Below it we leave them —
+/// clearing forces a re-download on the next run, not worth it for a small cache.
+#[cfg(windows)]
+const AUTOTRIM_CACHE_THRESHOLD: u64 = 8 * 1024 * 1024 * 1024; // 8 GiB
+
+/// Distros currently RUNNING (`wsl -l --running -q`, UTF-16LE) — checked so the
+/// startup pass never cold-starts WSL just to housekeep.
+#[cfg(windows)]
+fn running_distros() -> Vec<String> {
+    use std::os::windows::process::CommandExt;
+    match std::process::Command::new("wsl.exe")
+        .args(["-l", "--running", "-q"])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+    {
+        Ok(o) => {
+            let raw: Vec<u8> = o.stdout.into_iter().filter(|&b| b != 0).collect();
+            String::from_utf8_lossy(&raw)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Clear caches when large (or `force`d by the manual button), then fstrim.
+/// Returns bytes of cache freed. Safe: regenerable caches only, no admin.
+#[cfg(windows)]
+fn trim_impl(distro: Option<String>, force: bool) -> Result<u64, String> {
+    let distro = resolve_linux_distro(distro)?;
+    let cache = crate::wsl::run_in_distro_script(&distro, DISK_DU_SCRIPT)
+        .ok()
+        .map(|o| parse_sentinel(&o, "OWLLM_CACHE="))
+        .unwrap_or(0);
+    let mut freed = 0;
+    if force || cache >= AUTOTRIM_CACHE_THRESHOLD {
+        if let Ok(out) = crate::wsl::run_in_distro_script(&distro, CLEAR_CACHE_SCRIPT) {
+            freed = parse_sentinel(&out, "OWLLM_FREED=");
+        }
+    }
+    // fstrim (root — no password in WSL) marks the freed blocks reclaimable. Safe
+    // on any WSL and a no-op when there's nothing to trim.
+    let _ = crate::wsl::run_in_distro_script_user(
+        &distro,
+        Some("root"),
+        "fstrim -a 2>/dev/null || true",
+    );
+    Ok(freed)
+}
+
+#[cfg(not(windows))]
+fn trim_impl(_distro: Option<String>, _force: bool) -> Result<u64, String> {
+    // Linux/macOS sandboxes run on the host FS — no vhdx cache to reclaim.
+    Ok(0)
+}
+
+/// Startup housekeeping: if a real Linux distro is ALREADY running and its caches
+/// are over the threshold, clear them. Best-effort, background, never cold-starts
+/// WSL. Keeps a long-lived session's sandbox from ballooning unattended.
+#[cfg(windows)]
+pub(crate) fn auto_housekeep_startup() {
+    let Some(distro) = crate::wsl::best_linux_distro() else {
+        return;
+    };
+    if !running_distros().iter().any(|d| d == &distro) {
+        return;
+    }
+    let _ = trim_impl(Some(distro), false);
+}
+
+#[cfg(not(windows))]
+pub(crate) fn auto_housekeep_startup() {}
+
+/// Trim the sandbox now — clear regenerable caches + fstrim. Safe (no restart,
+/// no admin, no data risk). `force` clears caches regardless of size. Returns
+/// bytes freed.
+#[tauri::command]
+pub async fn sandbox_trim(distro: Option<String>, force: bool) -> Result<u64, String> {
+    tokio::task::spawn_blocking(move || trim_impl(distro, force))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
 }
 
 #[tauri::command]
@@ -1881,8 +2189,13 @@ fn sync_logins_impl(_distro: Option<String>) -> Result<SyncResult, String> {
 /// Mirror host logins into the sandbox. Returns what synced AND what was
 /// found on the Windows host, so the UI can explain the outcome precisely.
 #[tauri::command]
-pub fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, String> {
-    sync_logins_impl(distro)
+pub async fn sandbox_sync_logins(distro: Option<String>) -> Result<SyncResult, String> {
+    // Starting a cold WSL distro can take tens of seconds. This command is
+    // called from Accounts and must never occupy Tauri's UI/event loop while
+    // WSL starts or copies credentials.
+    tokio::task::spawn_blocking(move || sync_logins_impl(distro))
+        .await
+        .map_err(|e| format!("sandbox login sync task failed: {e}"))?
 }
 
 /// Pre-flight for an isolated run: make sure WSL is warm and the project folder is
@@ -2167,6 +2480,49 @@ mod tests {
         assert!(!is_managed_sandbox_copy("/etc"));
         // deeper than one level under owllm → NEVER (only the project dir matches)
         assert!(!is_managed_sandbox_copy("/home/mc/owllm/proj/sub"));
+    }
+
+    #[test]
+    fn sparse_merge_adds_section_to_empty_or_missing() {
+        // Missing/empty file → a fresh [experimental] section.
+        let out = merge_sparse_into_wslconfig("").unwrap();
+        assert!(out.contains("[experimental]"));
+        assert!(out.contains("sparseVhd=true"));
+        // Idempotent: feeding the result back is a no-op.
+        assert!(merge_sparse_into_wslconfig(&out).is_none());
+    }
+
+    #[test]
+    fn sparse_merge_preserves_existing_settings() {
+        let existing = "[wsl2]\nmemory=8GB\nprocessors=4\n";
+        let out = merge_sparse_into_wslconfig(existing).unwrap();
+        // Every prior setting survives …
+        assert!(out.contains("memory=8GB"));
+        assert!(out.contains("processors=4"));
+        assert!(out.contains("[wsl2]"));
+        // … and sparse is added under a new [experimental] section.
+        assert!(out.contains("[experimental]"));
+        assert!(out.contains("sparseVhd=true"));
+    }
+
+    #[test]
+    fn sparse_merge_uses_existing_experimental_section() {
+        let existing = "[experimental]\nautoMemoryReclaim=gradual\n";
+        let out = merge_sparse_into_wslconfig(existing).unwrap();
+        assert!(out.contains("autoMemoryReclaim=gradual"), "kept sibling key");
+        assert!(out.contains("sparseVhd=true"));
+        // Only ONE [experimental] header — we didn't append a duplicate section.
+        assert_eq!(out.matches("[experimental]").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn sparse_merge_flips_false_to_true_and_is_idempotent() {
+        let out = merge_sparse_into_wslconfig("[experimental]\nsparseVhd=false\n").unwrap();
+        assert!(out.contains("sparseVhd=true"));
+        assert!(!out.contains("sparseVhd=false"));
+        // Already-true in any casing/spacing → no rewrite.
+        assert!(merge_sparse_into_wslconfig("[experimental]\nsparseVhd = TRUE\n").is_none());
+        assert!(merge_sparse_into_wslconfig("[experimental]\nsparseVhd=true\n").is_none());
     }
 
     #[test]

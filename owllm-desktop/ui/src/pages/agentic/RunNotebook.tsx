@@ -29,6 +29,9 @@ import { useAutoResize } from "../../hooks/useAutoResize";
 import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
+import { formatDuration, formatClock } from "./RunTimer";
+import { translateUiText } from "../../localization";
+import ActionIcon from "../../components/ActionIcon";
 
 export type NotebookStep = {
   id: string;
@@ -36,6 +39,10 @@ export type NotebookStep = {
   /// pending = written, not fed yet · sent = fed to the team · done = user checked it off
   status: "pending" | "sent" | "done";
   ts: number;
+  /// When this step was fed to the team (started as a job).
+  startedAt?: number;
+  /// When the run that processed this step finished.
+  finishedAt?: number;
 };
 
 export type NotebookState = {
@@ -75,7 +82,13 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
     return {
       text: typeof p.text === "string" ? p.text : "",
       plan: typeof p.plan === "string" ? p.plan : "",
-      steps: Array.isArray(p.steps) ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string") : [],
+      steps: Array.isArray(p.steps)
+        ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string").map((s: NotebookStep) => ({
+            ...s,
+            startedAt: typeof s.startedAt === "number" ? s.startedAt : undefined,
+            finishedAt: typeof s.finishedAt === "number" ? s.finishedAt : undefined,
+          }))
+        : [],
       autoFeed: p.autoFeed === true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
@@ -106,6 +119,8 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
   next.status = "sent";
+  next.startedAt = Date.now();
+  next.finishedAt = undefined;
   if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
   saveNotebook(projectId, nb);
   return next;
@@ -121,15 +136,60 @@ export function autoFeedWouldRun(projectId: string | null | undefined, surfaceId
   return nb.steps.some((s) => s.status === "pending");
 }
 
+/// Stamp when a notebook step was fed to the team. Safe to call from any surface;
+/// the blob is shared per project and the event re-syncs open surfaces.
+export function markNotebookStepStarted(projectId: string | null | undefined, stepId: string, startedAt: number = Date.now()): void {
+  if (!projectId || !stepId) return;
+  const nb = loadNotebook(projectId);
+  const idx = nb.steps.findIndex((s) => s.id === stepId);
+  if (idx < 0) return;
+  nb.steps[idx] = { ...nb.steps[idx], startedAt, finishedAt: undefined };
+  saveNotebook(projectId, nb);
+}
+
+/// Stamp when the run that processed a notebook step finished. Idempotent.
+export function markNotebookStepFinished(projectId: string | null | undefined, stepId: string, finishedAt: number = Date.now()): void {
+  if (!projectId || !stepId) return;
+  const nb = loadNotebook(projectId);
+  const idx = nb.steps.findIndex((s) => s.id === stepId);
+  if (idx < 0) return;
+  nb.steps[idx] = { ...nb.steps[idx], finishedAt };
+  saveNotebook(projectId, nb);
+}
+
+/// A step is ARCHIVED once it is finished: the user checked it off ("done"),
+/// or a run it was fed to has completed ("sent" with a finish stamp). Archived
+/// steps leave the Active queue and appear only on the Archive tab — a fed
+/// step that finished no longer needs a manual check-off to get out of the way.
+function isStepArchived(s: NotebookStep): boolean {
+  return s.status === "done" || (s.status === "sent" && s.finishedAt != null);
+}
+
+/// Format a step's timing line: started → finished, duration, or still running.
+function formatStepTiming(s: NotebookStep): string | null {
+  if (s.startedAt == null) return null;
+  const start = formatClock(s.startedAt);
+  if (s.finishedAt != null) {
+    return translateUiText(`started ${start} • finished ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`);
+  }
+  return translateUiText(`started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`);
+}
+
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 type KanbanPlan = { now: string; next: string; later: string };
 const EMPTY_KANBAN: KanbanPlan = { now: "", next: "", later: "" };
 const KANBAN_COLUMNS: Array<{ key: keyof KanbanPlan; label: string; hint: string; color: string }> = [
-  { key: "now", label: "Now", hint: "active implementation batch", color: "#9ad9ff" },
-  { key: "next", label: "Next", hint: "queued after Now", color: "#7ff0c5" },
-  { key: "later", label: "Later", hint: "parked / optional", color: "#ffd97a" },
+  { key: "now", label: "Now", hint: "active implementation batch", color: "var(--accent)" },
+  { key: "next", label: "Next", hint: "queued after Now", color: "var(--ok)" },
+  { key: "later", label: "Later", hint: "parked / optional", color: "var(--warn)" },
 ];
+
+/// The Kanban plan board is hidden for now — it never worked reliably and
+/// reads as noise in the notebook. The board, its parse/feed logic, and the
+/// digest's PLAN output are all kept intact (not deleted) so it can be turned
+/// back on later; only the UI is gated off. Flip to `true` to restore it.
+const SHOW_KANBAN = false;
 
 function parseKanbanPlan(plan: string): KanbanPlan {
   const out: KanbanPlan = { ...EMPTY_KANBAN };
@@ -213,7 +273,9 @@ type Props = {
   /// Is a team run in progress right now (steers queue vs new dispatch).
   running: boolean;
   /// Feed one step to the team. Returns what happened so the UI can say it.
-  onFeed: (text: string) => "queued" | "dispatched" | "no-team";
+  /// The optional stepId lets the surface correlate a run back to the step
+  /// that started it for start/finish timing.
+  onFeed: (text: string, stepId?: string) => "queued" | "dispatched" | "no-team";
   /// Digest model routing (same trio the BrainstormPanel takes).
   modelId: string;
   port: number;
@@ -240,7 +302,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const [newStep, setNewStep] = useState("");
   const [digestBusy, setDigestBusy] = useState(false);
   const [digestLogOpen, setDigestLogOpen] = useState(false);
-  const [doneOpen, setDoneOpen] = useState(false);
+  /// Which steps tab is shown: the actionable queue or the archive of done
+  /// steps. Done steps are ONLY visible on the archive tab.
+  const [stepsTab, setStepsTab] = useState<"active" | "archive">("active");
   const [digestError, setDigestError] = useState("");
   /// Transient per-step outcome of the last Feed click — the onFeed result
   /// ("queued" into a live run vs "dispatched" as a new goal vs "no-team")
@@ -330,12 +394,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const setStep = (id: string, patch: Partial<NotebookStep>) =>
     updateNotebook((prev) => ({ ...prev, steps: prev.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
   const removeStep = (id: string) => updateNotebook((prev) => ({ ...prev, steps: prev.steps.filter((s) => s.id !== id) }));
-  // Reorder within the VISIBLE (unfinished) cards only — done steps are hidden
-  // from the feed, so swap the two adjacent visible steps rather than raw array
-  // neighbours (a raw swap could silently trade places with a hidden done step).
+  // Reorder within the VISIBLE (unfinished) cards only — archived steps are
+  // hidden from the feed, so swap the two adjacent visible steps rather than raw
+  // array neighbours (a raw swap could silently trade places with a hidden one).
   const moveStep = (id: string, dir: -1 | 1) =>
     updateNotebook((prev) => {
-      const visible = prev.steps.filter((s) => s.status !== "done");
+      const visible = prev.steps.filter((s) => !isStepArchived(s));
       const vi = visible.findIndex((s) => s.id === id);
       const vj = vi + dir;
       if (vi < 0 || vj < 0 || vj >= visible.length) return prev;
@@ -346,11 +410,13 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       return { ...prev, steps };
     });
   const feedStep = (s: NotebookStep) => {
-    const res = onFeed(s.text);
+    const res = onFeed(s.text, s.id);
     setFeedNotice({ id: s.id, kind: res });
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
-    setStep(s.id, { status: "sent" });
+    const now = Date.now();
+    setStep(s.id, { status: "sent", startedAt: now, finishedAt: undefined });
+    markNotebookStepStarted(projectId, s.id, now);
   };
   /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
   /// the lane content is NEVER cleared or consumed — only read.
@@ -441,10 +507,30 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
 
   const pendingCount = useMemo(() => nb.steps.filter((s) => s.status === "pending").length, [nb.steps]);
-  // The active feed shows only unfinished, actionable cards. Completed steps
-  // drop out of the feed and are preserved in the collapsible history below.
-  const activeSteps = useMemo(() => nb.steps.filter((s) => s.status !== "done"), [nb.steps]);
-  const doneSteps = useMemo(() => nb.steps.filter((s) => s.status === "done"), [nb.steps]);
+  // Total queue timing: sum of finished durations plus currently-running time.
+  const queueTiming = useMemo(() => {
+    const finished = nb.steps.filter((s) => s.startedAt != null && s.finishedAt != null);
+    const running = nb.steps.filter((s) => s.startedAt != null && s.finishedAt == null);
+    const finishedMs = finished.reduce((a, s) => a + (s.finishedAt! - s.startedAt!), 0);
+    const runningMs = running.reduce((a, s) => a + (Date.now() - s.startedAt!), 0);
+    return { finishedMs, runningMs, finishedCount: finished.length, runningCount: running.length };
+  }, [nb.steps]);
+  const queueTimingText = useMemo(() => {
+    const parts: string[] = [];
+    if (queueTiming.finishedCount) {
+      const doneText = `${formatDuration(queueTiming.finishedMs)} done`;
+      parts.push(translateUiText(doneText));
+    }
+    if (queueTiming.runningCount) {
+      const runningText = `${formatDuration(queueTiming.runningMs)} running`;
+      parts.push(translateUiText(runningText));
+    }
+    return parts.join(" · ");
+  }, [queueTiming]);
+  // The active feed shows only unfinished, actionable cards. Finished steps
+  // (checked off OR fed-and-completed) drop out of the feed into the Archive tab.
+  const activeSteps = useMemo(() => nb.steps.filter((s) => !isStepArchived(s)), [nb.steps]);
+  const doneSteps = useMemo(() => nb.steps.filter((s) => isStepArchived(s)), [nb.steps]);
   // Human-readable INHERITED digest model (the default when no override is
   // picked): the raw id with any file path stripped.
   const digestModelLabel = useMemo(() => {
@@ -453,8 +539,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   }, [modelId]);
   if (!inline && !open) return null;
 
-  const statusIcon = (s: NotebookStep) => (s.status === "done" ? "✓" : s.status === "sent" ? "⚡" : "○");
-  const statusColor = (s: NotebookStep) => (s.status === "done" ? "#7ff0c5" : s.status === "sent" ? "#ffd97a" : "var(--fg-muted)");
+  const statusIcon = (s: NotebookStep) => (
+    <ActionIcon name={s.status === "done" ? "check" : s.status === "sent" ? "bolt" : "circle"} size={15} />
+  );
+  const statusColor = (s: NotebookStep) => (s.status === "done" ? "var(--ok)" : s.status === "sent" ? "var(--warn)" : "var(--fg-muted)");
 
   const card: React.CSSProperties = {
     display: "flex", flexDirection: "column", gap: 8,
@@ -501,14 +589,14 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 title={ownedElsewhere
                   ? "Auto-feed is driven by another page on this project. Uncheck to stop it everywhere; check again afterwards to drive it from this page."
                   : "When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it. Only the page that turns this on feeds the queue."}
-                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: ownedElsewhere ? "#ffd97a" : nb.autoFeed ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}
+                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: ownedElsewhere ? "var(--warn)" : nb.autoFeed ? "var(--ok)" : "var(--fg-muted)", cursor: "pointer" }}
               >
                 <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked, autoFeedOwner: e.target.checked ? surfaceId : undefined })} />
                 {ownedElsewhere ? "Auto-feed (another page drives)" : "Auto-feed next step"}
               </label>
             );
           })()}
-          {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} style={{ height: 26, width: 28, padding: 0, fontSize: 13 }}>✕</button>}
+          {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} title="Close" aria-label="Close" style={{ height: 26, width: 28, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="close" size={14} /></button>}
         </div>
 
         {/* Body: scrollable column of cards */}
@@ -516,7 +604,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
           {/* Working notes and digest controls */}
           <div style={card}>
             <div style={sectionHeader}>
-              <span>💡</span>
+              <ActionIcon name="note" size={15} />
               <span>Working notes</span>
               <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>single source for digest</span>
             </div>
@@ -534,7 +622,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               style={textareaBase}
             />
             {digestError && (
-              <div style={{ padding: "8px 10px", border: "1px solid rgba(255,140,140,0.45)", borderRadius: 8, background: "rgba(70,20,28,0.35)", color: "#ffb4b4", fontSize: 12, lineHeight: 1.4 }}>
+              <div style={{ padding: "8px 10px", border: "1px solid rgba(var(--error-rgb),0.45)", borderRadius: 8, background: "rgba(var(--error-rgb),0.12)", color: "var(--error)", fontSize: 12, lineHeight: 1.4 }}>
                 {digestError}
               </div>
             )}
@@ -545,18 +633,19 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   onChange={(id) => update({ digestModel: id })}
                   models={models}
                   status={accountsStatus}
-                  fallbackLabel={`🪄 ${digestModelLabel}`}
+                  fallbackLabel={digestModelLabel}
                 />
               </div>
               {nb.digestModel && (
-                <button className="ghost-btn" onClick={() => update({ digestModel: undefined })} title="Back to the default team model" style={{ height: 28, width: 28, padding: 0, fontSize: 11, flexShrink: 0 }}>✕</button>
+                <button className="ghost-btn" onClick={() => update({ digestModel: undefined })} title="Back to the default team model" aria-label="Back to the default team model" style={{ height: 28, width: 28, padding: 0, display: "grid", placeItems: "center", flexShrink: 0 }}><ActionIcon name="close" size={13} /></button>
               )}
               <button
                 onClick={() => void runDigest()}
                 disabled={digestBusy}
+                aria-label={digestBusy ? "Digesting..." : "Digest notes"}
                 title="Digest the working notes, current plan, and existing steps"
-                style={{ height: 32, padding: "0 14px", border: "none", borderRadius: 7, background: digestBusy ? "var(--bg-surface)" : "rgba(var(--accent-rgb),0.2)", color: digestBusy ? "var(--fg-muted)" : "var(--accent)", fontSize: 12, fontWeight: 700, cursor: digestBusy ? "wait" : "pointer", flexShrink: 0 }}
-              >{digestBusy ? "Digesting..." : "🪄 Digest notes"}</button>
+                style={{ height: 32, padding: "0 14px", display: "inline-flex", alignItems: "center", gap: 7, border: digestBusy ? "1px solid var(--border)" : "1px solid var(--accent)", borderRadius: 7, background: digestBusy ? "var(--bg-surface)" : "linear-gradient(135deg, color-mix(in srgb, var(--accent) 82%, white), var(--accent))", color: digestBusy ? "var(--fg-muted)" : "var(--accent-fg)", boxShadow: digestBusy ? "none" : "0 2px 10px rgba(var(--accent-rgb),0.3)", fontSize: 12, fontWeight: 800, cursor: digestBusy ? "wait" : "pointer", opacity: digestBusy ? 0.62 : 1, flexShrink: 0 }}
+              ><ActionIcon name={digestBusy ? "loader" : "wand"} size={15} />{digestBusy ? "Digesting..." : "Digest notes"}</button>
               {nb.digest.length > 0 && (
                 <button className="ghost-btn" onClick={() => setDigestLogOpen((v) => !v)} title="Show or hide the raw digest transcript" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>
                   {digestLogOpen ? "Hide log" : "Show log"}
@@ -584,21 +673,21 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             )}
           </div>
 
-          {(proposedPlan || proposed.length > 0) && (
-            <div style={{ ...card, borderColor: "rgba(127,240,197,0.35)" }}>
+          {((SHOW_KANBAN && proposedPlan) || proposed.length > 0) && (
+            <div style={{ ...card, borderColor: "rgba(var(--ok-rgb),0.35)" }}>
               <div style={sectionHeader}>
-                <span>🪄</span>
+                <ActionIcon name="wand" size={15} />
                 <span>Proposed update</span>
                 <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>review before applying</span>
               </div>
-              {proposedPlan && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, background: "rgba(14,28,40,0.5)", border: "1px solid rgba(154,217,255,0.35)", borderRadius: 8 }}>
-                  <div style={{ fontSize: 11, color: "#9ad9ff", fontWeight: 700 }}>Proposed plan</div>
+              {SHOW_KANBAN && proposedPlan && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, background: "rgba(var(--accent-rgb),0.08)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 8 }}>
+                  <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>Proposed plan</div>
                   <div style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)" }}>{proposedPlan}</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
                       onClick={() => update({ plan: normalizeKanbanPlan(proposedPlan), text: "", proposedPlan: "" })}
-                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(154,217,255,0.45)", borderRadius: 6, background: "rgba(14,28,40,0.7)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(var(--accent-rgb),0.45)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                     >Save plan + clear notes</button>
                     <button className="ghost-btn" onClick={() => update({ proposedPlan: "" })} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
                   </div>
@@ -606,10 +695,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               )}
               {proposed.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  <div style={{ fontSize: 11, color: "#7ff0c5", fontWeight: 700 }}>Proposed steps</div>
+                  <div style={{ fontSize: 11, color: "var(--ok)", fontWeight: 700 }}>Proposed steps</div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                     {proposed.map((t, i) => (
-                      <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 8, background: "rgba(16,36,28,0.45)", border: "1px solid rgba(127,240,197,0.28)", borderRadius: 8 }}>
+                      <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: 8, background: "rgba(var(--ok-rgb),0.08)", border: "1px solid rgba(var(--ok-rgb),0.28)", borderRadius: 8 }}>
                         <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{t}</div>
                         <button
                           onClick={() => updateNotebook((prev) => ({
@@ -618,7 +707,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                             proposed: (prev.proposed ?? []).filter((_, j) => j !== i),
                           }))}
                           title="Add this step to the list"
-                          style={{ height: 26, padding: "0 10px", border: "1px solid rgba(127,240,197,0.45)", borderRadius: 6, background: "rgba(16,36,28,0.7)", color: "#7ff0c5", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
+                          style={{ height: 26, padding: "0 10px", border: "1px solid rgba(var(--ok-rgb),0.45)", borderRadius: 6, background: "rgba(var(--ok-rgb),0.12)", color: "var(--ok)", fontSize: 11, fontWeight: 700, cursor: "pointer", flexShrink: 0 }}
                         >Add</button>
                       </div>
                     ))}
@@ -638,7 +727,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           text: prev.proposedPlan ? prev.text : "",
                         }));
                       }}
-                      style={{ height: 28, padding: "0 12px", border: "none", borderRadius: 7, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                      style={{ height: 28, padding: "0 12px", border: "none", borderRadius: 7, background: "var(--ok)", color: "#ffffff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                     >Add all + clear notes</button>
                     <button className="ghost-btn" onClick={() => update({ proposed: [] })} title="Discard proposed steps" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>Discard steps</button>
                   </div>
@@ -647,10 +736,11 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             </div>
           )}
 
-          {/* Kanban plan */}
+          {/* Kanban plan — hidden for now (SHOW_KANBAN=false); kept for future resume */}
+          {SHOW_KANBAN && (
           <div style={card}>
             <div style={sectionHeader}>
-              <span>📋</span>
+              <ActionIcon name="clipboard" size={15} />
               <span>Plan board</span>
               <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 500, textTransform: "none", color: "var(--fg-muted)" }}>Kanban</span>
             </div>
@@ -679,13 +769,13 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           onClick={() => feedLane("now")}
                           disabled={!kanbanPlan.now.trim()}
                           title={running ? "Feed the whole NOW batch — steers the running team at its next boundary. The board keeps its cards." : "Start the whole NOW batch as a new goal. The board keeps its cards."}
-                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(154,217,255,0.5)", borderRadius: 6, background: "rgba(14,28,40,0.6)", color: "#9ad9ff", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
-                        >⚡ Start batch</button>
+                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--accent-rgb),0.5)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
+                        ><ActionIcon name="bolt" size={13} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start batch</button>
                         {laneNotice?.key === "now" && (
                           <span style={{
                             fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px",
-                            color: laneNotice.kind === "no-team" ? "#ffb4b4" : laneNotice.kind === "queued" ? "#ffd97a" : "#7ff0c5",
-                            border: `1px solid ${laneNotice.kind === "no-team" ? "rgba(255,140,140,0.45)" : laneNotice.kind === "queued" ? "rgba(255,217,122,0.45)" : "rgba(127,240,197,0.45)"}`,
+                            color: laneNotice.kind === "no-team" ? "var(--error)" : laneNotice.kind === "queued" ? "var(--warn)" : "var(--ok)",
+                            border: `1px solid ${laneNotice.kind === "no-team" ? "rgba(var(--error-rgb),0.45)" : laneNotice.kind === "queued" ? "rgba(var(--warn-rgb),0.45)" : "rgba(var(--ok-rgb),0.45)"}`,
                           }}>
                             {laneNotice.kind === "queued" ? "queued — steers the live run" : laneNotice.kind === "dispatched" ? "dispatched as a new goal" : "no team ready — pick a project & model"}
                           </span>
@@ -697,25 +787,52 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               })}
             </div>
           </div>
+          )}
 
           {/* Next steps */}
           <div style={card}>
             <div style={{ ...sectionHeader, borderBottom: "none", paddingBottom: 0 }}>
-              <span>🎯</span>
+              <ActionIcon name="target" size={15} />
               <span>Next steps</span>
-              <span style={{ marginLeft: "auto", fontSize: 10, fontWeight: 700, color: pendingCount ? "#7ff0c5" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
+              {queueTimingText && (
+                <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
+              )}
+              <span style={{ fontSize: 10, fontWeight: 700, color: pendingCount ? "var(--ok)" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
               {pendingCount > 0 && (
                 <button
                   onClick={startQueue}
                   title={nb.autoFeed
                     ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
                     : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
-                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: "#2f7d5b", color: "#eafff5", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
-                >▶ Start queue</button>
+                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: "var(--ok)", color: "#ffffff", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
+                ><ActionIcon name="play" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start queue</button>
               )}
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {/* Active/Archive tabs — done steps live ONLY on the archive tab
+                  so the queue never shows finished work unless asked. */}
+              <div role="tablist" aria-label="Steps" style={{ display: "flex", gap: 2, borderBottom: "1px solid var(--border)" }}>
+                {([
+                  { key: "active" as const, label: "Active", count: activeSteps.length },
+                  { key: "archive" as const, label: "Archive", count: doneSteps.length },
+                ]).map((t) => (
+                  <button
+                    key={t.key}
+                    role="tab"
+                    aria-selected={stepsTab === t.key}
+                    onClick={() => setStepsTab(t.key)}
+                    style={{
+                      height: 28, padding: "0 12px", border: "none", background: "transparent",
+                      borderBottom: stepsTab === t.key ? "2px solid var(--accent)" : "2px solid transparent",
+                      color: stepsTab === t.key ? "var(--fg-strong)" : "var(--fg-muted)",
+                      fontSize: 11.5, fontWeight: 700, cursor: "pointer",
+                    }}
+                  >{t.label} ({t.count})</button>
+                ))}
+              </div>
+
+              {stepsTab === "active" && (<>
               <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
                 <textarea
                   ref={newStepRef}
@@ -725,14 +842,14 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   placeholder="Write a step and press Enter…"
                   style={{ ...textareaBase, flex: 1, minHeight: 32 }}
                 />
-                <button className="ghost-btn" onClick={() => { addStep(newStep); setNewStep(""); }} style={{ height: 32, padding: "0 12px", fontSize: 12, flexShrink: 0 }}>＋ Add</button>
+                <button className="ghost-btn" onClick={() => { addStep(newStep); setNewStep(""); }} style={{ height: 32, padding: "0 12px", display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, flexShrink: 0 }}><ActionIcon name="plus" size={14} />Add</button>
               </div>
 
               {activeSteps.length === 0 && (
                 <div style={{ padding: 14, textAlign: "center", fontSize: 12, color: "var(--fg-muted)", background: "var(--bg-input)", borderRadius: 8, border: "1px dashed var(--border)" }}>
                   {doneSteps.length > 0
-                    ? "All steps done — reopen one from Completed below, or add a new step above."
-                    : "No steps yet — add one above, or 🪄 digest your notes below."}
+                    ? "All steps done — reopen one from the Archive tab, or add a new step above."
+                    : "No steps yet — add one above, or digest your notes below."}
                 </div>
               )}
 
@@ -765,64 +882,71 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <div
                           onClick={() => startEdit(s)}
                           title="Click to edit"
-                          style={{ flex: 1, fontSize: 12.5, lineHeight: 1.5, color: "var(--fg)", textDecoration: s.status === "done" ? "line-through" : "none", whiteSpace: "pre-wrap", wordBreak: "break-word", cursor: "text" }}
+                          style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, color: "var(--fg)", textDecoration: s.status === "done" ? "line-through" : "none", whiteSpace: "pre-wrap", wordBreak: "break-word", cursor: "text" }}
                         >
                           {s.text}
-                          {s.status === "sent" && <span style={{ display: "inline-block", marginLeft: 8, fontSize: 10, color: "#ffd97a", border: "1px solid rgba(255,217,122,0.45)", borderRadius: 999, padding: "1px 7px" }}>fed to team</span>}
+                          {s.status === "sent" && <span style={{ display: "inline-block", marginLeft: 8, fontSize: 10, color: "var(--warn)", border: "1px solid rgba(var(--warn-rgb),0.45)", borderRadius: 999, padding: "1px 7px" }}>fed to team</span>}
                         </div>
                       )}
                     </div>
+                    {formatStepTiming(s) && (
+                      <div style={{ paddingLeft: 28, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>
+                        {formatStepTiming(s)}
+                      </div>
+                    )}
 
                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", paddingLeft: 28 }}>
                       {s.status !== "done" && (
                         <button
                           onClick={() => feedStep(s)}
+                          aria-label={s.status === "sent" ? "Re-feed" : "Feed"}
                           title={running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
-                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(255,217,122,0.5)", borderRadius: 6, background: "rgba(38,30,10,0.6)", color: "#ffd97a", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
-                        >{s.status === "sent" ? "⚡ Re-feed" : "⚡ Feed"}</button>
+                          style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                        ><ActionIcon name="bolt" size={12} />{s.status === "sent" ? "Re-feed" : "Feed"}</button>
                       )}
                       {feedNotice?.id === s.id && (
                         <span style={{
                           fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px",
-                          color: feedNotice.kind === "no-team" ? "#ffb4b4" : feedNotice.kind === "queued" ? "#ffd97a" : "#7ff0c5",
-                          border: `1px solid ${feedNotice.kind === "no-team" ? "rgba(255,140,140,0.45)" : feedNotice.kind === "queued" ? "rgba(255,217,122,0.45)" : "rgba(127,240,197,0.45)"}`,
+                          color: feedNotice.kind === "no-team" ? "var(--error)" : feedNotice.kind === "queued" ? "var(--warn)" : "var(--ok)",
+                          border: `1px solid ${feedNotice.kind === "no-team" ? "rgba(var(--error-rgb),0.45)" : feedNotice.kind === "queued" ? "rgba(var(--warn-rgb),0.45)" : "rgba(var(--ok-rgb),0.45)"}`,
                         }}>
                           {feedNotice.kind === "queued" ? "queued — steers the live run" : feedNotice.kind === "dispatched" ? "dispatched as a new goal" : "no team ready — pick a project & model"}
                         </span>
                       )}
-                      <button className="ghost-btn" onClick={() => moveStep(s.id, -1)} title="Move up" style={{ height: 24, width: 24, padding: 0, fontSize: 10 }}>▲</button>
-                      <button className="ghost-btn" onClick={() => moveStep(s.id, 1)} title="Move down" style={{ height: 24, width: 24, padding: 0, fontSize: 10 }}>▼</button>
+                      <button className="ghost-btn" onClick={() => moveStep(s.id, -1)} title="Move up" aria-label="Move up" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="chevron-up" size={14} /></button>
+                      <button className="ghost-btn" onClick={() => moveStep(s.id, 1)} title="Move down" aria-label="Move down" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="chevron-down" size={14} /></button>
                       <div style={{ flex: 1 }} />
-                      <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete step" style={{ height: 24, width: 24, padding: 0, fontSize: 11, color: "#ff8c8c" }}>🗑</button>
+                      <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete step" aria-label="Delete step" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center", color: "var(--error)" }}><ActionIcon name="trash" size={13} /></button>
                     </div>
                   </div>
                 ))}
               </div>
+              </>)}
 
-              {/* Completed history — done steps leave the active feed but are
-                  kept here (collapsed by default) so nothing is lost and the
-                  user can reopen a step or clear it for good. */}
-              {doneSteps.length > 0 && (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  <button
-                    className="ghost-btn"
-                    onClick={() => setDoneOpen((v) => !v)}
-                    title="Show or hide completed steps"
-                    style={{ height: 26, alignSelf: "flex-start", padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}
-                  >{doneOpen ? "▾" : "▸"} Completed ({doneSteps.length})</button>
-                  {doneOpen && (
-                    <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                      {doneSteps.map((s) => (
-                        <div key={s.id} style={{ display: "flex", alignItems: "flex-start", gap: 8, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
-                          <span style={{ color: "#7ff0c5", fontSize: 13, lineHeight: "18px", flexShrink: 0 }}>✓</span>
-                          <div style={{ flex: 1, fontSize: 12, lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
-                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending" })} title="Reopen this step (moves it back to the active feed)" style={{ height: 22, padding: "0 8px", fontSize: 10.5, flexShrink: 0 }}>↺ Reopen</button>
-                          <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" style={{ height: 22, width: 22, padding: 0, fontSize: 11, color: "#ff8c8c", flexShrink: 0 }}>🗑</button>
+              {/* Archive — done steps leave the active feed and live only on
+                  this tab, where each can be reopened or cleared for good. */}
+              {stepsTab === "archive" && (
+                doneSteps.length === 0 ? (
+                  <div style={{ padding: 14, textAlign: "center", fontSize: 12, color: "var(--fg-muted)", background: "var(--bg-input)", borderRadius: 8, border: "1px dashed var(--border)" }}>
+                    No archived steps yet — steps marked done move here.
+                  </div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                    {doneSteps.map((s) => (
+                      <div key={s.id} style={{ display: "flex", flexDirection: "column", gap: 3, padding: "6px 10px", background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, opacity: 0.75 }}>
+                        <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                          <ActionIcon name="check" size={13} style={{ color: "var(--ok)", marginTop: 2 }} />
+                          <div style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
+                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending", startedAt: undefined, finishedAt: undefined })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
+                          <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" aria-label="Delete permanently" style={{ height: 22, width: 22, padding: 0, display: "grid", placeItems: "center", color: "var(--error)", flexShrink: 0 }}><ActionIcon name="trash" size={12} /></button>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                        {formatStepTiming(s) && (
+                          <div style={{ paddingLeft: 22, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>{formatStepTiming(s)}</div>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )
               )}
             </div>
           </div>

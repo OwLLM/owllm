@@ -112,7 +112,18 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   folder, no copy. Cloud CLIs run inside too; logins/API keys auto-mirror in.
 - Graduated trust: isolated by default, per-project Full-access opt-out,
   write-jail + dangerous-command guard when not isolated.
-- Sandbox disk card: usage view, cache clear, WSL disk reclaim.
+- Sandbox disk card: usage view, cache clear, WSL disk reclaim, plus
+  **anti-inflation** so the WSL `.vhdx` doesn't balloon unattended:
+  - **Safe default — automatic cache-trim** (`sandbox_trim` / `auto_housekeep`):
+    when the regenerable caches (uv/npm/pip) inside a *running* distro exceed a
+    threshold, they're cleared on startup + on demand, then `fstrim`. No admin,
+    no restart, no data risk. This is the main lever that keeps growth in check.
+  - **Advanced opt-in — sparse disk** (`sandbox_enable_sparse`): returns freed
+    space continuously via `.wslconfig sparseVhd=true` + `wsl --manage
+    --set-sparse true --allow-unsafe`. Gated behind an explicit warning because
+    **modern WSL disables sparse by default due to a potential data-corruption
+    risk** — never auto-applied. One-click, clearly labelled advanced.
+  - No-op on Linux/macOS (bwrap = host FS; Lima manages its own disk).
 - GitHub connect for clone/push from inside the sandbox.
 
 ## Browser control (`browser.rs`, `browser_vault.rs`, `browser_import.rs`)
@@ -128,15 +139,32 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   IPC capability is needed.
 - **OwLLM chrome (app-styled window)**: the browser is a FRAMELESS multi-webview
   window that looks like the app, not a stock OS window — an OwLLM chrome-bar
-  webview (`ui/public/browser-chrome.html`: title, back/reload, URL box,
-  min/max/close, accent-aware via the shared localStorage theme key) sits above
-  the page webview (`Window::builder` + `add_child`, tauri `unstable` feature),
-  so the bar never overlays site content. The bar's buttons/drag/URL entry
-  report over the same title channel tagged `EVT` (`parse_chrome_event`) — no
-  IPC grant to any webview. If the multi-webview build fails on some platform,
-  it falls back to the previous decorated single-webview window
-  (`build_legacy`) so agent browsing never breaks. `browser_set_chrome` still
-  paints the DWM border (and the fallback's caption) in the app accent.
+  webview (`ui/public/browser-chrome.html`: launcher app icon + title, tab
+  strip, back/reload, URL box, min/max/close) sits above the page webviews
+  (`Window::builder` + `add_child`, tauri `unstable` feature), so the bar never
+  overlays site content. The bar wears the app header's colour — the same
+  `--bg-header` recipe (70% accent over `#1c2244`) resolved live from the
+  shared localStorage accent key. Its buttons/drag/URL entry/tab events report
+  over the same title channel tagged `EVT` (`parse_chrome_event`) — no IPC
+  grant to any webview. If the multi-webview build fails on some platform, it
+  falls back to the previous decorated single-webview window (`build_legacy`)
+  so agent browsing never breaks. `browser_set_chrome` still paints the DWM
+  border (and the fallback's caption) in the app accent.
+- **Tabs (multiple pages at once)**: the chrome bar's tab strip opens any
+  number of pages side by side, like a normal browser — `+` for a new tab,
+  pills to switch, `✕` to close (closing the last tab closes the window). Each
+  tab is its own content webview labelled `owllm-browser-page-{id}`; they all
+  share one profile dir, so logins/cookies span tabs. Only the active tab sits
+  in view — inactive ones are parked offscreen (`PARK_X`), the cross-platform
+  substitute for a child-webview `hide()`. Agent `browser_*` tools always drive
+  the ACTIVE tab (`content_webview`), so the tool contract is unchanged.
+  Switching device emulation rebuilds the window and keeps the active tab.
+- **Typed-login auto-capture**: submitting a form with a filled password field
+  (or leaving a page with one) reports origin/username/password over the EVT
+  title channel; Rust upserts it into the encrypted vault
+  (`browser_vault::store_typed_login`), so anything the user types to log in
+  autofills next time. Blank passwords are ignored; dedupe is per (origin,
+  username), same merge path as manual and imported creds.
 - **Local dev servers**: scheme-less localhost-family URLs (`localhost:5173`,
   `127.0.0.1:3000`, `[::1]`, `192.168.*`, `10.*`, `*.localhost`) default to
   `http://` instead of `https://`, so agents can open and test a web app they
@@ -367,6 +395,19 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   diff/merge/finalize; orphan sweep.
 
 ## Support & UX
+
+- **Application-wide localization**: Settings switches English, Simplified
+  Chinese, Korean, Japanese, Arabic, Italian, Hindi, or Portuguese (pt-BR)
+  live and persists the choice; the selector is a 4×2 grid of flag icons
+  (bundled webp assets in `icons/App_icons/`, no OS-dependent emoji). The
+  shared catalogue covers page chrome, controls, menus, dialogs, empty
+  states, status copy, tooltips and accessibility labels; new/missing entries
+  fall back to English. Terminology follows native software conventions —
+  git/GitHub command words (commit, push, merge, branch…), CLI commands, and
+  established dev loanwords (Code, Info, Signing, token, prompt…) are never
+  literally translated. Arabic switches the application shell to RTL while
+  code, terminals, paths and user/model-authored content keep their natural or
+  technical direction. The separate agent-browser chrome follows the same key.
 
 - **The Watcher**: in-app support agent — per-page docs (`PAGE_DOCS`), guided
   walkthroughs, screenshot+ask, one-click bug report to GitHub. Window capture

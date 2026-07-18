@@ -42,7 +42,7 @@ export default class ErrorBoundary extends React.Component<
         <div style={{ fontSize: 18, fontWeight: 700, color: "#ff8080", marginBottom: 8 }}>
           ⚠ React render crash
         </div>
-        <div style={{ color: "#fff", marginBottom: 16 }}>
+        <div style={{ color: "var(--fg-strong)", marginBottom: 16 }}>
           {this.state.error.message}
         </div>
         <button

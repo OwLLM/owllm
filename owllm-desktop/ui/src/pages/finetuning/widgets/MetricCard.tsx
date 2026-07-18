@@ -70,7 +70,7 @@ export default function MetricCard({ title, icon, value = "--" }: MetricCardProp
           fontSize: 26,
           fontWeight: 700,
           textAlign: "center",
-          color: "#fafafa",
+          color: "var(--fg-strong)",
         }}
       >{value}</div>
 

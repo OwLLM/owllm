@@ -4,21 +4,27 @@
      the browser looks like OwLLM, not a stock OS window, and this bar never
      covers website content. App-origin: shares localStorage with the main UI,
      so it reads the same theme/accent keys the app writes.
+     Two rows, like a normal browser: a TAB STRIP (app icon + OwLLM title +
+     one pill per open page + New tab) over a NAV BAR (back/reload/URL). The
+     bar background follows the app header's --bg-header recipe (70% accent
+     over #1c2244 navy — theme.ts resolveHeaderHex) so both headers match.
      Rust link: NO IPC — buttons/drag/URL entry write sentinel-tagged events
      into document.title (same channel the page bridge uses); Rust's
      on_document_title_changed on this webview acts on them. Rust pushes page
-     url/title back by eval'ing window.__owllmChromeSet(...). -->
+     url/title back by eval'ing window.__owllmChromeSet(...) and the live tab
+     list via window.__owllmTabsSet(...). -->
 <html>
   <head>
     <meta charset="utf-8" />
     <title>OwLLM Browser Chrome</title>
     <style>
       :root {
-        --bg: #0e1117;
-        --bg-input: #171c26;
-        --fg: #e2e8f0;
-        --fg-muted: #8b95a7;
-        --border: #232a38;
+        --bg: #5b62a9;          /* replaced live by the header recipe below */
+        --bg-nav: rgba(0,0,0,0.22);
+        --bg-input: rgba(0,0,0,0.30);
+        --fg: #ffffff;
+        --fg-muted: rgba(255,255,255,0.72);
+        --border: rgba(255,255,255,0.18);
         --accent: #667eea;
       }
       html, body {
@@ -26,9 +32,15 @@
         background: var(--bg); user-select: none;
         font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
       }
-      #bar {
+      #rows { display: flex; flex-direction: column; height: 100%; }
+      #tabsrow {
+        display: flex; align-items: center; gap: 4px;
+        height: 28px; flex: none; padding: 0 4px 0 8px; box-sizing: border-box;
+      }
+      #navrow {
         display: flex; align-items: center; gap: 6px;
-        height: 100%; padding: 0 8px 0 10px; box-sizing: border-box;
+        flex: 1; padding: 0 8px; box-sizing: border-box;
+        background: var(--bg-nav);
         border-bottom: 1px solid var(--border);
       }
       .btn {
@@ -37,35 +49,69 @@
         background: transparent; color: var(--fg-muted); font-size: 13px;
         cursor: pointer; padding: 0;
       }
-      .btn:hover { background: rgba(255,255,255,0.08); color: var(--fg); }
+      .btn:hover { background: rgba(255,255,255,0.14); color: var(--fg); }
       #close:hover { background: #e81123; color: #fff; }
-      #logo { flex: none; font-size: 14px; margin-right: 2px; }
+      #logo { flex: none; width: 16px; height: 16px; margin-right: 4px; }
       #ttl {
-        flex: none; max-width: 260px; overflow: hidden; text-overflow: ellipsis;
-        white-space: nowrap; color: var(--fg); font-size: 12px; font-weight: 600;
+        flex: none; max-width: 160px; overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; color: var(--fg); font-size: 12px; font-weight: 700;
       }
+      #tabs {
+        display: flex; align-items: center; gap: 3px; margin: 0 2px;
+        min-width: 0; overflow: hidden; flex: none; max-width: 60%;
+      }
+      .tab {
+        display: flex; align-items: center; gap: 5px;
+        height: 22px; max-width: 150px; min-width: 48px;
+        padding: 0 4px 0 9px; border-radius: 7px 7px 0 0; border: none;
+        background: rgba(255,255,255,0.10); color: var(--fg-muted);
+        font-size: 11px; cursor: pointer;
+      }
+      .tab.active { background: var(--bg-nav); color: var(--fg); font-weight: 700; }
+      .tab:hover:not(.active) { background: rgba(255,255,255,0.18); }
+      .tab .tl {
+        min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      }
+      .tab .tx {
+        flex: none; display: flex; align-items: center; justify-content: center;
+        width: 16px; height: 16px; border: none; border-radius: 4px;
+        background: transparent; color: inherit; font-size: 11px; cursor: pointer; padding: 0;
+      }
+      .tab .tx:hover { background: rgba(255,255,255,0.25); }
+      #newtab {
+        flex: none; width: 24px; height: 22px; border: none; border-radius: 6px;
+        background: transparent; color: var(--fg-muted); font-size: 14px; cursor: pointer; padding: 0;
+      }
+      #newtab:hover { background: rgba(255,255,255,0.14); color: var(--fg); }
       #url {
         flex: 1; min-width: 60px; height: 24px; border-radius: 999px;
         border: 1px solid var(--border); background: var(--bg-input);
         color: var(--fg); font-size: 12px; padding: 0 12px; outline: none;
       }
-      #url:focus { border-color: var(--accent); }
+      #url::placeholder { color: var(--fg-muted); }
+      #url:focus { border-color: rgba(255,255,255,0.55); }
       #drag { flex: 1; height: 100%; min-width: 10px; }
       .winbtns { display: flex; gap: 2px; margin-left: 4px; }
     </style>
   </head>
   <body>
-    <div id="bar">
-      <span id="logo">🦉</span>
-      <span id="ttl">OwLLM Browser</span>
-      <button class="btn" id="back" title="Back">←</button>
-      <button class="btn" id="reload" title="Reload">⟳</button>
-      <input id="url" spellcheck="false" placeholder="Enter a URL and press Enter" />
-      <div id="drag"></div>
-      <div class="winbtns">
-        <button class="btn" id="min" title="Minimize">─</button>
-        <button class="btn" id="max" title="Maximize">▢</button>
-        <button class="btn" id="close" title="Close">✕</button>
+    <div id="rows">
+      <div id="tabsrow">
+        <img id="logo" src="app-icon.png" alt="" />
+        <span id="ttl">OwLLM Browser</span>
+        <div id="tabs"></div>
+        <button id="newtab" title="New tab">+</button>
+        <div id="drag"></div>
+        <div class="winbtns">
+          <button class="btn" id="min" title="Minimize">─</button>
+          <button class="btn" id="max" title="Maximize">▢</button>
+          <button class="btn" id="close" title="Close">✕</button>
+        </div>
+      </div>
+      <div id="navrow">
+        <button class="btn" id="back" title="Back">←</button>
+        <button class="btn" id="reload" title="Reload">⟳</button>
+        <input id="url" spellcheck="false" placeholder="Enter a URL and press Enter" />
       </div>
     </div>
     <script>
@@ -87,6 +133,7 @@
       $("close").addEventListener("click", function () { evt("close"); });
       $("back").addEventListener("click", function () { evt("back"); });
       $("reload").addEventListener("click", function () { evt("reload"); });
+      $("newtab").addEventListener("click", function () { evt("tabnew"); });
       $("url").addEventListener("keydown", function (e) {
         if (e.key === "Enter" && this.value.trim()) { evt("nav", this.value.trim()); this.blur(); }
       });
@@ -101,22 +148,88 @@
       window.__owllmChromeSet = function (info) {
         try {
           var i = typeof info === "string" ? JSON.parse(info) : (info || {});
-          if (i.title != null) $("ttl").textContent = i.title || "OwLLM Browser";
           if (i.url != null && document.activeElement !== $("url")) {
             $("url").value = i.url === "about:blank" ? "" : i.url;
           }
         } catch (e) {}
       };
-      // Accent: same key + live storage event the overlay frame uses.
+      // Rust → tab strip: the live tab list [{id, title, active}]. One pill per
+      // open page; click selects, × closes, + asks Rust for a fresh tab.
+      var closeTabTitle = "Close tab";
+      window.__owllmTabsSet = function (info) {
+        try {
+          var tabs = typeof info === "string" ? JSON.parse(info) : (info || []);
+          var host = $("tabs");
+          host.textContent = "";
+          for (var i = 0; i < tabs.length; i++) (function (t) {
+            var pill = document.createElement("button");
+            pill.className = "tab" + (t.active ? " active" : "");
+            pill.title = t.title || "";
+            var lbl = document.createElement("span");
+            lbl.className = "tl";
+            lbl.textContent = t.title || "…";
+            pill.appendChild(lbl);
+            if (tabs.length > 1) {
+              var x = document.createElement("span");
+              x.className = "tx";
+              x.textContent = "✕";
+              x.title = closeTabTitle;
+              x.addEventListener("click", function (e) { e.stopPropagation(); evt("tabclose", t.id); });
+              pill.appendChild(x);
+            }
+            pill.addEventListener("click", function () { evt("tabsel", t.id); });
+            host.appendChild(pill);
+          })(tabs[i]);
+        } catch (e) {}
+      };
+      // Header colour: same accent key + live storage event the overlay frame
+      // uses, resolved through the SAME recipe as the app header (--bg-header =
+      // 70% accent over #1c2244 navy — theme.ts resolveHeaderHex), so the
+      // browser chrome and the app header are always the same colour.
       var ACCENTS = { indigo: "#667eea", amber: "#fbbf24", red: "#ef4444",
                       blue: "#3b82f6", emerald: "#10b981", slate: "#6b7280" };
       function applyAccent(key) {
-        var hex = ACCENTS[key] || ACCENTS.indigo;
-        document.documentElement.style.setProperty("--accent", hex);
+        var hex = /^#[0-9a-f]{6}$/i.test(key || "") ? key : (ACCENTS[key] || ACCENTS.indigo);
+        var r = parseInt(hex.slice(1, 3), 16), g = parseInt(hex.slice(3, 5), 16), b = parseInt(hex.slice(5, 7), 16);
+        var hr = Math.round(0.70 * r + 0.30 * 28), hg = Math.round(0.70 * g + 0.30 * 34), hb = Math.round(0.70 * b + 0.30 * 68);
+        var css = document.documentElement.style;
+        css.setProperty("--accent", hex);
+        css.setProperty("--bg", "rgb(" + hr + "," + hg + "," + hb + ")");
+        // Same 0.55 luminance cut-off the app uses for --bg-header-fg.
+        var lum = (0.2126 * hr + 0.7152 * hg + 0.0722 * hb) / 255;
+        css.setProperty("--fg", lum > 0.55 ? "#06080d" : "#ffffff");
+        css.setProperty("--fg-muted", lum > 0.55 ? "rgba(0,0,0,0.62)" : "rgba(255,255,255,0.72)");
+        css.setProperty("--border", lum > 0.55 ? "rgba(0,0,0,0.20)" : "rgba(255,255,255,0.18)");
       }
       try { applyAccent(localStorage.getItem("owllm:theme:accent") || "indigo"); } catch (e) {}
       window.addEventListener("storage", function (e) {
         if (e.key === "owllm:theme:accent" && e.newValue) applyAccent(e.newValue);
+      });
+
+      // This chrome is a separate webview, so it cannot consume React context.
+      // Keep its small static surface in sync through the same persisted locale.
+      var CHROME_COPY = {
+        "en": ["OwLLM Browser", "Back", "Reload", "Enter a URL and press Enter", "Minimize", "Maximize", "Close", "New tab", "Close tab"],
+        "zh-CN": ["OwLLM 浏览器", "后退", "重新加载", "输入网址并按回车键", "最小化", "最大化", "关闭", "新标签页", "关闭标签页"],
+        "ko": ["OwLLM 브라우저", "뒤로", "새로고침", "URL을 입력하고 Enter 키를 누르세요", "최소화", "최대화", "닫기", "새 탭", "탭 닫기"],
+        "ja": ["OwLLM ブラウザー", "戻る", "再読み込み", "URLを入力して Enter キーを押す", "最小化", "最大化", "閉じる", "新しいタブ", "タブを閉じる"],
+        "ar": ["متصفح OwLLM", "رجوع", "إعادة تحميل", "أدخل عنوان URL واضغط Enter", "تصغير", "تكبير", "إغلاق", "علامة تبويب جديدة", "إغلاق علامة التبويب"],
+        "it": ["Browser OwLLM", "Indietro", "Ricarica", "Inserisci un URL e premi Invio", "Riduci a icona", "Ingrandisci", "Chiudi", "Nuova scheda", "Chiudi scheda"],
+        "hi": ["OwLLM ब्राउज़र", "पीछे", "रीलोड", "URL डालें और Enter दबाएँ", "मिनिमाइज़", "मैक्सिमाइज़", "बंद करें", "नया टैब", "टैब बंद करें"],
+        "pt": ["Navegador OwLLM", "Voltar", "Recarregar", "Digite uma URL e pressione Enter", "Minimizar", "Maximizar", "Fechar", "Nova aba", "Fechar aba"]
+      };
+      function applyLanguage(language) {
+        var copy = CHROME_COPY[language] || CHROME_COPY.en;
+        document.documentElement.lang = language in CHROME_COPY ? language : "en";
+        document.documentElement.dir = language === "ar" ? "rtl" : "ltr";
+        if ($("ttl").textContent === "OwLLM Browser" || Object.keys(CHROME_COPY).some(function (key) { return $("ttl").textContent === CHROME_COPY[key][0]; })) $("ttl").textContent = copy[0];
+        $("back").title = copy[1]; $("reload").title = copy[2]; $("url").placeholder = copy[3];
+        $("min").title = copy[4]; $("max").title = copy[5]; $("close").title = copy[6];
+        $("newtab").title = copy[7]; closeTabTitle = copy[8];
+      }
+      try { applyLanguage(localStorage.getItem("owllm:language") || "en"); } catch (e) { applyLanguage("en"); }
+      window.addEventListener("storage", function (e) {
+        if (e.key === "owllm:language") applyLanguage(e.newValue || "en");
       });
     </script>
   </body>

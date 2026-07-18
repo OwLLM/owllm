@@ -208,6 +208,15 @@ pub(super) fn handle_pair(pr: PairRequest) -> WireReply {
         &pr.from.x25519_pub,
     ) {
         Ok(()) => {
+            // Same-GitHub-account devices (proven via the private vault repo)
+            // are auto-approved with the standard grant — no human needed at
+            // THIS keyboard. Unverified requesters stay Pending as before.
+            let _ = super::ensure_vault_autotrust(
+                &pr.from.device_id,
+                &pr.from.name,
+                &pr.from.ed25519_pub,
+                &pr.from.x25519_pub,
+            );
             super::emit_pairing();
             // Return OUR public record so the controller learns our keys/id.
             match super::self_public_record() {

@@ -50,11 +50,14 @@ export const BUNDLED_CLOUD_CATALOGUE: CloudCatalogue = {
     { id: "claude-haiku-4-5-20251001", display: "Claude Haiku 4.5" },
   ],
   openai: [
+    // GPT-5.6 family — current flagship line (July 2026). Sol is the
+    // frontier tier; Terra balances cost; Luna is the budget tier.
+    { id: "gpt-5.6-sol",   display: "GPT-5.6 Sol",    sub: true, api: true, effort: ["low", "medium", "high", "extra_high"] },
+    { id: "gpt-5.6-terra", display: "GPT-5.6 Terra",  sub: true, api: true, effort: ["low", "medium", "high", "extra_high"] },
+    { id: "gpt-5.6-luna",  display: "GPT-5.6 Luna",   sub: true, api: true },
+    { id: "gpt-5.5",       display: "GPT-5.5 Codex",  sub: true, api: true, effort: ["low", "medium", "high", "extra_high"] },
     { id: "gpt-5.4",       display: "GPT-5.4",        api: true, effort: ["low", "medium", "high", "extra_high"] },
     { id: "gpt-5.4-mini",  display: "GPT-5.4 mini",   api: true },
-    { id: "gpt-5.4-nano",  display: "GPT-5.4 nano",   api: true },
-    { id: "gpt-5.5-codex", display: "GPT-5.5 Codex",  sub: true, effort: ["low", "medium", "high", "extra_high"] },
-    { id: "gpt-5.5",       display: "GPT-5.5",        api: true, effort: ["low", "medium", "high", "extra_high"] },
     { id: "gpt-4o",        display: "GPT-4o",         api: true },
     { id: "gpt-4o-mini",   display: "GPT-4o mini",    api: true },
   ],
@@ -69,8 +72,11 @@ export const BUNDLED_CLOUD_CATALOGUE: CloudCatalogue = {
     { id: "deepseek-v4-flash", display: "DeepSeek V4 Flash", api: true },
   ],
   xai: [
-    { id: "grok-4.3",      display: "Grok 4.3",      api: true },
-    { id: "grok-4.20",     display: "Grok 4.20",     api: true },
+    // Grok 4.5 — current flagship (July 2026). Subscription rows route
+    // via the Grok Build CLI (SuperGrok / X Premium+); API via XAI_API_KEY.
+    { id: "grok-4.5",      display: "Grok 4.5",      sub: true, api: true },
+    { id: "grok-4.3",      display: "Grok 4.3",      sub: true, api: true },
+    { id: "grok-4.20",     display: "Grok 4.20",     sub: true, api: true },
     { id: "grok-4.1-fast", display: "Grok 4.1 Fast", api: true },
   ],
   groq: [

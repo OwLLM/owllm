@@ -4,7 +4,7 @@
 //   ★ Access Tokens   — store / validate the HF read token. Adds a
 //                        "Get token →" deep link that opens
 //                        huggingface.co/settings/tokens in the user's
-//                        default browser so they don't have to copy
+//                        persistent browser so they don't have to copy
 //                        the URL out of help text.
 //   Info               — when a card on the Models grid is selected,
 //                        shows that model's name, params, size,
@@ -16,15 +16,14 @@
 
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "../../../utils/openWebUrl";
 
-// Open URL in the OS default browser. Inside Tauri we go through the
-// shell_open_url Rust command (which uses `cmd /c start ""`). Under
-// vite dev we fall back to window.open so links still work.
+// Open in OwLLM's browser. There is intentionally no OS-browser fallback.
 async function openExternal(url: string) {
   try {
-    await invoke("shell_open_url", { url });
-  } catch {
-    window.open(url, "_blank", "noopener,noreferrer");
+    await openWebUrl(url);
+  } catch (error) {
+    console.error("Could not open the OwLLM browser", error);
   }
 }
 
@@ -209,7 +208,7 @@ function TokensTab(p: {
           cursor: "pointer",
           boxShadow: "0 0 10px -4px var(--accent)88",
         }}
-        title="Opens huggingface.co/settings/tokens in your browser. Create a READ token."
+        title="Opens huggingface.co/settings/tokens in the OwLLM browser. Create a READ token."
       >🚀 Get a token from Hugging Face →</button>
       <textarea
         placeholder="Paste your read token here (starts with hf_…)"
@@ -299,7 +298,7 @@ function InfoTab(p: { selectedModel: SelectedModelInfo | null }) {
       )}
 
       {m.description && (
-        <div style={{ fontSize: 12, color: "#d6d8de", lineHeight: 1.4 }}>{m.description}</div>
+        <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.4 }}>{m.description}</div>
       )}
 
       <div style={{ borderTop: "1px solid var(--border-strong)", marginTop: 4, paddingTop: 8, display: "flex", flexDirection: "column", gap: 4 }}>

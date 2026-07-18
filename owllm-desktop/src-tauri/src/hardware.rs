@@ -100,7 +100,29 @@ async fn vram_via_nvidia_smi() -> Option<Vec<VramGpu>> {
         return None;
     }
     let stdout = String::from_utf8_lossy(&out.stdout);
-    Some(parse_nvidia_smi(&stdout))
+    let parsed = parse_nvidia_smi(&stdout);
+    // Jetson/Tegra-class SoCs (unified memory) print "[N/A], [N/A]" here —
+    // those lines parse to nothing, so the header stuck at "VRAM: N/A" while
+    // the System Status card showed the unified budget. Mirror
+    // apply_unified_budgets: 75 % of system RAM as the pool, live used from
+    // system memory, so the two views can't disagree.
+    if parsed.is_empty() && stdout.contains("[N/A]") {
+        return Some(vec![unified_vram_from_ram()]);
+    }
+    Some(parsed)
+}
+
+/// Live unified-memory reading for SoCs where nvidia-smi reports "[N/A]"
+/// (Jetson/Tegra): the GPU addresses system RAM, so used comes from live
+/// system memory and total is the same 75 % budget apply_unified_budgets
+/// assigns the GPU.
+fn unified_vram_from_ram() -> VramGpu {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    const MIB: u64 = 1024 * 1024;
+    let total_mib = ((sys.total_memory() as f64 * 0.75) / MIB as f64) as u32;
+    let used_mib = ((sys.used_memory() / MIB) as u32).min(total_mib);
+    VramGpu { index: 0, used_mib, total_mib }
 }
 
 /// Max CUDA version the installed NVIDIA driver supports, parsed from the

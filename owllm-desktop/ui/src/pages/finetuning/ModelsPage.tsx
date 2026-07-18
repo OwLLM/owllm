@@ -1091,7 +1091,7 @@ export default function ModelsPage() {
             return (
               <div key={id} style={{ display:"flex", flexDirection:"column", gap:4 }}>
                 <div style={{ display:"flex", alignItems:"baseline", gap:8, fontSize:12 }}>
-                  <span style={{ fontWeight:700, color:"#fafafa" }}>{id}</span>
+                  <span style={{ fontWeight:700, color: "var(--fg-strong)" }}>{id}</span>
                   <span style={{ color:"var(--fg-muted)" }}>· file {p.fileIndex + 1}/{p.fileCount}: {p.file}</span>
                   <span style={{ flex:1 }} />
                   {p.error
@@ -1165,7 +1165,7 @@ export default function ModelsPage() {
               </span>
               <span
                 style={{
-                  color: "#9aa0a6",
+                  color: "var(--fg-muted)",
                   fontSize: 13,
                   background: "transparent",
                 }}

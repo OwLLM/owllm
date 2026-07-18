@@ -3,7 +3,7 @@ name = "owllm-desktop"
 # Kept in sync with tauri.conf.json "version" (the release source of truth).
 # User-visible version strings read crate::APP_VERSION (parsed from the conf),
 # so this only affects exe/crate metadata.
-version = "0.8.47"
+version = "0.8.96"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
 authors = ["OWLLM"]
 edition = "2021"
@@ -235,3 +235,11 @@ tempfile = "3"
 [profile.release]
 lto = "thin"
 strip = "debuginfo"
+
+# The desktop crate changes on nearly every UI build because Tauri embeds the
+# frontend into Rust. Its incremental state cannot be reused after those changes
+# and Cargo retains every incompatible variant, which had grown past 9 GiB on a
+# single workstation. Keep dependency artifacts cached, but do not retain this
+# disposable per-revision state.
+[profile.dev]
+incremental = false

@@ -126,6 +126,11 @@ type ServerStatus = {
   model_id: string | null;
   port: number | null;
   message: string;
+  // Context window the server actually started with, and — when it was capped
+  // below the requested value — a plain-language reason. Set by the backend so
+  // a VRAM cap is shown to the user instead of silently starting at 2K.
+  context?: number | null;
+  context_notice?: string | null;
 };
 type ServerLog = { stream: "stdout" | "stderr"; line: string };
 
@@ -288,7 +293,7 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
     if (transitioning) return { text: running ? "● Stopping..." : "● Starting...", color: "#FF9800" };
     return running
       ? { text: "● Running", color: "#4CAF50" }
-      : { text: "● Stopped", color: "#888888" };
+      : { text: "● Stopped", color: "var(--fg-subtle)" };
   }
 
   function onGenerateToken() {
@@ -509,7 +514,7 @@ function MCPServerColumn({ appendLog }: { appendLog: (s: string) => void }) {
 
       {/* Config-path indicator (server_page.py:670-674, 9pt gray) */}
       <div style={{
-        fontSize: 11, color: "#7a7f87",
+        fontSize: 11, color: "var(--fg-subtle)",
         marginTop: 2, wordBreak: "break-all",
       }}
         title="Path to the JSON file where these settings are persisted.">
@@ -543,7 +548,7 @@ function llmStatusDecor(kind: LlmStatusKind, detail?: string): { text: string; c
     case "port_in_use": return { text: `● Port in use by ${detail ?? ""}`, color: "#FF9800" };
     case "error":       return { text: "● Error",                         color: "#f44336" };
     case "not_running":
-    default:            return { text: "● Not running",                   color: "#888888" };
+    default:            return { text: "● Not running",                   color: "var(--fg-subtle)" };
   }
 }
 
@@ -593,6 +598,15 @@ function LLMServerColumn({
       return ["not_running"];
     }
   }, [serverState, busy]);
+
+  // Plain-language reason the running context is below what was requested (VRAM
+  // cap). Surfaced by the backend so the user is never silently dropped to 2K.
+  const ctxNotice = useMemo<string | null>(() => {
+    try {
+      const s = JSON.parse(serverState) as { context_notice?: string | null };
+      return s?.context_notice || null;
+    } catch { return null; }
+  }, [serverState]);
 
   const decor = llmStatusDecor(statusKind, statusDetail);
   const isRunning = statusKind === "running" || statusKind === "loading";
@@ -745,6 +759,17 @@ function LLMServerColumn({
           </span>
         )}
       </div>
+      {ctxNotice && (
+        <div
+          style={{
+            marginTop: 4, fontSize: 11.5, lineHeight: 1.45, color: "var(--warn)",
+            background: "rgba(255,152,0,0.10)", border: "1px solid rgba(255,152,0,0.35)",
+            borderRadius: 8, padding: "6px 10px", maxWidth: 640,
+          }}
+        >
+          ⚠ {ctxNotice}
+        </div>
+      )}
       <div style={{ display: "flex", flexWrap: "wrap", gap: 5, alignItems: "center" }}>
         <button onClick={() => setCtx(null)}
           title="Let OWLLM size the context to your GPU — bigger card = bigger window (recommended)."
@@ -891,7 +916,7 @@ function LLMServerColumn({
         padding: 4,
       }}>
         {activeRows.length === 0 ? (
-          <div style={{ fontSize: 11, color: "#7a7f87", padding: 6 }}>
+          <div style={{ fontSize: 11, color: "var(--fg-subtle)", padding: 6 }}>
             (no active inference servers)
           </div>
         ) : activeRows.map((r, i) => {

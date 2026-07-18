@@ -16,8 +16,8 @@ import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun } from "./RunNotebook";
-import { formatDuration, useTick, RunTimerChip } from "./RunTimer";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
 import IconPickerDialog, {
@@ -112,7 +112,8 @@ import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIs
 import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isolation";
 import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
-import { ChatBubble, ChatMarkdown, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
+import { clearRunActivity, setRunActivity } from "../../runtime/runActivity";
+import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 
@@ -380,7 +381,16 @@ type GoalMsg = {
   /// call+result render as ONE collapsed input|output line. Never persisted.
   result?: string;
   resultStatus?: "ok" | "error";
+  /// Attached images (user uploads), shown as clickable thumbnails under the
+  /// bubble so an uploaded screenshot stays visible and re-viewable.
+  images?: { src: string; alt?: string }[];
 };
+
+// Turn image attachments into ChatBubble thumbnails (data URIs the webview can
+// always render) so uploaded images stay visible and clickable in the thread.
+function attachmentThumbs(atts: { mime: string; data_b64: string; filename?: string }[]): { src: string; alt?: string }[] {
+  return atts.map((a) => ({ src: `data:${a.mime};base64,${a.data_b64}`, alt: a.filename }));
+}
 
 // Extract the tool-use id shared by a call/result pair from its channelKey.
 // Call channel:  "tool:<name>:<id>"   Result channel: "tool-result:<id>".
@@ -2476,6 +2486,7 @@ function AgentChatTile({
                 isStreaming={streaming}
                 content={m.text}
                 ts={m.ts}
+                images={m.images}
               />
             );
           })
@@ -4760,7 +4771,7 @@ function isCodeFile(path: string): boolean {
 // renderer; this is for prose (replies + thinking blocks).
 function MarkdownBody({ text }: { text: string }) {
   return (
-    <div className="md-body" style={{ fontFamily: "Segoe UI, sans-serif", fontSize: 13, lineHeight: 1.55, color: "var(--fg)" }}>
+    <div className="md-body" style={{ fontFamily: "Segoe UI, sans-serif", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, color: "var(--fg)" }}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -4795,6 +4806,7 @@ function MarkdownBody({ text }: { text: string }) {
           ol: (p) => <ol style={{ margin: "6px 0", paddingLeft: 22 }} {...(p as any)} />,
           li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
           a: MarkdownLink,
+          img: (p: any) => <SmartImage src={p.src} alt={p.alt} />,
           blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "8px 0", padding: "2px 0 2px 12px", color: "var(--fg-muted)" }} {...(p as any)} />,
           table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
           th: (p) => <th style={{ border: "1px solid var(--border)", padding: "5px 9px", background: "var(--bg-surface)", textAlign: "left", fontWeight: 600 }} {...(p as any)} />,
@@ -4836,6 +4848,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         isStreaming={isStreaming}
         content={m.text}
         ts={m.ts}
+        images={m.images}
       />
       {m.action === "wsl-restart" ? (
         // One-click recovery for a network/DNS failure — runs `wsl --shutdown`
@@ -5231,7 +5244,7 @@ function ChatInputDock({
               background:"transparent",
               color:"var(--fg)",
               border:"none",
-              fontSize:13, lineHeight:1.45,
+              fontSize:"var(--chat-font-size, 13px)", lineHeight:1.45,
               fontFamily:"Segoe UI, sans-serif",
               resize:"none",
               outline:"none",
@@ -5281,9 +5294,9 @@ function ChatInputDock({
             onClick={() => setPaletteOpen(v => !v)}
             title="Slash commands"
             style={{
-              width:28, height:28, background: showPalette ? "rgba(255,217,122,0.18)" : "transparent",
+              width:28, height:28, background: showPalette ? "rgba(var(--accent-rgb),0.18)" : "transparent",
               border:"1px solid var(--border)", borderRadius:6,
-              color: showPalette ? "#ffd97a" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
+              color: showPalette ? "var(--accent)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
               display:"flex", alignItems:"center", justifyContent:"center",
             }}
           >/</button>
@@ -5295,10 +5308,10 @@ function ChatInputDock({
             style={{
               height:28, padding:"0 10px",
               display:"flex", alignItems:"center", gap:6,
-              background: autoApprove ? "rgba(255,217,122,0.18)" : "transparent",
-              border: `1px solid ${autoApprove ? "rgba(255,217,122,0.55)" : "var(--border)"}`,
+              background: autoApprove ? "rgba(var(--accent-rgb),0.18)" : "transparent",
+              border: `1px solid ${autoApprove ? "rgba(var(--accent-rgb),0.55)" : "var(--border)"}`,
               borderRadius:6,
-              color: autoApprove ? "#ffd97a" : "var(--fg-muted)",
+              color: autoApprove ? "var(--accent)" : "var(--fg-muted)",
               cursor:"pointer", fontSize:11, fontWeight:600,
             }}
           >
@@ -5318,9 +5331,9 @@ function ChatInputDock({
                   : (draft.trim() ? "Send message" : "Type something to send")}
             style={{
               width: (needsLoad || loadingModel) ? 76 : 32, height:28,
-              background: busy ? "#ff8c4a" : loadingModel ? "rgba(255,217,122,0.40)" : needsLoad ? "#3cf26b" : (draft.trim() ? "#ffd97a" : "rgba(255,217,122,0.18)"),
-              color: busy ? "#1a0e04" : (loadingModel || needsLoad) ? "#0a1505" : (draft.trim() ? "#1a1404" : "#7d6f4b"),
-              border:"1px solid " + (busy ? "#ff8c4a" : needsLoad ? "#3cf26b" : "rgba(255,217,122,0.55)"),
+              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
+              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() ? "var(--accent-fg)" : "var(--fg-muted)"),
+              border:"1px solid " + (busy ? "var(--warn)" : needsLoad ? "var(--ok)" : "rgba(var(--accent-rgb),0.55)"),
               borderRadius:6,
               cursor: (busy || loadingModel || draft.trim()) ? "pointer" : "not-allowed",
               fontSize: (needsLoad || loadingModel) ? 11 : 14, fontWeight:800,
@@ -7678,15 +7691,18 @@ async function streamOpenAI(
     let imageSaveNote = "";
     const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
     const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
+    const [pickedModel, pickedEffort] = modelId.split(":", 2);
+    const codexModel = pickedModel === "gpt-5.5-codex" ? "gpt-5.5" : pickedModel;
+    const codexEffort = pickedEffort === "extra_high" ? "xhigh" : pickedEffort || null;
     // Stream live activity (reasoning/commands/tools/web-search) into the
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, allowedTools, onDelta, onThought,
+        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools, onDelta, onThought,
       }), codexCwd);
     }
     const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
-      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths,
+      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort,
     }), codexCwd);
     if (reply) onDelta(reply);
     return reply;
@@ -8357,6 +8373,9 @@ export function AgentsPage({
   const [agentTiming, setAgentTiming] = useState<Map<string, AgentTiming>>(new Map());
   const addActive = (name: string) => {
     worldEmit({ kind: "agent-start", agent: name }); // 2.5D HQ tap (P0-1)
+    // Header "running" aura rides the SAME signal as the tile aura, so the
+    // ModeBar/SubTabs bars light exactly when any agent tile does.
+    setRunActivity(`agents:${name}`, true);
     setActiveAgents(prev => {
       if (prev.has(name)) return prev;
       const next = new Set(prev);
@@ -8374,6 +8393,7 @@ export function AgentsPage({
   };
   const removeActive = (name: string) => {
     worldEmit({ kind: "agent-end", agent: name }); // 2.5D HQ tap (P0-1)
+    setRunActivity(`agents:${name}`, false);
     setActiveAgents(prev => {
       if (!prev.has(name)) return prev;
       const next = new Set(prev);
@@ -8389,7 +8409,12 @@ export function AgentsPage({
       return next;
     });
   };
-  const clearActive = () => setActiveAgents(new Set());
+  const clearActive = () => {
+    // Wholesale clear (run end / stop) — also sweep the header-aura tags so a
+    // missed per-agent removal can't leave the header bars spinning forever.
+    clearRunActivity("agents:");
+    setActiveAgents(new Set());
+  };
   // OrchestratorPane focus needs a single "primary" — pick whichever
   // agent went active most recently (Sets preserve insertion order in
   // modern JS, so .values().next() gives the oldest, but for the
@@ -8401,7 +8426,11 @@ export function AgentsPage({
   // Phase setter wrapped so the 2.5D HQ hears run completion through the
   // SAME stream this page already drives (P0-1 — never a second stream).
   const setPhase = (p: DispatchPhase) => {
-    if (p === "done") worldEmit({ kind: "run-finish" });
+    if (p === "done") {
+      worldEmit({ kind: "run-finish" });
+      // Run over — sweep any straggler header-aura tags with it.
+      clearRunActivity("agents:");
+    }
     setPhaseRaw(p);
   };
 
@@ -8442,25 +8471,35 @@ export function AgentsPage({
   // orchestrator boundary and feeds it in as a ⚡ USER (mid-run) turn. steerQueueRef
   // is the source of truth; pendingSteers just mirrors the count for the UI.
   const steerQueueRef = useRef<string[]>([]);
+  // 📓 Notebook step timing: which step started the current run, and which steps
+  // were queued as mid-run steers. Dispatched steps are marked finished at run end;
+  // queued steers are only marked finished once they have been drained (processed).
+  const notebookStepRef = useRef<string | null>(null);
+  const notebookSteerStepIdsRef = useRef<string[]>([]);
+  const notebookSteerInFlightIdsRef = useRef<string[]>([]);
   // Drain the queued steers into a single block (empty string when none). Called at
   // safe boundaries in the run loop. The user's feedback that a message was captured
   // is the "⚡ queued to steer the run →" echo pushed into the chat on enqueue.
   const drainSteers = (): string => {
     const q = steerQueueRef.current;
+    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
     if (!q.length) return "";
+    if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
     return q.splice(0, q.length).join("\n");
   };
   // 📓 Notebook feed: a step goes to the team NOW — as a live steer while a
   // run is active (picked up at the next agent boundary, or between tool
   // calls on local models), or as a fresh dispatch when idle.
-  const feedFromNotebook = (text: string): "queued" | "dispatched" | "no-team" => {
+  const feedFromNotebook = (text: string, stepId?: string): "queued" | "dispatched" | "no-team" => {
     const t = text.trim();
     if (!t) return "no-team";
     if (supSendBusyRef.current || dispatchInFlightRef.current) {
       steerQueueRef.current.push(t);
+      if (stepId) notebookSteerStepIdsRef.current.push(stepId);
       setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `📓⚡ notebook step queued to steer the run → ${t}`, ts: Date.now(), seq: nextSeq() }]);
       return "queued";
     }
+    notebookStepRef.current = stepId ?? null;
     void onSupSendRef.current?.(`📓 Next step from the Notebook:\n${t}`);
     return "dispatched";
   };
@@ -8483,7 +8522,10 @@ export function AgentsPage({
         return;
       }
       const step = takeNextAutoStep(pid, notebookSurfaceId);
-      if (step) void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
+      if (step) {
+        notebookStepRef.current = step.id;
+        void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
+      }
     };
     setTimeout(attempt, 800);
   };
@@ -8677,6 +8719,7 @@ export function AgentsPage({
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
   // top-level so it can be reused later (e.g. from NewProjectDialog).
   const [brainstormOpen, setBrainstormOpen] = useState(false);
+  const [brainstormSeed, setBrainstormSeed] = useState("");
   // Cached "does BRIEF.md exist for this project's location" — drives
   // the 🧠 button's green tint and the orchestrator's brief-prepend.
   // Re-checked whenever the project switches or the brainstormer
@@ -8805,7 +8848,10 @@ export function AgentsPage({
     }
   };
   const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
-  const onProjectCreated = async (row: ProjectRow) => {
+  const onProjectCreated = async (
+    row: ProjectRow,
+    kickoff: { kind: string; action: "brainstorm" | "goal" },
+  ) => {
     const rows = await reloadProjects();
     // Select the freshly-created project. Fall back to id from the
     // returned row if list_projects raced.
@@ -8814,6 +8860,16 @@ export function AgentsPage({
     setProjectLocationDraft(target.location, target.id);
     setPickedTeamId(null);
     setTrustWritesOverride(null);
+    if (kickoff.action === "brainstorm") {
+      setBrainstormSeed(target.description ?? "");
+      // Let the selected project and its workspace propagate before mounting
+      // the modal; otherwise it can briefly inherit the previous project cwd.
+      window.setTimeout(() => setBrainstormOpen(true), 0);
+    } else if (target.description?.trim()) {
+      // Goal-first recipes land with a real next action in the dock instead of
+      // creating a row and leaving the user at an empty, generic project page.
+      try { localStorage.setItem(`owllm:supdraft:${target.id}`, target.description.trim()); } catch { /* ignore */ }
+    }
   };
   const onRenameProject = async () => {
     if (!selectedProject) return;
@@ -8924,6 +8980,14 @@ export function AgentsPage({
         setSupChat(prev => [...prev, {
           role: "system", color: "#7ff0c5",
           text: `✓ ${cli} reconnected — resuming the team.`,
+          ts: Date.now(), seq: nextSeq(),
+        }]);
+        return;
+      }
+      if (info.kind === "upgrade") {
+        setSupChat(prev => [...prev, {
+          role: "system", color: "#ffb74d",
+          text: `↻ ${cli} is too old for this model — upgrading the CLI in the project's execution environment, then retrying automatically. The GUI remains available.`,
           ts: Date.now(), seq: nextSeq(),
         }]);
         return;
@@ -9497,10 +9561,14 @@ export function AgentsPage({
     chatRuntime.registerPersister(psid, (payload) => {
       const p = payload as AgentRunPayload | null;
       if (!p) return;
-      const chatJson = JSON.stringify(p.supChat ?? []);
+      // Drop `images` (base64 data URIs) when persisting — they're for
+      // in-session re-view only; embedding them would bloat chat_json and the
+      // vault sync. The replacer strips the field at any depth.
+      const dropImages = (k: string, v: unknown) => (k === "images" ? undefined : v);
+      const chatJson = JSON.stringify(p.supChat ?? [], dropImages);
       const obj: Record<string, GoalMsg[]> = {};
       for (const [k, v] of p.agentLogs ?? new Map()) obj[k] = v;
-      const logsJson = JSON.stringify(obj);
+      const logsJson = JSON.stringify(obj, dropImages);
       invoke("update_project", {
         input: { id: pid, chat_json: chatJson, agent_logs_json: logsJson },
       })
@@ -9824,7 +9892,8 @@ export function AgentsPage({
           // it to the agent buffers, not supChat), then run. Mark any attached
           // images so the echoed turn matches what the single-assistant path shows.
           const echo: GoalMsg = { role: "you", color: "#9ad9ff",
-            text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
+            text,
+            images: images.length > 0 ? attachmentThumbs(images) : undefined,
             ts: Date.now(), seq: nextSeq() };
           setSupChat(prev => [...prev, echo]);
           await dispatchGoal(text, priorHistory, images);
@@ -9842,6 +9911,8 @@ export function AgentsPage({
       serverModelId: serverState.model_id,
       serverPort: serverState.port,
     });
+    const singleRunStartedAt = Date.now();
+    let singleRunCompletedCleanly = false;
     supSendBusyRef.current = true;
     setSupSendBusy(true);
     // Fresh abort controller for THIS run. Any owllm:dispatch-abort
@@ -9857,7 +9928,8 @@ export function AgentsPage({
 
     const userMsg: GoalMsg = {
       role: "you", color: "#9ad9ff",
-      text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
+      text,
+      images: images.length > 0 ? attachmentThumbs(images) : undefined,
       ts: Date.now(), seq: nextSeq(),
     };
     setSupChat(prev => [...prev, userMsg]);
@@ -10127,6 +10199,7 @@ export function AgentsPage({
         setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg, ts: Date.now(), seq: nextSeq() }]);
         appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
       }
+      singleRunCompletedCleanly = Boolean(cleanReply || cleanReturned);
     } catch (e: any) {
       // Loud, on-screen error — the user has been hitting silent
       // failures on the first message and missing the cause because
@@ -10169,6 +10242,17 @@ export function AgentsPage({
       if (supSendAbortRef.current === supSendAbort) {
         supSendAbortRef.current = null;
       }
+      const now = Date.now();
+      if (notebookStepRef.current) {
+        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        notebookStepRef.current = null;
+      }
+      setSupChat(prev => [...prev, { role: "system", color: "var(--fg-muted)", text: runTimingFooter(singleRunStartedAt, now), ts: now, seq: nextSeq() }]);
+      // The no-specialist/single-assistant path used to end here, so a Notebook
+      // queue could only process its first item. Continue from every clean run
+      // path, not only dispatchGoal's team/solo branches.
+      if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();
+      else notifyAutoFeedPaused("the run ended with an error");
     }
   };
   onSupSendRef.current = onSupSend; // the notebook helpers (declared earlier) dispatch through this
@@ -11518,7 +11602,7 @@ export function AgentsPage({
         } else if (res.status === "notAGitRepo") {
           worktreeBySpec.set(spec.name, null);
           appendThought(orch.name, {
-            role: "fleet", color: "#8a92a3",
+            role: "fleet", color: "var(--fg-muted)",
             text: `🗂 ${spec.name}: project is not a git repo — running shared in ${projectCwd || "(no cwd)"}`,
           });
         } else if (res.status === "dirtyWorkingTree") {
@@ -11876,7 +11960,7 @@ export function AgentsPage({
                 text: `📦 committed ${finalize.commitSha.slice(0,7)} · ${finalize.filesChanged} file${finalize.filesChanged === 1 ? "" : "s"}\n${finalize.files.slice(0, 12).join("\n")}`,
               });
             } else if (finalize.status === "noChanges") {
-              appendThought(startSpec.name, { role: "fleet", color: "#8a92a3", text: "📦 no changes to commit" });
+              appendThought(startSpec.name, { role: "fleet", color: "var(--fg-muted)", text: "📦 no changes to commit" });
             } else {
               appendThought(startSpec.name, { role: "fleet", color: "#ff8c8c", text: `📦 finalize failed: ${finalize.message}` });
             }
@@ -12125,7 +12209,7 @@ export function AgentsPage({
             text: `⚠ conflict merging ${o.name} (branch ${o.worktree.branch} kept on disk for resolution):\n${merge.files.join("\n")}`,
           });
         } else if (merge.status === "noChanges") {
-          appendThought(orch.name, { role: "fleet", color: "#8a92a3", text: `🔀 ${o.name}: nothing to merge` });
+          appendThought(orch.name, { role: "fleet", color: "var(--fg-muted)", text: `🔀 ${o.name}: nothing to merge` });
         } else {
           keepOnDisk.add(o.name);
           appendThought(orch.name, { role: "fleet", color: "#ff8c8c", text: `⚠ merge ${o.name} failed: ${merge.message}` });
@@ -12297,6 +12381,7 @@ export function AgentsPage({
             report += `\n   eval vs "${fx.note ?? fx.goal}": ${card.ok ? "✓ PASS" : "✗ FAIL"} (${card.passed}/${card.checks.length})${misses.length ? " — failed: " + misses.join(", ") : ""}`;
           }
           setSupChat(prev => [...prev, { role: "system", color: trace.done ? "#7ff0c5" : "#ffb74d", text: report, ts: Date.now(), seq: nextSeq() }]);
+          setSupChat(prev => [...prev, { role: "system", color: "var(--fg-muted)", text: runTimingFooter(rt.t0, Date.now()), ts: Date.now(), seq: nextSeq() }]);
           // Persist (append, keep last 200) for the node scorecard. Best-effort.
           try {
             let prior = "";
@@ -12330,6 +12415,16 @@ export function AgentsPage({
       setBusy(false);
       setRunning(false); // clear the store-backed in-flight flag (mirrors setBusy)
       setRunEndedAt(Date.now()); // freeze the team stopwatch on the final duration
+      // 📓 Stamp notebook step timing for the step that started this run and any
+      // notebook steps that were drained and processed as mid-run steers.
+      const now = Date.now();
+      if (notebookStepRef.current) {
+        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        notebookStepRef.current = null;
+      }
+      for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
+        markNotebookStepFinished(selectedProjectId, sid, now);
+      }
       clearActive();
       abortRef.current = null;
       agentRunAborts.delete(agentSessId);
@@ -12708,7 +12803,7 @@ export function AgentsPage({
         // settings so the user can set one (the folder field moved into that
         // popup in v0.5.26, so a bare "set a location" hint had nowhere to point).
         onBrainstorm={() => {
-          if (runCwd && runCwd.trim()) { setBrainstormOpen(true); }
+          if (runCwd && runCwd.trim()) { setBrainstormSeed(""); setBrainstormOpen(true); }
           else { setSettingsMode("edit"); setNewProjOpen(true); }
         }}
         brainstormReady={!!(runCwd && runCwd.trim())}
@@ -12734,7 +12829,7 @@ export function AgentsPage({
             <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 8 }}>
               🔒 File outside the workspace
             </div>
-            <div style={{ fontSize: 13, lineHeight: 1.5, color: "#b6c4d8" }}>
+            <div style={{ fontSize: 13, lineHeight: 1.5, color: "var(--fg)" }}>
               <b>{fileConsent.agent}</b> tried to read a file{" "}
               {fileConsent.path ? <>outside the project folder:</> : <>outside the project folder.</>}
               {fileConsent.path && (
@@ -12787,7 +12882,7 @@ export function AgentsPage({
                   onClick={() => setFileConsent(null)}
                   style={{
                     flex: "0 0 auto", padding: "10px 14px", borderRadius: 8,
-                    border: "1px solid #2a3a52", background: "transparent", color: "#9fb0c6",
+                    border: "1px solid #2a3a52", background: "transparent", color: "var(--fg-muted)",
                     fontSize: 13, cursor: "pointer",
                   }}
                 >
@@ -12795,7 +12890,7 @@ export function AgentsPage({
                 </button>
               </div>
             )}
-            <div style={{ marginTop: 12, fontSize: 11, color: "#6f7f96" }}>
+            <div style={{ marginTop: 12, fontSize: 11, color: "var(--fg-subtle)" }}>
               Recommended: <b>Copy into workspace</b> — the file is duplicated inside the project and
               the sandbox stays intact. “Grant home” widens access to your whole user profile for this
               run only and resets automatically next run.
@@ -12834,7 +12929,7 @@ export function AgentsPage({
       />
       <BrainstormPanel
         open={brainstormOpen}
-        onClose={() => setBrainstormOpen(false)}
+        onClose={() => { setBrainstormOpen(false); setBrainstormSeed(""); }}
         projectCwd={runCwd}
         brainstormerRole={roleByName.get("brainstormer") ?? null}
         // Use the team's default model. Fallback to the orchestrator's
@@ -12844,6 +12939,8 @@ export function AgentsPage({
         modelId={(teamModelOverride || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "") || "").trim()}
         port={serverState.port ?? 0}
         models={models}
+        accountsStatus={accountsStatus}
+        initialIdea={brainstormSeed}
         onBriefSaved={() => setHasBriefForProject(true)}
         projectId={selectedProjectId}
         // Apply the assembled roster to THIS project (persists), then clear any

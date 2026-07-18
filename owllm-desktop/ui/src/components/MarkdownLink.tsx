@@ -2,12 +2,11 @@
 //
 // In a Tauri webview a plain `<a target="_blank">` does NOTHING — the runtime
 // blocks the navigation and no browser window opens, so links pasted by agents
-// looked dead. Route the click through the existing `shell_open_url` Rust
-// command (the same one Accounts / MCP pages use) so it opens in the user's
-// default browser. Use this for react-markdown's `components.a` everywhere
+// looked dead. Route the click through OwLLM's persistent browser so the
+// user's login session stays available to agents. Use this for react-markdown's `components.a` everywhere
 // instead of re-declaring the override per chat component.
 
-import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "../utils/openWebUrl";
 
 export default function MarkdownLink(props: any) {
   const href: string | undefined = props.href;
@@ -19,7 +18,7 @@ export default function MarkdownLink(props: any) {
       onClick={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (href) invoke("shell_open_url", { url: href }).catch((err) => console.error("open link failed", err));
+        if (href) openWebUrl(href).catch((err) => console.error("open link failed", err));
       }}
     >
       {props.children}

@@ -169,17 +169,18 @@ export default function InfoPage() {
         }}>{error}</div>
       ) : null}
 
-      <div style={{
-        columnCount: 2,
-        columnGap: 14,
-      }}>
-        {/* Multi-column layout: cards flow DOWN each column at their natural
-            heights (not strict left-to-right rows), so wildly different card
-            sizes pack cleanly instead of being locked into an equal-height grid.
-            Cache + Sandbox disk are the two disk-reclaim panels — they read
-            adjacent down the first column rather than side-by-side on a row.
-            Each card is wrapped break-safe so it is never split across columns. */}
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
+      {/* Two explicit columns instead of a CSS multi-column flow: multi-column
+          reads DOWN each column, which scrambled the intended reading order.
+          The right column is a fixed pair — Application on top, Sandbox directly
+          below — and because it is its own vertical flex column that order holds
+          at every window width, even once the row wraps to a single column on
+          narrow windows. flexWrap lets the right column drop under the left one
+          rather than overflow. */}
+      <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
+        <div
+          data-ui="InfoPage:left-column"
+          style={{ flex: "1 1 340px", minWidth: 0, display: "flex", flexDirection: "column", gap: 14 }}
+        >
         <Card title="💽 Cache">
           {cacheMsg && (
             <div style={{
@@ -190,32 +191,14 @@ export default function InfoPage() {
           )}
           <CacheTab setBanner={setCacheMsg} />
         </Card>
-        </div>
 
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
-        <SandboxDiskCard />
-        </div>
-
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
-        <Card title="📦 Application">
-          <Row label="Product" value="OwLLM Desktop" />
-          <Row label="Version" value={version} />
-          <Row label="Runtime" value="Tauri 2 · Rust + React" />
-          <Row label="Update channel" value="GitHub Releases (auto-update)" />
-          <Row label="Python" value="Invited on-demand only (fine-tuning)" />
-        </Card>
-        </div>
-
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
         <Card title="✅ Environment readiness">
           <ReadyLine label="WSL / Ubuntu"      row={ready?.wsl} />
           <ReadyLine label="GPU & CUDA driver" row={ready?.gpu} />
           <ReadyLine label="Fine-tuning env"   row={ready?.env} />
           <ReadyLine label="Local LLM runtime" row={ready?.runtime} />
         </Card>
-        </div>
 
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
         <Card title="🖥 Hardware">
           {hw ? (
             <>
@@ -225,12 +208,10 @@ export default function InfoPage() {
               <Row label="GPUs" value={hw.gpus.length === 0 ? "(none detected)" : `${hw.gpus.length}`} />
             </>
           ) : (
-            <div style={{ fontSize: 12, color: "#7a7f87" }}>Probing…</div>
+            <div style={{ fontSize: 12, color: "var(--fg-subtle)" }}>Probing…</div>
           )}
         </Card>
-        </div>
 
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
         <Card title="🎮 GPU detail">
           {hw && hw.gpus.length > 0 ? (
             hw.gpus.map(g => {
@@ -247,7 +228,7 @@ export default function InfoPage() {
                           {"  "}·  {(live.used_mib / 1024).toFixed(1)} / {(live.total_mib / 1024).toFixed(1)} GiB live
                         </span>
                       ) : (
-                        <span style={{ color: "#7a7f87" }}>{"  "}·  {g.vram_gb.toFixed(1)} GiB</span>
+                        <span style={{ color: "var(--fg-subtle)" }}>{"  "}·  {g.vram_gb.toFixed(1)} GiB</span>
                       )}
                     </span>
                   }
@@ -255,12 +236,10 @@ export default function InfoPage() {
               );
             })
           ) : (
-            <div style={{ fontSize: 12, color: "#7a7f87" }}>No GPUs visible — nvidia-smi unreachable.</div>
+            <div style={{ fontSize: 12, color: "var(--fg-subtle)" }}>No GPUs visible — nvidia-smi unreachable.</div>
           )}
         </Card>
-        </div>
 
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
         <Card title="🦙 Model server">
           <Row
             label="State"
@@ -274,9 +253,7 @@ export default function InfoPage() {
           <Row label="Port" value={server?.port ? String(server.port) : "—"} />
           <Row label="Detail" value={server?.message ?? "…"} />
         </Card>
-        </div>
 
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
         <Card title="📁 Models">
           <Row label="Local GGUFs" value={`${localModels.length}`} />
           <Row label="Cloud peers" value={`${cloudModels.length}`} />
@@ -290,9 +267,7 @@ export default function InfoPage() {
             value={<code style={{ color: "var(--accent)", fontSize: 11, wordBreak: "break-all" }}>{llamaRuntime}</code>}
           />
         </Card>
-        </div>
 
-        <div style={{ breakInside: "avoid", marginBottom: 14 }}>
         <Card title="📜 About OwLLM">
           <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6 }}>
             Native Rust supervises every subprocess with <code>CREATE_NO_WINDOW</code> — no
@@ -307,6 +282,22 @@ export default function InfoPage() {
             <strong style={{ color: "var(--accent)" }}>Advanced ⚙</strong> — MCP, Environment, Accounts, Logs.
           </div>
         </Card>
+        </div>
+
+        <div
+          data-ui="InfoPage:right-column"
+          style={{ flex: "1 1 340px", minWidth: 0, display: "flex", flexDirection: "column", gap: 14 }}
+        >
+        {/* Right column: Application first, Sandbox directly below it. */}
+        <Card title="📦 Application">
+          <Row label="Product" value="OwLLM Desktop" />
+          <Row label="Version" value={version} />
+          <Row label="Runtime" value="Tauri 2 · Rust + React" />
+          <Row label="Update channel" value="GitHub Releases (auto-update)" />
+          <Row label="Python" value="Invited on-demand only (fine-tuning)" />
+        </Card>
+
+        <SandboxDiskCard />
         </div>
       </div>
     </div>

@@ -296,6 +296,53 @@ export function getBrowserStateLine(): string {
   return _browserStateLine;
 }
 
+type SelfDeviceId = { device_id: string; name: string; os: string; arch: string };
+
+/// Cached one-line GROUND TRUTH of the device THIS run executes on, spliced into
+/// every prompt right after the project workspace. Team memory is SHARED across a
+/// user's machines (vault sync merges facts device-blind, last-writer-wins), so a
+/// fact written on PC-A ("this machine is X", "the path is Y", "the GPU is Z") can
+/// reach an agent running on PC-B and make it believe it is somewhere it is not.
+/// This line is the authoritative "you are HERE, now" that overrides any
+/// device-specific memory fact. Device identity is static per session → fetched
+/// once and cached. "" until the first successful fetch (then omitted, never a
+/// false claim).
+let _deviceGroundTruthLine = "";
+
+/// Best-effort one-time fetch of this device's identity (device_get_identity —
+/// cheap, local). Idempotent: a no-op once the line is populated, since identity
+/// does not change within a session. Never throws; on failure the line stays ""
+/// and is simply left out of the prompt rather than asserting something false.
+export async function refreshDeviceGroundTruth(): Promise<void> {
+  if (_deviceGroundTruthLine) return;
+  try {
+    const id = await withMemoryTimeout<SelfDeviceId | null>(
+      invoke<SelfDeviceId>("device_get_identity"),
+      null,
+    );
+    if (!id || !id.device_id) return;
+    const label = (id.name || "this device").trim();
+    _deviceGroundTruthLine =
+      `CURRENT DEVICE (ground truth for THIS run): ${label} — ${id.os}/${id.arch} — id ${id.device_id.slice(0, 8)}. ` +
+      "You are running on THIS machine, right now. Team memory is SHARED across the user's devices, so a stored " +
+      "fact may have been written on a DIFFERENT machine. When a memory fact names a device, hostname, absolute " +
+      "path, drive, GPU, OS, or says \"this PC/machine\", it refers to wherever it was WRITTEN — not necessarily " +
+      "here. Trust THIS line and your own live file/shell tools for what is true on this machine; never conclude " +
+      "you are on another device just because memory mentions one.";
+  } catch { /* identity unavailable — omit the line rather than assert falsely */ }
+}
+
+/// SYNC accessor for the (sync) prompt builders, same pattern as
+/// getBrowserStateLine(). Warmed by refreshDeviceGroundTruth() at dispatch
+/// run-start; also self-warms here (fire-and-forget) so the AgentsPage /
+/// Brainstorm run loops — which don't share this dispatch's warm-up — still get
+/// the line populated by their second prompt build. Identity is static, so a
+/// single first-prompt miss is harmless (line absent, never wrong).
+export function getDeviceGroundTruthLine(): string {
+  if (!_deviceGroundTruthLine) void refreshDeviceGroundTruth();
+  return _deviceGroundTruthLine;
+}
+
 /// Retrieve the shared work-state RELEVANT to a task (BM25-lite ranked by
 /// team_memory_search) and render it as a prompt block. This is the RAG READ path
 /// done right: query BY THE TASK, not by recency — so a specialist sees what

@@ -17,6 +17,7 @@
 
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "../../utils/openWebUrl";
 import {
   isMcpMasterEnabled, setMcpMasterEnabled,
   isMcpToolDisabled, setMcpToolDisabled,
@@ -61,8 +62,7 @@ type EnvHint = {
   /// One-line plain-English description shown next to the input.
   description: string;
   /// URL where the user signs up / generates this credential. Rendered
-  /// as a "Get key →" button that opens the user's default browser via
-  /// shell_open_url. Empty = no signup link (e.g. a path the user
+  /// as a "Get key →" button that opens OwLLM's browser. Empty means no signup link (e.g. a path the user
   /// already knows).
   url?: string;
   /// Hint string shown as the input placeholder so the user has a
@@ -292,11 +292,10 @@ const CATALOG_LINKS: Array<{ label: string; url: string; description: string }> 
   },
 ];
 
-/// Open a URL in the user's default browser via the Rust shell_open_url
-/// Tauri command. Used by the "Get key →" buttons in the env-hint rows
+/// Open a URL in OwLLM's persistent browser. Used by the "Get key →" buttons in the env-hint rows
 /// so users can fly straight from "add server" to the signup page.
 async function openExternal(url: string) {
-  try { await invoke("shell_open_url", { url }); } catch (e) { console.error("openExternal", e); }
+  try { await openWebUrl(url); } catch (e) { console.error("openExternal", e); }
 }
 
 // ----- Shared inline styles (carried from the old MCPPage for visual continuity) -----
@@ -588,7 +587,7 @@ function ServerCard({
           Auto-start
         </label>
         <span style={{
-          background: badgeColor, color: "#fff",
+          background: badgeColor, color: "var(--fg-strong)",
           padding: "4px 12px", borderRadius: 4,
           fontSize: 11, fontWeight: 700,
         }}>{badgeText}</span>
@@ -728,7 +727,7 @@ function ServerCard({
                       }}>SANITIZED</span>
                   )}
                   {off && (
-                    <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "#9E9E9E" }}>OFF</span>
+                    <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "var(--fg-muted)" }}>OFF</span>
                   )}
                   {t.description && (
                     <span style={{ color: "var(--fg-subtle)" }}> — {t.description}</span>

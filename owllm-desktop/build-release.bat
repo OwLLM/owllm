@@ -95,5 +95,12 @@ for /F "delims=" %%F in ('dir /B /O-D "%RELEASE%\bundle\nsis\OwLLM Desktop_*_x64
 echo   Run now:       %cd%\OwLLM Desktop.exe
 echo   Dist exe:      %DIST%\OwLLM Desktop.exe
 echo   Dist setup:    %DIST%\OwLLM Desktop Setup.exe
-echo   Cargo output:  %RELEASE%
+echo [owllm-desktop] Pruning superseded OwLLM crate artifacts...
+rem The installer and portable executable are copied above. Cargo itself can now
+rem remove every obsolete hash variant for OUR crate, across debug/test/release
+rem profiles, while preserving the cached third-party dependencies needed by the
+rem next build. This prevents source/UI revisions from growing target forever.
+call cargo clean -p owllm-desktop --manifest-path src-tauri\Cargo.toml
+if errorlevel 1 echo [owllm-desktop] warn: artifact prune failed; retained cache for this run
+echo   Cargo dependency cache retained in src-tauri\target
 exit /b 0

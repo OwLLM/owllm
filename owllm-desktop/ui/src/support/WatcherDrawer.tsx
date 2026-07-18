@@ -9,6 +9,7 @@
 
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "../utils/openWebUrl";
 import { getActivity } from "./activityStats";
 import { redactForReport } from "./redact";
 // Model discovery + dispatch: the SAME machinery the rest of the app uses
@@ -29,49 +30,11 @@ import {
 // the sign-in page also lets them CREATE a free account). Reuses the shared
 // github bindings so there's no parallel auth path.
 import { githubStatus, githubDeviceStart, githubDevicePoll, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT } from "../pages/agentic/github";
+import ActionIcon, { type ActionIconName } from "../components/ActionIcon";
 
 /// Open a URL in the user's real browser (native shell; window.open fallback).
 function openExternal(url: string) {
-  invoke("shell_open_url", { url }).catch(() => {
-    try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* ignore */ }
-  });
-}
-
-// Landing-card icons are inline SVG, NOT emoji, on purpose: the life-ring emoji
-// (🛟 U+1F6DF, Emoji 13.0) ships in Windows 11's Segoe UI Emoji but is MISSING on
-// Windows 10, where it renders as a "tofu" box. SVG paints identically on Win10/
-// Win11/macOS/Linux and inherits the theme accent, so the icons stop differing
-// across OS versions. Sized to match the old 32px emoji.
-function LifeRingIcon() {
-  return (
-    <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"
-      stroke="var(--accent)" strokeWidth={2.5} strokeLinecap="round">
-      <circle cx="16" cy="16" r="13" />
-      <circle cx="16" cy="16" r="5.5" />
-      <line x1="16" y1="3" x2="16" y2="10.5" />
-      <line x1="16" y1="21.5" x2="16" y2="29" />
-      <line x1="3" y1="16" x2="10.5" y2="16" />
-      <line x1="21.5" y1="16" x2="29" y2="16" />
-    </svg>
-  );
-}
-function BugIcon() {
-  return (
-    <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"
-      stroke="var(--accent)" strokeWidth={2.5} strokeLinecap="round">
-      <ellipse cx="16" cy="18" rx="8" ry="9.5" />
-      <line x1="16" y1="8.5" x2="16" y2="27.5" />
-      <circle cx="16" cy="7" r="3" />
-      <line x1="14" y1="5" x2="11.5" y2="2.5" />
-      <line x1="18" y1="5" x2="20.5" y2="2.5" />
-      <line x1="8" y1="14" x2="4.5" y2="12" />
-      <line x1="8" y1="18" x2="4.5" y2="18" />
-      <line x1="8" y1="22" x2="4.5" y2="24" />
-      <line x1="24" y1="14" x2="27.5" y2="12" />
-      <line x1="24" y1="18" x2="27.5" y2="18" />
-      <line x1="24" y1="22" x2="27.5" y2="24" />
-    </svg>
-  );
+  openWebUrl(url).catch((error) => console.error("Could not open the OwLLM browser", error));
 }
 
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
@@ -223,10 +186,11 @@ const PAGE_DOCS: Record<string, string> = {
 
 /// The guided "Help using the app" option list. Each topic shows a real,
 /// app-accurate step-by-step. (Future: each gets a short animated walkthrough.)
-const HELP_TOPICS: { key: string; label: string; steps: string }[] = [
+const HELP_TOPICS: { key: string; label: string; icon: ActionIconName; steps: string }[] = [
   {
     key: "finetune",
-    label: "🎓 Fine-tune a model",
+    label: "Fine-tune a model",
+    icon: "sliders",
     steps:
       "🎓 FINE-TUNE A MODEL (Train page)\n" +
       "1. Models page → download a base model (a 🟢 one that fits your GPU), or pick one you already have.\n" +
@@ -238,7 +202,8 @@ const HELP_TOPICS: { key: string; label: string; steps: string }[] = [
   },
   {
     key: "local",
-    label: "💻 Use a local model",
+    label: "Use a local model",
+    icon: "monitor",
     steps:
       "💻 USE A LOCAL MODEL (private, offline)\n" +
       "1. Models page → Browse → download a GGUF. A card's colour tells you the fit: 🟢 fits your GPU, 🟡 tight, 🔴 too big.\n" +
@@ -247,7 +212,8 @@ const HELP_TOPICS: { key: string; label: string; steps: string }[] = [
   },
   {
     key: "abliterate",
-    label: "🚫 Abliterate a model",
+    label: "Abliterate a model",
+    icon: "shield-off",
     steps:
       "🚫 ABLITERATE A MODEL (strip refusals)\n" +
       "1. Models page → download the base model you want to uncensor (full transformers weights, not a GGUF).\n" +
@@ -257,7 +223,8 @@ const HELP_TOPICS: { key: string; label: string; steps: string }[] = [
   },
   {
     key: "coder",
-    label: "⌨️ Coding agent",
+    label: "Coding agent",
+    icon: "code",
     steps:
       "⌨️ CODING AGENT (Code page)\n" +
       "1. Give it a brain: Accounts page → sign into Claude Code or Codex (subscription), or paste an API key — or run a local model.\n" +
@@ -267,7 +234,8 @@ const HELP_TOPICS: { key: string; label: string; steps: string }[] = [
   },
   {
     key: "agentic",
-    label: "🧩 Agentic workflow",
+    label: "Agentic workflow",
+    icon: "workflow",
     steps:
       "🧩 AGENTIC WORKFLOW (Agentic Team page)\n" +
       "1. Have at least one working model (Accounts for cloud/subscription, or a running local model).\n" +
@@ -499,7 +467,7 @@ export default function WatcherDrawer({
     // The user's own description (from the note composer) is what the team
     // reads first; the entry text (e.g. a screenshot caption) is just context.
     const userNote = (note ?? "").trim();
-    say(userNote ? `🐞 Bug report: ${userNote}` : "Report this as a bug", "you");
+    say(userNote ? `Bug report: ${userNote}` : "Report this as a bug", "you");
     const reportedMessage = userNote
       ? `${userNote}\n\n— captured view: ${entry.text}`
       : entry.text;
@@ -728,7 +696,7 @@ export default function WatcherDrawer({
       setSelfHidden(false);
       const shot: Entry = {
         from: "watcher",
-        text: `📸 Screenshot captured (${c.width}×${c.height}). Describe what went wrong below — what you did, what you expected, what happened — then send it to the OwLLM team.`,
+        text: `Screenshot captured (${c.width}×${c.height}). Describe what went wrong below — what you did, what you expected, what happened — then send it to the OwLLM team.`,
         imageDataUrl: `data:image/png;base64,${c.pngBase64}`,
       };
       setEntries([shot]);
@@ -798,8 +766,9 @@ export default function WatcherDrawer({
             <button
               onClick={goHome}
               title="Back to menu"
+              aria-label="Back to menu"
               style={{ position: "absolute", left: 14, top: "50%", transform: "translateY(-50%)", display: "flex", alignItems: "center", gap: 4, height: 26, padding: "0 10px", border: "1px solid rgba(255,255,255,0.45)", background: "rgba(255,255,255,0.18)", color: "var(--bg-header-fg)", fontSize: 13, fontWeight: 800, cursor: "pointer", borderRadius: 6 }}
-            >← Back</button>
+            ><ActionIcon name="arrow-left" size={14} /> Back</button>
           )}
           <div style={{ fontWeight: 800, fontSize: 16, letterSpacing: 0.4, lineHeight: 1.1 }}>The Watcher</div>
           <div style={{ fontSize: 11, color: "var(--fg-muted)" }}>
@@ -808,22 +777,23 @@ export default function WatcherDrawer({
           <button
             onClick={onClose}
             title="Close (Esc)"
+            aria-label="Close (Esc)"
             style={{ position: "absolute", right: 16, top: "50%", transform: "translateY(-50%)", width: 32, height: 24, border: "none", background: "rgba(244,67,54,0.18)", color: "#ff8080", fontSize: 13, cursor: "pointer", borderRadius: 5 }}
-          >✕</button>
+          ><ActionIcon name="close" size={15} style={{ margin: "auto" }} /></button>
         </div>
 
         {view === "home" ? (
           /* Landing menu — the 1×2 table: Help using the app · Report a bug. */
           <div style={{ padding: 22, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "stretch" }}>
-            <button style={homeCard} disabled={busy} onClick={enterHelp}>
-              <div style={{ height: 32, display: "flex", alignItems: "center" }}><LifeRingIcon /></div>
+            <button style={homeCard} disabled={busy} onClick={enterHelp} aria-label="Help using the app" title="Help using the app">
+              <div style={{ height: 38, display: "flex", alignItems: "center", color: "var(--accent)" }}><ActionIcon name="help" size={36} /></div>
               <div style={{ fontWeight: 800, fontSize: 15 }}>Help using the app</div>
               <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                 Pick a model, get guided walkthroughs, or screenshot your screen and ask.
               </div>
             </button>
-            <button style={homeCard} disabled={busy} onClick={startBugReport}>
-              <div style={{ height: 32, display: "flex", alignItems: "center" }}><BugIcon /></div>
+            <button style={homeCard} disabled={busy} onClick={startBugReport} aria-label="Report a bug" title="Report a bug">
+              <div style={{ height: 38, display: "flex", alignItems: "center", color: "var(--accent)" }}><ActionIcon name="bug" size={36} /></div>
               <div style={{ fontWeight: 800, fontSize: 15 }}>Report a bug</div>
               <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                 Grabs a screenshot automatically and opens a box to describe the issue.
@@ -859,6 +829,7 @@ export default function WatcherDrawer({
                     <button
                       onClick={() => { setReportingEntry(e); setReportNote(""); }}
                       disabled={busy}
+                      aria-label="Report this as a bug"
                       title="Describe what's wrong, then send this view + diagnostics + any screenshot to the OwLLM team."
                       style={{
                         marginTop: 9, display: "inline-flex", alignItems: "center", gap: 5,
@@ -867,7 +838,7 @@ export default function WatcherDrawer({
                         background: "rgba(var(--accent-rgb),0.10)",
                         color: "var(--accent)", cursor: busy ? "wait" : "pointer",
                       }}
-                    >🐞 Report this as a bug</button>
+                    ><ActionIcon name="bug" size={13} /> Report this as a bug</button>
                   )}
                 </div>
               ))}
@@ -883,7 +854,7 @@ export default function WatcherDrawer({
                 display: "flex", flexDirection: "column", gap: 8,
               }}>
                 <div style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-strong)" }}>
-                  Describe the bug {reportingEntry.imageDataUrl ? "(screenshot attached 📸)" : ""}
+                  Describe the bug {reportingEntry.imageDataUrl ? <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>(screenshot attached <ActionIcon name="camera" size={13} />)</span> : ""}
                 </div>
                 <div style={{ fontSize: 11, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                   What did you do, what did you expect, what happened? This is what the team reads first.
@@ -902,25 +873,26 @@ export default function WatcherDrawer({
                 />
                 {ghConnected === false && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 7, padding: 10, borderRadius: 8, background: "rgba(122,162,255,0.08)", border: "1px solid rgba(122,162,255,0.35)" }}>
-                    <div style={{ fontSize: 11.5, color: "var(--fg-strong)", lineHeight: 1.45 }}>
-                      🔗 <b>Connect GitHub to send</b> — reports go to the OwLLM team as GitHub issues, so you need a (free) GitHub account connected. One time, then it's one click from any PC you sign in on.
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: 11.5, color: "var(--fg-strong)", lineHeight: 1.45 }}>
+                      <ActionIcon name="link" size={14} style={{ marginTop: 1 }} /><span><b>Connect GitHub to send</b> — reports go to the OwLLM team as GitHub issues, so you need a (free) GitHub account connected. One time, then it's one click from any PC you sign in on.</span>
                     </div>
                     {ghDevice ? (
                       <div style={{ display: "flex", flexDirection: "column", gap: 5, fontSize: 11.5, color: "var(--fg-muted)" }}>
                         <div>1. We opened <b>github.com/login/device</b> — copy this code and paste it there:</div>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
                           <code style={{ fontSize: 15, fontWeight: 800, letterSpacing: 2, color: "var(--fg-strong)", background: "var(--bg-input)", padding: "3px 10px", borderRadius: 6, userSelect: "text", WebkitUserSelect: "text", cursor: "text" }}>{ghDevice.userCode}</code>
-                          <button style={actionBtn} title="Copy the code" onClick={() => { setGhCopied(false); navigator.clipboard?.writeText(ghDevice.userCode).then(() => setGhCopied(true)).catch(() => {}); }}>{ghCopied ? "✓ Copied" : "📋 Copy"}</button>
-                          <button style={actionBtn} onClick={() => openExternal(ghDevice.verificationUri)}>Open page</button>
+                          <button style={{ ...actionBtn, display: "inline-flex", alignItems: "center", gap: 5 }} aria-label={ghCopied ? "Copied" : "Copy"} title="Copy the code" onClick={() => { setGhCopied(false); navigator.clipboard?.writeText(ghDevice.userCode).then(() => setGhCopied(true)).catch(() => {}); }}><ActionIcon name={ghCopied ? "check" : "copy"} size={14} />{ghCopied ? "Copied" : "Copy"}</button>
+                          <button style={{ ...actionBtn, display: "inline-flex", alignItems: "center", gap: 5 }} aria-label="Open page" onClick={() => openExternal(ghDevice.verificationUri)}><ActionIcon name="external-link" size={14} />Open page</button>
                         </div>
                         <div>2. Sign in (or <b>create a free account</b>) and paste the code. Waiting for you…</div>
                       </div>
                     ) : (
                       <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
                         <button
-                          style={{ ...actionBtn, background: "#24292f", color: "#fff", border: "1px solid #444", fontWeight: 700, alignSelf: "flex-start" }}
+                          style={{ ...actionBtn, display: "inline-flex", alignItems: "center", gap: 6, background: "#24292f", color: "#fff", border: "1px solid #444", fontWeight: 700, alignSelf: "flex-start" }}
+                          aria-label="Sign in with GitHub"
                           onClick={connectGithub}
-                        >🔗 Sign in with GitHub</button>
+                        ><ActionIcon name="link" size={14} />Sign in with GitHub</button>
                         <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", lineHeight: 1.4 }}>
                           No account yet? The sign-in page lets you create one free in a minute — come back here and it connects automatically. (Or <span onClick={() => openExternal(GITHUB_TOKEN_URL)} style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>create a token</span> and paste it on the Home page.)
                         </div>
@@ -930,15 +902,16 @@ export default function WatcherDrawer({
                   </div>
                 )}
                 {ghConnected === true && ghLogin && (
-                  <div style={{ fontSize: 11, color: "#7ff0c5" }}>✓ GitHub connected as {ghLogin} — ready to send.</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11, color: "#7ff0c5" }}><ActionIcon name="check" size={14} />GitHub connected as {ghLogin} — ready to send.</div>
                 )}
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   <button
-                    style={{ ...actionBtn, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800, opacity: (busy || !reportNote.trim() || ghConnected === false) ? 0.5 : 1 }}
+                    style={{ ...actionBtn, display: "inline-flex", alignItems: "center", gap: 6, background: "linear-gradient(180deg, #7ff0c5, #2bbf8a)", color: "#04231a", fontWeight: 800, opacity: (busy || !reportNote.trim() || ghConnected === false) ? 0.5 : 1 }}
                     disabled={busy || !reportNote.trim() || ghConnected === false}
+                    aria-label="Send report"
                     onClick={async () => { const ent = reportingEntry; const note = reportNote; setReportingEntry(null); setReportNote(""); await reportEntry(ent, note); }}
                     title={ghConnected === false ? "Connect GitHub above first." : "Send your description + this view + diagnostics + any screenshot to the OwLLM team."}
-                  >📤 Send report</button>
+                  ><ActionIcon name="send" size={14} />Send report</button>
                   <button style={actionBtn} disabled={busy} onClick={() => { setReportNote(""); if (view === "bug") goHome(); else setReportingEntry(null); }}>Cancel</button>
                 </div>
               </div>
@@ -950,7 +923,7 @@ export default function WatcherDrawer({
               <>
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "2px 14px 0" }}>
                   {HELP_TOPICS.map((t) => (
-                    <button key={t.key} style={topicBtn} disabled={busy} onClick={() => showTopic(t)}>{t.label}</button>
+                    <button key={t.key} style={{ ...topicBtn, display: "inline-flex", alignItems: "center", gap: 5 }} disabled={busy} aria-label={t.label} onClick={() => showTopic(t)}><ActionIcon name={t.icon} size={13} />{t.label}</button>
                   ))}
                 </div>
 
@@ -965,7 +938,7 @@ export default function WatcherDrawer({
                       models={models}
                       status={accounts}
                       placeholder="Auto (running local first)"
-                      fallbackLabel="⚡ Auto (running local first)"
+                      fallbackLabel="Auto (running local first)"
                     />
                   </div>
                   {pickedModel && (
@@ -992,11 +965,12 @@ export default function WatcherDrawer({
                     }}
                   />
                   <button
-                    style={actionBtn}
+                    style={{ ...actionBtn, display: "inline-flex", alignItems: "center", gap: 6 }}
                     disabled={busy}
                     onClick={screenshotAndAsk}
+                    aria-label="Screenshot & ask"
                     title="Capture this app window and ask the model about what's on screen."
-                  >{busy ? "⏳" : "📸 Screenshot & ask"}</button>
+                  ><ActionIcon name={busy ? "loader" : "camera"} size={15} />{busy ? "Working..." : "Screenshot & ask"}</button>
                 </div>
               </>
             )}

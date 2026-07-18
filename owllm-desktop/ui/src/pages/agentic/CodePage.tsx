@@ -7,7 +7,7 @@
 // search, edit and create files and run shell commands in that folder.
 // Cline's card-based UX is inspiration for later phases (file tree, live
 // diffs, task Kanban); Phase 1 is the working agent core.
-import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
@@ -16,6 +16,7 @@ import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { getSetting, setSetting, scope, SettingKey } from "../../state/pageSettings";
 import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
+import { setRunActivity } from "../../runtime/runActivity";
 import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
@@ -23,10 +24,13 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun } from "./RunNotebook";
-import { RunTimerChip } from "./RunTimer";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import { RunTimerChip, runTimingFooter } from "./RunTimer";
+import { translateUiText } from "../../localization";
+import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
+import TeamMemoryModal from "./TeamMemoryModal";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -44,7 +48,10 @@ type Msg = {
   role: "user" | "assistant" | "tool";
   content: string;
   thinking?: string;
-  kind?: "tool" | "terminal";
+  /// "meta" = page-generated notice (run timing footer, auto-feed pause note):
+  /// rendered as a muted line, never sent to the model as history, and never
+  /// treated as the agent's answer (no Forward button).
+  kind?: "tool" | "terminal" | "meta";
   title?: string;
   status?: "ok" | "error" | "running";
   /// Which agent conversation owns this message. Stamped automatically at the
@@ -58,7 +65,21 @@ type Msg = {
   /// begins or the turn ends.
   placeholder?: boolean;
   ts: number;
+  /// Attached images shown as clickable thumbnails in the bubble (user uploads
+  /// or results), stored so they persist and can be re-viewed by clicking.
+  images?: { src: string; alt?: string }[];
 };
+
+// Turn chat image attachments into ChatBubble thumbnails (data URIs the webview
+// can always render), so uploaded images stay visible and clickable in history.
+function attachmentThumbs(atts: { mime: string; data_b64: string; filename?: string }[]): { src: string; alt?: string }[] {
+  return atts.map((a) => ({ src: `data:${a.mime};base64,${a.data_b64}`, alt: a.filename }));
+}
+
+// JSON replacer that drops `images` (base64 data URIs) when persisting to
+// localStorage — thumbnails are for in-session re-view only; embedding megabytes
+// of base64 would blow the localStorage quota and silently lose the session.
+const dropImages = (k: string, v: unknown) => (k === "images" ? undefined : v);
 
 const CODING_SYSTEM = (ws: string) =>
   `You are OWLLM's coding agent, working directly inside the user's project at:\n${ws}\n\n` +
@@ -129,6 +150,17 @@ const DEFAULT_CODE_STATE: CodeState = {
   messages: [], tasks: [], workspace: "", modelId: "", draft: "", busy: false,
   status: "Pick a folder and a local model, then describe what to build or fix.",
 };
+// Hydration migration: older sessions saved page notices (the run timing
+// footer, the auto-feed pause note) as plain assistant answers, which let them
+// own the Forward button and re-enter the model's history. Stamp them as meta.
+function stampLegacyMetaNotices(s: CodeState | null): CodeState | null {
+  if (!s?.messages?.length) return s;
+  const fix = (list?: Msg[]) => list?.map((m) =>
+    m.role === "assistant" && !m.kind && (m.content.startsWith("⏱ ") || m.content.startsWith("📓 Auto-feed paused"))
+      ? { ...m, kind: "meta" as const }
+      : m);
+  return { ...s, messages: fix(s.messages) ?? [], secondaryMessages: fix(s.secondaryMessages) };
+}
 
 // Worktree command outcomes — serde-tagged "status", camelCase. Mirror of the
 // Rust enum for fleet_worktree_create, reused AS-IS for the Code page.
@@ -153,6 +185,50 @@ function loadPages(): CodePageMeta[] {
 function savePages(pages: CodePageMeta[]): void {
   try { localStorage.setItem(PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
 }
+
+const PSYCHEDELIC_AURA_STOPS = "#3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b";
+const PSYCHEDELIC_AURA_RING = `conic-gradient(from var(--owllm-aura-angle), ${PSYCHEDELIC_AURA_STOPS}) border-box`;
+const PSYCHEDELIC_AURA_DOT = `conic-gradient(from 0deg, ${PSYCHEDELIC_AURA_STOPS})`;
+// A solid colour followed by `padding-box` is not a valid multi-layer CSS
+// background, so WebView dropped the rainbow layer and showed only the pale
+// shadow. Wrap the colour in a gradient, matching AgentChatTile's valid shape.
+const PSYCHEDELIC_AURA_FILL = "linear-gradient(var(--bg-input), var(--bg-input)) padding-box";
+const PSYCHEDELIC_AURA_BACKGROUND = `${PSYCHEDELIC_AURA_FILL}, ${PSYCHEDELIC_AURA_RING}`;
+// Colour-cycling spin only — the halo itself is a constant soft box-shadow
+// (no breathe pulse), so the aura reads as a subtle shifting glow.
+const PSYCHEDELIC_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
+const PSYCHEDELIC_AURA_HALO = "0 0 12px rgba(176,124,255,.22), 0 0 20px rgba(127,212,255,.14)";
+
+// ---- Cross-page activity signal (tab-strip glow + "done" badge) -------------
+// Lets the tab strip show WHERE work is happening even when you've switched to
+// another page. The primary coder's `busy` already lives per-page in
+// chatRuntime and keeps updating after the page unmounts (module singleton), so
+// a run started on page A stays visible while you work on page B — the parent
+// reads it straight from chatRuntime. The MOUNTED page additionally reports its
+// aggregate busy (coder OR second agent OR just-chat) here so the visible tab
+// glows for ANY active agent; that extra signal is cleared on unmount (the
+// second agent is aborted on unmount anyway, so it can't run in the background).
+// `done` marks a page whose run FINISHED while you were on another tab — a badge
+// that persists on its tab until you open it.
+const pageBusyExtra = new Map<string, boolean>();
+const pageDone = new Set<string>();
+const activityListeners = new Set<() => void>();
+function notifyActivity(): void { for (const cb of activityListeners) cb(); }
+const pageActivity = {
+  subscribe(cb: () => void): () => void {
+    activityListeners.add(cb);
+    return () => { activityListeners.delete(cb); };
+  },
+  reportExtra(pageId: string, busy: boolean): void {
+    if ((pageBusyExtra.get(pageId) ?? false) === busy) return;
+    if (busy) pageBusyExtra.set(pageId, true); else pageBusyExtra.delete(pageId);
+    notifyActivity();
+  },
+  extraBusy(pageId: string): boolean { return pageBusyExtra.get(pageId) ?? false; },
+  markDone(pageId: string): void { if (!pageDone.has(pageId)) { pageDone.add(pageId); notifyActivity(); } },
+  clearDone(pageId: string): void { if (pageDone.delete(pageId)) notifyActivity(); },
+  isDone(pageId: string): boolean { return pageDone.has(pageId); },
+};
 // Per-PAGE session persistence (keyed by page id, NOT the folder/worktree path,
 // so an isolated page survives the worktree being re-created at a new path).
 function pageSessionKey(pageId: string): string { return PAGE_SESSION_PREFIX + pageId; }
@@ -184,7 +260,7 @@ function loadPageSession(pageId: string): CodeState | null {
 }
 function savePageSession(pageId: string, s: CodeState | null | undefined): void {
   if (!s) return;
-  try { localStorage.setItem(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false })); }
+  try { localStorage.setItem(pageSessionKey(pageId), JSON.stringify({ ...s, busy: false }, dropImages)); }
   catch { /* quota / unavailable */ }
   // Mirror the model choice into the sync-ready settings layer (see load).
   // setSetting treats ""/undefined as "clear", and no-op writes short-circuit,
@@ -219,7 +295,7 @@ const CODE_RECENTS_MAX = 12;
 // The "New chat" surface keeps a list of past conversations in localStorage so
 // they survive tab switches AND app restarts (the chat used to be plain useState
 // that evaporated). Each thread is one conversation; the newest is first.
-type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string };
+type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string; images?: { src: string; alt?: string }[] };
 type ChatThread = { id: string; title: string; ts: number; messages: ChatMsg[] };
 const CHATS_KEY = "owllm:code:chats";
 const CHATS_MAX = 60;
@@ -242,7 +318,7 @@ function loadChats(): ChatThread[] {
   } catch { return []; }
 }
 function saveChats(chats: ChatThread[]): void {
-  try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX))); } catch { /* private mode / quota */ }
+  try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX), dropImages)); } catch { /* private mode / quota */ }
 }
 function newThreadId(): string { return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function threadTitle(text: string): string {
@@ -285,7 +361,7 @@ function loadCodeSession(ws: string): CodeState | null {
 function saveCodeSession(s: CodeState | null | undefined): void {
   if (!s || !s.workspace) return; // no folder → nothing to save (onboarding state)
   try {
-    localStorage.setItem(codeSessionKey(s.workspace), JSON.stringify({ ...s, busy: false }));
+    localStorage.setItem(codeSessionKey(s.workspace), JSON.stringify({ ...s, busy: false }, dropImages));
   } catch { /* quota / unavailable — best effort */ }
 }
 
@@ -355,18 +431,10 @@ function probeSandboxOnce(): Promise<{ st: WslStatus; iso: WslIsolation; s: Sand
       const [st, iso0] = await Promise.all([wslStatus(), wslIsolationGet()]);
       // Retry while the sandbox reports "not available" — the first wsl.exe call
       // after boot can transiently miss the distro while the service warms up.
-      let s = await sandboxStatus();
-      for (let i = 0; i < 3 && !s.available; i++) {
-        await new Promise((r) => setTimeout(r, 800));
-        s = await sandboxStatus();
-      }
+      const s = await sandboxStatus();
       // Sandbox present + isolation off → enable it once (every new project is
       // isolated by default; the user can still opt out per project).
-      let iso = iso0;
-      if (s.available && !iso0.enabled) {
-        try { iso = await wslIsolationSet(true, s.defaultTarget ?? null); } catch { iso = iso0; }
-      }
-      return { st, iso, s };
+      return { st, iso: iso0, s };
     })();
     _sandboxProbe.catch(() => { _sandboxProbe = null; });
   }
@@ -394,6 +462,10 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [ruleScope, setRuleScope] = useState<{ id: string; shared: boolean }>({ id: "", shared: false });
   const ruleScopeRef = useRef(ruleScope);
   ruleScopeRef.current = ruleScope;
+  // Last folder we resolved scope for — so a folder switch resets the notebook/
+  // rules SYNCHRONOUSLY (see the scope effect) instead of leaving the previous
+  // project's memory on screen while the async project lookup is in flight.
+  const lastScopeFolderRef = useRef<string>("");
   // Auto-feed identity of THIS Code page — the notebook blob is per project,
   // so this is what stops a second page on the same project from popping the
   // queue when its own (unrelated) turn finishes.
@@ -406,7 +478,16 @@ function CodeWorkspace({ pageId, onTitle }: {
   // busy are drained between tool calls on local models (getSteer), or at the
   // end of the turn on CLI/API paths.
   const steerRef = useRef<string[]>([]);
-  const drainSteer = () => steerRef.current.splice(0, steerRef.current.length).join("\n\n");
+  const notebookStepRef = useRef<string | null>(null);
+  const notebookSteerStepIdsRef = useRef<string[]>([]);
+  const notebookSteerInFlightIdsRef = useRef<string[]>([]);
+  const drainSteer = () => {
+    const q = steerRef.current;
+    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
+    if (!q.length) return "";
+    if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
+    return q.splice(0, q.length).join("\n\n");
+  };
   const busySendRef = useRef(false);
   // Live port for the notebook's digest agent (refreshed when the notebook opens).
   const [srvPort, setSrvPort] = useState(0);
@@ -450,6 +531,25 @@ function CodeWorkspace({ pageId, onTitle }: {
   // every chat behaves the same. Sent with the next message, then cleared.
   const [codeImages, setCodeImages] = useState<Attachment[]>([]);
   const codeFileRef = useRef<HTMLInputElement | null>(null);
+  // Composer textareas — refs so "Forward" can drop the text into the target
+  // agent's draft and focus it for editing before Send (compose-then-send).
+  const codeDraftRef = useRef<HTMLTextAreaElement | null>(null);
+  const secondaryDraftRef = useRef<HTMLTextAreaElement | null>(null);
+  // Forward a reply into an agent's composer as an EDITABLE draft (not a
+  // committed message) — appends under any existing draft, then focuses the
+  // box with the cursor at the end so the user can add comments / tweak it
+  // before pressing Send.
+  const forwardToDraft = (
+    setter: (v: string | ((s: string) => string)) => void,
+    ref: RefObject<HTMLTextAreaElement | null>,
+    block: string,
+  ) => {
+    setter((d) => (d && d.trim() ? `${d.replace(/\s*$/, "")}\n\n${block}` : block));
+    requestAnimationFrame(() => {
+      const el = ref.current;
+      if (el) { el.focus(); const end = el.value.length; el.setSelectionRange(end, end); }
+    });
+  };
   // Clicking a file in the tree OPENS it in a viewer (was: silently inserted an
   // @ref, which is why the tree felt "fake" — you couldn't see files). The viewer
   // is also editable: ✎ Edit turns the <pre> into a <textarea>, and once the text
@@ -525,8 +625,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     // open page and survives the worktree path changing underneath it. On first
     // launch after upgrading, the default page also adopts the LEGACY per-folder
     // session so existing users don't see their Code history vanish.
-    const restored = loadPageSession(pageId)
-      ?? (pageId === "main" ? loadCodeSession(getLastCodeProject()) : null);
+    const restored = stampLegacyMetaNotices(loadPageSession(pageId)
+      ?? (pageId === "main" ? loadCodeSession(getLastCodeProject()) : null));
     chatRuntime.hydrateIfIdle(SID, restored ?? DEFAULT_CODE_STATE);
     // Persist EVERY mutation (debounced) under this page id, with a final flush
     // after unmount / stream-end — the "coded for an hour, closed the app,
@@ -567,15 +667,38 @@ function CodeWorkspace({ pageId, onTitle }: {
   // model when it hasn't chosen one (empty = "same as 1st agent").
   const secondaryModelEffective = secondaryModelId || modelId;
   const [secondaryBusy, setSecondaryBusy] = useState(false);
+  // `chatBusy` belongs to the global no-project Just Chat surface. Including it
+  // here made every project chat glow while an unrelated chat was running (and
+  // could look permanently active after navigation). This pane is the coder.
+  const primaryAuraActive = busy;
+  // One-step undo for per-agent "Clear history": each pane keeps its OWN
+  // snapshot of the transcript it last cleared, so clearing one agent never
+  // touches the other and each ↩ Undo restores exactly what that pane wiped.
+  // Transient (component state) — the undo is a safety net for the click that
+  // just happened, not a persisted feature.
+  const [primaryUndo, setPrimaryUndo] = useState<Msg[] | null>(null);
+  const [secondaryUndo, setSecondaryUndo] = useState<Msg[] | null>(null);
   // Terminal popup (right-column 🖥 button) — floats above THIS app's UI only.
   const [termOpen, setTermOpen] = useState(false);
   // Terminal popup chrome: hide (— keeps the shell alive, just display:none)
   // and drag (title bar). null pos = default docked bottom-right.
   const [termHidden, setTermHidden] = useState(false);
   const [termPos, setTermPos] = useState<{ x: number; y: number } | null>(null);
+  // Docked (default) → the shell renders in-column right above the composer,
+  // where the input box lives. Popped out → the old floating draggable popup.
+  const [termDocked, setTermDocked] = useState(true);
   // Agent Browser popup (right-column 🌐 button) — viewer for the shared daemon.
   const [browserOpen, setBrowserOpen] = useState(false);
   useEffect(() => () => { secondaryAbortRef.current?.abort(); }, []);
+  // Tell the tab strip this page has an agent running (coder, second agent, or
+  // just-chat) so its tab glows for ANY active agent while it's the visible
+  // page. The coder's cross-page glow comes from chatRuntime directly; this
+  // extra is cleared on unmount, so a background page never falsely glows for a
+  // second-agent/just-chat run it can no longer sustain.
+  useEffect(() => {
+    pageActivity.reportExtra(pageId, busy || secondaryBusy || chatBusy);
+  }, [pageId, busy, secondaryBusy, chatBusy]);
+  useEffect(() => () => { pageActivity.reportExtra(pageId, false); }, [pageId]);
   // Consecutive AUTOMATIC exchanges between the two panes (⇄ auto-feed).
   // Any manual send resets it; the cap stops a both-directions-on ping-pong
   // from looping forever (the user un-pauses by just sending a message).
@@ -629,19 +752,32 @@ function CodeWorkspace({ pageId, onTitle }: {
   // fall back to a stable per-folder key.
   useEffect(() => {
     const folder = (projectRoot || workspace || "").trim();
-    if (!folder) { setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
     const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+    if (!folder) { lastScopeFolderRef.current = ""; setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
+    const nf = norm(folder);
+    const fallbackId = `code:${nf}`;
+    // Folder switched → drop the previous project's scope IMMEDIATELY so its
+    // notebook and rules can never linger on screen while the async project
+    // lookup runs (or if it hangs). The lookup below only UPGRADES this to the
+    // shared team-project id when the folder matches a registered project —
+    // that shared id is what makes the Agent and Code pages load, update, and
+    // see one notebook + rule set for the same repo.
+    if (lastScopeFolderRef.current !== nf) {
+      lastScopeFolderRef.current = nf;
+      setRuleScope({ id: fallbackId, shared: false });
+      setDirectives([]);
+    }
     let alive = true;
     (async () => {
-      let id = `code:${norm(folder)}`;
+      let id = fallbackId;
       let shared = false;
       try {
         const rows = await invoke<{ id: string; location: string }[]>("list_projects");
-        const hit = (rows || []).find((r) => r.location && norm(r.location) === norm(folder));
+        const hit = (rows || []).find((r) => r.location && norm(r.location) === nf);
         if (hit) { id = hit.id; shared = true; }
       } catch { /* no projects table reachable — per-folder scope */ }
       if (!alive) return;
-      setRuleScope({ id, shared });
+      setRuleScope((prev) => (prev.id === id && prev.shared === shared ? prev : { id, shared }));
       try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: id })); }
       catch { setDirectives([]); }
     })();
@@ -701,6 +837,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   // start, freeze runEndedAt on stop (only if a run was actually live, so a
   // double stop() doesn't move the frozen time).
   const setBusy = (v: boolean) => {
+    // Keep the imperative send gate in sync immediately; waiting for the
+    // chatRuntime update to trigger a React render can strand auto-follow-ups.
+    busySendRef.current = v;
+    // Header "running" aura: code runs (incl. CLI paths that never touch
+    // chatRuntime.startStream) count as run activity too.
+    setRunActivity(`code:${SID}`, v);
     chatRuntime.setPayload(SID, (prev) => {
       const cur = (prev as CodeState) ?? DEFAULT_CODE_STATE;
       if (v) return { ...cur, busy: true, runStartedAt: Date.now(), runEndedAt: undefined };
@@ -861,7 +1003,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (busy) return;
     try {
       const { open } = await import("@tauri-apps/plugin-dialog");
-      const dir = await open({ directory: true, multiple: false, title: "Pick a project folder" });
+      const dir = await open({ directory: true, multiple: false, title: translateUiText("Pick a project folder") });
       if (typeof dir === "string" && dir) openWorkspace(dir);
     } catch (e) {
       setStatus(`Folder picker failed: ${e}`);
@@ -876,8 +1018,8 @@ function CodeWorkspace({ pageId, onTitle }: {
       try {
         const { confirm } = await import("@tauri-apps/plugin-dialog");
         const ok = await confirm(
-          `Close this project? Unmerged changes in its worktree (${stx.branch}) will be discarded. Merge to main first to keep them.`,
-          { title: "Close project", kind: "warning" },
+          translateUiText(`Close this project? Unmerged changes in its worktree (${stx.branch}) will be discarded. Merge to main first to keep them.`),
+          { title: translateUiText("Close project"), kind: "warning" },
         );
         if (!ok) return;
       } catch { /* dialog unavailable — proceed */ }
@@ -930,16 +1072,6 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
   // WSL/sandbox STATUS — from the app-wide cache, so a new page never re-pays
   // the cold wsl.exe probe (the 40s "opening a page" stall). See probeSandboxOnce.
-  useEffect(() => {
-    let dead = false;
-    probeSandboxOnce().then(({ st, iso, s }) => {
-      if (dead) return;
-      setWslStat(st);
-      setIsolation(iso);
-      setSbox(s);
-    }).catch(() => { /* leave UI in "checking" */ });
-    return () => { dead = true; };
-  }, []);
   // Onboarding lists (WSL/sandbox projects + toolchain) only populate the PICKER
   // screen, so fetch them ONLY when this page has no project — a page with one
   // open skips these extra wsl.exe calls.
@@ -948,8 +1080,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     let dead = false;
     probeSandboxOnce().then(({ st, iso, s }) => {
       if (dead) return;
+      setWslStat(st);
+      setIsolation(iso);
+      setSbox(s);
       refreshWslProjects(iso, st);
-      refreshToolchain(st);
       refreshSboxProjects(iso, s);
     }).catch(() => { /* onboarding lists are best-effort */ });
     return () => { dead = true; };
@@ -1143,7 +1277,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const openNewProject = () => {
     setNpName("");
     setNpFolder("");
-    setNpIsolate(!!sbox?.available); // default isolated whenever an engine exists
+    setNpIsolate(false); // host folders are instant; isolation is an explicit choice
     setNpCreateRepo(false);
     setNpBusy(false);
     setNpOpen(true);
@@ -1532,7 +1666,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     const text = (textOverride ?? draft).trim();
     const images = fromComposer ? imageAttachments(codeImages) : [];
     if (!text && images.length === 0) return;
-    if (busy) {
+    if (busySendRef.current) {
       // Coder is mid-turn → the message becomes a ⚡ steer (VS Code-style),
       // injected between tool calls on local models, at turn end otherwise —
       // never silently dropped. (Images can't ride a steer — text only.)
@@ -1543,8 +1677,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       }
       return;
     }
-    if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { setStatus("No model selected — pick one above."); return; }
+    // Guard failures on PROGRAMMATIC sends (fix-with-agent, notebook auto-feed,
+    // pane cross-feed) get a visible transcript bubble — a status-line note is
+    // invisible when the user isn't watching the composer, and a silently
+    // dropped task looks like "the agent ignored me".
+    const blockSend = (why: string) => {
+      setStatus(why);
+      if (!fromComposer) setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${why}\n\nDropped task:\n${text.length > 400 ? text.slice(0, 400) + "…" : text}`, ts: Date.now() }]);
+    };
+    if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
+    if (!modelId) { blockSend("No model selected — pick one above."); return; }
     if (fromComposer) { setDraft(""); setCodeImages([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
@@ -1552,9 +1694,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     const history: HistoryItem[] = messages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
       .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
-    // The bubble shows a 🖼 marker; the actual images ride to the model via runTurn.
-    const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
-    setMessages((msgs) => [...msgs, { role: "user", content: label, ts: Date.now() }]);
+    // The bubble shows the actual images as clickable thumbnails; the same
+    // images also ride to the model via runTurn.
+    setMessages((msgs) => [...msgs, { role: "user", content: text, ts: Date.now(), images: images.length ? attachmentThumbs(images) : undefined }]);
     // Immediately show the user that something is happening, so the timer is not
     // the only visible change. The placeholder is replaced by real tokens/tools.
     setMessages((msgs) => [...msgs, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
@@ -1590,6 +1732,20 @@ function CodeWorkspace({ pageId, onTitle }: {
       });
       setBusy(false);
       abortRef.current = null;
+      // 📓 Stamp notebook step timing and append a concise run timing footer
+      // after the agent's answer so the user sees start/finish for every run.
+      const now = Date.now();
+      const payload = chatRuntime.getSnapshot(SID).payload as CodeState | undefined;
+      if (notebookStepRef.current) {
+        markNotebookStepFinished(ruleScopeRef.current.id, notebookStepRef.current, now);
+        notebookStepRef.current = null;
+      }
+      for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
+        markNotebookStepFinished(ruleScopeRef.current.id, sid, now);
+      }
+      if (payload?.runStartedAt) {
+        setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: runTimingFooter(payload.runStartedAt!, now), ts: now }]);
+      }
       // After state settles: steers queued on a path that can't inject
       // mid-turn (CLI/API) land as a follow-up turn — never silently dropped
       // (unless the user hit Stop). Then, on a clean finish, auto-feed the
@@ -1603,9 +1759,12 @@ function CodeWorkspace({ pageId, onTitle }: {
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
         if (ok) {
           const st = takeNextAutoStep(ruleScopeRef.current.id, notebookSurfaceId);
-          if (st) void sendRef.current?.(st.text);
+          if (st) {
+            notebookStepRef.current = st.id;
+            void sendRef.current?.(st.text);
+          }
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
-          setMessages((msgs) => [...msgs, { role: "assistant", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
+          setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }
       }, 80);
     }
@@ -1655,6 +1814,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     if (!workspace) { setStatus(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!secondaryModelEffective) { setStatus("No model for the second agent — pick one in the second-agent pane (or select a primary model)."); return; }
     if (fromComposer) { setSecondaryDraft(""); autoFeedHopsRef.current = 0; }
+    // A new second-agent turn supersedes its pending clear-undo (see setBusy).
+    setSecondaryUndo(null);
     setSecondaryBusy(true);
     const ctrl = new AbortController();
     secondaryAbortRef.current = ctrl;
@@ -1700,13 +1861,14 @@ function CodeWorkspace({ pageId, onTitle }: {
   const renderSecondaryComposer = () => (
     <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
       <textarea
+        ref={secondaryDraftRef}
         value={secondaryDraft}
         onChange={(e) => setSecondaryDraft(e.target.value)}
         onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
         placeholder="Message the second agent… (same workspace, its own conversation & model)"
         rows={2}
         disabled={secondaryBusy}
-        style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 12.5, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
+        style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
       />
       {secondaryBusy ? (
         <button
@@ -1727,9 +1889,14 @@ function CodeWorkspace({ pageId, onTitle }: {
 
   // Notebook → coder: idle = dispatch now; busy = mid-run steer (drained
   // between tool calls on local models, at turn end otherwise).
-  const feedFromNotebook = (text: string): "queued" | "dispatched" | "no-team" => {
+  const feedFromNotebook = (text: string, stepId?: string): "queued" | "dispatched" | "no-team" => {
     if (!workspace || !modelId) return "no-team";
-    if (busySendRef.current) { steerRef.current.push(text); return "queued"; }
+    if (busySendRef.current) {
+      steerRef.current.push(text);
+      if (stepId) notebookSteerStepIdsRef.current.push(stepId);
+      return "queued";
+    }
+    notebookStepRef.current = stepId ?? null;
     void sendRef.current?.(text);
     return "dispatched";
   };
@@ -1766,10 +1933,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     setChatBusy(true);
     const ctrl = new AbortController();
     justChatAbort = ctrl;
-    // The visible bubble shows the text + an image marker; the actual images
-    // ride to the model via the multimodal content / attachments below.
-    const label = images.length ? `${text}${text ? "\n\n" : ""}🖼 ${images.length} image${images.length > 1 ? "s" : ""}` : text;
-    const userMsg: ChatMsg = { role: "user", content: label };
+    // The visible bubble shows the actual images as clickable thumbnails; the
+    // same images also ride to the model via the multimodal content below.
+    const userMsg: ChatMsg = { role: "user", content: text, images: images.length ? attachmentThumbs(images) : undefined };
     const asstMsg: ChatMsg = { role: "assistant", content: "" };
     // Resolve/create the active thread; history = its current messages.
     let tid = chatId;
@@ -1913,20 +2079,31 @@ function CodeWorkspace({ pageId, onTitle }: {
       return { ...cur, tasks: [], draft: "", secondaryDraft: "", runStartedAt: undefined, runEndedAt: undefined, status: `Workspace: ${cur.workspace || "(none)"}` };
     });
   };
-  const clearChatHistory = () => {
-    if (busy || secondaryBusy) return;
-    if (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0) return;
-    if (window.confirm("Clear the chat window and all saved chat history? This cannot be undone.")) {
-      // The visible workspace transcripts — this is what the button promises.
-      setMessages([]);
-      setSecondaryMessages([]);
-      // …and the saved just-chat threads.
-      setChats([]);
-      setChatId("");
-      setChatDraft("");
-      setChatImages([]);
-      setShowHistory(false);
-    }
+  // Per-agent "Clear history": clears ONLY the pane it belongs to and stashes a
+  // snapshot for that pane's ↩ Undo. No confirm dialog — the undo is the safety
+  // net, and each agent is fully independent (clearing the Coder leaves the
+  // Second agent's transcript, and its undo, untouched, and vice versa).
+  const clearPrimaryHistory = () => {
+    if (busy || messages.length === 0) return;
+    setPrimaryUndo(messages);
+    setMessages([]);
+  };
+  const undoPrimaryHistory = () => {
+    const snap = primaryUndo;
+    if (!snap) return;
+    setMessages(snap);
+    setPrimaryUndo(null);
+  };
+  const clearSecondaryHistory = () => {
+    if (secondaryBusy || secondaryMessages.length === 0) return;
+    setSecondaryUndo(secondaryMessages);
+    setSecondaryMessages([]);
+  };
+  const undoSecondaryHistory = () => {
+    const snap = secondaryUndo;
+    if (!snap) return;
+    setSecondaryMessages(snap);
+    setSecondaryUndo(null);
   };
 
   // Clicking a file in the tree drops an @-reference into the composer so the
@@ -2038,7 +2215,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           {chatMsgs.map((m, i) => {
             const isUser = m.role === "user";
             return (
-              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} />
+              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} />
             );
           })}
         </div>
@@ -2063,12 +2240,12 @@ function CodeWorkspace({ pageId, onTitle }: {
               onPaste={onChatPaste}
               placeholder="Message…  (paste or attach an image, Enter to send, Shift+Enter for newline)"
               rows={1}
-              style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: 13.5, padding: "9px 12px", lineHeight: 1.5 }}
+              style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "9px 12px", lineHeight: 1.5 }}
             />
             {chatBusy ? (
-              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}>Stop</button>
+              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "var(--error)" }}>Stop</button>
             ) : (
-              <button onClick={sendChat} disabled={!chatDraft.trim() && chatImages.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: (chatDraft.trim() || chatImages.length) ? 1 : 0.5 }}>Send</button>
+              <button onClick={sendChat} disabled={!chatDraft.trim() && chatImages.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatImages.length) ? 1 : 0.5 }}>Send</button>
             )}
           </div>
         </div>
@@ -2114,10 +2291,10 @@ function CodeWorkspace({ pageId, onTitle }: {
                 {ghOpen && !gh?.connected && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0 0 28px", padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
                     <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5 }}>Paste a GitHub token so agents can clone private repos and push from inside the sandbox.</div>
-                    <button onClick={() => { invoke("shell_open_url", { url: GITHUB_TOKEN_URL }).catch(() => {}); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent)" }}>↗ Create a token (repo scope)</button>
+                    <button onClick={() => { openWebUrl(GITHUB_TOKEN_URL).catch((error) => console.error("Could not open the OwLLM browser", error)); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent)" }}>↗ Create a token (repo scope)</button>
                     <input type="password" value={ghToken} onChange={(e) => setGhToken(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }} placeholder="ghp_… or github_pat_…" style={{ height: 32, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }} />
                     <div style={{ display: "flex", gap: 8 }}>
-                      <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 32, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "#06080d", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>{ghBusy ? "⏳ Connecting…" : "Connect"}</button>
+                      <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 32, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>{ghBusy ? "⏳ Connecting…" : "Connect"}</button>
                       <button onClick={() => { setGhOpen(false); setGhMsg(""); }} disabled={ghBusy} style={{ ...btn, height: 32, padding: "0 12px", color: "var(--fg-muted)" }}>Cancel</button>
                     </div>
                   </div>
@@ -2308,7 +2485,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                 <button
                   onClick={createNewProject}
                   disabled={npBusy || (!npIsolate && !npFolder.trim())}
-                  style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: "var(--accent)", color: "#06080d", fontWeight: 700, fontSize: 14, cursor: npBusy ? "not-allowed" : "pointer", opacity: npBusy || (!npIsolate && !npFolder.trim()) ? 0.6 : 1 }}
+                  style={{ height: 38, padding: "0 22px", border: "none", borderRadius: 9, background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 700, fontSize: 14, cursor: npBusy ? "not-allowed" : "pointer", opacity: npBusy || (!npIsolate && !npFolder.trim()) ? 0.6 : 1 }}
                 >
                   {npBusy ? "Creating…" : (npIsolate ? "Create isolated project" : "Open folder")}
                 </button>
@@ -2322,10 +2499,55 @@ function CodeWorkspace({ pageId, onTitle }: {
 
   return (
     <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", gap: 8, background: "var(--bg-panel)", color: "var(--fg)" }}>
+      {/* Rainbow agent "aura": a conic-gradient ring painted on each chat
+          pane's border-box (spun by the --owllm-aura-angle @property, shared
+          with the Agents page). The pane's solid fill sits on padding-box so
+          the message/input area keeps its background — the glow reads only
+          OUTSIDE the container. Houdini-less browsers fall back to a static
+          rainbow, still on-brand. */}
+      <style>{`
+        @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
+        @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+      `}</style>
       {/* Header: workspace · model · status */}
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
         <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
+        {/* Terminal controls, right beside the project path (user spec): a real
+            PTY shell in THIS workspace. ⌨ toggles it; ⤢/⤡ docks it above the
+            composer (default) or pops it out to the floating popup. */}
+        {workspace && (
+          <button
+            onClick={() => { if (!termOpen) { setTermOpen(true); setTermHidden(false); } else setTermHidden((h) => !h); }}
+            title={!termOpen ? `Open a terminal in ${wsShort}` : (termHidden ? "Show the terminal" : "Hide the terminal (shell keeps running)")}
+            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap",
+              ...(termOpen && !termHidden ? { background: "var(--accent)", color: "var(--accent-fg)", border: "none", fontWeight: 700 } : { color: "var(--fg-muted)" }) }}
+          >
+            ⌨ Terminal
+          </button>
+        )}
+        {workspace && termOpen && (
+          <button
+            onClick={() => setTermDocked((d) => !d)}
+            title={termDocked ? "Pop out to a floating window" : "Dock above the message box"}
+            style={{ ...btn, height: 26, width: 30, padding: 0, fontSize: 13, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
+          >
+            {termDocked ? "⤢" : "⤡"}
+          </button>
+        )}
+        {/* Project Memory — same shared surface (TeamMemoryModal) and same
+            project scope both code agents read/write, matching the Agents page's
+            🧠 Memory button. Scoped event so only THIS page's modal opens (the
+            keep-alive Agents modal is mounted+hidden alongside). */}
+        {(projectRoot || workspace) && (
+          <button
+            onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-code-memory"))}
+            title="Project Memory — the shared knowledge base both code agents read and write (build commands, decisions, file maps). Same memory as the Agents page for this project; syncs across your PCs via the vault."
+            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
+          >
+            🧠 Memory
+          </button>
+        )}
         {/* Per-page rename — tab shows "folder(rename)" so two pages on the
             same project stay tellable apart. Empty = folder name only. */}
         <input
@@ -2417,7 +2639,8 @@ function CodeWorkspace({ pageId, onTitle }: {
           />
         </div>
         <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
-        <button onClick={clearChatHistory} disabled={busy || secondaryBusy || (chats.length === 0 && messages.length === 0 && secondaryMessages.length === 0)} title="Clear the chat window and all saved chat history" style={btn}>Clear history</button>
+        {/* Clear history is now PER AGENT — each pane's own button lives in that
+            pane's header (below), with an independent ↩ Undo. */}
       </div>
 
       {/* Phase 3: Kanban plan/act board (only while a plan is active) */}
@@ -2513,6 +2736,17 @@ function CodeWorkspace({ pageId, onTitle }: {
               isolated={isolated}
               disabled={busy}
               onStatus={setStatus}
+              // Failed release actions become a coder task; send() queues it
+              // as a ⚡ steer when a run is already in flight. Pre-check the
+              // guards send() would trip so the card reports the truth instead
+              // of claiming "sent" while the task was silently dropped.
+              onFixIssues={(task) => {
+                if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
+                if (!workspace) return "no-workspace";
+                if (!modelId) { setStatus("No model selected — pick one above."); return "no-model"; }
+                void sendRef.current?.(task);
+                return "sent";
+              }}
             />
           </div>
         )}
@@ -2528,10 +2762,23 @@ function CodeWorkspace({ pageId, onTitle }: {
         {/* Primary pane — same box anatomy as the second-agent pane: a slim
             label header over its own scrolling transcript. (Model picker +
             Clear buttons live in the page header above.) */}
-        <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+        <div style={{
+          flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12,
+          // Solid fill on padding-box keeps the message/input area's background;
+          // the rainbow ring paints border-box only, so the aura reads OUTSIDE
+          // the chat container. It exists only while this coder is running.
+          background: primaryAuraActive ? PSYCHEDELIC_AURA_BACKGROUND : "var(--bg-input)",
+          border: primaryAuraActive ? "2px solid transparent" : "1px solid var(--border)", borderRadius: 8,
+          boxShadow: primaryAuraActive ? PSYCHEDELIC_AURA_HALO : undefined,
+          animation: primaryAuraActive ? PSYCHEDELIC_AURA_ANIMATION : undefined,
+        }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
             <span style={{ flex: 1 }} />
+            {primaryUndo && (
+              <button onClick={undoPrimaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
+            )}
+            <button onClick={clearPrimaryHistory} disabled={busy || messages.length === 0} title="Clear this agent's conversation (undoable)" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>Clear history</button>
           </div>
       <div
         ref={transcriptSticky.ref}
@@ -2557,12 +2804,23 @@ function CodeWorkspace({ pageId, onTitle }: {
           )
         ) : (
           messages.map((m, i) => {
+            // Page-generated notices (timing footer, auto-feed pause) are not
+            // agent answers: muted line, no bubble, no Forward button.
+            if (m.kind === "meta") {
+              return (
+                <div key={i} style={{ alignSelf: "center", textAlign: "center", color: "var(--fg-muted)", fontSize: 11.5, padding: "2px 8px" }}>
+                  {m.content}
+                </div>
+              );
+            }
             if (m.role === "tool") {
               return <ToolEventCard key={i} kind={m.kind ?? "tool"} title={m.title ?? "tool"} status={m.status} content={m.content} />;
             }
             const isUser = m.role === "user";
             const isStreaming = busy && i === messages.length - 1 && m.role === "assistant";
-            const canForward = m.role === "assistant" && i === messages.length - 1 && !isStreaming && !!m.content?.trim();
+            // Forward targets the last real answer — trailing meta notices
+            // (e.g. the run timing footer) must not steal the button.
+            const canForward = m.role === "assistant" && !m.kind && !isStreaming && !!m.content?.trim() && messages.slice(i + 1).every((n) => n.kind === "meta");
             return (
               <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                 <ChatBubble
@@ -2574,20 +2832,16 @@ function CodeWorkspace({ pageId, onTitle }: {
                   content={m.content}
                   thinking={m.thinking}
                   ts={m.ts}
+                  images={m.images}
                 />
                 {canForward && (
                   <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
                     <button
                       onClick={() => {
-                        const forwarded: Msg = {
-                          role: "user",
-                          content: `Forwarded from primary agent:\n\n${m.content}`,
-                          ts: Date.now(),
-                        };
-                        setSecondaryMessages((prev) => [...((prev as Msg[] | undefined) ?? []), forwarded]);
                         setSecondaryOpen(true);
+                        forwardToDraft(setSecondaryDraft, secondaryDraftRef, `Forwarded from primary agent:\n\n${m.content}`);
                       }}
-                      title="Forward this reply to the second agent"
+                      title="Forward this reply into the second agent's composer to edit before sending"
                       style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}
                     >
                       → Forward to second agent
@@ -2603,7 +2857,16 @@ function CodeWorkspace({ pageId, onTitle }: {
         {/* Second-agent chat pane — parallel/hand-off coder using the same
             workspace and model as the primary chat, with its own transcript. */}
         {secondaryOpen && (
-          <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+          <div style={{
+            flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12,
+            // Same rainbow aura as the primary pane: rainbow ring on border-box,
+            // solid var(--bg-input) fill on padding-box so the message/input
+            // area stays solid. Spins while the second agent is running.
+            background: secondaryBusy ? PSYCHEDELIC_AURA_BACKGROUND : "var(--bg-input)",
+            border: secondaryBusy ? "2px solid transparent" : "1px solid var(--border)", borderRadius: 8,
+            boxShadow: secondaryBusy ? PSYCHEDELIC_AURA_HALO : undefined,
+            animation: secondaryBusy ? PSYCHEDELIC_AURA_ANIMATION : undefined,
+          }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>
               {/* The second agent's OWN model — independent of the primary chat.
@@ -2616,6 +2879,10 @@ function CodeWorkspace({ pageId, onTitle }: {
                 fallbackLabel="Same as 1st agent"
               />
               <span style={{ flex: 1 }} />
+              {secondaryUndo && (
+                <button onClick={undoSecondaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
+              )}
+              <button onClick={clearSecondaryHistory} disabled={secondaryBusy || secondaryMessages.length === 0} title="Clear this agent's conversation (undoable)" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>Clear history</button>
               <button onClick={() => setSecondaryOpen(false)} title="Close the second-agent pane" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>✕ Close</button>
             </div>
             {/* Transcript — its own scroll column, mirrors the primary chat so the
@@ -2627,6 +2894,13 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
             ) : (
               secondaryMessages.map((m, i) => {
+                if (m.kind === "meta") {
+                  return (
+                    <div key={i} style={{ alignSelf: "center", textAlign: "center", color: "var(--fg-muted)", fontSize: 11.5, padding: "2px 8px" }}>
+                      {m.content}
+                    </div>
+                  );
+                }
                 if (m.role === "tool") {
                   return <ToolEventCard key={i} kind={m.kind ?? "tool"} title={m.title ?? "tool"} status={m.status} content={m.content} />;
                 }
@@ -2644,19 +2918,15 @@ function CodeWorkspace({ pageId, onTitle }: {
                       content={m.content}
                       thinking={m.thinking}
                       ts={m.ts}
+                      images={m.images}
                     />
                     {canForwardToPrimary && (
                       <div style={{ display: "flex", justifyContent: "flex-end", paddingRight: 4 }}>
                         <button
                           onClick={() => {
-                            const forwarded: Msg = {
-                              role: "user",
-                              content: `Forwarded from second agent:\n\n${m.content}`,
-                              ts: Date.now(),
-                            };
-                            setMessages((prev) => [...prev, forwarded]);
+                            forwardToDraft(setDraft, codeDraftRef, `Forwarded from second agent:\n\n${m.content}`);
                           }}
-                          title="Forward this reply to the primary agent"
+                          title="Forward this reply into the primary agent's composer to edit before sending"
                           style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, fontWeight: 600, color: "var(--fg-muted)" }}
                         >
                           ← Forward to primary agent
@@ -2681,6 +2951,31 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={status.includes("\n")
         ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6, flexShrink: 0 }
         : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>{status}</div>
+
+      {/* Docked terminal — a real PTY shell in the workspace, sitting right
+          above the message box (user spec). Same shell as the popup; ⤢ moves
+          it out to the floating window. Kept mounted while hidden so the shell
+          survives a hide/show. */}
+      {termOpen && workspace && termDocked && (
+        <div style={{ display: termHidden ? "none" : "flex", flexDirection: "column", height: 240, flexShrink: 0,
+          background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 8, overflow: "hidden" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 10px", borderBottom: "1px solid var(--border)", userSelect: "none" }}>
+            <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg)" }}>🖥 Terminal — {wsShort}</span>
+            <span style={{ flex: 1 }} />
+            <button className="ghost-btn" onClick={() => setTermDocked(false)} title="Pop out to a floating window" style={{ height: 24, width: 26, padding: 0, fontSize: 13 }}>⤢</button>
+            <button className="ghost-btn" onClick={() => setTermHidden(true)} title="Hide (shell keeps running — reopen from the ⌨ Terminal button)" style={{ height: 24, width: 26, padding: 0, fontSize: 13 }}>—</button>
+            <button className="ghost-btn" onClick={() => { setTermOpen(false); setTermHidden(false); }} title="Close (ends the shell)" style={{ height: 24, width: 26, padding: 0, fontSize: 12 }}>✕</button>
+          </div>
+          <div style={{ flex: 1, minHeight: 0 }}>
+            <PtyTerminal
+              cli={navigator.userAgent.includes("Windows") ? "powershell" : "bash"}
+              args={[]}
+              cwd={workspace}
+              onExit={() => { setTermOpen(false); setTermHidden(false); }}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Composer row — lives in the SAME column as the chat panes, so it is
           always exactly as wide as the chat window. DIVIDED (fine-tune-chat
@@ -2710,13 +3005,14 @@ function CodeWorkspace({ pageId, onTitle }: {
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
           <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
+            ref={codeDraftRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
             placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
             rows={3}
-            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: 13, lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
+            style={{ flex: 1, resize: "vertical", minHeight: 82, maxHeight: 142, padding: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box" }}
           />
           {busy ? (
             <button onClick={stop} style={{ ...btn, background: "rgba(180,60,60,0.85)", color: "#fff", border: "none", height: 44, padding: "0 16px" }}>Stop</button>
@@ -2730,7 +3026,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                 : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
                 : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
                 : "Act directly — read, edit and run in the workspace"}
-              style={{ ...btn, background: "var(--accent)", color: "#06080d", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeImages.length)) && !preparing) ? 1 : 0.5 }}
+              style={{ ...btn, background: "var(--accent)", color: "var(--accent-fg)", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeImages.length)) && !preparing) ? 1 : 0.5 }}
             >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
           )}
         </div>
@@ -2783,8 +3079,9 @@ function CodeWorkspace({ pageId, onTitle }: {
       </div>
 
       {/* 🖥 Terminal popup — a real PTY shell in the workspace folder, floating
-          above THIS app's UI only (fixed overlay, no OS always-on-top). */}
-      {termOpen && workspace && (
+          above THIS app's UI only (fixed overlay, no OS always-on-top). Only
+          when popped out (⤢); the docked variant renders above the composer. */}
+      {termOpen && workspace && !termDocked && (
         <div
           ref={termBoxRef}
           style={{
@@ -2818,6 +3115,17 @@ function CodeWorkspace({ pageId, onTitle }: {
           (a real OwLLM WebviewWindow) the agents drive with the browser_* tools.
           Shared component; also handles the password vault + browser import. */}
       <BrowserPanel open={browserOpen} onClose={() => setBrowserOpen(false)} />
+
+      {/* 🧠 Project Memory — the SAME shared surface the Agents page opens,
+          scoped by the SAME id both code agents use for memory (memoryScope():
+          ruleScope.id ?? projectRoot ?? workspace), so what you see here is
+          exactly what the primary and secondary code agents read and write.
+          Opens on the page-scoped event from the header 🧠 Memory button. */}
+      <TeamMemoryModal
+        openEvent="owllm:open-code-memory"
+        projectId={ruleScope.id || projectRoot || workspace || null}
+        projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "") || undefined}
+      />
 
       {/* File viewer — opening a file in the tree shows its real contents, and
           (via ✎ Edit → 💾 Save) lets you edit and write it back to disk. */}
@@ -2929,8 +3237,8 @@ export default function CodePage() {
       try {
         const { confirm } = await import("@tauri-apps/plugin-dialog");
         const ok = await confirm(
-          `Close this page? Its private worktree (${st.branch}) and any unmerged changes are removed. Merge first to keep them.`,
-          { title: "Close page", kind: "warning" },
+          translateUiText(`Close this page? Its private worktree (${st.branch}) and any unmerged changes are removed. Merge first to keep them.`),
+          { title: translateUiText("Close page"), kind: "warning" },
         );
         if (!ok) return;
       } catch { /* dialog unavailable — proceed */ }
@@ -2942,6 +3250,7 @@ export default function CodePage() {
       }).catch(() => { /* best-effort */ });
     }
     dropPageSession(id);
+    pageActivity.clearDone(id);   // drop any lingering finished-badge for the closed page
     setPages((ps) => {
       const next = ps.filter((p) => p.id !== id);
       if (next.length === 0) {
@@ -2954,26 +3263,99 @@ export default function CodePage() {
     });
   };
 
+  // ---- Per-page activity: glow the working tab, badge finished-while-away ----
+  // Re-render the tab strip whenever any page's coder busy (chatRuntime, updates
+  // even after the page unmounts) or the visible page's aggregate busy / badges
+  // change. Subscribing per-page id also covers a run that outlives its tab.
+  const [, setActivityTick] = useState(0);
+  const bumpActivity = () => setActivityTick((n) => n + 1);
+  useEffect(() => {
+    const unsubs = pages.map((p) => chatRuntime.subscribe(sidForPage(p.id), bumpActivity));
+    unsubs.push(pageActivity.subscribe(bumpActivity));
+    return () => { for (const u of unsubs) u(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pages.map((p) => p.id).join(",")]);
+
+  // A page is "working" if its coder is busy (read straight from chatRuntime, so
+  // background pages stay lit) OR the mounted page reports a second-agent/chat run.
+  const pageWorking = (id: string): boolean => {
+    const snap = chatRuntime.getSnapshot(sidForPage(id)).payload as CodeState | null;
+    return !!snap?.busy || pageActivity.extraBusy(id);
+  };
+
+  // Badge a page whose run FINISHED while you were on another tab (busy→idle on a
+  // non-active page); the active tab is always "seen", so it never carries a badge.
+  const prevWorkingRef = useRef<Map<string, boolean>>(new Map());
+  useEffect(() => {
+    for (const p of pages) {
+      const now = pageWorking(p.id);
+      const was = prevWorkingRef.current.get(p.id) ?? false;
+      if (was && !now && p.id !== active?.id) pageActivity.markDone(p.id);
+      prevWorkingRef.current.set(p.id, now);
+    }
+    if (active) pageActivity.clearDone(active.id);
+  });
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0, background: "var(--bg-panel)" }}>
+      {/* Keyframes for the working-tab glow pulse (parent is always mounted). */}
+      <style>{`
+        @keyframes owllm-tab-working {
+          0%, 100% {
+            box-shadow:
+              0 0 0 1px rgba(255,255,255,0.08),
+              0 0 8px rgba(176,124,255,0.28),
+              0 0 12px rgba(127,212,255,0.18);
+          }
+          50% {
+            box-shadow:
+              0 0 0 1px rgba(255,255,255,0.20),
+              0 0 18px rgba(176,124,255,0.90),
+              0 0 28px rgba(127,212,255,0.55);
+          }
+        }
+      `}</style>
       {/* Tab strip */}
       <div style={{ display: "flex", alignItems: "center", gap: 2, padding: "5px 6px 0", flexShrink: 0, overflowX: "auto" }}>
         {pages.map((p) => {
           const on = p.id === active?.id;
+          const working = pageWorking(p.id);   // an agent is running on this page
+          const done = pageActivity.isDone(p.id); // finished while you were away
           return (
             <div
               key={p.id}
               onClick={() => setActiveId(p.id)}
-              title={p.title}
+              title={working ? `${p.title} — agent working…` : done ? `${p.title} — finished (unseen)` : p.title}
               style={{
                 display: "flex", alignItems: "center", gap: 6, padding: "5px 10px",
                 borderRadius: "7px 7px 0 0", cursor: "pointer", maxWidth: 200, flexShrink: 0,
                 background: on ? "var(--bg-input)" : "transparent",
                 border: "1px solid", borderColor: on ? "var(--border-strong)" : "transparent", borderBottom: "none",
                 color: on ? "var(--fg-strong)" : "var(--fg-muted)", fontSize: 12, fontWeight: on ? 700 : 500,
+                // Glow while an agent runs on this page — visible even from
+                // another tab, so you can see WHERE work is happening.
+                animation: working ? "owllm-tab-working 1.4s ease-in-out infinite" : undefined,
               }}
             >
+              {/* Live rainbow dot while working (matches the agentic aura). */}
+              {working && (
+                <span title="Agent working" style={{ flexShrink: 0, width: 8, height: 8, borderRadius: "50%", background: PSYCHEDELIC_AURA_DOT, boxShadow: "0 0 0 1px rgba(255,255,255,0.20), 0 0 8px rgba(176,124,255,0.85), 0 0 12px rgba(127,212,255,0.45)" }} />
+              )}
               <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p.title || "New page"}</span>
+              {/* Finished-while-away badge (psychedelic check) — cleared when you open the page. */}
+              {done && !working && (
+                <span title="Finished — click to view" style={{
+                  flexShrink: 0,
+                  fontSize: 12,
+                  fontWeight: 900,
+                  lineHeight: 1,
+                  color: "transparent",
+                  background: PSYCHEDELIC_AURA_DOT,
+                  WebkitBackgroundClip: "text",
+                  backgroundClip: "text",
+                  filter: "drop-shadow(0 0 5px rgba(176,124,255,0.85)) drop-shadow(0 0 8px rgba(127,212,255,0.45))",
+                }}>✓</span>
+              )}
               <span
                 onClick={(e) => { e.stopPropagation(); void closePage(p.id); }}
                 title="Close this page (its worktree is removed)"

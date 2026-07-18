@@ -154,7 +154,7 @@ export default function GitBar({ workspace, busy }: { workspace: string; busy: b
               style={{ resize: "vertical", minHeight: 40, borderRadius: 6, border: "1px solid var(--border-strong)", background: "var(--bg-input)", color: "var(--fg)", fontSize: 12, padding: 8, fontFamily: "inherit" }}
             />
             <div style={{ display: "flex", gap: 6 }}>
-              <button onClick={commitAll} disabled={working || !dirty} style={{ ...chip, flex: 1, justifyContent: "center", background: "var(--accent)", color: "#06080d", border: "none", opacity: dirty ? 1 : 0.5 }}>
+              <button onClick={commitAll} disabled={working || !dirty} style={{ ...chip, flex: 1, justifyContent: "center", background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: dirty ? 1 : 0.5 }}>
                 Commit all
               </button>
               <button onClick={viewDiff} disabled={working} style={{ ...chip }}>View diff</button>

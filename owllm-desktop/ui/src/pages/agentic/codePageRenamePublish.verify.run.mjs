@@ -73,6 +73,21 @@ anchor("PublishCards.tsx", cards, "the inline activity row renders in the card",
   '{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}');
 anchor("PublishCards.tsx", cards, "a not-ready Publish stays clickable and surfaces the reason",
   "if (canPublish) { doPublish(); return; }");
+// Fix-with-agent must report the TRUTH: send() has silent guards (no model /
+// no workspace), so the handler returns an outcome and the card reflects it
+// instead of unconditionally claiming "Sent to the coder agent".
+anchor("PublishCards.tsx", cards, "fixWithAgent consumes the dispatch outcome",
+  'const outcome = onFixIssues(');
+anchor("PublishCards.tsx", cards, "a no-model outcome surfaces as an inline error, not a fake success",
+  'if (outcome === "no-model") {');
+anchor("PublishCards.tsx", cards, "a mid-run dispatch tells the user it rides the steer queue",
+  '} else if (outcome === "queued") {');
+anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the busy guard and steers",
+  'if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }');
+anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the model guard",
+  'if (!modelId) { setStatus("No model selected — pick one above."); return "no-model"; }');
+anchor("CodePage.tsx", codePage, "programmatic sends surface guard failures in the transcript",
+  "if (!fromComposer) setMessages((msgs) => [...msgs, { role: \"assistant\", content: `⚠ ${why}");
 
 if (failures > 0) {
   console.error(`\n${failures} source anchor(s) FAILED — the feature code has drifted or been reverted.`);

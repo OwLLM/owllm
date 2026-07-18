@@ -222,7 +222,7 @@ export default function AssetsPage() {
           style={{
             padding: "6px 14px", borderRadius: 6, fontWeight: 600,
             background: selectedProjectId ? "var(--accent)" : "var(--border-strong)",
-            color: "#0a0a0a", border: "none", cursor: selectedProjectId ? "pointer" : "not-allowed",
+            color: "var(--accent-fg)", border: "none", cursor: selectedProjectId ? "pointer" : "not-allowed",
           }}
         >
           {importing ? "Importing…" : "＋ Import"}
@@ -391,7 +391,7 @@ function EmptyState({ title, subtitle, action }: { title: string; subtitle: stri
           onClick={action.onClick}
           style={{
             marginTop: 16, padding: "8px 16px", borderRadius: 6, fontWeight: 600,
-            background: "var(--accent)", color: "#0a0a0a", border: "none", cursor: "pointer",
+            background: "var(--accent)", color: "var(--accent-fg)", border: "none", cursor: "pointer",
           }}
         >
           {action.label}
@@ -698,7 +698,7 @@ function AssetPreviewModal({
                 onClick={onClose}
                 style={{
                   marginLeft: "auto", padding: "8px 18px", borderRadius: 6, fontWeight: 700,
-                  background: "var(--accent)", color: "#0a0a0a", border: "none", cursor: "pointer",
+                  background: "var(--accent)", color: "var(--accent-fg)", border: "none", cursor: "pointer",
                 }}
               >
                 Done

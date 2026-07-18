@@ -171,6 +171,13 @@ pub struct CreateProjectInput {
     pub description: String,
     #[serde(default)]
     pub location: String,
+    /// Create `location` (including parents) for a new/workspace recipe.
+    /// Existing-repository recipes leave this false and require a real folder.
+    #[serde(default)]
+    pub create_location: bool,
+    /// Stable onboarding recipe id written into the initial Project Card.
+    #[serde(default)]
+    pub project_kind: String,
     /// List of agent names (matches `agent_projects.team_json`).
     #[serde(default)]
     pub team: Vec<String>,
@@ -285,6 +292,43 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
     };
     let path2 = path.clone();
     tokio::task::spawn_blocking(move || {
+        let location = input.location.trim();
+        // Goal-aware onboarding owns its workspace lifecycle. Older callers
+        // (notably the text bridges) still create DB-only projects, so retain
+        // that compatibility until those flows explicitly opt into a recipe.
+        let managed_onboarding = input.create_location || !input.project_kind.trim().is_empty();
+        if managed_onboarding && location.is_empty() {
+            return Err("A project folder is required.".to_string());
+        }
+        let workspace = PathBuf::from(location);
+        if input.create_location {
+            if workspace.exists() && !workspace.is_dir() {
+                return Err(format!("project location is not a folder: {}", workspace.display()));
+            }
+            std::fs::create_dir_all(&workspace)
+                .map_err(|e| format!("create project folder {}: {e}", workspace.display()))?;
+            let owllm_dir = workspace.join(".owllm");
+            std::fs::create_dir_all(&owllm_dir)
+                .map_err(|e| format!("create {}: {e}", owllm_dir.display()))?;
+            let card_path = owllm_dir.join("project.json");
+            if !card_path.exists() {
+                let card = serde_json::json!({
+                    "name": input.name.clone(),
+                    "kind": input.project_kind.clone(),
+                    "goal": input.description.clone(),
+                    "mode": "team"
+                });
+                let body = serde_json::to_string_pretty(&card)
+                    .map_err(|e| format!("encode project card: {e}"))?;
+                std::fs::write(&card_path, format!("{body}\n"))
+                    .map_err(|e| format!("write {}: {e}", card_path.display()))?;
+            }
+        } else if managed_onboarding && !workspace.is_dir() {
+            return Err(format!(
+                "This workflow needs an existing folder: {}",
+                workspace.display()
+            ));
+        }
         if let Some(parent) = path2.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }

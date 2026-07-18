@@ -27,6 +27,7 @@ mod accounts;
 mod agent_tools;
 mod agents;
 mod audio;
+mod autostart;
 mod bootstrap;
 mod bridges;
 mod browser;
@@ -42,9 +43,9 @@ mod email;
 mod env_manager;
 mod finetuning;
 mod fleet;
-mod frame_shape;
 mod git;
 mod github;
+mod gguf;
 mod hardware;
 mod huggingface;
 mod kvm;
@@ -122,6 +123,10 @@ pub fn run() {
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.
     paths::init_portable_mode();
+    // WebView2 groups processes by profile rather than executable. A copied
+    // local build must not join (and inherit a hang from) the installed app or
+    // another checkout. Installed and portable profiles remain unchanged.
+    paths::init_isolated_webview_profile();
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -146,6 +151,11 @@ pub fn run() {
             // install ships with a rich, equippable skill set. Gated by a
             // sentinel; retries on a later launch if git/network is unavailable.
             bootstrap::provision_curated_skills_first_run();
+            // Safe, no-risk disk housekeeping: if a WSL sandbox is already running
+            // with large regenerable caches, trim them so the .vhdx doesn't balloon
+            // unattended. Background + best-effort — never cold-starts WSL, never
+            // blocks startup, no admin, no sparse (which modern WSL flags unsafe).
+            std::thread::spawn(sandbox::auto_housekeep_startup);
             // Diagnostic: log the resolved paths on startup so missing
             // models / disappeared user state can be triaged from the
             // log file without F12 console acrobatics. Tries three
@@ -180,6 +190,10 @@ pub fn run() {
             // launch-time vault sync publishes this device's record WITH its
             // dialable endpoints — lazy start left peers endpoint-less records.
             remote_devices::init(&app.handle());
+            // Launch-at-login: self-register on first run (idempotent, per-user,
+            // honors a prior explicit opt-out) so OwLLM comes back after a reboot
+            // without the user re-launching it. Failures are logged and swallowed.
+            autostart::ensure_default_enabled();
             // Module system (registry + per-user installed.json under
             // app_data_dir/modules/). Wizard reads from this; Server /
             // Train pages resolve binaries through it.
@@ -244,10 +258,12 @@ pub fn run() {
             accounts::accounts_test_probe_wsl,
             accounts::claude_cli_complete,
             accounts::codex_cli_complete,
+            accounts::codex_cli_upgrade_for_cwd,
             accounts::codex_cli_stream,
             accounts::claude_cli_stream,
             accounts::kimi_cli_complete,
             accounts::gemini_cli_complete,
+            accounts::grok_cli_complete,
             accounts::cli_cancel_all,
             accounts::subscription_cli_login,
             accounts::subscription_cli_logout,
@@ -339,6 +355,7 @@ pub fn run() {
             vault::vault_sync_devices,
             browser::browser_ensure,
             browser::browser_start,
+            browser::browser_open_url,
             browser::browser_cmd,
             browser::browser_stop,
             browser::browser_status,
@@ -352,6 +369,7 @@ pub fn run() {
             browser_vault::browser_vault_autofill,
             browser_import::browser_import_scan,
             browser_import::browser_import_run,
+            browser_import::browser_import_csv,
             git::git_status,
             git::git_branches,
             git::git_checkout,
@@ -380,8 +398,8 @@ pub fn run() {
             hardware::set_gpu_selection,
             models::list_models,
             overlay_frame::overlay_frame_enabled,
+            overlay_frame::overlay_frame_set_visible,
             overlay_frame::overlay_frame_capture_geometry,
-            frame_shape::frame_input_region,
             projects::list_projects,
             projects::create_project,
             projects::update_project,
@@ -404,6 +422,8 @@ pub fn run() {
             server::server_status,
             server::server_start,
             server::server_stop,
+            autostart::autostart_get,
+            autostart::autostart_set,
             server::inference_expose_get,
             server::inference_expose_set,
             skill_library::list_skill_sources,
@@ -436,6 +456,7 @@ pub fn run() {
             huggingface::delete_model_weight,
             recommendations::models_recommended,
             paths::shell_open_url,
+            paths::update_install_mode,
             paths::paths_debug,
             paths::llama_server_path,
             readiness::app_readiness,
@@ -527,6 +548,8 @@ pub fn run() {
             sandbox::sandbox_disk_usage,
             sandbox::sandbox_clear_caches,
             sandbox::sandbox_reclaim_disk,
+            sandbox::sandbox_enable_sparse,
+            sandbox::sandbox_trim,
             sandbox::sandbox_create_project,
             sandbox::sandbox_list_projects,
             sandbox::sandbox_provision,

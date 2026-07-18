@@ -10,7 +10,10 @@
 // the trail (accountability for what ran on your machine), the same visibility
 // a shell history gives.
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::{Read, Seek, SeekFrom},
+    path::{Path, PathBuf},
+};
 
 use serde_json::{json, Value};
 
@@ -93,9 +96,39 @@ pub fn write(record: &Value) {
 /// The last `limit` audit lines, newest last, for the UI viewer.
 pub fn tail(limit: usize) -> Vec<Value> {
     let Some(path) = audit_path() else { return vec![] };
-    let Ok(txt) = std::fs::read_to_string(&path) else { return vec![] };
-    let all: Vec<Value> = txt
-        .lines()
+    if limit == 0 {
+        return vec![];
+    }
+
+    // The audit is append-only and can grow for months. Reading and parsing the
+    // whole file just to render the newest rows used to stall the Devices page.
+    let Ok(mut file) = std::fs::File::open(&path) else { return vec![] };
+    let Ok(mut offset) = file.metadata().map(|m| m.len()) else { return vec![] };
+    let mut bytes = Vec::new();
+    const CHUNK_BYTES: u64 = 64 * 1024;
+
+    while offset > 0 && bytes.iter().filter(|b| **b == b'\n').count() <= limit {
+        let chunk_len = offset.min(CHUNK_BYTES) as usize;
+        offset -= chunk_len as u64;
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return vec![];
+        }
+        let mut chunk = vec![0; chunk_len];
+        if file.read_exact(&mut chunk).is_err() {
+            return vec![];
+        }
+        chunk.extend_from_slice(&bytes);
+        bytes = chunk;
+    }
+
+    let text = String::from_utf8_lossy(&bytes);
+    let mut lines = text.lines();
+    // A chunk that did not start at byte zero begins in the middle of one JSON
+    // line. Drop that partial record before parsing the complete tail.
+    if offset > 0 {
+        let _ = lines.next();
+    }
+    let all: Vec<Value> = lines
         .filter(|l| !l.trim().is_empty())
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
         .collect();

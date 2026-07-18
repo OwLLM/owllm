@@ -27,6 +27,7 @@ import { vaultStatus } from "../pages/agentic/github";
 // against the remote blob's syncedAt to decide whether to adopt. NOT synced.
 const LAST_KEY = "owllm:sync-last";
 const DEVICE_KEY = "owllm:sync-device";
+const USER_INTERACTED_KEY = "owllm:session:user-interacted";
 
 // Keys that must NOT sync (device-local / regenerable / machine-specific).
 const DENY_EXACT = new Set<string>([
@@ -209,6 +210,11 @@ export async function syncSigningNow(): Promise<boolean> {
 /// the refresh event and let the next launch pick up any residual diff.
 function reloadOnce(): boolean {
   try {
+    // Once the user has clicked or typed, a full reload would cancel their
+    // work just because a background sync finished. Components that own data
+    // receive their normal refresh events below instead; a complete repaint is
+    // only acceptable during an untouched initial boot.
+    if (sessionStorage.getItem(USER_INTERACTED_KEY) === "1") return false;
     if (sessionStorage.getItem("owllm:vault:reloaded")) return false;
     sessionStorage.setItem("owllm:vault:reloaded", "1");
   } catch { return false; /* storage blocked → never risk a reload loop */ }

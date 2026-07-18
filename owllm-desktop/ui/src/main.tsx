@@ -7,6 +7,7 @@ import UpdateController from "./UpdatePrompt";
 import { ChatRuntimeProvider } from "./runtime/ChatRuntimeProvider";
 import { bootstrapTheme } from "./theme";
 import { bootstrapLocalization, LocalizationProvider } from "./localization";
+import { installOwllmWebLinkInterceptor } from "./utils/openWebUrl";
 import "./styles.css";
 
 // Apply the persisted theme BEFORE the first React render so the very
@@ -26,6 +27,10 @@ function isTauriContext(): boolean {
   const w = window as any;
   return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__ || w.__TAURI_METADATA__);
 }
+
+// Enforce the app-wide rule even for a future plain <a href="https://…">.
+// Local file/download anchors are intentionally unaffected.
+if (isTauriContext()) installOwllmWebLinkInterceptor();
 
 function BootCover() {
   // The cover masks the startup flash until the first real frame paints.

@@ -9,6 +9,7 @@
 
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "../utils/openWebUrl";
 import { getActivity } from "./activityStats";
 import { redactForReport } from "./redact";
 // Model discovery + dispatch: the SAME machinery the rest of the app uses
@@ -33,9 +34,7 @@ import ActionIcon, { type ActionIconName } from "../components/ActionIcon";
 
 /// Open a URL in the user's real browser (native shell; window.open fallback).
 function openExternal(url: string) {
-  invoke("shell_open_url", { url }).catch(() => {
-    try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* ignore */ }
-  });
+  openWebUrl(url).catch((error) => console.error("Could not open the OwLLM browser", error));
 }
 
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };

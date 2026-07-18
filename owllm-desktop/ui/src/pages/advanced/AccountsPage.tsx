@@ -11,7 +11,7 @@
 //
 // Backend contract unchanged: accounts_status / accounts_save_api_key /
 // accounts_delete_secret / accounts_test_probe / subscription_cli_login /
-// cli_install_stream / shell_open_url. The CardState shape is per-route
+// cli_install_stream / browser_open_url. The CardState shape is per-route
 // now (one CardState entry per subscription OR api spec).
 
 import { useEffect, useRef, useState } from "react";
@@ -27,6 +27,7 @@ import PtyTerminal from "./PtyTerminal";
 import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
+import { openWebUrl } from "../../utils/openWebUrl";
 
 const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
 const HOST_LABEL = HOST_IS_WINDOWS
@@ -1011,23 +1012,16 @@ export default function AccountsPage() {
       if (route.webOnly) {
         // Open in the OwLLM in-app browser (NOT the system browser): its cookie
         // store persists, so the sign-in survives and agents can use the session
-        // through the built-in browser. The old shell_open_url launched the
-        // EXTERNAL browser, whose login OwLLM never saw — "I log in but nothing
-        // happens". Falls back to the system browser only if ours won't start.
+        // through the built-in browser. External-browser logins are deliberately
+        // forbidden because OwLLM and its browser tools cannot reuse them.
         const url = route.webOnly.url;
         logInfo(route.backend, `Opening ${url} in the OwLLM browser — sign in there; your session is saved and available to agents.`);
         (async () => {
           try {
-            await invoke("browser_ensure");
-            await invoke("browser_start");
-            await invoke("browser_cmd", { action: "navigate", params: { url } });
-            await invoke("browser_focus");
+            await openWebUrl(url);
             logInfo(route.backend, `${provider.name} opened in the OwLLM browser. Complete the sign-in there — the session stays logged in for agents that drive the browser.`);
           } catch (e) {
-            logInfo(route.backend, `[warn] OwLLM browser unavailable (${e}); opening in your system browser instead.`);
-            invoke("shell_open_url", { url }).catch((e2) => {
-              logInfo(route.backend, `[error] couldn't open a browser: ${e2}`);
-            });
+            logInfo(route.backend, `[error] OwLLM browser unavailable: ${e}`);
           }
         })();
         return;

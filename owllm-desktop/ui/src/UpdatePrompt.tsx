@@ -14,6 +14,7 @@
 
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "./utils/openWebUrl";
 
 const ICONS = "/Page_icons";
 
@@ -115,11 +116,9 @@ export default function UpdateController() {
   };
 
   // Manual-mode path (Linux deb/rpm): open the releases page in the
-  // default browser and dismiss — there is nothing we can install in place.
+  // OwLLM browser and dismiss — there is nothing we can install in place.
   const onDownload = () => {
-    invoke("shell_open_url", { url: RELEASES_URL }).catch(() => {
-      try { window.open(RELEASES_URL, "_blank", "noopener,noreferrer"); } catch { /* ignore */ }
-    });
+    openWebUrl(RELEASES_URL).catch((error) => console.error("Could not open the OwLLM browser", error));
     dismiss();
   };
 

@@ -355,6 +355,7 @@ pub fn run() {
             vault::vault_sync_devices,
             browser::browser_ensure,
             browser::browser_start,
+            browser::browser_open_url,
             browser::browser_cmd,
             browser::browser_stop,
             browser::browser_status,

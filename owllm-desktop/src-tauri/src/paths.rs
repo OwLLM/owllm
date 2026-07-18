@@ -31,42 +31,11 @@ use std::path::{Path, PathBuf};
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 
-/// Open a URL in the user's default browser. Used by the AccessTokens
-/// pane to launch huggingface.co/settings/tokens and the HF model page.
-/// Refuses anything that isn't http(s) so a compromised React side
-/// can't pass `file://...` and read local files.
-#[tauri::command]
-pub fn shell_open_url(url: String) -> Result<(), String> {
-    let lower = url.to_lowercase();
-    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
-        return Err("only http(s) urls allowed".into());
-    }
-    #[cfg(windows)]
-    {
-        // `cmd /c start "" "<url>"` is the canonical Windows way to
-        // launch the registered handler without inheriting our window.
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/c", "start", "", &url])
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .map_err(|e| format!("spawn: {e}"))?;
-    }
-    #[cfg(not(windows))]
-    {
-        // Best-effort cross-platform fallback.
-        let opener = if cfg!(target_os = "macos") {
-            "open"
-        } else {
-            "xdg-open"
-        };
-        std::process::Command::new(opener)
-            .arg(&url)
-            .spawn()
-            .map_err(|e| format!("spawn: {e}"))?;
-    }
-    Ok(())
+/// Compatibility alias for older UI bundles. All user-facing web links must
+/// stay inside OwLLM's persistent browser, on every operating system.
+#[tauri::command(async)]
+pub fn shell_open_url(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    crate::browser::open_web_url(&app, &url)
 }
 
 /// How this install can take updates.

@@ -1269,6 +1269,53 @@ fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     Ok("browser started".to_string())
 }
 
+/// Open an http(s) URL in OwLLM's persistent browser window.
+///
+/// This is the single entry point for user-facing web links throughout the
+/// desktop app. It deliberately does not wait for the page bridge: buttons
+/// such as "Get a token" must return immediately even when the destination is
+/// a slow login page. Agent browser tools continue to use `browser_cmd`, which
+/// waits for the document because they need to interact with its contents.
+fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
+    let url = raw_url.trim();
+    if url.is_empty() {
+        return Err("web url is empty".to_string());
+    }
+    let parsed: tauri::Url = url
+        .parse()
+        .map_err(|e| format!("bad web url {url:?}: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("only http(s) urls can open in the OwLLM browser".to_string());
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn open_web_url(app: &tauri::AppHandle, raw_url: &str) -> Result<String, String> {
+    let url = raw_url.trim();
+    let parsed = parse_web_url(url)?;
+
+    let _operation = lock_browser_operation();
+    if get_window(app).is_none() {
+        build_window(app, parsed)?;
+    } else {
+        content_webview(app)
+            .ok_or_else(|| "OwLLM browser page is unavailable".to_string())?
+            .navigate(parsed)
+            .map_err(|e| format!("navigate failed: {e}"))?;
+    }
+    if let Some(win) = get_window(app) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+    Ok(format!("Opened {url} in the OwLLM browser"))
+}
+
+#[tauri::command(async)]
+pub fn browser_open_url(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    open_web_url(&app, &url)
+}
+
 /// Switch device emulation (desktop / iphone / android / tablet). The UA can
 /// only be set at build time, so if the window is open we rebuild it in place
 /// and re-navigate to the page it was on. Logins survive (stable profile dir).
@@ -1526,6 +1573,20 @@ mod tests {
             "1270.0.0.1",
         ] {
             assert!(!is_local_host(u), "{u} should default to https");
+        }
+    }
+
+    #[test]
+    fn user_web_links_accept_http_and_reject_local_schemes() {
+        assert_eq!(
+            parse_web_url(" https://huggingface.co/settings/tokens ")
+                .unwrap()
+                .as_str(),
+            "https://huggingface.co/settings/tokens"
+        );
+        assert!(parse_web_url("http://localhost:5173").is_ok());
+        for bad in ["", "file:///tmp/model", "C:/models/model.gguf", "javascript:alert(1)"] {
+            assert!(parse_web_url(bad).is_err(), "{bad:?} must not open as web content");
         }
     }
 

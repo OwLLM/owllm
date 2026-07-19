@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::webview::{Color, Webview, WebviewBuilder};

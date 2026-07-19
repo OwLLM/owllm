@@ -527,6 +527,8 @@ pub fn run() {
             github::github_device_start,
             github::github_device_poll,
             github::github_create_repo,
+            github::github_repo_url,
+            github::github_clone_project,
             vault::vault_status,
             vault::vault_ensure,
             vault::vault_read_remote_state,

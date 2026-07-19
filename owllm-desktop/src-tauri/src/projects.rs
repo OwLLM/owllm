@@ -30,6 +30,12 @@ pub struct ProjectRow {
     pub name: String,
     pub description: String,
     pub location: String,
+    /// Shared portable identity. Unlike `location`, this follows the project
+    /// across devices and is the only safe way to materialize it on a new PC.
+    pub repo_url: String,
+    /// Stable origin metadata for the UI. Folder bindings remain per-device.
+    pub created_device_id: String,
+    pub created_device_name: String,
     pub trust_writes: bool,
     pub auto_approve_all: bool,
     pub team: Vec<String>,
@@ -92,6 +98,9 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
             updated_at TEXT NOT NULL,\
             team_default_model_id TEXT NOT NULL DEFAULT '',\
             location_device_id TEXT NOT NULL DEFAULT ''\
+            ,repo_url TEXT NOT NULL DEFAULT ''\
+            ,created_device_id TEXT NOT NULL DEFAULT ''\
+            ,created_device_name TEXT NOT NULL DEFAULT ''\
         )",
         [],
     )
@@ -110,6 +119,18 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     );
     let _ = conn.execute(
         "ALTER TABLE agent_projects ADD COLUMN location_device_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN repo_url TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN created_device_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN created_device_name TEXT NOT NULL DEFAULT ''",
         [],
     );
     // Migrate the old global location column into a binding owned by THIS
@@ -173,7 +194,9 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
     let mut stmt = conn
         .prepare(
             "SELECT id, name, description, \
-             CASE WHEN location_device_id = ?1 THEN location ELSE '' END, trust_writes, \
+             CASE WHEN location_device_id = ?1 THEN location ELSE '' END, \
+             COALESCE(repo_url, ''), COALESCE(created_device_id, ''), \
+             COALESCE(created_device_name, ''), trust_writes, \
              auto_approve_all, team_json, team_default_model_id, graph_json, \
              chat_json, agent_logs_json, updated_at \
              FROM agent_projects ORDER BY updated_at DESC",
@@ -181,26 +204,65 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
         .map_err(|e| format!("prepare: {e}"))?;
     let rows = stmt
         .query_map(rusqlite::params![self_id], |r| {
-            let team_json: String = r.get(6)?;
+            let team_json: String = r.get(9)?;
             let team: Vec<String> = serde_json::from_str(&team_json).unwrap_or_default();
             Ok(ProjectRow {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 description: r.get::<_, String>(2).unwrap_or_default(),
                 location: r.get::<_, String>(3).unwrap_or_default(),
-                trust_writes: r.get::<_, i64>(4).unwrap_or(0) != 0,
-                auto_approve_all: r.get::<_, i64>(5).unwrap_or(0) != 0,
+                repo_url: r.get::<_, String>(4).unwrap_or_default(),
+                created_device_id: r.get::<_, String>(5).unwrap_or_default(),
+                created_device_name: r.get::<_, String>(6).unwrap_or_default(),
+                trust_writes: r.get::<_, i64>(7).unwrap_or(0) != 0,
+                auto_approve_all: r.get::<_, i64>(8).unwrap_or(0) != 0,
                 team,
-                team_default_model_id: r.get::<_, String>(7).unwrap_or_default(),
-                graph_json: r.get::<_, String>(8).unwrap_or_default(),
-                chat_json: r.get::<_, String>(9).unwrap_or_default(),
-                agent_logs_json: r.get::<_, String>(10).unwrap_or_default(),
-                updated_at: r.get::<_, String>(11).unwrap_or_default(),
+                team_default_model_id: r.get::<_, String>(10).unwrap_or_default(),
+                graph_json: r.get::<_, String>(11).unwrap_or_default(),
+                chat_json: r.get::<_, String>(12).unwrap_or_default(),
+                agent_logs_json: r.get::<_, String>(13).unwrap_or_default(),
+                updated_at: r.get::<_, String>(14).unwrap_or_default(),
             })
         })
         .map_err(|e| format!("query: {e}"))?;
     let out: Result<Vec<_>, _> = rows.collect();
-    out.map_err(|e| format!("row decode: {e}"))
+    let mut out = out.map_err(|e| format!("row decode: {e}"))?;
+    drop(stmt);
+    // Upgrade existing local repositories lazily. This makes GitHub the shared
+    // identity without asking users to re-create projects that already have an
+    // origin remote.
+    for project in &mut out {
+        if project.repo_url.is_empty() && !project.location.trim().is_empty() {
+            if let Some(url) = git_origin(&project.location) {
+                let _ = conn.execute(
+                    "UPDATE agent_projects SET repo_url = ?2 WHERE id = ?1",
+                    rusqlite::params![project.id, url],
+                );
+                project.repo_url = url;
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn git_origin(location: &str) -> Option<String> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C")
+        .arg(location)
+        .args(["remote", "get-url", "origin"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    let out = cmd.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!url.is_empty() && url.contains("github.com")).then_some(url)
 }
 
 // ---------- Write API ----------
@@ -212,6 +274,8 @@ pub struct CreateProjectInput {
     pub description: String,
     #[serde(default)]
     pub location: String,
+    #[serde(default)]
+    pub repo_url: String,
     /// Create `location` (including parents) for a new/workspace recipe.
     /// Existing-repository recipes leave this false and require a real folder.
     #[serde(default)]
@@ -382,16 +446,23 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
         let team_json = serde_json::to_string(&input.team).unwrap_or("[]".into());
 
         let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
+        let self_name = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "This PC".to_string());
         conn.execute(
-            "INSERT INTO agent_projects (id, name, description, location, location_device_id, trust_writes, auto_approve_all, \
-             team_json, model_overrides_json, graph_json, created_at, updated_at, team_default_model_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '{}', ?9, ?10, ?10, ?11)",
+            "INSERT INTO agent_projects (id, name, description, location, location_device_id, repo_url, \
+             created_device_id, created_device_name, trust_writes, auto_approve_all, team_json, \
+             model_overrides_json, graph_json, created_at, updated_at, team_default_model_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '{}', ?12, ?13, ?13, ?14)",
             rusqlite::params![
                 id,
                 input.name,
                 input.description,
                 input.location,
                 self_id,
+                input.repo_url,
+                self_id,
+                self_name,
                 input.trust_writes as i64,
                 input.auto_approve_all as i64,
                 team_json,
@@ -407,6 +478,9 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
             name: input.name,
             description: input.description,
             location: input.location,
+            repo_url: input.repo_url,
+            created_device_id: self_id,
+            created_device_name: self_name,
             trust_writes: input.trust_writes,
             auto_approve_all: input.auto_approve_all,
             team: input.team,
@@ -429,6 +503,7 @@ pub struct UpdateProjectInput {
     pub name: Option<String>,
     pub description: Option<String>,
     pub location: Option<String>,
+    pub repo_url: Option<String>,
     pub trust_writes: Option<bool>,
     pub auto_approve_all: Option<bool>,
     pub team: Option<Vec<String>>,
@@ -472,6 +547,10 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
             params.push(Box::new(
                 crate::remote_devices::self_device_id().unwrap_or_default(),
             ));
+        }
+        if let Some(v) = input.repo_url {
+            sets.push("repo_url = ?");
+            params.push(Box::new(v));
         }
         if let Some(v) = input.trust_writes {
             sets.push("trust_writes = ?");

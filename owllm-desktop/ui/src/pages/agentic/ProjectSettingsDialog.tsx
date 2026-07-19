@@ -28,6 +28,7 @@ type Team = {
 };
 type ProjectRow = {
   id: string; name: string; description: string; location: string;
+  repo_url: string; created_device_id: string; created_device_name: string;
   trust_writes: boolean; auto_approve_all: boolean;
   team: string[]; team_default_model_id: string; graph_json: string;
   chat_json: string; agent_logs_json: string; updated_at: string;
@@ -124,6 +125,8 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   // team"). The <select> options carry the id; create resolves the id.
   const [teamId, setTeamId] = useState("");
   const [newTrust, setNewTrust] = useState(false);
+  const [githubAccount, setGithubAccount] = useState<{ connected: boolean; login?: string | null }>({ connected: false });
+  const [createGithubRepo, setCreateGithubRepo] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   // Visual onboarding: step 1 = "what do you want to make?" card grid,
@@ -181,6 +184,10 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     setErr(null); setActMsg(null); setActBusy(null); setConfirmDelete(false);
     if (mode === "new") {
       setName(""); setDescription(""); setNewLocation(""); setNewTrust(false);
+      setCreateGithubRepo(true);
+      void invoke<{ connected: boolean; login?: string | null }>("github_status")
+        .then(setGithubAccount)
+        .catch(() => setGithubAccount({ connected: false }));
       // A template explicitly handed in (e.g. "use this team" from the teams
       // page) skips the card grid — the user already chose their setup.
       const preset = defaultTeamName ? teams.find(t => t.name === defaultTeamName) : null;
@@ -291,6 +298,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
       const row = await invoke<ProjectRow>("create_project", {
         input: {
           name: name.trim(), description: description.trim(), location: newLocation.trim(),
+          repo_url: "",
           create_location: kind?.folderMode === "create",
           project_kind: kind?.key ?? "custom",
           team: team.agents.map(a => a.name),
@@ -303,7 +311,31 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
           team_default_model_id: "", trust_writes: newTrust, auto_approve_all: false,
         },
       });
+      let repoUrl = await invoke<string>("github_repo_url", { cwd: row.location }).catch(() => "");
+      let repoSetupError = "";
+      if (githubAccount.connected && createGithubRepo && !repoUrl) {
+        try {
+          await invoke<string>("github_create_repo", {
+            cwd: row.location,
+            name: name.trim(),
+            private: true,
+          });
+          repoUrl = await invoke<string>("github_repo_url", { cwd: row.location });
+        } catch (e: any) {
+          // The local project already exists at this point. Finish onboarding
+          // exactly once and surface the portable-identity failure; leaving the
+          // dialog open would let Retry create duplicate DB rows.
+          repoSetupError = String(e?.message ?? e);
+        }
+      }
+      if (repoUrl) {
+        await invoke("update_project", { input: { id: row.id, repo_url: repoUrl } });
+        row.repo_url = repoUrl;
+      }
       onCreated(row, { kind: kind?.key ?? "custom", action: kind?.kickoff ?? "goal" }); onClose();
+      if (repoSetupError) window.setTimeout(() => {
+        window.alert(`Project created locally, but GitHub setup failed:\n\n${repoSetupError}\n\nIt will remain tied to this PC until a repository is connected.`);
+      }, 0);
     } catch (e: any) { setErr(String(e?.message ?? e)); }
     finally { setBusy(false); }
   };
@@ -587,6 +619,40 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                   <button onClick={browseNewLocation} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
                 </div>
               </div>
+              <div
+                data-ui="GitHubPortableProjectChoice"
+                style={{
+                  display: "flex", alignItems: "flex-start", gap: 12, padding: 13,
+                  borderRadius: 12, background: "rgba(var(--accent-rgb),0.10)",
+                  border: "1px solid rgba(var(--accent-rgb),0.48)",
+                  boxShadow: "0 0 26px rgba(var(--accent-rgb),0.08)",
+                }}
+              >
+                <span style={{ fontSize: 24, lineHeight: 1 }}>🐙</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 800 }}>
+                    GitHub is the shared project identity
+                  </div>
+                  <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>
+                    The repository carries the work, Project Card and memory between computers.
+                    Local folders stay tied to each PC and are never copied as paths.
+                  </div>
+                  {githubAccount.connected ? (
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 9, color: "var(--fg)", fontSize: 12.5, cursor: "pointer" }}>
+                      <input
+                        type="checkbox"
+                        checked={createGithubRepo}
+                        onChange={(e) => setCreateGithubRepo(e.target.checked)}
+                      />
+                      <span><b>Create a private GitHub repository</b> as <b>{githubAccount.login || "your account"}/{name.trim() || "project"}</b> (recommended)</span>
+                    </label>
+                  ) : (
+                    <div style={{ color: "var(--warn)", fontSize: 12, fontWeight: 700, marginTop: 8 }}>
+                      Connect GitHub in Settings to make this project portable. Without a repo it stays usable only on this PC.
+                    </div>
+                  )}
+                </div>
+              </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <label style={LBL}>Goal / starting idea <span style={{ opacity: 0.6, textTransform: "none", letterSpacing: 0 }}>— this becomes the first real workflow input</span></label>
                 <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="What must this project accomplish?" rows={3} style={{ ...INPUT, height: "auto", padding: "8px 12px", resize: "vertical", minHeight: 58 }} />
@@ -646,11 +712,20 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                 <input value={location} onChange={e => onChangeLocation(e.target.value)} placeholder="/path/to/repo · github.com/me/x" style={{ ...INPUT, flex: 1, ...(folderMissing ? { borderColor: "#e0a03a" } : null) }} />
                 <button onClick={() => browse(onChangeLocation)} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
               </div>
-              {folderMissing && (
+              {(folderMissing || !location.trim()) && (
                 <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#e0a03a", background: "rgba(224,160,58,0.10)", border: "1px solid rgba(224,160,58,0.35)", borderRadius: 8, padding: "6px 10px" }}>
-                  <span>📁 This folder isn't on this device — the project (chat, memory & settings) synced from another machine. <b>Browse…</b> to point it at a local folder here.</span>
+                  <span>📁 No folder is bound on this device. This project was created on <b>{project?.created_device_name || "another computer"}</b>. {project?.repo_url ? "Use the project hub to clone its GitHub repository into a new local folder." : "Create a GitHub repository on the source computer before using it here."}</span>
                 </div>
               )}
+            </div>
+            <div style={{ padding: 12, borderRadius: 10, background: "rgba(var(--accent-rgb),0.08)", border: "1px solid rgba(var(--accent-rgb),0.4)" }}>
+              <label style={LBL}>Portable identity</label>
+              <div style={{ color: project?.repo_url ? "var(--accent-ink)" : "var(--warn)", fontSize: 12.5, fontWeight: 750, marginTop: 5 }}>
+                {project?.repo_url ? `🐙 ${project.repo_url}` : "No GitHub repository — this project cannot be opened safely on another PC"}
+              </div>
+              <div style={{ color: "var(--fg-muted)", fontSize: 11, marginTop: 5 }}>
+                Created on {project?.created_device_name || "a legacy/unknown device"} · local paths are stored separately for every computer.
+              </div>
             </div>
             {/* Security */}
             <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, borderRadius: 10, background: "var(--bg-elevated)", border: "1px solid var(--border)" }}>

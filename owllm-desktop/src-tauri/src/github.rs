@@ -523,6 +523,89 @@ pub async fn github_create_repo(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Return the portable GitHub identity for a local project, if it has one.
+/// Absolute folders are device-local; the origin URL is safe to sync.
+#[tauri::command]
+pub async fn github_repo_url(cwd: String) -> Result<String, String> {
+    let host = crate::agent_tools::host_cwd(&cwd);
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("-C")
+            .arg(&host)
+            .args(["remote", "get-url", "origin"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd.output().map_err(|e| format!("couldn't run git: {e}"))?;
+        if !out.status.success() {
+            return Ok(String::new());
+        }
+        let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        Ok(if url.contains("github.com") { url } else { String::new() })
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Materialize a portable project on THIS computer. The caller chooses a
+/// parent folder; the repository name becomes a new child directory. We never
+/// reuse a peer device's absolute path.
+#[tauri::command]
+pub async fn github_clone_project(repo_url: String, parent: String) -> Result<String, String> {
+    let repo_url = repo_url.trim().to_string();
+    if !repo_url.contains("github.com") {
+        return Err("This project has no valid GitHub repository.".to_string());
+    }
+    let parent = std::path::PathBuf::from(parent.trim());
+    if !parent.is_dir() {
+        return Err("Choose an existing parent folder on this computer.".to_string());
+    }
+    let leaf = repo_url
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .rsplit(['/', ':'])
+        .next()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or("project");
+    let destination = parent.join(leaf);
+    if destination.exists() {
+        return Err(format!(
+            "{} already exists. Open that folder instead, or choose another parent.",
+            destination.display()
+        ));
+    }
+    let dest_text = destination.to_string_lossy().to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut cmd = std::process::Command::new("git");
+        cmd.arg("clone")
+            .arg("--")
+            .arg(&repo_url)
+            .arg(&destination)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd.output().map_err(|e| format!("couldn't run git clone: {e}"))?;
+        if !out.status.success() {
+            let _ = std::fs::remove_dir_all(&destination);
+            return Err(format!(
+                "GitHub clone failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(dest_text)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
 /// Disconnect: forget the token and scrub credentials from the sandbox and
 /// host. Best effort — always clears the stored token even if scrubbing fails.
 #[tauri::command]

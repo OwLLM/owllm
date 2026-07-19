@@ -27,6 +27,7 @@ import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
+import { projectAvailability, projectOriginLabel } from "./projectPortability";
 import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
@@ -109,6 +110,12 @@ type CodeState = {
   draft: string;
   busy: boolean;
   status: string;
+  /// Portable project identity + origin label. The absolute workspace remains
+  /// local to this device and is denied from vault sync.
+  projectId?: string;
+  repoUrl?: string;
+  createdDeviceId?: string;
+  createdDeviceName?: string;
   // ---- per-page git-worktree isolation (every page = its own branch off HEAD) ----
   projectRoot?: string;    // the REAL repo the worktree was cut from (merge target)
   branch?: string;         // the worktree's branch
@@ -172,6 +179,13 @@ type WtCreate =
 
 // ---- Multi-page shell state (the tab strip) --------------------------------
 type CodePageMeta = { id: string; title: string };
+type ProjectCatalogRow = {
+  id: string; name: string; description: string; location: string;
+  repo_url: string; created_device_id: string; created_device_name: string;
+  team: string[]; trust_writes: boolean; auto_approve_all: boolean;
+  team_default_model_id: string; graph_json: string; chat_json: string;
+  agent_logs_json: string; updated_at: string;
+};
 const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
 const PAGE_SESSION_PREFIX = "owllm:code:page:";
@@ -349,7 +363,10 @@ const CODE_RECENTS_MAX = 12;
 // they survive tab switches AND app restarts (the chat used to be plain useState
 // that evaporated). Each thread is one conversation; the newest is first.
 type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string; images?: { src: string; alt?: string }[] };
-type ChatThread = { id: string; title: string; ts: number; messages: ChatMsg[] };
+type ChatThread = {
+  id: string; title: string; ts: number; messages: ChatMsg[];
+  createdDeviceId?: string; createdDeviceName?: string;
+};
 const CHATS_KEY = "owllm:code:chats";
 const CHATS_MAX = 60;
 // The just-chat surface is GLOBAL (one thread list shared by every page). Its
@@ -652,7 +669,11 @@ function CodeWorkspace({ pageId, onTitle }: {
       : c));
   const newChat = () => {
     const id = newThreadId();
-    setChats((cs) => [{ id, title: "New chat", ts: Date.now(), messages: [] }, ...cs]);
+    setChats((cs) => [{
+      id, title: "New chat", ts: Date.now(), messages: [],
+      createdDeviceId: deviceIdentity.device_id,
+      createdDeviceName: deviceIdentity.name,
+    }, ...cs]);
     setChatId(id); setShowHistory(false); setChatImages([]); setChatDraft("");
   };
   const deleteThread = (id: string) => { setChats((cs) => cs.filter((c) => c.id !== id)); if (chatId === id) setChatId(""); };
@@ -701,6 +722,24 @@ function CodeWorkspace({ pageId, onTitle }: {
   // Recent projects, for the onboarding screen shown when no folder is open.
   const [recents, setRecents] = useState<string[]>(getCodeRecents);
   const [recentsMeta, setRecentsMeta] = useState<Record<string, RecentMeta>>(getRecentsMeta);
+  const [catalogProjects, setCatalogProjects] = useState<ProjectCatalogRow[]>([]);
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [ghostProjectId, setGhostProjectId] = useState("");
+  const [deviceIdentity, setDeviceIdentity] = useState<{ device_id: string; name: string }>({ device_id: "", name: "This PC" });
+  const refreshProjectCatalog = () =>
+    invoke<ProjectCatalogRow[]>("list_projects")
+      .then((rows) => { setCatalogProjects(rows); return rows; })
+      .catch(() => [] as ProjectCatalogRow[]);
+  useEffect(() => {
+    void refreshProjectCatalog();
+    void invoke<{ device_id: string; name: string }>("device_get_identity")
+      .then((d) => setDeviceIdentity(d))
+      .catch(() => {});
+    const refresh = () => { void refreshProjectCatalog(); };
+    window.addEventListener("owllm:projects:refresh", refresh);
+    return () => window.removeEventListener("owllm:projects:refresh", refresh);
+  }, []);
   // Inline rename: which recent is being renamed + the draft text.
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -985,6 +1024,42 @@ function CodeWorkspace({ pageId, onTitle }: {
   // events only while the user is near the bottom (contentKey = message count).
   const transcriptSticky = useStickyScroll(messages.length, workspace);
 
+  const ensureCatalogProject = async (dir: string, preferredName?: string): Promise<ProjectCatalogRow | null> => {
+    const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+    const rows = await invoke<ProjectCatalogRow[]>("list_projects").catch(() => catalogProjects);
+    const existing = rows.find((p) => p.location && norm(p.location) === norm(dir));
+    let repoUrl = await invoke<string>("github_repo_url", { cwd: dir }).catch(() => "");
+    if (existing) {
+      if (repoUrl && repoUrl !== existing.repo_url) {
+        await invoke("update_project", { input: { id: existing.id, repo_url: repoUrl } });
+      }
+      const next = { ...existing, repo_url: repoUrl || existing.repo_url };
+      setCatalogProjects(rows.map((p) => p.id === next.id ? next : p));
+      return next;
+    }
+    try {
+      const row = await invoke<ProjectCatalogRow>("create_project", {
+        input: {
+          name: preferredName || dir.replace(/^.*[\\/]/, "") || "Coding project",
+          description: "Coding workspace",
+          location: dir,
+          repo_url: repoUrl,
+          create_location: false,
+          project_kind: "coding",
+          team: [],
+          graph_json: "",
+          team_default_model_id: "",
+          trust_writes: true,
+          auto_approve_all: false,
+        },
+      });
+      setCatalogProjects((prev) => [row, ...prev.filter((p) => p.id !== row.id)]);
+      return row;
+    } catch {
+      return null;
+    }
+  };
+
   // Switch the page to a project folder: save whatever's open now, then load
   // THAT folder's saved session (conversation + Kanban + draft + model), or
   // start a fresh one carrying the current model selection over. Updates the
@@ -996,6 +1071,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   const openWorkspace = async (dir: string) => {
     if (!dir || busy) return;
     const name = dir.replace(/^.*[\\/]/, "");
+    const catalogProject = await ensureCatalogProject(dir, name);
     const normPath = (p: string | undefined) =>
       (p || "").replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
     const reopeningCurrent = normPath(stx.projectRoot || stx.workspace) === normPath(dir);
@@ -1019,6 +1095,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     const keepRename = reopeningCurrent ? stx.pageRename : undefined;
     chatRuntime.setPayload(SID, () => ({
       ...base,
+      projectId: catalogProject?.id || base.projectId,
+      repoUrl: catalogProject?.repo_url || base.repoUrl,
+      createdDeviceId: catalogProject?.created_device_id || base.createdDeviceId || deviceIdentity.device_id,
+      createdDeviceName: catalogProject?.created_device_name || base.createdDeviceName || deviceIdentity.name,
       projectRoot: dir,
       workspace: "",
       modelId: base.modelId || modelId,
@@ -1090,6 +1170,34 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (typeof dir === "string" && dir) openWorkspace(dir);
     } catch (e) {
       setStatus(`Folder picker failed: ${e}`);
+    }
+  };
+
+  const openCatalogProject = async (project: ProjectCatalogRow) => {
+    setCatalogError("");
+    setGhostProjectId(project.id);
+    if (project.location.trim()) {
+      await openWorkspace(project.location);
+      return;
+    }
+    if (!project.repo_url) return; // stays ghosted with the source-PC guidance.
+    setCatalogBusy(true);
+    try {
+      const parent = await invoke<string | null>("pick_folder", {
+        title: `Choose where to clone ${project.name} on this computer`,
+      });
+      if (!parent) return;
+      const location = await invoke<string>("github_clone_project", {
+        repoUrl: project.repo_url,
+        parent,
+      });
+      await invoke("update_project", { input: { id: project.id, location } });
+      await refreshProjectCatalog();
+      await openWorkspace(location);
+    } catch (e: any) {
+      setCatalogError(String(e?.message ?? e));
+    } finally {
+      setCatalogBusy(false);
     }
   };
 
@@ -1361,7 +1469,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     setNpName("");
     setNpFolder("");
     setNpIsolate(false); // host folders are instant; isolation is an explicit choice
-    setNpCreateRepo(false);
+    setNpCreateRepo(!!gh?.connected);
     setNpBusy(false);
     setNpOpen(true);
     // Mirror Accounts logins into the sandbox, THEN show what's available —
@@ -1415,6 +1523,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           setStatus(`🐙 Project created, but the GitHub repo could not be set up: ${String((e as Error)?.message ?? e)} — retry from the Publisher card's ⚙ Set up repo.`);
         }
       }
+      if (createdPath) await ensureCatalogProject(createdPath, npName.trim() || undefined);
     } catch (e) {
       setStatus(`Couldn't create project: ${e}`);
     } finally {
@@ -2031,7 +2140,11 @@ function CodeWorkspace({ pageId, onTitle }: {
     } else {
       tid = newThreadId();
       setChatId(tid);
-      setChats((cs) => [{ id: tid, title: threadTitle(text || "Image"), ts: Date.now(), messages: [userMsg, asstMsg] }, ...cs]);
+      setChats((cs) => [{
+        id: tid, title: threadTitle(text || "Image"), ts: Date.now(), messages: [userMsg, asstMsg],
+        createdDeviceId: deviceIdentity.device_id,
+        createdDeviceName: deviceIdentity.name,
+      }, ...cs]);
     }
     const onD = (d: string) => updateThread(tid, (m) => {
       const c = [...m];
@@ -2259,6 +2372,9 @@ function CodeWorkspace({ pageId, onTitle }: {
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
           <button onClick={() => setChatMode(false)} title="Back to Start" style={{ ...btn, height: 30, padding: "0 10px" }}>← Start</button>
           <button onClick={newChat} title="New conversation" style={{ ...btn, height: 30, padding: "0 10px", fontWeight: 700 }}>＋ New</button>
+          <span title="This no-project chat is stored on its creator computer." style={{ fontSize: 10.5, color: "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px" }}>
+            🖥 {chats.find((c) => c.id === chatId)?.createdDeviceName || deviceIdentity.name}
+          </span>
           {/* History dropdown — past conversations (persisted) */}
           <div style={{ position: "relative" }}>
             <button onClick={() => setShowHistory((v) => !v)} title="Past conversations" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg)" }}>🕘 History{chats.length ? ` (${chats.length})` : ""}</button>
@@ -2273,6 +2389,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       onMouseLeave={(e) => (e.currentTarget.style.background = c.id === chatId ? "var(--bg-input)" : "transparent")}
                       style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 7, cursor: "pointer", background: c.id === chatId ? "var(--bg-input)" : "transparent" }}>
                       <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</span>
+                      <span title="Creator PC" style={{ fontSize: 10, color: "var(--fg-subtle)", whiteSpace: "nowrap" }}>🖥 {c.createdDeviceName || "legacy"}</span>
                       <span style={{ fontSize: 10.5, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>{c.messages.length}</span>
                       <button onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete" style={{ ...btn, height: 22, padding: "0 6px", color: "var(--fg-muted)", fontSize: 11 }}>✕</button>
                     </div>
@@ -2344,20 +2461,68 @@ function CodeWorkspace({ pageId, onTitle }: {
   // get-started screen: open a folder, or reopen a recent project.
   if (!workspace && !preparing) {
     return (
-      <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
-          <div style={{ width: "100%", maxWidth: 760, display: "flex", flexDirection: "column", gap: 30, padding: "48px 36px" }}>
+      <div data-ui="CodingProjectHub" style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", overflowY: "auto" }}>
+          <div style={{ width: "100%", maxWidth: 1280, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24, padding: "clamp(24px,4vw,56px)", background: "radial-gradient(circle at 88% 8%, rgba(var(--accent-rgb),0.14), transparent 31%)" }}>
             <div>
-              <div style={{ fontSize: 30, fontWeight: 800, color: "var(--fg-strong)", letterSpacing: -0.4 }}>OwLLM Code</div>
+              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.8, textTransform: "uppercase" }}>Portable coding command center</div>
+              <div style={{ fontSize: "clamp(30px,4vw,48px)", fontWeight: 850, color: "var(--fg-strong)", letterSpacing: -0.8, lineHeight: 1.05, marginTop: 7 }}>OwLLM Coding</div>
               <div style={{ fontSize: 13.5, color: "var(--fg-muted)", marginTop: 5, lineHeight: 1.5 }}>
-                Your local AI coding workspace — open a folder and your model reads, searches, edits and runs commands right inside it.
+                GitHub is the project identity. Each computer creates its own local clone; OwLLM never reuses another PC's absolute folder.
               </div>
             </div>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: "1px solid rgba(var(--accent-rgb),0.48)", background: "linear-gradient(120deg,rgba(var(--accent-rgb),0.13),var(--bg-card))", boxShadow: "0 0 34px rgba(var(--accent-rgb),0.09)" }}>
+              <span style={{ fontSize: 28 }}>🐙</span>
+              <div style={{ flex: 1, minWidth: 260 }}>
+                <b style={{ color: "var(--fg-strong)", fontSize: 14 }}>GitHub keeps code, Project Cards and memory consistent across PCs</b>
+                <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>Projects without a repository remain tied to their creator computer and appear ghosted elsewhere.</div>
+              </div>
+              <button onClick={openNewProject} style={{ ...btn, height: 40, padding: "0 16px", border: "none", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: 10 }}>+ New GitHub-first project</button>
+            </div>
+
+            <section>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>Projects</div>
+                <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>{deviceIdentity.name}</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 13 }}>
+                {catalogProjects.map((project) => {
+                  const local = projectAvailability(project) === "local";
+                  const selectedGhost = ghostProjectId === project.id && !local;
+                  return (
+                    <button key={project.id} onClick={() => { void openCatalogProject(project); }} disabled={catalogBusy} style={{
+                      minHeight: 150, padding: 16, borderRadius: 15, textAlign: "left",
+                      border: `1px solid ${selectedGhost ? "var(--warn)" : local ? "var(--border)" : "var(--border-strong)"}`,
+                      background: selectedGhost ? "rgba(var(--warn-rgb),.09)" : "var(--bg-card)",
+                      opacity: local ? 1 : .58, filter: local ? "none" : "saturate(.55)",
+                      cursor: catalogBusy ? "wait" : "pointer", boxShadow: local ? "0 10px 28px rgba(0,0,0,.12)" : "none",
+                    }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span style={{ fontSize: 21 }}>{local ? "⌁" : "◌"}</span>
+                        <b style={{ color: "var(--fg-strong)", fontSize: 15, flex: 1 }}>{project.name}</b>
+                        <span style={{ color: local ? "var(--ok)" : "var(--warn)", fontSize: 10, fontWeight: 900 }}>{local ? "READY" : "GHOSTED"}</span>
+                      </div>
+                      <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 9 }}>
+                        {local ? project.location : `Created on ${projectOriginLabel(project)} · no local folder on ${deviceIdentity.name}`}
+                      </div>
+                      <div style={{ color: project.repo_url ? "var(--accent-ink)" : "var(--warn)", fontSize: 11, marginTop: 9 }}>
+                        {project.repo_url ? `🐙 ${project.repo_url.replace(/^https?:\/\//, "")}` : "No GitHub repo · available only on its creator PC"}
+                      </div>
+                      {!local && <div style={{ color: "var(--fg-strong)", fontSize: 11.5, fontWeight: 750, marginTop: 10 }}>{project.repo_url ? "Click to clone into a new folder on this PC →" : "Create the repo on the source PC before opening here"}</div>}
+                    </button>
+                  );
+                })}
+                {catalogProjects.length === 0 && <div style={{ padding: 20, border: "1px dashed var(--border-strong)", borderRadius: 14, color: "var(--fg-muted)", fontSize: 12.5 }}>No managed projects yet. Create one or open an existing GitHub checkout below.</div>}
+              </div>
+              {catalogError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 9 }}>{catalogError}</div>}
+            </section>
 
             <div style={{ display: "flex", gap: 52, alignItems: "flex-start", width: "100%", flexWrap: "wrap" }}>
               {/* START — VS Code-style action rows */}
               <div style={{ flex: "1 1 250px", minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Start</div>
+                <div style={{ fontSize: 16, fontWeight: 750, color: "var(--fg-strong)", marginBottom: 8 }}>Local actions</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8 }}>
                 {([
                   { icon: "🆕", label: "New project…", onClick: openNewProject },
                   { icon: "📁", label: "Open a project folder…", onClick: pickWorkspace },
@@ -2366,12 +2531,13 @@ function CodeWorkspace({ pageId, onTitle }: {
                 ]).map((a) => (
                   <button key={a.label} onClick={a.onClick}
                     onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                    style={{ display: "flex", alignItems: "center", gap: 11, background: "transparent", border: "none", padding: "7px 8px", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>
-                    <span style={{ fontSize: 15, width: 18, textAlign: "center" }}>{a.icon}</span>
+                    onMouseLeave={(e) => (e.currentTarget.style.background = "var(--bg-card)")}
+                    style={{ display: "flex", alignItems: "center", gap: 11, minHeight: 64, background: "var(--bg-card)", border: "1px solid var(--border)", padding: "10px 12px", borderRadius: 11, cursor: "pointer", textAlign: "left" }}>
+                    <span style={{ fontSize: 19, width: 24, textAlign: "center" }}>{a.icon}</span>
                     <span style={{ color: "var(--accent-ink)", fontWeight: 500, fontSize: 13.5 }}>{a.label}</span>
                   </button>
                 ))}
+                </div>
                 {/* GitHub connect form (inline, opens under the row) */}
                 {ghOpen && !gh?.connected && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0 0 28px", padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
@@ -2400,7 +2566,7 @@ function CodeWorkspace({ pageId, onTitle }: {
 
               {/* RECENT — projects (name + path), VS Code style */}
               <div style={{ flex: "1 1 320px", minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Recent</div>
+                <div style={{ fontSize: 16, fontWeight: 750, color: "var(--fg-strong)", marginBottom: 8 }}>Device-only recent folders</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 360, overflowY: "auto", paddingRight: 2 }}>
                   {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
                     <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — create one on the left to get started.</div>
@@ -2598,6 +2764,10 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
         <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
+        <span title={`This chat was created on ${stx.createdDeviceName || deviceIdentity.name}. Its active folder belongs only to this computer.`} style={{ fontSize: 10.5, fontWeight: 750, color: "var(--fg-muted)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px", whiteSpace: "nowrap" }}>
+          🖥 {stx.createdDeviceName || deviceIdentity.name}
+        </span>
+        {stx.repoUrl && <span title={stx.repoUrl} style={{ fontSize: 10.5, fontWeight: 750, color: "var(--accent-ink)", whiteSpace: "nowrap" }}>🐙 GitHub</span>}
         {/* Terminal controls, right beside the project path (user spec): a real
             PTY shell in THIS workspace. ⌨ toggles it; ⤢/⤡ docks it above the
             composer (default) or pops it out to the floating popup. */}

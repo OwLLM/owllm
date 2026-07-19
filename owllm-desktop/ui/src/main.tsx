@@ -32,6 +32,9 @@ function isTauriContext(): boolean {
 // Local file/download anchors are intentionally unaffected.
 if (isTauriContext()) installOwllmWebLinkInterceptor();
 
+// Route plain user-facing links through OwLLM's persistent browser as well.
+if (isTauriContext()) installOwllmWebLinkInterceptor();
+
 function BootCover() {
   // The cover masks the startup flash until the first real frame paints.
   // All three platforms now ship an OPAQUE window (Linux went opaque with

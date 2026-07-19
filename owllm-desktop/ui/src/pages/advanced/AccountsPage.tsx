@@ -1026,20 +1026,10 @@ export default function AccountsPage() {
   function handleConnect(route: RouteSpec, provider: ProviderSpec) {
     if (route.kind === "subscription") {
       if (route.webOnly) {
-        // Open in the OwLLM in-app browser (NOT the system browser): its cookie
-        // store persists, so the sign-in survives and agents can use the session
-        // through the built-in browser. External-browser logins are deliberately
-        // forbidden because OwLLM and its browser tools cannot reuse them.
-        const url = route.webOnly.url;
-        logInfo(route.backend, `Opening ${url} in the OwLLM browser — sign in there; your session is saved and available to agents.`);
-        (async () => {
-          try {
-            await openWebUrl(url);
-            logInfo(route.backend, `${provider.name} opened in the OwLLM browser. Complete the sign-in there — the session stays logged in for agents that drive the browser.`);
-          } catch (e) {
-            logInfo(route.backend, `[error] OwLLM browser unavailable: ${e}`);
-          }
-        })();
+        logInfo(route.backend, `Opening ${route.webOnly.url} in your browser…`);
+        openWebUrl(route.webOnly.url).catch((e) => {
+          logInfo(route.backend, `[error] couldn't open browser: ${e}`);
+        });
         return;
       }
       // CLI-backed subscription: spawn the CLI inside our embedded

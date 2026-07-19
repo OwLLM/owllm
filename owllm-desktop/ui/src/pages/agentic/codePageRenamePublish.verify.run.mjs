@@ -67,8 +67,16 @@ anchor("PublishCards.tsx", cards, "network probe interval is 30s (not 8s)", "ref
 anchor("PublishCards.tsx", cards, "header shows ahead / behind / dirty facts", "↑{git.ahead}");
 anchor("PublishCards.tsx", cards, "Commit button carries the live change count",
   "Commit{git && git.total > 0 ? ` (${git.total})` : \"\"}");
-anchor("PublishCards.tsx", cards, "Push button carries the live ahead count on normal pages and the merged-project label on isolated pages",
-  "Push{isolated ? \" merged\" : (git && git.ahead > 0 ? ` (${git.ahead})` : \"\")}");
+anchor("PublishCards.tsx", cards, "Push button keeps its compact label in the narrow publisher card",
+  '{loading ? "⏳" : "↑"} Push');
+anchor("PublishCards.tsx", cards, "Push tooltip explains the merged-project destination",
+  "Push the merged project checkout");
+anchor("PublishCards.tsx", cards, "Commit keeps its hover explanation",
+  "Commit all changes in this workspace");
+anchor("PublishCards.tsx", cards, "Merge keeps its hover explanation",
+  "Merge this page's worktree back into");
+anchor("PublishCards.tsx", cards, "Publish keeps its hover explanation",
+  "Readiness check running");
 anchor("PublishCards.tsx", cards, "readiness summary renders READY / N issues",
   'readyFails.length === 0 ? "READY" : `${readyFails.length} issue');
 anchor("PublishCards.tsx", cards, "expanded checklist shows the actionable detail per failing check",

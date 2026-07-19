@@ -61,6 +61,7 @@ const TRIPWIRES = [
   ["src-tauri/src/browser.rs", /browser_start_inner\(&app\)\?/, "serialized browser tool first-call auto-start — snapshot/get_text no longer fail on closed window (v0.8.18/v0.8.96)"],
   ["src-tauri/src/paths.rs", /fn webview_profile_scope[\s\S]*exe\.parent\(\)\.map\(Path::to_path_buf\)/, "installed app never reuses poisoned default EBWebView profile (v0.8.97)"],
   ["src-tauri/src/paths.rs", /(?=[\s\S]*isolated-webview-v2)(?=[\s\S]*Default\/Local Storage)(?=[\s\S]*max_by_key)/, "isolated WebView upgrades preserve the richest chat/notebook profile (v0.8.98)"],
+  ["src-tauri/Cargo.toml", /tao[\s\S]*rev = "c704261c519c58cfdd0bc2d58ba24e06a0b71c92"/, "Tao PeekMessageW runs outside input mutexes — no keyboard re-entrancy deadlock (v0.9.2)"],
   ["src-tauri/src/mcp_gateway.rs", /cli_safe_path/, "spaced 'OwLLM Desktop' --mcp-config path split → 8.3 short path (v0.7.62)"],
   ["src-tauri/src/mcp_gateway.rs", /bearer_token_env_var/, "codex MCP wiring via -c overrides + env token (v0.7.72)"],
   ["src-tauri/src/directives.rs", /directives_seed_marks/, "project rules re-seeded 11x into every prompt (v0.7.91)"],

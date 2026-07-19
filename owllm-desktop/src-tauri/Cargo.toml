@@ -225,6 +225,15 @@ windows-sys = { version = "0.59", features = [
 [dev-dependencies]
 tempfile = "3"
 
+# Tao 0.35.3 calls PeekMessageW while holding its non-reentrant Windows
+# KEY_EVENT_BUILDERS mutex. Win32 may dispatch a synchronous window callback
+# from inside PeekMessageW, re-enter Tao, and wait forever on that same mutex.
+# This is the exact main-thread stack captured from the frozen v0.8.99 install.
+# Pin Tao's accepted upstream fix until it is included in a crates.io release:
+# https://github.com/tauri-apps/tao/commit/c704261c519c58cfdd0bc2d58ba24e06a0b71c92
+[patch.crates-io]
+tao = { git = "https://github.com/tauri-apps/tao", rev = "c704261c519c58cfdd0bc2d58ba24e06a0b71c92" }
+
 # Release profile: use Cargo defaults (opt-level=3, codegen-units=16)
 # plus LTO for the smallest, fastest binary. The previous override
 # (opt-level=2, codegen-units=256, lto=false) existed only to dodge

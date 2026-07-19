@@ -1071,19 +1071,36 @@ pub fn browser_ensure() -> Result<String, String> {
 /// If the multi-webview build fails on some platform/engine, fall back to the
 /// previous decorated single-webview window so agent browsing never breaks.
 fn build_window(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
-    match build_framed(app, url.clone()) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            eprintln!("[browser] app-styled window failed ({e}); using the decorated fallback");
-            if let Some(w) = get_window(app) {
-                let _ = w.destroy();
+    // Linux/WebKitGTK — notably the Jetson/Tegra GL stack — mislays stacked child
+    // webviews (the chrome bar ends up floating mid-window over a blank strip) and
+    // SIGBUSes the WebKitWebProcess when they are resized, taking the whole app
+    // down. The framed multi-webview shape build_framed() builds is therefore
+    // unusable there, and it "succeeds" without erroring so the runtime fallback
+    // below never triggers. Use the proven decorated single-webview window on
+    // Linux; keep the OwLLM-chrome framed shape on Windows/macOS where it works.
+    #[cfg(target_os = "linux")]
+    {
+        build_legacy(app, url)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        match build_framed(app, url.clone()) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                eprintln!("[browser] app-styled window failed ({e}); using the decorated fallback");
+                if let Some(w) = get_window(app) {
+                    let _ = w.destroy();
+                }
+                build_legacy(app, url)
             }
-            build_legacy(app, url)
         }
     }
 }
 
 /// The app-styled browser: frameless Window + chrome-bar webview + page webview.
+/// Windows/macOS only — build_window() routes Linux to build_legacy() because
+/// stacked child webviews are broken on WebKitGTK/Jetson (see build_window).
+#[cfg_attr(target_os = "linux", allow(dead_code))]
 fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
     // Start the dispatcher before adding child webviews so even their very
     // first load/title callback performs only a cheap channel send.

@@ -41,12 +41,18 @@ export default function TeamMemoryModal({
   projectId,
   projectName,
   active = true,
+  openEvent = "owllm:open-team-memory",
 }: {
   projectId: string | null | undefined;
   projectName?: string;
   /// With multiple agentic tabs mounted at once, every instance hears the
   /// window-level open event — only the visible tab's modal should open.
   active?: boolean;
+  /// Window event that opens this modal. Defaults to the Agents-page toolbar
+  /// event; the Code page passes its own scoped name so its 🧠 Memory button
+  /// opens ONLY the code modal (the keep-alive Agents modal, mounted+hidden,
+  /// must not open behind it).
+  openEvent?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<"list" | "graph">("list");
@@ -84,9 +90,9 @@ export default function TeamMemoryModal({
   activeRef.current = active;
   useEffect(() => {
     const onOpen = () => { if (activeRef.current) setOpen(true); };
-    window.addEventListener("owllm:open-team-memory", onOpen as EventListener);
-    return () => window.removeEventListener("owllm:open-team-memory", onOpen as EventListener);
-  }, []);
+    window.addEventListener(openEvent, onOpen as EventListener);
+    return () => window.removeEventListener(openEvent, onOpen as EventListener);
+  }, [openEvent]);
   useEffect(() => { if (open) void reload(); }, [open, reload]);
 
   if (!open) return null;

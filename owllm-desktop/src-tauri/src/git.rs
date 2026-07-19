@@ -110,6 +110,13 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
                     }
                 }
             } else if line.len() > 3 {
+                // Skip OWLLM's own scratch (.owllm-inbox image drop, .owllm
+                // project state) so the publish card never reports a phantom
+                // "1 pending" that the user can't commit away — it's app
+                // runtime data, not a user change.
+                if crate::fleet::is_app_scratch(&line[3..]) {
+                    continue;
+                }
                 total += 1;
                 if files.len() < MAX_STATUS_FILES {
                     files.push(GitFile {

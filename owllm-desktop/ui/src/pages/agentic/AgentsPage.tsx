@@ -381,7 +381,16 @@ type GoalMsg = {
   /// call+result render as ONE collapsed input|output line. Never persisted.
   result?: string;
   resultStatus?: "ok" | "error";
+  /// Attached images (user uploads), shown as clickable thumbnails under the
+  /// bubble so an uploaded screenshot stays visible and re-viewable.
+  images?: { src: string; alt?: string }[];
 };
+
+// Turn image attachments into ChatBubble thumbnails (data URIs the webview can
+// always render) so uploaded images stay visible and clickable in the thread.
+function attachmentThumbs(atts: { mime: string; data_b64: string; filename?: string }[]): { src: string; alt?: string }[] {
+  return atts.map((a) => ({ src: `data:${a.mime};base64,${a.data_b64}`, alt: a.filename }));
+}
 
 // Extract the tool-use id shared by a call/result pair from its channelKey.
 // Call channel:  "tool:<name>:<id>"   Result channel: "tool-result:<id>".
@@ -2478,6 +2487,7 @@ function AgentChatTile({
                 isStreaming={streaming}
                 content={m.text}
                 ts={m.ts}
+                images={m.images}
               />
             );
           })
@@ -4797,6 +4807,7 @@ function MarkdownBody({ text }: { text: string }) {
           ol: (p) => <ol style={{ margin: "6px 0", paddingLeft: 22 }} {...(p as any)} />,
           li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
           a: MarkdownLink,
+          img: (p: any) => <SmartImage src={p.src} alt={p.alt} />,
           blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "8px 0", padding: "2px 0 2px 12px", color: "var(--fg-muted)" }} {...(p as any)} />,
           table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
           th: (p) => <th style={{ border: "1px solid var(--border)", padding: "5px 9px", background: "var(--bg-surface)", textAlign: "left", fontWeight: 600 }} {...(p as any)} />,
@@ -4838,6 +4849,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
         isStreaming={isStreaming}
         content={m.text}
         ts={m.ts}
+        images={m.images}
       />
       {m.action === "wsl-restart" ? (
         // One-click recovery for a network/DNS failure — runs `wsl --shutdown`
@@ -7680,15 +7692,18 @@ async function streamOpenAI(
     let imageSaveNote = "";
     const codexImagePaths = await saveCliImages(images ?? [], codexCwd, (note) => { imageSaveNote = note; });
     const codexPrompt = imageSaveNote ? `${prompt}\n\n${imageSaveNote}` : prompt;
+    const [pickedModel, pickedEffort] = modelId.split(":", 2);
+    const codexModel = pickedModel === "gpt-5.5-codex" ? "gpt-5.5" : pickedModel;
+    const codexEffort = pickedEffort === "extra_high" ? "xhigh" : pickedEffort || null;
     // Stream live activity (reasoning/commands/tools/web-search) into the
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, allowedTools, onDelta, onThought,
+        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools, onDelta, onThought,
       }), codexCwd);
     }
     const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
-      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths,
+      systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? undefined, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort,
     }), codexCwd);
     if (reply) onDelta(reply);
     return reply;
@@ -8707,6 +8722,7 @@ export function AgentsPage({
   // Brainstorm modal — opens from the 🧠 GoalRow button. Lives at the
   // top-level so it can be reused later (e.g. from NewProjectDialog).
   const [brainstormOpen, setBrainstormOpen] = useState(false);
+  const [brainstormSeed, setBrainstormSeed] = useState("");
   // Cached "does BRIEF.md exist for this project's location" — drives
   // the 🧠 button's green tint and the orchestrator's brief-prepend.
   // Re-checked whenever the project switches or the brainstormer
@@ -8835,7 +8851,10 @@ export function AgentsPage({
     }
   };
   const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
-  const onProjectCreated = async (row: ProjectRow) => {
+  const onProjectCreated = async (
+    row: ProjectRow,
+    kickoff: { kind: string; action: "brainstorm" | "goal" },
+  ) => {
     const rows = await reloadProjects();
     // Select the freshly-created project. Fall back to id from the
     // returned row if list_projects raced.
@@ -8844,6 +8863,16 @@ export function AgentsPage({
     setProjectLocationDraft(target.location, target.id);
     setPickedTeamId(null);
     setTrustWritesOverride(null);
+    if (kickoff.action === "brainstorm") {
+      setBrainstormSeed(target.description ?? "");
+      // Let the selected project and its workspace propagate before mounting
+      // the modal; otherwise it can briefly inherit the previous project cwd.
+      window.setTimeout(() => setBrainstormOpen(true), 0);
+    } else if (target.description?.trim()) {
+      // Goal-first recipes land with a real next action in the dock instead of
+      // creating a row and leaving the user at an empty, generic project page.
+      try { localStorage.setItem(`owllm:supdraft:${target.id}`, target.description.trim()); } catch { /* ignore */ }
+    }
   };
   const onRenameProject = async () => {
     if (!selectedProject) return;
@@ -8954,6 +8983,14 @@ export function AgentsPage({
         setSupChat(prev => [...prev, {
           role: "system", color: "#7ff0c5",
           text: `✓ ${cli} reconnected — resuming the team.`,
+          ts: Date.now(), seq: nextSeq(),
+        }]);
+        return;
+      }
+      if (info.kind === "upgrade") {
+        setSupChat(prev => [...prev, {
+          role: "system", color: "#ffb74d",
+          text: `↻ ${cli} is too old for this model — upgrading the CLI in the project's execution environment, then retrying automatically. The GUI remains available.`,
           ts: Date.now(), seq: nextSeq(),
         }]);
         return;
@@ -9256,8 +9293,13 @@ export function AgentsPage({
       // bleed into the new project's pane.
       setAgentThoughts(new Map());
     }
+  // Re-run when a project reload supplies its preserved DB transcript too.
+  // Folder rebinding keeps the same project id, so depending on id alone left
+  // an already-created empty runtime session blank even though chat_json and
+  // agent_logs_json were still intact. The sessionEmpty guard above prevents
+  // a reload from clobbering a live/non-empty conversation.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProject?.id]);
+  }, [selectedProject?.id, selectedProject?.chat_json, selectedProject?.agent_logs_json]);
 
   // Active team: pickedTeamId wins; else project roster; else first
   // built-in template so the canvas is never empty.
@@ -9527,10 +9569,14 @@ export function AgentsPage({
     chatRuntime.registerPersister(psid, (payload) => {
       const p = payload as AgentRunPayload | null;
       if (!p) return;
-      const chatJson = JSON.stringify(p.supChat ?? []);
+      // Drop `images` (base64 data URIs) when persisting — they're for
+      // in-session re-view only; embedding them would bloat chat_json and the
+      // vault sync. The replacer strips the field at any depth.
+      const dropImages = (k: string, v: unknown) => (k === "images" ? undefined : v);
+      const chatJson = JSON.stringify(p.supChat ?? [], dropImages);
       const obj: Record<string, GoalMsg[]> = {};
       for (const [k, v] of p.agentLogs ?? new Map()) obj[k] = v;
-      const logsJson = JSON.stringify(obj);
+      const logsJson = JSON.stringify(obj, dropImages);
       invoke("update_project", {
         input: { id: pid, chat_json: chatJson, agent_logs_json: logsJson },
       })
@@ -9854,7 +9900,8 @@ export function AgentsPage({
           // it to the agent buffers, not supChat), then run. Mark any attached
           // images so the echoed turn matches what the single-assistant path shows.
           const echo: GoalMsg = { role: "you", color: "#9ad9ff",
-            text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
+            text,
+            images: images.length > 0 ? attachmentThumbs(images) : undefined,
             ts: Date.now(), seq: nextSeq() };
           setSupChat(prev => [...prev, echo]);
           await dispatchGoal(text, priorHistory, images);
@@ -9889,7 +9936,8 @@ export function AgentsPage({
 
     const userMsg: GoalMsg = {
       role: "you", color: "#9ad9ff",
-      text: images.length > 0 ? `${text}${text ? " " : ""}🖼×${images.length}` : text,
+      text,
+      images: images.length > 0 ? attachmentThumbs(images) : undefined,
       ts: Date.now(), seq: nextSeq(),
     };
     setSupChat(prev => [...prev, userMsg]);
@@ -12763,7 +12811,7 @@ export function AgentsPage({
         // settings so the user can set one (the folder field moved into that
         // popup in v0.5.26, so a bare "set a location" hint had nowhere to point).
         onBrainstorm={() => {
-          if (runCwd && runCwd.trim()) { setBrainstormOpen(true); }
+          if (runCwd && runCwd.trim()) { setBrainstormSeed(""); setBrainstormOpen(true); }
           else { setSettingsMode("edit"); setNewProjOpen(true); }
         }}
         brainstormReady={!!(runCwd && runCwd.trim())}
@@ -12889,7 +12937,7 @@ export function AgentsPage({
       />
       <BrainstormPanel
         open={brainstormOpen}
-        onClose={() => setBrainstormOpen(false)}
+        onClose={() => { setBrainstormOpen(false); setBrainstormSeed(""); }}
         projectCwd={runCwd}
         brainstormerRole={roleByName.get("brainstormer") ?? null}
         // Use the team's default model. Fallback to the orchestrator's
@@ -12899,6 +12947,8 @@ export function AgentsPage({
         modelId={(teamModelOverride || (activeTeam ? modelFor(findOrchestratorSpec(activeTeam)?.name ?? "") : "") || "").trim()}
         port={serverState.port ?? 0}
         models={models}
+        accountsStatus={accountsStatus}
+        initialIdea={brainstormSeed}
         onBriefSaved={() => setHasBriefForProject(true)}
         projectId={selectedProjectId}
         // Apply the assembled roster to THIS project (persists), then clear any

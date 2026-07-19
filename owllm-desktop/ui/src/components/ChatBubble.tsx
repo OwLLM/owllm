@@ -124,6 +124,7 @@ export function ChatMarkdown({ text }: { text: string }) {
           ol: (p) => <ol style={{ margin: "5px 0", paddingLeft: 20 }} {...(p as any)} />,
           li: (p) => <li style={{ margin: "2px 0" }} {...(p as any)} />,
           a: MarkdownLink,
+          img: (p: any) => <SmartImage src={p.src} alt={p.alt} />,
           blockquote: (p) => <blockquote style={{ borderLeft: "3px solid var(--accent)", margin: "6px 0", padding: "2px 0 2px 10px", color: "var(--fg-muted)" }} {...(p as any)} />,
           table: (p) => <div style={{ overflowX: "auto", margin: "8px 0" }}><table style={{ borderCollapse: "collapse", fontSize: 12, minWidth: "100%" }} {...(p as any)} /></div>,
           th: (p) => <th style={{ border: "1px solid var(--border)", padding: "4px 8px", background: "var(--bg-surface)", textAlign: "left", fontWeight: 600 }} {...(p as any)} />,
@@ -312,6 +313,10 @@ export type ChatBubbleProps = {
   thinking?: string;
   /// Epoch ms, rendered as the full date/time on the right.
   ts?: number;
+  /// Optional attached images (user uploads or agent results), shown as
+  /// clickable thumbnails under the body. Store this array ON the message so
+  /// its identity is stable and memo keeps skipping unchanged bubbles.
+  images?: { src: string; alt?: string }[];
 };
 
 // memo: a chat surface re-renders on EVERY keystroke in its composer (the draft
@@ -319,7 +324,7 @@ export type ChatBubbleProps = {
 // re-parse their markdown each keystroke → multi-second input lag, brutal over
 // remote desktop. All props are primitives, so memo's shallow compare lets an
 // unchanged bubble skip entirely; only the streaming/edited one re-renders.
-export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isUser, isStreaming, content, thinking, ts }: ChatBubbleProps) {
+export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isUser, isStreaming, content, thinking, ts, images }: ChatBubbleProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 5, flexShrink: 0 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -359,6 +364,11 @@ export const ChatBubble = memo(function ChatBubble({ avatar, sender, accent, isU
               {content}{isStreaming ? <span className="owl-cursor">▍</span> : null}
             </span>}
       </div>
+      {images && images.length > 0 && (
+        <div style={{ marginLeft: 28, display: "flex", flexWrap: "wrap", gap: 8, marginTop: content ? 6 : 0 }}>
+          {images.map((im, i) => <SmartImage key={i} src={im.src} alt={im.alt} thumb />)}
+        </div>
+      )}
     </div>
   );
 });

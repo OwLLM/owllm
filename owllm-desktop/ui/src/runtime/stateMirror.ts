@@ -22,12 +22,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-// History-bearing prefixes. Extend deliberately — every added prefix grows
-// DB traffic, so keep it to state whose loss the user would call data loss.
+// User-owned local state. This deliberately covers every `owllm:` key rather
+// than a hand-picked subset: the narrow first version preserved Code chats and
+// notebooks but still abandoned the page catalog, project bindings, model
+// choices, brainstorm checkpoints, theme and other settings whenever WebView
+// moved profiles. localStorage itself is quota-bounded and the per-key ceiling
+// below still applies, so mirroring the namespace cannot grow without bound.
 export const DURABLE_PREFIXES = [
-  "owllm:code:",            // Coding page: pages, per-page sessions, chats, recents
-  "owllm:agents:notebook:", // Run Notebook blob per project
-  "owllm:chat:",            // fine-tuning chat page state (columns/templates)
+  "owllm:",
 ];
 
 // Per-key ceiling. Chromium caps a localStorage entry well below this; the
@@ -36,7 +38,7 @@ const MAX_VALUE_BYTES = 4 * 1024 * 1024;
 const SWEEP_MS = 20_000;
 const RESTORE_TIMEOUT_MS = 3_000;
 
-type MirrorEntry = { key: string; value: string };
+type MirrorEntry = { key: string; value: string; pending_recovery?: boolean };
 
 function isTauriContext(): boolean {
   if (typeof window === "undefined") return false;
@@ -84,17 +86,26 @@ export async function restoreStateMirror(): Promise<number> {
     entries = [];
   }
   let restored = 0;
-  for (const { key, value } of entries) {
+  const recoveryApplied: string[] = [];
+  for (const { key, value, pending_recovery } of entries) {
     if (!isDurableKey(key)) continue; // stale prefix no longer mirrored
     try {
-      if (localStorage.getItem(key) === null) {
+      if (pending_recovery || localStorage.getItem(key) === null) {
         localStorage.setItem(key, value);
         restored++;
+        if (pending_recovery) recoveryApplied.push(key);
       }
     } catch {
       /* quota/unavailable — skip, never block boot */
     }
     lastMirrored.set(key, value);
+  }
+  if (recoveryApplied.length > 0) {
+    try {
+      await invoke("state_mirror_ack_recovery", { keys: recoveryApplied });
+    } catch {
+      // Marker remains and the recovered value is retried next launch.
+    }
   }
   return restored;
 }

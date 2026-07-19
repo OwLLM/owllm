@@ -219,28 +219,36 @@ pub fn cli_cancel_all() -> Result<u32, String> {
         .unwrap_or_default();
     let mut killed = 0u32;
     for pid in pids {
-        #[cfg(windows)]
-        let ok = {
-            let mut c = Command::new("taskkill");
-            c.args(["/PID", &pid.to_string(), "/T", "/F"]);
-            c.stdout(Stdio::null());
-            c.stderr(Stdio::null());
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(CREATE_NO_WINDOW);
-            c.status().map(|s| s.success()).unwrap_or(false)
-        };
-        #[cfg(not(windows))]
-        let ok = Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let ok = terminate_cli_child(pid);
         if ok {
             killed += 1;
         }
         unregister_cli_child(pid);
     }
     Ok(killed)
+}
+
+/// Terminate a CLI process tree. On Windows the spawned npm shim owns the real
+/// `node`/`codex` descendants, so killing only the direct child is insufficient.
+fn terminate_cli_child(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        let mut c = Command::new("taskkill");
+        c.args(["/PID", &pid.to_string(), "/T", "/F"]);
+        c.stdout(Stdio::null());
+        c.stderr(Stdio::null());
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(CREATE_NO_WINDOW);
+        c.status().map(|s| s.success()).unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
 }
 
 /// Push an arg onto `cmd`, going through `raw_arg` + manual quoting
@@ -256,6 +264,21 @@ fn push_arg(cmd: &mut Command, _batch: bool, arg: &str) {
         }
     }
     cmd.arg(arg);
+}
+
+/// Append Codex's initial-input arguments in the only unambiguous order:
+/// images first, then the explicit `-` stdin prompt marker. `--image/-i`
+/// accepts one-or-more values, so placing a positional prompt after the final
+/// image makes clap consume that prompt as another image path. Codex then sees
+/// no prompt, tries its closed stdin, and exits 1 with "Reading prompt from
+/// stdin... No prompt provided via stdin." Every Codex call uses this helper so
+/// the Accounts probe exercises the same transport as chat and agent streams.
+fn append_codex_input_args(args: &mut Vec<String>, image_paths: Option<&[String]>) {
+    for path in image_paths.unwrap_or_default() {
+        args.push("-i".into());
+        args.push(path.clone());
+    }
+    args.push("-".into());
 }
 
 /// Where API keys live on disk. Same path as the legacy Python store.
@@ -299,6 +322,9 @@ fn write_secrets(map: &BTreeMap<String, String>) -> Result<(), String> {
 
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AccountsStatus {
+    /// Backend-authoritative host OS. WebView user-agent strings can be
+    /// overridden/emulated and are not a reliable platform signal.
+    pub host_os: String,
     /// ANTHROPIC_API_KEY is set + non-empty.
     pub anthropic_api_key: bool,
     /// OPENAI_API_KEY is set + non-empty.
@@ -331,6 +357,9 @@ pub struct AccountsStatus {
     /// Google Gemini CLI (google-gemini/gemini-cli) is installed AND
     /// logged in (~/.gemini/ contains OAuth cache).
     pub gemini_cli: bool,
+    /// xAI Grok Build CLI (`grok`) is installed AND logged in
+    /// (~/.grok/ carries the sign-in state).
+    pub grok_cli: bool,
 }
 
 /// Probe what's connected right now. Cheap — runs on the AccountsPage
@@ -353,6 +382,7 @@ pub async fn accounts_status() -> AccountsStatus {
 fn accounts_status_blocking() -> AccountsStatus {
     let map = load_secrets();
     AccountsStatus {
+        host_os: std::env::consts::OS.to_string(),
         anthropic_api_key: map
             .get("ANTHROPIC_API_KEY")
             .map(|s| !s.trim().is_empty())
@@ -377,6 +407,7 @@ fn accounts_status_blocking() -> AccountsStatus {
         claude_cli: claude_cli_logged_in(),
         codex_cli: codex_cli_logged_in(),
         kimi_cli: kimi_cli_logged_in(),
+        grok_cli: grok_cli_logged_in(),
     }
 }
 
@@ -1004,37 +1035,25 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
             )
             .await
         }
-        // OpenAI Codex CLI: `codex exec <prompt>` is the non-interactive
-        // shape. There's no --print/--prompt; older docs to the contrary.
-        // Two things have to be right or it exits 1 with "Reading additional
-        // input from stdin...":
-        //   1. The prompt is fed BOTH as the positional arg AND on stdin —
-        //      older builds read the arg, newer ones read stdin; stdin is
-        //      closed right after the write (EOF) so the stdin-style codex
-        //      proceeds instead of hanging.
-        //   2. The SAME non-interactive flags codex_cli_complete uses must be
-        //      present. Without --skip-git-repo-check, codex run outside a git
-        //      repo stops to read a confirmation from stdin (that "Reading
-        //      additional input from stdin..." line) and exits 1 when it gets
-        //      the prompt instead of a yes/no. --sandbox read-only + --color
-        //      never keep the probe side-effect-free and unescaped. This is
-        //      why the chat path worked but Test didn't — Test was missing
-        //      the flags.
+        // OpenAI Codex CLI: exercise the same stdin-only invocation as real
+        // chat and agent runs. The explicit `-` marker also terminates a
+        // variadic image list, which is the attachment failure a positional
+        // prompt cannot represent safely.
         "codex_cli" => {
+            let mut args = vec![
+                "exec".into(),
+                "--skip-git-repo-check".into(),
+                "--color".into(),
+                "never".into(),
+                "--sandbox".into(),
+                "read-only".into(),
+                "--model".into(),
+                "gpt-5.5".into(),
+            ];
+            append_codex_input_args(&mut args, None);
             probe_cli_subscription(
                 find_codex_cli(),
-                [
-                    "exec",
-                    "--skip-git-repo-check",
-                    "--color",
-                    "never",
-                    "--sandbox",
-                    "read-only",
-                    "ok",
-                ]
-                .iter()
-                .map(|s| s.to_string())
-                .collect(),
+                args,
                 "Codex",
                 Some("ok"),
             )
@@ -1069,6 +1088,17 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
                     "ok".into(),
                 ],
                 "Gemini",
+                None,
+            )
+            .await
+        }
+        // xAI Grok Build CLI: `grok -p <prompt>` is the non-interactive
+        // one-shot shape (SuperGrok / X Premium+ subscription auth).
+        "grok_cli" => {
+            probe_cli_subscription(
+                find_grok_cli(),
+                vec!["-p".into(), "ok".into()],
+                "Grok",
                 None,
             )
             .await
@@ -1249,12 +1279,21 @@ fn wsl_probe(backend: &str) -> (bool, String) {
     };
     let script = match backend {
         "claude_cli" => cli_probe("claude", "[ -f ~/.claude/.credentials.json ]"),
-        "codex_cli" => cli_probe("codex", "[ -f ~/.codex/auth.json ]"),
+        "codex_cli" => {
+            // Run the same explicit-stdin contract as an isolated agent. A
+            // credentials file and binary can both exist while execution is
+            // broken, so presence alone must not produce a green result.
+            "if ! PATH=/usr/local/bin:/usr/bin:/bin command -v codex >/dev/null 2>&1; then echo NOBIN; \
+             elif ! [ -f ~/.codex/auth.json ]; then echo NOCRED; else \
+             out=$(printf '%s' 'Reply with exactly OWLLM_PROBE_OK and nothing else.' | timeout 45 codex exec --skip-git-repo-check --color never --sandbox read-only --model gpt-5.6-sol - 2>&1); rc=$?; \
+             if [ \"$rc\" -eq 0 ] && printf '%s' \"$out\" | grep -q 'OWLLM_PROBE_OK'; then echo YES; \
+             else echo RUNFAIL; printf '%s\n' \"$out\" | tail -n 12; fi; fi".to_string()
+        }
         // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
-        // Accept a credential or config file in either home.
+        // config.toml is created before authentication and is not a credential.
         "kimi_cli" => cli_probe(
             "kimi",
-            "{ [ -f ~/.kimi-code/credentials/kimi-code.json ] || [ -f ~/.kimi-code/config.toml ] || [ -f ~/.kimi/credentials/kimi-code.json ] || [ -f ~/.kimi/config.toml ]; }",
+            "{ [ -f ~/.kimi-code/credentials/kimi-code.json ] || [ -f ~/.kimi/credentials/kimi-code.json ]; }",
         ),
         "gemini_cli" => cli_probe("gemini", "[ -f ~/.gemini/oauth_creds.json ]"),
         other => {
@@ -1276,6 +1315,14 @@ fn wsl_probe(backend: &str) -> (bool, String) {
         }
     };
     match crate::wsl::run_in_distro(&distro, &script) {
+        Ok(o) if o.contains("RUNFAIL") => {
+            let detail = o
+                .split_once("RUNFAIL")
+                .map(|(_, tail)| tail.trim())
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Codex CLI round-trip failed");
+            (false, format!("Codex CLI failed inside WSL: {detail}"))
+        }
         Ok(o) if o.contains("YES") => (true, "Installed + logged in — an isolated agent can use it".to_string()),
         Ok(o) if o.contains("NOBIN") => (false,
             "CLI isn't installed where an isolated agent can reach it (the sandbox sees /usr/local, not ~/.local/bin) — re-run Install CLI for WSL.".to_string()),
@@ -1340,9 +1387,10 @@ async fn probe_cli_subscription(
             }
             let mut child = cmd.spawn().map_err(|e| e.to_string())?;
             if let Some(text) = &stdin_owned {
-                if let Some(mut stdin) = child.stdin.take() {
-                    let _ = stdin.write_all(text.as_bytes());
-                }
+                let mut stdin = child.stdin.take().ok_or_else(|| "CLI stdin pipe missing".to_string())?;
+                stdin
+                    .write_all(text.as_bytes())
+                    .map_err(|e| format!("write CLI prompt to stdin: {e}"))?;
             }
             child.wait_with_output().map_err(|e| e.to_string())
         }),
@@ -1505,6 +1553,32 @@ fn find_kimi_cli() -> Option<PathBuf> {
     None
 }
 
+/// Locate the `grok` executable (xAI's Grok Build CLI). Same resolution
+/// shape as the other subscription CLIs.
+fn find_grok_cli() -> Option<PathBuf> {
+    for name in ["grok.exe", "grok.cmd", "grok"] {
+        if let Some(path) = which_extended(name) {
+            return Some(path);
+        }
+    }
+    None
+}
+
+/// Grok Build keeps actual sign-in state in ~/.grok/auth.json. config.toml is
+/// created by the installer before authentication, so treating it as a login
+/// marker makes a brand-new install appear connected while every request fails
+/// with "Not signed in".
+fn grok_cli_logged_in() -> bool {
+    if find_grok_cli().is_none() {
+        return false;
+    }
+    let Some(home) = user_home_dir() else {
+        return false;
+    };
+    let grok = home.join(".grok");
+    grok.join("auth.json").is_file() || grok.join("credentials.json").is_file()
+}
+
 fn which_in_path(name: &str) -> Result<PathBuf, ()> {
     let path_var = std::env::var_os("PATH").ok_or(())?;
     for dir in std::env::split_paths(&path_var) {
@@ -1601,6 +1675,20 @@ fn extra_search_dirs() -> Vec<PathBuf> {
         }
     }
 
+    // GUI apps on macOS/Linux frequently inherit a reduced PATH that omits
+    // Homebrew/MacPorts and /usr/local even though the same `codex` command is
+    // available in the user's terminal. Search the canonical POSIX locations
+    // directly so Accounts and real execution resolve the same binary.
+    #[cfg(not(windows))]
+    {
+        for p in ["/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"] {
+            let pp = PathBuf::from(p);
+            if pp.is_dir() {
+                dirs.push(pp);
+            }
+        }
+    }
+
     // POSIX pip --user / pipx fallback.
     if let Some(h) = &home {
         let local_bin = PathBuf::from(h).join(".local").join("bin");
@@ -1616,6 +1704,14 @@ fn extra_search_dirs() -> Vec<PathBuf> {
         let volta_bin = PathBuf::from(h).join(".volta").join("bin");
         if volta_bin.is_dir() {
             dirs.push(volta_bin);
+        }
+        // xAI Grok Build installs `grok` (and `agent`) into ~/.grok/bin and
+        // adds it to the User PATH — but that PATH edit isn't visible to the
+        // already-running app, so search the dir directly for immediate
+        // discovery after the in-app installer finishes (no restart needed).
+        let grok_bin = PathBuf::from(h).join(".grok").join("bin");
+        if grok_bin.is_dir() {
+            dirs.push(grok_bin);
         }
     }
 
@@ -2056,13 +2152,18 @@ fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
     if looks_like_cli_auth_error(stderr) {
         return stderr.to_string();
     }
+    // JSON/streaming CLIs increasingly report every fatal error on stdout and
+    // leave stderr empty. Never erase a real diagnostic merely because it was
+    // written to the other pipe.
+    let detail = if !stderr.is_empty() {
+        stderr
+    } else if !body.is_empty() {
+        body
+    } else {
+        "no stdout or stderr"
+    };
     format!(
-        "{cli} CLI exited {code} — {}",
-        if stderr.is_empty() {
-            "no stderr".to_string()
-        } else {
-            stderr.to_string()
-        }
+        "{cli} CLI exited {code} — {detail}"
     )
 }
 
@@ -2073,9 +2174,9 @@ fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
 ///
 /// `codex exec` is the non-interactive entry point. It has no `--system`
 /// flag, so the system prompt is folded into the prompt as a leading
-/// block. The prompt is passed BOTH as the positional arg AND on stdin so
-/// every codex version gets it (older builds read the arg, newer ones read
-/// stdin — same cross-version split that broke the Test probe). The final
+/// block. The prompt is passed once on stdin, with an explicit positional `-`
+/// after every image argument. This is the documented non-interactive shape
+/// and prevents variadic `-i` from consuming the prompt. The final
 /// assistant message is captured via `-o <file>` (clean text, no JSONL /
 /// agent-activity noise) and read back. Sandbox is forced read-only so a
 /// chat turn can never mutate the user's disk.
@@ -2085,6 +2186,8 @@ pub async fn codex_cli_complete(
     user_message: String,
     cwd: Option<String>,
     image_paths: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         let prompt = if system_prompt.trim().is_empty() {
@@ -2092,14 +2195,9 @@ pub async fn codex_cli_complete(
         } else {
             format!("{}\n\n{}", system_prompt.trim(), user_message)
         };
-        // Windows caps a command line at ~32 KB. codex passes the prompt BOTH as a
-        // positional arg AND on stdin (cross-version); a large agentic prompt as
-        // the positional arg overflows ("filename or extension is too long, os
-        // 206") — the same crash the claude path hit. Newer codex reads the prompt
-        // from stdin (always piped below), so for a large prompt we DROP the
-        // positional arg and rely on stdin. Small prompts keep both (older codex).
-        const MAX_PROMPT_ARG: usize = 4000;
-        let pass_prompt_positionally = prompt.len() <= MAX_PROMPT_ARG;
+        // Keep prompts off argv entirely: Windows has a small command-line limit,
+        // and Codex's variadic image option can consume a following positional
+        // prompt. The explicit `-` added below makes stdin the single source.
         // Base args shared by both paths (no -o — see per-branch handling).
         let mut base_args: Vec<String> = vec![
             "exec".into(),
@@ -2110,22 +2208,20 @@ pub async fn codex_cli_complete(
             "--sandbox".into(),
             "read-only".into(),
         ];
-        // Attach pasted images via codex's native `-i` flag (verified: codex
-        // reads them as vision input). One flag per file so the variadic `-i`
-        // doesn't swallow the positional prompt. Paths are relative to cwd.
-        for p in image_paths.iter().flatten() {
-            base_args.push("-i".into());
-            base_args.push(p.clone());
+        if let Some(model) = model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            base_args.push("--model".into());
+            base_args.push(model.to_string());
         }
-
+        if let Some(effort) = effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            base_args.push("-c".into());
+            base_args.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
         // Isolated project → run `codex` inside the sandbox and read the final
         // message from stdout (a Windows -o tempfile path is meaningless inside
         // the sandbox, so we omit -o on this path).
         if let Some((exe, sargs)) = {
             let mut args = base_args.clone();
-            if pass_prompt_positionally {
-                args.push(prompt.clone());
-            }
+            append_codex_input_args(&mut args, image_paths.as_deref());
             crate::sandbox::program_argv(cwd.as_deref(), "codex", &args)
         } {
             let mut cmd = Command::new(exe);
@@ -2140,9 +2236,14 @@ pub async fn codex_cli_complete(
             }
             let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
             let pid = register_cli_child(&child);
-            if let Some(mut stdin) = child.stdin.take() {
-                let _ = stdin.write_all(prompt.as_bytes());
-            }
+            let mut stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| "codex stdin pipe missing".to_string())?;
+            stdin
+                .write_all(prompt.as_bytes())
+                .map_err(|e| format!("write codex prompt to stdin: {e}"))?;
+            drop(stdin);
             let output = wait_cli_child(child, pid).map_err(|e| format!("wait codex: {e}"))?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -2161,7 +2262,9 @@ pub async fn codex_cli_complete(
             return Ok(reply);
         }
 
-        // Windows path (unchanged): -o <tempfile> captures the clean final msg.
+        // Native host path (Windows, Linux, or macOS): -o <tempfile> captures
+        // the clean final message. Only Windows batch shims need special argv
+        // quoting; POSIX hosts receive these same arguments through Command.
         let exe = find_codex_cli().ok_or_else(|| {
             "codex CLI not found on PATH — install OpenAI Codex first (Accounts → Install CLI)"
                 .to_string()
@@ -2182,11 +2285,12 @@ pub async fn codex_cli_complete(
         }
         push_arg(&mut cmd, batch, "-o");
         push_arg(&mut cmd, batch, &out_file.to_string_lossy());
-        // Positional prompt (older codex reads it here); stdin carries it too.
-        // Skipped for a large prompt to stay under the ~32 KB command-line cap —
-        // stdin below still delivers it (see MAX_PROMPT_ARG note above).
-        if pass_prompt_positionally {
-            push_arg(&mut cmd, batch, &prompt);
+        // Images followed by `-`: force the initial instructions to come from
+        // the pipe and terminate the variadic image list unambiguously.
+        let mut input_args = Vec::new();
+        append_codex_input_args(&mut input_args, image_paths.as_deref());
+        for arg in &input_args {
+            push_arg(&mut cmd, batch, arg);
         }
         if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
             let p = std::path::Path::new(dir);
@@ -2204,9 +2308,14 @@ pub async fn codex_cli_complete(
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
         let pid = register_cli_child(&child);
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes());
-        }
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "codex stdin pipe missing".to_string())?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| format!("write codex prompt to stdin: {e}"))?;
+        drop(stdin);
         let output = wait_cli_child(child, pid).map_err(|e| format!("wait codex: {e}"))?;
         let from_file = std::fs::read_to_string(&out_file).ok();
         let _ = std::fs::remove_file(&out_file);
@@ -2235,6 +2344,71 @@ pub async fn codex_cli_complete(
             return Err(reply);
         }
         Ok(reply)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Upgrade the Codex CLI that will actually execute a project run.
+///
+/// On Windows, WSL projects do not use the green Windows Accounts binary;
+/// they use the distro's independent `/usr/local/bin/codex`. Provisioning used
+/// npm's mutable default prefix, which could install a newer copy under `/usr`
+/// while an older `/usr/local` copy kept winning PATH. Pin the destination and
+/// run as WSL root (WSL supports this without an interactive sudo prompt).
+#[tauri::command]
+pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, String> {
+    #[cfg(windows)]
+    if let Some((distro, _)) = cwd
+        .as_deref()
+        .and_then(crate::wsl::parse_wsl_unc)
+    {
+        return tokio::task::spawn_blocking(move || {
+            crate::wsl::run_in_distro_script_user(
+                &distro,
+                Some("root"),
+                "set -e; command -v npm >/dev/null 2>&1 || { echo 'npm is missing in WSL'; exit 1; }; \
+                 npm install -g --prefix /usr/local @openai/codex@latest; \
+                 PATH=/usr/local/bin:/usr/bin:/bin codex --version",
+            )
+        })
+        .await
+        .map_err(|e| format!("join error: {e}"))?;
+    }
+
+    // Native Windows/Linux/macOS project: update the npm installation owned by
+    // that host. If permissions block the global prefix, preserve npm's exact
+    // diagnostic so the UI can tell the user what needs intervention.
+    tokio::task::spawn_blocking(move || {
+        let npm = ["npm.cmd", "npm.exe", "npm"]
+            .iter()
+            .find_map(|name| which_extended(name))
+            .ok_or_else(|| "npm not found — install the Node.js runtime first".to_string())?;
+        #[cfg(windows)]
+        let batch = is_batch_shim(&npm);
+        #[cfg(not(windows))]
+        let batch = false;
+        let mut cmd = Command::new(&npm);
+        for arg in ["install", "-g", "@openai/codex@latest"] {
+            push_arg(&mut cmd, batch, arg);
+        }
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let out = cmd.output().map_err(|e| format!("start npm: {e}"))?;
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if !out.status.success() {
+            return Err(format!(
+                "Codex CLI upgrade failed: {}",
+                if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+            ));
+        }
+        Ok(stdout.trim().to_string())
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -2944,6 +3118,8 @@ pub async fn codex_cli_stream(
     user_message: String,
     cwd: Option<String>,
     image_paths: Option<Vec<String>>,
+    model: Option<String>,
+    effort: Option<String>,
     // Per-role tool gate. Codex has no `--allowedTools` flag, so this is used
     // to detect the Browser role (its allowlist names browser_*, the same
     // capability-key the Publisher uses). Browser is the host-capable role
@@ -3051,6 +3227,14 @@ pub async fn codex_cli_stream(
             "--sandbox".into(),
             sandbox_mode.into(),
         ];
+        if let Some(model) = model.as_deref().map(str::trim).filter(|m| !m.is_empty()) {
+            args.push("--model".into());
+            args.push(model.to_string());
+        }
+        if let Some(effort) = effort.as_deref().map(str::trim).filter(|e| !e.is_empty()) {
+            args.push("-c".into());
+            args.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
         // Point Codex at the in-app MCP gateway (browser_* tools) + let its calls
         // actually execute (approval_policy=never — see the codex-quirk note).
         if gateway_wired {
@@ -3058,21 +3242,9 @@ pub async fn codex_cli_stream(
             args.push("-c".into());
             args.push("approval_policy=\"never\"".into());
         }
-        // Pasted images via codex's native `-i` flag (one per file so the
-        // positional prompt isn't swallowed). Relative paths (cwd-rooted).
-        for p in image_paths.iter().flatten() {
-            args.push("-i".into());
-            args.push(p.clone());
-        }
-        // Positional prompt (older codex reads it here); stdin carries it
-        // too (newer codex reads it there). A large agentic prompt as the
-        // positional arg overflows the Windows ~32 KB command line ("os error
-        // 206") — same crash the claude path hit — so for a large prompt we drop
-        // the positional and rely on stdin (written below).
-        const MAX_PROMPT_ARG: usize = 4000;
-        if prompt.len() <= MAX_PROMPT_ARG {
-            args.push(prompt.clone());
-        }
+        // Pasted images followed by the explicit stdin marker. `-i` is
+        // variadic, so a normal positional prompt here is parsed as an image.
+        append_codex_input_args(&mut args, image_paths.as_deref());
 
         // WSL-isolated project → run `codex` inside the distro; else Windows CLI.
         // BROWSER-ROLE JAIL EXCEPTION: the Browser role runs UNJAILED (plain WSL)
@@ -3125,18 +3297,86 @@ pub async fn codex_cli_stream(
         }
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
         let child_pid = register_cli_child(&child);
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(prompt.as_bytes());
-            // Drop closes the pipe (EOF) so the stdin-style codex proceeds.
-        }
+        // `codex exec --json` writes progress and diagnostics to stderr.  The
+        // old stream path did not read that pipe until *after* stdout closed;
+        // a verbose model turn could fill the OS pipe buffer, leaving Codex
+        // blocked and the WebView awaiting this invoke forever. Drain stderr
+        // concurrently, retaining only a bounded tail for a useful error.
+        const MAX_STDERR_CAPTURE: usize = 256 * 1024;
+        let started = Instant::now();
+        let last_activity = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let stream_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let timed_out = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stderr_buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| "no stderr pipe".to_string())?;
+        let stderr_buf_reader = std::sync::Arc::clone(&stderr_buf);
+        let stderr_activity = std::sync::Arc::clone(&last_activity);
+        let stderr_reader = std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            let mut stderr = stderr;
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut buf) = stderr_buf_reader.lock() {
+                            let keep = MAX_STDERR_CAPTURE.saturating_sub(buf.len()).min(n);
+                            buf.extend_from_slice(&chunk[..keep]);
+                        }
+                        stderr_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+        // Streaming calls used to have no liveness bound at all (unlike the
+        // one-shot CLI paths). The watchdog uses the same inactivity/absolute
+        // ceilings, so a genuinely stalled GPT-5.5 Codex turn returns control
+        // to the UI while a chatty long-running turn remains untouched.
+        let watchdog_done = std::sync::Arc::clone(&stream_done);
+        let watchdog_activity = std::sync::Arc::clone(&last_activity);
+        let watchdog_timed_out = std::sync::Arc::clone(&timed_out);
+        let watchdog = std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+            while !watchdog_done.load(Ordering::Relaxed) {
+                let idle = started.elapsed().saturating_sub(Duration::from_millis(
+                    watchdog_activity.load(Ordering::Relaxed),
+                ));
+                if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+                    watchdog_timed_out.store(true, Ordering::Relaxed);
+                    let _ = terminate_cli_child(child_pid);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        });
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| "codex stdin pipe missing".to_string())?;
+        stdin
+            .write_all(prompt.as_bytes())
+            .map_err(|e| format!("write codex prompt to stdin: {e}"))?;
+        // Drop closes the pipe (EOF) so the stdin-style Codex proceeds.
+        drop(stdin);
         let stdout = child
             .stdout
             .take()
             .ok_or_else(|| "no stdout pipe".to_string())?;
         let reader = BufReader::new(stdout);
         let mut assembled = String::new();
+        // Codex emits structured failures on STDOUT in --json mode (for
+        // example "model requires a newer version of Codex") and commonly
+        // leaves stderr empty. Retain those messages for the final Result;
+        // previously we sent them transiently to the UI channel, discarded
+        // them here, and replaced the real cause with "exited 1 — no stderr".
+        let mut stream_errors: Vec<String> = Vec::new();
 
         for line_res in reader.lines() {
+            use std::sync::atomic::Ordering;
+            last_activity.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
             let line = match line_res {
                 Ok(l) => l,
                 Err(e) => {
@@ -3265,6 +3505,7 @@ pub async fn codex_cli_stream(
                         // Non-fatal item warning.
                         "error" => {
                             if let Some(m) = item.get("message").and_then(|c| c.as_str()) {
+                                stream_errors.push(m.to_string());
                                 let _ = on_event
                                     .send(CodexStreamEvent::Error { message: m.to_string() });
                             }
@@ -3275,6 +3516,7 @@ pub async fn codex_cli_stream(
                 // Stream-level / turn-level failures.
                 "error" => {
                     if let Some(m) = v.get("message").and_then(|t| t.as_str()) {
+                        stream_errors.push(m.to_string());
                         let _ = on_event.send(CodexStreamEvent::Error { message: m.to_string() });
                     }
                 }
@@ -3284,6 +3526,7 @@ pub async fn codex_cli_stream(
                         .and_then(|e| e.get("message"))
                         .and_then(|t| t.as_str())
                     {
+                        stream_errors.push(m.to_string());
                         let _ = on_event.send(CodexStreamEvent::Error { message: m.to_string() });
                     }
                 }
@@ -3291,21 +3534,31 @@ pub async fn codex_cli_stream(
             }
         }
         let wait_res = child.wait();
+        stream_done.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = watchdog.join();
+        let _ = stderr_reader.join();
         unregister_cli_child(child_pid);
         let status = wait_res.map_err(|e| format!("wait codex: {e}"))?;
         let asm = assembled.trim().to_string();
+        if timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(format!(
+                "Codex CLI stopped after {} seconds with no output (or {} seconds total). Try the request again or use a lower effort.",
+                CLI_CHILD_TIMEOUT.as_secs(),
+                CLI_CHILD_ABS_TIMEOUT.as_secs(),
+            ));
+        }
         if !status.success() && asm.is_empty() {
             // Only an error if we got NO usable reply — codex can exit
             // nonzero after the read-only sandbox denies a write it tried,
             // even though it produced a perfectly good message.
-            let mut stderr_buf = String::new();
-            if let Some(mut stderr) = child.stderr.take() {
-                let _ = stderr.read_to_string(&mut stderr_buf);
-            }
+            let stderr_buf = stderr_buf
+                .lock()
+                .map(|buf| String::from_utf8_lossy(&buf).into_owned())
+                .unwrap_or_default();
             return Err(cli_exit_err(
                 "codex",
                 status.code().unwrap_or(-1),
-                "",
+                &stream_errors.join("\n"),
                 &stderr_buf,
             ));
         }
@@ -3384,13 +3637,12 @@ fn kimi_is_new_flavor() -> bool {
         .unwrap_or(true)
 }
 
-/// Kimi Code CLI marks a login in `credentials/kimi-code.json` (modern) or
-/// directly in `config.toml` (legacy). Accept either marker in either home.
+/// Kimi Code CLI stores OAuth tokens in `credentials/kimi-code.json`.
+/// config.toml exists before login and must never count as authentication.
 fn kimi_cli_logged_in() -> bool {
-    kimi_home_candidates().iter().any(|kimi| {
-        kimi.join("credentials").join("kimi-code.json").is_file()
-            || kimi.join("config.toml").exists()
-    })
+    kimi_home_candidates()
+        .iter()
+        .any(|kimi| kimi.join("credentials").join("kimi-code.json").is_file())
 }
 
 /// Raw text of the active Kimi config.toml (None when absent/unreadable).
@@ -3699,7 +3951,7 @@ fn generic_api_probe(
 /// `*_cli_logged_in()` detector):
 ///   * claude: ~/.claude/.credentials.json
 ///   * codex:  ~/.codex/auth.json + ~/.openai/auth.json (old path)
-///   * kimi:   ~/.kimi/credentials/kimi-code.json (modern) + ~/.kimi/config.toml (old)
+///   * kimi:   ~/.kimi[-code]/credentials/kimi-code.json
 ///   * gemini: ~/.gemini/oauth_creds.json + ~/.gemini/credentials.json
 ///             only. settings.json is configuration, not auth.
 ///
@@ -3735,13 +3987,13 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
         }
         "kimi_cli" => {
             // Modern kimi-code uses ~/.kimi-code; legacy kimi-cli used ~/.kimi.
-            // Remove from BOTH so Disconnect actually clears the real token.
+            // Remove credentials from BOTH. Preserve config.toml: it contains
+            // model/provider configuration and is not proof of authentication.
             for kimi in kimi_home_candidates() {
                 try_remove(
                     &kimi.join("credentials").join("kimi-code.json"),
                     &mut removed,
                 );
-                try_remove(&kimi.join("config.toml"), &mut removed);
             }
         }
         "gemini_cli" => {
@@ -3791,6 +4043,10 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         "codex_cli" => (find_codex_cli, &["login"]),
         "kimi_cli" => (find_kimi_cli, &[]),
         "gemini_cli" => (find_gemini_cli, &[]),
+        // Grok Build (xAI): first interactive run opens the browser
+        // sign-in (X / SuperGrok account) — same no-args REPL flavour
+        // as claude/kimi/gemini.
+        "grok_cli" => (find_grok_cli, &[]),
         other => return Err(format!("unknown subscription backend: {other}")),
     };
     let exe = find_fn()
@@ -3842,7 +4098,10 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
 /// find_claude_cli / find_kimi_cli — npm-installed, lives in the
 /// npm-global dir on Windows.
 fn find_codex_cli() -> Option<PathBuf> {
-    for name in ["codex.exe", "codex.cmd", "codex"] {
+    // Prefer the user-upgradeable npm shim over a bundled editor executable.
+    // VS Code's Codex binary can lag behind npm and reject newly available
+    // subscription models even when `npm install -g` already updated Codex.
+    for name in ["codex.cmd", "codex.exe", "codex"] {
         if let Some(path) = which_extended(name) {
             return Some(path);
         }
@@ -3893,7 +4152,42 @@ pub async fn cli_install_stream(
     };
     let kimi_via_pip = backend == "kimi_cli" && kimi_uv.is_none();
 
-    let (tool_path, args): (PathBuf, Vec<String>) = if let Some(uv) = kimi_uv {
+    // Grok Build (xAI) ships platform installers, not an npm/pip package:
+    //   Windows      → official PowerShell installer (irm .../install.ps1 | iex)
+    //   macOS/Linux  → shell installer (curl -fsSL .../install.sh | bash)
+    // Both drop `grok` into ~/.grok/bin (which extra_search_dirs() now walks,
+    // so the card sees it without an app restart). On Windows we run the
+    // documented installer automatically rather than making the user do it by
+    // hand — same "one click, we handle it" flow as the npm/pip CLIs.
+    #[cfg(windows)]
+    let grok_native: Option<(PathBuf, Vec<String>)> = if backend == "grok_cli" {
+        let ps = which_extended("powershell.exe")
+            .or_else(|| which_extended("pwsh.exe"))
+            .ok_or_else(|| {
+                "PowerShell not found — can't run xAI's Grok Build installer. Use this card's 'API · XAI_API_KEY' route instead.".to_string()
+            })?;
+        Some((
+            ps,
+            [
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "irm https://x.ai/cli/install.ps1 | iex",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+        ))
+    } else {
+        None
+    };
+    #[cfg(not(windows))]
+    let grok_native: Option<(PathBuf, Vec<String>)> = None;
+
+    let (tool_path, args): (PathBuf, Vec<String>) = if let Some(g) = grok_native {
+        g
+    } else if let Some(uv) = kimi_uv {
         // `uv tool install` puts the shim in ~/.local/bin, which
         // extra_search_dirs() already walks — no restart needed.
         (
@@ -3916,6 +4210,9 @@ pub async fn cli_install_stream(
             "codex_cli" => ("npm", vec!["install", "-g", "@openai/codex"]),
             "kimi_cli" => ("pip", vec!["install", "--upgrade", "kimi-cli"]),
             "gemini_cli" => ("npm", vec!["install", "-g", "@google/gemini-cli"]),
+            // Grok Build's macOS/Linux installer is a curl|bash shell pipeline
+            // (the Windows PowerShell path is handled above in grok_native).
+            "grok_cli" => ("sh", vec!["-c", "curl -fsSL https://x.ai/cli/install.sh | bash"]),
             other => return Err(format!("unknown CLI backend: {other}")),
         };
 
@@ -4057,6 +4354,14 @@ pub fn cli_install(backend: String) -> Result<(), String> {
     //   * Codex:       @openai/codex (npm)
     //   * Kimi Code:   kimi-cli (pip)
     //   * Gemini CLI:  @google/gemini-cli (npm)
+    // Grok Build installs via a platform installer (PowerShell on Windows,
+    // curl|bash on macOS/Linux), which this legacy console launcher's
+    // whitespace-split runner can't execute safely — the in-app streaming
+    // installer (cli_install_stream) runs the right one automatically. Point
+    // the caller there rather than mis-run the pipeline.
+    if backend == "grok_cli" {
+        return Err("Use the card's Install button (streaming installer) for Grok Build — it runs xAI's official installer for your OS automatically (PowerShell on Windows, curl|bash on macOS/Linux).".to_string());
+    }
     let (tool, install_cmd) = match backend.as_str() {
         "claude_cli" => ("npm", "npm install -g @anthropic-ai/claude-code"),
         "codex_cli" => ("npm", "npm install -g @openai/codex"),
@@ -4244,6 +4549,94 @@ pub async fn gemini_cli_complete(
         // Exit-0 auth envelope — same check every other CLI path does: gemini
         // can print the auth failure as its "answer" and exit 0, which sailed
         // through as the agent's reply so the token-refresh retry never fired.
+        if looks_like_cli_auth_error(&reply) {
+            return Err(reply);
+        }
+        Ok(reply)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
+}
+
+/// One-shot completion via the `grok` CLI (xAI Grok Build — SuperGrok /
+/// X Premium+ subscription auth). `-p` is the non-interactive one-shot
+/// flag, `-m` selects the model. Same argv-limit fold as the gemini /
+/// kimi / claude paths: a large composed prompt goes on stdin with an
+/// empty `-p` so the spawn never dies on the Windows command-line cap.
+#[tauri::command]
+pub async fn grok_cli_complete(
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+) -> Result<String, String> {
+    tokio::task::spawn_blocking(move || {
+        let composed = if system_prompt.trim().is_empty() {
+            user_message
+        } else {
+            format!("{system_prompt}\n\n---\n\n{user_message}")
+        };
+        const MAX_PROMPT_ARG: usize = 4000;
+        let fold_prompt_into_stdin = composed.len() > MAX_PROMPT_ARG;
+        let mut args: Vec<String> = Vec::new();
+        if let Some(m) = model.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            args.push("-m".into());
+            args.push(m.to_string());
+        }
+        args.push("-p".into());
+        args.push(if fold_prompt_into_stdin { String::new() } else { composed.clone() });
+
+        // WSL-isolated project → run `grok` inside the distro; else Windows CLI.
+        let mut cmd = if let Some((exe, sargs)) =
+            crate::sandbox::program_argv(cwd.as_deref(), "grok", &args)
+        {
+            let mut c = Command::new(exe);
+            c.args(sargs);
+            c
+        } else {
+            let exe = find_grok_cli()
+                .ok_or_else(|| "grok CLI not found on PATH — install Grok Build (https://x.ai/news/grok-build-cli) first".to_string())?;
+            #[cfg(windows)]
+            let batch = is_batch_shim(&exe);
+            #[cfg(not(windows))]
+            let batch = false;
+            let mut c = Command::new(&exe);
+            for a in &args {
+                push_arg(&mut c, batch, a);
+            }
+            if let Some(dir) = cwd.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                let p = std::path::Path::new(dir);
+                if p.is_dir() {
+                    c.current_dir(p);
+                }
+            }
+            c
+        };
+        cmd.stdin(if fold_prompt_into_stdin { Stdio::piped() } else { Stdio::null() });
+        cmd.stdout(Stdio::piped());
+        cmd.stderr(Stdio::piped());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(CREATE_NO_WINDOW);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("spawn grok: {e}"))?;
+        let pid = register_cli_child(&child);
+        if fold_prompt_into_stdin {
+            if let Some(mut stdin) = child.stdin.take() {
+                use std::io::Write as _;
+                let _ = stdin.write_all(composed.as_bytes());
+            }
+        }
+        let output = wait_cli_child(child, pid).map_err(|e| format!("wait grok: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+            let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+            return Err(cli_exit_err("grok", output.status.code().unwrap_or(-1), &stdout, &stderr));
+        }
+        let stdout = String::from_utf8(output.stdout).map_err(|e| format!("decode stdout: {e}"))?;
+        let reply = stdout.trim().to_string();
+        // Exit-0 auth envelope — same check as every other CLI path.
         if looks_like_cli_auth_error(&reply) {
             return Err(reply);
         }
@@ -4567,10 +4960,44 @@ pub async fn kimi_cli_complete(
 #[cfg(test)]
 mod tests {
     use super::{
-        codex_should_grant_browser, is_browser_role_allowlist, kimi_agent_yaml,
-        kimi_config_has_default, kimi_config_model_keys, kimi_output_auth_failed,
-        kimi_output_llm_unset, kimi_output_mcp_failed,
+        append_codex_input_args, cli_exit_err, codex_should_grant_browser, is_browser_role_allowlist,
+        kimi_agent_yaml, kimi_config_has_default, kimi_config_model_keys,
+        kimi_output_auth_failed, kimi_output_llm_unset, kimi_output_mcp_failed,
     };
+
+    #[test]
+    fn codex_images_are_terminated_by_the_stdin_prompt_marker() {
+        let images = vec![
+            ".owllm-inbox/image_1.png".to_string(),
+            ".owllm-inbox/image_2.jpg".to_string(),
+        ];
+        let mut args = vec!["exec".to_string(), "--json".to_string()];
+        append_codex_input_args(&mut args, Some(&images));
+        assert_eq!(
+            args,
+            vec![
+                "exec",
+                "--json",
+                "-i",
+                ".owllm-inbox/image_1.png",
+                "-i",
+                ".owllm-inbox/image_2.jpg",
+                "-",
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_exit_preserves_stdout_error_when_stderr_is_empty() {
+        let err = cli_exit_err(
+            "codex",
+            1,
+            "The model requires a newer version of Codex.",
+            "",
+        );
+        assert!(err.contains("requires a newer version of Codex"));
+        assert!(!err.contains("no stderr"));
+    }
 
     // The exact kimi output that crashed a team run (reproduced live 2026-07-06,
     // ~/.kimi/logs/kimi.log): kimi aborts the turn when the browser gateway

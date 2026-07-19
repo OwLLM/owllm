@@ -182,7 +182,7 @@ fn handle_request(mut req: tiny_http::Request, rt: &tokio::runtime::Handle) {
 /// A pairing request: verify the sender actually holds the key it presents, and
 /// that the claimed id matches that key, then record it as Pending (a human on
 /// this machine must still approve).
-fn handle_pair(pr: PairRequest) -> WireReply {
+pub(super) fn handle_pair(pr: PairRequest) -> WireReply {
     if !super::feature_enabled() {
         return WireReply::Error { message: "remote device control is disabled on this machine".into() };
     }
@@ -208,6 +208,15 @@ fn handle_pair(pr: PairRequest) -> WireReply {
         &pr.from.x25519_pub,
     ) {
         Ok(()) => {
+            // Same-GitHub-account devices (proven via the private vault repo)
+            // are auto-approved with the standard grant — no human needed at
+            // THIS keyboard. Unverified requesters stay Pending as before.
+            let _ = super::ensure_vault_autotrust(
+                &pr.from.device_id,
+                &pr.from.name,
+                &pr.from.ed25519_pub,
+                &pr.from.x25519_pub,
+            );
             super::emit_pairing();
             // Return OUR public record so the controller learns our keys/id.
             match super::self_public_record() {

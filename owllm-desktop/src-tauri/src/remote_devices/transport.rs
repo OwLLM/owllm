@@ -17,7 +17,7 @@
 // controller's key; loopback needs no wire protection because nothing leaves the
 // process.)
 
-use super::protocol::{CommandResult, SignedEnvelope};
+use super::protocol::{CommandResult, SignedEnvelope, WireReply};
 
 /// The abstraction every transport implements.
 #[allow(async_fn_in_trait)]
@@ -46,15 +46,20 @@ pub struct LanDirectTransport {
 impl Transport for LanDirectTransport {
     async fn deliver(&self, frame: SignedEnvelope) -> Result<CommandResult, String> {
         let reply = super::lan::post_wire(&self.endpoint, &super::protocol::WireMessage::Command(frame)).await?;
-        match reply {
-            super::protocol::WireReply::Result(sealed) => {
-                // Open the target's sealed reply with THIS device's X25519 secret.
-                let me = super::identity::load_or_create()?;
-                let pt = super::crypto::open(&sealed, &me.secrets.x25519_secret)?;
-                serde_json::from_slice(&pt).map_err(|e| format!("bad sealed result: {e}"))
-            }
-            super::protocol::WireReply::Error { message } => Err(message),
-            super::protocol::WireReply::Paired { .. } => Err("unexpected Paired reply to a command".into()),
+        open_sealed_reply(reply)
+    }
+}
+
+/// Open a wire reply carrying a sealed CommandResult with THIS device's X25519
+/// secret. Shared by every network transport (LAN-direct, embedded P2P).
+pub(super) fn open_sealed_reply(reply: WireReply) -> Result<CommandResult, String> {
+    match reply {
+        WireReply::Result(sealed) => {
+            let me = super::identity::load_or_create()?;
+            let pt = super::crypto::open(&sealed, &me.secrets.x25519_secret)?;
+            serde_json::from_slice(&pt).map_err(|e| format!("bad sealed result: {e}"))
         }
+        WireReply::Error { message } => Err(message),
+        WireReply::Paired { .. } => Err("unexpected Paired reply to a command".into()),
     }
 }

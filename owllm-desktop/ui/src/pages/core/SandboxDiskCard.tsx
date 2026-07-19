@@ -13,6 +13,7 @@ import { Card, Row } from "./infoCards";
 type SandboxDisk = {
   vhdxBytes: number; vhdxPath: string | null;
   cacheBytes: number; copiesBytes: number; available: boolean;
+  sparseConfig: boolean;
 };
 
 export default function SandboxDiskCard() {
@@ -28,7 +29,7 @@ export default function SandboxDiskCard() {
     catch {
       // Non-WSL platform or no distro → mark unavailable so the card hides
       // itself instead of showing perpetual "…" placeholders.
-      setDisk({ vhdxBytes: 0, vhdxPath: null, cacheBytes: 0, copiesBytes: 0, available: false });
+      setDisk({ vhdxBytes: 0, vhdxPath: null, cacheBytes: 0, copiesBytes: 0, available: false, sparseConfig: false });
     }
   };
   useEffect(() => { load(); }, []);
@@ -62,6 +63,26 @@ export default function SandboxDiskCard() {
     finally { setBusy(null); }
   };
 
+  // ADVANCED opt-in: sparse disks return freed space to Windows continuously, but
+  // modern WSL disables them by default because they can (rarely) corrupt data —
+  // so this is gated behind an explicit warning and uses --allow-unsafe. The SAFE
+  // default is the automatic cache-trim, not this.
+  const enableSparse = async () => {
+    if (busy) return;
+    if (!window.confirm(
+      "Enable sparse disk? (advanced)\n\n⚠ Microsoft DISABLES this by default because sparse WSL disks can, in rare cases, CORRUPT DATA — turning it on uses the --allow-unsafe override.\n\nUpside: the disk returns freed space to Windows automatically and never balloons. It briefly restarts WSL to convert the existing disk.\n\nMost users don't need this — the sandbox already auto-trims caches. Enable sparse anyway?"
+    )) return;
+    setBusy("sparse");
+    setMsg("♻️ Enabling sparse and converting the sandbox disk — this briefly restarts WSL…");
+    try {
+      const r = await invoke<{ configEnabled: boolean; distroConverted: boolean; applicable: boolean; detail: string }>(
+        "sandbox_enable_sparse", { distro: null, convertExisting: true });
+      setMsg((r.applicable ? "✅ " : "") + r.detail);
+      await load();
+    } catch (e) { setMsg("Enable sparse failed: " + String(e)); }
+    finally { setBusy(null); }
+  };
+
   // Hide entirely on non-WSL platforms or when no distro is present.
   if (disk && !disk.available) return null;
 
@@ -87,12 +108,14 @@ export default function SandboxDiskCard() {
       title="💾 Sandbox disk"
       action={<button className="ghost-btn" onClick={load} disabled={!!busy}>🔄 Refresh</button>}
     >
-      <Row label="WSL disk file"          value={<>{value(disk ? fmt(disk.vhdxBytes) : "…")}{hint("grows over time; shrink with Reclaim")}</>} />
-      <Row label="Reclaimable caches"     value={<>{value(disk ? fmt(disk.cacheBytes) : "…")}{hint("uv / npm / pip — safe to clear")}</>} />
+      <Row label="WSL disk file"          value={<>{value(disk ? fmt(disk.vhdxBytes) : "…")}{hint(disk?.sparseConfig ? "sparse — freed space returns to Windows" : "grows over time; caches auto-trim, Reclaim to shrink")}</>} />
+      <Row label="Reclaimable caches"     value={<>{value(disk ? fmt(disk.cacheBytes) : "…")}{hint("uv / npm / pip — auto-trimmed when large; safe to clear now")}</>} />
       <Row label="Project sandbox copies" value={<>{value(disk ? fmt(disk.copiesBytes) : "…")}{hint("freed automatically when you delete a project")}</>} />
+      <Row label="Sparse disk (advanced)" value={<>{value(disk ? (disk.sparseConfig ? "On" : "Off") : "…")}{hint(disk?.sparseConfig ? "auto-returns freed space (uses --allow-unsafe)" : "off — Microsoft flags a data-corruption risk")}</>} />
       <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 12 }}>
         {actionBtn("🧹 Clear caches", clearCaches, "clear", true)}
         {actionBtn("💿 Reclaim disk space", reclaim, "reclaim")}
+        {disk && !disk.sparseConfig && actionBtn("⚠ Enable sparse (advanced)", enableSparse, "sparse")}
       </div>
       {msg && (
         <div style={{ marginTop: 12, fontSize: 12, color: "var(--fg)", whiteSpace: "pre-wrap", lineHeight: 1.5 }}>{msg}</div>

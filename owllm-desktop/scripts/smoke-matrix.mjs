@@ -58,7 +58,10 @@ const TRIPWIRES = [
   ["src-tauri/src/accounts.rs", /let gw_broken = false;/, "kimi browser MCP failure is per-run only, never a session-long tool blackout (v0.8.20)"],
   ["src-tauri/src/accounts.rs", /CLI_CHILD_TIMEOUT[\s\S]*20 \* 60/, "one-shot CLI providers cannot keep Agents page busy forever (v0.8.21)"],
   ["src-tauri/src/accounts.rs", /is_browser_role_allowlist/, "browser gateway gated to Browser role, not every agent (v0.7.84)"],
-  ["src-tauri/src/browser.rs", /browser_start\(app\.clone\(\)\)\?/, "browser tool first-call auto-start — snapshot/get_text no longer fail on closed window (v0.8.18)"],
+  ["src-tauri/src/browser.rs", /browser_start_inner\(&app\)\?/, "serialized browser tool first-call auto-start — snapshot/get_text no longer fail on closed window (v0.8.18/v0.8.96)"],
+  ["src-tauri/src/paths.rs", /fn webview_profile_scope[\s\S]*exe\.parent\(\)\.map\(Path::to_path_buf\)/, "installed app never reuses poisoned default EBWebView profile (v0.8.97)"],
+  ["src-tauri/src/paths.rs", /(?=[\s\S]*isolated-webview-v2)(?=[\s\S]*Default\/Local Storage)(?=[\s\S]*max_by_key)/, "isolated WebView upgrades preserve the richest chat/notebook profile (v0.8.98)"],
+  ["src-tauri/Cargo.toml", /tao[\s\S]*rev = "c704261c519c58cfdd0bc2d58ba24e06a0b71c92"/, "Tao PeekMessageW runs outside input mutexes — no keyboard re-entrancy deadlock (v0.9.2)"],
   ["src-tauri/src/mcp_gateway.rs", /cli_safe_path/, "spaced 'OwLLM Desktop' --mcp-config path split → 8.3 short path (v0.7.62)"],
   ["src-tauri/src/mcp_gateway.rs", /bearer_token_env_var/, "codex MCP wiring via -c overrides + env token (v0.7.72)"],
   ["src-tauri/src/directives.rs", /directives_seed_marks/, "project rules re-seeded 11x into every prompt (v0.7.91)"],
@@ -289,7 +292,7 @@ async function runProviders() {
       // Mirrors codex_cli_complete: prompt as positional arg AND on stdin (EOF'd).
       const smallP = "Reply with exactly SMOKE_OK_CODEX and nothing else.";
       await cell("P", "codex · small prompt", async () =>
-        expectToken(await runCli(codex, ["exec", smallP], { stdinText: smallP }), "SMOKE_OK_CODEX"));
+        expectToken(await runCli(codex, ["exec", smallP]), "SMOKE_OK_CODEX"));
       await cell("P", "codex · 40KB prompt via stdin (arg dropped)", async () =>
         expectToken(await runCli(codex, ["exec"], { stdinText: bigPrompt("SMOKE_BIG_CODEX") }), "SMOKE_BIG_CODEX"));
       // Mirrors codex_http_config + the approval reality verified 2026-07-05:

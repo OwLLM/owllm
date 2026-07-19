@@ -112,7 +112,18 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
   folder, no copy. Cloud CLIs run inside too; logins/API keys auto-mirror in.
 - Graduated trust: isolated by default, per-project Full-access opt-out,
   write-jail + dangerous-command guard when not isolated.
-- Sandbox disk card: usage view, cache clear, WSL disk reclaim.
+- Sandbox disk card: usage view, cache clear, WSL disk reclaim, plus
+  **anti-inflation** so the WSL `.vhdx` doesn't balloon unattended:
+  - **Safe default — automatic cache-trim** (`sandbox_trim` / `auto_housekeep`):
+    when the regenerable caches (uv/npm/pip) inside a *running* distro exceed a
+    threshold, they're cleared on startup + on demand, then `fstrim`. No admin,
+    no restart, no data risk. This is the main lever that keeps growth in check.
+  - **Advanced opt-in — sparse disk** (`sandbox_enable_sparse`): returns freed
+    space continuously via `.wslconfig sparseVhd=true` + `wsl --manage
+    --set-sparse true --allow-unsafe`. Gated behind an explicit warning because
+    **modern WSL disables sparse by default due to a potential data-corruption
+    risk** — never auto-applied. One-click, clearly labelled advanced.
+  - No-op on Linux/macOS (bwrap = host FS; Lima manages its own disk).
 - GitHub connect for clone/push from inside the sandbox.
 
 ## Browser control (`browser.rs`, `browser_vault.rs`, `browser_import.rs`)
@@ -255,9 +266,12 @@ mid-run chat becomes a steer. "Just chat" mode with persisted threads.
 - **Sealed transport (WAN-capable)**: every command AND its reply is an
   end-to-end AES-256-GCM sealed + Ed25519-signed envelope — the wire only carries
   ciphertext. `Transport` seam with `LoopbackTransport` (self), `LanDirectTransport`
-  (`lan.rs` — `tiny_http` listener + `reqwest`), and `RelayTransport` (`relay.rs`).
-  Devices need NOT be on the same network: each publishes all its addresses
-  (overlay/Tailscale + public host:port + LAN), the controller tries each, then
+  (`lan.rs` — `tiny_http` listener + `reqwest`), `P2pTransport` (`p2p.rs`), and
+  `RelayTransport` (`relay.rs`). Devices need NOT be on the same network: each
+  publishes all its addresses (overlay/Tailscale + public host:port + LAN), the
+  controller tries each, then the **embedded P2P transport** (iroh: QUIC NAT
+  hole-punching + n0's free public relays — compiled in, zero setup, no account;
+  each device publishes a `p2p_node_id`, pairable by node id from anywhere), then
   falls back to a **self-hostable relay** (store-and-forward, both peers dial out,
   ciphertext-only — run it via `device_relay_serve` on any always-on box).
 - **Discovery**: `vault_sync_devices` (a 4th vault channel) publishes each

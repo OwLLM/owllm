@@ -15,6 +15,12 @@ use tauri::{App, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, Windo
 
 const OVERLAY_LABEL: &str = "owllm-overlay-frame";
 static OVERLAY_READY: AtomicBool = AtomicBool::new(false);
+// Linux/Jetson cannot reliably repaint an already-drawn pixel back to alpha
+// zero. The frame therefore clears by unmapping the WHOLE overlay window,
+// which the compositor handles correctly. Windows keeps its CSS fade and
+// leaves the native overlay mapped.
+#[cfg(target_os = "linux")]
+static LINUX_OVERLAY_VISIBLE: AtomicBool = AtomicBool::new(true);
 const BORDER_T: i32 = 18;
 const CORNER_OUTSET: i32 = 10;
 const SHIFT_OUT: i32 = BORDER_T / 2;
@@ -47,17 +53,18 @@ pub fn disable_window_ghosting() {
 pub fn disable_window_ghosting() {}
 
 pub fn enabled() -> bool {
-    // The overlay frame is Windows-only decorative chrome: the owner-window
-    // wiring is a no-op stub off Windows, and the click-through path aborts on
-    // GTK (tao `CursorIgnoreEvents` unwraps a not-yet-realized GDK window,
-    // SIGABRT on launch). Default it off everywhere except Windows; opt-in only.
-    #[cfg(not(target_os = "windows"))]
+    // Windows and Linux use the same split-window architecture: an opaque,
+    // content-sized main window plus a transparent decorative overlay. Linux
+    // used to draw the chrome inside one oversized opaque window, which made
+    // every frame margin a solid slab. GTK click-through is configured with an
+    // empty native input region below, avoiding tao's pre-realize panic.
+    #[cfg(target_os = "macos")]
     {
         return std::env::var("OWLLM_OVERLAY_FRAME")
             .map(|v| v == "1")
             .unwrap_or(false);
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         std::env::var("OWLLM_OVERLAY_FRAME")
             .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
@@ -110,8 +117,11 @@ pub fn install(app: &mut App) {
         eprintln!("[overlay-frame] initial sync failed: {e}");
     }
 
-    // The overlay is decorative only. Clicks pass through to the real
-    // app window, which avoids focus/input regressions while testing.
+    // The overlay is decorative only. Clicks pass through to the real app.
+    // tao's GTK set_ignore_cursor_events path can panic before the GDK window
+    // is realized, so Linux uses a native empty input region in
+    // set_owner_to_main instead.
+    #[cfg(target_os = "windows")]
     let _ = overlay.set_ignore_cursor_events(true);
 
     // Make main the OWNER so the chrome rides with our app instead of
@@ -185,11 +195,81 @@ fn set_owner_to_main(overlay: &WebviewWindow, main: &WebviewWindow) -> tauri::Re
     Ok(())
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+fn set_owner_to_main(overlay: &WebviewWindow, main: &WebviewWindow) -> tauri::Result<()> {
+    use gtk::prelude::*;
+
+    let overlay_gtk = overlay.gtk_window()?;
+    let main_gtk = main.gtk_window()?;
+    overlay_gtk.set_transient_for(Some(&main_gtk));
+    overlay_gtk.set_destroy_with_parent(true);
+    overlay_gtk.set_accept_focus(false);
+    overlay_gtk.set_focus_on_map(false);
+
+    // An empty input region makes the entire overlay click-through while
+    // leaving its visual alpha channel intact. Apply it after realization too:
+    // some GTK window managers discard a shape assigned before the GDK window
+    // exists, which was the source of the old pre-realize tao panic.
+    if overlay_gtk.is_realized() {
+        let empty = gtk::cairo::Region::create_rectangles(&[]);
+        overlay_gtk.input_shape_combine_region(Some(&empty));
+    } else {
+        overlay_gtk.connect_realize(|window| {
+            let empty = gtk::cairo::Region::create_rectangles(&[]);
+            window.input_shape_combine_region(Some(&empty));
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 fn set_owner_to_main(_overlay: &WebviewWindow, _main: &WebviewWindow) -> tauri::Result<()> {
-    // Non-Windows builds don't ship the overlay frame today; if they
-    // ever do, equivalent owner/parent wiring goes here. The empty
-    // impl keeps the call site cfg-free.
+    Ok(())
+}
+
+fn should_map_overlay() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        return LINUX_OVERLAY_VISIBLE.load(Ordering::Acquire);
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
+    }
+}
+
+/// Map/unmap the Linux overlay as a unit. Jetson's WebKitGTK compositor leaves
+/// stale pixels behind when CSS fades to transparent; unmapping the native
+/// window is the reliable clear. Windows keeps its smoother CSS fade.
+#[tauri::command]
+pub fn overlay_frame_set_visible(app: tauri::AppHandle, visible: bool) -> Result<(), String> {
+    if !enabled() {
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        LINUX_OVERLAY_VISIBLE.store(visible, Ordering::Release);
+        let Some(overlay) = app.get_webview_window(OVERLAY_LABEL) else {
+            return Ok(());
+        };
+        if visible {
+            if let Some(main) = app.get_webview_window("main") {
+                sync_geometry(
+                    main.outer_position().map_err(|e| e.to_string())?,
+                    main.outer_size().map_err(|e| e.to_string())?,
+                    &overlay,
+                )
+                .map_err(|e| e.to_string())?;
+            }
+            overlay.show().map_err(|e| e.to_string())?;
+        } else {
+            overlay.hide().map_err(|e| e.to_string())?;
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (app, visible);
+    }
     Ok(())
 }
 
@@ -204,7 +284,7 @@ pub fn prepare_and_show_for_main(main: &Window) -> tauri::Result<()> {
     // Never show the overlay before its page painted — a not-yet-ready
     // transparent WebView2 window flashes WHITE over the app. If the 700ms
     // startup wait timed out, the sync loop shows it once mark_ready fires.
-    if OVERLAY_READY.load(Ordering::Acquire) {
+    if OVERLAY_READY.load(Ordering::Acquire) && should_map_overlay() {
         overlay.show()?;
     }
     Ok(())
@@ -226,21 +306,115 @@ fn sync_geometry(
     Ok(())
 }
 
+// On Windows the follow loop + sync_now use the event-loop-free sync_once_win32
+// instead; this tauri-dispatcher version is only compiled-in for the (disabled)
+// non-Windows path, so silence the Windows dead-code warning.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
 fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()> {
     sync_geometry(main.outer_position()?, main.outer_size()?, overlay)?;
 
     if !main.is_visible()? {
         let _ = overlay.hide();
-    } else if !main.is_minimized()? && OVERLAY_READY.load(Ordering::Acquire) {
+    } else if !main.is_minimized()?
+        && OVERLAY_READY.load(Ordering::Acquire)
+        && should_map_overlay()
+    {
         // Ready-gated for the same reason as prepare_and_show_for_main:
         // an unpainted transparent webview shows as a white sheet.
         let _ = overlay.show();
+    } else if !should_map_overlay() {
+        let _ = overlay.hide();
     }
 
     if main.is_minimized()? {
         let _ = overlay.hide();
     }
 
+    Ok(())
+}
+
+/// Windows-only, event-loop-FREE geometry sync — the body of the 33 ms follow
+/// loop. Reads the main window's rect and drives the overlay purely through
+/// Win32 (`GetWindowRect` / `SetWindowPos` / `ShowWindow`), so the loop NEVER
+/// calls a blocking `WryWindowDispatcher` method (`outer_position`, `outer_size`,
+/// `is_visible`, `is_minimized`, `set_position`, `set_size`). Each of those posts
+/// a message to the event loop and blocks on its reply; hammering ~7 of them
+/// 30×/sec from this background thread drove re-entrancy into tao's non-reentrant
+/// window-callback `parking_lot` mutex and self-deadlocked the UI thread when an
+/// incoming synchronous `SendMessage` landed mid-pump — the whole app froze
+/// ("Not Responding", no repaint, no mouse). Win32 reads (`GetWindowRect`) are
+/// pure kernel-object queries off the event loop, so those can't deadlock. The
+/// WRITE (`SetWindowPos`) still targets a MAIN-thread-owned window, so it MUST
+/// carry `SWP_ASYNCWINDOWPOS` (see below) — otherwise it sends messages
+/// synchronously to the main thread and reintroduces the exact freeze (observed
+/// live at v0.8.56). Returns `Err` only when the main window can't be read
+/// (destroyed), so the caller's give-up counter still works.
+#[cfg(target_os = "windows")]
+fn sync_once_win32(main_hwnd: isize, overlay_hwnd: isize) -> Result<(), ()> {
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, IsIconic, IsWindowVisible, SetWindowPos, ShowWindowAsync,
+        SWP_ASYNCWINDOWPOS, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, SW_SHOWNOACTIVATE,
+    };
+    let main = main_hwnd as HWND;
+    let overlay = overlay_hwnd as HWND;
+    unsafe {
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if GetWindowRect(main, &mut r) == 0 {
+            return Err(()); // main window gone / unqueryable
+        }
+        // Always keep the overlay glued around the main window's outer rect. No
+        // show flag here, so a hidden overlay stays hidden (matches sync_geometry).
+        let x = r.left - CONTENT_OFFSET_X;
+        let y = r.top - CONTENT_OFFSET_Y;
+        let w = (r.right - r.left) + OVERLAY_EXTRA_W as i32;
+        let h = (r.bottom - r.top) + OVERLAY_EXTRA_H as i32;
+        // SWP_ASYNCWINDOWPOS is LOAD-BEARING: this runs on a background
+        // thread but the overlay window is owned by the MAIN (event-loop)
+        // thread. Without the async flag, SetWindowPos SENDS
+        // WM_WINDOWPOSCHANGING/CHANGED synchronously to the owning thread and
+        // BLOCKS until it pumps them — and that message gets dispatched
+        // re-entrantly into tao's non-reentrant window-callback parking_lot
+        // mutex, self-deadlocking the UI thread ("Not Responding" freeze, seen
+        // in v0.8.56 despite the earlier Win32-direct move: raw SetWindowPos is
+        // still a synchronous CROSS-THREAD call). The async flag POSTS the
+        // request to the main thread's queue instead, so this loop never
+        // blocks and never forces a re-entrant callback.
+        SetWindowPos(
+            overlay,
+            std::ptr::null_mut(),
+            x,
+            y,
+            w,
+            h,
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+        );
+
+        let visible = IsWindowVisible(main) != 0;
+        let minimized = IsIconic(main) != 0;
+        // ShowWindowAsync, NOT ShowWindow — for the SAME reason SetWindowPos above
+        // carries SWP_ASYNCWINDOWPOS. The overlay window is owned by the MAIN
+        // (event-loop) thread; a plain ShowWindow from this background thread SENDS
+        // WM_SHOWWINDOW SYNCHRONOUSLY to the main thread, which Windows dispatches
+        // re-entrantly into tao's non-reentrant window-callback parking_lot mutex
+        // while it's mid-keyboard-pump — self-deadlocking the UI thread ("Not
+        // Responding" freeze while typing; SWP_ASYNCWINDOWPOS on SetWindowPos fixed
+        // the move path in v0.8.56 but this show/hide path kept sending). Confirmed
+        // via a live gdb dump of a frozen instance: main thread parked on this exact
+        // mutex under a re-entrant SendMessageTimeoutW. ShowWindowAsync POSTS the
+        // request to the main thread's queue instead, so it never blocks or re-enters.
+        if !visible || minimized {
+            ShowWindowAsync(overlay, SW_HIDE);
+        } else if OVERLAY_READY.load(Ordering::Acquire) {
+            // Ready-gated: an unpainted transparent webview flashes white.
+            ShowWindowAsync(overlay, SW_SHOWNOACTIVATE);
+        }
+    }
     Ok(())
 }
 
@@ -289,29 +463,49 @@ pub fn overlay_frame_capture_geometry(app: tauri::AppHandle) -> Option<CaptureGe
 }
 
 fn start_sync_loop(main: WebviewWindow, overlay: WebviewWindow) {
-    std::thread::spawn(move || {
-        // A single transient failure must NOT kill the follow. Reading the
-        // main window's position/size/visibility can briefly error while it's
-        // mid-move or the webview is momentarily busy; the old code did
-        // `if is_err() { break }`, so one hiccup froze the frame at a stale
-        // spot forever (the "stuck outside / not following" bug). Now we keep
-        // going on errors and only give up once main has been unreachable for
-        // a sustained stretch (≈ window really gone), not a momentary glitch.
-        let mut consecutive_err: u32 = 0;
-        loop {
-            match sync_once(&main, &overlay) {
-                Ok(()) => consecutive_err = 0,
-                Err(_) => {
-                    consecutive_err += 1;
-                    if consecutive_err > 150 {
-                        // ~5s of continuous failure → main is gone; stop.
-                        break;
+    // A single transient failure must NOT kill the follow. Reading the main
+    // window can briefly error while it's mid-move; the old code did
+    // `if is_err() { break }`, so one hiccup froze the frame at a stale spot
+    // forever (the "stuck outside / not following" bug). We keep going on
+    // errors and only give up once main has been unreachable for a sustained
+    // stretch (≈ window really gone), not a momentary glitch.
+    #[cfg(target_os = "windows")]
+    {
+        // Resolve the raw HWNDs ONCE (isize is `Send`; `.hwnd()` is a cheap
+        // cached read, not an event-loop round-trip). The 33 ms poll then uses
+        // ONLY direct Win32 via sync_once_win32 — never a blocking dispatcher
+        // call — which is what previously deadlocked the UI thread. See
+        // sync_once_win32 for the full root-cause note.
+        let (main_hwnd, overlay_hwnd) = match (main.hwnd(), overlay.hwnd()) {
+            (Ok(m), Ok(o)) => (m.0 as isize, o.0 as isize),
+            _ => return,
+        };
+        std::thread::spawn(move || {
+            // Hold the window handles for the loop's life so the HWNDs stay
+            // valid; never call their blocking dispatcher methods.
+            let _keep = (main, overlay);
+            let mut consecutive_err: u32 = 0;
+            loop {
+                match sync_once_win32(main_hwnd, overlay_hwnd) {
+                    Ok(()) => consecutive_err = 0,
+                    Err(()) => {
+                        consecutive_err += 1;
+                        if consecutive_err > 150 {
+                            break; // ~5s of continuous failure → main is gone; stop.
+                        }
                     }
                 }
+                std::thread::sleep(Duration::from_millis(33));
             }
-            std::thread::sleep(Duration::from_millis(33));
-        }
-    });
+        });
+    }
+    // Linux is event-driven: RunEvent::Moved/Resized calls sync_now, and GTK's
+    // transient-parent relationship handles stacking/minimize. A 30Hz
+    // dispatcher loop here would needlessly contend with WebKitGTK's UI thread.
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _keep = (main, overlay);
+    }
 }
 
 /// Immediately re-glue the overlay to the main window. Called from the
@@ -325,6 +519,18 @@ pub fn sync_now(app: &tauri::AppHandle) {
         app.get_webview_window("main"),
         app.get_webview_window(OVERLAY_LABEL),
     ) {
-        let _ = sync_once(&main, &overlay);
+        // Same event-loop-free path as the poll. sync_now fires on the main
+        // thread from Moved/Resized (many times/sec during a drag), so keep it
+        // off the blocking dispatcher too.
+        #[cfg(target_os = "windows")]
+        {
+            if let (Ok(m), Ok(o)) = (main.hwnd(), overlay.hwnd()) {
+                let _ = sync_once_win32(m.0 as isize, o.0 as isize);
+            }
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let _ = sync_once(&main, &overlay);
+        }
     }
 }

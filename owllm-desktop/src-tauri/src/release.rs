@@ -6,8 +6,56 @@
 // role's tool_allowlist. Model-agnostic (one native tool call → all CLI) and the
 // script branches per-OS (all OS).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::{Mutex, OnceLock};
+
+const MIN_HOST_RELEASE_FREE_BYTES: u64 = 20 * 1024 * 1024 * 1024;
+
+/// Publishing mutates version files, Git refs, the shared Cargo target, and the
+/// same dist artifacts. Two Code/Agentic cards publishing one repo at once can
+/// duplicate an entire build and race those files. Hold a process-wide,
+/// per-repository lease for every publish entry point.
+static ACTIVE_PUBLISHES: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+struct PublishLease {
+    key: String,
+}
+
+impl Drop for PublishLease {
+    fn drop(&mut self) {
+        let active = ACTIVE_PUBLISHES.get_or_init(|| Mutex::new(HashSet::new()));
+        active
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(&self.key);
+    }
+}
+
+fn publish_key(repo_dir: &str) -> String {
+    let host = crate::agent_tools::host_cwd(repo_dir);
+    let canonical = std::fs::canonicalize(&host).unwrap_or_else(|_| PathBuf::from(host));
+    let mut key = canonical.to_string_lossy().replace('\\', "/");
+    #[cfg(windows)]
+    key.make_ascii_lowercase();
+    key
+}
+
+fn acquire_publish_lease(repo_dir: &str) -> Result<PublishLease, String> {
+    let key = publish_key(repo_dir);
+    let active = ACTIVE_PUBLISHES.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut guard = active
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if !guard.insert(key.clone()) {
+        return Err(
+            "A publish is already running for this repository. The app remains usable; follow the existing Publisher card instead of starting another build."
+                .to_string(),
+        );
+    }
+    Ok(PublishLease { key })
+}
 
 /// Code-signing certificate selection for a release. Mirrors the Publisher card's
 /// code-signing fields and maps 1:1 onto publish-release.sh's OWLLM_SIGN_* env.
@@ -135,6 +183,7 @@ pub async fn publish_release(
     draft: Option<bool>,
     sign: Option<SignCfg>,
 ) -> Result<String, String> {
+    let _publish_lease = acquire_publish_lease(&repo_dir)?;
     let posix = to_gitbash_path(&repo_dir);
     let script = format!("{posix}/owllm-desktop/scripts/publish-release.sh");
     let mut args: Vec<String> = vec![script, "--notes".into(), notes.unwrap_or_default()];
@@ -226,6 +275,7 @@ pub async fn finish_and_publish(
     mode: Option<String>,
     sign: Option<SignCfg>,
 ) -> Result<String, String> {
+    let _publish_lease = acquire_publish_lease(&repo_dir)?;
     let posix = to_gitbash_path(&repo_dir);
     // Script resolution — this is what makes publishing work for ANY repo:
     // a repo-local copy wins (OwLLM itself / power users), else the app's
@@ -315,6 +365,64 @@ fn run_probe(name: &str, args: &[&str]) -> (bool, String) {
     }
 }
 
+fn fmt_gb(bytes: u64) -> String {
+    format!("{:.1} GB", bytes as f64 / 1024.0 / 1024.0 / 1024.0)
+}
+
+#[cfg(windows)]
+fn disk_free_bytes_for_path(path: &str) -> Option<(String, u64)> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::path::{Component, Prefix};
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+
+    let full = std::fs::canonicalize(path).ok()?;
+    let label = match full.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => {
+                format!("{}:", letter as char)
+            }
+            Prefix::UNC(server, share) | Prefix::VerbatimUNC(server, share) => {
+                format!(
+                    r"\\{}\{}",
+                    server.to_string_lossy(),
+                    share.to_string_lossy()
+                )
+            }
+            _ => full.display().to_string(),
+        },
+        _ => full.display().to_string(),
+    };
+    let wide: Vec<u16> = full.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut available = 0u64;
+    let ok = unsafe {
+        GetDiskFreeSpaceExW(
+            wide.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    Some((label, available))
+}
+
+#[cfg(not(windows))]
+fn disk_free_bytes_for_path(path: &str) -> Option<(String, u64)> {
+    let out = Command::new("df").args(["-Pk", path]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let txt = String::from_utf8_lossy(&out.stdout);
+    let line = txt.lines().last()?;
+    let cols: Vec<&str> = line.split_whitespace().collect();
+    let avail_kb = cols.get(3)?.parse::<u64>().ok()?;
+    Some((
+        cols.first().unwrap_or(&"filesystem").to_string(),
+        avail_kb * 1024,
+    ))
+}
 /// Locate signtool.exe the same way the publish script does:
 /// first via PATH, then the standard Windows SDK install layout.
 /// Returns the newest x64 signtool when multiple SDK versions are present.
@@ -342,7 +450,8 @@ fn find_signtool() -> Option<PathBuf> {
                 if path.is_dir() {
                     let signtool = path.join("x64").join("signtool.exe");
                     if signtool.is_file() {
-                        candidates.push((entry.file_name().to_string_lossy().into_owned(), signtool));
+                        candidates
+                            .push((entry.file_name().to_string_lossy().into_owned(), signtool));
                     }
                 }
             }
@@ -424,13 +533,15 @@ fn auto_install_signtool() -> Result<PathBuf, String> {
         Err(e) => (false, format!("spawn curl: {e}")),
     };
     if !dl_ok {
-        return Err(format!("could not download Windows SDK installer:\n{dl_out}"));
+        return Err(format!(
+            "could not download Windows SDK installer:\n{dl_out}"
+        ));
     }
     let mut setup = Command::new(&installer);
     setup.args([
-        "/q",          // quiet
-        "/norestart",  // do not restart
-        "/features",   // install selected features only
+        "/q",                    // quiet
+        "/norestart",            // do not restart
+        "/features",             // install selected features only
         "OptionId.SigningTools", // signtool + certs
     ]);
     {
@@ -669,6 +780,30 @@ pub async fn publish_readiness(
 
         // Host-mode specific build / publish tooling probes.
         if host_mode {
+            let disk = disk_free_bytes_for_path(&host);
+            checks.push(ReadyCheck {
+                id: "disk".into(),
+                label: "Disk headroom (host release)".into(),
+                ok: disk
+                    .as_ref()
+                    .is_some_and(|(_, free)| *free >= MIN_HOST_RELEASE_FREE_BYTES),
+                detail: match disk {
+                    Some((where_, free)) if free >= MIN_HOST_RELEASE_FREE_BYTES => {
+                        format!("{} free on {where_} (minimum {})", fmt_gb(free), fmt_gb(MIN_HOST_RELEASE_FREE_BYTES))
+                    }
+                    Some((where_, free)) => {
+                        format!(
+                            "{} free on {where_}; host release requires at least {} before building",
+                            fmt_gb(free),
+                            fmt_gb(MIN_HOST_RELEASE_FREE_BYTES)
+                        )
+                    }
+                    None => format!(
+                        "could not measure free disk space; host release requires at least {} free",
+                        fmt_gb(MIN_HOST_RELEASE_FREE_BYTES)
+                    ),
+                },
+            });
             let (node_ok, node_out) = run_probe("node", &["--version"]);
             checks.push(ReadyCheck {
                 id: "node".into(),
@@ -764,6 +899,7 @@ pub async fn repo_commit(
         if !add_ok {
             return Err(format!("git add failed:\n{add_out}"));
         }
+        crate::fleet::unstage_app_scratch(Path::new(&host))?;
         let msg = if message.trim().is_empty() {
             "Checkpoint from Publisher card".to_string()
         } else {
@@ -879,9 +1015,10 @@ pub async fn repo_merge(repo_dir: String, target: Option<String>) -> Result<Stri
     .map_err(|e| format!("join error: {e}"))?
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::strip_credential_noise;
+    use super::{acquire_publish_lease, disk_free_bytes_for_path};
 
     #[test]
     fn strips_cosmetic_credential_lines_keeps_push_summary() {
@@ -906,5 +1043,23 @@ mod tests {
         let clean = strip_credential_noise(out);
         assert!(clean.contains("[rejected]"));
         assert!(clean.contains("failed to push some refs"));
+    }
+
+    #[test]
+    fn disk_probe_accepts_windows_canonical_paths() {
+        let (volume, available) = disk_free_bytes_for_path(".")
+            .expect("the native disk probe should accept a canonical Windows path");
+        assert!(!volume.trim().is_empty());
+        assert!(available > 0);
+    }
+
+    #[test]
+    fn publish_lease_is_single_flight_per_repository() {
+        let repo = tempfile::tempdir().expect("temporary repository path");
+        let path = repo.path().to_string_lossy().to_string();
+        let first = acquire_publish_lease(&path).expect("first publish acquires the lease");
+        assert!(acquire_publish_lease(&path).is_err());
+        drop(first);
+        assert!(acquire_publish_lease(&path).is_ok());
     }
 }

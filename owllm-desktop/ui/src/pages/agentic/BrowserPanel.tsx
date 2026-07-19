@@ -121,6 +121,18 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
     try { setScanMsg(await invoke<string>("browser_import_run", { id: d.id })); await loadCreds(); }
     catch (e) { setErr(String(e)); } finally { setBusy(false); }
   };
+  const importCsv = async () => {
+    setBusy(true); setErr(""); setScanMsg("");
+    try {
+      const path = await invoke<string | null>("pick_file", {
+        title: "Choose a passwords CSV exported from your browser",
+        filters: [["CSV", ["csv"]]],
+      });
+      if (!path) return;
+      setScanMsg(await invoke<string>("browser_import_csv", { path }));
+      await loadCreds();
+    } catch (e) { setErr(String(e)); } finally { setBusy(false); }
+  };
 
   const onDragStart = (e: React.MouseEvent) => {
     if ((e.target as HTMLElement).closest("button, input")) return;

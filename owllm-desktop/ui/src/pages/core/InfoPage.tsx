@@ -299,6 +299,7 @@ export default function InfoPage() {
           </div>
         </Card>
         </div>
+
       </div>
     </div>
   );

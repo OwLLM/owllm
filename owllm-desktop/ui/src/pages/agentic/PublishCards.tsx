@@ -73,6 +73,14 @@ const hasLocalSettings = (repoDir: string) => {
   catch { return false; }
 };
 
+// The shared status line below the chatbox is a single ambient line — send it a
+// one-line summary; the full multi-line output lives in the output modal.
+const firstLine = (s: string) => { const i = s.indexOf("\n"); return i === -1 ? s : s.slice(0, i); };
+const elapsedClock = (seconds: number) => {
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+};
+
 /** Merge project-card release defaults into local settings. Card values are used only
  *  when the user has NOT saved a local override (so per-machine certs can still differ). */
 function mergeCardDefaults(base: PublishSettings, card: ProjectCard | null, repoDir: string): PublishSettings {
@@ -145,11 +153,19 @@ export default function PublishCards({
   const [ready, setReady] = useState<ReadyCheck[] | null>(null);
   const [git, setGit] = useState<GitStatusInfo | null>(null);
   const [loading, setLoading] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
   // Inline, right-by-the-buttons progress. The shared `status` line lives in the
   // center column, far from this left-rail card, so an action there felt dead:
   // no acknowledgement on click, only a result at the very end. This shows
   // ⏳ running / ✓ done / ✗ error in place.
   const [activity, setActivity] = useState<{ kind: "run" | "ok" | "err"; msg: string } | null>(null);
+  // Full command output (Commit/Push/Merge/Publish) — the possibly multi-line
+  // result or error. It used to expand the shared status line below the chatbox
+  // into a tall, undismissable block; now it lives in a closable modal so long
+  // build/publish logs and errors can be read then dismissed. `outputOpen`
+  // controls visibility so a dismissed log can be reopened from the rail chip.
+  const [output, setOutput] = useState<{ kind: "run" | "ok" | "err"; title: string; body: string } | null>(null);
+  const [outputOpen, setOutputOpen] = useState(false);
   const [pubNotes, setPubNotes] = useState("");
   const [settings, setSettings] = useState<PublishSettings>(() => loadSettings(repoDir));
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -158,6 +174,9 @@ export default function PublishCards({
   const [commitMsg, setCommitMsg] = useState("");
   const mergeTarget = "main";
   const mounted = useRef(true);
+  // State disables the button on the next render. This synchronous latch
+  // closes the double-click window before that render happens.
+  const runningRef = useRef(false);
   const rootRef = useRef<HTMLDivElement | null>(null);
   // The Code page stays mounted (keep-alive, hidden via display:none) — skip
   // polling while it isn't visible so background pages don't probe forever.
@@ -213,6 +232,21 @@ export default function PublishCards({
     return () => window.clearInterval(id);
   }, [fetchGit]);
 
+  // A host Rust build can legitimately take several minutes. Keep a cheap
+  // elapsed clock moving in the card so "working" cannot look like "frozen".
+  useEffect(() => {
+    if (!loading) {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    setElapsedSeconds(0);
+    const id = window.setInterval(() => {
+      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [loading]);
+
   // Seed mode + signing from the committed Project Card when there is no local override.
   // This keeps the project's release rules in sync across machines and teammates.
   useEffect(() => {
@@ -232,24 +266,43 @@ export default function PublishCards({
 
   const status = (msg: string) => { if (onStatus) onStatus(msg); };
 
-  const run = async (label: string, fn: () => Promise<unknown>) => {
+  const run = async (
+    label: string,
+    fn: () => Promise<unknown>,
+    { openOutput = true }: { openOutput?: boolean } = {},
+  ) => {
+    if (runningRef.current) {
+      setActivity({ kind: "err", msg: "An action is already running for this project." });
+      return;
+    }
+    runningRef.current = true;
     setLoading(true);
-    // Immediate acknowledgement — both inline and on the shared status line —
-    // so a long host build (commit → tag → build → sign → publish) doesn't look
-    // frozen while it runs.
+    // Immediate acknowledgement on three surfaces — a compact rail chip, a
+    // one-line ambient note on the shared status line, and the full output in a
+    // closable modal — so a long host build (commit → tag → build → sign →
+    // publish) doesn't look frozen while it runs, and its multi-line log/error
+    // can be read then dismissed instead of permanently expanding the status
+    // line below the chatbox.
     setActivity({ kind: "run", msg: `${label}…` });
+    setOutput({ kind: "run", title: label, body: `${label}…` });
+    // Host publishing takes minutes. Do not place a full-screen modal over the
+    // app for that whole period; its output remains available from the rail.
+    setOutputOpen(openOutput);
     status(`⏳ ${label}…`);
     try {
       const out = await fn();
       const msg = String(out ?? "Done.");
-      setActivity({ kind: "ok", msg });
-      status(msg);
+      setActivity({ kind: "ok", msg: firstLine(msg) });
+      setOutput({ kind: "ok", title: label, body: msg });
+      status(`✓ ${firstLine(msg)}`);
       refresh();
     } catch (e) {
       const msg = String((e as Error).message ?? e);
-      setActivity({ kind: "err", msg });
-      status(msg);
+      setActivity({ kind: "err", msg: firstLine(msg) });
+      setOutput({ kind: "err", title: label, body: msg });
+      status(`✗ ${firstLine(msg)}`);
     } finally {
+      runningRef.current = false;
       setLoading(false);
       fetchGit();
     }
@@ -262,7 +315,11 @@ export default function PublishCards({
     return out;
   });
 
-  const doPush = () => run("Pushing to origin", () => invoke("repo_push", { repoDir: gitDir }));
+  // Merge writes an isolated page's squash commit into the real project
+  // checkout. Push that checkout, not the page branch again. The old routing
+  // let Commit + Merge + Push all report success while origin/main never moved.
+  const pushDir = isolated && projectRoot ? projectRoot : gitDir;
+  const doPush = () => run("Pushing to origin", () => invoke("repo_push", { repoDir: pushDir }));
 
   const doMerge = () => run(isolated ? "Merging worktree" : `Merging to ${mergeTarget}`, async () => {
     if (isolated && projectRoot && branch && gitDir) {
@@ -317,7 +374,7 @@ export default function PublishCards({
       draft: visibility === "draft",
       sign: signPayload,
     });
-  });
+  }, { openOutput: false });
 
   // The local git_status answers "is this a repo" instantly and offline; the
   // readiness probe (network) only gates the remote-dependent buttons.
@@ -331,6 +388,14 @@ export default function PublishCards({
   // remote involved, so a project without origin must still get its Merge.
   const showMerge = isRepo && ((isolated && !!projectRoot && !!branch) || hasRemote);
   const showPublish = isRepo && hasPublishScript;
+  // Dirtiness is NOT a hard block here — the authoritative check lives in the
+  // publish script (it fails fast, BEFORE any build, if real work under the
+  // stage path is uncommitted, and it ignores generated churn like Cargo.lock).
+  // Gating the button on the whole-repo dirty count (untracked files, lockfile
+  // version churn, changes outside the stage path) made Publish look dead even
+  // when the release could proceed. Keep it clickable; the "● N" pending badge
+  // above already signals uncommitted work, and clicking surfaces the script's
+  // precise "commit these first" message instead of a silent grey button.
   const canPublish = ready?.every((c) => c.ok) ?? false;
   const readyFails = ready?.filter((c) => !c.ok) ?? [];
   const publishFailReason = readyFails.map((c) => `${c.label}: ${c.detail}`).join("\n");
@@ -432,12 +497,14 @@ export default function PublishCards({
               <button
                 onClick={doPush}
                 disabled={disabled || loading}
-                title={git && git.ahead > 0
-                  ? `Push ${git.ahead} commit(s) on ${git.branch || branch || "current"} to origin`
-                  : `Push ${git?.branch || branch || "current"} to origin`}
+                title={isolated && projectRoot
+                  ? `Push the merged project checkout (${projectRoot.replace(/^.*[\\/]/, "")}) to origin`
+                  : git && git.ahead > 0
+                    ? `Push ${git.ahead} commit(s) on ${git.branch || branch || "current"} to origin`
+                    : `Push ${git?.branch || branch || "current"} to origin`}
                 style={{ ...chipBtn, flex: 1 }}
               >
-                {loading ? "⏳" : "↑"} Push{git && git.ahead > 0 ? ` (${git.ahead})` : ""}
+                {loading ? "⏳" : "↑"} Push{isolated ? " merged" : (git && git.ahead > 0 ? ` (${git.ahead})` : "")}
               </button>
             )}
             {showPublish && (
@@ -488,6 +555,21 @@ export default function PublishCards({
             >
               <span style={{ flexShrink: 0 }}>{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}</span>
               <span style={{ minWidth: 0 }}>{activity.msg}</span>
+              {activity.kind === "run" && (
+                <span
+                  aria-label={`Elapsed ${elapsedClock(elapsedSeconds)}`}
+                  style={{ flexShrink: 0, color: "var(--accent)", fontVariantNumeric: "tabular-nums" }}
+                >
+                  · {elapsedClock(elapsedSeconds)}
+                </span>
+              )}
+              {output && !outputOpen && (
+                <button
+                  onClick={() => setOutputOpen(true)}
+                  title="Show full output"
+                  style={{ marginLeft: "auto", flexShrink: 0, background: "transparent", border: "none", color: "inherit", cursor: "pointer", padding: 0, fontSize: 10.5, textDecoration: "underline", fontFamily: "inherit" }}
+                >⤢</button>
+              )}
             </div>
           )}
           {/* Fix with agent — hands failed-action output + unmet readiness
@@ -680,6 +762,48 @@ export default function PublishCards({
                 style={{ ...inputBase, resize: "vertical", minHeight: 56, padding: 6 }}
               />
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Command-output popup — Commit/Push/Merge/Publish output (and errors)
+          used to expand the shared status line below the chatbox into a tall,
+          undismissable block. Now the full, possibly multi-line output lives
+          here: click-outside or ✕ to dismiss; reopen from the rail chip's ⤢. */}
+      {outputOpen && output && (
+        <div
+          onMouseDown={(e) => { if (e.target === e.currentTarget) setOutputOpen(false); }}
+          style={{
+            position: "fixed", inset: 0, zIndex: 100,
+            background: "rgba(0,0,0,0.45)", display: "flex",
+            alignItems: "center", justifyContent: "center", padding: 24,
+          }}
+        >
+          <div
+            style={{
+              width: "min(640px, 94vw)", maxHeight: "80vh", background: "var(--bg-panel)",
+              border: "1px solid var(--border-strong)", borderRadius: 10,
+              padding: 12, display: "flex", flexDirection: "column", gap: 10,
+              boxShadow: "0 10px 32px rgba(0,0,0,0.5)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span style={{ flexShrink: 0, fontSize: 14 }}>
+                {output.kind === "run" ? "⏳" : output.kind === "ok" ? "✓" : "✗"}
+              </span>
+              <span style={{
+                fontWeight: 700, fontSize: 13, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                color: output.kind === "err" ? "#ff8c8c" : output.kind === "ok" ? "#7ff0c5" : "var(--fg-strong)",
+              }}>{output.title}</span>
+              <span style={{ flex: 1 }} />
+              <button onClick={() => setOutputOpen(false)} title="Dismiss" style={{ ...chipBtn, width: 24, padding: 0 }}>✕</button>
+            </div>
+            <pre style={{
+              margin: 0, flex: 1, minHeight: 0, overflow: "auto",
+              background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8,
+              padding: 10, fontSize: 11.5, lineHeight: 1.5, fontFamily: "var(--font-mono, monospace)",
+              whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)",
+            }}>{output.body}</pre>
           </div>
         </div>
       )}

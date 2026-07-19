@@ -4,7 +4,7 @@
 //   ★ Access Tokens   — store / validate the HF read token. Adds a
 //                        "Get token →" deep link that opens
 //                        huggingface.co/settings/tokens in the user's
-//                        default browser so they don't have to copy
+//                        persistent browser so they don't have to copy
 //                        the URL out of help text.
 //   Info               — when a card on the Models grid is selected,
 //                        shows that model's name, params, size,
@@ -205,7 +205,7 @@ function TokensTab(p: {
           cursor: "pointer",
           boxShadow: "0 0 10px -4px var(--accent)88",
         }}
-        title="Opens huggingface.co/settings/tokens in your browser. Create a READ token."
+        title="Opens huggingface.co/settings/tokens in the OwLLM browser. Create a READ token."
       >🚀 Get a token from Hugging Face →</button>
       <textarea
         placeholder="Paste your read token here (starts with hf_…)"

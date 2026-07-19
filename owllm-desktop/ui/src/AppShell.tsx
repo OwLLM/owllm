@@ -213,6 +213,18 @@ type ServerStatusLite = {
 };
 type VramGpu = { index: number; used_mib: number; total_mib: number };
 type VramStatusLite = { gpus: VramGpu[] };
+
+// Model ids commonly include the organisation, fine-tune recipe and quant.
+// Keeping the tail is useful because it usually carries the quant, while a
+// middle ellipsis prevents one unusually descriptive id from taking over the
+// header. The full id remains available on hover in SysInfoBlock.
+function abbreviateModelId(modelId: string, maxLength = 42): string {
+  if (modelId.length <= maxLength) return modelId;
+  const tailLength = Math.min(14, Math.floor((maxLength - 1) / 2));
+  const headLength = maxLength - tailLength - 1;
+  return `${modelId.slice(0, headLength)}…${modelId.slice(-tailLength)}`;
+}
+
 function useLiveSysInfo() {
   const [server, setServer] = useState<ServerStatusLite>({
     running: false, model_id: null, port: null, message: "",
@@ -682,6 +694,8 @@ function ModeBar({
       height: 100, boxSizing: "border-box",
       display: "grid", gridTemplateColumns: "auto 1fr auto auto",
       alignItems: "center", padding: "10px 18px 10px 20px", gap: 16,
+      // Language changes text, never the physical header/control order.
+      direction: "ltr",
       // Header surface — now uses --bg-header so the accent picker
       // visibly repaints the band (amber → golden header, red → red
       // header, emerald → green header). Was hardcoded #1c2244.
@@ -1093,8 +1107,9 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
   // Mirrors Qt main.py:28564/28573 — pluralised "Servers", count-based.
   // Stopped → "🟢 Servers: 0"; running → "🟢 Servers: N (modelSummary)".
   // ServerStatusLite carries only one server, so N is 0 or 1.
+  const fullModelId = server.model_id ?? "?";
   const serverLine = server.running
-    ? `🟢 Servers: 1 (${server.model_id ?? "?"})`
+    ? `🟢 Servers: 1 (${abbreviateModelId(fullModelId)})`
     : "🟢 Servers: 0";
   const vramLine = vram.gpus.length === 0
     ? "VRAM: N/A"
@@ -1108,9 +1123,11 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
     <div
       data-ui="SysInfoBlock"
       onClick={onOpenServer}
-      title="Open Server Control"
+      title={server.running
+        ? `Model: ${fullModelId}\nOpen Server Control`
+        : "Open Server Control"}
       style={{
-        maxWidth: 420, height: 60,
+        width: "min(420px, 31vw)", minWidth: 0, height: 60,
         display: "flex", flexDirection: "column",
         alignItems: "stretch", justifyContent: "center", gap: 3,
         fontSize: 12, fontWeight: 700, color: "var(--bg-header-fg)", textAlign: "right",
@@ -1122,15 +1139,15 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
         cursor: "pointer",
       }}
     >
-      <div data-ui="HeaderServersLabel">
+      <div data-ui="HeaderServersLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {serverLine}
       </div>
-      <div data-ui="HeaderApiKeyLabel">
+      <div data-ui="HeaderApiKeyLabel" style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ marginRight: 4 }}>🔑</span>
         API key: owllm-local
         <GenSpeedBadge variant="header" />
       </div>
-      <div data-ui="HeaderVramLabel" title={server.message || undefined}>
+      <div data-ui="HeaderVramLabel" title={server.message || undefined} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         <span style={{ marginRight: 4 }}>💾</span>{vramLine}
       </div>
     </div>
@@ -1327,6 +1344,24 @@ function resolveDeepLink(key: string): { mode: ActiveMode; activeKey: string } |
   return null;
 }
 
+// Vault sync can legitimately reload the webview once after it imports newer
+// state from another device. Keep the user's navigation separate from synced
+// state and restore it after that reload; otherwise an async boot task can
+// dump someone working in Code/Agents back onto Home without any action from
+// them. sessionStorage is intentionally used so this is per-window and never
+// leaks a machine-local navigation choice into the vault.
+const NAV_RESTORE_KEY = "owllm:nav-restore";
+function readSavedNavigation(): { mode: ActiveMode; activeKey: string } | null {
+  try {
+    const raw = sessionStorage.getItem(NAV_RESTORE_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw) as { activeKey?: unknown };
+    return typeof saved.activeKey === "string" ? resolveDeepLink(saved.activeKey) : null;
+  } catch {
+    return null;
+  }
+}
+
 function OverlayContentPanel({ children }: { children: React.ReactNode }) {
   return (
     <div style={{
@@ -1368,7 +1403,11 @@ export default function AppShell() {
     const k = readPageFromUrl();
     return k ? resolveDeepLink(k) : null;
   }, []);
-  const [mode, setMode] = useState<ActiveMode>(initialDeep?.mode ?? "home");
+  const initialNavigation = useMemo(
+    () => initialDeep ?? readSavedNavigation() ?? { mode: "home" as ActiveMode, activeKey: CORE.firstTab },
+    [initialDeep],
+  );
+  const [mode, setMode] = useState<ActiveMode>(initialNavigation.mode);
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
   const [bridgesModalOpen, setBridgesModalOpen] = useState<boolean>(false);
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
@@ -1426,6 +1465,38 @@ export default function AppShell() {
   // suggest the click — and stops forever once the user has opened it.
   const [watcherOpen, setWatcherOpen] = useState<boolean>(false);
   const [watcherHint, setWatcherHint] = useState<boolean>(false);
+  const [frameIntroVisible, setFrameIntroVisible] = useState<boolean>(true);
+  const [watcherNear, setWatcherNear] = useState<boolean>(false);
+
+  // Show the complete decorative frame as a short opening flourish. It then
+  // gets out of the way; moving near the compact top-centre Watcher target
+  // reveals only the owl. The generous proximity zone makes discovery easy
+  // without restoring the old oversized clickable region.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setFrameIntroVisible(false), 3000);
+    return () => window.clearTimeout(timer);
+  }, []);
+  useEffect(() => {
+    const update = (e: PointerEvent) => {
+      const near = Math.abs(e.clientX - window.innerWidth / 2) <= 210 && e.clientY <= 135;
+      setWatcherNear(current => current === near ? current : near);
+    };
+    const leave = () => setWatcherNear(false);
+    window.addEventListener("pointermove", update, { passive: true });
+    window.addEventListener("blur", leave);
+    document.documentElement.addEventListener("pointerleave", leave);
+    return () => {
+      window.removeEventListener("pointermove", update);
+      window.removeEventListener("blur", leave);
+      document.documentElement.removeEventListener("pointerleave", leave);
+    };
+  }, []);
+  useEffect(() => {
+    if (!isTauri()) return;
+    // The Windows frame is a separate click-through webview, so it cannot
+    // sense the pointer itself. Broadcast only state transitions to it.
+    emit("owllm:watcher-proximity", watcherNear).catch(() => {});
+  }, [watcherNear]);
   useEffect(() => {
     try { if (localStorage.getItem("owllm:watcher:discovered") === "1") return; } catch { return; }
     let hideTimer: number | undefined;
@@ -1533,8 +1604,13 @@ export default function AppShell() {
     return mod?.firstTab ?? CORE.firstTab;
   };
   const [activeKey, setActiveKey] = useState<string>(
-    () => initialDeep?.activeKey ?? defaultKeyForMode("home"),
+    () => initialNavigation.activeKey,
   );
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(NAV_RESTORE_KEY, JSON.stringify({ mode, activeKey }));
+    } catch { /* storage unavailable: a reload falls back to Home as before */ }
+  }, [mode, activeKey]);
   // Local-only activity stats (P0-8 Slice 4): count page visits by KEY
   // (a product id, never content). Viewed/cleared inside The Watcher.
   useEffect(() => {
@@ -1613,24 +1689,6 @@ export default function AppShell() {
   }, [activeKey, keepAliveActive]);
 
   const vp = useViewportSize();
-  // Linux in-page chrome (no overlay window there): the window is transparent
-  // and LARGER than the visible frame — the EXTRA_TOP band above the frame is
-  // see-through headroom for the peeking owl. Shape the window's INPUT region
-  // to frame + owl so clicks in the empty band fall through to whatever is
-  // behind the app instead of being swallowed (they used to block underlying
-  // windows' close buttons). The command is a no-op on Windows/macOS.
-  useEffect(() => {
-    if (!isTauri() || overlayFrame) return;
-    invoke("frame_input_region", {
-      rects: [
-        // Everything from the frame's top edge down stays interactive; the
-        // EXTRA_TOP band above it (owl headroom) is click-through, exactly
-        // like the Windows overlay window. The owl summon is the compact
-        // ModeBar hotspot, which sits inside the frame body.
-        { x: 0, y: EXTRA_TOP, w: vp.w, h: Math.max(0, vp.h - EXTRA_TOP) },
-      ],
-    }).catch(() => { /* backend predates the command — harmless */ });
-  }, [overlayFrame, vp.w, vp.h]);
   const appContent = (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
           <ModeBar

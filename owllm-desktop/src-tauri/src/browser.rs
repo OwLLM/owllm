@@ -181,6 +181,16 @@ const SENTINEL: &str = "\u{2063}OWLLM\u{2063}";
 /// mistaken for the current reply.
 static REQ: AtomicU64 = AtomicU64::new(1);
 
+/// The visible agent browser is one shared, stateful page. Parallel agents
+/// therefore have to queue their DOM actions instead of navigating/evaluating
+/// the same WebView concurrently. The command runs on Tauri's async worker
+/// pool, so waiting here never occupies the native UI/event thread.
+static BROWSER_OPERATION: Mutex<()> = Mutex::new(());
+
+fn lock_browser_operation() -> std::sync::MutexGuard<'static, ()> {
+    BROWSER_OPERATION.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 /// A reply being assembled from one-or-more title-channel chunks.
 /// `document.title` can't reliably carry a large payload in a single write (a
 /// long page's base64 gets truncated in transit → decode failure → the agent
@@ -567,6 +577,16 @@ const BRIDGE_JS: &str = r##"
 /// runs and are isolated from the app UI's own webview storage.
 #[cfg_attr(not(any(windows, target_os = "linux")), allow(dead_code))]
 fn browser_data_dir() -> Option<std::path::PathBuf> {
+    // A side-by-side Windows build receives its own WebView2 root before Tauri
+    // starts (paths::init_isolated_webview_profile). Keep the agent-browser
+    // child WebViews under that same isolated root too; otherwise their
+    // explicit data_directory would silently reconnect the builds again.
+    #[cfg(windows)]
+    if let Some(root) = std::env::var_os("WEBVIEW2_USER_DATA_FOLDER") {
+        if !root.is_empty() {
+            return Some(std::path::PathBuf::from(root).join("agent-browser"));
+        }
+    }
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
@@ -1232,14 +1252,66 @@ fn build_legacy(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
 /// Create the agent-browser window if it isn't already open. Idempotent.
 #[tauri::command(async)]
 pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
+    let _operation = lock_browser_operation();
+    browser_start_inner(&app)
+}
+
+fn browser_start_inner(app: &tauri::AppHandle) -> Result<String, String> {
     if get_window(&app).is_some() {
         return Ok("browser already running".to_string());
     }
     let start_url = "about:blank"
         .parse()
         .map_err(|e| format!("bad start url: {e}"))?;
-    build_window(&app, start_url)?;
+    build_window(app, start_url)?;
     Ok("browser started".to_string())
+}
+
+/// Open an http(s) URL in OwLLM's persistent browser window.
+///
+/// This is the single entry point for user-facing web links throughout the
+/// desktop app. It deliberately does not wait for the page bridge: buttons
+/// such as "Get a token" must return immediately even when the destination is
+/// a slow login page. Agent browser tools continue to use `browser_cmd`, which
+/// waits for the document because they need to interact with its contents.
+fn parse_web_url(raw_url: &str) -> Result<tauri::Url, String> {
+    let url = raw_url.trim();
+    if url.is_empty() {
+        return Err("web url is empty".to_string());
+    }
+    let parsed: tauri::Url = url
+        .parse()
+        .map_err(|e| format!("bad web url {url:?}: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("only http(s) urls can open in the OwLLM browser".to_string());
+    }
+    Ok(parsed)
+}
+
+pub(crate) fn open_web_url(app: &tauri::AppHandle, raw_url: &str) -> Result<String, String> {
+    let url = raw_url.trim();
+    let parsed = parse_web_url(url)?;
+
+    let _operation = lock_browser_operation();
+    if get_window(app).is_none() {
+        build_window(app, parsed)?;
+    } else {
+        content_webview(app)
+            .ok_or_else(|| "OwLLM browser page is unavailable".to_string())?
+            .navigate(parsed)
+            .map_err(|e| format!("navigate failed: {e}"))?;
+    }
+    if let Some(win) = get_window(app) {
+        let _ = win.show();
+        let _ = win.unminimize();
+        let _ = win.set_focus();
+    }
+    Ok(format!("Opened {url} in the OwLLM browser"))
+}
+
+#[tauri::command(async)]
+pub fn browser_open_url(app: tauri::AppHandle, url: String) -> Result<String, String> {
+    open_web_url(&app, &url)
 }
 
 /// Switch device emulation (desktop / iphone / android / tablet). The UA can
@@ -1249,6 +1321,7 @@ pub fn browser_start(app: tauri::AppHandle) -> Result<String, String> {
 /// the old window, like a fresh browser session.
 #[tauri::command(async)]
 pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<String, String> {
+    let _operation = lock_browser_operation();
     let dev = device_by_name(&device).ok_or_else(|| {
         format!("unknown device {device:?} — use desktop, iphone, android or tablet")
     })?;
@@ -1306,8 +1379,9 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
 /// eval __owllmRun directly. Read-back is via the sentinel title channel.
 #[tauri::command(async)]
 pub fn browser_cmd(app: tauri::AppHandle, action: String, params: Value) -> Result<String, String> {
+    let _operation = lock_browser_operation();
     if get_window(&app).is_none() {
-        browser_start(app.clone())?;
+        browser_start_inner(&app)?;
     }
     let win = content_webview(&app).ok_or_else(|| "browser did not start".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
@@ -1445,6 +1519,7 @@ pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
 /// Panel view: current URL + title as JSON (the window itself is the live view).
 #[tauri::command(async)]
 pub fn browser_view(app: tauri::AppHandle) -> Result<String, String> {
+    let _operation = lock_browser_operation();
     let win = content_webview(&app).ok_or_else(|| "browser not running".to_string())?;
     let req = REQ.fetch_add(1, Ordering::SeqCst);
     eval_until_reply(&win, req, "info", &json!({}), Duration::from_secs(6))
@@ -1496,6 +1571,20 @@ mod tests {
             "1270.0.0.1",
         ] {
             assert!(!is_local_host(u), "{u} should default to https");
+        }
+    }
+
+    #[test]
+    fn user_web_links_accept_http_and_reject_local_schemes() {
+        assert_eq!(
+            parse_web_url(" https://huggingface.co/settings/tokens ")
+                .unwrap()
+                .as_str(),
+            "https://huggingface.co/settings/tokens"
+        );
+        assert!(parse_web_url("http://localhost:5173").is_ok());
+        for bad in ["", "file:///tmp/model", "C:/models/model.gguf", "javascript:alert(1)"] {
+            assert!(parse_web_url(bad).is_err(), "{bad:?} must not open as web content");
         }
     }
 

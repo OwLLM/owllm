@@ -25,6 +25,7 @@ mod crypto;
 mod executor;
 mod identity;
 mod lan;
+mod p2p;
 mod policy;
 mod registry;
 mod relay;
@@ -46,7 +47,7 @@ use tokio::sync::oneshot;
 
 use protocol::{
     Authorization, CommandKind, CommandRequest, CommandResult, DevicePublic, DeviceRecord,
-    PairRequest, PermissionPolicy, SignedEnvelope, TrustedController,
+    PairRequest, PermissionPolicy, SignedEnvelope, TrustState, TrustedController,
 };
 use transport::{LanDirectTransport, LoopbackTransport, Transport};
 
@@ -181,16 +182,22 @@ fn env_override() -> bool {
         .unwrap_or(false)
 }
 
-fn load_enabled() -> bool {
+/// Explicit on/off from the toggle file — `None` when the user never set it.
+fn enabled_explicit() -> Option<bool> {
     enabled_path()
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v.get("enabled").and_then(Value::as_bool))
-        .unwrap_or(false)
 }
 
 fn feature_enabled() -> bool {
-    env_override() || load_enabled()
+    // On by default for a machine signed into the account that owns the private
+    // vault (same GitHub login) — a device that's provably one of your own is
+    // reachable without anyone toggling it on at that keyboard, which is the
+    // whole point of controlling your own PCs without interaction. Inbound is
+    // still fully gated: only vault-verified (same-account) controllers
+    // auto-trust; anyone else lands in Pending. An explicit toggle always wins.
+    env_override() || enabled_explicit().unwrap_or_else(|| github_login().is_some())
 }
 
 fn set_enabled(enabled: bool) -> Result<(), String> {
@@ -400,8 +407,33 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
         return Ok(r);
     }
 
-    // Trust → policy. Unknown / pending / revoked / key-mismatch ⇒ None ⇒ refuse.
-    let policy = match trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub) {
+    // Trust → policy. Unknown / pending / revoked / key-mismatch ⇒ None ⇒ refuse —
+    // UNLESS the controller is vault-verified (provably one of this GitHub
+    // account's own devices), in which case it is auto-trusted with the
+    // standard account policy right here, so an unattended machine never
+    // deadlocks waiting for an approval nobody can click.
+    let mut policy = trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub);
+    // Unknown controller — or a known one holding LESS than the standard grant
+    // (e.g. a stale pre-auto-trust record with shell off): if it's vault-verified
+    // as one of this account's own devices, (re)grant the standard policy. A
+    // restrictive leftover would otherwise deadlock a machine nobody can click
+    // approve on.
+    if policy.as_ref().map_or(true, |p| !is_full_grant(p)) {
+        let peer_name = registry::list(&self_public_record()?)
+            .into_iter()
+            .find(|d| d.public.device_id == frame.from_device)
+            .map(|d| d.public.name)
+            .unwrap_or_default();
+        if ensure_vault_autotrust(
+            &frame.from_device,
+            &peer_name,
+            &frame.from_ed25519_pub,
+            &frame.from_x25519_pub,
+        ) {
+            policy = trust::authorized_policy(&frame.from_device, &frame.from_ed25519_pub);
+        }
+    }
+    let policy = match policy {
         Some(p) => p,
         None => {
             let r = deny(
@@ -446,13 +478,18 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
 
     // Authorized surface — show the banner while it runs, then execute. Dangerous
     // kinds (FileWrite/Admin) additionally require a LIVE per-action approval on
-    // this machine, even when the policy toggle is on.
+    // this machine — EXCEPT from a vault-verified controller (same GitHub
+    // account): its actions run with the standard grant, because the whole
+    // point of remote control is a machine with nobody at the keyboard to
+    // click approve.
     begin_control(&frame, &req);
     let result = match policy::authorize(req.kind, &policy) {
         Authorization::Denied => deny(&req.request_id, "permission denied by target policy"),
         Authorization::Allowed => executor::execute(&req, &policy).await,
         Authorization::RequiresApproval => {
-            if await_approval(&frame, &req).await {
+            if vault_verified(&frame.from_device, &frame.from_ed25519_pub)
+                || await_approval(&frame, &req).await
+            {
                 executor::execute_dangerous(&req).await
             } else {
                 deny(
@@ -507,10 +544,14 @@ fn ensure_listener_started(rt: tokio::runtime::Handle) {
                 eprintln!("remote_devices: listener start failed: {e}");
             }
         }
-        ensure_relay_client(rt);
+        ensure_relay_client(rt.clone());
+        if !p2p::running() {
+            p2p::start(rt);
+        }
     } else {
         lan::stop();
         relay::stop_client();
+        p2p::stop();
     }
 }
 
@@ -556,6 +597,71 @@ pub fn self_vault_record() -> Result<(String, String), String> {
     let rec = self_public_record()?;
     let json = serde_json::to_string_pretty(&rec).map_err(|e| e.to_string())?;
     Ok((rec.device_id, json))
+}
+
+/// The standard same-account permission grant: everything on. Applied
+/// automatically to controllers proven to belong to this GitHub account
+/// (see `vault_verified`). Per-controller policy edits on the Devices
+/// page still override it afterwards.
+pub fn standard_account_policy() -> PermissionPolicy {
+    PermissionPolicy {
+        allow_shell: true,
+        allow_wsl: true,
+        allow_file_writes: true,
+        allow_admin: true,
+    }
+}
+
+/// Whether a stored policy already covers the full standard account grant.
+fn is_full_grant(p: &PermissionPolicy) -> bool {
+    p.allow_shell && p.allow_wsl && p.allow_file_writes && p.allow_admin
+}
+
+/// Same-GitHub-account proof: the claimed device id + Ed25519 key match the
+/// device record synced through the account's PRIVATE vault repo. Only
+/// someone with push access to that repo (= signed into the same GitHub
+/// account) could have published the record, so a match means "this
+/// controller is one of the user's own machines". The id↔key binding is
+/// re-checked so a forged record with a mismatched key never verifies.
+pub fn vault_verified(device_id: &str, ed25519_pub: &str) -> bool {
+    let Some(txt) = crate::vault::vault_device_record(device_id) else {
+        return false;
+    };
+    let Ok(rec) = serde_json::from_str::<DevicePublic>(&txt) else {
+        return false;
+    };
+    rec.device_id == device_id
+        && rec.ed25519_pub == ed25519_pub
+        && crypto::device_id_from_ed_pub_b64(&rec.ed25519_pub).as_deref() == Some(device_id)
+}
+
+/// Auto-trust a vault-verified controller with the standard account policy.
+/// Called lazily from the pairing + inbound-command gates so a device that
+/// is provably ours never waits on a human at THIS keyboard (the exact
+/// remote-machine deadlock: you can't approve on a PC you can't reach).
+/// Never downgrades: an already-Trusted controller keeps its edited policy.
+pub fn ensure_vault_autotrust(device_id: &str, name: &str, ed25519_pub: &str, x25519_pub: &str) -> bool {
+    if !vault_verified(device_id, ed25519_pub) {
+        return false;
+    }
+    if let Some(c) = trust::find(device_id) {
+        if c.state == TrustState::Trusted && c.ed25519_pub == ed25519_pub {
+            if is_full_grant(&c.policy) {
+                return true; // already at (or above) the standard account grant
+            }
+            // Stale pre-auto-trust record (e.g. shell off): a same-account
+            // controller gets the standard grant. A restrictive leftover is
+            // the exact deadlock this exists to break — you can't loosen a
+            // policy from a machine that policy locks you out of.
+            return trust::approve(device_id, standard_account_policy()).is_ok();
+        }
+    }
+    let ok = trust::record_pairing_request(device_id, name, ed25519_pub, x25519_pub).is_ok()
+        && trust::approve(device_id, standard_account_policy()).is_ok();
+    if ok {
+        emit_pairing();
+    }
+    ok
 }
 
 /// Ingest a peer's public record (from the vault) into the local registry.
@@ -621,6 +727,16 @@ fn target_endpoints(to_device: &str) -> Vec<String> {
     eps
 }
 
+/// The target's embedded-P2P endpoint id from the registry, if it has one.
+fn target_p2p_node(to_device: &str) -> Option<String> {
+    let self_pub = self_public_record().ok()?;
+    registry::list(&self_pub)
+        .into_iter()
+        .find(|d| d.public.device_id == to_device)
+        .and_then(|d| d.public.p2p_node_id)
+        .filter(|n| !n.trim().is_empty())
+}
+
 /// A single known endpoint for a target (first candidate) — for pairing dials.
 fn lookup_endpoint(to_device: &str) -> Option<String> {
     target_endpoints(to_device).into_iter().next()
@@ -643,26 +759,41 @@ async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandRe
         }
     }
 
-    // 2) Relay fallback (works behind any NAT — both peers dial the relay out).
+    // 2) Embedded P2P (iroh): QUIC hole-punch direct, n0 public relays as
+    //    fallback. Zero setup — works behind NATs and AP isolation.
+    if let Some(node) = target_p2p_node(to_device) {
+        match (p2p::P2pTransport { node_id: node }).deliver(env.clone()).await {
+            Ok(r) => return Ok(r),
+            Err(e) => last_err = e,
+        }
+    }
+
+    // 3) Self-hosted relay fallback (both peers dial the relay out).
     if let Some(url) = relay_url() {
         return (relay::RelayTransport { url }).deliver(env).await;
     }
 
-    if cands.is_empty() {
-        Err("target device has no known endpoint and no relay is configured (discover it, pair by IP, or set a relay)".into())
+    if cands.is_empty() && last_err.is_empty() {
+        Err("target device has no known endpoint or p2p id and no relay is configured (discover it, pair by IP, or set a relay)".into())
     } else {
-        Err(format!("no direct endpoint reachable (tried {}); last error: {last_err}. Configure a relay for off-LAN control.", cands.len()))
+        Err(format!("target unreachable (direct endpoints tried: {}); last error: {last_err}. If the target is off-LAN, make sure both sides run a version with embedded P2P and have re-synced discovery.", cands.len()))
     }
 }
 
-/// Build a signed pairing request for THIS device, POST it to a peer endpoint,
-/// and add the peer's returned record to the registry. Used by both "pair a
-/// known device" and "pair by IP".
+/// Build a signed pairing request for THIS device, send it to a peer address —
+/// "ip:port" (LAN-direct) or an iroh endpoint id (embedded P2P) — and add the
+/// peer's returned record to the registry. Used by both "pair a known device"
+/// and "pair by address".
 async fn pair_with_endpoint(endpoint: &str) -> Result<DevicePublic, String> {
     let me_pub = self_public_record()?;
     let me = identity::load_or_create()?;
     let sig = crypto::sign_detached(&me.secrets, &PairRequest::signed_bytes(&me_pub));
-    let peer = lan::send_pair(endpoint, PairRequest { from: me_pub, sig }).await?;
+    let pr = PairRequest { from: me_pub, sig };
+    let peer = if p2p::looks_like_node_id(endpoint) {
+        p2p::send_pair(endpoint, pr).await?
+    } else {
+        lan::send_pair(endpoint, pr).await?
+    };
     // Learn the peer's keys/id so we can later seal commands to it.
     registry::upsert(peer.clone(), false)?;
     Ok(peer)
@@ -747,6 +878,13 @@ pub fn init(app: &AppHandle) {
     store_app(app);
     tauri::async_runtime::spawn(async {
         ensure_listener_started(tokio::runtime::Handle::current());
+        // Publish our record (endpoints + p2p node id) and pull peers right at
+        // boot, so an auto-enabled machine becomes discoverable without anyone
+        // clicking Discover on it. Fire-and-forget — the git round-trip must
+        // not stall startup, and it's a no-op when the feature is off.
+        if feature_enabled() {
+            let _ = crate::vault::vault_sync_devices().await;
+        }
     });
 }
 
@@ -754,34 +892,51 @@ pub fn init(app: &AppHandle) {
 // Tauri commands
 // ==================================================================
 
+/// Cheap stable identity for device-scoped UI/vault state. Unlike the old
+/// random localStorage id, this survives WebView profile migration and is the
+/// same id used by per-device project folder bindings.
+#[tauri::command]
+pub fn device_get_id() -> Result<String, String> {
+    self_device_id().ok_or_else(|| "device identity unavailable".to_string())
+}
+
 /// This device's public identity + live capability/enable state. Also starts the
 /// LAN listener when the feature is enabled (so the endpoint below is populated).
 #[tauri::command]
 pub async fn device_get_identity(app: AppHandle) -> Result<Value, String> {
     store_app(&app);
-    ensure_listener_started(tokio::runtime::Handle::current());
-    let rec = self_public_record()?;
-    Ok(json!({
-        "device_id": rec.device_id,
-        "name": rec.name,
-        "os": rec.os,
-        "arch": rec.arch,
-        "app_version": rec.app_version,
-        "ed25519_pub": rec.ed25519_pub,
-        "x25519_pub": rec.x25519_pub,
-        "github_login": rec.github_login,
-        "capabilities": rec.capabilities,
-        "enabled": feature_enabled(),
-        "env_override": env_override(),
-        "endpoint": rec.endpoint,
-        "endpoints": rec.endpoints,
-        "listening": lan::current_port().is_some(),
-        "public_endpoint": public_endpoint(),
-        "relay_url": relay_url(),
-        "relay_client": relay::client_running(),
-        "relay_serving": relay::serving(),
-        "agents_allowed": agents_allowed(),
-    }))
+    let runtime = tokio::runtime::Handle::current();
+    tokio::task::spawn_blocking(move || {
+        // This can create a listener and read several small config files. Keep
+        // even that setup away from the event loop so page navigation wins.
+        ensure_listener_started(runtime);
+        let rec = self_public_record()?;
+        Ok(json!({
+            "device_id": rec.device_id,
+            "name": rec.name,
+            "os": rec.os,
+            "arch": rec.arch,
+            "app_version": rec.app_version,
+            "ed25519_pub": rec.ed25519_pub,
+            "x25519_pub": rec.x25519_pub,
+            "github_login": rec.github_login,
+            "capabilities": rec.capabilities,
+            "enabled": feature_enabled(),
+            "env_override": env_override(),
+            "endpoint": rec.endpoint,
+            "endpoints": rec.endpoints,
+            "listening": lan::current_port().is_some(),
+            "public_endpoint": public_endpoint(),
+            "relay_url": relay_url(),
+            "relay_client": relay::client_running(),
+            "relay_serving": relay::serving(),
+            "p2p_node_id": rec.p2p_node_id,
+            "p2p_running": p2p::running(),
+            "agents_allowed": agents_allowed(),
+        }))
+    })
+    .await
+    .map_err(|e| format!("device identity task failed: {e}"))?
 }
 
 /// Rename this device (cosmetic; the keypair/id are unchanged).
@@ -866,10 +1021,14 @@ pub fn device_listener_status() -> Value {
 
 /// "My OwLLM Devices" — known devices, with this machine always present.
 #[tauri::command]
-pub fn devices_list() -> Result<Vec<DeviceRecord>, String> {
-    let me = identity::public_record(github_login())?;
-    registry::upsert(me.clone(), true)?;
-    Ok(registry::list(&me))
+pub async fn devices_list() -> Result<Vec<DeviceRecord>, String> {
+    tokio::task::spawn_blocking(|| {
+        let me = identity::public_record(github_login())?;
+        registry::upsert(me.clone(), true)?;
+        Ok(registry::list(&me))
+    })
+    .await
+    .map_err(|e| format!("device registry task failed: {e}"))?
 }
 
 /// Remove a device from the local registry.
@@ -880,8 +1039,10 @@ pub fn device_forget(device_id: String) -> Result<(), String> {
 
 /// Controllers this device knows about (pending / trusted / revoked).
 #[tauri::command]
-pub fn device_trust_list() -> Result<Vec<TrustedController>, String> {
-    Ok(trust::list())
+pub async fn device_trust_list() -> Result<Vec<TrustedController>, String> {
+    tokio::task::spawn_blocking(|| Ok(trust::list()))
+        .await
+        .map_err(|e| format!("device trust task failed: {e}"))?
 }
 
 /// Request pairing with a device. For THIS device (loopback) it records a local
@@ -898,28 +1059,39 @@ pub async fn device_request_pairing(to_device: String) -> Result<(), String> {
             &me.x25519_pub,
         );
     }
-    let endpoint = match lookup_endpoint(&to_device) {
-        Some(ep) => ep,
-        None => {
-            // The registry copy may be stale (published before the peer enabled
-            // remote control). Pull the vault once before giving up.
-            let _ = crate::vault::vault_sync_devices().await;
-            lookup_endpoint(&to_device).ok_or_else(|| {
-                "that device hasn't published an address yet — on it, open Devices and enable remote control (its address then syncs here through your GitHub vault), or pair by ip:port".to_string()
-            })?
+    if lookup_endpoint(&to_device).is_none() && target_p2p_node(&to_device).is_none() {
+        // The registry copy may be stale (published before the peer enabled
+        // remote control). Pull the vault once before giving up.
+        let _ = crate::vault::vault_sync_devices().await;
+    }
+    // Prefer the LAN endpoint (fast path), then the embedded P2P id (works
+    // through NATs / AP isolation with zero setup).
+    let mut last_err = String::new();
+    if let Some(ep) = lookup_endpoint(&to_device) {
+        match pair_with_endpoint(&ep).await {
+            Ok(_) => return Ok(()),
+            Err(e) => last_err = e,
         }
-    };
-    pair_with_endpoint(&endpoint).await.map(|_| ())
+    }
+    if let Some(node) = target_p2p_node(&to_device) {
+        return pair_with_endpoint(&node).await.map(|_| ());
+    }
+    if last_err.is_empty() {
+        Err("that device hasn't published an address yet — on it, open Devices and enable remote control (its address then syncs here through your GitHub vault), or pair by ip:port / node id".to_string())
+    } else {
+        Err(last_err)
+    }
 }
 
-/// Pair by typing a peer's "ip:port" directly (no vault discovery needed). Sends
-/// this device's signed pairing request and adds the peer's returned record to
-/// the registry so it can then be controlled once IT approves us.
+/// Pair by typing a peer's "ip:port" (LAN) or p2p node id (works from anywhere)
+/// directly — no vault discovery needed. Sends this device's signed pairing
+/// request and adds the peer's returned record to the registry so it can then
+/// be controlled once IT approves us.
 #[tauri::command]
 pub async fn device_pair_by_address(endpoint: String) -> Result<DeviceRecord, String> {
     let endpoint = endpoint.trim().to_string();
     if endpoint.is_empty() {
-        return Err("enter the peer's ip:port".into());
+        return Err("enter the peer's ip:port or node id".into());
     }
     let peer = pair_with_endpoint(&endpoint).await?;
     Ok(DeviceRecord { public: peer, last_seen: Some(now_rfc3339()), is_self: false })
@@ -1171,8 +1343,10 @@ pub fn device_set_agents_allowed(allowed: bool) -> Result<(), String> {
 
 /// The last `limit` audit lines (redacted), newest last.
 #[tauri::command]
-pub fn device_audit_tail(limit: Option<usize>) -> Vec<Value> {
-    audit::tail(limit.unwrap_or(200))
+pub async fn device_audit_tail(limit: Option<usize>) -> Vec<Value> {
+    tokio::task::spawn_blocking(move || audit::tail(limit.unwrap_or(200)))
+        .await
+        .unwrap_or_default()
 }
 
 /// End-to-end self-test: seals a diagnostics request self→self, opens it
@@ -1283,7 +1457,11 @@ mod tests {
         let _g = TEST_ENV_LOCK.lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         std::env::set_var("OWLLM_USER_DATA", dir.path());
-        std::env::remove_var("OWLLM_REMOTE_DEVICES"); // feature OFF
+        std::env::remove_var("OWLLM_REMOTE_DEVICES");
+        // Explicitly disable — an explicit toggle always wins over the
+        // signed-into-account default, so this holds regardless of whether the
+        // machine running the test happens to have a GitHub login.
+        set_enabled(false).unwrap();
 
         let target = identity::load_or_create().unwrap();
         let controller = crypto::DeviceSecrets::generate();

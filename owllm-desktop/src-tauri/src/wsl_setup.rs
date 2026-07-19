@@ -658,6 +658,11 @@ pub async fn wsl_setup_provision_python(
             .map_err(|e| format!("join error: {e}"))?;
         match res {
             Ok(()) => {
+                // NOTE: we intentionally do NOT auto-enable a sparse disk here.
+                // Modern WSL disables sparse by default "due to potential data
+                // corruption", so it's an explicit, warned opt-in only (see
+                // sandbox::sandbox_enable_sparse). The safe default against disk
+                // inflation is the automatic cache-trim (sandbox::auto_housekeep).
                 let _ = channel.send(SetupEvent::Finished);
                 Ok(())
             }

@@ -76,20 +76,45 @@ globalThis.__invokeStub = async (cmd) => {
     { key: "owllm:code:page:p1", value: "{restored}" },
     { key: "owllm:agents:notebook:proj1", value: "{nb}" },
     { key: "owllm:chat:v3", value: "{chat}" },
-    { key: "owllm:secret-unrelated", value: "nope" },
+    { key: "owllm:settings:v1", value: "{settings}" },
+    { key: "foreign:unrelated", value: "nope" },
   ];
 };
 localStorage.setItem("owllm:code:pages", "[live]");
 const restored = await mirror.restoreStateMirror();
-check(restored === 3, "restore fills exactly the missing durable keys");
+check(restored === 4, "restore fills exactly the missing durable keys");
 check(localStorage.getItem("owllm:code:pages") === "[live]",
   "restore NEVER overwrites a key the live profile already has");
 check(localStorage.getItem("owllm:code:page:p1") === "{restored}",
   "a missing Coding session comes back from the DB");
 check(localStorage.getItem("owllm:agents:notebook:proj1") === "{nb}",
   "a missing notebook blob comes back from the DB");
-check(localStorage.getItem("owllm:secret-unrelated") === null,
+check(localStorage.getItem("owllm:settings:v1") === "{settings}",
+  "project and model settings come back with the rest of the user state");
+check(localStorage.getItem("foreign:unrelated") === null,
   "rows outside the durable prefixes are ignored on restore");
+
+// ---- shipped upgrade recovery may replace a default already in new profile ----
+mirror.__resetStateMirrorForTests();
+globalThis.localStorage = makeStorage();
+localStorage.setItem("owllm:code:pages", "[]");
+let recoveryAck = null;
+globalThis.__invokeStub = async (cmd, args) => {
+  if (cmd === "state_mirror_load") {
+    return [{ key: "owllm:code:pages", value: "[historical]", pending_recovery: true }];
+  }
+  if (cmd === "state_mirror_ack_recovery") {
+    recoveryAck = args.keys;
+    return null;
+  }
+  throw new Error(`unexpected ${cmd}`);
+};
+check((await mirror.restoreStateMirror()) === 1,
+  "an upgrade recovery replaces a default value already written by the new profile");
+check(localStorage.getItem("owllm:code:pages") === "[historical]",
+  "the recovered historical value becomes the live value");
+check(recoveryAck?.[0] === "owllm:code:pages",
+  "recovery is acknowledged only after localStorage accepted it");
 
 // ---- restore resilience: backend failure cannot block boot ----
 mirror.__resetStateMirrorForTests();
@@ -101,7 +126,7 @@ mirror.__resetStateMirrorForTests();
 globalThis.localStorage = makeStorage();
 localStorage.setItem("owllm:code:pages", "[v1]");
 localStorage.setItem("owllm:agents:notebook:proj1", "{nb1}");
-localStorage.setItem("owllm:untracked", "ignore-me");
+localStorage.setItem("foreign:untracked", "ignore-me");
 let saves = [];
 globalThis.__invokeStub = async (cmd, args) => {
   if (cmd === "state_mirror_load") return [];
@@ -112,7 +137,7 @@ await mirror.restoreStateMirror();
 await mirror.__sweepOnceForTests();
 check(saves.length === 1 && saves[0].sets.length === 2 && saves[0].deletes.length === 0,
   "first sweep mirrors every durable key exactly once");
-check(!saves[0].sets.some((e) => e.key === "owllm:untracked"),
+check(!saves[0].sets.some((e) => e.key === "foreign:untracked"),
   "non-durable keys never reach the mirror");
 saves = [];
 await mirror.__sweepOnceForTests();
@@ -159,8 +184,8 @@ check(calls === 2 && saves.length === 1 && saves[0].sets[0].value === "[v1]",
 
 // ---- wiring pins ----
 const mirrorSrc = readSource("runtime/stateMirror.ts");
-check(mirrorSrc.includes('"owllm:code:"') && mirrorSrc.includes('"owllm:agents:notebook:"') && mirrorSrc.includes('"owllm:chat:"'),
-  "durable prefixes cover Coding pages, notebook blobs and chat state");
+check(mirrorSrc.includes('"owllm:"'),
+  "the durable namespace covers project catalogs, settings, brainstorms, chats and notebook state");
 const mainSrc = readSource("main.tsx");
 check(mainSrc.includes("await restoreStateMirror()"),
   "boot AWAITS the restore so pages' useState initializers see recovered keys");
@@ -168,12 +193,21 @@ check(/await restoreStateMirror\(\)[\s\S]*createRoot/.test(mainSrc),
   "restore runs BEFORE the React root renders");
 check(mainSrc.includes("startStateMirror()"), "the background mirror starts at boot");
 const rustMod = readTauri("src/state_mirror.rs");
-check(rustMod.includes("pub async fn state_mirror_load") && rustMod.includes("pub async fn state_mirror_save"),
-  "Rust exposes the load/save commands the UI invokes");
+check(rustMod.includes("pub async fn state_mirror_load")
+    && rustMod.includes("pub async fn state_mirror_save")
+    && rustMod.includes("pub async fn state_mirror_ack_recovery"),
+  "Rust exposes load/save and recovery acknowledgement commands");
 check(rustMod.includes("LIKE 'ls:%'"), "the mirror only ever reads its own ls: rows from kv");
+check(rustMod.includes("read_legacy_leveldb") && rustMod.includes("rusty_leveldb"),
+  "the shipped backend reads abandoned WebView LevelDB profiles itself");
 const librs = readTauri("src/lib.rs");
-check(librs.includes("state_mirror::state_mirror_load") && librs.includes("state_mirror::state_mirror_save"),
-  "both commands are registered in the invoke handler");
+check(librs.indexOf("state_mirror::import_legacy_webview_state_once()")
+    < librs.indexOf("tauri::Builder::default()"),
+  "legacy import runs before WebView startup can lock the profile");
+check(librs.includes("state_mirror::state_mirror_load")
+    && librs.includes("state_mirror::state_mirror_save")
+    && librs.includes("state_mirror::state_mirror_ack_recovery"),
+  "all mirror commands are registered in the invoke handler");
 
 console.log(`\nall checks passed (${passed})`);
 process.exit(0);

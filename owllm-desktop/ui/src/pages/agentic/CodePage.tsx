@@ -28,6 +28,7 @@ import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinish
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
+import { savedPageIdsForLocalProject } from "./codeProjectPages";
 import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
@@ -186,6 +187,11 @@ type ProjectCatalogRow = {
   team_default_model_id: string; graph_json: string; chat_json: string;
   agent_logs_json: string; updated_at: string;
 };
+type OpenProjectPagesDetail = {
+  project: Pick<ProjectCatalogRow, "id" | "name" | "location">;
+  handled: boolean;
+};
+const OPEN_PROJECT_PAGES_EVENT = "owllm:code:open-project-pages";
 const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
 const PAGE_SESSION_PREFIX = "owllm:code:page:";
@@ -251,6 +257,26 @@ function loadPages(): CodePageMeta[] {
 }
 function savePages(pages: CodePageMeta[]): void {
   try { localStorage.setItem(PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
+}
+
+// Project rows and Coding tabs are persisted separately. Opening a project
+// should restore every saved page that belongs to this device's checkout, not
+// replace the current page with a blank worktree. Exact local-path matching is
+// intentional: a repo URL/project id may refer to a different PC's checkout,
+// whose absolute paths must never become runnable here.
+function savedPageMetasForLocalProject(project: Pick<ProjectCatalogRow, "location">): CodePageMeta[] {
+  const catalog = new Map(loadPages().map((page) => [page.id, page]));
+  return savedPageIdsForLocalProject(localStorage, project.location, PAGE_SESSION_PREFIX)
+    .map((id) => {
+      const known = catalog.get(id);
+      if (known) return known;
+      try {
+        const state = JSON.parse(localStorage.getItem(pageSessionKey(id)) || "{}") as Partial<CodeState>;
+        return { id, title: recoveredPageTitle(state) };
+      } catch {
+        return { id, title: "Recovered page" };
+      }
+    });
 }
 
 const PSYCHEDELIC_AURA_STOPS = "#3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b";
@@ -1177,6 +1203,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     setCatalogError("");
     setGhostProjectId(project.id);
     if (project.location.trim()) {
+      const detail: OpenProjectPagesDetail = { project, handled: false };
+      window.dispatchEvent(new CustomEvent<OpenProjectPagesDetail>(OPEN_PROJECT_PAGES_EVENT, { detail }));
+      if (detail.handled) return;
       await openWorkspace(project.location);
       return;
     }
@@ -3472,6 +3501,22 @@ export default function CodePage() {
   const active = pages.find((p) => p.id === activeId) ?? pages[0];
   useEffect(() => { savePages(pages); }, [pages]);
   useEffect(() => { try { if (active) localStorage.setItem(ACTIVE_PAGE_KEY, active.id); } catch { /* best effort */ } }, [active]);
+  useEffect(() => {
+    const openSavedProjectPages = (event: Event) => {
+      const detail = (event as CustomEvent<OpenProjectPagesDetail>).detail;
+      if (!detail?.project?.location) return;
+      const saved = savedPageMetasForLocalProject(detail.project);
+      if (saved.length === 0) return;
+      detail.handled = true;
+      setPages((current) => {
+        const known = new Set(current.map((page) => page.id));
+        return [...current, ...saved.filter((page) => !known.has(page.id))];
+      });
+      setActiveId(saved[0].id);
+    };
+    window.addEventListener(OPEN_PROJECT_PAGES_EVENT, openSavedProjectPages);
+    return () => window.removeEventListener(OPEN_PROJECT_PAGES_EVENT, openSavedProjectPages);
+  }, []);
 
   const setTitle = (id: string, title: string) =>
     setPages((ps) => ps.map((p) => (p.id === id ? (p.title === title ? p : { ...p, title }) : p)));

@@ -17,6 +17,7 @@
 *.ts text eol=lf
 *.tsx text eol=lf
 *.mjs text eol=lf
+*.sh text eol=lf
 
 # Release metadata is rewritten by the host publisher. Keep it LF even when
 # core.autocrlf=true so a completed/aborted version bump cannot leave a

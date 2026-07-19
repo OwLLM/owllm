@@ -10,10 +10,11 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.resolve(HERE, "../../../..");
-const cards = fs.readFileSync(path.join(HERE, "PublishCards.tsx"), "utf8");
-const release = fs.readFileSync(path.join(APP, "src-tauri/src/release.rs"), "utf8");
-const finishScript = fs.readFileSync(path.join(APP, "scripts/finish-and-publish.sh"), "utf8");
-const attributes = fs.readFileSync(path.join(APP, "../.gitattributes"), "utf8");
+const readLF = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
+const cards = readLF(path.join(HERE, "PublishCards.tsx"));
+const release = readLF(path.join(APP, "src-tauri/src/release.rs"));
+const finishScript = readLF(path.join(APP, "scripts/finish-and-publish.sh"));
+const attributes = readLF(path.join(APP, "../.gitattributes"));
 
 function fail(message) {
   console.error(`FAIL publish responsiveness: ${message}`);

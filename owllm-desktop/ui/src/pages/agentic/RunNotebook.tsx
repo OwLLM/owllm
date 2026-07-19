@@ -29,7 +29,7 @@ import { useAutoResize } from "../../hooks/useAutoResize";
 import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
-import { formatDuration, formatClock } from "./RunTimer";
+import { formatDuration, formatClock, useTick } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import ActionIcon from "../../components/ActionIcon";
 
@@ -59,6 +59,13 @@ export type NotebookState = {
   /// feeding notebook steps). The surface whose toggle turned auto-feed on
   /// owns it; unchecking from ANY page stops it everywhere.
   autoFeedOwner?: string;
+  /// Wall-clock bounds for one whole auto-fed queue run. Unlike the queue
+  /// total below, this includes the gaps between jobs as well as their work.
+  autoFeedStartedAt?: number;
+  autoFeedFinishedAt?: number;
+  /// A user may turn auto-feed off before the queue is empty. Keep that
+  /// distinct from a naturally completed sequence in the timing display.
+  autoFeedStopped?: boolean;
   digest: Array<{ role: "you" | "digest"; text: string }>;
   /// User-picked digest model (per project). Empty/undefined = inherit the
   /// surface's default (team model → server model), same rule as before.
@@ -91,6 +98,9 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
         : [],
       autoFeed: p.autoFeed === true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
+      autoFeedStartedAt: typeof p.autoFeedStartedAt === "number" ? p.autoFeedStartedAt : undefined,
+      autoFeedFinishedAt: typeof p.autoFeedFinishedAt === "number" ? p.autoFeedFinishedAt : undefined,
+      autoFeedStopped: p.autoFeedStopped === true,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
       digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
@@ -118,12 +128,45 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return null;
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
+  const now = Date.now();
   next.status = "sent";
-  next.startedAt = Date.now();
+  next.startedAt = now;
   next.finishedAt = undefined;
+  if (nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) {
+    nb.autoFeedStartedAt = now;
+    nb.autoFeedFinishedAt = undefined;
+    nb.autoFeedStopped = false;
+  }
   if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
   saveNotebook(projectId, nb);
   return next;
+}
+
+/// Start the wall-clock timer for an auto-fed queue when a caller is not also
+/// persisting its first step. The UI writes both atomically; later queue jobs
+/// are covered by takeNextAutoStep.
+export function markNotebookAutoFeedStarted(projectId: string | null | undefined, startedAt: number = Date.now()): void {
+  if (!projectId) return;
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeed || (nb.autoFeedStartedAt != null && nb.autoFeedFinishedAt == null)) return;
+  nb.autoFeedStartedAt = startedAt;
+  nb.autoFeedFinishedAt = undefined;
+  nb.autoFeedStopped = false;
+  saveNotebook(projectId, nb);
+}
+
+/// Freeze the whole-sequence timer only after the owner finishes the final
+/// auto-fed job. Pending or in-flight sent steps mean the sequence continues.
+export function markNotebookAutoFeedFinished(projectId: string | null | undefined, surfaceId: string, finishedAt: number = Date.now()): boolean {
+  if (!projectId) return false;
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeed || (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) || nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) return false;
+  const stillActive = nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null));
+  if (stillActive) return false;
+  nb.autoFeedFinishedAt = finishedAt;
+  nb.autoFeedStopped = false;
+  saveNotebook(projectId, nb);
+  return true;
 }
 
 /// True when auto-feed is on with pending steps and THIS surface may drive it
@@ -173,6 +216,17 @@ function formatStepTiming(s: NotebookStep): string | null {
     return translateUiText(`started ${start} • finished ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`);
   }
   return translateUiText(`started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`);
+}
+
+function formatAutoFeedTiming(nb: NotebookState): string | null {
+  if (nb.autoFeedStartedAt == null) return null;
+  const finishedAt = nb.autoFeedFinishedAt;
+  const elapsed = formatDuration((finishedAt ?? Date.now()) - nb.autoFeedStartedAt);
+  if (finishedAt != null) {
+    const outcome = nb.autoFeedStopped ? "stopped" : "finished";
+    return `Auto-feed ${outcome} • started ${formatClock(nb.autoFeedStartedAt)} • finished ${formatClock(finishedAt)} • ${elapsed}`;
+  }
+  return `Auto-feed running • started ${formatClock(nb.autoFeedStartedAt)} • ${elapsed}`;
 }
 
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -323,6 +377,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   activeRef.current = active;
   const projRef = useRef(projectId);
   projRef.current = projectId;
+  useTick(nb.autoFeedStartedAt != null && nb.autoFeedFinishedAt == null);
 
   const kanbanPlan = useMemo(() => parseKanbanPlan(nb.plan), [nb.plan]);
   const brainstormRef = useAutoResize<HTMLTextAreaElement>(nb.text, { minRows: 4, maxRows: 16 });
@@ -415,8 +470,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
     const now = Date.now();
-    setStep(s.id, { status: "sent", startedAt: now, finishedAt: undefined });
-    markNotebookStepStarted(projectId, s.id, now);
+    // Persist the first step and sequence clock together. Separate writes can
+    // race React's queued state updater and erase the just-started sequence.
+    updateNotebook((prev) => ({
+      ...prev,
+      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined } : step),
+      ...(prev.autoFeed && (prev.autoFeedStartedAt == null || prev.autoFeedFinishedAt != null)
+        ? { autoFeedStartedAt: now, autoFeedFinishedAt: undefined, autoFeedStopped: false }
+        : {}),
+    }));
   };
   /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
   /// the lane content is NEVER cleared or consumed — only read.
@@ -527,6 +589,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     }
     return parts.join(" · ");
   }, [queueTiming]);
+  const autoFeedTimingText = formatAutoFeedTiming(nb);
   // The active feed shows only unfinished, actionable cards. Finished steps
   // (checked off OR fed-and-completed) drop out of the feed into the Archive tab.
   const activeSteps = useMemo(() => nb.steps.filter((s) => !isStepArchived(s)), [nb.steps]);
@@ -591,7 +654,24 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   : "When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it. Only the page that turns this on feeds the queue."}
                 style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: ownedElsewhere ? "var(--warn)" : nb.autoFeed ? "var(--ok)" : "var(--fg-muted)", cursor: "pointer" }}
               >
-                <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked, autoFeedOwner: e.target.checked ? surfaceId : undefined })} />
+                <input
+                  type="checkbox"
+                  checked={nb.autoFeed}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    const stoppedAt = Date.now();
+                    updateNotebook((prev) => enabled
+                      ? { ...prev, autoFeed: true, autoFeedOwner: surfaceId }
+                      : {
+                          ...prev,
+                          autoFeed: false,
+                          autoFeedOwner: undefined,
+                          ...(prev.autoFeedStartedAt != null && prev.autoFeedFinishedAt == null
+                            ? { autoFeedFinishedAt: stoppedAt, autoFeedStopped: true }
+                            : {}),
+                        });
+                  }}
+                />
                 {ownedElsewhere ? "Auto-feed (another page drives)" : "Auto-feed next step"}
               </label>
             );
@@ -808,6 +888,22 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 ><ActionIcon name="play" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start queue</button>
               )}
             </div>
+
+            {autoFeedTimingText && (
+              <div
+                data-ui="NotebookAutoFeedTiming"
+                title="Total wall-clock time for this auto-fed notebook sequence"
+                style={{
+                  marginTop: 8, display: "inline-flex", alignItems: "center", alignSelf: "flex-start", gap: 5,
+                  maxWidth: "100%", padding: "4px 8px", borderRadius: 6, fontSize: 10.5, fontWeight: 700,
+                  fontVariantNumeric: "tabular-nums", color: "var(--accent-ink)",
+                  background: "rgba(var(--accent-rgb),0.10)", border: "1px solid rgba(var(--accent-rgb),0.30)",
+                }}
+              >
+                <ActionIcon name="clock" size={12} />
+                <span>{autoFeedTimingText}</span>
+              </div>
+            )}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {/* Active/Archive tabs — done steps live ONLY on the archive tab

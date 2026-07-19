@@ -24,7 +24,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import PtyTerminal from "../advanced/PtyTerminal";
@@ -1659,6 +1659,8 @@ function CodeWorkspace({ pageId, onTitle }: {
           if (st) {
             notebookStepRef.current = st.id;
             void sendRef.current?.(st.text);
+          } else {
+            markNotebookAutoFeedFinished(ruleScopeRef.current.id, notebookSurfaceId);
           }
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
           setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
@@ -2798,6 +2800,17 @@ function CodeWorkspace({ pageId, onTitle }: {
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
           <input ref={codeFileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
+          <button
+            onClick={() => {
+              // Terminal belongs with the workspace composer, not the compact
+              // utility/header strip. Hidden shells re-open; visible shells hide.
+              if (!termOpen) { setTermOpen(true); setTermHidden(false); }
+              else setTermHidden((hidden) => !hidden);
+            }}
+            title="Open the workspace terminal"
+            aria-label="Open terminal"
+            style={{ ...btn, height: 44, width: 44, justifyContent: "center", padding: 0, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
+          >🖥</button>
           <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
             value={draft}
@@ -2844,13 +2857,6 @@ function CodeWorkspace({ pageId, onTitle }: {
             onDirectivesChanged={reloadDirectives}
             mode={agentMode}
             onModeChange={setAgentMode}
-            terminalOpen={termOpen && !termHidden}
-            onToggleTerminal={() => {
-              // Closed → open. Hidden → re-show (shell was kept alive).
-              // Visible → hide (shell stays alive; ✕ on the popup kills it).
-              if (!termOpen) { setTermOpen(true); setTermHidden(false); }
-              else setTermHidden((h) => !h);
-            }}
             browserOpen={browserOpen}
             onToggleBrowser={() => setBrowserOpen((v) => !v)}
             usageProvider={providerFor(modelId, availableModels)}

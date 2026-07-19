@@ -16,7 +16,7 @@ import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -1948,7 +1948,7 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
     <div
       onClick={(e) => e.stopPropagation()}
       style={{
-        flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+        flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column",
         gap: 8, padding: 10, cursor: "default",
       }}
     >
@@ -1997,16 +1997,17 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
         onClick={(e) => { e.stopPropagation(); setSetupOpen(true); }}
         title="Repository settings + readiness details"
         style={{
-          display: "flex", alignItems: "center", gap: 8, width: "100%",
+          display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", width: "100%", minWidth: 0,
           padding: "6px 10px", flexShrink: 0,
           background: "rgba(0,0,0,0.30)",
           border: `1px solid rgba(${rgb},0.4)`, borderRadius: 7,
           color: "var(--fg)", fontSize: 11, fontWeight: 600, cursor: "pointer",
         }}
       >
-        <span>⚙ Set up repo</span>
-        <span style={{ flex: 1 }} />
+        <span style={{ flex: "0 0 auto", whiteSpace: "nowrap" }}>⚙ Set up repo</span>
+        <span style={{ flex: 1, minWidth: 0 }} />
         <span style={{
+          marginLeft: "auto", maxWidth: "100%", whiteSpace: "nowrap",
           fontSize: 9, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase",
           padding: "1px 7px", borderRadius: 4,
           color: ready ? "#3cf26b" : "#ffd97a",
@@ -8510,6 +8511,8 @@ export function AgentsPage({
       if (step) {
         notebookStepRef.current = step.id;
         void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
+      } else {
+        markNotebookAutoFeedFinished(pid, notebookSurfaceId);
       }
     };
     setTimeout(attempt, 800);

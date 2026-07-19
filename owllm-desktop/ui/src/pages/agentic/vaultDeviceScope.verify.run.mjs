@@ -2,12 +2,16 @@
 // shared; open tabs, selected projects and absolute folders belong to a single
 // device and must never be adopted from a peer.
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const SRC = path.resolve(HERE, "../..");
 const DESKTOP = path.resolve(SRC, "../..");
+const require = createRequire(path.join(DESKTOP, "package.json"));
+const ts = require("typescript");
 const read = (p) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 let passed = 0;
 const check = (ok, message) => {
@@ -29,6 +33,96 @@ check(sync.includes("if (!isSyncable(k)) continue"),
   "old remote blobs cannot re-import newly denied device-local keys");
 check(sync.includes('invoke<string>("device_get_id")'),
   "vault metadata uses the backend's stable cryptographic device id");
+check(sync.includes("import { vaultEnsure, vaultStatus }"),
+  "startup can repair a missing local vault clone");
+check(sync.includes("if (!st?.connected) return") &&
+      sync.includes("if (!st.cloned) st = await vaultEnsure()"),
+  "a connected device ensures its vault clone before project sync");
+check(sync.indexOf("if (!st.cloned) st = await vaultEnsure()") <
+      sync.indexOf("if (await syncProjectsNow() && reloadOnce()) return"),
+  "vault recovery happens before projects are pulled");
+check(sync.includes("_started = false") &&
+      sync.includes("[vaultSync] vault startup failed"),
+  "a transient vault-recovery failure does not permanently latch sync off");
+
+// Execute the real startup module with Tauri/GitHub shims. The first ensure
+// deliberately fails; a second startup call must retry, repair the clone, and
+// only then pull projects.
+const output = ts.transpileModule(sync, {
+  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+}).outputText;
+const temp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-vault-startup-"));
+const coreDir = path.join(temp, "node_modules", "@tauri-apps", "api");
+const runtimeDir = path.join(temp, "runtime");
+const githubDir = path.join(temp, "pages", "agentic");
+fs.mkdirSync(coreDir, { recursive: true });
+fs.mkdirSync(runtimeDir, { recursive: true });
+fs.mkdirSync(githubDir, { recursive: true });
+fs.writeFileSync(
+  path.join(coreDir, "package.json"),
+  JSON.stringify({ name: "@tauri-apps/api", version: "0.0.0", exports: { "./core": "./core.js" } }),
+);
+fs.writeFileSync(
+  path.join(coreDir, "core.js"),
+  "module.exports = { invoke: (...a) => globalThis.__vaultInvoke(...a) };\n",
+);
+fs.writeFileSync(
+  path.join(githubDir, "github.js"),
+  "module.exports = {\n" +
+    "  vaultStatus: async () => ({ connected: true, cloned: false }),\n" +
+    "  vaultEnsure: async () => globalThis.__vaultEnsure(),\n" +
+    "};\n",
+);
+fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), output);
+
+function storage() {
+  const values = new Map();
+  return {
+    get length() { return values.size; },
+    key: (i) => [...values.keys()][i] ?? null,
+    getItem: (key) => values.has(key) ? values.get(key) : null,
+    setItem: (key, value) => void values.set(key, String(value)),
+    removeItem: (key) => void values.delete(key),
+  };
+}
+globalThis.localStorage = storage();
+globalThis.sessionStorage = storage();
+globalThis.CustomEvent = class { constructor(type) { this.type = type; } };
+globalThis.location = { reload: () => {} };
+globalThis.document = { addEventListener: () => {}, visibilityState: "visible" };
+globalThis.window = {
+  addEventListener: () => {},
+  dispatchEvent: () => {},
+  setInterval: () => 1,
+};
+const startupEvents = [];
+let ensureCalls = 0;
+globalThis.__vaultEnsure = async () => {
+  ensureCalls += 1;
+  startupEvents.push("ensure");
+  if (ensureCalls === 1) throw new Error("temporary network failure");
+  return { connected: true, cloned: true };
+};
+globalThis.__vaultInvoke = async (command) => {
+  startupEvents.push(command);
+  if (command === "device_get_id") return "device-test";
+  if (command === "vault_read_remote_state") return null;
+  if (command === "vault_sync_projects") return false;
+  return null;
+};
+const runtime = require(path.join(runtimeDir, "vaultSync.js"));
+const originalWarn = console.warn;
+console.warn = () => {}; // the first failure is intentional in this test
+try {
+  await runtime.startVaultSync();
+  await runtime.startVaultSync();
+} finally {
+  console.warn = originalWarn;
+}
+check(ensureCalls === 2,
+  "startup retries clone recovery after a transient failure");
+check(startupEvents.lastIndexOf("ensure") < startupEvents.indexOf("vault_sync_projects"),
+  "the repaired clone exists before the real project-sync command runs");
 
 const remote = read(path.join(DESKTOP, "src-tauri", "src", "remote_devices", "mod.rs"));
 check(remote.includes("pub fn device_get_id()") && remote.includes("self_device_id()"),

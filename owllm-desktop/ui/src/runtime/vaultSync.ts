@@ -21,7 +21,7 @@
 // regenerable caches, machine-specific workspace paths) are denied below.
 
 import { invoke } from "@tauri-apps/api/core";
-import { vaultStatus } from "../pages/agentic/github";
+import { vaultEnsure, vaultStatus } from "../pages/agentic/github";
 
 // Device-local marker of the newest blob we've adopted OR pushed. Compared
 // against the remote blob's syncedAt to decide whether to adopt. NOT synced.
@@ -255,8 +255,26 @@ export async function startVaultSync(): Promise<void> {
   if (_started) return;
   _started = true;
   let st;
-  try { st = await vaultStatus(); } catch { return; }
-  if (!st?.cloned) return; // not connected / vault not set up → local-only
+  try {
+    st = await vaultStatus();
+    if (!st?.connected) return; // signed out → local-only
+    // A reinstall/profile repair can preserve the encrypted GitHub account
+    // while losing the local vault clone. Previously startup returned here
+    // forever, so projects on the user's existing remote vault never reached
+    // this PC unless they manually reopened the account modal. Self-heal the
+    // clone on every connected startup; vaultEnsure is idempotent.
+    if (!st.cloned) st = await vaultEnsure();
+  } catch (e) {
+    // Do not permanently latch startup off after a transient clone/network
+    // failure. A later account action (or the next launch) may retry safely.
+    _started = false;
+    console.warn("[vaultSync] vault startup failed", e);
+    return;
+  }
+  if (!st.cloned) {
+    _started = false;
+    return;
+  }
   _enabled = true;
 
   // 1) Adopt newer remote state, then reload (once) so every store repaints.

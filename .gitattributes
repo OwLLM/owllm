@@ -17,3 +17,10 @@
 *.ts text eol=lf
 *.tsx text eol=lf
 *.mjs text eol=lf
+
+# Release metadata is rewritten by the host publisher. Keep it LF even when
+# core.autocrlf=true so a completed/aborted version bump cannot leave a
+# content-identical file looking dirty to the next Publish preflight.
+owllm-desktop/src-tauri/Cargo.toml text eol=lf
+owllm-desktop/src-tauri/Cargo.lock text eol=lf
+owllm-desktop/src-tauri/tauri.conf.json text eol=lf

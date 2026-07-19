@@ -67,6 +67,7 @@ mod server;
 mod signing;
 mod skill_library;
 mod slack;
+mod state_mirror;
 mod support;
 mod telegram;
 mod vault;
@@ -367,6 +368,8 @@ pub fn run() {
             directives::directives_restore_defaults,
             directives::project_set_director_mode,
             directives::project_get_director_mode,
+            state_mirror::state_mirror_load,
+            state_mirror::state_mirror_save,
             fleet::path_is_dir,
             fleet::fleet_worktree_create,
             fleet::fleet_worktree_finalize,

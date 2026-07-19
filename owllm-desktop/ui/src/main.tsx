@@ -7,6 +7,7 @@ import UpdateController from "./UpdatePrompt";
 import { ChatRuntimeProvider } from "./runtime/ChatRuntimeProvider";
 import { bootstrapTheme } from "./theme";
 import { bootstrapLocalization, LocalizationProvider } from "./localization";
+import { restoreStateMirror, startStateMirror } from "./runtime/stateMirror";
 import { installOwllmWebLinkInterceptor } from "./utils/openWebUrl";
 import "./styles.css";
 
@@ -94,16 +95,29 @@ function BootCover() {
   ) : null;
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <LocalizationProvider>
-        <ChatRuntimeProvider>
-          <AppShell />
-        </ChatRuntimeProvider>
-      </LocalizationProvider>
-    </ErrorBoundary>
-    <UpdateController />
-    <BootCover />
-  </React.StrictMode>,
-);
+// Restore mirrored durable state (Coding pages, notebook, chat state) into
+// localStorage BEFORE the first render — pages read localStorage in their
+// useState initializers, so restoring later would miss the initial mount.
+// restoreStateMirror never throws and self-times-out, so boot can't hang.
+async function boot() {
+  try {
+    await restoreStateMirror();
+  } catch {
+    /* never block startup on recovery */
+  }
+  startStateMirror();
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <LocalizationProvider>
+          <ChatRuntimeProvider>
+            <AppShell />
+          </ChatRuntimeProvider>
+        </LocalizationProvider>
+      </ErrorBoundary>
+      <UpdateController />
+      <BootCover />
+    </React.StrictMode>,
+  );
+}
+void boot();

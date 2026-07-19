@@ -782,6 +782,21 @@ pub async fn repo_commit(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Git surfaces credential-helper failures as `fatal:` lines on stderr even
+/// when the operation itself succeeded (exit 0) — e.g. a stale sandbox-written
+/// `credential.helper store --file=<linux path>` in the shared repo config
+/// dies on the post-push approve phase. Embedding that noise in a SUCCESS
+/// message makes the Publisher card read as failed. Strip only those known
+/// cosmetic lines; error paths keep the full untouched output.
+fn strip_credential_noise(out: &str) -> String {
+    out.lines()
+        .filter(|l| !(l.contains("credential storage lock") || l.contains("credential store")))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
 /// Push the current branch to origin. Fast-forward-only on the remote side,
 /// refusing to overwrite history. Lightweight counterpart to repo_merge for
 /// the "Push" card in the Code page rail.
@@ -796,7 +811,12 @@ pub async fn repo_push(repo_dir: String) -> Result<String, String> {
         let branch = cur.trim();
         let (p_ok, p_out) = run_git(&host, &["push", "origin", branch]);
         if p_ok {
-            Ok(format!("Pushed {branch} to origin.\n{p_out}"))
+            let p_out = strip_credential_noise(&p_out);
+            if p_out.is_empty() {
+                Ok(format!("Pushed {branch} to origin."))
+            } else {
+                Ok(format!("Pushed {branch} to origin.\n{p_out}"))
+            }
         } else if p_out.contains("Everything up-to-date") {
             Ok("Everything up-to-date.".into())
         } else {
@@ -850,10 +870,41 @@ pub async fn repo_merge(repo_dir: String, target: Option<String>) -> Result<Stri
         if cur_ok && cur != target {
             let _ = run_git(&host, &["branch", "-f", &target, "HEAD"]);
         }
+        let p_out = strip_credential_noise(&p_out);
         Ok(format!(
             "Fast-forwarded '{target}' to HEAD and pushed.\n{p_out}"
         ))
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_credential_noise;
+
+    #[test]
+    fn strips_cosmetic_credential_lines_keeps_push_summary() {
+        let out = "fatal: unable to get credential storage lock in 1000 ms: No such file or directory\n\
+                   To https://github.com/ruigro/LLM-Studio.git\n\
+                   \x20\x20\x201ec502a1..efb98b41  main -> main";
+        let clean = strip_credential_noise(out);
+        assert!(!clean.contains("credential storage lock"));
+        assert!(clean.contains("main -> main"));
+        assert!(clean.contains("To https://github.com/ruigro/LLM-Studio.git"));
+    }
+
+    #[test]
+    fn strips_write_credential_store_variant() {
+        let out = "fatal: unable to write credential store: Device or resource busy\nEverything up-to-date";
+        assert_eq!(strip_credential_noise(out), "Everything up-to-date");
+    }
+
+    #[test]
+    fn passes_real_errors_untouched() {
+        let out = " ! [rejected]          main -> main (fetch first)\nerror: failed to push some refs";
+        let clean = strip_credential_noise(out);
+        assert!(clean.contains("[rejected]"));
+        assert!(clean.contains("failed to push some refs"));
+    }
 }

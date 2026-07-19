@@ -218,7 +218,7 @@ CONF="$REPO/$VERSION_FILE"
 # uncommitted. That is never "real work" for What's New, and blocking on it
 # turns every release into a treadmill (build bumps lock → lock dirty → next
 # publish blocked). The bump commit still re-stages it via `git add $STAGE_PATH`.
-# On Windows, release metadata can remain stat-dirty after a tool rewrites the
+# On Windows hosts, release metadata can remain stat-dirty after a tool rewrites the
 # exact bytes already in the index. Plain `git status` reports that as modified
 # even though `git diff` is empty, blocking Publish forever. `--really-refresh`
 # re-hashes those entries before we decide whether real work is pending. Its

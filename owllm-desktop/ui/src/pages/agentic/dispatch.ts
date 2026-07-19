@@ -698,6 +698,7 @@ export type TeamTemplateBackend = { id: string; path: string; built_in: boolean;
 export type AgentRoleBackend    = { id: string; path: string; built_in: boolean; data: any };
 export type ProjectRow = {
   id: string; name: string; description: string; location: string;
+  repo_url: string; created_device_id: string; created_device_name: string;
   trust_writes: boolean; auto_approve_all: boolean;
   team: string[]; team_default_model_id: string;
   graph_json: string;

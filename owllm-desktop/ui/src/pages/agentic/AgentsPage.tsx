@@ -13,6 +13,7 @@ import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
 import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
+import { projectAvailability, projectCanRun, projectOriginLabel } from "./projectPortability";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
@@ -126,6 +127,7 @@ const ICONS = "/Page_icons";
 // ---------- Backend shapes ----------
 type ProjectRow = {
   id: string; name: string; description: string; location: string;
+  repo_url: string; created_device_id: string; created_device_name: string;
   trust_writes: boolean; auto_approve_all: boolean;
   team: string[]; team_default_model_id: string;
   /// Routing graph blob — `{"edges": [{"source":"x","target":"y"}]}`.
@@ -8836,6 +8838,9 @@ export function AgentsPage({
   // After every mutation we refetch list_projects so the combo box +
   // selection stay accurate.
   const [newProjOpen, setNewProjOpen] = useState(false);
+  const [projectHubOpen, setProjectHubOpen] = useState(false);
+  const [projectMaterializing, setProjectMaterializing] = useState(false);
+  const [projectMaterializeError, setProjectMaterializeError] = useState("");
   // The project popup is ONE dialog in two modes: "new" (create) and "edit"
   // (⚙ settings for the current project). Both open the same ProjectSettingsDialog.
   const [settingsMode, setSettingsMode] = useState<"new" | "edit">("edit");
@@ -8850,6 +8855,30 @@ export function AgentsPage({
       return [] as ProjectRow[];
     }
   };
+  const cloneSelectedProjectHere = async () => {
+    if (!selectedProject?.repo_url || projectMaterializing) return;
+    setProjectMaterializing(true);
+    setProjectMaterializeError("");
+    try {
+      const parent = await invoke<string | null>("pick_folder", {
+        title: `Choose where to clone ${selectedProject.name} on this computer`,
+      });
+      if (!parent) return;
+      const location = await invoke<string>("github_clone_project", {
+        repoUrl: selectedProject.repo_url,
+        parent,
+      });
+      await invoke("update_project", { input: { id: selectedProject.id, location } });
+      const rows = await reloadProjects();
+      const rebound = rows.find((p) => p.id === selectedProject.id);
+      setProjectLocationDraft(rebound?.location || location, selectedProject.id);
+      setProjectHubOpen(false);
+    } catch (e: any) {
+      setProjectMaterializeError(String(e?.message ?? e));
+    } finally {
+      setProjectMaterializing(false);
+    }
+  };
   const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
   const onProjectCreated = async (
     row: ProjectRow,
@@ -8861,6 +8890,7 @@ export function AgentsPage({
     const target = rows.find(p => p.id === row.id) ?? row;
     setSelectedProjectId(target.id);
     setProjectLocationDraft(target.location, target.id);
+    setProjectHubOpen(false);
     setPickedTeamId(null);
     setTrustWritesOverride(null);
     if (kickoff.action === "brainstorm") {
@@ -9858,6 +9888,12 @@ export function AgentsPage({
       }
       return;
     }
+    if (!selectedProject || !projectCanRun({ ...selectedProject, location: runCwd })) {
+      setRunError(selectedProject?.repo_url
+        ? "Clone this project's GitHub repository on this PC before sending a message."
+        : "This remote project has no GitHub repository. Create it on the source PC before working here.");
+      return;
+    }
     // Remember this goal so a failed second-agent / forwarded send can offer a
     // one-click "⟳ Retry" (re-runs it via onSupSend). Steers returned above, so
     // only genuine goals land here.
@@ -10508,6 +10544,12 @@ export function AgentsPage({
     // when it's wired directly as the onRun handler.
     let text = (typeof overrideText === "string" ? overrideText : goal).trim();
     if (!text) return;
+    if (!selectedProject || !projectCanRun({ ...selectedProject, location: runCwd })) {
+      setRunError(selectedProject?.repo_url
+        ? "This project is not installed on this computer. Clone its GitHub repository here before running agents."
+        : "This project belongs to another computer and has no GitHub repository. Create and push the repository on the source computer first.");
+      return;
+    }
     // Key the shared team memory by this project's stable ID so it matches across
     // machines (and syncs via the vault) rather than by the per-PC folder path.
     setTeamMemoryScope(selectedProjectId);
@@ -12731,6 +12773,136 @@ export function AgentsPage({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId]);
 
+  // A synced project without a folder binding on THIS device is intentionally
+  // non-runnable. Do not mount the canvas/composer at all: that previously let
+  // an empty cwd fall through to the app/install directory. The GitHub repo is
+  // the portable identity; cloning it creates a fresh local path for this PC.
+  if (projectHubOpen || !selectedProject || !projectCanRun({ ...selectedProject, location: locationDraft })) {
+    return (
+      <div data-ui="AgenticProjectHub" style={{
+        height: "100%", minHeight: 0, overflow: "auto", padding: "clamp(20px,4vw,54px)",
+        color: "var(--fg)", background:
+          "radial-gradient(circle at 84% 12%, rgba(var(--accent-rgb),0.13), transparent 34%), var(--bg-panel)",
+      }}>
+        <ProjectSettingsDialog
+          open={newProjOpen}
+          mode={settingsMode}
+          onClose={() => setNewProjOpen(false)}
+          teams={teams}
+          pickedTeamId={pickedTeamId}
+          onPickTeam={changeProjectTeam}
+          resolvedTeamLabel={activeTeamTemplate?.display ?? null}
+          onResetTeam={resetTeamToTemplate}
+          defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+          onCreated={onProjectCreated}
+          project={selectedProject}
+          location={locationDraft}
+          effectiveCwd={runCwd}
+          onChangeLocation={(value) => setProjectLocationDraft(value, selectedProjectId, true)}
+          trustWrites={trustWrites}
+          onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
+          fullAccess={fullAccess}
+          onToggleFullAccess={onToggleFullAccess}
+          bridgeOn={bridgeOn}
+          isolationRequested={isolationRequested}
+          onAfterRename={() => { void reloadProjects(); }}
+          onAfterDelete={() => { void reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
+        />
+        <div style={{ maxWidth: 1180, margin: "0 auto", display: "flex", flexDirection: "column", gap: 22 }}>
+          <div style={{ display: "flex", gap: 18, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 280 }}>
+              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.6, textTransform: "uppercase" }}>
+                Agentic project command center
+              </div>
+              <h1 style={{ margin: "7px 0 5px", color: "var(--fg-strong)", fontSize: "clamp(27px,4vw,44px)", lineHeight: 1.05 }}>
+                GitHub carries the project. This PC carries its folder.
+              </h1>
+              <div style={{ color: "var(--fg-muted)", maxWidth: 760, lineHeight: 1.6, fontSize: 13.5 }}>
+                Chats, team memory and project rules can follow your account. An absolute folder never does.
+                Projects from another computer stay ghosted until their repository is cloned locally.
+              </div>
+            </div>
+            <button onClick={onNewProject} style={{
+              height: 44, padding: "0 18px", border: "none", borderRadius: 12,
+              background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 850, cursor: "pointer",
+              boxShadow: "0 0 26px rgba(var(--accent-rgb),0.22)",
+            }}>+ New GitHub-first project</button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 14 }}>
+            {projects.map((p) => {
+              const local = projectAvailability(p) === "local";
+              const selected = p.id === selectedProjectId;
+              return (
+                <button key={p.id} onClick={() => {
+                  setSelectedProjectId(p.id);
+                  setProjectLocationDraft(p.location || "", p.id);
+                  setPickedTeamId(null);
+                  setProjectMaterializeError("");
+                  if (projectAvailability(p) === "local") setProjectHubOpen(false);
+                }} style={{
+                  minHeight: 142, padding: 16, textAlign: "left", cursor: "pointer", borderRadius: 15,
+                  border: `1px solid ${selected ? "var(--accent)" : "var(--border)"}`,
+                  background: selected ? "rgba(var(--accent-rgb),0.10)" : "var(--bg-card)",
+                  opacity: local ? 1 : 0.58, filter: local ? "none" : "saturate(.55)",
+                  boxShadow: selected ? "0 0 25px rgba(var(--accent-rgb),0.12)" : "none",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 20 }}>{local ? "🟢" : "◌"}</span>
+                    <b style={{ color: "var(--fg-strong)", fontSize: 15, flex: 1 }}>{p.name}</b>
+                    <span style={{ color: local ? "var(--ok)" : "var(--warn)", fontSize: 10.5, fontWeight: 800 }}>
+                      {local ? "THIS PC" : "REMOTE"}
+                    </span>
+                  </div>
+                  <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 9 }}>
+                    {local ? p.location : `Created on ${projectOriginLabel(p)}`}
+                  </div>
+                  <div style={{ color: p.repo_url ? "var(--accent-ink)" : "var(--warn)", fontSize: 11, marginTop: 8 }}>
+                    {p.repo_url ? `🐙 ${p.repo_url.replace(/^https?:\/\//, "")}` : "No GitHub repository — not portable"}
+                  </div>
+                </button>
+              );
+            })}
+            {projects.length === 0 && (
+              <div style={{ padding: 24, border: "1px dashed var(--border-strong)", borderRadius: 15, color: "var(--fg-muted)" }}>
+                No projects yet. Create one and keep the recommended private GitHub repository enabled.
+              </div>
+            )}
+          </div>
+
+          {selectedProject && !locationDraft.trim() && (
+            <div data-ui="GhostProjectNotice" style={{
+              padding: "20px 22px", borderRadius: 16, background: "var(--bg-card)",
+              border: "1px solid var(--warn)", display: "flex", alignItems: "center",
+              gap: 18, flexWrap: "wrap", boxShadow: "0 14px 40px rgba(0,0,0,.18)",
+            }}>
+              <div style={{ fontSize: 34, opacity: .75 }}>◌</div>
+              <div style={{ flex: 1, minWidth: 260 }}>
+                <div style={{ color: "var(--fg-strong)", fontSize: 17, fontWeight: 850 }}>
+                  {selectedProject.name} is not installed on this PC
+                </div>
+                <div style={{ color: "var(--fg-muted)", fontSize: 12.5, lineHeight: 1.55, marginTop: 4 }}>
+                  Its original folder belongs to <b>{projectOriginLabel(selectedProject)}</b> and is never reused here.
+                  {selectedProject.repo_url
+                    ? " Clone the GitHub repository to create a new local folder and bind only this computer."
+                    : " This project has no GitHub repository. On the source computer, create and push the repo first; then sync again."}
+                </div>
+                {projectMaterializeError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 8 }}>{projectMaterializeError}</div>}
+              </div>
+              {selectedProject.repo_url && (
+                <button onClick={cloneSelectedProjectHere} disabled={projectMaterializing} style={{
+                  height: 42, padding: "0 17px", borderRadius: 11, border: "none",
+                  background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 800,
+                  cursor: projectMaterializing ? "wait" : "pointer", opacity: projectMaterializing ? .65 : 1,
+                }}>{projectMaterializing ? "Cloning…" : "🐙 Clone on this PC"}</button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>
       {directivesPanelOpen && selectedProjectId && (
@@ -12772,6 +12944,11 @@ export function AgentsPage({
         // crowd the old project strip now lives in the ⚙ ProjectSettingsDialog.
         leftSlot={
           <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+            <button
+              onClick={() => setProjectHubOpen(true)}
+              title="Open the full project manager"
+              style={{ height:38, padding:"0 11px", border:"1px solid var(--border)", borderRadius:10, background:"var(--bg-card)", color:"var(--accent-ink)", fontSize:12, fontWeight:800, cursor:"pointer" }}
+            >⌁ Projects</button>
             <span style={{ fontSize:15 }} title="Project">📁</span>
             <select
               data-ui="ProjectCombo"
@@ -12788,8 +12965,17 @@ export function AgentsPage({
             >
               {projects.length === 0
                 ? <option value="">(no projects — + New)</option>
-                : projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                : projects.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.location ? p.name : `◌ ${p.name} — ${p.repo_url ? "clone GitHub repo" : "source PC only"}`}
+                  </option>
+                ))}
             </select>
+            {selectedProject && (
+              <span title={`Created on ${projectOriginLabel(selectedProject)}. The active folder is bound only to this PC.`} style={{ fontSize: 10.5, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>
+                🖥 {projectOriginLabel(selectedProject)}
+              </span>
+            )}
             <button
               data-ui="ProjectSettingsBtn"
               onClick={onOpenSettings}

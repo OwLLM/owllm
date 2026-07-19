@@ -27,6 +27,7 @@ import PtyTerminal from "./PtyTerminal";
 import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
+import { openWebUrl } from "../../utils/openWebUrl";
 
 const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
 const HOST_LABEL = HOST_IS_WINDOWS
@@ -1011,7 +1012,7 @@ export default function AccountsPage() {
     if (route.kind === "subscription") {
       if (route.webOnly) {
         logInfo(route.backend, `Opening ${route.webOnly.url} in your browser…`);
-        invoke("shell_open_url", { url: route.webOnly.url }).catch((e) => {
+        openWebUrl(route.webOnly.url).catch((e) => {
           logInfo(route.backend, `[error] couldn't open browser: ${e}`);
         });
         return;

@@ -7,7 +7,7 @@
 // default browser. Use this for react-markdown's `components.a` everywhere
 // instead of re-declaring the override per chat component.
 
-import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "../utils/openWebUrl";
 
 export default function MarkdownLink(props: any) {
   const href: string | undefined = props.href;
@@ -19,7 +19,7 @@ export default function MarkdownLink(props: any) {
       onClick={(e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (href) invoke("shell_open_url", { url: href }).catch((err) => console.error("open link failed", err));
+        if (href) openWebUrl(href).catch((err) => console.error("open link failed", err));
       }}
     >
       {props.children}

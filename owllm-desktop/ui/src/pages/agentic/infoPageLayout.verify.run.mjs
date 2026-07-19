@@ -32,6 +32,8 @@ const rightAt = src.indexOf('data-ui="InfoPage:right-column"');
 check(leftAt !== -1, "a left column container is present");
 check(rightAt !== -1, "a right column container is present");
 check(leftAt < rightAt, "the left column is declared before the right column");
+check((src.match(/data-ui="InfoPage:right-column"/g) || []).length === 1,
+  "exactly one right column container is rendered");
 
 // Slice the two columns so placement is asserted per-container, not page-wide.
 const leftCol = src.slice(leftAt, rightAt);

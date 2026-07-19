@@ -16,6 +16,7 @@
 // engine build on top of this; this modal is the front door.
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "../../utils/openWebUrl";
 import {
   githubStatus,
   githubConnect,
@@ -32,9 +33,7 @@ import {
 const SEEN_KEY = "owllm:sync-onboard-seen";
 
 function openExternal(url: string) {
-  invoke("shell_open_url", { url }).catch(() => {
-    try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* ignore */ }
-  });
+  openWebUrl(url).catch((error) => console.error("Could not open the OwLLM browser", error));
 }
 
 /// Imperatively open the modal from anywhere (e.g. a header button).

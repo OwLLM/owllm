@@ -7,6 +7,7 @@ import UpdateController from "./UpdatePrompt";
 import { ChatRuntimeProvider } from "./runtime/ChatRuntimeProvider";
 import { bootstrapTheme } from "./theme";
 import { bootstrapLocalization, LocalizationProvider } from "./localization";
+import { installOwllmWebLinkInterceptor } from "./utils/openWebUrl";
 import "./styles.css";
 
 // Apply the persisted theme BEFORE the first React render so the very
@@ -33,6 +34,9 @@ function isLinuxWebview(): boolean {
   if (typeof navigator === "undefined") return false;
   return navigator.userAgent.indexOf("Linux") !== -1;
 }
+
+// Route plain user-facing links through OwLLM's persistent browser as well.
+if (isTauriContext()) installOwllmWebLinkInterceptor();
 
 function BootCover() {
   // The cover masks the WINDOWS overlay-frame startup flash on the OPAQUE

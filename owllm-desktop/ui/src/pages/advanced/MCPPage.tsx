@@ -22,6 +22,7 @@ import {
   isMcpToolDisabled, setMcpToolDisabled,
 } from "../agentic/mcpSettings";
 import { sanitizeToolParameters } from "../agentic/localTools";
+import { openWebUrl } from "../../utils/openWebUrl";
 
 const ICONS = "/Page_icons";
 
@@ -296,7 +297,7 @@ const CATALOG_LINKS: Array<{ label: string; url: string; description: string }> 
 /// Tauri command. Used by the "Get key →" buttons in the env-hint rows
 /// so users can fly straight from "add server" to the signup page.
 async function openExternal(url: string) {
-  try { await invoke("shell_open_url", { url }); } catch (e) { console.error("openExternal", e); }
+  try { await openWebUrl(url); } catch (e) { console.error("openExternal", e); }
 }
 
 // ----- Shared inline styles (carried from the old MCPPage for visual continuity) -----

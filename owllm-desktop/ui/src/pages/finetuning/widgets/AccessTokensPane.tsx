@@ -16,16 +16,12 @@
 
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { openWebUrl } from "../../../utils/openWebUrl";
 
-// Open URL in the OS default browser. Inside Tauri we go through the
-// shell_open_url Rust command (which uses `cmd /c start ""`). Under
-// vite dev we fall back to window.open so links still work.
+// Keep user-facing links in OwLLM's persistent browser so the login profile
+// can be reused by future browser actions.
 async function openExternal(url: string) {
-  try {
-    await invoke("shell_open_url", { url });
-  } catch {
-    window.open(url, "_blank", "noopener,noreferrer");
-  }
+  await openWebUrl(url);
 }
 
 type Tab = "tokens" | "info";

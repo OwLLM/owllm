@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock, TryLockError};
+use std::sync::{Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::webview::{Color, Webview, WebviewBuilder};
@@ -624,6 +624,10 @@ enum BrowserUiEvent {
         action: String,
         data: String,
     },
+    ChromeUpdate {
+        url: Option<String>,
+        title: Option<String>,
+    },
     Layout {
         width: u32,
         height: u32,
@@ -634,16 +638,8 @@ enum BrowserUiEvent {
         id: u64,
         title: String,
     },
-    /// A tab finished loading. Active-tab lookup is deliberately deferred so
-    /// the native page-load callback never waits on the TABS mutex.
-    TabLoaded {
-        id: u64,
-        url: String,
-    },
     /// Re-push the live tab list into the chrome strip (chrome page load).
     PushTabs,
-    /// Clear browser tab state after the native window-destroyed callback.
-    DropTabs,
     /// Typed-login capture from BRIDGE_JS. Vault I/O must stay off the native
     /// callback thread just like window work.
     TypedLogin {
@@ -654,11 +650,11 @@ enum BrowserUiEvent {
 #[derive(Default)]
 struct BrowserUiBatch {
     actions: Vec<(String, String)>,
+    url: Option<String>,
+    title: Option<String>,
     layout: Option<(u32, u32)>,
     tab_titles: HashMap<u64, String>,
-    tab_loads: HashMap<u64, String>,
     push_tabs: bool,
-    drop_tabs: bool,
     creds: Vec<String>,
 }
 
@@ -666,15 +662,19 @@ impl BrowserUiBatch {
     fn absorb(&mut self, event: BrowserUiEvent) {
         match event {
             BrowserUiEvent::ChromeAction { action, data } => self.actions.push((action, data)),
+            BrowserUiEvent::ChromeUpdate { url, title } => {
+                if url.is_some() {
+                    self.url = url;
+                }
+                if title.is_some() {
+                    self.title = title;
+                }
+            }
             BrowserUiEvent::Layout { width, height } => self.layout = Some((width, height)),
             BrowserUiEvent::TabTitle { id, title } => {
                 self.tab_titles.insert(id, title);
             }
-            BrowserUiEvent::TabLoaded { id, url } => {
-                self.tab_loads.insert(id, url);
-            }
             BrowserUiEvent::PushTabs => self.push_tabs = true,
-            BrowserUiEvent::DropTabs => self.drop_tabs = true,
             BrowserUiEvent::TypedLogin { data } => self.creds.push(data),
         }
     }
@@ -725,22 +725,17 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
                 eprintln!("[browser] could not save typed login: {e}");
             }
         }
-        if batch.drop_tabs {
-            *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
-        }
         if let Some((width, height)) = batch.layout {
             layout_children(&app, tauri::PhysicalSize::new(width, height));
-        }
-        for (id, url) in batch.tab_loads {
-            if is_active_tab(id) {
-                update_chrome_bar(&app, Some(&url), None);
-            }
         }
         for (id, title) in batch.tab_titles {
             on_tab_title(&app, id, &title);
         }
         if batch.push_tabs {
             push_tabs(&app);
+        }
+        if batch.url.is_some() || batch.title.is_some() {
+            update_chrome_bar(&app, batch.url.as_deref(), batch.title.as_deref());
         }
     }
 }
@@ -826,6 +821,7 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
 /// under the chrome bar; inactive ones are parked offscreen. All tabs share
 /// the same profile data dir, so logins/cookies span tabs.
 fn attach_tab(
+    app: &tauri::AppHandle,
     win: &Window,
     url: tauri::Url,
     id: u64,
@@ -856,13 +852,15 @@ fn attach_tab(
             }
         })
         .on_page_load(move |wv, payload| {
-            queue_browser_ui(
-                &wv.app_handle().clone(),
-                BrowserUiEvent::TabLoaded {
-                    id,
-                    url: payload.url().to_string(),
-                },
-            );
+            if is_active_tab(id) {
+                queue_browser_ui(
+                    &wv.app_handle().clone(),
+                    BrowserUiEvent::ChromeUpdate {
+                        url: Some(payload.url().to_string()),
+                        title: None,
+                    },
+                );
+            }
         });
     if let Some(ua) = dev.ua {
         content = content.user_agent(ua);
@@ -898,7 +896,7 @@ fn new_tab(app: &tauri::AppHandle, url: &str) -> Result<(), String> {
     }
     let parsed: tauri::Url = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
     let id = NEXT_TAB.fetch_add(1, Ordering::SeqCst);
-    attach_tab(&win, parsed, id, true)?;
+    attach_tab(app, &win, parsed, id, true)?;
     {
         let mut guard = TABS.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(tabs) = guard.as_mut() {
@@ -1145,7 +1143,7 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         active: first,
         titles: HashMap::new(),
     });
-    attach_tab(&win, url, first, true)?;
+    attach_tab(app, &win, url, first, true)?;
 
     // Keep the children glued to the window on resize/maximize, and drop the
     // tab state when the window goes away (✕, browser_stop, device rebuild).
@@ -1156,12 +1154,12 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         match ev {
             WindowEvent::Resized(size) => queue_browser_ui(
                 &handle,
-                BrowserUiEvent::Layout {
-                    width: size.width,
-                    height: size.height,
-                },
+                BrowserUiEvent::Layout { width: size.width, height: size.height },
             ),
-            WindowEvent::Destroyed => queue_browser_ui(&handle, BrowserUiEvent::DropTabs),
+            WindowEvent::Destroyed => {
+                // Pure state drop — no window/webview work.
+                *TABS.lock().unwrap_or_else(|p| p.into_inner()) = None;
+            }
             _ => {}
         }
     });

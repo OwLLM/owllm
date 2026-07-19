@@ -406,19 +406,20 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
     cnTL, cnTR, cnBL, cnBR,
     badgeX, badgeY,
   } = computeFrameGeometry(outerW, outerH);
-  const bandBg = FRAME_BG;
+  // The 18px fill bands give the neon frame a solid chrome backing on the
+  // OPAQUE Windows/macOS window. On Linux the window is TRANSPARENT and the
+  // bands straddle the panel edge (SHIFT_OUT px hang OUTSIDE the content into
+  // the see-through margin), so FRAME_BG (var(--bg-header), opaque dark) paints
+  // solid black bars over the desktop every time the frame reveals — that IS
+  // the "becomes solid black sometimes" flash. Drop the fill on Linux so only
+  // the neon strokes + corner art remain (the intended glass look); the bands
+  // stay on opaque platforms where they read as chrome, not black.
+  const bandBg = LINUX_TRANSPARENT_WINDOW ? "transparent" : FRAME_BG;
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
       <div data-ui="DecorativeWindowFrame" style={{
         position: "absolute", inset: 0, pointerEvents: "none",
-        // Must out-rank AppHeader's zIndex:50 — the header would otherwise
-        // paint OVER the frame's top band / inner neon line / owl lower half
-        // ("frame under the window at the top, over at the bottom"), since
-        // neither this layer nor the content panel forms a stacking context.
-        // The overlay-frame webview on Windows is always-on-top, so frame-
-        // above-header is the intended look. Modals (zIndex 9000+) stay above.
-        zIndex: 60,
         opacity: frameVisible ? 1 : 0,
         transition: `opacity ${frameVisible ? 220 : 360}ms ease`,
       }}>
@@ -1384,15 +1385,15 @@ function WindowAccentEdge() {
   );
 }
 
-// Linux ships an OPAQUE window (tauri.linux.conf.json transparent:false),
-// same as the macOS HybridFrame mode. It USED to be transparent with
-// see-through margins, but webkit2gtk's GL present on NVIDIA/Jetson never
-// clears once-painted pixels in alpha-0 regions (verified with a minimal
-// repro: fade-out/display:none/DOM-removal/XShape/XClearArea all leave the
-// old pixels on screen; only unmapping the window clears them). That one
-// driver bug was the entire Linux frame family: the frame never fading,
-// black margin flashes, and frame art stuck "under" the panel. Do not
-// re-enable transparency on Linux without re-testing that repro.
+// The accent edge hugs the WINDOW boundary, which is only the visible app
+// edge when the window is opaque (Windows/macOS, or overlay-frame mode).
+// Linux ships a TRANSPARENT window that is LARGER than the in-page
+// HybridFrame (owl headroom + see-through margins) — there the border drew
+// a floating orange rectangle in mid-air around the invisible window rect,
+// slicing through the owl badge. Same UA check index.html uses for the
+// boot splash: only webkit2gtk on Linux reports "Linux".
+const LINUX_TRANSPARENT_WINDOW =
+  typeof navigator !== "undefined" && navigator.userAgent.indexOf("Linux") !== -1;
 
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
@@ -1456,17 +1457,7 @@ export default function AppShell() {
     const payload = { visible: frameVisible, nonce: Date.now() };
     try { localStorage.setItem(FRAME_VISIBILITY_STATE_KEY, JSON.stringify(payload)); }
     catch { /* localStorage blocked */ }
-    if (isTauri()) {
-      // Linux uses a separate transparent overlay just like Windows, but its
-      // NVIDIA/WebKitGTK compositor cannot erase already-painted alpha pixels.
-      // Tell the overlay page first, then physically map/unmap its native
-      // window. Unmapping is the only reliable clear on Jetson and also means
-      // the opaque main window never needs transparent frame margins.
-      void (async () => {
-        await emit("owllm:frame-visibility", frameVisible).catch(() => {});
-        await invoke("overlay_frame_set_visible", { visible: frameVisible }).catch(() => {});
-      })();
-    }
+    if (isTauri()) emit("owllm:frame-visibility", frameVisible).catch(() => {});
   }, [frameVisible]);
 
   // The Watcher (P0-8): summoned from the top-center owl. A small animated
@@ -1764,7 +1755,7 @@ export default function AppShell() {
       <EmailBridgeRunner />
       <WebhookBridgeRunner />
       <ResizeEdges />
-      <WindowAccentEdge />
+      {(overlayFrame || !LINUX_TRANSPARENT_WINDOW) && <WindowAccentEdge />}
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
         : <HybridFrame

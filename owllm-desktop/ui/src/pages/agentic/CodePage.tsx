@@ -24,10 +24,9 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
-import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
 import TeamMemoryModal from "./TeamMemoryModal";
@@ -1762,6 +1761,8 @@ function CodeWorkspace({ pageId, onTitle }: {
           if (st) {
             notebookStepRef.current = st.id;
             void sendRef.current?.(st.text);
+          } else {
+            markNotebookAutoFeedFinished(ruleScopeRef.current.id, notebookSurfaceId);
           }
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
           setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
@@ -2284,14 +2285,14 @@ function CodeWorkspace({ pageId, onTitle }: {
                     onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
                     style={{ display: "flex", alignItems: "center", gap: 11, background: "transparent", border: "none", padding: "7px 8px", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>
                     <span style={{ fontSize: 15, width: 18, textAlign: "center" }}>{a.icon}</span>
-                    <span style={{ color: "var(--accent)", fontWeight: 500, fontSize: 13.5 }}>{a.label}</span>
+                    <span style={{ color: "var(--accent-ink)", fontWeight: 500, fontSize: 13.5 }}>{a.label}</span>
                   </button>
                 ))}
                 {/* GitHub connect form (inline, opens under the row) */}
                 {ghOpen && !gh?.connected && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0 0 28px", padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
                     <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5 }}>Paste a GitHub token so agents can clone private repos and push from inside the sandbox.</div>
-                    <button onClick={() => { openWebUrl(GITHUB_TOKEN_URL).catch((error) => console.error("Could not open the OwLLM browser", error)); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent)" }}>↗ Create a token (repo scope)</button>
+                    <button onClick={() => { invoke("shell_open_url", { url: GITHUB_TOKEN_URL }).catch(() => {}); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent-ink)" }}>↗ Create a token (repo scope)</button>
                     <input type="password" value={ghToken} onChange={(e) => setGhToken(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }} placeholder="ghp_… or github_pat_…" style={{ height: 32, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }} />
                     <div style={{ display: "flex", gap: 8 }}>
                       <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 32, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>{ghBusy ? "⏳ Connecting…" : "Connect"}</button>
@@ -2362,7 +2363,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                             <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ws}</div>
                           </button>
                         )}
-                        <button onClick={() => togglePin(ws)} title={pinned ? "Unpin" : "Pin to top"} style={{ ...btn, height: 26, padding: "0 8px", color: pinned ? "var(--accent)" : "var(--fg-muted)" }}>📌</button>
+                        <button onClick={() => togglePin(ws)} title={pinned ? "Unpin" : "Pin to top"} style={{ ...btn, height: 26, padding: "0 8px", color: pinned ? "var(--accent-ink)" : "var(--fg-muted)" }}>📌</button>
                         <button onClick={() => startRename(ws)} title="Rename (display only — folder is unchanged)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✎</button>
                         <button onClick={() => removeRecent(ws)} title="Remove from recent projects (keeps files on disk)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✕</button>
                       </div>
@@ -3003,6 +3004,17 @@ function CodeWorkspace({ pageId, onTitle }: {
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
           <input ref={codeFileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
+          <button
+            onClick={() => {
+              // Terminal belongs with the workspace composer, not the compact
+              // utility/header strip. Hidden shells re-open; visible shells hide.
+              if (!termOpen) { setTermOpen(true); setTermHidden(false); }
+              else setTermHidden((hidden) => !hidden);
+            }}
+            title="Open the workspace terminal"
+            aria-label="Open terminal"
+            style={{ ...btn, height: 44, width: 44, justifyContent: "center", padding: 0, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
+          >🖥</button>
           <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
             ref={codeDraftRef}
@@ -3050,13 +3062,6 @@ function CodeWorkspace({ pageId, onTitle }: {
             onDirectivesChanged={reloadDirectives}
             mode={agentMode}
             onModeChange={setAgentMode}
-            terminalOpen={termOpen && !termHidden}
-            onToggleTerminal={() => {
-              // Closed → open. Hidden → re-show (shell was kept alive).
-              // Visible → hide (shell stays alive; ✕ on the popup kills it).
-              if (!termOpen) { setTermOpen(true); setTermHidden(false); }
-              else setTermHidden((h) => !h);
-            }}
             browserOpen={browserOpen}
             onToggleBrowser={() => setBrowserOpen((v) => !v)}
             usageProvider={providerFor(modelId, availableModels)}

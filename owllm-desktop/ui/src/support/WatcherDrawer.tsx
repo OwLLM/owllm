@@ -34,7 +34,9 @@ import ActionIcon, { type ActionIconName } from "../components/ActionIcon";
 
 /// Open a URL in the user's real browser (native shell; window.open fallback).
 function openExternal(url: string) {
-  openWebUrl(url).catch((error) => console.error("Could not open the OwLLM browser", error));
+  invoke("shell_open_url", { url }).catch(() => {
+    try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* ignore */ }
+  });
 }
 
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };
@@ -726,7 +728,7 @@ export default function WatcherDrawer({
   };
   const topicBtn: React.CSSProperties = {
     padding: "6px 11px", borderRadius: 999, border: "1px solid rgba(var(--accent-rgb),0.40)",
-    background: "rgba(var(--accent-rgb),0.10)", color: "var(--accent)", fontSize: 12,
+    background: "rgba(var(--accent-rgb),0.10)", color: "var(--accent-ink)", fontSize: 12,
     fontWeight: 700, cursor: busy ? "wait" : "pointer", opacity: busy ? 0.6 : 1,
   };
 
@@ -786,14 +788,14 @@ export default function WatcherDrawer({
           /* Landing menu — the 1×2 table: Help using the app · Report a bug. */
           <div style={{ padding: 22, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, alignItems: "stretch" }}>
             <button style={homeCard} disabled={busy} onClick={enterHelp} aria-label="Help using the app" title="Help using the app">
-              <div style={{ height: 38, display: "flex", alignItems: "center", color: "var(--accent)" }}><ActionIcon name="help" size={36} /></div>
+              <div style={{ height: 38, display: "flex", alignItems: "center", color: "var(--accent-ink)" }}><ActionIcon name="help" size={36} /></div>
               <div style={{ fontWeight: 800, fontSize: 15 }}>Help using the app</div>
               <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                 Pick a model, get guided walkthroughs, or screenshot your screen and ask.
               </div>
             </button>
             <button style={homeCard} disabled={busy} onClick={startBugReport} aria-label="Report a bug" title="Report a bug">
-              <div style={{ height: 38, display: "flex", alignItems: "center", color: "var(--accent)" }}><ActionIcon name="bug" size={36} /></div>
+              <div style={{ height: 38, display: "flex", alignItems: "center", color: "var(--accent-ink)" }}><ActionIcon name="bug" size={36} /></div>
               <div style={{ fontWeight: 800, fontSize: 15 }}>Report a bug</div>
               <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.4 }}>
                 Grabs a screenshot automatically and opens a box to describe the issue.
@@ -836,7 +838,7 @@ export default function WatcherDrawer({
                         padding: "3px 10px", borderRadius: 999, fontSize: 11, fontWeight: 800,
                         border: "1px solid rgba(var(--accent-rgb),0.45)",
                         background: "rgba(var(--accent-rgb),0.10)",
-                        color: "var(--accent)", cursor: busy ? "wait" : "pointer",
+                        color: "var(--accent-ink)", cursor: busy ? "wait" : "pointer",
                       }}
                     ><ActionIcon name="bug" size={13} /> Report this as a bug</button>
                   )}
@@ -894,7 +896,7 @@ export default function WatcherDrawer({
                           onClick={connectGithub}
                         ><ActionIcon name="link" size={14} />Sign in with GitHub</button>
                         <div style={{ fontSize: 10.5, color: "var(--fg-subtle)", lineHeight: 1.4 }}>
-                          No account yet? The sign-in page lets you create one free in a minute — come back here and it connects automatically. (Or <span onClick={() => openExternal(GITHUB_TOKEN_URL)} style={{ color: "var(--accent)", cursor: "pointer", textDecoration: "underline" }}>create a token</span> and paste it on the Home page.)
+                          No account yet? The sign-in page lets you create one free in a minute — come back here and it connects automatically. (Or <span onClick={() => openExternal(GITHUB_TOKEN_URL)} style={{ color: "var(--accent-ink)", cursor: "pointer", textDecoration: "underline" }}>create a token</span> and paste it on the Home page.)
                         </div>
                       </div>
                     )}

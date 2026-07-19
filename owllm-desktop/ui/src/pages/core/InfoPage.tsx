@@ -171,11 +171,10 @@ export default function InfoPage() {
 
       {/* Two explicit columns instead of a CSS multi-column flow: multi-column
           reads DOWN each column, which scrambled the intended reading order.
-          The right column is a fixed pair — Application on top, Sandbox directly
-          below — and because it is its own vertical flex column that order holds
-          at every window width, even once the row wraps to a single column on
-          narrow windows. flexWrap lets the right column drop under the left one
-          rather than overflow. */}
+          Cache anchors the left column; Application and Sandbox lead the right.
+          The remaining cards are split between the columns so neither side is a
+          long single stack. flexWrap lets the right column drop under the left
+          one rather than overflow on narrow windows. */}
       <div style={{ display: "flex", gap: 14, alignItems: "flex-start", flexWrap: "wrap" }}>
         <div
           data-ui="InfoPage:left-column"
@@ -212,6 +211,37 @@ export default function InfoPage() {
           )}
         </Card>
 
+        <Card title="🦙 Model server">
+          <Row
+            label="State"
+            value={
+              <span style={{ color: server?.running ? "#22c55e" : "var(--fg-muted)", fontWeight: 700 }}>
+                {server ? (server.running ? "🟢 Running" : "⚪ Stopped") : "…"}
+              </span>
+            }
+          />
+          <Row label="Model" value={server?.model_id ?? "—"} />
+          <Row label="Port" value={server?.port ? String(server.port) : "—"} />
+          <Row label="Detail" value={server?.message ?? "…"} />
+        </Card>
+
+        </div>
+
+        <div
+          data-ui="InfoPage:right-column"
+          style={{ flex: "1 1 340px", minWidth: 0, display: "flex", flexDirection: "column", gap: 14 }}
+        >
+        {/* Right column: Application first, Sandbox directly below it. */}
+        <Card title="📦 Application">
+          <Row label="Product" value="OwLLM Desktop" />
+          <Row label="Version" value={version} />
+          <Row label="Runtime" value="Tauri 2 · Rust + React" />
+          <Row label="Update channel" value="GitHub Releases (auto-update)" />
+          <Row label="Python" value="Invited on-demand only (fine-tuning)" />
+        </Card>
+
+        <SandboxDiskCard />
+
         <Card title="🎮 GPU detail">
           {hw && hw.gpus.length > 0 ? (
             hw.gpus.map(g => {
@@ -240,31 +270,17 @@ export default function InfoPage() {
           )}
         </Card>
 
-        <Card title="🦙 Model server">
-          <Row
-            label="State"
-            value={
-              <span style={{ color: server?.running ? "#22c55e" : "var(--fg-muted)", fontWeight: 700 }}>
-                {server ? (server.running ? "🟢 Running" : "⚪ Stopped") : "…"}
-              </span>
-            }
-          />
-          <Row label="Model" value={server?.model_id ?? "—"} />
-          <Row label="Port" value={server?.port ? String(server.port) : "—"} />
-          <Row label="Detail" value={server?.message ?? "…"} />
-        </Card>
-
         <Card title="📁 Models">
           <Row label="Local GGUFs" value={`${localModels.length}`} />
           <Row label="Cloud peers" value={`${cloudModels.length}`} />
           <Row label="Total on disk" value={`${totalGgufGiB.toFixed(1)} GiB`} />
           <Row
             label="Root"
-            value={<code style={{ color: "var(--accent)", fontSize: 11, wordBreak: "break-all" }}>{modelsRoot}</code>}
+            value={<code style={{ color: "var(--accent-ink)", fontSize: 11, wordBreak: "break-all" }}>{modelsRoot}</code>}
           />
           <Row
             label="Runtime"
-            value={<code style={{ color: "var(--accent)", fontSize: 11, wordBreak: "break-all" }}>{llamaRuntime}</code>}
+            value={<code style={{ color: "var(--accent-ink)", fontSize: 11, wordBreak: "break-all" }}>{llamaRuntime}</code>}
           />
         </Card>
 
@@ -276,10 +292,10 @@ export default function InfoPage() {
             fine-tuning workflow and per-model virtualenv bootstrap.
           </div>
           <div style={{ fontSize: 12, color: "var(--fg)", lineHeight: 1.6, marginTop: 10 }}>
-            <strong style={{ color: "var(--accent)" }}>Server</strong> — start / stop a model.<br />
-            <strong style={{ color: "var(--accent)" }}>Models</strong> (under Fine Tuning) — browse discovered GGUFs.<br />
-            <strong style={{ color: "var(--accent)" }}>Chat</strong> (under Fine Tuning) — talk to the running model.<br />
-            <strong style={{ color: "var(--accent)" }}>Advanced ⚙</strong> — MCP, Environment, Accounts, Logs.
+            <strong style={{ color: "var(--accent-ink)" }}>Server</strong> — start / stop a model.<br />
+            <strong style={{ color: "var(--accent-ink)" }}>Models</strong> (under Fine Tuning) — browse discovered GGUFs.<br />
+            <strong style={{ color: "var(--accent-ink)" }}>Chat</strong> (under Fine Tuning) — talk to the running model.<br />
+            <strong style={{ color: "var(--accent-ink)" }}>Advanced ⚙</strong> — MCP, Environment, Accounts, Logs.
           </div>
         </Card>
         </div>

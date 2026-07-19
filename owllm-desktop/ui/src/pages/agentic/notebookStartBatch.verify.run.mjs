@@ -81,6 +81,7 @@ fs.writeFileSync(path.join(TMP, "RunTimer.js"), `
     __esModule: true,
     formatDuration: (ms) => String(Math.floor(ms / 1000)) + "s",
     formatClock: (ts) => new Date(ts).toLocaleTimeString(),
+    useTick: () => {},
   };
 `);
 fs.writeFileSync(path.join(TMP, "localization.js"), `
@@ -148,6 +149,8 @@ console.log("case 0: run completion paths cannot depend on a later React render"
 check("Code busy state synchronizes the imperative lock", codePageSrc.includes("const setBusy = (v: boolean) => {\n    // Keep the imperative send gate") && codePageSrc.includes("busySendRef.current = v;"));
 check("Code send gates on the synchronous lock", codePageSrc.includes("if (busySendRef.current) {"));
 check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();"));
+check("Code finishes the notebook sequence after its final auto-fed step", codePageSrc.includes("markNotebookAutoFeedFinished(ruleScopeRef.current.id, notebookSurfaceId);"));
+check("Agents finishes the notebook sequence after its final auto-fed step", agentsPageSrc.includes("markNotebookAutoFeedFinished(pid, notebookSurfaceId);"));
 check("Watcher help and bug actions have accessible names", watcherSrc.includes('aria-label="Help using the app"') && watcherSrc.includes('aria-label="Report a bug"'));
 check("Watcher actions use bundled SVG icons", watcherSrc.includes('<ActionIcon name="help"') && watcherSrc.includes('<ActionIcon name="bug"') && !watcherSrc.includes(">🐞 Report this as a bug"));
 function mount(props) {
@@ -213,6 +216,43 @@ console.log("case 3b: markNotebookStepStarted / markNotebookStepFinished update 
   markNotebookStepFinished(PID, "s1", 5000);
   check("finishedAt is stamped", blob().steps.find((s) => s.id === "s1")?.finishedAt === 5000);
   check("status is untouched by timing helpers", blob().steps.find((s) => s.id === "s1")?.status === "pending");
+}
+
+// ---- 3c. The auto-feed sequence tracks wall-clock start through final stop,
+//          rather than summing only individual job durations. ----
+console.log("case 3c: whole auto-feed sequence start / completion timing");
+{
+  const { markNotebookAutoFeedStarted, markNotebookAutoFeedFinished } = NB;
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [{ id: "s1", text: "completed auto-fed step", status: "sent", ts: 1, startedAt: 2000, finishedAt: 5000 }],
+    autoFeed: true, autoFeedOwner: "agents:main", digest: [],
+  }));
+  markNotebookAutoFeedStarted(PID, 1000);
+  check("sequence start is persisted", blob().autoFeedStartedAt === 1000 && blob().autoFeedFinishedAt == null);
+  check("sequence cannot finish while another job is pending", (() => {
+    const withPending = { ...blob(), steps: [...blob().steps, { id: "s2", text: "pending", status: "pending", ts: 2 }] };
+    localStorage.setItem(KEY, JSON.stringify(withPending));
+    const result = markNotebookAutoFeedFinished(PID, "agents:main", 9000);
+    localStorage.setItem(KEY, JSON.stringify({ ...withPending, steps: withPending.steps.slice(0, 1) }));
+    return result === false && blob().autoFeedFinishedAt == null;
+  })());
+  check("sequence completion is persisted after the final job", markNotebookAutoFeedFinished(PID, "agents:main", 10000) === true && blob().autoFeedFinishedAt === 10000);
+  const { root } = mount({ surfaceId: "agents:main" });
+  check("total sequence elapsed time is displayed", textOf(document.body).includes("Auto-feed finished") && textOf(document.body).includes("9s"));
+  act(() => root.unmount());
+}
+
+console.log("case 3d: stopping auto-feed freezes its sequence timer");
+{
+  seed();
+  const { root } = mount({ surfaceId: "agents:main" });
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("successful auto-feed start stamps sequence start", typeof blob().autoFeedStartedAt === "number" && blob().autoFeedFinishedAt == null);
+  clickEl(document.querySelector("input[type=checkbox]"));
+  check("turning auto-feed off stamps a stopped finish", typeof blob().autoFeedFinishedAt === "number" && blob().autoFeedStopped === true);
+  check("stopped total time remains visible", textOf(document.body).includes("Auto-feed stopped"));
+  act(() => root.unmount());
 }
 
 // ---- 4. no team ready → step NOT consumed ----

@@ -163,7 +163,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
         border: "1px solid " + (tab === id ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
         borderBottom: "none", borderRadius: "7px 7px 0 0",
         background: tab === id ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-        color: tab === id ? "var(--accent)" : "var(--fg-muted)",
+        color: tab === id ? "var(--accent-ink)" : "var(--fg-muted)",
       }}
     >{label}</button>
   );
@@ -240,7 +240,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                     fontSize: 10.5, padding: "2px 8px",
                     border: "1px solid " + (status?.device === id ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
                     background: status?.device === id ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-                    color: status?.device === id ? "var(--accent)" : "var(--fg-muted)",
+                    color: status?.device === id ? "var(--accent-ink)" : "var(--fg-muted)",
                   }}>{label}</button>
               ))}
             </div>
@@ -257,7 +257,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                 Local dev servers work too (localhost:5173 opens as http), and the DEVICE chips preview mobile layouts.
               </div>
             )}
-            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)" }}>{scanMsg}</div>}
+            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent-ink)" }}>{scanMsg}</div>}
           </>
         )}
 
@@ -306,13 +306,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
               ))}
               {detected.length === 0 && <div style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>Press Rescan to detect browsers.</div>}
             </div>
-            <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ flex: 1, fontSize: 10.5, color: "var(--fg-muted)", lineHeight: 1.45 }}>
-                Chrome/Edge 127+ protect saved passwords with App-Bound Encryption, which can't be read directly. Export a CSV from the browser (Settings → Passwords → ⋮ → Export) and import it here.
-              </div>
-              <button className="btn" disabled={busy} onClick={() => void importCsv()} style={{ fontSize: 11, padding: "3px 10px", whiteSpace: "nowrap" }}>Import CSV…</button>
-            </div>
-            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)" }}>{scanMsg}</div>}
+            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent-ink)" }}>{scanMsg}</div>}
           </>
         )}
 

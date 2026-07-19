@@ -16,7 +16,7 @@ import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import BrainstormPanel from "./BrainstormPanel";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -933,7 +933,7 @@ function GoalRow({ onCancel, busy, onBrainstorm, hasBrief, brainstormReady, left
                    background: busy ? "rgba(255,140,140,0.20)" : "rgba(255,140,140,0.10)",
                    color: busy ? "#ff8c8c" : "#555", fontWeight:600, fontSize:14,
                    cursor: busy ? "pointer" : "not-allowed" }}>Cancel</button>
-        <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(var(--accent-rgb),0.18)", color:"var(--accent)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
+        <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(var(--accent-rgb),0.18)", color:"var(--accent-ink)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
       </div>
     </div>
   );
@@ -992,7 +992,7 @@ function FlowHeader({
         style={{
           height:28, padding:"0 10px", fontSize:11,
           background: on ? "rgba(var(--accent-rgb),0.22)" : undefined,
-          color: on ? "var(--accent)" : undefined,
+          color: on ? "var(--accent-ink)" : undefined,
           borderRadius:0,
         }}
       >{label}</button>
@@ -1073,7 +1073,7 @@ function FlowHeader({
             display:"flex", alignItems:"center", gap:6, height:28, padding:"0 11px",
             borderRadius:999, fontSize:12, fontWeight:700, cursor:"pointer",
             background:"rgba(var(--accent-rgb),0.12)", border:"1px solid rgba(var(--accent-rgb),0.45)",
-            color:"var(--accent)",
+            color:"var(--accent-ink)",
           }}
         >
           <span style={{ fontSize:13 }}>👥</span>
@@ -1957,7 +1957,7 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
     <div
       onClick={(e) => e.stopPropagation()}
       style={{
-        flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+        flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column",
         gap: 8, padding: 10, cursor: "default",
       }}
     >
@@ -2006,16 +2006,17 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
         onClick={(e) => { e.stopPropagation(); setSetupOpen(true); }}
         title="Repository settings + readiness details"
         style={{
-          display: "flex", alignItems: "center", gap: 8, width: "100%",
+          display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", width: "100%", minWidth: 0,
           padding: "6px 10px", flexShrink: 0,
           background: "rgba(0,0,0,0.30)",
           border: `1px solid rgba(${rgb},0.4)`, borderRadius: 7,
           color: "var(--fg)", fontSize: 11, fontWeight: 600, cursor: "pointer",
         }}
       >
-        <span>⚙ Set up repo</span>
-        <span style={{ flex: 1 }} />
+        <span style={{ flex: "0 0 auto", whiteSpace: "nowrap" }}>⚙ Set up repo</span>
+        <span style={{ flex: 1, minWidth: 0 }} />
         <span style={{
+          marginLeft: "auto", maxWidth: "100%", whiteSpace: "nowrap",
           fontSize: 9, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase",
           padding: "1px 7px", borderRadius: 4,
           color: ready ? "#3cf26b" : "#ffd97a",
@@ -2843,7 +2844,7 @@ function AgentEditorModal({
               padding: "6px 18px", borderRadius: 6,
               border: "1px solid var(--accent)",
               background: (saving || !templateId) ? "rgba(var(--accent-rgb),0.25)" : "var(--accent)",
-              color: (saving || !templateId) ? "#7d8595" : "var(--bg-elevated)",
+              color: (saving || !templateId) ? "var(--fg-muted)" : "var(--accent-fg)",
               cursor: (saving || !templateId) ? "default" : "pointer",
               fontSize: 13, fontWeight: 700,
             }}
@@ -3171,7 +3172,7 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
               padding:"4px 14px", borderRadius:6,
               border:"1px solid var(--accent)",
               background: newText.trim() ? "var(--accent)" : "rgba(var(--accent-rgb),0.25)",
-              color: newText.trim() ? "var(--bg-elevated)" : "#7d8595",
+              color: newText.trim() ? "var(--accent-fg)" : "var(--fg-muted)",
               fontSize:12, fontWeight:700,
               cursor: newText.trim() ? "pointer" : "not-allowed",
             }}
@@ -3206,7 +3207,7 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
                         autoFocus
                         style={{ flex:1, padding:"2px 6px", borderRadius:4, border:"1px solid var(--border-strong)", background:"var(--bg-input)", color:"var(--fg)", fontSize:13 }}
                       />
-                      <button onClick={saveEdit} disabled={busy} style={{ padding:"2px 8px", fontSize:11, fontWeight:700, borderRadius:4, border:"1px solid var(--accent)", background:"var(--accent)", color:"var(--bg-elevated)", cursor:"pointer" }}>Save</button>
+                      <button onClick={saveEdit} disabled={busy} style={{ padding:"2px 8px", fontSize:11, fontWeight:700, borderRadius:4, border:"1px solid var(--accent)", background:"var(--accent)", color:"var(--accent-fg)", cursor:"pointer" }}>Save</button>
                       <button onClick={() => setEditingId(null)} disabled={busy} style={{ padding:"2px 6px", fontSize:11, borderRadius:4, border:"1px solid var(--border-strong)", background:"#1a2030", color:"var(--fg)", cursor:"pointer" }}>Cancel</button>
                     </>
                   ) : (
@@ -4861,7 +4862,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
           style={{
             marginLeft: 28, marginTop: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700,
             borderRadius: 6, border: "1px solid var(--accent)", background: "rgba(var(--accent-rgb),0.16)",
-            color: "var(--accent)", cursor: "pointer",
+            color: "var(--accent-ink)", cursor: "pointer",
           }}
         >
           ⟳ Restart WSL networking
@@ -4877,7 +4878,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
           style={{
             marginLeft: 28, marginTop: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700,
             borderRadius: 6, border: "1px solid var(--accent)", background: "rgba(var(--accent-rgb),0.16)",
-            color: "var(--accent)", cursor: "pointer",
+            color: "var(--accent-ink)", cursor: "pointer",
           }}
         >
           ⟳ Retry
@@ -5296,7 +5297,7 @@ function ChatInputDock({
             style={{
               width:28, height:28, background: showPalette ? "rgba(var(--accent-rgb),0.18)" : "transparent",
               border:"1px solid var(--border)", borderRadius:6,
-              color: showPalette ? "var(--accent)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
+              color: showPalette ? "var(--accent-ink)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
               display:"flex", alignItems:"center", justifyContent:"center",
             }}
           >/</button>
@@ -5311,7 +5312,7 @@ function ChatInputDock({
               background: autoApprove ? "rgba(var(--accent-rgb),0.18)" : "transparent",
               border: `1px solid ${autoApprove ? "rgba(var(--accent-rgb),0.55)" : "var(--border)"}`,
               borderRadius:6,
-              color: autoApprove ? "var(--accent)" : "var(--fg-muted)",
+              color: autoApprove ? "var(--accent-ink)" : "var(--fg-muted)",
               cursor:"pointer", fontSize:11, fontWeight:600,
             }}
           >
@@ -8525,6 +8526,8 @@ export function AgentsPage({
       if (step) {
         notebookStepRef.current = step.id;
         void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
+      } else {
+        markNotebookAutoFeedFinished(pid, notebookSurfaceId);
       }
     };
     setTimeout(attempt, 800);

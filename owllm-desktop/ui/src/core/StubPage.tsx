@@ -43,7 +43,7 @@ export default function StubPage({ spec }: { spec: StubSpec }) {
         fontSize: 13,
         lineHeight: 1.55,
       }}>
-        <div style={{ fontWeight: 700, color: "var(--accent)", marginBottom: 6 }}>
+        <div style={{ fontWeight: 700, color: "var(--accent-ink)", marginBottom: 6 }}>
           Page not ported yet
         </div>
         <div>{spec.blurb}</div>

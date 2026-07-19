@@ -7,7 +7,6 @@ import UpdateController from "./UpdatePrompt";
 import { ChatRuntimeProvider } from "./runtime/ChatRuntimeProvider";
 import { bootstrapTheme } from "./theme";
 import { bootstrapLocalization, LocalizationProvider } from "./localization";
-import { installOwllmWebLinkInterceptor } from "./utils/openWebUrl";
 import "./styles.css";
 
 // Apply the persisted theme BEFORE the first React render so the very

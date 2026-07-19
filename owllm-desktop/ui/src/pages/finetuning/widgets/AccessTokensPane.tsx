@@ -200,7 +200,7 @@ function TokensTab(p: {
         style={{
           padding: "6px 10px",
           background: "linear-gradient(180deg, var(--accent) 0%, var(--accent) 100%)",
-          color: "#fff",
+          color: "var(--accent-fg)",
           border: "none",
           borderRadius: 4,
           fontSize: 11,

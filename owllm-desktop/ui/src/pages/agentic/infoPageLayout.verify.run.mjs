@@ -42,7 +42,7 @@ const appAt = rightCol.indexOf('title="📦 Application"');
 const sandboxAt = rightCol.indexOf("<SandboxDiskCard");
 check(appAt !== -1, "the Application container lives in the right column");
 check(sandboxAt !== -1, "the Sandbox container lives in the right column");
-check(appAt < sandboxAt, "Application renders first, Sandbox directly below it");
+check(appAt < sandboxAt, "Application renders first, with Sandbox directly below it");
 
 // The right column is its own vertical flex column, so the Application-above-
 // Sandbox order is width-independent (holds even when the row wraps).
@@ -56,8 +56,13 @@ check(rightCol.includes('label="Product"') && rightCol.includes('label="Update c
   "the application info (Product … Update channel) is inside the Application container");
 check(!leftCol.includes('title="📦 Application"') && !leftCol.includes("<SandboxDiskCard"),
   "the left column holds neither the Application nor the Sandbox container");
-check(leftCol.includes('title="🖥 Hardware"') && leftCol.includes('title="📁 Models"') && leftCol.includes('title="💽 Cache"'),
-  "the remaining machine/runtime cards (Hardware, Models, Cache) stay in the left column");
+check(leftCol.includes('title="💽 Cache"'), "Cache remains pinned in the left column");
+check(leftCol.includes('title="✅ Environment readiness"') && leftCol.includes('title="🖥 Hardware"') && leftCol.includes('title="🦙 Model server"'),
+  "the left column contains a balanced set of readiness, hardware, and server panels");
+check(rightCol.includes('title="🎮 GPU detail"') && rightCol.includes('title="📁 Models"') && rightCol.includes('title="📜 About OwLLM"'),
+  "the right column receives the remaining GPU, Models, and About panels");
+check(!leftCol.includes('title="🎮 GPU detail"') && !leftCol.includes('title="📁 Models"') && !leftCol.includes('title="📜 About OwLLM"'),
+  "the right-side balancing panels are not left stacked");
 
 // No accidental duplication of either right-column container anywhere on the page.
 check((src.match(/title="📦 Application"/g) || []).length === 1, "the Application container appears exactly once");

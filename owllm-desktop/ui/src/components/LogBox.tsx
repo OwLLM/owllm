@@ -130,7 +130,7 @@ export function LogBox({
           style={{ display: "flex", alignItems: "center", gap: 8, cursor: noExpand ? "default" : "pointer" }}
         >
           <span style={{ fontSize: 13, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>{header}</span>
-          {!noExpand && <span style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>⤢ open</span>}
+          {!noExpand && <span style={{ fontSize: 11, color: "var(--accent-ink)", fontWeight: 700 }}>⤢ open</span>}
         </div>
         {box}
       </div>

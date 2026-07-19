@@ -29,7 +29,7 @@ import { useAutoResize } from "../../hooks/useAutoResize";
 import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
-import { formatDuration, formatClock } from "./RunTimer";
+import { formatDuration, formatClock, useTick } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import ActionIcon from "../../components/ActionIcon";
 
@@ -59,6 +59,13 @@ export type NotebookState = {
   /// feeding notebook steps). The surface whose toggle turned auto-feed on
   /// owns it; unchecking from ANY page stops it everywhere.
   autoFeedOwner?: string;
+  /// Wall-clock bounds for one whole auto-fed queue run. Unlike the queue
+  /// total below, this includes the gaps between jobs as well as their work.
+  autoFeedStartedAt?: number;
+  autoFeedFinishedAt?: number;
+  /// A user may turn auto-feed off before the queue is empty. Keep that
+  /// distinct from a naturally completed sequence in the timing display.
+  autoFeedStopped?: boolean;
   digest: Array<{ role: "you" | "digest"; text: string }>;
   /// User-picked digest model (per project). Empty/undefined = inherit the
   /// surface's default (team model → server model), same rule as before.
@@ -91,6 +98,9 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
         : [],
       autoFeed: p.autoFeed === true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
+      autoFeedStartedAt: typeof p.autoFeedStartedAt === "number" ? p.autoFeedStartedAt : undefined,
+      autoFeedFinishedAt: typeof p.autoFeedFinishedAt === "number" ? p.autoFeedFinishedAt : undefined,
+      autoFeedStopped: p.autoFeedStopped === true,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
       digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
@@ -118,12 +128,45 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return null;
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
+  const now = Date.now();
   next.status = "sent";
-  next.startedAt = Date.now();
+  next.startedAt = now;
   next.finishedAt = undefined;
+  if (nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) {
+    nb.autoFeedStartedAt = now;
+    nb.autoFeedFinishedAt = undefined;
+    nb.autoFeedStopped = false;
+  }
   if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
   saveNotebook(projectId, nb);
   return next;
+}
+
+/// Start the wall-clock timer for an auto-fed queue when a caller is not also
+/// persisting its first step. The UI writes both atomically; later queue jobs
+/// are covered by takeNextAutoStep.
+export function markNotebookAutoFeedStarted(projectId: string | null | undefined, startedAt: number = Date.now()): void {
+  if (!projectId) return;
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeed || (nb.autoFeedStartedAt != null && nb.autoFeedFinishedAt == null)) return;
+  nb.autoFeedStartedAt = startedAt;
+  nb.autoFeedFinishedAt = undefined;
+  nb.autoFeedStopped = false;
+  saveNotebook(projectId, nb);
+}
+
+/// Freeze the whole-sequence timer only after the owner finishes the final
+/// auto-fed job. Pending or in-flight sent steps mean the sequence continues.
+export function markNotebookAutoFeedFinished(projectId: string | null | undefined, surfaceId: string, finishedAt: number = Date.now()): boolean {
+  if (!projectId) return false;
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeed || (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) || nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) return false;
+  const stillActive = nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null));
+  if (stillActive) return false;
+  nb.autoFeedFinishedAt = finishedAt;
+  nb.autoFeedStopped = false;
+  saveNotebook(projectId, nb);
+  return true;
 }
 
 /// True when auto-feed is on with pending steps and THIS surface may drive it
@@ -175,12 +218,23 @@ function formatStepTiming(s: NotebookStep): string | null {
   return translateUiText(`started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`);
 }
 
+function formatAutoFeedTiming(nb: NotebookState): string | null {
+  if (nb.autoFeedStartedAt == null) return null;
+  const finishedAt = nb.autoFeedFinishedAt;
+  const elapsed = formatDuration((finishedAt ?? Date.now()) - nb.autoFeedStartedAt);
+  if (finishedAt != null) {
+    const outcome = nb.autoFeedStopped ? "stopped" : "finished";
+    return `Auto-feed ${outcome} • started ${formatClock(nb.autoFeedStartedAt)} • finished ${formatClock(finishedAt)} • ${elapsed}`;
+  }
+  return `Auto-feed running • started ${formatClock(nb.autoFeedStartedAt)} • ${elapsed}`;
+}
+
 const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 type KanbanPlan = { now: string; next: string; later: string };
 const EMPTY_KANBAN: KanbanPlan = { now: "", next: "", later: "" };
 const KANBAN_COLUMNS: Array<{ key: keyof KanbanPlan; label: string; hint: string; color: string }> = [
-  { key: "now", label: "Now", hint: "active implementation batch", color: "var(--accent)" },
+  { key: "now", label: "Now", hint: "active implementation batch", color: "var(--accent-ink)" },
   { key: "next", label: "Next", hint: "queued after Now", color: "var(--ok)" },
   { key: "later", label: "Later", hint: "parked / optional", color: "var(--warn)" },
 ];
@@ -323,6 +377,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   activeRef.current = active;
   const projRef = useRef(projectId);
   projRef.current = projectId;
+  useTick(nb.autoFeedStartedAt != null && nb.autoFeedFinishedAt == null);
 
   const kanbanPlan = useMemo(() => parseKanbanPlan(nb.plan), [nb.plan]);
   const brainstormRef = useAutoResize<HTMLTextAreaElement>(nb.text, { minRows: 4, maxRows: 16 });
@@ -415,8 +470,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
     const now = Date.now();
-    setStep(s.id, { status: "sent", startedAt: now, finishedAt: undefined });
-    markNotebookStepStarted(projectId, s.id, now);
+    // Persist the first step and sequence clock together. Separate writes can
+    // race React's queued state updater and erase the just-started sequence.
+    updateNotebook((prev) => ({
+      ...prev,
+      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined } : step),
+      ...(prev.autoFeed && (prev.autoFeedStartedAt == null || prev.autoFeedFinishedAt != null)
+        ? { autoFeedStartedAt: now, autoFeedFinishedAt: undefined, autoFeedStopped: false }
+        : {}),
+    }));
   };
   /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
   /// the lane content is NEVER cleared or consumed — only read.
@@ -527,6 +589,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     }
     return parts.join(" · ");
   }, [queueTiming]);
+  const autoFeedTimingText = formatAutoFeedTiming(nb);
   // The active feed shows only unfinished, actionable cards. Finished steps
   // (checked off OR fed-and-completed) drop out of the feed into the Archive tab.
   const activeSteps = useMemo(() => nb.steps.filter((s) => !isStepArchived(s)), [nb.steps]);
@@ -591,7 +654,24 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   : "When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it. Only the page that turns this on feeds the queue."}
                 style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: ownedElsewhere ? "var(--warn)" : nb.autoFeed ? "var(--ok)" : "var(--fg-muted)", cursor: "pointer" }}
               >
-                <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked, autoFeedOwner: e.target.checked ? surfaceId : undefined })} />
+                <input
+                  type="checkbox"
+                  checked={nb.autoFeed}
+                  onChange={(e) => {
+                    const enabled = e.target.checked;
+                    const stoppedAt = Date.now();
+                    updateNotebook((prev) => enabled
+                      ? { ...prev, autoFeed: true, autoFeedOwner: surfaceId }
+                      : {
+                          ...prev,
+                          autoFeed: false,
+                          autoFeedOwner: undefined,
+                          ...(prev.autoFeedStartedAt != null && prev.autoFeedFinishedAt == null
+                            ? { autoFeedFinishedAt: stoppedAt, autoFeedStopped: true }
+                            : {}),
+                        });
+                  }}
+                />
                 {ownedElsewhere ? "Auto-feed (another page drives)" : "Auto-feed next step"}
               </label>
             );
@@ -682,12 +762,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               </div>
               {SHOW_KANBAN && proposedPlan && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, background: "rgba(var(--accent-rgb),0.08)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 8 }}>
-                  <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>Proposed plan</div>
+                  <div style={{ fontSize: 11, color: "var(--accent-ink)", fontWeight: 700 }}>Proposed plan</div>
                   <div style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)" }}>{proposedPlan}</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
                       onClick={() => update({ plan: normalizeKanbanPlan(proposedPlan), text: "", proposedPlan: "" })}
-                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(var(--accent-rgb),0.45)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(var(--accent-rgb),0.45)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent-ink)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                     >Save plan + clear notes</button>
                     <button className="ghost-btn" onClick={() => update({ proposedPlan: "" })} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
                   </div>
@@ -769,7 +849,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           onClick={() => feedLane("now")}
                           disabled={!kanbanPlan.now.trim()}
                           title={running ? "Feed the whole NOW batch — steers the running team at its next boundary. The board keeps its cards." : "Start the whole NOW batch as a new goal. The board keeps its cards."}
-                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--accent-rgb),0.5)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
+                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--accent-rgb),0.5)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent-ink)", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
                         ><ActionIcon name="bolt" size={13} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start batch</button>
                         {laneNotice?.key === "now" && (
                           <span style={{
@@ -795,7 +875,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               <ActionIcon name="target" size={15} />
               <span>Next steps</span>
               {queueTimingText && (
-                <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
+                <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent-ink)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
               )}
               <span style={{ fontSize: 10, fontWeight: 700, color: pendingCount ? "var(--ok)" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
               {pendingCount > 0 && (
@@ -808,6 +888,22 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 ><ActionIcon name="play" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start queue</button>
               )}
             </div>
+
+            {autoFeedTimingText && (
+              <div
+                data-ui="NotebookAutoFeedTiming"
+                title="Total wall-clock time for this auto-fed notebook sequence"
+                style={{
+                  marginTop: 8, display: "inline-flex", alignItems: "center", alignSelf: "flex-start", gap: 5,
+                  maxWidth: "100%", padding: "4px 8px", borderRadius: 6, fontSize: 10.5, fontWeight: 700,
+                  fontVariantNumeric: "tabular-nums", color: "var(--accent-ink)",
+                  background: "rgba(var(--accent-rgb),0.10)", border: "1px solid rgba(var(--accent-rgb),0.30)",
+                }}
+              >
+                <ActionIcon name="clock" size={12} />
+                <span>{autoFeedTimingText}</span>
+              </div>
+            )}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {/* Active/Archive tabs — done steps live ONLY on the archive tab
@@ -824,7 +920,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     onClick={() => setStepsTab(t.key)}
                     style={{
                       height: 28, padding: "0 12px", border: "none", background: "transparent",
-                      borderBottom: stepsTab === t.key ? "2px solid var(--accent)" : "2px solid transparent",
+                      borderBottom: stepsTab === t.key ? "2px solid var(--accent-ink)" : "2px solid transparent",
                       color: stepsTab === t.key ? "var(--fg-strong)" : "var(--fg-muted)",
                       fontSize: 11.5, fontWeight: 700, cursor: "pointer",
                     }}

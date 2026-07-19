@@ -581,9 +581,13 @@ pub async fn fleet_worktree_create(
             details: dirty.into_iter().take(20).collect::<Vec<_>>().join("\n"),
         });
     }
-    if let Err(message) = sync_current_branch_from_origin(&cwd) {
-        return Ok(CreateOutcome::Error { message });
-    }
+    // Opening a Coding page is a local operation: its private worktree is cut
+    // from the checkout the user actually has on this device. A local branch
+    // may legitimately be ahead of or diverged from origin while work is in
+    // progress; forcing remote reconciliation here made those projects
+    // impossible to open even though Agentic could use the same folder.
+    // Remote-history safety still runs at integration time (merge/publish),
+    // where rewriting or publishing divergent history would be consequential.
     // Resolve the current HEAD SHA so the merge step later can squash
     // from exactly this base.
     let (ok, base_sha, err) = git(&cwd, &["rev-parse", "HEAD"])?;

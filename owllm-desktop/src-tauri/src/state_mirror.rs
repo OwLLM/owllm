@@ -45,7 +45,11 @@ fn db_path() -> Option<PathBuf> {
 
 const LS_PREFIX: &str = "ls:";
 const RECOVERY_PREFIX: &str = "ls-pending:";
-const LEGACY_IMPORT_MARKER: &str = "migration:legacy-webview-leveldb-v1";
+// v1 could mark itself complete after opening only the new, nearly-empty
+// isolated profile while an older WebView profile still held the user's Code
+// page catalog and transcripts. v2 deliberately performs one more full scan;
+// recovered history wins only when it is missing or substantively larger.
+const LEGACY_IMPORT_MARKER: &str = "migration:legacy-webview-leveldb-v2";
 
 // The legacy Python app created `kv` without IF NOT EXISTS semantics we can
 // rely on; recreate lazily with the exact same shape so a fresh DB works.

@@ -2797,28 +2797,6 @@ function CodeWorkspace({ pageId, onTitle }: {
           🖥 {stx.createdDeviceName || deviceIdentity.name}
         </span>
         {stx.repoUrl && <span title={stx.repoUrl} style={{ fontSize: 10.5, fontWeight: 750, color: "var(--accent-ink)", whiteSpace: "nowrap" }}>🐙 GitHub</span>}
-        {/* Terminal controls, right beside the project path (user spec): a real
-            PTY shell in THIS workspace. ⌨ toggles it; ⤢/⤡ docks it above the
-            composer (default) or pops it out to the floating popup. */}
-        {workspace && (
-          <button
-            onClick={() => { if (!termOpen) { setTermOpen(true); setTermHidden(false); } else setTermHidden((h) => !h); }}
-            title={!termOpen ? `Open a terminal in ${wsShort}` : (termHidden ? "Show the terminal" : "Hide the terminal (shell keeps running)")}
-            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap",
-              ...(termOpen && !termHidden ? { background: "var(--accent)", color: "var(--accent-fg)", border: "none", fontWeight: 700 } : { color: "var(--fg-muted)" }) }}
-          >
-            ⌨ Terminal
-          </button>
-        )}
-        {workspace && termOpen && (
-          <button
-            onClick={() => setTermDocked((d) => !d)}
-            title={termDocked ? "Pop out to a floating window" : "Dock above the message box"}
-            style={{ ...btn, height: 26, width: 30, padding: 0, fontSize: 13, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
-          >
-            {termDocked ? "⤢" : "⤡"}
-          </button>
-        )}
         {/* Project Memory — same shared surface (TeamMemoryModal) and same
             project scope both code agents read/write, matching the Agents page's
             🧠 Memory button. Scoped event so only THIS page's modal opens (the

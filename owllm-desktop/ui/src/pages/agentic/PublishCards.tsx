@@ -504,7 +504,7 @@ export default function PublishCards({
                     : `Push ${git?.branch || branch || "current"} to origin`}
                 style={{ ...chipBtn, flex: 1 }}
               >
-                {loading ? "⏳" : "↑"} Push{isolated ? " merged" : (git && git.ahead > 0 ? ` (${git.ahead})` : "")}
+                {loading ? "⏳" : "↑"} Push
               </button>
             )}
             {showPublish && (

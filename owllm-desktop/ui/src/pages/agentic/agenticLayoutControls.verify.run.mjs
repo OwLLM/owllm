@@ -24,6 +24,8 @@ check("inline Notebook defaults to a comfortably wide column", sidePanel.include
 check("Notebook surface fills the widened column", sidePanel.includes('width, flexShrink: 0, minHeight: 0, display: "flex"'));
 check("Terminal is absent from the compact side-panel header", !sidePanel.includes("onToggleTerminal") && !sidePanel.includes("🖥 Terminal"));
 check("Terminal remains reachable beside the Code composer", codePage.includes('aria-label="Open terminal"') && codePage.includes("Terminal belongs with the workspace composer"));
+const codeHeader = codePage.slice(codePage.indexOf("{/* Header: workspace"), codePage.indexOf("{/* Per-page rename"));
+check("Terminal is absent from the Code header row beside Memory", !codeHeader.includes("Terminal") && !codeHeader.includes("setTermOpen"));
 check("Code side-panel invocation no longer passes terminal header props", !codePage.includes("terminalOpen={termOpen && !termHidden}"));
 check("publisher panel can shrink inside the chat-grid column", agentsPage.includes('flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column"'));
 check("Set up repo row wraps rather than clipping on narrow columns", agentsPage.includes('gap: 8, flexWrap: "wrap", width: "100%", minWidth: 0'));

@@ -124,6 +124,12 @@ pub fn run() {
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.
     paths::init_portable_mode();
+    // Both migrations must happen BEFORE WebView2 starts. In particular, the
+    // legacy localStorage importer needs to copy/open old LevelDB stores while
+    // no browser process holds their LOCK file. Keeping this inside setup()
+    // made recovery work only when a developer repaired a machine manually.
+    bootstrap::migrate_user_state_if_needed();
+    state_mirror::import_legacy_webview_state_once();
     // WebView2 groups processes by profile rather than executable. A copied
     // local build must not join (and inherit a hang from) the installed app or
     // another checkout. Installed and portable profiles remain unchanged.
@@ -142,7 +148,6 @@ pub fn run() {
             // launches no-op. Runs synchronously before any module that
             // touches the SQLite state so we don't end up with two parallel
             // DBs on first launch.
-            bootstrap::migrate_user_state_if_needed();
             // Seed OWLLM's built-in skill packs (e.g. parallel-dispatch) into the
             // user skills dir if absent, so they're visible + editable in Studio
             // and equippable. Never clobbers a user-edited copy.
@@ -317,6 +322,7 @@ pub fn run() {
             kvm::kvm_node_list,
             kvm::kvm_node_delete,
             remote_devices::device_get_identity,
+            remote_devices::device_get_id,
             remote_devices::device_set_name,
             remote_devices::device_remote_enabled_get,
             remote_devices::device_remote_enabled_set,
@@ -388,6 +394,7 @@ pub fn run() {
             directives::project_get_director_mode,
             state_mirror::state_mirror_load,
             state_mirror::state_mirror_save,
+            state_mirror::state_mirror_ack_recovery,
             fleet::path_is_dir,
             fleet::fleet_worktree_create,
             fleet::fleet_worktree_finalize,

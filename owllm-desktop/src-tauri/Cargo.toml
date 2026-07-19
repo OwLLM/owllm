@@ -3,7 +3,7 @@ name = "owllm-desktop"
 # Kept in sync with tauri.conf.json "version" (the release source of truth).
 # User-visible version strings read crate::APP_VERSION (parsed from the conf),
 # so this only affects exe/crate metadata.
-version = "0.9.3"
+version = "0.9.4"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
 authors = ["OWLLM"]
 edition = "2021"
@@ -56,6 +56,12 @@ sysinfo = { version = "0.32", default-features = false, features = ["system"] }
 # tab). `bundled` ships the SQLite C lib so we don't depend on an
 # externally installed sqlite3.
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Upgrade recovery for Chromium/WebView2 localStorage. Older OwLLM releases
+# moved between WebView profiles/origins before state was mirrored to SQLite;
+# this pure-Rust reader lets the shipped app import those abandoned LevelDB
+# stores itself on every user's PC (instead of requiring a developer-side
+# Python/plyvel repair).
+rusty-leveldb = "4.0.1"
 # Native folder/file picker for the LocationRow's Browse… button. The
 # tauri-plugin-dialog setup is heavier (needs JS-side init + permission
 # config); rfd is a direct, no-plugin path that opens the system's

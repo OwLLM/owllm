@@ -36,10 +36,19 @@ const DENY_EXACT = new Set<string>([
   "owllm:sync-device",       // this device's id
   "owllm.wizard.completed",  // per-device module setup
   "owllm:cloud-models-remote", // regenerated from the remote catalogue
+  // Open tabs and their selected project are workspace UI on THIS computer.
+  // Project/chat content syncs separately through SQLite; syncing these keys
+  // made another PC's open projects suddenly become this PC's open pages.
+  "owllm:agents:pages",
+  "owllm:agents:activePage",
+  "owllm:assets:selectedProject",
 ]);
 // Prefixes for machine-specific state that shouldn't follow the user (paths
 // to WSL workspaces differ per device).
-const DENY_PREFIX = ["owllm:code:"];
+const DENY_PREFIX = [
+  "owllm:code:",
+  "owllm:agents:page:",
+];
 
 function isSyncable(key: string): boolean {
   if (DENY_EXACT.has(key)) return false;
@@ -47,16 +56,31 @@ function isSyncable(key: string): boolean {
   return key.startsWith("owllm:") || key.startsWith("owllm.");
 }
 
-function deviceId(): string {
+let _stableDeviceId: string | null = null;
+
+async function deviceId(): Promise<string> {
+  if (_stableDeviceId) return _stableDeviceId;
   try {
-    let d = localStorage.getItem(DEVICE_KEY);
-    if (!d) {
-      d = `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-      localStorage.setItem(DEVICE_KEY, d);
-    }
-    return d;
+    // One identity system everywhere: Rust's persisted cryptographic device id
+    // also keys project.locations. The former random localStorage id vanished
+    // with the very profile migration it was supposed to identify.
+    _stableDeviceId = await invoke<string>("device_get_id");
+    try { localStorage.setItem(DEVICE_KEY, _stableDeviceId); } catch { /* marker only */ }
+    return _stableDeviceId;
   } catch {
-    return "unknown";
+    // Compatibility fallback for a damaged identity store. Keep it stable for
+    // this profile, but never generate a new id on every call.
+    try {
+      let d = localStorage.getItem(DEVICE_KEY);
+      if (!d) {
+        d = `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+        localStorage.setItem(DEVICE_KEY, d);
+      }
+      _stableDeviceId = d;
+      return d;
+    } catch {
+      return "unknown";
+    }
   }
 }
 
@@ -96,11 +120,14 @@ async function pullAndAdopt(): Promise<boolean> {
   if (!raw) return false;
   let blob: Blob;
   try { blob = JSON.parse(raw) as Blob; } catch { return false; }
-  if (!blob?.syncedAt || blob.device === deviceId()) return false;
+  if (!blob?.syncedAt || blob.device === await deviceId()) return false;
   if (blob.syncedAt <= getLast()) return false;
   // Adopt: write each synced key. We DON'T delete local-only keys — a merge,
   // not a mirror, so device-local prefs survive.
   for (const [k, v] of Object.entries(blob.data || {})) {
+    // Old vault blobs can still contain page/folder bindings from versions
+    // before the deny-list was corrected. Never re-import them.
+    if (!isSyncable(k)) continue;
     try { localStorage.setItem(k, v); } catch { /* quota */ }
   }
   setLast(blob.syncedAt);
@@ -116,7 +143,7 @@ export async function pushNow(force = false): Promise<void> {
   const dataJson = JSON.stringify(data);
   if (!force && dataJson === _lastSnapshotJson) return;
   const syncedAt = Date.now();
-  const blob: Blob = { syncedAt, device: deviceId(), data };
+  const blob: Blob = { syncedAt, device: await deviceId(), data };
   try {
     await invoke("vault_write_state", { json: JSON.stringify(blob) });
     _lastSnapshotJson = dataJson;

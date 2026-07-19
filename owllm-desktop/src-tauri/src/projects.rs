@@ -90,7 +90,8 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
             graph_json TEXT NOT NULL DEFAULT '',\
             created_at TEXT NOT NULL,\
             updated_at TEXT NOT NULL,\
-            team_default_model_id TEXT NOT NULL DEFAULT ''\
+            team_default_model_id TEXT NOT NULL DEFAULT '',\
+            location_device_id TEXT NOT NULL DEFAULT ''\
         )",
         [],
     )
@@ -107,6 +108,44 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         "ALTER TABLE agent_projects ADD COLUMN agent_logs_json TEXT NOT NULL DEFAULT ''",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN location_device_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    // Migrate the old global location column into a binding owned by THIS
+    // computer. Previous sync releases copied foreign absolute paths into every
+    // DB and then stamped them into each device's vault map. A path that does
+    // not exist here is therefore not a usable local binding: ghost it once.
+    if let Some(self_id) = crate::remote_devices::self_device_id() {
+        migrate_location_ownership(conn, &self_id)?;
+    }
+    Ok(())
+}
+
+fn migrate_location_ownership(
+    conn: &rusqlite::Connection,
+    self_id: &str,
+) -> Result<(), String> {
+    let mut legacy = conn
+        .prepare(
+            "SELECT id, location FROM agent_projects \
+             WHERE COALESCE(location_device_id, '') = ''",
+        )
+        .map_err(|e| format!("prepare location migration: {e}"))?;
+    let rows = legacy
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| format!("query location migration: {e}"))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    drop(legacy);
+    for (id, location) in rows {
+        let valid = !location.trim().is_empty() && std::path::Path::new(&location).is_dir();
+        conn.execute(
+            "UPDATE agent_projects SET location = ?2, location_device_id = ?3 WHERE id = ?1",
+            rusqlite::params![id, if valid { location } else { String::new() }, self_id],
+        )
+        .map_err(|e| format!("migrate project location: {e}"))?;
+    }
     Ok(())
 }
 
@@ -130,16 +169,18 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
     }
     ensure_schema(&conn)?;
 
+    let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
     let mut stmt = conn
         .prepare(
-            "SELECT id, name, description, location, trust_writes, \
+            "SELECT id, name, description, \
+             CASE WHEN location_device_id = ?1 THEN location ELSE '' END, trust_writes, \
              auto_approve_all, team_json, team_default_model_id, graph_json, \
              chat_json, agent_logs_json, updated_at \
              FROM agent_projects ORDER BY updated_at DESC",
         )
         .map_err(|e| format!("prepare: {e}"))?;
     let rows = stmt
-        .query_map([], |r| {
+        .query_map(rusqlite::params![self_id], |r| {
             let team_json: String = r.get(6)?;
             let team: Vec<String> = serde_json::from_str(&team_json).unwrap_or_default();
             Ok(ProjectRow {
@@ -340,15 +381,17 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
         let now = now_iso();
         let team_json = serde_json::to_string(&input.team).unwrap_or("[]".into());
 
+        let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
         conn.execute(
-            "INSERT INTO agent_projects (id, name, description, location, trust_writes, auto_approve_all, \
+            "INSERT INTO agent_projects (id, name, description, location, location_device_id, trust_writes, auto_approve_all, \
              team_json, model_overrides_json, graph_json, created_at, updated_at, team_default_model_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}', ?8, ?9, ?9, ?10)",
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '{}', ?9, ?10, ?10, ?11)",
             rusqlite::params![
                 id,
                 input.name,
                 input.description,
                 input.location,
+                self_id,
                 input.trust_writes as i64,
                 input.auto_approve_all as i64,
                 team_json,
@@ -425,6 +468,10 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
         if let Some(v) = input.location {
             sets.push("location = ?");
             params.push(Box::new(v));
+            sets.push("location_device_id = ?");
+            params.push(Box::new(
+                crate::remote_devices::self_device_id().unwrap_or_default(),
+            ));
         }
         if let Some(v) = input.trust_writes {
             sets.push("trust_writes = ?");
@@ -509,4 +556,51 @@ pub async fn delete_project(id: String) -> Result<(), String> {
         tokio::task::spawn_blocking(move || crate::sandbox::cleanup_deleted_project(&loc));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_keeps_only_folders_that_exist_on_this_computer() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let valid = std::env::temp_dir().join(format!(
+            "owllm-project-binding-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&valid).unwrap();
+        let missing = valid.with_extension("missing");
+        conn.execute(
+            "INSERT INTO agent_projects \
+             (id, name, location, location_device_id, created_at, updated_at) VALUES \
+             ('valid', 'valid', ?1, '', 'x', 'x'), \
+             ('foreign', 'foreign', ?2, '', 'x', 'x')",
+            rusqlite::params![
+                valid.to_string_lossy().to_string(),
+                missing.to_string_lossy().to_string()
+            ],
+        )
+        .unwrap();
+        migrate_location_ownership(&conn, "device-here").unwrap();
+        let valid_row: (String, String) = conn
+            .query_row(
+                "SELECT location, location_device_id FROM agent_projects WHERE id = 'valid'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let foreign_row: (String, String) = conn
+            .query_row(
+                "SELECT location, location_device_id FROM agent_projects WHERE id = 'foreign'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(valid_row.0, valid.to_string_lossy());
+        assert_eq!(valid_row.1, "device-here");
+        assert_eq!(foreign_row, (String::new(), "device-here".into()));
+        let _ = std::fs::remove_dir_all(valid);
+    }
 }

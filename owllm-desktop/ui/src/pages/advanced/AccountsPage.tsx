@@ -27,6 +27,7 @@ import PtyTerminal from "./PtyTerminal";
 import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
+import { openWebUrl } from "../../utils/openWebUrl";
 
 const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
 const HOST_LABEL = HOST_IS_WINDOWS

@@ -300,21 +300,6 @@ export default function InfoPage() {
         </Card>
         </div>
 
-        <div
-          data-ui="InfoPage:right-column"
-          style={{ flex: "1 1 340px", minWidth: 0, display: "flex", flexDirection: "column", gap: 14 }}
-        >
-        {/* Right column: Application first, Sandbox directly below it. */}
-        <Card title="📦 Application">
-          <Row label="Product" value="OwLLM Desktop" />
-          <Row label="Version" value={version} />
-          <Row label="Runtime" value="Tauri 2 · Rust + React" />
-          <Row label="Update channel" value="GitHub Releases (auto-update)" />
-          <Row label="Python" value="Invited on-demand only (fine-tuning)" />
-        </Card>
-
-        <SandboxDiskCard />
-        </div>
       </div>
     </div>
   );

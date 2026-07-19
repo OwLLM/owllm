@@ -27,6 +27,7 @@ import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
+import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
 import TeamMemoryModal from "./TeamMemoryModal";
@@ -2292,7 +2293,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                 {ghOpen && !gh?.connected && (
                   <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0 0 28px", padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
                     <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5 }}>Paste a GitHub token so agents can clone private repos and push from inside the sandbox.</div>
-                    <button onClick={() => { invoke("shell_open_url", { url: GITHUB_TOKEN_URL }).catch(() => {}); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent-ink)" }}>↗ Create a token (repo scope)</button>
+                    <button onClick={() => { openWebUrl(GITHUB_TOKEN_URL).catch(() => {}); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent-ink)" }}>↗ Create a token (repo scope)</button>
                     <input type="password" value={ghToken} onChange={(e) => setGhToken(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }} placeholder="ghp_… or github_pat_…" style={{ height: 32, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }} />
                     <div style={{ display: "flex", gap: 8 }}>
                       <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 32, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>{ghBusy ? "⏳ Connecting…" : "Connect"}</button>

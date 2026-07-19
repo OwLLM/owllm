@@ -32,11 +32,9 @@ import {
 import { githubStatus, githubDeviceStart, githubDevicePoll, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT } from "../pages/agentic/github";
 import ActionIcon, { type ActionIconName } from "../components/ActionIcon";
 
-/// Open a URL in the user's real browser (native shell; window.open fallback).
+/** Open a URL in OwLLM's persistent browser so the session remains available to agents. */
 function openExternal(url: string) {
-  invoke("shell_open_url", { url }).catch(() => {
-    try { window.open(url, "_blank", "noopener,noreferrer"); } catch { /* ignore */ }
-  });
+  openWebUrl(url).catch((error) => console.error("Could not open the OwLLM browser", error));
 }
 
 type ReadinessRow = { ok: boolean; warn: boolean; detail: string };

@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::webview::{Color, Webview, WebviewBuilder};
@@ -217,7 +217,15 @@ fn capture_reply(title: &str) {
     let Some((id, k, total, payload)) = parse_reply(title) else {
         return;
     };
-    let mut guard = REPLIES.lock().unwrap_or_else(|p| p.into_inner());
+    // This runs in WebView2/WKWebView/WebKitGTK's native callback. It must
+    // never wait for a Rust worker holding REPLIES: a missed title is harmless
+    // because eval_until_reply re-emits/retries it, while a blocked callback
+    // freezes every OwLLM window sharing the event thread.
+    let mut guard = match REPLIES.try_lock() {
+        Ok(guard) => guard,
+        Err(TryLockError::Poisoned(p)) => p.into_inner(),
+        Err(TryLockError::WouldBlock) => return,
+    };
     let map = guard.get_or_insert_with(HashMap::new);
     let acc = map.entry(id).or_insert_with(|| ReplyAcc {
         total,

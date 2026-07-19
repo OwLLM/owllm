@@ -22,12 +22,14 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-// History-bearing prefixes. Extend deliberately — every added prefix grows
-// DB traffic, so keep it to state whose loss the user would call data loss.
+// User-owned local state. This deliberately covers every `owllm:` key rather
+// than a hand-picked subset: the narrow first version preserved Code chats and
+// notebooks but still abandoned the page catalog, project bindings, model
+// choices, brainstorm checkpoints, theme and other settings whenever WebView
+// moved profiles. localStorage itself is quota-bounded and the per-key ceiling
+// below still applies, so mirroring the namespace cannot grow without bound.
 export const DURABLE_PREFIXES = [
-  "owllm:code:",            // Coding page: pages, per-page sessions, chats, recents
-  "owllm:agents:notebook:", // Run Notebook blob per project
-  "owllm:chat:",            // fine-tuning chat page state (columns/templates)
+  "owllm:",
 ];
 
 // Per-key ceiling. Chromium caps a localStorage entry well below this; the

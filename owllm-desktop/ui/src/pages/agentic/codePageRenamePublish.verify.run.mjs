@@ -38,9 +38,19 @@ anchor("CodePage.tsx", codePage, "CodeState carries the per-page rename field", 
 anchor("CodePage.tsx", codePage, "tab title composes folder(rename)", "`${folder}(${rename})`");
 anchor("CodePage.tsx", codePage, "unrenamed fallback is the folder name only", "rename ? `${folder}(${rename})` : folder");
 anchor("CodePage.tsx", codePage, "same-project reopen keeps the rename, switch resets it",
-  "(stx.projectRoot === dir || stx.workspace === dir) ? stx.pageRename : undefined");
+  "const keepRename = reopeningCurrent ? stx.pageRename : undefined");
 anchor("CodePage.tsx", codePage, "header rename box normalises on blur",
   'setField("pageRename", e.target.value.trim() || undefined)');
+anchor("CodePage.tsx", codePage, "orphaned page sessions rebuild a missing catalog",
+  "recovered.push({ id, title: recoveredPageTitle(state) })");
+anchor("CodePage.tsx", codePage, "blank/default page records do not pollute the recovered tabs",
+  "if (!hasRecoverablePageState(state)) continue");
+anchor("CodePage.tsx", codePage, "every page persist also writes a project-root recovery copy",
+  "saveCodeSession(state)");
+anchor("CodePage.tsx", codePage, "folder reopen loads its project-root recovery copy before preparing",
+  "const recovered = reopeningCurrent ? stx : loadCodeSession(dir)");
+anchor("CodePage.tsx", codePage, "worktree errors preserve the recovered conversation",
+  "...((p as CodeState) ?? base)");
 
 const cards = fs.readFileSync(path.join(HERE, "PublishCards.tsx"), "utf8");
 anchor("PublishCards.tsx", cards, "visibility comes from the cheap LOCAL git_status",

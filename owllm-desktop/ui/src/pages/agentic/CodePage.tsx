@@ -176,11 +176,64 @@ const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
 const PAGE_SESSION_PREFIX = "owllm:code:page:";
 function newPageId(): string { return `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
+
+function hasRecoverablePageState(s: Partial<CodeState>): boolean {
+  return Boolean(
+    s.workspace
+    || s.projectRoot
+    || s.chatMode
+    || s.pageRename
+    || s.draft
+    || (Array.isArray(s.messages) && s.messages.length > 0)
+    || (Array.isArray(s.secondaryMessages) && s.secondaryMessages.length > 0)
+    || (Array.isArray(s.tasks) && s.tasks.length > 0)
+  );
+}
+
+function recoveredPageTitle(s: Partial<CodeState>): string {
+  const parts = (s.projectRoot || s.workspace || "").split(/[\\/]/).filter(Boolean);
+  // An isolated worktree ends in <project>/<page>/code. Older records may not
+  // carry projectRoot, so recover the project name from that stable layout.
+  const folder = s.projectRoot
+    ? parts[parts.length - 1]
+    : parts[parts.length - 1] === "code" && parts.length >= 3
+      ? parts[parts.length - 3]
+      : parts[parts.length - 1];
+  const rename = (s.pageRename || "").trim();
+  return folder ? (rename ? `${folder}(${rename})` : folder) : rename || "Recovered page";
+}
+
 function loadPages(): CodePageMeta[] {
+  let pages: CodePageMeta[] = [];
   try {
     const a = JSON.parse(localStorage.getItem(PAGES_KEY) || "[]");
-    return Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
-  } catch { return []; }
+    pages = Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
+  } catch { /* rebuild from the per-page records below */ }
+
+  // The catalog and the sessions are separate localStorage writes. A crash,
+  // profile migration or old narrow state mirror can therefore leave complete
+  // sessions orphaned behind an empty/partial catalog. Reconstruct missing tabs
+  // from every substantive per-page record before React gets a chance to save a
+  // default one-page catalog over the evidence.
+  try {
+    const known = new Set(pages.map((p) => p.id));
+    const recovered: CodePageMeta[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(PAGE_SESSION_PREFIX)) continue;
+      const id = key.slice(PAGE_SESSION_PREFIX.length);
+      if (!id || known.has(id)) continue;
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const state = JSON.parse(raw) as Partial<CodeState>;
+      if (!hasRecoverablePageState(state)) continue;
+      known.add(id);
+      recovered.push({ id, title: recoveredPageTitle(state) });
+    }
+    recovered.sort((a, b) => a.id.localeCompare(b.id));
+    pages = [...pages, ...recovered];
+  } catch { /* one malformed record must not block the Code page */ }
+  return pages;
 }
 function savePages(pages: CodePageMeta[]): void {
   try { localStorage.setItem(PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
@@ -354,14 +407,20 @@ function loadCodeSession(ws: string): CodeState | null {
     const raw = localStorage.getItem(codeSessionKey(ws));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
-    return closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, workspace: ws, busy: false });
+    return closeStaleTimer({
+      ...DEFAULT_CODE_STATE,
+      ...s,
+      projectRoot: s.projectRoot || ws,
+      busy: false,
+    });
   } catch { return null; }
 }
 
 function saveCodeSession(s: CodeState | null | undefined): void {
-  if (!s || !s.workspace) return; // no folder → nothing to save (onboarding state)
+  const root = (s?.projectRoot || s?.workspace || "").trim();
+  if (!s || !root) return; // no folder → nothing to save (onboarding state)
   try {
-    localStorage.setItem(codeSessionKey(s.workspace), JSON.stringify({ ...s, busy: false }, dropImages));
+    localStorage.setItem(codeSessionKey(root), JSON.stringify({ ...s, busy: false }, dropImages));
   } catch { /* quota / unavailable — best effort */ }
 }
 
@@ -631,7 +690,13 @@ function CodeWorkspace({ pageId, onTitle }: {
     // Persist EVERY mutation (debounced) under this page id, with a final flush
     // after unmount / stream-end — the "coded for an hour, closed the app,
     // nothing saved" fix, now per page.
-    chatRuntime.registerPersister(SID, (payload) => savePageSession(pageId, payload as CodeState));
+    chatRuntime.registerPersister(SID, (payload) => {
+      const state = payload as CodeState;
+      savePageSession(pageId, state);
+      // A second, project-root keyed copy makes "Recent projects → reopen"
+      // restore the conversation even when its old page catalog was lost.
+      saveCodeSession(state);
+    });
   }
   // Recent projects, for the onboarding screen shown when no folder is open.
   const [recents, setRecents] = useState<string[]>(getCodeRecents);
@@ -931,6 +996,14 @@ function CodeWorkspace({ pageId, onTitle }: {
   const openWorkspace = async (dir: string) => {
     if (!dir || busy) return;
     const name = dir.replace(/^.*[\\/]/, "");
+    const normPath = (p: string | undefined) =>
+      (p || "").replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+    const reopeningCurrent = normPath(stx.projectRoot || stx.workspace) === normPath(dir);
+    // Prefer the live page when it already owns this project. Otherwise recover
+    // the latest project-root copy written by the persister. This is evaluated
+    // BEFORE the preparing state so opening a folder can never blank the chat.
+    const recovered = reopeningCurrent ? stx : loadCodeSession(dir);
+    const base = recovered ?? DEFAULT_CODE_STATE;
     // Switching THIS page to a different project: drop the old worktree in the
     // BACKGROUND so it doesn't block (or leak). Unmerged work is the user's to
     // merge before switching.
@@ -943,9 +1016,14 @@ function CodeWorkspace({ pageId, onTitle }: {
     // invoke below is async (runs on a Rust thread), so the UI stays responsive.
     // Re-opening the SAME project (worktree self-heal / re-pick) keeps the
     // page's rename; switching to a different project starts unnamed.
-    const keepRename = (stx.projectRoot === dir || stx.workspace === dir) ? stx.pageRename : undefined;
+    const keepRename = reopeningCurrent ? stx.pageRename : undefined;
     chatRuntime.setPayload(SID, () => ({
-      ...DEFAULT_CODE_STATE, projectRoot: dir, workspace: "", modelId, pageRename: keepRename,
+      ...base,
+      projectRoot: dir,
+      workspace: "",
+      modelId: base.modelId || modelId,
+      pageRename: keepRename,
+      busy: false,
       preparing: true,
       status: `⏳ Preparing a private workspace for ${name} on its own branch… (you can type your request now)`,
     }));
@@ -979,12 +1057,17 @@ function CodeWorkspace({ pageId, onTitle }: {
         status: `Not a git repo — editing this folder directly (no isolation). Run "git init" in it to enable per-page worktrees.`,
       }));
     } else if (outcome.status === "dirtyWorkingTree") {
-      chatRuntime.setPayload(SID, () => ({
-        ...DEFAULT_CODE_STATE,
+      chatRuntime.setPayload(SID, (p) => ({
+        ...((p as CodeState) ?? base),
+        preparing: false,
         status: `"${name}" has uncommitted changes — commit or stash them first, then reopen so the worktree includes them.\n${outcome.details.split("\n").slice(0, 3).join("\n")}`,
       }));
     } else {
-      chatRuntime.setPayload(SID, () => ({ ...DEFAULT_CODE_STATE, status: `Couldn't create the worktree: ${outcome.message}` }));
+      chatRuntime.setPayload(SID, (p) => ({
+        ...((p as CodeState) ?? base),
+        preparing: false,
+        status: `Couldn't create the worktree: ${outcome.message}`,
+      }));
     }
   };
 

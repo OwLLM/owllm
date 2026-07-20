@@ -33,7 +33,7 @@ import AssetsPage from "../pages/agentic/AssetsPage";
 // Gamify mode:
 import GamifyPage from "../pages/gamify/GamifyPage";
 import CharactersPage from "../pages/gamify/CharactersPage";
-import ArenaPage from "../pages/gamify/ArenaPage";
+import WorldMapPage from "../pages/gamify/WorldMapRoute";
 
 // Advanced toggle (not a mode — independent reveal):
 import MCPPage from "../pages/advanced/MCPPage";
@@ -124,7 +124,7 @@ export const AGENTIC: ModuleDef = {
   firstTab: "agents",  // Qt _GROUP_FIRST_TAB["agentic"] = "agents"
 };
 
-/** Gamify — Gamify + Characters + Arena.
+/** Gamify — Gamify + Characters + World Map.
  *  Qt: `_NAVBAR_GROUPS["gamify"] = ("gamify_btn", "characters_btn", "arena_top_btn")`. */
 export const GAMIFY: ModuleDef = {
   id: "gamify",
@@ -132,7 +132,7 @@ export const GAMIFY: ModuleDef = {
   pages: [
     { key: "gamify",     label: "🎮 Gamify",     component: GamifyPage     },
     { key: "characters", label: "🧙‍♂️ Characters", component: CharactersPage },
-    { key: "arena",      label: "🏟 Arena",      component: ArenaPage      },
+    { key: "world-map",  label: "🌐 World Map",   component: WorldMapPage   },
   ],
   firstTab: "gamify",  // Qt _GROUP_FIRST_TAB["gamify"] = "gamify"
 };

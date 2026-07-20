@@ -2501,6 +2501,52 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
             </div>
 
+            <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: "1px solid rgba(var(--accent-rgb),0.48)", background: "linear-gradient(120deg,rgba(var(--accent-rgb),0.13),var(--bg-card))", boxShadow: "0 0 34px rgba(var(--accent-rgb),0.09)" }}>
+              <span style={{ fontSize: 28 }}>🐙</span>
+              <div style={{ flex: 1, minWidth: 260 }}>
+                <b style={{ color: "var(--fg-strong)", fontSize: 14 }}>GitHub keeps code, Project Cards and memory consistent across PCs</b>
+                <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>Projects without a repository remain tied to their creator computer and appear ghosted elsewhere.</div>
+              </div>
+              <button onClick={openNewProject} style={{ ...btn, height: 40, padding: "0 16px", border: "none", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: 10 }}>+ New GitHub-first project</button>
+            </div>
+
+            <section>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>Managed projects</div>
+                <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>{deviceIdentity.name}</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 13 }}>
+                {catalogProjects.map((project) => {
+                  const local = projectAvailability(project) === "local";
+                  const selectedGhost = ghostProjectId === project.id && !local;
+                  return (
+                    <button key={project.id} onClick={() => { void openCatalogProject(project); }} disabled={catalogBusy} style={{
+                      minHeight: 150, padding: 16, borderRadius: 15, textAlign: "left",
+                      border: `1px solid ${selectedGhost ? "var(--warn)" : local ? "var(--border)" : "var(--border-strong)"}`,
+                      background: selectedGhost ? "rgba(var(--warn-rgb),.09)" : "var(--bg-card)",
+                      opacity: local ? 1 : .58, filter: local ? "none" : "saturate(.55)",
+                      cursor: catalogBusy ? "wait" : "pointer", boxShadow: local ? "0 10px 28px rgba(0,0,0,.12)" : "none",
+                    }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span style={{ fontSize: 21 }}>{local ? "⌁" : "◌"}</span>
+                        <b style={{ color: "var(--fg-strong)", fontSize: 15, flex: 1 }}>{project.name}</b>
+                        <span style={{ color: local ? "var(--ok)" : "var(--warn)", fontSize: 10, fontWeight: 900 }}>{local ? "READY" : "GHOSTED"}</span>
+                      </div>
+                      <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 9 }}>
+                        {local ? project.location : `Created on ${projectOriginLabel(project)} · no local folder on ${deviceIdentity.name}`}
+                      </div>
+                      <div style={{ color: project.repo_url ? "var(--accent-ink)" : "var(--warn)", fontSize: 11, marginTop: 9 }}>
+                        {project.repo_url ? `🐙 ${project.repo_url.replace(/^https?:\/\//, "")}` : "No GitHub repo · available only on its creator PC"}
+                      </div>
+                      {!local && <div style={{ color: "var(--fg-strong)", fontSize: 11.5, fontWeight: 750, marginTop: 10 }}>{project.repo_url ? "Click to clone into a new folder on this PC →" : "Create the repo on the source PC before opening here"}</div>}
+                    </button>
+                  );
+                })}
+                {catalogProjects.length === 0 && <div style={{ padding: 20, border: "1px dashed var(--border-strong)", borderRadius: 14, color: "var(--fg-muted)", fontSize: 12.5 }}>No managed projects yet. Create one or open an existing GitHub checkout below.</div>}
+              </div>
+              {catalogError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 9 }}>{catalogError}</div>}
+            </section>
+
             <div style={{ display: "flex", flexDirection: "column", gap: 24, width: "100%", minWidth: 0 }}>
               {/* START — VS Code-style action rows */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
@@ -2549,7 +2595,7 @@ function CodeWorkspace({ pageId, onTitle }: {
 
               {/* RECENT — projects (name + path), VS Code style */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Projects</div>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Local folders</div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, maxHeight: 420, overflowY: "auto", paddingRight: 2 }}>
                   {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
                     <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — use Local actions above to get started.</div>

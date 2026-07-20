@@ -1386,14 +1386,12 @@ function WindowAccentEdge() {
 }
 
 // The accent edge hugs the WINDOW boundary, which is only the visible app
-// edge when the window is opaque (Windows/macOS, or overlay-frame mode).
-// Linux ships a TRANSPARENT window that is LARGER than the in-page
-// HybridFrame (owl headroom + see-through margins) — there the border drew
-// a floating orange rectangle in mid-air around the invisible window rect,
-// slicing through the owl badge. Same UA check index.html uses for the
-// boot splash: only webkit2gtk on Linux reports "Linux".
-const LINUX_TRANSPARENT_WINDOW =
-  typeof navigator !== "undefined" && navigator.userAgent.indexOf("Linux") !== -1;
+// edge when the window is opaque (all platforms now: Windows/macOS/Linux).
+// The old Linux build shipped a TRANSPARENT window larger than the in-page
+// HybridFrame, and the border drew a floating orange rectangle in mid-air.
+// Linux switched to an opaque window + optional overlay frame, so the accent
+// edge is correct everywhere.
+const LINUX_TRANSPARENT_WINDOW = false;
 
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);

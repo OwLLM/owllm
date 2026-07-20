@@ -34,6 +34,30 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CLI_CHILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const CLI_CHILD_ABS_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
+/// AppImage environment variables that must never leak into a child CLI.
+/// AppRun exports them for OwLLM's bundled runtime; passing them to a user's
+/// Python/native CLI makes it load modules and libraries from OwLLM's
+/// temporary AppImage mount instead of its own installation, causing launch
+/// failures or hard crashes.
+#[cfg(target_os = "linux")]
+const APPIMAGE_ENV_KEYS: &[&str] = &[
+    "APPDIR",
+    "APPIMAGE",
+    "ARGV0",
+    "LD_LIBRARY_PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+];
+
+/// Strip AppImage-specific environment variables from a Command before spawn.
+/// No-op on non-Linux platforms.
+fn sanitize_appimage_env(cmd: &mut Command) {
+    #[cfg(target_os = "linux")]
+    for key in APPIMAGE_ENV_KEYS {
+        cmd.env_remove(key);
+    }
+}
+
 /// Quote an argument for cmd.exe so it round-trips through a .cmd /
 /// .bat shim to the underlying program (npm installs Claude Code as
 /// `claude.cmd` on Windows, which wraps `node cli.js`). This bypasses
@@ -1385,6 +1409,7 @@ async fn probe_cli_subscription(
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
+            sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| e.to_string())?;
             if let Some(text) = &stdin_owned {
                 let mut stdin = child.stdin.take().ok_or_else(|| "CLI stdin pipe missing".to_string())?;
@@ -2035,6 +2060,7 @@ pub async fn claude_cli_complete(
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
+            sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
             let pid = register_cli_child(&child);
             if let Some(mut stdin) = child.stdin.take() {
@@ -2234,6 +2260,7 @@ pub async fn codex_cli_complete(
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
+            sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
             let pid = register_cli_child(&child);
             let mut stdin = child
@@ -2306,6 +2333,7 @@ pub async fn codex_cli_complete(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
         let pid = register_cli_child(&child);
         let mut stdin = child
@@ -2791,6 +2819,7 @@ pub async fn claude_cli_stream(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn claude: {e}"))?;
         let child_pid = register_cli_child(&child);
         if let Some(mut stdin) = child.stdin.take() {
@@ -3295,6 +3324,7 @@ pub async fn codex_cli_stream(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn codex: {e}"))?;
         let child_pid = register_cli_child(&child);
         // `codex exec --json` writes progress and diagnostics to stderr.  The
@@ -4087,6 +4117,7 @@ pub fn subscription_cli_login(backend: String) -> Result<(), String> {
         cmd.stdin(Stdio::null());
         cmd.stdout(Stdio::null());
         cmd.stderr(Stdio::null());
+        sanitize_appimage_env(&mut cmd);
         cmd.spawn()
             .map_err(|e| format!("spawn {}: {e}", exe.display()))?;
     }
@@ -4271,6 +4302,7 @@ pub async fn cli_install_stream(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
 
         let _ = on_event.send(CliInstallEvent::Line {
             stream: "stdout".to_string(),
@@ -4526,6 +4558,7 @@ pub async fn gemini_cli_complete(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn gemini: {e}"))?;
         let pid = register_cli_child(&child);
         if fold_prompt_into_stdin {
@@ -4620,6 +4653,7 @@ pub async fn grok_cli_complete(
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| format!("spawn grok: {e}"))?;
         let pid = register_cli_child(&child);
         if fold_prompt_into_stdin {
@@ -4842,6 +4876,7 @@ pub async fn kimi_cli_complete(
                 use std::os::windows::process::CommandExt;
                 cmd.creation_flags(CREATE_NO_WINDOW);
             }
+            sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| format!("spawn kimi: {e}"))?;
             let pid = register_cli_child(&child);
             if !use_prompt_flag {

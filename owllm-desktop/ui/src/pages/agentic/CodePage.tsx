@@ -2490,7 +2490,7 @@ function CodeWorkspace({ pageId, onTitle }: {
   // get-started screen: open a folder, or reopen a recent project.
   if (!workspace && !preparing) {
     return (
-      <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
+      <div data-ui="CodingProjectHub" style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
         <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
           <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 30, padding: "36px 36px" }}>
             <div>

@@ -96,6 +96,8 @@ anchor("PublishCards.tsx", cards, "a not-ready Publish stays clickable and surfa
 // instead of unconditionally claiming "Sent to the coder agent".
 anchor("PublishCards.tsx", cards, "fixWithAgent consumes the dispatch outcome",
   'const outcome = onFixIssues(');
+anchor("PublishCards.tsx", cards, "fixWithAgent sends the full failed output, not the one-line rail summary",
+  'const failedOutput = output?.kind === "err" ? output.body : activity.msg;');
 anchor("PublishCards.tsx", cards, "a no-model outcome surfaces as an inline error, not a fake success",
   'if (outcome === "no-model") {');
 anchor("PublishCards.tsx", cards, "a mid-run dispatch tells the user it rides the steer queue",

@@ -413,7 +413,8 @@ export default function PublishCards({
     if (!onFixIssues) return;
     const parts: string[] = [];
     if (activity?.kind === "err") {
-      parts.push(`The last release action failed with this output:\n\n${activity.msg}`);
+      const failedOutput = output?.kind === "err" ? output.body : activity.msg;
+      parts.push(`The last release action failed with this output:\n\n${failedOutput}`);
     }
     if (readyFails.length > 0) {
       parts.push(`Publish readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);

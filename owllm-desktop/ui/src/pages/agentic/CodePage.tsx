@@ -2490,9 +2490,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   // get-started screen: open a folder, or reopen a recent project.
   if (!workspace && !preparing) {
     return (
-      <div data-ui="CodingProjectHub" style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", overflowY: "auto" }}>
-          <div style={{ width: "100%", maxWidth: 1280, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24, padding: "clamp(24px,4vw,56px)", background: "radial-gradient(circle at 88% 8%, rgba(var(--accent-rgb),0.14), transparent 31%)" }}>
+      <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
+          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 30, padding: "36px 36px" }}>
             <div>
               <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.8, textTransform: "uppercase" }}>Portable coding command center</div>
               <div style={{ fontSize: "clamp(30px,4vw,48px)", fontWeight: 850, color: "var(--fg-strong)", letterSpacing: -0.8, lineHeight: 1.05, marginTop: 7 }}>OwLLM Coding</div>
@@ -2501,75 +2501,29 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: "1px solid rgba(var(--accent-rgb),0.48)", background: "linear-gradient(120deg,rgba(var(--accent-rgb),0.13),var(--bg-card))", boxShadow: "0 0 34px rgba(var(--accent-rgb),0.09)" }}>
-              <span style={{ fontSize: 28 }}>🐙</span>
-              <div style={{ flex: 1, minWidth: 260 }}>
-                <b style={{ color: "var(--fg-strong)", fontSize: 14 }}>GitHub keeps code, Project Cards and memory consistent across PCs</b>
-                <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>Projects without a repository remain tied to their creator computer and appear ghosted elsewhere.</div>
-              </div>
-              <button onClick={openNewProject} style={{ ...btn, height: 40, padding: "0 16px", border: "none", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: 10 }}>+ New GitHub-first project</button>
-            </div>
-
-            <section>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>Projects</div>
-                <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>{deviceIdentity.name}</span>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 13 }}>
-                {catalogProjects.map((project) => {
-                  const local = projectAvailability(project) === "local";
-                  const selectedGhost = ghostProjectId === project.id && !local;
-                  return (
-                    <button key={project.id} onClick={() => { void openCatalogProject(project); }} disabled={catalogBusy} style={{
-                      minHeight: 150, padding: 16, borderRadius: 15, textAlign: "left",
-                      border: `1px solid ${selectedGhost ? "var(--warn)" : local ? "var(--border)" : "var(--border-strong)"}`,
-                      background: selectedGhost ? "rgba(var(--warn-rgb),.09)" : "var(--bg-card)",
-                      opacity: local ? 1 : .58, filter: local ? "none" : "saturate(.55)",
-                      cursor: catalogBusy ? "wait" : "pointer", boxShadow: local ? "0 10px 28px rgba(0,0,0,.12)" : "none",
-                    }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <span style={{ fontSize: 21 }}>{local ? "⌁" : "◌"}</span>
-                        <b style={{ color: "var(--fg-strong)", fontSize: 15, flex: 1 }}>{project.name}</b>
-                        <span style={{ color: local ? "var(--ok)" : "var(--warn)", fontSize: 10, fontWeight: 900 }}>{local ? "READY" : "GHOSTED"}</span>
-                      </div>
-                      <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 9 }}>
-                        {local ? project.location : `Created on ${projectOriginLabel(project)} · no local folder on ${deviceIdentity.name}`}
-                      </div>
-                      <div style={{ color: project.repo_url ? "var(--accent-ink)" : "var(--warn)", fontSize: 11, marginTop: 9 }}>
-                        {project.repo_url ? `🐙 ${project.repo_url.replace(/^https?:\/\//, "")}` : "No GitHub repo · available only on its creator PC"}
-                      </div>
-                      {!local && <div style={{ color: "var(--fg-strong)", fontSize: 11.5, fontWeight: 750, marginTop: 10 }}>{project.repo_url ? "Click to clone into a new folder on this PC →" : "Create the repo on the source PC before opening here"}</div>}
-                    </button>
-                  );
-                })}
-                {catalogProjects.length === 0 && <div style={{ padding: 20, border: "1px dashed var(--border-strong)", borderRadius: 14, color: "var(--fg-muted)", fontSize: 12.5 }}>No managed projects yet. Create one or open an existing GitHub checkout below.</div>}
-              </div>
-              {catalogError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 9 }}>{catalogError}</div>}
-            </section>
-
-            <div style={{ display: "flex", gap: 52, alignItems: "flex-start", width: "100%", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 24, width: "100%", minWidth: 0 }}>
               {/* START — VS Code-style action rows */}
-              <div style={{ flex: "1 1 250px", minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 16, fontWeight: 750, color: "var(--fg-strong)", marginBottom: 8 }}>Local actions</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8 }}>
-                {([
-                  { icon: "🆕", label: "New project…", onClick: openNewProject },
-                  { icon: "📁", label: "Open a project folder…", onClick: pickWorkspace },
-                  { icon: "💬", label: "New chat (no project)", onClick: startChat },
-                  { icon: "🐙", label: gh?.connected ? `GitHub — ${gh.login}` : "Connect GitHub…", onClick: () => { setGhOpen((v) => !v); setGhMsg(""); } },
-                ]).map((a) => (
-                  <button key={a.label} onClick={a.onClick}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "var(--bg-card)")}
-                    style={{ display: "flex", alignItems: "center", gap: 11, minHeight: 64, background: "var(--bg-card)", border: "1px solid var(--border)", padding: "10px 12px", borderRadius: 11, cursor: "pointer", textAlign: "left" }}>
-                    <span style={{ fontSize: 19, width: 24, textAlign: "center" }}>{a.icon}</span>
-                    <span style={{ color: "var(--accent-ink)", fontWeight: 500, fontSize: 13.5 }}>{a.label}</span>
-                  </button>
-                ))}
+              <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Local actions</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 4, width: "100%" }}>
+                  {([
+                    { icon: "🆕", label: "New project…", onClick: openNewProject },
+                    { icon: "📁", label: "Open a project folder…", onClick: pickWorkspace },
+                    { icon: "💬", label: "New chat (no project)", onClick: startChat },
+                    { icon: "🐙", label: gh?.connected ? `GitHub — ${gh.login}` : "Connect GitHub…", onClick: () => { setGhOpen((v) => !v); setGhMsg(""); } },
+                  ]).map((a) => (
+                    <button key={a.label} onClick={a.onClick}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                      style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0, background: "transparent", border: "none", padding: "7px 8px", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>
+                      <span style={{ fontSize: 15, width: 18, textAlign: "center", flexShrink: 0 }}>{a.icon}</span>
+                      <span style={{ color: "var(--accent-ink)", fontWeight: 500, fontSize: 13.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.label}</span>
+                    </button>
+                  ))}
                 </div>
                 {/* GitHub connect form (inline, opens under the row) */}
                 {ghOpen && !gh?.connected && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0 0 28px", padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8, maxWidth: 520, padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
                     <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5 }}>Paste a GitHub token so agents can clone private repos and push from inside the sandbox.</div>
                     <button onClick={() => { openWebUrl(GITHUB_TOKEN_URL).catch(() => {}); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent-ink)" }}>↗ Create a token (repo scope)</button>
                     <input type="password" value={ghToken} onChange={(e) => setGhToken(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }} placeholder="ghp_… or github_pat_…" style={{ height: 32, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }} />
@@ -2579,8 +2533,8 @@ function CodeWorkspace({ pageId, onTitle }: {
                     </div>
                   </div>
                 )}
-                {gh?.connected && <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 24, width: "fit-content", margin: "2px 0 0 28px", padding: "0 10px", color: "var(--fg-muted)", fontSize: 11 }}>Disconnect</button>}
-                {ghMsg && <div style={{ margin: "4px 0 0 28px", fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
+                {gh?.connected && <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 24, width: "fit-content", marginTop: 6, padding: "0 10px", color: "var(--fg-muted)", fontSize: 11 }}>Disconnect</button>}
+                {ghMsg && <div style={{ marginTop: 6, fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
                 {/* Isolation status — compact line */}
                 <div style={{ marginTop: 18, fontSize: 11.5, lineHeight: 1.5, color: sbox?.available ? "#7ff0c5" : "var(--fg-muted)" }}>
                   {sbox === null ? "⏳ Checking isolation (WSL)…"
@@ -2594,11 +2548,11 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
 
               {/* RECENT — projects (name + path), VS Code style */}
-              <div style={{ flex: "1 1 320px", minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 16, fontWeight: 750, color: "var(--fg-strong)", marginBottom: 8 }}>Device-only recent folders</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 360, overflowY: "auto", paddingRight: 2 }}>
+              <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Projects</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, maxHeight: 420, overflowY: "auto", paddingRight: 2 }}>
                   {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
-                    <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — create one on the left to get started.</div>
+                    <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — use Local actions above to get started.</div>
                   )}
                   {/* Isolated projects that aren't already in recents */}
                   {isolation.enabled && sboxProjects.filter((p) => !recents.includes(p.path)).map((p) => (
@@ -2606,7 +2560,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       key={p.path}
                       onClick={() => openWorkspace(p.path)}
                       title={p.innerPath}
-                      style={{ display: "block", textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
+                        style={{ display: "block", minWidth: 0, textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
                     >
                       <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)" }}>🐧 {p.name}</div>
                       <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.innerPath}</div>
@@ -2618,7 +2572,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                     return (
                       <div
                         key={ws}
-                        style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
+                        style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
                       >
                         {isRenaming ? (
                           <input

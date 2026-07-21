@@ -482,22 +482,6 @@ export default function WorldMapPage() {
     return () => { controller.abort(); window.clearInterval(timer); };
   }, []);
 
-  useEffect(() => {
-    if (!presenceEnabled) return;
-    const controller = new AbortController();
-    const heartbeat = async () => {
-      try {
-        const sent = await sendAnonymousHeartbeat(true, controller.signal);
-        if (!sent) setConfigured(false);
-      } catch (reason) {
-        if (!controller.signal.aborted) setError(String(reason));
-      }
-    };
-    void heartbeat();
-    const timer = window.setInterval(heartbeat, 60_000);
-    return () => { controller.abort(); window.clearInterval(timer); };
-  }, [presenceEnabled]);
-
   const loadFleet = async (showLoading = false) => {
     if (showLoading) setLoading(true);
     setFleetError("");

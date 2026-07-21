@@ -52,6 +52,7 @@ import {
   readChatFontStep, saveChatFontStep,
 } from "./chatFontPreferences";
 import ActionIcon from "./components/ActionIcon";
+import { installWorldPresenceHeartbeat } from "./pages/gamify/worldPresence";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -1747,6 +1748,7 @@ export default function AppShell() {
 
   return (
     <>
+      <WorldPresenceRunner />
       <TelegramBridgeRunner />
       <DiscordBridgeRunner />
       <SlackBridgeRunner />
@@ -1800,6 +1802,11 @@ export default function AppShell() {
 // overlay above the rest of the app on first launch when no modules are
 // installed yet. Dismissing it (Skip or Install) records `wizard.completed`
 // in localStorage so subsequent launches stay clean.
+function WorldPresenceRunner() {
+  useEffect(() => installWorldPresenceHeartbeat(), []);
+  return null;
+}
+
 function FirstRunWizardMount() {
   const { needed, setDismissed } = useNeedsFirstRunWizard();
   if (!needed) return null;

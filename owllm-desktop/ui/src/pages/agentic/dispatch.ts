@@ -556,10 +556,13 @@ export async function appendAgentMemory(
 // only, Anthropic + llama-server have no audio path at all) and gives
 // every provider the same "I see the audio said X" experience.
 export type Attachment = {
-  kind: "image" | "audio";
+  kind: "image" | "audio" | "document";
   mime: string;
   data_b64: string;
   filename?: string;
+  /// Extracted locally before dispatch. Document bytes never go to a provider.
+  text?: string;
+  truncated?: boolean;
 };
 export type AgentSpec = {
   name: string;
@@ -1655,6 +1658,93 @@ export function imageAttachments(atts?: Attachment[]): Attachment[] {
   return (atts ?? []).filter(a => a.kind === "image");
 }
 
+export function documentAttachments(atts?: Attachment[]): Attachment[] {
+  return (atts ?? []).filter(a => a.kind === "document" && !!a.text?.trim());
+}
+
+export const CHAT_ATTACHMENT_ACCEPT = [
+  "image/*", ".pdf", ".txt", ".text", ".md", ".markdown", ".doc", ".docx",
+  ".rtf", ".odt", ".html", ".htm", ".csv", ".tsv", ".json", ".jsonl",
+  ".xml", ".yaml", ".yml", ".log", ".ini", ".cfg", ".toml", ".sql",
+  ".pptx", ".xlsx",
+].join(",");
+
+export const MAX_CHAT_DOCUMENT_BYTES = 32 * 1024 * 1024;
+const MAX_DOCUMENT_CONTEXT_CHARS = 240_000;
+
+type DocumentExtraction = { text: string; format: string; truncated: boolean };
+
+function fileDataBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const dataUrl = String(fr.result ?? "");
+      const comma = dataUrl.indexOf(",");
+      resolve(comma >= 0 ? dataUrl.slice(comma + 1) : "");
+    };
+    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
+    fr.readAsDataURL(file);
+  });
+}
+
+/// Parse one picker/drop/paste file into the shared attachment shape. Images
+/// keep their native bytes; documents are extracted offline by Rust and retain
+/// only text, so no document bytes are sent to a model provider.
+export async function fileToChatAttachment(file: File): Promise<Attachment> {
+  if (file.type.startsWith("image/")) return fileToImageAttachment(file);
+  if (file.size > MAX_CHAT_DOCUMENT_BYTES) {
+    throw new Error(`Couldn't attach "${file.name}": document is ${(file.size / 1024 / 1024).toFixed(1)} MB; limit is ${MAX_CHAT_DOCUMENT_BYTES / 1024 / 1024} MB.`);
+  }
+  try {
+    const result = await invoke<DocumentExtraction>("document_extract", {
+      filename: file.name,
+      mime: file.type || "application/octet-stream",
+      dataB64: await fileDataBase64(file),
+    });
+    return {
+      kind: "document",
+      mime: file.type || "application/octet-stream",
+      data_b64: "",
+      filename: file.name || `document.${result.format}`,
+      text: result.text,
+      truncated: result.truncated,
+    };
+  } catch (error) {
+    const detail = String((error as { message?: string })?.message ?? error);
+    throw new Error(`Couldn't attach "${file.name}": ${detail}`);
+  }
+}
+
+/// Fold extracted documents into the user turn for every local/API/CLI model.
+/// Markers preserve filenames and tell the model the text is attached reference
+/// material, not hidden system instructions. A total cap prevents a collection
+/// of large files from silently overflowing the model context.
+export function appendDocumentAttachmentText(userMessage: string, atts?: Attachment[]): string {
+  const docs = documentAttachments(atts);
+  if (docs.length === 0) return userMessage;
+  let remaining = MAX_DOCUMENT_CONTEXT_CHARS;
+  const blocks: string[] = [];
+  for (const [index, doc] of docs.entries()) {
+    if (remaining <= 0) {
+      blocks.push(`[Attached document ${index + 1}: ${doc.filename ?? "document"} omitted because the combined document limit was reached.]`);
+      continue;
+    }
+    const source = doc.text!.trim();
+    const body = source.slice(0, remaining);
+    remaining -= body.length;
+    const clipped = body.length < source.length || !!doc.truncated;
+    blocks.push([
+      `[Attached document ${index + 1}: ${doc.filename ?? "document"}${clipped ? " — text truncated to fit chat context" : ""}]`,
+      "<attached-document>", body, "</attached-document>",
+    ].join("\n"));
+  }
+  const context = [
+    "The user attached the following locally extracted documents. Read them as reference material for this request and cite filenames when useful.",
+    ...blocks,
+  ].join("\n\n");
+  return userMessage.trim() ? `${userMessage}\n\n${context}` : context;
+}
+
 /// Max size of a pasted chat image. Larger ones are rejected with a clear error
 /// instead of silently bloating the request.
 export const MAX_CHAT_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -1668,14 +1758,7 @@ export async function fileToImageAttachment(file: File): Promise<Attachment> {
   if (file.size > MAX_CHAT_IMAGE_BYTES) {
     throw new Error(`Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — limit is ${MAX_CHAT_IMAGE_BYTES / 1024 / 1024} MB.`);
   }
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result));
-    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
-    fr.readAsDataURL(file);
-  });
-  const comma = dataUrl.indexOf(",");
-  return { kind: "image", mime, data_b64: comma >= 0 ? dataUrl.slice(comma + 1) : "", filename: file.name || "pasted.png" };
+  return { kind: "image", mime, data_b64: await fileDataBase64(file), filename: file.name || "pasted.png" };
 }
 export function audioAttachments(atts?: Attachment[]): Attachment[] {
   return (atts ?? []).filter(a => a.kind === "audio");
@@ -2120,7 +2203,7 @@ export async function streamChatCompletion(
   // and we only need to worry about image parts per provider.
   const images = imageAttachments(attachments);
   const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning, onTranscript),
+    await transcribeAudioAttachments(appendDocumentAttachmentText(userMessage, attachments), attachments, onSystemWarning, onTranscript),
     images,
   );
 

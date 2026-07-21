@@ -56,6 +56,9 @@ import {
   saveCliImages,
   resolveImageCwd,
   fileToImageAttachment,
+  fileToChatAttachment,
+  appendDocumentAttachmentText,
+  CHAT_ATTACHMENT_ACCEPT,
   openaiUserContent,
   anthropicUserContent,
   parseClaudeModelId,
@@ -362,6 +365,9 @@ type GoalMsg = {
   role: string;
   color: string;
   text: string;
+  /// Model-visible version of a user turn (for example extracted documents).
+  /// The UI keeps `text` concise while follow-up turns retain attachment context.
+  context?: string;
   /// Renderer hint. "thinking" → italic block, "tool" → monospace
   /// command-style block, undefined / "dispatch" / etc. → default reply look.
   kind?: "thinking" | "tool" | "dispatch";
@@ -5025,7 +5031,7 @@ function ChatInputDock({
   draft: string;
   setDraft: (v: string) => void;
   inputRef: React.RefObject<HTMLTextAreaElement>;
-  onSend: (images: Attachment[]) => void;
+  onSend: (attachments: Attachment[]) => void;
   busy: boolean;
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
@@ -5064,18 +5070,25 @@ function ChatInputDock({
     { name: "/clear",     description: "Clear the draft text",              action: () => setDraft("") },
   ], [autoApprove, onSwitchTab, onToggleAutoApprove, setDraft]);
 
-  // Pasted images for the team chat (parity with the Code + fine-tuning chats).
-  // Sent on the next message via onSend(images); cleared after. Same shared
-  // fileToImageAttachment + Attachment shape used everywhere.
-  const [images, setImages] = useState<Attachment[]>([]);
+  // Files for the next team-chat turn. Images retain their bytes; documents are
+  // parsed locally and carry extracted text only.
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const addDockFiles = async (files: FileList | File[]) => {
+    for (const file of Array.from(files)) {
+      try {
+        const attachment = await fileToChatAttachment(file);
+        setAttachments((current) => [...current, attachment]);
+      } catch (error) {
+        flashNote(String((error as { message?: string })?.message ?? error));
+      }
+    }
+  };
   const onDockPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []).filter(f => f.type.startsWith("image/"));
+    const files = Array.from(e.clipboardData?.files ?? []);
     if (files.length === 0) return;
     e.preventDefault();
-    files.forEach(async (f) => {
-      try { const a = await fileToImageAttachment(f); setImages(x => [...x, a]); }
-      catch (err) { console.warn("[agentic chat] image paste failed", err); }
-    });
+    void addDockFiles(files);
   };
 
   // Droplist state — open whenever the draft is exactly "/" or starts
@@ -5146,23 +5159,7 @@ function ChatInputDock({
     }
   };
 
-  // + attach — opens the OS file picker via the rfd-backed Tauri
-  // command we already use elsewhere (Browse… on the LocationRow).
-  // The desktop dispatch path is text-only today, so we drop the
-  // path into the draft as a hint; the orchestrator can read the
-  // file via its read_file tool.
-  const onAttach = async () => {
-    try {
-      const path = await invoke<string | null>("pick_file", { title: "Attach a file", filters: null });
-      if (path && typeof path === "string") {
-        const sep = draft.endsWith("\n") || draft.length === 0 ? "" : "\n";
-        setDraft(`${draft}${sep}Attached file: \`${path}\``);
-        flashNote(`Attached: ${path.split(/[/\\]/).pop()}`);
-      }
-    } catch (e) {
-      flashNote(`File picker failed: ${String(e)}`);
-    }
-  };
+  const onAttach = () => fileInputRef.current?.click();
 
   // Send / Stop: when idle, send the draft (slash commands run
   // inline). When busy, fire owllm:dispatch-abort which AgentsPage
@@ -5181,7 +5178,7 @@ function ChatInputDock({
       return;
     }
     const t = draft.trim();
-    if (!t && images.length === 0) return;
+    if (!t && attachments.length === 0) return;
     if (t.startsWith("/")) {
       const exact = slashCommands.find(c => c.name.toLowerCase() === t.toLowerCase());
       if (exact) { runCommand(exact); return; }
@@ -5197,14 +5194,15 @@ function ChatInputDock({
       // up and auto-send once the model finishes loading. Clear the
       // textarea so the user knows we accepted it.
       try {
-        window.dispatchEvent(new CustomEvent("owllm:dock:park-draft", { detail: { text: t } }));
+        window.dispatchEvent(new CustomEvent("owllm:dock:park-draft", { detail: { text: appendDocumentAttachmentText(t, attachments) } }));
       } catch {}
       setDraft("");
+      setAttachments([]);
       onLoadModel();
       return;
     }
-    onSend(images);
-    setImages([]);
+    onSend(attachments);
+    setAttachments([]);
   };
 
   return (
@@ -5253,12 +5251,12 @@ function ChatInputDock({
         borderRadius:12,
         overflow:"hidden",
       }}>
-        {images.length > 0 && (
+        {attachments.length > 0 && (
           <div style={{ display:"flex", gap:6, flexWrap:"wrap", padding:"8px 12px 0" }}>
-            {images.map((a, i) => (
+            {attachments.map((a, i) => (
               <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:6, border:"1px solid rgba(122,162,255,0.35)", background:"rgba(122,162,255,0.12)", color:"#9ad9ff", borderRadius:12, padding:"2px 6px 2px 8px", fontSize:11, fontWeight:700 }}>
-                🖼 {a.filename ?? "image"}
-                <button onClick={() => setImages(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border:"none", background:"transparent", color:"#9ad9ff", cursor:"pointer", fontSize:13, lineHeight:1, padding:0 }}>×</button>
+                {a.kind === "image" ? "🖼" : "📄"} {a.filename ?? (a.kind === "image" ? "image" : "document")}
+                <button onClick={() => setAttachments(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border:"none", background:"transparent", color:"#9ad9ff", cursor:"pointer", fontSize:13, lineHeight:1, padding:0 }}>×</button>
               </span>
             ))}
           </div>
@@ -5277,7 +5275,7 @@ function ChatInputDock({
                 // While a run is active, Enter QUEUES the message to steer the run
                 // (onSend → onSupSend enqueues). handleSend()-when-busy is Stop, so
                 // route around it here; the ■ button remains the way to stop.
-                if (busy && draft.trim()) onSend(images);
+                if (busy && (draft.trim() || attachments.length)) onSend(attachments);
                 else handleSend();
               }
             }}
@@ -5326,7 +5324,7 @@ function ChatInputDock({
           <button
             type="button"
             onClick={onAttach}
-            title="Attach a file"
+            title="Attach images or documents"
             style={{
               width:28, height:28, background:"transparent",
               border:"1px solid var(--border)", borderRadius:6,
@@ -5334,6 +5332,14 @@ function ChatInputDock({
               display:"flex", alignItems:"center", justifyContent:"center",
             }}
           >+</button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={CHAT_ATTACHMENT_ACCEPT}
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => { if (e.target.files) void addDockFiles(e.target.files); e.target.value = ""; }}
+          />
           <button
             type="button"
             onClick={() => setPaletteOpen(v => !v)}
@@ -5366,21 +5372,21 @@ function ChatInputDock({
           <button
             type="button"
             onClick={handleSend}
-            disabled={!busy && !loadingModel && !draft.trim()}
+            disabled={!busy && !loadingModel && !draft.trim() && attachments.length === 0}
             title={busy
               ? "Stop the in-flight dispatch"
               : loadingModel
                 ? "Loading model into VRAM — click sends as soon as ready"
                 : needsLoad
                   ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
-                  : (draft.trim() ? "Send message" : "Type something to send")}
+                  : (draft.trim() || attachments.length ? "Send message" : "Type something or attach a document")}
             style={{
               width: (needsLoad || loadingModel) ? 76 : 32, height:28,
-              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
-              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() ? "var(--accent-fg)" : "var(--fg-muted)"),
+              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() || attachments.length ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
+              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() || attachments.length ? "var(--accent-fg)" : "var(--fg-muted)"),
               border:"1px solid " + (busy ? "var(--warn)" : needsLoad ? "var(--ok)" : "rgba(var(--accent-rgb),0.55)"),
               borderRadius:6,
-              cursor: (busy || loadingModel || draft.trim()) ? "pointer" : "not-allowed",
+              cursor: (busy || loadingModel || draft.trim() || attachments.length) ? "pointer" : "not-allowed",
               fontSize: (needsLoad || loadingModel) ? 11 : 14, fontWeight:800,
               display:"flex", alignItems:"center", justifyContent:"center", gap: 4,
             }}
@@ -7078,7 +7084,7 @@ function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
     if (m.role === "system" || m.role === "error" || m.role === "dispatch") continue;
     out.push({
       role: m.role === "you" ? "user" : "assistant",
-      content: m.text,
+      content: m.context || m.text,
     });
   }
   return out;
@@ -7309,7 +7315,7 @@ async function streamChatCompletion(
     );
   }
   const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning, onTranscript),
+    await transcribeAudioAttachments(appendDocumentAttachmentText(userMessage, attachments), attachments, onSystemWarning, onTranscript),
     images,
   );
 
@@ -9934,15 +9940,18 @@ export function AgentsPage({
   // log buffer. The dispatch loop above handles the orchestrator-led
   // flow; this lets the user sneak in a side note without re-running.
   const onSupSend = async (text: string, images: Attachment[] = []) => {
+    const visualImages = imageAttachments(images);
+    const documentNames = images.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleText = documentNames.length ? `${text}${text ? "\n\n" : ""}📄 ${documentNames.join(", ")}` : text;
     if (supSendBusyRef.current) {
       // A run is active → DON'T drop the message. Queue it as a mid-run steer;
       // dispatchGoal drains it at the next orchestrator boundary and feeds it in.
       // (Images aren't carried mid-run — text only.) Echo it so the user sees it
       // was captured, not ignored.
-      const t = text.trim();
+      const t = appendDocumentAttachmentText(text.trim(), images).trim();
       if (t) {
         steerQueueRef.current.push(t);
-        setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `⚡ queued to steer the run → ${t}`, ts: Date.now(), seq: nextSeq() }]);
+        setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `⚡ queued to steer the run → ${visibleText}`, context: t, ts: Date.now(), seq: nextSeq() }]);
       }
       return;
     }
@@ -9969,7 +9978,7 @@ export function AgentsPage({
     // Otherwise attaching a picture silently diverted the run to the read-only
     // single-assistant orchestrator below, skipping the solo-loop's publish
     // (the "I said publish but it switched to the orchestrator" bug).
-    if (text.trim() && activeTeam && (soloMode || images.length === 0)) {
+    if (text.trim() && activeTeam && (soloMode || visualImages.length === 0)) {
       const orchSpec = findOrchestratorSpec(activeTeam);
       const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
       if (soloMode || hasSpecialists) {
@@ -9994,8 +10003,9 @@ export function AgentsPage({
           // it to the agent buffers, not supChat), then run. Mark any attached
           // images so the echoed turn matches what the single-assistant path shows.
           const echo: GoalMsg = { role: "you", color: "#9ad9ff",
-            text,
-            images: images.length > 0 ? attachmentThumbs(images) : undefined,
+            text: visibleText,
+            context: appendDocumentAttachmentText(text, images),
+            images: visualImages.length > 0 ? attachmentThumbs(visualImages) : undefined,
             ts: Date.now(), seq: nextSeq() };
           setSupChat(prev => [...prev, echo]);
           await dispatchGoal(text, priorHistory, images);
@@ -10030,8 +10040,9 @@ export function AgentsPage({
 
     const userMsg: GoalMsg = {
       role: "you", color: "#9ad9ff",
-      text,
-      images: images.length > 0 ? attachmentThumbs(images) : undefined,
+      text: visibleText,
+      context: appendDocumentAttachmentText(text, images),
+      images: visualImages.length > 0 ? attachmentThumbs(visualImages) : undefined,
       ts: Date.now(), seq: nextSeq(),
     };
     setSupChat(prev => [...prev, userMsg]);

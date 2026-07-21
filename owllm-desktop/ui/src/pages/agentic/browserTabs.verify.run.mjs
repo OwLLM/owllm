@@ -19,6 +19,10 @@ const readLF = (p) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 const browserRs = readLF(path.join(root, "src-tauri", "src", "browser.rs"));
 const vaultRs = readLF(path.join(root, "src-tauri", "src", "browser_vault.rs"));
 const chromeHtml = readLF(path.join(root, "ui", "public", "browser-chrome.html"));
+const localTools = readLF(path.join(root, "ui", "src", "pages", "agentic", "localTools.ts"));
+const gatewayRs = readLF(path.join(root, "src-tauri", "src", "mcp_gateway.rs"));
+const libRs = readLF(path.join(root, "src-tauri", "src", "lib.rs"));
+const browserPanel = readLF(path.join(root, "ui", "src", "pages", "agentic", "BrowserPanel.tsx"));
 
 let failures = 0;
 function check(cond, label) {
@@ -41,13 +45,50 @@ check(browserRs.includes("fn attach_tab(") && browserRs.includes("fn new_tab(") 
       browserRs.includes("fn activate_tab(") && browserRs.includes("fn close_tab("),
   "tab lifecycle functions exist (attach/new/activate/close)");
 check(browserRs.includes("PARK_X"),
-  "inactive tabs are parked offscreen (cross-platform, no hide())");
+  "inactive framed tabs are parked offscreen without losing their page state");
+check(browserRs.includes("fn attach_legacy_tab(") &&
+      browserRs.includes("WebviewWindowBuilder::new(app, tab_label(id), WebviewUrl::External(url))") &&
+      browserRs.includes(".visible(active)") &&
+      /fn activate_tab[\s\S]{0,2500}win\.hide\(\)/.test(browserRs),
+  "Linux safety fallback keeps independent top-level WebViews and shows only the selected tab");
+check(/fn destroy_browser_windows[\s\S]{0,900}tabs\.order\.clone\(\)[\s\S]{0,500}window\.destroy\(\)/.test(browserRs),
+  "stopping or rebuilding closes every platform-specific tab window");
 check(browserRs.includes("__owllmTabsSet"),
   "Rust pushes the live tab list into the chrome strip");
 check(browserRs.includes("const CHROME_H: f64 = 66.0"),
   "chrome bar is two rows (28px tab strip + 38px nav)");
-check(/fn content_webview[\s\S]{0,400}tab_label\(id\)/.test(browserRs),
-  "agent commands resolve the ACTIVE tab's webview");
+check(/fn content_webview_for_tab[\s\S]{0,500}tab_id\.or_else\(active_tab_id\)[\s\S]{0,300}tab_label\(id\)/.test(browserRs),
+  "agent commands resolve an explicit tab id before falling back to the active tab");
+check(/pub fn browser_cmd[\s\S]{0,500}tab_id_from_params[\s\S]{0,250}content_webview_for_tab/.test(browserRs),
+  "every DOM action captures its target tab before navigation or evaluation");
+check(browserRs.includes("pub fn browser_list_tabs") &&
+      browserRs.includes("pub fn browser_select_tab") &&
+      browserRs.includes("pub fn browser_close_tab"),
+  "agents can list, select, and close tabs explicitly");
+check(/pub fn browser_open_tab[\s\S]{0,900}new_tab\(&app, parsed\.as_str\(\), activate\)/.test(browserRs),
+  "agent browser_open creates a separate addressable tab");
+check(/fn open_web_url[\s\S]{0,800}new_tab\(app, parsed\.as_str\(\), true\)/.test(browserRs),
+  "user-facing app links create a new selected tab instead of replacing the active page");
+check(/\.on_new_window\([\s\S]{0,500}BrowserUiEvent::OpenTab[\s\S]{0,200}NewWindowResponse::Deny/.test(browserRs),
+  "target=_blank and window.open are captured as managed tabs, not unmanaged popups");
+check(/OpenTab \{[\s\S]{0,150}url: String,[\s\S]{0,100}activate: bool/.test(browserRs) &&
+      /open_tabs: Vec<\(String, bool\)>/.test(browserRs),
+  "simultaneous native new-tab requests remain separate queued operations");
+check(libRs.includes("browser::browser_open_tab") && libRs.includes("browser::browser_list_tabs") &&
+      libRs.includes("browser::browser_select_tab") && libRs.includes("browser::browser_close_tab"),
+  "tab commands are registered with the desktop invoke handler");
+check(localTools.includes('name: "browser_tabs"') && localTools.includes('name: "browser_tab_select"') &&
+      localTools.includes('name: "browser_tab_close"') &&
+      /case "browser_snapshot"[\s\S]{0,250}tab_id: call\.args\.tab_id/.test(localTools),
+  "local/API agents receive tab management and tab-addressed DOM tools");
+check(gatewayRs.includes('"browser_tabs" => crate::browser::browser_list_tabs') &&
+      /"browser_snapshot"[\s\S]{0,220}as_optional_index\(args, "tab_id"\)/.test(gatewayRs),
+  "CLI/MCP agents receive the same tab management and tab-id routing");
+check(browserPanel.includes("status.tabs.map") && browserPanel.includes('invoke("browser_select_tab"') &&
+      browserPanel.includes('invoke("browser_close_tab"'),
+  "the in-app user browser panel exposes the same open/select/close tab surface");
+check(/const navigate[\s\S]{0,350}browser_open_tab[\s\S]{0,100}activate: true/.test(browserPanel),
+  "URLs opened by the user panel create selected tabs instead of replacing the current tab");
 
 // --- typed-login capture --------------------------------------------------
 check(browserRs.includes("function reportCred()") &&

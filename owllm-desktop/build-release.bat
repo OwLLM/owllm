@@ -64,7 +64,10 @@ rem ships OwLLM.Desktop.Setup.exe (the NSIS) + latest.json ? the MSI is never
 rem uploaded, and its WiX bundling step started failing with "cannot find the file
 rem specified (os error 2)" AFTER everything (incl. the NSIS) was already EV-signed.
 rem Skipping it removes a dependency we don't ship and unblocks signed releases.
-call npm run tauri -- build --target x86_64-pc-windows-gnu --bundles nsis
+rem Remove tauri.conf.json's baked-in EV thumbprint for the build itself.
+rem publish-release.sh signs the finished payload/installer later when a cert is
+rem configured; if SimplySign is not mounted, local bundling must still work.
+call npm run tauri -- build --target x86_64-pc-windows-gnu --bundles nsis --config "{\"bundle\":{\"windows\":{\"certificateThumbprint\":null}}}"
 if errorlevel 1 exit /b 1
 
 echo.

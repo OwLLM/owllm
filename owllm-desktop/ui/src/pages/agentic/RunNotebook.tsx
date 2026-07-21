@@ -79,6 +79,7 @@ export type NotebookState = {
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
 const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [] };
 const keyFor = (projectId: string) => `owllm:agents:notebook:${projectId}`;
+const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 export function loadNotebook(projectId: string | null | undefined): NotebookState {
   if (!projectId) return { ...EMPTY };
@@ -140,6 +141,57 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
   saveNotebook(projectId, nb);
   return next;
+}
+
+/// Convert the ordered `## Plan` in BRIEF.md into feedable implementation
+/// steps. Brainstormer is required to write this section, but the fallback
+/// still gives the team one useful job instead of ending at a dead-end CTA.
+export function briefImplementationSteps(brief: string): string[] {
+  const lines = brief.replace(/\r\n/g, "\n").split("\n");
+  const steps: string[] = [];
+  let inPlan = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (/^#{1,3}\s+(?:implementation\s+)?plan\s*$/i.test(line)) {
+      inPlan = true;
+      continue;
+    }
+    if (inPlan && /^#{1,3}\s+/.test(line)) break;
+    if (!inPlan) continue;
+    const numbered = line.match(/^\d+[.)]\s+(.{3,})$/);
+    const task = line.match(/^[-*]\s+\[[ xX]\]\s+(.{3,})$/);
+    const text = (numbered?.[1] ?? task?.[1] ?? "").trim();
+    if (text) steps.push(text);
+  }
+  return steps.length
+    ? steps.slice(0, 12)
+    : ["Implement the approved plan in BRIEF.md, follow its ordered scope, and run the verification described there."];
+}
+
+/// Finish an in-project brainstorm by preparing that SAME project's Notebook.
+/// Existing queue/history stays intact; only new, non-duplicate plan steps are
+/// appended. The brief itself becomes the living plan when the user has not
+/// already written one.
+export function seedNotebookFromBrief(projectId: string | null | undefined, brief: string): number {
+  if (!projectId || !brief.trim()) return 0;
+  const nb = loadNotebook(projectId);
+  const known = new Set(nb.steps.map((s) => s.text.trim().toLocaleLowerCase()).filter(Boolean));
+  const now = Date.now();
+  const additions = briefImplementationSteps(brief).filter((text) => {
+    const key = text.trim().toLocaleLowerCase();
+    if (!key || known.has(key)) return false;
+    known.add(key);
+    return true;
+  });
+  if (!nb.plan.trim()) nb.plan = brief.trim();
+  nb.steps.push(...additions.map((text, index) => ({
+    id: `${newStepId()}${index.toString(36)}`,
+    text,
+    status: "pending" as const,
+    ts: now + index,
+  })));
+  saveNotebook(projectId, nb);
+  return additions.length;
 }
 
 /// Start the wall-clock timer for an auto-fed queue when a caller is not also
@@ -228,8 +280,6 @@ function formatAutoFeedTiming(nb: NotebookState): string | null {
   }
   return `Auto-feed running • started ${formatClock(nb.autoFeedStartedAt)} • ${elapsed}`;
 }
-
-const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 
 type KanbanPlan = { now: string; next: string; later: string };
 const EMPTY_KANBAN: KanbanPlan = { now: "", next: "", later: "" };

@@ -16,6 +16,7 @@ import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
+import { seedNotebookFromBrief } from "./RunNotebook";
 import {
   type RoleData,
   type ModelInfo,
@@ -60,6 +61,11 @@ type Props = {
   /// Called after a team is applied to the project so the parent reloads
   /// the roster + canvas.
   onTeamApplied?: () => void;
+  /// Existing projects already have a runnable team. Their brainstorm must
+  /// finish in the Notebook, not ask the user to create another team.
+  hasTeam?: boolean;
+  /// Close the brainstorm and reveal this project's prepared Notebook.
+  onOpenNotebook?: () => void;
 };
 
 type LogLine = { kind: "text" | "tool" | "system"; text: string };
@@ -195,7 +201,7 @@ function parseProposedTeam(reply: string): ProposedAgent[] | null {
 
 export default function BrainstormPanel(props: Props) {
   const { open, onClose, projectCwd, brainstormerRole, modelId, port, models, accountsStatus,
-    initialIdea, onBriefSaved, projectId, availableRoles, onTeamApplied } = props;
+    initialIdea, onBriefSaved, projectId, availableRoles, onTeamApplied, hasTeam = false, onOpenNotebook } = props;
 
   const [idea, setIdea] = useState("");
   const [selectedModelId, setSelectedModelId] = useState(modelId);
@@ -208,6 +214,7 @@ export default function BrainstormPanel(props: Props) {
   const [proposedTeam, setProposedTeam] = useState<ProposedAgent[] | null>(null);
   const [applying, setApplying] = useState(false);
   const [teamApplied, setTeamApplied] = useState(false);
+  const [notebookStepCount, setNotebookStepCount] = useState(0);
   // Conversational co-founder (step 3): a back-and-forth before/around the brief.
   const [convHistory, setConvHistory] = useState<ConversationTurn[]>([]);
   const [chatInput, setChatInput] = useState("");
@@ -308,6 +315,7 @@ export default function BrainstormPanel(props: Props) {
     setProposedTeam(null);
     setApplying(false);
     setTeamApplied(false);
+    setNotebookStepCount(0);
     setConvHistory([]);
     setChatInput("");
     setBriefText("");
@@ -367,6 +375,9 @@ export default function BrainstormPanel(props: Props) {
       setDone(st?.done ?? false);
       setProposedTeam(st?.proposedTeam ?? null);
       setTeamApplied(st?.teamApplied ?? false);
+      if (st?.done && restoredBrief && projectId && hasTeam) {
+        setNotebookStepCount(seedNotebookFromBrief(projectId, restoredBrief));
+      }
       setBriefText(restoredBrief);
       setBoardView(st?.boardView ?? false);
       setError(st?.error ?? null);
@@ -439,6 +450,7 @@ export default function BrainstormPanel(props: Props) {
     setLines([]);
     setProposedTeam(null);
     setTeamApplied(false);
+    setNotebookStepCount(0);
     setError(null);
     setIdea("");
     setChatInput("");
@@ -524,15 +536,24 @@ export default function BrainstormPanel(props: Props) {
       setConvHistory(newHistory);
       // Did the brief land (or get refined) this turn?
       let briefOnDisk = false;
+      let briefTextOnDisk = "";
       try {
         const text = await invoke<string>("tool_read_file", { path: "BRIEF.md", cwd: projectCwd });
         briefOnDisk = text.trim().length > 0;
-        if (briefOnDisk) setBriefText(text);   // keep the live board in sync each turn
+        if (briefOnDisk) {
+          briefTextOnDisk = text;
+          setBriefText(text);   // keep the live board in sync each turn
+        }
       } catch { /* not yet */ }
-      if (briefOnDisk && !done) {
-        setDone(true);
-        append("system", `\n✓ BRIEF.md saved. Keep chatting to refine it (the board updates live), or 🤝 Assemble a team below.`);
-        onBriefSaved?.();
+      if (briefOnDisk) {
+        if (projectId && hasTeam) setNotebookStepCount(seedNotebookFromBrief(projectId, briefTextOnDisk));
+        if (!done) {
+          setDone(true);
+          append("system", hasTeam
+            ? `\n✓ BRIEF.md saved and its implementation steps were added to this project's Notebook.`
+            : `\n✓ BRIEF.md saved. This project has no team yet; assemble one below.`);
+          onBriefSaved?.();
+        }
       }
     } catch (e: any) {
       if (reply) setConvHistory([...historyWithUser, { role: "assistant", content: reply }]);
@@ -689,7 +710,9 @@ export default function BrainstormPanel(props: Props) {
             <div>
               <div style={{ color: "var(--fg-strong)", fontWeight: 700, fontSize: 15 }}>Project Brainstorm</div>
               <div style={{ color: "var(--fg-muted)", fontSize: 11, marginTop: 2 }}>
-                Co-founder chat → research (competitors, OSS, real pain) → BRIEF.md → assemble a team
+                {hasTeam
+                  ? "Co-founder chat → BRIEF.md → implementation Notebook"
+                  : "Co-founder chat → BRIEF.md → assemble the first team"}
               </div>
             </div>
           </div>
@@ -812,7 +835,20 @@ export default function BrainstormPanel(props: Props) {
             )}
             {done && !teamApplied && (
               <>
-                {projectId && !proposedTeam && (
+                {hasTeam ? (
+                  <button
+                    data-ui="BrainstormOpenNotebook"
+                    onClick={() => { void queueCheckpoint(); onOpenNotebook?.(); }}
+                    disabled={!projectId}
+                    title="Open this project's implementation queue"
+                    style={{
+                      padding: "8px 16px", fontSize: 13, fontWeight: 700,
+                      background: "linear-gradient(180deg, var(--accent), rgba(var(--accent-rgb),0.72))",
+                      color: "var(--accent-fg)", border: "none", borderRadius: 6,
+                      cursor: projectId ? "pointer" : "not-allowed", opacity: projectId ? 1 : 0.55,
+                    }}
+                  >📓 Open implementation Notebook{notebookStepCount > 0 ? ` · ${notebookStepCount} new` : ""}</button>
+                ) : projectId && !proposedTeam && (
                   <button
                     onClick={assembleTeam}
                     disabled={proposing}
@@ -822,7 +858,7 @@ export default function BrainstormPanel(props: Props) {
                       color: "#062012", border: "none", borderRadius: 6,
                       cursor: proposing ? "wait" : "pointer", opacity: proposing ? 0.7 : 1,
                     }}
-                  >{proposing ? "🤝 Assembling team…" : "🤝 Assemble team from brief"}</button>
+                  >{proposing ? "🤝 Assembling team…" : "🤝 Assemble first team from brief"}</button>
                 )}
                 <button
                   onClick={closeAndSave}
@@ -973,7 +1009,9 @@ export default function BrainstormPanel(props: Props) {
                 onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendFollowup(); } }}
                 disabled={running}
                 rows={1}
-                placeholder={running ? "Co-founder is thinking…" : (done ? "Refine the brief, or assemble a team above…" : "Answer, push back, or say ‘go’ to research + write the brief…")}
+                placeholder={running ? "Co-founder is thinking…" : (done
+                  ? (hasTeam ? "Refine the brief, or open its implementation Notebook above…" : "Refine the brief, or assemble the first team above…")
+                  : "Answer, push back, or say ‘go’ to research + write the brief…")}
                 style={{
                   flex: 1, minWidth: 0, minHeight: 38, maxHeight: 180,
                   padding: "9px 12px", background: "rgba(10,14,22,0.8)",

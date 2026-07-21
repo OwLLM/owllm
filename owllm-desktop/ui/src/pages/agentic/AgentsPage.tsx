@@ -15,6 +15,7 @@ import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import { projectAvailability, projectCanRun, projectOriginLabel } from "./projectPortability";
 import BrainstormPanel from "./BrainstormPanel";
+import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
 import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
@@ -4029,7 +4030,7 @@ function GraphCanvas({
   // (below) still own left-button behaviour on their own elements via
   // stopPropagation, so they don't fight with the hook.
   const view = useCanvasGestures({ minZoom: 0.25, maxZoom: 3.0, factor: 1.12 });
-  const { pan, zoom, setPan, containerRef, onMouseDown: onContainerMouseDown, onWheel: onContainerWheel, panDragging } = view;
+  const { pan, zoom, setPan, setZoom, containerRef, onMouseDown: onContainerMouseDown, onWheel: onContainerWheel, panDragging } = view;
 
   // Active-state pulse so the green ring on a streaming node breathes
   // (static 40 %-opacity ring used to be easy to miss against the dark
@@ -4171,6 +4172,33 @@ function GraphCanvas({
     return out;
   })();
 
+  // Fit every saved/manual layout into the CURRENT viewport. Absolute graph
+  // coordinates are persisted per project and can outlive a window resize,
+  // a side-column change, or a profile restored on another PC. Previously the
+  // root kept the old measured pixel width and those valid coordinates were
+  // simply clipped, producing a half-canvas/black-panel layout. Reframing the
+  // view preserves the user's positions while ensuring every card is visible.
+  const fitGraphToViewport = () => {
+    if (!team || team.agents.length === 0 || w <= 0 || h <= 0) return;
+    const points = team.agents
+      .map((agent) => effective.get(agent.name))
+      .filter((p): p is { x: number; y: number } => !!p);
+    if (points.length === 0) return;
+    const fit = computeGraphViewportFit(points, w, h, NODE_W, NODE_H);
+    if (!fit) return;
+    setZoom(fit.zoom);
+    setPan(fit.pan);
+  };
+  const positionMembershipKey = positions
+    ? Array.from(positions.keys()).sort().join("|")
+    : "auto";
+  useLayoutEffect(() => {
+    fitGraphToViewport();
+  // Values do not participate deliberately: dragging a card must not re-fit
+  // under the pointer. A team/viewport change or initial saved-map load does.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [team?.id, w, h, soloLayout, positionMembershipKey]);
+
   // Convert a client-space (mouse event) coordinate to inner-content
   // coordinates accounting for pan + zoom. Used by every interaction
   // that needs to know "what content point is the cursor over".
@@ -4239,7 +4267,7 @@ function GraphCanvas({
 
   if (!team || team.agents.length === 0) {
     return (
-      <div data-ui="GraphCanvas" style={{ position:"relative", width:w, height:h, background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--fg-subtle)", fontSize:13 }}>
+      <div data-ui="GraphCanvas" style={{ position:"relative", width:"100%", height:"100%", background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--fg-subtle)", fontSize:13 }}>
         No agents on this team yet. Pick a template via <b style={{ margin:"0 4px" }}>Team…</b>.
       </div>
     );
@@ -4390,7 +4418,7 @@ function GraphCanvas({
       onWheel={onContainerWheel}
       onContextMenu={(e) => e.preventDefault()}
       style={{
-        position:"relative", width:w, height:h,
+        position:"relative", width:"100%", height:"100%",
         background:"linear-gradient(180deg, #101522 0%, #06080d 100%)",
         overflow:"hidden",
         // Middle-click on Windows triggers an "auto-scroll" wheel cursor.
@@ -4728,6 +4756,18 @@ function GraphCanvas({
           );
         })}
       </div>
+      <button
+        data-ui="GraphFitViewport"
+        onClick={(event) => { event.stopPropagation(); fitGraphToViewport(); }}
+        title="Fit the complete team graph in this window"
+        style={{
+          position:"absolute", left:10, top:10, zIndex:60,
+          padding:"5px 9px", borderRadius:7,
+          border:"1px solid var(--border-strong)",
+          background:"rgba(8,12,20,0.82)", color:"var(--fg)",
+          fontSize:11, fontWeight:700, cursor:"pointer",
+        }}
+      >Fit graph</button>
       {/* Empty-state hint */}
       {liveEdges.length === 0 && !drag && (
         <div style={{ position:"absolute", bottom:8, left:0, right:0, textAlign:"center", color:"var(--fg-subtle)", fontSize:11, pointerEvents:"none" }}>
@@ -13155,6 +13195,12 @@ export function AgentsPage({
         initialIdea={brainstormSeed}
         onBriefSaved={() => setHasBriefForProject(true)}
         projectId={selectedProjectId}
+        hasTeam={!!activeTeam?.agents.length}
+        onOpenNotebook={() => {
+          setBrainstormOpen(false);
+          setBrainstormSeed("");
+          window.setTimeout(() => window.dispatchEvent(new CustomEvent("owllm:open-run-notebook")), 0);
+        }}
         // Apply the assembled roster to THIS project (persists), then clear any
         // template override + reload so the canvas shows the new team.
         onTeamApplied={() => { setPickedTeamId(null); reloadProjects(); }}

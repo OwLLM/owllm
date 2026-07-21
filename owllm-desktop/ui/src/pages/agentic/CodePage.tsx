@@ -3248,12 +3248,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         )}
       </div>
 
-      {/* Status line — expands to multiple lines for the per-credential
-          sync report (P1-2); stays a single ellipsized line otherwise. */}
-      <div style={status.includes("\n")
-        ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6, flexShrink: 0 }
-        : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>{status}</div>
-
       {/* Docked terminal — a real PTY shell in the workspace, sitting right
           above the message box (user spec). Same shell as the popup; ⤢ moves
           it out to the floating window. Kept mounted while hidden so the shell
@@ -3278,6 +3272,25 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
         </div>
       )}
+
+      {/* Status + Terminal line — sits directly above the composer (the input
+          chatbox). The "Coding in …" info is on the left; the Terminal toggle
+          is on the top-right of the input area, full text. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        <div style={status.includes("\n")
+          ? { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
+          : { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
+        <button
+          onClick={() => {
+            // Hidden shells re-open; visible shells hide.
+            if (!termOpen) { setTermOpen(true); setTermHidden(false); }
+            else setTermHidden((hidden) => !hidden);
+          }}
+          title="Open the workspace terminal"
+          aria-label="Open terminal"
+          style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
+        >Terminal</button>
+      </div>
 
       {/* Composer row — lives in the SAME column as the chat panes, so it is
           always exactly as wide as the chat window. DIVIDED (fine-tune-chat
@@ -3305,17 +3318,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
           <input ref={codeFileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
-          <button
-            onClick={() => {
-              // Terminal belongs with the workspace composer, not the compact
-              // utility/header strip. Hidden shells re-open; visible shells hide.
-              if (!termOpen) { setTermOpen(true); setTermHidden(false); }
-              else setTermHidden((hidden) => !hidden);
-            }}
-            title="Open the workspace terminal"
-            aria-label="Open terminal"
-            style={{ ...btn, height: 44, width: 44, justifyContent: "center", padding: 0, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
-          >🖥</button>
           <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
             ref={codeDraftRef}

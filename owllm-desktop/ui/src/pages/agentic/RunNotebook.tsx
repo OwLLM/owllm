@@ -417,6 +417,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   /// Same transient outcome for the Kanban NOW-batch button (keyed separately —
   /// lanes have no step id).
   const [laneNotice, setLaneNotice] = useState<{ key: keyof KanbanPlan; kind: "queued" | "dispatched" | "no-team" } | null>(null);
+  /// Transient whole-queue outcome for Start Queue clicked while a run is
+  /// already in progress — tells the user the queue is deferred until the
+  /// current job finishes instead of steering it now.
+  const [queueNotice, setQueueNotice] = useState<"waiting" | null>(null);
   const [editingStepId, setEditingStepId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   // Digest proposals live IN the notebook blob (nb.proposed / nb.proposedPlan)
@@ -459,6 +463,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     setDigestError("");
     setEditingStepId(null);
     setFeedNotice(null);
+    setQueueNotice(null);
   }, [projectId]);
 
   const updateNotebook = (makeNext: (prev: NotebookState) => NotebookState) => {
@@ -545,7 +550,17 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   /// what kicks the chain off while the team is idle.
   const startQueue = () => {
     const first = nb.steps.find((s) => s.status === "pending");
-    if (first) feedStep(first);
+    if (!first) return;
+    if (running) {
+      // Agent is already running — claim auto-feed ownership so the queue
+      // starts automatically as soon as the current job finishes, without
+      // steering the live run now.
+      updateNotebook((prev) => ({ ...prev, autoFeed: true, autoFeedOwner: surfaceId }));
+      setQueueNotice("waiting");
+      window.setTimeout(() => setQueueNotice(null), 6000);
+      return;
+    }
+    feedStep(first);
   };
 
   const startEdit = (s: NotebookStep) => { setEditingStepId(s.id); setEditingText(s.text); };
@@ -672,7 +687,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     width: "100%", resize: "none", overflow: "hidden",
     background: "var(--bg-input)", color: "var(--fg)",
     border: "1px solid var(--border-strong)", borderRadius: 8,
-    padding: 10, fontSize: 12.5, lineHeight: 1.55, outline: "none",
+    padding: 10, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, outline: "none",
   };
 
   const panel = (
@@ -931,11 +946,22 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               {pendingCount > 0 && (
                 <button
                   onClick={startQueue}
-                  title={nb.autoFeed
-                    ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
-                    : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
-                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: "var(--ok)", color: "#ffffff", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
+                  title={running
+                    ? "Queue is waiting for the current run to finish before starting"
+                    : nb.autoFeed
+                      ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
+                      : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
+                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: running ? "var(--warn)" : "var(--ok)", color: "#ffffff", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
                 ><ActionIcon name="play" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start queue</button>
+              )}
+              {queueNotice && (
+                <span style={{
+                  fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px",
+                  color: "var(--warn)",
+                  border: "1px solid rgba(var(--warn-rgb),0.45)",
+                }}>
+                  queued — starts after the current run
+                </span>
               )}
             </div>
 

@@ -78,4 +78,5 @@ export const ACTION_CATALOG: string[][] = [
   ["No paired devices found.", "未找到已配对设备。", "페어링된 기기가 없습니다.", "ペアリング済みデバイスがありません。", "لم يتم العثور على أجهزة مقترنة.", "Nessun dispositivo associato.", "कोई पेयर किया गया डिवाइस नहीं मिला।", "Nenhum dispositivo pareado encontrado."],
   ["Private fleet orbit · not a location", "私有设备轨道 · 并非地理位置", "비공개 기기 궤도 · 실제 위치 아님", "非公開デバイス軌道 · 実際の位置ではありません", "مدار أجهزة خاص · ليس موقعًا جغرافيًا", "Orbita privata · non indica una posizione", "निजी डिवाइस कक्षा · यह स्थान नहीं है", "Órbita privada · não representa uma localização"],
   ["Coarse server region only", "仅显示大致服务器区域", "대략적인 서버 지역만 표시", "おおよそのサーバー地域のみ", "منطقة الخادم التقريبية فقط", "Solo area approssimativa del server", "केवल अनुमानित सर्वर क्षेत्र", "Somente a região aproximada do servidor"],
+  ["Refresh", "刷新", "새로고침", "更新", "تحديث", "Aggiorna", "रीफ्रेश", "Atualizar"],
 ];

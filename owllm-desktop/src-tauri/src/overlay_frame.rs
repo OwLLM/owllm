@@ -53,22 +53,29 @@ pub fn disable_window_ghosting() {
 pub fn disable_window_ghosting() {}
 
 pub fn enabled() -> bool {
-    // Windows and Linux use the same split-window architecture: an opaque,
-    // content-sized main window plus a transparent decorative overlay. Linux
-    // used to draw the chrome inside one oversized opaque window, which made
-    // every frame margin a solid slab. GTK click-through is configured with an
-    // empty native input region below, avoiding tao's pre-realize panic.
-    #[cfg(target_os = "macos")]
-    {
-        return std::env::var("OWLLM_OVERLAY_FRAME")
-            .map(|v| v == "1")
-            .unwrap_or(false);
-    }
-    #[cfg(any(target_os = "windows", target_os = "linux"))]
+    // Windows: split-window chrome is stable there; keep it on by default.
+    #[cfg(target_os = "windows")]
     {
         std::env::var("OWLLM_OVERLAY_FRAME")
             .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "NO"))
             .unwrap_or(true)
+    }
+    // Linux: the transparent WebKitGTK overlay is a recurring crash source on
+    // NVIDIA/Jetson and some Mesa compositors. Default it OFF and require an
+    // explicit opt-in (OWLLM_OVERLAY_FRAME=1) until the frame is verified crash-
+    // free across the shipping distros.
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("OWLLM_OVERLAY_FRAME")
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
+    }
+    // macOS: overlay frame never shipped; stay opt-in only.
+    #[cfg(target_os = "macos")]
+    {
+        std::env::var("OWLLM_OVERLAY_FRAME")
+            .map(|v| v == "1")
+            .unwrap_or(false)
     }
 }
 

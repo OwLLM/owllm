@@ -175,6 +175,9 @@ owllm-desktop/rel*/
 # Scratch.
 owllm-desktop/tooltest/
 
-# Local Brainstorm transcript. This is live per-checkout user state, not
-# project source, and must never be merged over another device/session.
+# OWLLM project-local runtime state. These files are recreated by the app and
+# must not become permanent Git changes. Keep durable project metadata such as
+# .owllm/project.json, .owllm/verify.json, skills, and assets trackable.
+.owllm-inbox/
 .owllm/brainstorm.json
+.owllm/eval-traces.jsonl

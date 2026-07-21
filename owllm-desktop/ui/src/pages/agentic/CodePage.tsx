@@ -21,7 +21,7 @@ import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
-import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
+import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
@@ -192,6 +192,7 @@ type OpenProjectPagesDetail = {
   handled: boolean;
 };
 const OPEN_PROJECT_PAGES_EVENT = "owllm:code:open-project-pages";
+type ProjectScopeRow = { id: string; location: string; repo_url?: string };
 const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
 const PAGE_SESSION_PREFIX = "owllm:code:page:";
@@ -877,15 +878,31 @@ function CodeWorkspace({ pageId, onTitle }: {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
+  const normProjectPath = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+  const fallbackProjectScope = (folder: string) => `code:${normProjectPath(folder)}`;
+  const resolveFolderProjectScope = async (folder: string, apply = true): Promise<string> => {
+    const clean = folder.trim();
+    if (!clean) return "";
+    const name = clean.replace(/^.*[\\/]/, "") || "Code project";
+    const row = await invoke<ProjectScopeRow>("resolve_project_for_location", {
+      input: { location: clean, name },
+    });
+    const id = row.id || fallbackProjectScope(clean);
+    if (apply) {
+      setRuleScope((prev) => (prev.id === id && prev.shared ? prev : { id, shared: true }));
+      try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: id })); }
+      catch { setDirectives([]); }
+    }
+    return id;
+  };
   // Resolve the rules/notebook scope whenever the folder changes: prefer the
   // matching AGENTIC project id (shared rule set + notebook with the team),
   // fall back to a stable per-folder key.
   useEffect(() => {
     const folder = (projectRoot || workspace || "").trim();
-    const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
     if (!folder) { lastScopeFolderRef.current = ""; setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
-    const nf = norm(folder);
-    const fallbackId = `code:${nf}`;
+    const nf = normProjectPath(folder);
+    const fallbackId = fallbackProjectScope(folder);
     // Folder switched → drop the previous project's scope IMMEDIATELY so its
     // notebook and rules can never linger on screen while the async project
     // lookup runs (or if it hangs). The lookup below only UPGRADES this to the
@@ -902,9 +919,8 @@ function CodeWorkspace({ pageId, onTitle }: {
       let id = fallbackId;
       let shared = false;
       try {
-        const rows = await invoke<{ id: string; location: string }[]>("list_projects");
-        const hit = (rows || []).find((r) => r.location && norm(r.location) === nf);
-        if (hit) { id = hit.id; shared = true; }
+        id = await resolveFolderProjectScope(folder, false);
+        shared = true;
       } catch { /* no projects table reachable — per-folder scope */ }
       if (!alive) return;
       setRuleScope((prev) => (prev.id === id && prev.shared === shared ? prev : { id, shared }));
@@ -1756,14 +1772,28 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
 
   const enrichSecondaryCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
-    const scope = memoryScope();
+    const scope = await resolveMemoryScope();
     const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (!scope || !user.trim()) return { text: user, pack: empty };
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(user);
+    await refreshTeamMemorySnapshot();
     const pack = await retrieveScopedTeamMemoryPack(scope, user, 8, false);
     return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
-  const memoryScope = () => ruleScopeRef.current.id || projectRoot || workspace || "";
+  const memoryScope = () => ruleScopeRef.current.id || ((projectRoot || workspace) ? fallbackProjectScope(projectRoot || workspace) : "");
+  const resolveMemoryScope = async (): Promise<string> => {
+    const current = ruleScopeRef.current;
+    if (current.shared && current.id) return current.id;
+    const folder = (projectRoot || workspace || "").trim();
+    if (!folder) return current.id || "";
+    try {
+      return await resolveFolderProjectScope(folder);
+    } catch {
+      return current.id || fallbackProjectScope(folder);
+    }
+  };
 
   const memoryLabel = (pack: TeamMemoryPack): string =>
     pack.total > 0 ? `${pack.factCount} fact${pack.factCount === 1 ? "" : "s"} · ${pack.worklogCount} worklog` : "no hits";
@@ -1788,16 +1818,23 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
 
   const enrichCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
-    const scope = memoryScope();
+    const scope = await resolveMemoryScope();
     const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (!scope || !user.trim()) return { text: user, pack: empty };
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(user);
+    await refreshTeamMemorySnapshot();
     const pack = await retrieveScopedTeamMemoryPack(scope, user, 8, false);
     return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
-  const logCodeWork = async (instruction: string, result: string) => {
-    const scope = memoryScope();
-    await logScopedTeamWork(scope, "code", instruction, result);
+  const logCodeWork = async (agent: string, instruction: string, result: string) => {
+    const scope = await resolveMemoryScope();
+    if (!scope || !result.trim()) return;
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(instruction);
+    await harvestMemoryWrites(result);
+    await logScopedTeamWork(scope, agent, instruction, stripMemoryDirectives(result));
   };
 
   // One agent turn against the SELECTED model. Routes by provider exactly like
@@ -1928,7 +1965,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     try {
       setStatus(`Coding in ${workspace}`);
       const reply = await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
-      await logCodeWork(text || "(see attached image)", reply);
+      await logCodeWork("code", text || "(see attached image)", reply);
       replyText = reply;
       ok = true;
     } catch (e) {
@@ -2052,6 +2089,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     try {
       setStatus(`Second agent working in ${workspace}`);
       replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
+      await logCodeWork("code_second", text, replyText);
     } catch (e) {
       const err = e as { name?: string; message?: string };
       aborted = err.name === "AbortError";
@@ -2195,14 +2233,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
-        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
+        const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
+        await logCodeWork("code_chat", text || "(see attached image)", reply);
       } else {
         // Pass a working dir so pasted images can be saved into it for the model
         // to read (codex -i / claude file-ref). Use the workspace if one is
         // selected, else the WSL scratch — without ANY cwd the image is dropped
         // ("I can't inspect the image"), which is the bug on a no-folder chat.
         const chatCwd = workspace || chatScratchRef.current || undefined;
-        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
+        const reply = await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
+        await logCodeWork("code_chat", text || "(see attached image)", reply);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -2255,11 +2295,12 @@ function CodeWorkspace({ pageId, onTitle }: {
         setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
         setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
         try {
-          await runTurn(
+          const stepReply = await runTurn(
             CODING_SYSTEM(workspace),
             `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
             [], ctrl.signal, { withEvents: true },
           );
+          await logCodeWork("code", plan[i].title, stepReply);
           setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "done" } : t)));
         } catch (e) {
           const err = e as { name?: string };
@@ -2491,8 +2532,8 @@ function CodeWorkspace({ pageId, onTitle }: {
   if (!workspace && !preparing) {
     return (
       <div data-ui="CodingProjectHub" style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-        <div style={{ flex: 1, minHeight: 0, display: "flex", overflowY: "auto" }}>
-          <div style={{ width: "100%", maxWidth: 1280, margin: "0 auto", display: "flex", flexDirection: "column", gap: 24, padding: "clamp(24px,4vw,56px)", background: "radial-gradient(circle at 88% 8%, rgba(var(--accent-rgb),0.14), transparent 31%)" }}>
+        <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
+          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 30, padding: "36px 36px" }}>
             <div>
               <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.8, textTransform: "uppercase" }}>Portable coding command center</div>
               <div style={{ fontSize: "clamp(30px,4vw,48px)", fontWeight: 850, color: "var(--fg-strong)", letterSpacing: -0.8, lineHeight: 1.05, marginTop: 7 }}>OwLLM Coding</div>
@@ -2512,7 +2553,7 @@ function CodeWorkspace({ pageId, onTitle }: {
 
             <section>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>Projects</div>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>Managed projects</div>
                 <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>{deviceIdentity.name}</span>
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 13 }}>
@@ -2546,30 +2587,29 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
               {catalogError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 9 }}>{catalogError}</div>}
             </section>
-
-            <div style={{ display: "flex", gap: 52, alignItems: "flex-start", width: "100%", flexWrap: "wrap" }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 24, width: "100%", minWidth: 0 }}>
               {/* START — VS Code-style action rows */}
-              <div style={{ flex: "1 1 250px", minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 16, fontWeight: 750, color: "var(--fg-strong)", marginBottom: 8 }}>Local actions</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 8 }}>
-                {([
-                  { icon: "🆕", label: "New project…", onClick: openNewProject },
-                  { icon: "📁", label: "Open a project folder…", onClick: pickWorkspace },
-                  { icon: "💬", label: "New chat (no project)", onClick: startChat },
-                  { icon: "🐙", label: gh?.connected ? `GitHub — ${gh.login}` : "Connect GitHub…", onClick: () => { setGhOpen((v) => !v); setGhMsg(""); } },
-                ]).map((a) => (
-                  <button key={a.label} onClick={a.onClick}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "var(--bg-card)")}
-                    style={{ display: "flex", alignItems: "center", gap: 11, minHeight: 64, background: "var(--bg-card)", border: "1px solid var(--border)", padding: "10px 12px", borderRadius: 11, cursor: "pointer", textAlign: "left" }}>
-                    <span style={{ fontSize: 19, width: 24, textAlign: "center" }}>{a.icon}</span>
-                    <span style={{ color: "var(--accent-ink)", fontWeight: 500, fontSize: 13.5 }}>{a.label}</span>
-                  </button>
-                ))}
+              <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Local actions</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 4, width: "100%" }}>
+                  {([
+                    { icon: "🆕", label: "New project…", onClick: openNewProject },
+                    { icon: "📁", label: "Open a project folder…", onClick: pickWorkspace },
+                    { icon: "💬", label: "New chat (no project)", onClick: startChat },
+                    { icon: "🐙", label: gh?.connected ? `GitHub — ${gh.login}` : "Connect GitHub…", onClick: () => { setGhOpen((v) => !v); setGhMsg(""); } },
+                  ]).map((a) => (
+                    <button key={a.label} onClick={a.onClick}
+                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
+                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                      style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0, background: "transparent", border: "none", padding: "7px 8px", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>
+                      <span style={{ fontSize: 15, width: 18, textAlign: "center", flexShrink: 0 }}>{a.icon}</span>
+                      <span style={{ color: "var(--accent-ink)", fontWeight: 500, fontSize: 13.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.label}</span>
+                    </button>
+                  ))}
                 </div>
                 {/* GitHub connect form (inline, opens under the row) */}
                 {ghOpen && !gh?.connected && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0 0 28px", padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8, maxWidth: 520, padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
                     <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5 }}>Paste a GitHub token so agents can clone private repos and push from inside the sandbox.</div>
                     <button onClick={() => { openWebUrl(GITHUB_TOKEN_URL).catch(() => {}); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent-ink)" }}>↗ Create a token (repo scope)</button>
                     <input type="password" value={ghToken} onChange={(e) => setGhToken(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }} placeholder="ghp_… or github_pat_…" style={{ height: 32, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }} />
@@ -2579,8 +2619,8 @@ function CodeWorkspace({ pageId, onTitle }: {
                     </div>
                   </div>
                 )}
-                {gh?.connected && <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 24, width: "fit-content", margin: "2px 0 0 28px", padding: "0 10px", color: "var(--fg-muted)", fontSize: 11 }}>Disconnect</button>}
-                {ghMsg && <div style={{ margin: "4px 0 0 28px", fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
+                {gh?.connected && <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 24, width: "fit-content", marginTop: 6, padding: "0 10px", color: "var(--fg-muted)", fontSize: 11 }}>Disconnect</button>}
+                {ghMsg && <div style={{ marginTop: 6, fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
                 {/* Isolation status — compact line */}
                 <div style={{ marginTop: 18, fontSize: 11.5, lineHeight: 1.5, color: sbox?.available ? "#7ff0c5" : "var(--fg-muted)" }}>
                   {sbox === null ? "⏳ Checking isolation (WSL)…"
@@ -2594,11 +2634,11 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
 
               {/* RECENT — projects (name + path), VS Code style */}
-              <div style={{ flex: "1 1 320px", minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 16, fontWeight: 750, color: "var(--fg-strong)", marginBottom: 8 }}>Device-only recent folders</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 360, overflowY: "auto", paddingRight: 2 }}>
+              <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Projects</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, maxHeight: 420, overflowY: "auto", paddingRight: 2 }}>
                   {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
-                    <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — create one on the left to get started.</div>
+                    <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — use Local actions above to get started.</div>
                   )}
                   {/* Isolated projects that aren't already in recents */}
                   {isolation.enabled && sboxProjects.filter((p) => !recents.includes(p.path)).map((p) => (
@@ -2606,7 +2646,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       key={p.path}
                       onClick={() => openWorkspace(p.path)}
                       title={p.innerPath}
-                      style={{ display: "block", textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
+                        style={{ display: "block", minWidth: 0, textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
                     >
                       <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)" }}>🐧 {p.name}</div>
                       <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.innerPath}</div>
@@ -2618,7 +2658,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                     return (
                       <div
                         key={ws}
-                        style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
+                        style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
                       >
                         {isRenaming ? (
                           <input

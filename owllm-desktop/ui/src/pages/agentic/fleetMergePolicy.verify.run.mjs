@@ -49,6 +49,32 @@ if (!fleet.includes("preserve_after_merge") ||
     !fleet.includes("differing_untracked_app_state_is_preserved_and_does_not_block_merge")) {
   fail("differing app-owned state is not preserved across worktree merges");
 }
+if (!fleet.includes("fn prepare_identical_tracked_collisions") ||
+    !fleet.includes("IdenticalTrackedBackup") ||
+    !fleet.includes("identical_tracked_local_edits_are_adopted_by_merge") ||
+    !fleet.includes("differing_tracked_local_edits_are_preserved_and_block_merge")) {
+  fail("tracked local edit collision safety or regression coverage is missing");
+}
+if (!fleet.includes('["diff", "--cached", "--name-only"]') ||
+    !fleet.includes("scratch_only_finalize_returns_no_changes") ||
+    !fleet.includes("git_failure_message_uses_stdout_when_stderr_is_empty")) {
+  fail("worktree finalize can still treat unstaged OWLLM scratch as a committable change or return blank commit diagnostics");
+}
+if (!fleet.includes('p == ".owllm/brainstorm.json"') ||
+    !fleet.includes('!is_app_scratch(".owllm/project.json")') ||
+    !fleet.includes('!is_app_scratch(".owllm/verify.json")')) {
+  fail("runtime cleanup can still hide durable .owllm project metadata from commits");
+}
+
+const gitSource = fs.readFileSync(path.join(APP, "src-tauri/src/git.rs"), "utf8");
+const publishCards = fs.readFileSync(path.join(APP, "ui/src/pages/agentic/PublishCards.tsx"), "utf8");
+if (!gitSource.includes("pub nuisance_files: Vec<String>") ||
+    !gitSource.includes("crate::fleet::is_app_scratch(path)") ||
+    !gitSource.includes("status_reports_tracked_runtime_but_keeps_project_card_committable") ||
+    !publishCards.includes("Use Fix with agent to safely de-track them") ||
+    !publishCards.includes("Do not delete or ignore durable project data")) {
+  fail("tracked runtime files are not surfaced through the constrained Fix-with-agent cleanup path");
+}
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-merge-policy-"));
 const git = (...args) => execFileSync("git", args, { cwd: tmp, stdio: "pipe" });

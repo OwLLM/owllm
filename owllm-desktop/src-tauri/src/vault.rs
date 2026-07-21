@@ -938,7 +938,7 @@ fn import_project(
                     p.description,
                     insert_location,
                     self_id,
-                    p.repo_url,
+                    crate::projects::normalize_repo_url(&p.repo_url),
                     p.created_device_id,
                     p.created_device_name,
                     p.team_json,
@@ -962,7 +962,7 @@ fn import_project(
             if p.updated_at > *local {
                 // Remote is newer → adopt CONTENT, keep local path + trust flags.
                 conn.execute(
-                "UPDATE agent_projects SET name = ?2, description = ?3, repo_url = ?4, \
+                    "UPDATE agent_projects SET name = ?2, description = ?3, repo_url = ?4, \
                      created_device_id = ?5, created_device_name = ?6, team_json = ?7, \
                      model_overrides_json = ?8, graph_json = ?9, chat_json = ?10, \
                      agent_logs_json = ?11, team_default_model_id = ?12, updated_at = ?13 \
@@ -971,7 +971,7 @@ fn import_project(
                         p.id,
                         p.name,
                         p.description,
-                        p.repo_url,
+                        crate::projects::normalize_repo_url(&p.repo_url),
                         p.created_device_id,
                         p.created_device_name,
                         p.team_json,
@@ -1054,6 +1054,7 @@ fn import_project(
         if let Ok(entries) = serde_json::from_str::<Vec<VaultMemEntry>>(&p.team_memory_json) {
             let _ = crate::memory::ensure_schema(conn);
             merge_team_memory(conn, &p.id, &entries);
+            let _ = crate::memory::reindex_team_memory_scope(conn, &p.id);
         }
     }
     // 3) Merge the rule set — unit last-writer-wins by directives_updated_at

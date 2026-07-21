@@ -211,11 +211,16 @@ pub async fn list_models() -> Result<Vec<ModelInfo>, String> {
             provider: "openai".to_string(),
         });
     }
-    // Moonshot AI / Kimi — OpenAI-compatible API. The older
-    // kimi-k2-* preview ids are being discontinued 2026-05-25 by
-    // Moonshot; we ship only the current K2.5 + K2.6 line plus the
-    // stable Moonshot V1 128K context fallback.
-    for id in ["kimi-k2.6", "kimi-k2.5", "moonshot-v1-128k"] {
+    // Moonshot AI / Kimi — OpenAI-compatible API and Kimi Code CLI.
+    // Keep this in sync with cloudCatalogue.ts so non-picker callers
+    // see the same current Kimi model line.
+    for id in [
+        "kimi-k3",
+        "kimi-k2.7",
+        "kimi-k2.6",
+        "kimi-k2.5",
+        "moonshot-v1-128k",
+    ] {
         out.push(ModelInfo {
             model_id: id.to_string(),
             port: None,

@@ -274,3 +274,17 @@ html[dir="rtl"] input[type="url"],
 html[dir="rtl"] input[type="email"],
 html[dir="rtl"] input[type="password"],
 html[dir="rtl"] input[type="number"] { direction: ltr; text-align: left; }
+/* Gamify World Map: keep the globe dominant on desktop, then stack the live
+   signal rail below it on narrow windows without changing node order. */
+.world-map-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 310px);
+}
+
+@media (max-width: 900px) {
+  .world-map-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .world-map-globe-panel {
+    min-height: 460px !important;
+  }
+}

@@ -48,6 +48,7 @@ const readLF = (p) => fs.readFileSync(p, "utf8").replace(/\r\n/g, "\n");
 const src = readLF(path.join(HERE, "RunNotebook.tsx"));
 const codePageSrc = readLF(path.join(HERE, "CodePage.tsx"));
 const agentsPageSrc = readLF(path.join(HERE, "AgentsPage.tsx"));
+const brainstormSrc = readLF(path.join(HERE, "BrainstormPanel.tsx"));
 const watcherSrc = readLF(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"));
 const js = ts.transpileModule(src, {
   compilerOptions: {
@@ -153,6 +154,12 @@ check("Code finishes the notebook sequence after its final auto-fed step", codeP
 check("Agents finishes the notebook sequence after its final auto-fed step", agentsPageSrc.includes("markNotebookAutoFeedFinished(pid, notebookSurfaceId);"));
 check("Watcher help and bug actions have accessible names", watcherSrc.includes('aria-label="Help using the app"') && watcherSrc.includes('aria-label="Report a bug"'));
 check("Watcher actions use bundled SVG icons", watcherSrc.includes('<ActionIcon name="help"') && watcherSrc.includes('<ActionIcon name="bug"') && !watcherSrc.includes(">🐞 Report this as a bug"));
+check("Existing-project brainstorm ends in the Notebook", brainstormSrc.includes('data-ui="BrainstormOpenNotebook"') && brainstormSrc.includes("seedNotebookFromBrief(projectId, briefTextOnDisk)"));
+check("Existing-project brainstorm does not offer another team", brainstormSrc.includes("{hasTeam ? (") && brainstormSrc.includes("Assemble first team from brief"));
+check("Agents wires brainstorm completion to the Notebook", agentsPageSrc.includes('hasTeam={!!activeTeam?.agents.length}') && agentsPageSrc.includes('new CustomEvent("owllm:open-run-notebook")'));
+check("Graph fills its parent instead of retaining a stale pixel width", agentsPageSrc.includes('data-ui="GraphFitViewport"') && agentsPageSrc.includes('position:"relative", width:"100%", height:"100%"'));
+check("Graph reframes saved positions when its viewport changes", agentsPageSrc.includes("const fitGraphToViewport = () =>") && agentsPageSrc.includes("positionMembershipKey"));
+
 function mount(props) {
   const container = document.getElementById("root");
   const root = createRoot(container);
@@ -216,6 +223,26 @@ console.log("case 3b: markNotebookStepStarted / markNotebookStepFinished update 
   markNotebookStepFinished(PID, "s1", 5000);
   check("finishedAt is stamped", blob().steps.find((s) => s.id === "s1")?.finishedAt === 5000);
   check("status is untouched by timing helpers", blob().steps.find((s) => s.id === "s1")?.status === "pending");
+}
+
+console.log("case 0c: a completed project brainstorm prepares its Notebook queue");
+{
+  localStorage.removeItem(KEY);
+  const brief = [
+    "# Improve the graph",
+    "",
+    "## Plan",
+    "1. Fix the graph sizing - AgentsPage.tsx - verify every card is visible",
+    "2. Add regression coverage - notebookStartBatch.verify.run.mjs - run the harness",
+    "",
+    "## Scope",
+    "In: graph and tests",
+  ].join("\n");
+  const added = NB.seedNotebookFromBrief(PID, brief);
+  check("brief creates two feedable steps", added === 2 && blob().steps.length === 2);
+  check("brief steps are pending", blob().steps.every((s) => s.status === "pending"));
+  check("brief becomes the Notebook plan", blob().plan === brief);
+  check("seeding the same brief is idempotent", NB.seedNotebookFromBrief(PID, brief) === 0 && blob().steps.length === 2);
 }
 
 // ---- 3c. The auto-feed sequence tracks wall-clock start through final stop,

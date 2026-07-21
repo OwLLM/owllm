@@ -6,9 +6,10 @@ import * as THREE from "three";
 // @ts-ignore: bundled Three.js example module
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { useLocalization } from "../../localization";
-import { getIdentity, listDevices, type DeviceRecord } from "../advanced/remoteDevices";
+import { getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from "../advanced/remoteDevices";
 import {
   loadWorldPresence,
+  includeSelfDevice,
   readPresenceEnabled,
   readWorldMapMode,
   savePresenceEnabled,
@@ -39,28 +40,12 @@ type GlobeNode = {
   orbit?: OrbitParams;
 };
 
-// More accurate continent silhouettes in equirectangular [lon, lat] coordinates.
-// These are still stylized, but the higher vertex count lets the glow read as land.
-const CONTINENTS: Array<Array<[number, number]>> = [
-  // North America
-  [[-168,72],[-157,71],[-141,69],[-122,49],[-124,40],[-117,32],[-105,29],[-100,20],[-84,15],[-80,7],[-83,18],[-95,28],[-79,44],[-62,48],[-52,58],[-55,65],[-72,72],[-105,82],[-140,78]],
-  // South America
-  [[-81,12],[-77,9],[-69,0],[-51,-2],[-38,-8],[-36,-22],[-46,-38],[-56,-53],[-70,-55],[-75,-45],[-78,-18]],
-  // Eurasia
-  [[-24,35],[-9,36],[10,37],[33,31],[49,20],[55,55],[70,70],[103,77],[135,58],[158,54],[146,36],[142,47],[128,44],[122,19],[104,6],[78,8],[58,26],[40,31],[31,42],[12,37]],
-  // Africa
-  [[-17,34],[10,37],[33,31],[49,12],[42,-13],[30,-34],[17,-35],[3,-24],[-9,4],[-17,20]],
-  // Australia
-  [[113,-12],[153,-15],[154,-39],[143,-39],[130,-33],[116,-25],[113,-12]],
-  // Greenland
-  [[-52,60],[-28,72],[-38,83],[-61,82]],
-  // Antarctica
-  [[-180,-65],[180,-65],[180,-78],[-180,-78]],
-  // Japan / Kurils
-  [[130,31],[143,35],[146,43],[140,44],[130,31]],
-  // UK / Ireland
-  [[-11,50],[2,51],[2,59],[-11,59]],
-];
+const EARTH_TEXTURES = {
+  day: "/world-map/earth-day.jpg",
+  normal: "/world-map/earth-normal.jpg",
+  specular: "/world-map/earth-specular.jpg",
+  clouds: "/world-map/earth-clouds.png",
+} as const;
 
 function hashNumber(value: string): number {
   let hash = 2166136261;
@@ -114,86 +99,53 @@ function orbitPosition(orbit: OrbitParams, elapsed: number) {
   );
 }
 
-function earthTexture(accent: string) {
-  const canvas = document.createElement("canvas");
-  canvas.width = 2048;
-  canvas.height = 1024;
-  const ctx = canvas.getContext("2d")!;
-
-  // Deep ocean.
-  const gradient = ctx.createRadialGradient(canvas.width / 2, canvas.height / 2, 120, canvas.width / 2, canvas.height / 2, canvas.width);
-  gradient.addColorStop(0, "#0b1d33");
-  gradient.addColorStop(0.45, "#051425");
-  gradient.addColorStop(0.85, "#020c17");
-  gradient.addColorStop(1, "#01060c");
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-  // Subtle meridian grid.
-  ctx.strokeStyle = "rgba(125,180,235,.06)";
-  ctx.lineWidth = 1;
-  for (let lon = -165; lon <= 165; lon += 30) {
-    const x = (lon + 180) / 360 * canvas.width;
-    ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
-  }
-  for (let lat = -75; lat <= 75; lat += 30) {
-    const y = (90 - lat) / 180 * canvas.height;
-    ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
-  }
-
-  const drawPoly = (polygon: Array<[number, number]>, fill: string, stroke: string, lineWidth: number, glow: number) => {
-    ctx.save();
-    if (glow > 0) {
-      ctx.shadowColor = accent;
-      ctx.shadowBlur = glow;
-    }
-    ctx.beginPath();
-    polygon.forEach(([lon, lat], index) => {
-      const x = (lon + 180) / 360 * canvas.width;
-      const y = (90 - lat) / 180 * canvas.height;
-      if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-    });
-    ctx.closePath();
-    ctx.fillStyle = fill;
-    ctx.fill();
-    ctx.strokeStyle = stroke;
-    ctx.lineWidth = lineWidth;
-    ctx.stroke();
-    ctx.restore();
+function fleetWithSelf(identity: DeviceIdentity, devices: DeviceRecord[]): DeviceRecord[] {
+  if (devices.some((device) => device.device_id === identity.device_id)) return devices;
+  const self: DeviceRecord = {
+    device_id: identity.device_id,
+    name: identity.name,
+    ed25519_pub: identity.ed25519_pub,
+    x25519_pub: identity.x25519_pub,
+    os: identity.os,
+    arch: identity.arch,
+    app_version: identity.app_version,
+    github_login: identity.github_login,
+    capabilities: identity.capabilities,
+    endpoint: identity.endpoint,
+    endpoints: identity.endpoints,
+    p2p_node_id: identity.p2p_node_id,
+    last_seen: new Date().toISOString(),
+    is_self: true,
   };
+  return includeSelfDevice(self, devices);
+}
 
-  // Landmass base with accent-tinted underglow.
-  for (const polygon of CONTINENTS) {
-    drawPoly(polygon, "rgba(20,40,62,.55)", "rgba(125,180,235,.18)", 2, 8);
-  }
-  ctx.globalAlpha = 0.65;
-  for (const polygon of CONTINENTS) {
-    drawPoly(polygon, accent, accent, 1, 0);
-  }
-  ctx.globalAlpha = 1;
-
-  // City lights (scattered across landmass regions, not real locations).
-  ctx.fillStyle = "rgba(255,245,200,.55)";
-  const lightSpots = 180;
-  for (let i = 0; i < lightSpots; i++) {
-    const lon = ((i * 137.5) % 360) - 180;
-    const lat = ((i * 73) % 140) - 70;
-    // Keep lights mostly over continental latitudes by rejection sampling against rough bands.
-    if (Math.abs(lat) > 60) continue;
-    const x = (lon + 180) / 360 * canvas.width;
-    const y = (90 - lat) / 180 * canvas.height;
-    const size = 1 + (i % 3);
-    ctx.globalAlpha = 0.3 + (i % 5) / 10;
-    ctx.beginPath();
-    ctx.arc(x, y, size, 0, Math.PI * 2);
-    ctx.fill();
-  }
-  ctx.globalAlpha = 1;
-
+function satelliteLabel(text: string, color: string) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 512;
+  canvas.height = 112;
+  const ctx = canvas.getContext("2d")!;
+  ctx.font = "700 34px system-ui, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.shadowColor = "rgba(0,0,0,.95)";
+  ctx.shadowBlur = 12;
+  ctx.fillStyle = "rgba(2,8,20,.84)";
+  ctx.beginPath();
+  ctx.roundRect(10, 10, 492, 92, 32);
+  ctx.fill();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.shadowBlur = 5;
+  ctx.fillStyle = "#f4f8ff";
+  ctx.fillText(text.slice(0, 24), 256, 57);
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 16;
-  return texture;
+  const material = new THREE.SpriteMaterial({ map: texture, transparent: true, depthWrite: false });
+  const sprite = new THREE.Sprite(material);
+  sprite.scale.set(1.18, 0.26, 1);
+  return sprite;
 }
 
 function atmosphereMaterial(accent: string) {
@@ -225,7 +177,10 @@ function atmosphereMaterial(accent: string) {
 function useThemeColors() {
   const read = () => {
     const style = getComputedStyle(document.documentElement);
-    return { accent: style.getPropertyValue("--accent").trim() || "#72d9ff" };
+    return {
+      accent: style.getPropertyValue("--accent").trim() || "#72d9ff",
+      accentInk: style.getPropertyValue("--accent-ink").trim() || "#72d9ff",
+    };
   };
   const [colors, setColors] = useState(read);
   useEffect(() => {
@@ -249,10 +204,14 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     if (!host) return;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    camera.position.set(0, 0.35, 8.2);
+    const hasFleetSatellites = nodes.some((node) => node.kind === "fleet");
+    camera.position.set(0, 0.24, hasFleetSatellites ? 11.8 : 9.4);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.18;
     renderer.domElement.setAttribute("aria-label", "Interactive 3D OWLLM world map");
     renderer.domElement.setAttribute("role", "img");
     host.appendChild(renderer.domElement);
@@ -260,28 +219,57 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = 4.8;
-    controls.maxDistance = 13;
+    controls.minDistance = hasFleetSatellites ? 8.4 : 5.8;
+    controls.maxDistance = 15;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.32;
 
-    const earthMap = earthTexture(accent);
+    const textureLoader = new THREE.TextureLoader();
+    const earthMap = textureLoader.load(EARTH_TEXTURES.day);
+    const earthNormal = textureLoader.load(EARTH_TEXTURES.normal);
+    const earthSpecular = textureLoader.load(EARTH_TEXTURES.specular);
+    const cloudMap = textureLoader.load(EARTH_TEXTURES.clouds);
+    earthMap.colorSpace = THREE.SRGBColorSpace;
+    cloudMap.colorSpace = THREE.SRGBColorSpace;
+    const maxAnisotropy = Math.min(16, renderer.capabilities.getMaxAnisotropy());
+    earthMap.anisotropy = maxAnisotropy;
+    earthNormal.anisotropy = maxAnisotropy;
+    earthSpecular.anisotropy = maxAnisotropy;
+    cloudMap.anisotropy = maxAnisotropy;
+
+    const earthGroup = new THREE.Group();
+    earthGroup.rotation.z = -0.14;
+    scene.add(earthGroup);
     const globe = new THREE.Mesh(
       new THREE.SphereGeometry(2.35, 128, 64),
-      new THREE.MeshStandardMaterial({
+      new THREE.MeshPhongMaterial({
         map: earthMap,
-        roughness: 0.72,
-        metalness: 0.08,
-        emissive: new THREE.Color(accent).multiplyScalar(0.04),
+        normalMap: earthNormal,
+        normalScale: new THREE.Vector2(0.48, 0.48),
+        specularMap: earthSpecular,
+        specular: new THREE.Color(0x557799),
+        shininess: 18,
       }),
     );
-    scene.add(globe);
+    earthGroup.add(globe);
 
-    const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(2.58, 96, 64), atmosphereMaterial(accent));
+    const clouds = new THREE.Mesh(
+      new THREE.SphereGeometry(2.382, 128, 64),
+      new THREE.MeshPhongMaterial({
+        map: cloudMap,
+        transparent: true,
+        opacity: 0.68,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    earthGroup.add(clouds);
+
+    const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(2.47, 96, 64), atmosphereMaterial(accent));
     scene.add(atmosphere);
     const outerGlow = new THREE.Mesh(
-      new THREE.SphereGeometry(2.78, 80, 48),
-      new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.045, side: THREE.BackSide, depthWrite: false }),
+      new THREE.SphereGeometry(2.56, 80, 48),
+      new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.035, side: THREE.BackSide, depthWrite: false }),
     );
     scene.add(outerGlow);
 
@@ -310,9 +298,10 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       sizeAttenuation: true,
     })));
 
-    scene.add(new THREE.AmbientLight(0x6a8ab8, 0.55));
-    const sunLight = new THREE.DirectionalLight(0xffffff, 2.8);
-    sunLight.position.set(5.5, 2.2, 6.5);
+    scene.add(new THREE.HemisphereLight(0x91bdff, 0x071224, 1.25));
+    scene.add(new THREE.AmbientLight(0x8aaee0, 0.42));
+    const sunLight = new THREE.DirectionalLight(0xffffff, 3.9);
+    sunLight.position.set(5.8, 2.6, 7.2);
     scene.add(sunLight);
     const rimLight = new THREE.PointLight(new THREE.Color(accent), 1.6, 20);
     rimLight.position.set(-6, -1.5, -5);
@@ -321,7 +310,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     const clickable: THREE.Mesh[] = [];
     const pulseMeshes: THREE.Mesh[] = [];
     const orbitRings: { line: THREE.LineLoop; node: GlobeNode }[] = [];
-    const nodeMeshes: { mesh: THREE.Mesh; halo: THREE.Mesh; node: GlobeNode; baseScale: number }[] = [];
+    const nodeMeshes: { mesh: THREE.Mesh; halo: THREE.Mesh; label?: THREE.Sprite; node: GlobeNode; baseScale: number }[] = [];
 
     nodes.forEach((node, index) => {
       const color = node.online ? accent : 0x718096;
@@ -330,22 +319,16 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
 
       if (node.kind === "fleet" && node.orbit) {
         const orbit = node.orbit;
-        const ringGeometry = new THREE.BufferGeometry().setFromPoints(
-          Array.from({ length: 128 }, (_, i) => {
-            const angle = i / 128 * Math.PI * 2;
-            return new THREE.Vector3(Math.cos(angle), Math.sin(angle), 0);
-          }),
-        );
-        const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.14 }));
-        ring.scale.setScalar(orbit.radius);
-        ring.rotation.x = orbit.inclination;
-        ring.rotation.y = orbit.ascendingNode;
+        const ringGeometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 192 }, (_, i) =>
+          orbitPosition({ ...orbit, phase: i / 192 * Math.PI * 2, speed: 0 }, 0),
+        ));
+        const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: node.online ? 0.34 : 0.14 }));
         scene.add(ring);
         orbitRings.push({ line: ring, node });
       }
 
       const geometry = node.kind === "fleet"
-        ? new THREE.OctahedronGeometry(0.1, 0)
+        ? new THREE.OctahedronGeometry(0.15, 1)
         : new THREE.SphereGeometry(0.07, 20, 16);
       const material = new THREE.MeshStandardMaterial({
         color,
@@ -359,14 +342,16 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       clickable.push(mesh);
 
       const halo = new THREE.Mesh(
-        new THREE.SphereGeometry(node.kind === "fleet" ? 0.22 : 0.16, 20, 16),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.22 : 0.09, depthWrite: false }),
+        new THREE.SphereGeometry(node.kind === "fleet" ? 0.31 : 0.16, 24, 18),
+        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
       );
       halo.userData.offset = index * 0.63;
       scene.add(halo);
       pulseMeshes.push(halo);
 
-      nodeMeshes.push({ mesh, halo, node, baseScale });
+      const label = node.kind === "fleet" ? satelliteLabel(node.label, new THREE.Color(color).getStyle()) : undefined;
+      if (label) scene.add(label);
+      nodeMeshes.push({ mesh, halo, label, node, baseScale });
     });
 
     const raycaster = new THREE.Raycaster();
@@ -396,7 +381,8 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     const started = performance.now();
     const animate = (now: number) => {
       const elapsed = (now - started) / 1000;
-      globe.rotation.y = elapsed * 0.012;
+      globe.rotation.y = elapsed * 0.018 - 0.34;
+      clouds.rotation.y = elapsed * 0.024 - 0.34;
       atmosphere.rotation.y = elapsed * 0.018;
       outerGlow.rotation.y = -elapsed * 0.006;
 
@@ -405,13 +391,14 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
         mesh.scale.setScalar(scale);
       });
 
-      nodeMeshes.forEach(({ mesh, halo, node, baseScale }) => {
+      nodeMeshes.forEach(({ mesh, halo, label, node, baseScale }) => {
         const isSelected = selectedId === node.id;
         const selectedScale = isSelected ? 1.55 : 1;
         if (node.kind === "fleet" && node.orbit) {
           const position = orbitPosition(node.orbit, elapsed);
           mesh.position.copy(position);
           halo.position.copy(position);
+          if (label) label.position.copy(position).add(new THREE.Vector3(0, 0.24, 0));
           mesh.scale.setScalar(baseScale * selectedScale);
         } else if (node.latitude != null && node.longitude != null) {
           const position = latLonVector(node.latitude, node.longitude, 2.39);
@@ -433,6 +420,9 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       renderer.domElement.removeEventListener("pointerup", click);
       controls.dispose();
       earthMap.dispose();
+      earthNormal.dispose();
+      earthSpecular.dispose();
+      cloudMap.dispose();
       scene.traverse((object: any) => {
         object.geometry?.dispose?.();
         if (Array.isArray(object.material)) object.material.forEach((material: any) => material.dispose?.());
@@ -514,7 +504,7 @@ export default function WorldMapPage() {
     try {
       const [identity, devices] = await Promise.all([getIdentity(), listDevices()]);
       setSelfId(identity.device_id);
-      setFleet(devices);
+      setFleet(fleetWithSelf(identity, devices));
     } catch (reason) {
       setFleetError(String(reason));
     } finally {
@@ -529,7 +519,7 @@ export default function WorldMapPage() {
         const [identity, devices] = await Promise.all([getIdentity(), listDevices()]);
         if (!alive) return;
         setSelfId(identity.device_id);
-        setFleet(devices);
+        setFleet(fleetWithSelf(identity, devices));
         setFleetError("");
       } catch (reason) {
         if (alive) setFleetError(String(reason));
@@ -606,9 +596,9 @@ export default function WorldMapPage() {
           </div>
         </header>
 
-        <div className="world-map-layout" style={{ display: "grid", gap: 14, flex: 1, minHeight: 560 }}>
-          <section className="world-map-globe-panel" style={{ ...panelStyle(), position: "relative", minHeight: 560, overflow: "hidden", background: "radial-gradient(circle at 50% 45%, rgba(var(--accent-rgb),.10), #030711 67%, #01030a)" }}>
-            <Globe nodes={nodes} accent={colors.accent} selectedId={selected?.id ?? null} onSelect={setSelected} />
+        <div className="world-map-layout" style={{ display: "grid", gap: 14, flex: 1, minHeight: 450 }}>
+          <section className="world-map-globe-panel" style={{ ...panelStyle(), position: "relative", minHeight: 450, overflow: "hidden", background: "radial-gradient(circle at 50% 44%, #142b50 0%, #081326 38%, #020713 72%, #01030a 100%)" }}>
+            <Globe nodes={nodes} accent={colors.accentInk} selectedId={selected?.id ?? null} onSelect={setSelected} />
             <div style={{ position: "absolute", top: 13, left: 13, display: "flex", gap: 8, pointerEvents: "none", flexWrap: "wrap" }}>
               <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid rgba(var(--accent-rgb),.28)", color: "var(--fg-strong)", fontSize: 11.5 }}>
                 <b style={{ color: "var(--accent-ink)" }}>{onlineCount}</b> {mode === "world" ? t("nodes online") : t("devices online")}

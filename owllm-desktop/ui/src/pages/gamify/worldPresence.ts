@@ -3,6 +3,10 @@ export const WORLD_MAP_MODE_KEY = "owllm:world-map:mode";
 
 export type WorldMapMode = "world" | "fleet";
 
+export function includeSelfDevice<T extends { device_id: string }>(self: T, devices: T[]): T[] {
+  return devices.some((device) => device.device_id === self.device_id) ? devices : [self, ...devices];
+}
+
 export type PublicPresenceNode = {
   id: string;
   region: string;

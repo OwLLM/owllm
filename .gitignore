@@ -174,3 +174,7 @@ runtime-data/
 owllm-desktop/rel*/
 # Scratch.
 owllm-desktop/tooltest/
+
+# Local Brainstorm transcript. This is live per-checkout user state, not
+# project source, and must never be merged over another device/session.
+.owllm/brainstorm.json

@@ -233,21 +233,49 @@ fn sync_current_branch_from_origin(cwd: &Path) -> Result<(), String> {
 /// Keep them recoverable outside the checkout while the branch adds the same
 /// blobs. The guard restores them on an early return; a successful merge
 /// discards only the verified-identical backup.
-struct IdenticalUntrackedBackup {
+struct UntrackedCollisionBackup {
     cwd: PathBuf,
     root: PathBuf,
     paths: Vec<String>,
+    preserve_after_merge: Vec<String>,
     restore_on_drop: bool,
 }
 
-impl IdenticalUntrackedBackup {
+impl UntrackedCollisionBackup {
+    /// App-owned state belongs to the destination checkout. A page branch may
+    /// have accidentally tracked an older copy, but Merge must never replace
+    /// the destination's live transcript/settings with it. Restore those files
+    /// after Git has applied the source changes and scratch has been unstaged.
+    fn restore_preserved(&mut self) -> Result<(), String> {
+        for path in &self.preserve_after_merge {
+            let from = self.root.join(path);
+            let to = self.cwd.join(path);
+            if !from.exists() {
+                continue;
+            }
+            if to.exists() {
+                std::fs::remove_file(&to)
+                    .map_err(|e| format!("could not remove merged app state {path}: {e}"))?;
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("could not restore app state directory for {path}: {e}")
+                })?;
+            }
+            std::fs::rename(&from, &to)
+                .map_err(|e| format!("could not restore app-owned file {path} after merge: {e}"))?;
+        }
+        self.preserve_after_merge.clear();
+        Ok(())
+    }
+
     fn discard(mut self) {
         self.restore_on_drop = false;
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
-impl Drop for IdenticalUntrackedBackup {
+impl Drop for UntrackedCollisionBackup {
     fn drop(&mut self) {
         if !self.restore_on_drop {
             return;
@@ -267,13 +295,14 @@ impl Drop for IdenticalUntrackedBackup {
     }
 }
 
-/// Move only byte-identical untracked files that the branch is about to add.
-/// A differing file is user content, so leave every path untouched and return
-/// an actionable error instead of Git's generic "would be overwritten" block.
-fn prepare_identical_untracked_collisions(
+/// Move untracked files that the branch is about to add when it is safe to do
+/// so. Byte-identical source assets are adopted. App-owned runtime state is
+/// preserved regardless of content and restored after the merge. Any other
+/// differing file is user content, so it remains untouched and blocks.
+fn prepare_untracked_collisions(
     cwd: &Path,
     branch: &str,
-) -> Result<Option<IdenticalUntrackedBackup>, String> {
+) -> Result<Option<UntrackedCollisionBackup>, String> {
     let (ok, added, err) = git(
         cwd,
         &[
@@ -293,6 +322,7 @@ fn prepare_identical_untracked_collisions(
     }
 
     let mut identical = Vec::new();
+    let mut preserve = Vec::new();
     let mut differing = Vec::new();
     for path in added.split('\0').filter(|p| !p.is_empty()) {
         let disk_path = cwd.join(path);
@@ -301,6 +331,10 @@ fn prepare_identical_untracked_collisions(
         }
         let (tracked, _, _) = git(cwd, &["ls-files", "--error-unmatch", "--", path])?;
         if tracked {
+            continue;
+        }
+        if is_app_scratch(path) {
+            preserve.push(path.to_string());
             continue;
         }
         let branch_path = format!("{branch}:{path}");
@@ -319,7 +353,7 @@ fn prepare_identical_untracked_collisions(
             differing.join(", ")
         ));
     }
-    if identical.is_empty() {
+    if identical.is_empty() && preserve.is_empty() {
         return Ok(None);
     }
 
@@ -342,7 +376,7 @@ fn prepare_identical_untracked_collisions(
         std::process::id()
     ));
     let mut moved = Vec::new();
-    for path in &identical {
+    for path in identical.iter().chain(preserve.iter()) {
         let from = cwd.join(path);
         let to = root.join(path);
         if let Some(parent) = to.parent() {
@@ -350,10 +384,11 @@ fn prepare_identical_untracked_collisions(
                 .map_err(|e| format!("could not prepare untracked-file backup for {path}: {e}"))?;
         }
         if let Err(e) = std::fs::rename(&from, &to) {
-            let guard = IdenticalUntrackedBackup {
+            let guard = UntrackedCollisionBackup {
                 cwd: cwd.to_path_buf(),
                 root,
                 paths: moved,
+                preserve_after_merge: preserve.clone(),
                 restore_on_drop: true,
             };
             drop(guard);
@@ -364,10 +399,11 @@ fn prepare_identical_untracked_collisions(
         moved.push(path.clone());
     }
 
-    Ok(Some(IdenticalUntrackedBackup {
+    Ok(Some(UntrackedCollisionBackup {
         cwd: cwd.to_path_buf(),
         root,
         paths: moved,
+        preserve_after_merge: preserve,
         restore_on_drop: true,
     }))
 }
@@ -820,7 +856,7 @@ fn fleet_worktree_merge_blocking(
     if let Err(message) = sync_current_branch_from_origin(&cwd) {
         return Ok(MergeOutcome::Error { message });
     }
-    let untracked_backup = match prepare_identical_untracked_collisions(&cwd, &branch) {
+    let mut untracked_backup = match prepare_untracked_collisions(&cwd, &branch) {
         Ok(backup) => backup,
         Err(message) => return Ok(MergeOutcome::Error { message }),
     };
@@ -869,6 +905,9 @@ fn fleet_worktree_merge_blocking(
         }
     }
     drop_staged_app_scratch(&cwd)?;
+    if let Some(backup) = untracked_backup.as_mut() {
+        backup.restore_preserved()?;
+    }
     // If `merge --squash` succeeded but staged nothing, the agent's
     // branch is a fast-forward of HEAD (no new commits to apply).
     let (_, staged, _) = git(&cwd, &["diff", "--cached", "--name-only"])?;
@@ -1235,6 +1274,55 @@ mod tests {
         assert_eq!(
             fs::read(root.join("icons/App_icons/india_flag.webp")).unwrap(),
             b"user flag"
+        );
+    }
+
+    #[test]
+    fn differing_untracked_app_state_is_preserved_and_does_not_block_merge() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent-state"]);
+        fs::create_dir_all(root.join(".owllm")).unwrap();
+        fs::write(
+            root.join(".owllm/brainstorm.json"),
+            b"older page transcript",
+        )
+        .unwrap();
+        fs::write(root.join("feature.txt"), b"real source change").unwrap();
+        git_ok(root, &["add", "-A"]);
+        git_ok(root, &["commit", "-m", "page source and runtime state"]);
+
+        git_ok(root, &["checkout", "main"]);
+        fs::create_dir_all(root.join(".owllm")).unwrap();
+        fs::write(
+            root.join(".owllm/brainstorm.json"),
+            b"newer local transcript",
+        )
+        .unwrap();
+
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "code".into(),
+            "agent-state".into(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            fs::read(root.join(".owllm/brainstorm.json")).unwrap(),
+            b"newer local transcript"
+        );
+        assert_eq!(
+            fs::read(root.join("feature.txt")).unwrap(),
+            b"real source change"
+        );
+        let tracked = Command::new("git")
+            .args(["ls-files", "--error-unmatch", ".owllm/brainstorm.json"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(
+            !tracked.success(),
+            "runtime transcript must remain untracked"
         );
     }
 

@@ -23,7 +23,11 @@ check("inline Notebook column has a 420px writable minimum", sidePanel.includes(
 check("inline Notebook defaults to a comfortably wide column", sidePanel.includes("window.innerWidth * 0.28"));
 check("Notebook surface fills the widened column", sidePanel.includes('width, flexShrink: 0, minHeight: 0, display: "flex"'));
 check("Terminal is absent from the compact side-panel header", !sidePanel.includes("onToggleTerminal") && !sidePanel.includes("🖥 Terminal"));
-check("Terminal remains reachable beside the Code composer", codePage.includes('aria-label="Open terminal"') && codePage.includes("Terminal belongs with the workspace composer"));
+check("Terminal remains reachable in the status line above the Code composer",
+  codePage.includes('aria-label="Open terminal"')
+  && codePage.includes("Status + Terminal line")
+  && codePage.includes(">Terminal</button>")
+  && !codePage.includes("Terminal belongs with the workspace composer"));
 const codeHeader = codePage.slice(codePage.indexOf("{/* Header: workspace"), codePage.indexOf("{/* Per-page rename"));
 check("Terminal is absent from the Code header row beside Memory", !codeHeader.includes("Terminal") && !codeHeader.includes("setTermOpen"));
 check("Code side-panel invocation no longer passes terminal header props", !codePage.includes("terminalOpen={termOpen && !termHidden}"));

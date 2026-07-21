@@ -1,31 +1,19 @@
-const PRESENCE_TTL_MS = 15 * 60 * 1000;
-const MAX_PUBLIC_NODES = 5_000;
-const TOKEN_BYTES = 32;
-const PUBLIC_ID_BYTES = 12;
+const MAX_PRESENCE_NODES = 5_000;
+const MAX_VIEWERS = 1_000;
+const PRESENCE_TAG = "presence";
+const VIEWER_TAG = "viewer";
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Authorization, Content-Type",
-  "Access-Control-Max-Age": "86400",
-};
-
-const JSON_HEADERS = {
-  ...CORS_HEADERS,
+const SECURITY_HEADERS = {
   "Cache-Control": "no-store",
-  "Content-Type": "application/json; charset=utf-8",
   "Referrer-Policy": "no-referrer",
   "X-Content-Type-Options": "nosniff",
 };
 
-const schemaReady = new WeakMap();
-
 function json(value, status = 200) {
-  return new Response(JSON.stringify(value), { status, headers: JSON_HEADERS });
-}
-
-function empty(status = 204) {
-  return new Response(null, { status, headers: { ...CORS_HEADERS, "Cache-Control": "no-store" } });
+  return new Response(JSON.stringify(value), {
+    status,
+    headers: { ...SECURITY_HEADERS, "Content-Type": "application/json; charset=utf-8" },
+  });
 }
 
 function clamp(value, min, max) {
@@ -37,36 +25,22 @@ function finite(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
-function randomToken(bytes = TOKEN_BYTES, cryptoApi = crypto) {
-  const data = new Uint8Array(bytes);
-  cryptoApi.getRandomValues(data);
-  return Array.from(data, (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-async function sha256(value, cryptoApi = crypto) {
-  const digest = await cryptoApi.subtle.digest("SHA-256", new TextEncoder().encode(value));
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function bearerToken(request) {
-  const header = request.headers.get("Authorization") ?? "";
-  const match = /^Bearer ([a-f0-9]{64})$/i.exec(header);
-  return match?.[1]?.toLowerCase() ?? "";
-}
-
 function stableFraction(seed, salt) {
   let hash = 2166136261;
-  const source = `${salt}:${seed}`;
-  for (let index = 0; index < source.length; index += 1) {
-    hash ^= source.charCodeAt(index);
+  for (const character of `${salt}:${seed}`) {
+    hash ^= character.charCodeAt(0);
     hash = Math.imul(hash, 16777619);
   }
   return (hash >>> 0) / 0xffffffff;
 }
 
+function randomId(cryptoApi = crypto) {
+  return cryptoApi.randomUUID().replaceAll("-", "").slice(0, 24);
+}
+
 /**
- * Reduce Cloudflare's edge geolocation to a deliberately coarse map point.
- * Exact request coordinates and IP addresses are never returned or persisted.
+ * Reduce Cloudflare edge metadata to a deliberately coarse map point.
+ * Source IP and exact request coordinates are never read, returned, or stored.
  */
 export function coarseLocation(cf, publicId) {
   const latitude = finite(cf?.latitude);
@@ -87,164 +61,158 @@ export function coarseLocation(cf, publicId) {
   };
 }
 
-function publicNode(record) {
+function attachment(socket) {
+  try { return socket.deserializeAttachment?.() ?? null; }
+  catch { return null; }
+}
+
+function nodeFromSocket(socket) {
+  const data = attachment(socket);
+  if (!data || data.role !== PRESENCE_TAG) return null;
   return {
-    id: record.publicId,
-    region: record.region,
-    latitude: record.latitude,
-    longitude: record.longitude,
-    lastSeen: record.lastSeen,
+    id: String(data.id ?? "").slice(0, 96),
+    region: String(data.region ?? "").slice(0, 80),
+    latitude: finite(data.latitude),
+    longitude: finite(data.longitude),
+    lastSeen: String(data.connectedAt ?? ""),
   };
 }
 
-export function createMemoryPresenceStore() {
-  const records = new Map();
+export function snapshotFromSockets(sockets, now = Date.now()) {
+  const seen = new Set();
+  const nodes = [];
+  for (const socket of sockets) {
+    const node = nodeFromSocket(socket);
+    if (!node?.id || seen.has(node.id) || node.latitude == null || node.longitude == null) continue;
+    if (node.latitude < -90 || node.latitude > 90 || node.longitude < -180 || node.longitude > 180) continue;
+    seen.add(node.id);
+    nodes.push(node);
+  }
   return {
-    async find(tokenHash) { return records.get(tokenHash) ?? null; },
-    async upsert(record) { records.set(record.tokenHash, { ...record }); },
-    async remove(tokenHash) { records.delete(tokenHash); },
-    async cleanup(nowMs) {
-      for (const [key, value] of records) if (value.expiresAt <= nowMs) records.delete(key);
-    },
-    async count(nowMs) {
-      return [...records.values()].filter((record) => record.expiresAt > nowMs).length;
-    },
-    async list(nowMs, limit) {
-      return [...records.values()]
-        .filter((record) => record.expiresAt > nowMs)
-        .sort((left, right) => right.lastSeen.localeCompare(left.lastSeen))
-        .slice(0, limit);
-    },
-    records,
+    type: "snapshot",
+    nodes: nodes.slice(0, MAX_PRESENCE_NODES),
+    updatedAt: new Date(now).toISOString(),
   };
 }
 
-export async function handlePresenceRequest(request, store, runtime = {}) {
-  const now = runtime.now?.() ?? Date.now();
-  const cryptoApi = runtime.crypto ?? crypto;
-  const url = new URL(request.url);
-
-  if (request.method === "OPTIONS") return empty();
-  if (url.pathname === "/health" && request.method === "GET") {
-    return json({ ok: true, service: "owllm-world-presence", now: new Date(now).toISOString() });
+function safeSend(socket, value) {
+  try {
+    socket.send(typeof value === "string" ? value : JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
   }
-  if (url.pathname !== "/v1/presence") return json({ error: "not_found" }, 404);
+}
 
-  if (request.method === "GET") {
-    await store.cleanup(now);
-    const records = await store.list(now, MAX_PUBLIC_NODES);
-    return json({
-      nodes: records.map(publicNode),
-      updatedAt: new Date(now).toISOString(),
-      expiresAfterSeconds: PRESENCE_TTL_MS / 1000,
-    });
+function socketRole(request) {
+  const role = new URL(request.url).searchParams.get("role");
+  return role === PRESENCE_TAG || role === VIEWER_TAG ? role : "";
+}
+
+function isWebSocketUpgrade(request) {
+  return request.headers.get("Upgrade")?.toLowerCase() === "websocket";
+}
+
+export class WorldPresence {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
   }
 
-  if (request.method === "POST") {
-    let token = bearerToken(request);
-    let tokenHash = token ? await sha256(token, cryptoApi) : "";
-    let existing = tokenHash ? await store.find(tokenHash) : null;
-    if (!token || !existing) {
-      await store.cleanup(now);
-      if (await store.count(now) >= MAX_PUBLIC_NODES) return json({ error: "presence_capacity_reached" }, 429);
-      token = randomToken(TOKEN_BYTES, cryptoApi);
-      tokenHash = await sha256(token, cryptoApi);
-      existing = null;
+  presenceSockets() {
+    return this.state.getWebSockets(PRESENCE_TAG);
+  }
+
+  viewerSockets() {
+    return this.state.getWebSockets(VIEWER_TAG);
+  }
+
+  snapshot(excludedSocket) {
+    return snapshotFromSockets(this.presenceSockets().filter((socket) => socket !== excludedSocket));
+  }
+
+  broadcast(value) {
+    const payload = JSON.stringify(value);
+    for (const viewer of this.viewerSockets()) safeSend(viewer, payload);
+  }
+
+  async fetch(request) {
+    if (!isWebSocketUpgrade(request)) return json({ error: "websocket_upgrade_required" }, 426);
+    const role = socketRole(request);
+    if (!role) return json({ error: "invalid_socket_role" }, 400);
+    if (role === PRESENCE_TAG && this.presenceSockets().length >= MAX_PRESENCE_NODES) {
+      return json({ error: "presence_capacity_reached" }, 503);
+    }
+    if (role === VIEWER_TAG && this.viewerSockets().length >= MAX_VIEWERS) {
+      return json({ error: "viewer_capacity_reached" }, 503);
     }
 
-    const publicId = existing?.publicId ?? randomToken(PUBLIC_ID_BYTES, cryptoApi);
-    const location = coarseLocation(request.cf, publicId);
-    if (!location) return json({ error: "coarse_location_unavailable" }, 503);
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    const connectedAt = new Date().toISOString();
+    if (role === PRESENCE_TAG) {
+      const id = randomId();
+      const location = coarseLocation({
+        country: request.headers.get("X-OWLLM-Country"),
+        regionCode: request.headers.get("X-OWLLM-Region"),
+        latitude: request.headers.get("X-OWLLM-Latitude"),
+        longitude: request.headers.get("X-OWLLM-Longitude"),
+      }, id);
+      if (!location) return json({ error: "coarse_location_unavailable" }, 503);
+      server.serializeAttachment({ role, id, ...location, connectedAt });
+    } else {
+      server.serializeAttachment({ role, connectedAt });
+    }
+    this.state.acceptWebSocket(server, [role]);
 
-    const record = {
-      tokenHash,
-      publicId,
-      ...location,
-      lastSeen: new Date(now).toISOString(),
-      expiresAt: now + PRESENCE_TTL_MS,
-    };
-    await store.upsert(record);
-    return json({ token, node: publicNode(record), expiresAfterSeconds: PRESENCE_TTL_MS / 1000 });
+    if (role === VIEWER_TAG) {
+      safeSend(server, this.snapshot());
+    } else {
+      this.broadcast({ type: "upsert", node: nodeFromSocket(server), updatedAt: new Date().toISOString() });
+    }
+    return new Response(null, { status: 101, webSocket: client });
   }
 
-  if (request.method === "DELETE") {
-    const token = bearerToken(request);
-    if (token) await store.remove(await sha256(token, cryptoApi));
-    return empty();
+  async webSocketMessage(socket, message) {
+    if (message === "snapshot" && attachment(socket)?.role === VIEWER_TAG) safeSend(socket, this.snapshot());
   }
 
-  return json({ error: "method_not_allowed" }, 405);
+  async webSocketClose(socket) {
+    const data = attachment(socket);
+    try { socket.close(1000, "closed"); }
+    catch { /* already closed */ }
+    if (data?.role === PRESENCE_TAG) {
+      this.broadcast({ type: "remove", id: String(data.id ?? "").slice(0, 96), updatedAt: new Date().toISOString() });
+    }
+  }
+
+  async webSocketError(socket) {
+    const data = attachment(socket);
+    if (data?.role === PRESENCE_TAG) {
+      this.broadcast({ type: "remove", id: String(data.id ?? "").slice(0, 96), updatedAt: new Date().toISOString() });
+    }
+  }
 }
 
-async function ensureSchema(db) {
-  let pending = schemaReady.get(db);
-  if (!pending) {
-    pending = (async () => {
-      await db.prepare(`CREATE TABLE IF NOT EXISTS presence (
-        token_hash TEXT PRIMARY KEY,
-        public_id TEXT NOT NULL UNIQUE,
-        region TEXT NOT NULL,
-        latitude REAL NOT NULL,
-        longitude REAL NOT NULL,
-        last_seen TEXT NOT NULL,
-        expires_at INTEGER NOT NULL
-      )`).run();
-      await db.prepare("CREATE INDEX IF NOT EXISTS presence_expires_at ON presence(expires_at)").run();
-    })();
-    schemaReady.set(db, pending);
-  }
-  return pending;
-}
-
-function d1Store(db) {
-  return {
-    async find(tokenHash) {
-      const row = await db.prepare(`SELECT token_hash AS tokenHash, public_id AS publicId,
-        region, latitude, longitude, last_seen AS lastSeen, expires_at AS expiresAt
-        FROM presence WHERE token_hash = ?`).bind(tokenHash).first();
-      return row ?? null;
-    },
-    async upsert(record) {
-      await db.prepare(`INSERT INTO presence
-        (token_hash, public_id, region, latitude, longitude, last_seen, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(token_hash) DO UPDATE SET
-          region = excluded.region,
-          latitude = excluded.latitude,
-          longitude = excluded.longitude,
-          last_seen = excluded.last_seen,
-          expires_at = excluded.expires_at`)
-        .bind(record.tokenHash, record.publicId, record.region, record.latitude, record.longitude, record.lastSeen, record.expiresAt)
-        .run();
-    },
-    async remove(tokenHash) {
-      await db.prepare("DELETE FROM presence WHERE token_hash = ?").bind(tokenHash).run();
-    },
-    async cleanup(nowMs) {
-      await db.prepare("DELETE FROM presence WHERE expires_at <= ?").bind(nowMs).run();
-    },
-    async count(nowMs) {
-      const row = await db.prepare("SELECT COUNT(*) AS count FROM presence WHERE expires_at > ?").bind(nowMs).first();
-      return Number(row?.count ?? 0);
-    },
-    async list(nowMs, limit) {
-      const result = await db.prepare(`SELECT token_hash AS tokenHash, public_id AS publicId,
-        region, latitude, longitude, last_seen AS lastSeen, expires_at AS expiresAt
-        FROM presence WHERE expires_at > ? ORDER BY last_seen DESC LIMIT ?`)
-        .bind(nowMs, limit)
-        .all();
-      return result.results ?? [];
-    },
-  };
+function durableRequest(request, env) {
+  const id = env.WORLD_PRESENCE.idFromName("global");
+  return env.WORLD_PRESENCE.get(id).fetch(request);
 }
 
 export default {
   async fetch(request, env) {
-    await ensureSchema(env.DB);
-    return handlePresenceRequest(request, d1Store(env.DB));
-  },
-  async scheduled(_controller, env) {
-    await ensureSchema(env.DB);
-    await d1Store(env.DB).cleanup(Date.now());
+    const url = new URL(request.url);
+    if (url.pathname === "/health" && request.method === "GET") {
+      return json({ ok: true, service: "owllm-world-presence", transport: "hibernating-websocket" });
+    }
+    if (url.pathname !== "/v1/presence/connect") return json({ error: "not_found" }, 404);
+    if (!isWebSocketUpgrade(request)) return json({ error: "websocket_upgrade_required" }, 426);
+
+    const headers = new Headers(request.headers);
+    headers.set("X-OWLLM-Country", String(request.cf?.country ?? ""));
+    headers.set("X-OWLLM-Region", String(request.cf?.regionCode ?? request.cf?.region ?? ""));
+    headers.set("X-OWLLM-Latitude", String(request.cf?.latitude ?? ""));
+    headers.set("X-OWLLM-Longitude", String(request.cf?.longitude ?? ""));
+    return durableRequest(new Request(request, { headers }), env);
   },
 };

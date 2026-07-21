@@ -2,34 +2,47 @@
 
 Cloudflare Worker backing Gamify → World Map → Live World.
 
-The service accepts anonymous heartbeats, derives a coarse region from
-Cloudflare request metadata, and returns short-lived map nodes. It never reads
-or stores account details, device names, projects, prompts, files, or source IP
-headers. Exact edge coordinates are rounded and deterministically jittered
-before storage.
+The service uses one hibernating WebSocket Durable Object. An opted-in OWLLM
+installation holds one `presence` socket; an open World Map holds one `viewer`
+socket. The socket itself is the presence signal, so there are no heartbeats,
+database writes, cleanup jobs, retained presence records, or automatic costs
+outside the Cloudflare Free-plan limits.
 
-## API
+Cloudflare request metadata is reduced to a coarse, jittered region before the
+socket reaches the Durable Object. The service never reads or stores account
+details, device names, projects, prompts, files, source IP headers, or precise
+coordinates. Closing the socket removes the node immediately.
 
-- `GET /v1/presence` — list active anonymous nodes.
-- `POST /v1/presence` — create/refresh a node. The first response issues an
-  opaque token; later heartbeats send it as `Authorization: Bearer …`.
-- `DELETE /v1/presence` — immediately remove the caller's node.
-- `GET /health` — service health.
+## WebSocket API
 
-Nodes expire after 15 minutes without a heartbeat. Tokens are SHA-256 hashed
-before D1 storage and never appear in public snapshots.
+- `GET /v1/presence/connect?role=presence` with `Upgrade: websocket` — appear
+  as one anonymous node until the socket closes.
+- `GET /v1/presence/connect?role=viewer` with `Upgrade: websocket` — receive an
+  initial `{ type: "snapshot", nodes, updatedAt }` message, then small
+  `{ type: "upsert", node }` / `{ type: "remove", id }` membership changes.
+- A viewer may send the text message `snapshot` to request a fresh snapshot.
+- `GET /health` — service health and transport information.
+
+The first deployment uses one global object. The implementation caps it at
+5,000 presence sockets and 1,000 viewer sockets so it fails closed before the
+platform's theoretical per-object limit. Shard by continent before raising
+those caps or when overload metrics justify it.
 
 ## Develop and deploy
 
 ```powershell
 npm.cmd install
 npm.cmd test
+npm.cmd run check
 npx.cmd wrangler dev
 npx.cmd wrangler login
 npm.cmd run deploy
 ```
 
-Wrangler automatically provisions the D1 binding on first authenticated
-deployment and writes its generated ID back to `wrangler.jsonc`. Put the
-resulting `https://…workers.dev` URL in
-`VITE_OWLLM_WORLD_PRESENCE_URL` for the desktop release build.
+The production service is deployed at
+`https://owllm-world-presence.mc-9fa.workers.dev`. The desktop uses this URL by
+default; `VITE_OWLLM_WORLD_PRESENCE_URL` can override it for staging or
+self-hosted deployments. A future `world.owllm.com` custom domain can replace
+the default without changing the WebSocket contract.
+The desktop contract is ordinary WebSocket JSON and is not tied to Cloudflare;
+another backend can replace the Worker without changing the app.

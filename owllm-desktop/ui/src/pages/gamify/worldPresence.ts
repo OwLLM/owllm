@@ -1,14 +1,17 @@
 export const WORLD_PRESENCE_ENABLED_KEY = "owllm:world-map:presence-enabled";
 export const WORLD_MAP_MODE_KEY = "owllm:world-map:mode";
-export const WORLD_PRESENCE_TOKEN_KEY = "owllm:world-map:presence-token";
 export const WORLD_PRESENCE_CHANGED_EVENT = "owllm:world-presence-changed";
-export const WORLD_PRESENCE_HEARTBEAT_MS = 5 * 60 * 1_000;
+export const WORLD_PRESENCE_RECONNECT_BASE_MS = 1_000;
+export const WORLD_PRESENCE_RECONNECT_MAX_MS = 30_000;
 
-// Filled with the deployed workers.dev URL for production releases. The Vite
-// environment variable remains available for staging/self-hosted deployments.
-export const DEFAULT_WORLD_PRESENCE_URL = "";
+// Production endpoint for OWLLM's anonymous, ephemeral presence service. The
+// Vite variable remains available for staging and self-hosted deployments.
+export const DEFAULT_WORLD_PRESENCE_URL = "https://owllm-world-presence.mc-9fa.workers.dev";
+
+const LEGACY_WORLD_PRESENCE_TOKEN_KEY = "owllm:world-map:presence-token";
 
 export type WorldMapMode = "world" | "fleet";
+export type PresenceSocketRole = "presence" | "viewer";
 
 export function includeSelfDevice<T extends { device_id: string }>(self: T, devices: T[]): T[] {
   return devices.some((device) => device.device_id === self.device_id) ? devices : [self, ...devices];
@@ -23,13 +26,35 @@ export type PublicPresenceNode = {
 };
 
 export type PresenceSnapshot = {
-  configured: boolean;
   nodes: PublicPresenceNode[];
   updatedAt: string | null;
 };
 
-type FetchLike = (input: string, init?: RequestInit) => Promise<Pick<Response, "ok" | "status" | "json">>;
+export type PresenceConnectionStatus = {
+  configured: boolean;
+  connected: boolean;
+  error: string;
+};
+
 type PresenceStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+type TimerHandle = ReturnType<typeof setTimeout>;
+type SocketEventName = "open" | "message" | "close" | "error";
+type SocketEvent = Event | MessageEvent<unknown>;
+
+type SocketLike = {
+  close(code?: number, reason?: string): void;
+  addEventListener(type: SocketEventName, listener: (event: SocketEvent) => void): void;
+};
+
+type ConnectionOptions = {
+  baseUrl?: string;
+  socketFactory?: (url: string) => SocketLike;
+  setTimer?: (callback: () => void, delay: number) => TimerHandle;
+  clearTimer?: (handle: TimerHandle) => void;
+  onOpen?: () => void;
+  onMessage?: (value: unknown) => void;
+  onDisconnect?: (error: string) => void;
+};
 
 function availableStorage(): PresenceStorage | undefined {
   try { return typeof localStorage === "undefined" ? undefined : localStorage; }
@@ -39,6 +64,21 @@ function availableStorage(): PresenceStorage | undefined {
 export function worldPresenceEndpoint(): string {
   const meta = import.meta as ImportMeta & { env?: Record<string, unknown> };
   return String(meta.env?.VITE_OWLLM_WORLD_PRESENCE_URL ?? DEFAULT_WORLD_PRESENCE_URL).trim().replace(/\/$/, "");
+}
+
+export function worldPresenceSocketUrl(role: PresenceSocketRole, baseUrl = worldPresenceEndpoint()): string {
+  const normalized = baseUrl.trim().replace(/\/$/, "");
+  if (!normalized) return "";
+  try {
+    const url = new URL(`${normalized}/v1/presence/connect`);
+    if (url.protocol === "https:") url.protocol = "wss:";
+    else if (url.protocol === "http:") url.protocol = "ws:";
+    else if (url.protocol !== "wss:" && url.protocol !== "ws:") return "";
+    url.searchParams.set("role", role);
+    return url.toString();
+  } catch {
+    return "";
+  }
 }
 
 function finiteCoordinate(value: unknown, min: number, max: number): number | null {
@@ -90,80 +130,21 @@ export function savePresenceEnabled(enabled: boolean, storage: Pick<Storage, "se
   if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(WORLD_PRESENCE_CHANGED_EVENT, { detail: { enabled } }));
 }
 
-export async function loadWorldPresence(
-  signal?: AbortSignal,
-  fetcher: FetchLike = fetch,
-  baseUrl = worldPresenceEndpoint(),
-): Promise<PresenceSnapshot> {
-  if (!baseUrl) return { configured: false, nodes: [], updatedAt: null };
-  const response = await fetcher(`${baseUrl.replace(/\/$/, "")}/v1/presence`, {
-    method: "GET",
-    cache: "no-store",
-    signal,
-    headers: { Accept: "application/json" },
-  });
-  if (!response.ok) throw new Error(`World presence service returned HTTP ${response.status}`);
-  const body = await response.json() as { nodes?: unknown; updatedAt?: unknown };
-  return {
-    configured: true,
-    nodes: sanitizePresenceNodes(body.nodes),
-    updatedAt: typeof body.updatedAt === "string" ? body.updatedAt : null,
-  };
+function reconnectDelay(attempt: number): number {
+  return Math.min(WORLD_PRESENCE_RECONNECT_MAX_MS, WORLD_PRESENCE_RECONNECT_BASE_MS * (2 ** Math.min(attempt, 5)));
 }
 
-export async function sendAnonymousHeartbeat(
-  enabled: boolean,
-  signal?: AbortSignal,
-  fetcher: FetchLike = fetch,
-  baseUrl = worldPresenceEndpoint(),
-  storage: PresenceStorage | undefined = availableStorage(),
-): Promise<boolean> {
-  if (!baseUrl) return false;
-  const token = storage?.getItem(WORLD_PRESENCE_TOKEN_KEY)?.trim() ?? "";
-  if (!enabled && !token) return true;
-  const headers: Record<string, string> = { Accept: "application/json" };
-  if (enabled) headers["Content-Type"] = "application/json";
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetcher(`${baseUrl.replace(/\/$/, "")}/v1/presence`, {
-    method: enabled ? "POST" : "DELETE",
-    cache: "no-store",
-    signal,
-    headers,
-    // Deliberately no identity, coordinates, device name, account, or content.
-    body: enabled ? "{}" : undefined,
-  });
-  if (!response.ok) throw new Error(`World presence service returned HTTP ${response.status}`);
-  if (enabled) {
-    const body = await response.json() as { token?: unknown };
-    const issuedToken = typeof body.token === "string" && /^[a-f0-9]{64}$/i.test(body.token) ? body.token.toLowerCase() : "";
-    if (!issuedToken) throw new Error("World presence service returned no anonymous token");
-    try { storage?.setItem(WORLD_PRESENCE_TOKEN_KEY, issuedToken); }
-    catch { /* storage unavailable; the node will expire naturally */ }
-  } else {
-    try { storage?.removeItem(WORLD_PRESENCE_TOKEN_KEY); }
-    catch { /* storage unavailable */ }
-  }
-  return true;
-}
-
-type PresenceHeartbeatOptions = {
-  storage?: PresenceStorage;
-  fetcher?: FetchLike;
-  baseUrl?: string;
-  setTimer?: (callback: () => void, delay: number) => number;
-  clearTimer?: (timer: number) => void;
-};
-
-/** Keep an opted-in installation present even when World Map is not open. */
-export function installWorldPresenceHeartbeat(options: PresenceHeartbeatOptions = {}): () => void {
-  const storage = options.storage ?? availableStorage();
-  const fetcher = options.fetcher ?? fetch;
-  const baseUrl = options.baseUrl ?? worldPresenceEndpoint();
-  const setTimer = options.setTimer ?? ((callback, delay) => window.setTimeout(callback, delay));
-  const clearTimer = options.clearTimer ?? ((timer) => window.clearTimeout(timer));
-  let timer: number | undefined;
+function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionOptions = {}): () => void {
+  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint());
+  if (!url) return () => {};
+  const socketFactory = options.socketFactory ?? ((target) => new WebSocket(target));
+  const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
+  const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle));
+  let socket: SocketLike | undefined;
+  let timer: TimerHandle | undefined;
+  let attempt = 0;
   let disposed = false;
-  let controller: AbortController | undefined;
+  let generation = 0;
 
   const cancelTimer = () => {
     if (timer !== undefined) clearTimer(timer);
@@ -171,37 +152,136 @@ export function installWorldPresenceHeartbeat(options: PresenceHeartbeatOptions 
   };
   const schedule = () => {
     cancelTimer();
-    if (!disposed && baseUrl && readPresenceEnabled(storage)) timer = setTimer(() => void heartbeat(), WORLD_PRESENCE_HEARTBEAT_MS);
+    if (disposed) return;
+    const delay = reconnectDelay(attempt);
+    attempt += 1;
+    timer = setTimer(connect, delay);
   };
-  const heartbeat = async () => {
-    if (disposed || !baseUrl || !readPresenceEnabled(storage)) return;
-    controller?.abort();
-    controller = new AbortController();
-    try { await sendAnonymousHeartbeat(true, controller.signal, fetcher, baseUrl, storage); }
-    catch { /* World Map surfaces service errors; background presence retries. */ }
-    finally { schedule(); }
+  const connect = () => {
+    if (disposed) return;
+    cancelTimer();
+    const ownGeneration = ++generation;
+    let next: SocketLike;
+    try { next = socketFactory(url); }
+    catch (reason) {
+      options.onDisconnect?.(String(reason));
+      schedule();
+      return;
+    }
+    socket = next;
+    next.addEventListener("open", () => {
+      if (disposed || generation !== ownGeneration) return;
+      attempt = 0;
+      options.onOpen?.();
+    });
+    next.addEventListener("message", (event) => {
+      if (disposed || generation !== ownGeneration) return;
+      try { options.onMessage?.(JSON.parse(String((event as MessageEvent).data))); }
+      catch { /* Ignore malformed public data. */ }
+    });
+    next.addEventListener("error", () => {
+      if (!disposed && generation === ownGeneration) options.onDisconnect?.("World presence connection failed");
+    });
+    next.addEventListener("close", () => {
+      if (disposed || generation !== ownGeneration) return;
+      socket = undefined;
+      options.onDisconnect?.("World presence connection closed");
+      schedule();
+    });
   };
-  const onPreferenceChanged = () => {
-    // World Map sends the immediate POST/DELETE; reset the background cadence.
-    if (readPresenceEnabled(storage)) schedule();
-    else cancelTimer();
+
+  connect();
+  return () => {
+    disposed = true;
+    generation += 1;
+    cancelTimer();
+    try { socket?.close(1000, "disabled"); }
+    catch { /* already closed */ }
+    socket = undefined;
   };
+}
+
+type PresenceSubscriptionOptions = ConnectionOptions & {
+  onSnapshot: (snapshot: PresenceSnapshot) => void;
+  onStatus?: (status: PresenceConnectionStatus) => void;
+};
+
+/** Subscribe the open World Map to live snapshots from the global object. */
+export function subscribeWorldPresence(options: PresenceSubscriptionOptions): () => void {
+  const baseUrl = options.baseUrl ?? worldPresenceEndpoint();
+  if (!worldPresenceSocketUrl("viewer", baseUrl)) {
+    options.onStatus?.({ configured: false, connected: false, error: "" });
+    return () => {};
+  }
+  const nodes = new Map<string, PublicPresenceNode>();
+  const emit = (updatedAt: unknown) => options.onSnapshot({
+    nodes: [...nodes.values()],
+    updatedAt: typeof updatedAt === "string" ? updatedAt : null,
+  });
+  options.onStatus?.({ configured: true, connected: false, error: "" });
+  return createReconnectingSocket("viewer", {
+    ...options,
+    baseUrl,
+    onOpen: () => options.onStatus?.({ configured: true, connected: true, error: "" }),
+    onDisconnect: (error) => options.onStatus?.({ configured: true, connected: false, error }),
+    onMessage: (value) => {
+      if (!value || typeof value !== "object") return;
+      const message = value as { type?: unknown; nodes?: unknown; node?: unknown; id?: unknown; updatedAt?: unknown };
+      if (message.type === "snapshot") {
+        nodes.clear();
+        for (const node of sanitizePresenceNodes(message.nodes)) nodes.set(node.id, node);
+        emit(message.updatedAt);
+      } else if (message.type === "upsert") {
+        const [node] = sanitizePresenceNodes([message.node]);
+        if (!node) return;
+        nodes.set(node.id, node);
+        emit(message.updatedAt);
+      } else if (message.type === "remove" && typeof message.id === "string") {
+        nodes.delete(message.id.trim().slice(0, 96));
+        emit(message.updatedAt);
+      }
+    },
+  });
+}
+
+type PresenceRunnerOptions = ConnectionOptions & { storage?: PresenceStorage };
+
+/** Maintain one anonymous presence socket while this installation is opted in. */
+export function installWorldPresenceConnection(options: PresenceRunnerOptions = {}): () => void {
+  const storage = options.storage ?? availableStorage();
+  const baseUrl = options.baseUrl ?? worldPresenceEndpoint();
+  let stopSocket: (() => void) | undefined;
+  let disposed = false;
+
+  // D1-era opaque tokens are obsolete and must never sync or affect identity.
+  try { storage?.removeItem(LEGACY_WORLD_PRESENCE_TOKEN_KEY); }
+  catch { /* storage unavailable */ }
+
+  const sync = () => {
+    stopSocket?.();
+    stopSocket = undefined;
+    if (disposed || !readPresenceEnabled(storage) || !worldPresenceSocketUrl("presence", baseUrl)) return;
+    stopSocket = createReconnectingSocket("presence", { ...options, baseUrl });
+  };
+  const onPreferenceChanged = () => sync();
   const onStorage = (event: StorageEvent) => {
-    if (event.key === WORLD_PRESENCE_ENABLED_KEY) void heartbeat();
+    if (event.key === WORLD_PRESENCE_ENABLED_KEY) sync();
   };
+  const onOnline = () => sync();
 
   if (typeof window !== "undefined") {
     window.addEventListener(WORLD_PRESENCE_CHANGED_EVENT, onPreferenceChanged);
     window.addEventListener("storage", onStorage);
+    window.addEventListener("online", onOnline);
   }
-  void heartbeat();
+  sync();
   return () => {
     disposed = true;
-    cancelTimer();
-    controller?.abort();
+    stopSocket?.();
     if (typeof window !== "undefined") {
       window.removeEventListener(WORLD_PRESENCE_CHANGED_EVENT, onPreferenceChanged);
       window.removeEventListener("storage", onStorage);
+      window.removeEventListener("online", onOnline);
     }
   };
 }

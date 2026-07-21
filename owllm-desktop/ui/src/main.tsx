@@ -29,11 +29,9 @@ function isTauriContext(): boolean {
   return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__ || w.__TAURI_METADATA__);
 }
 
-// Enforce the app-wide rule even for a future plain <a href="https://…">.
-// Local file/download anchors are intentionally unaffected.
-if (isTauriContext()) installOwllmWebLinkInterceptor();
-
-// Route plain user-facing links through OwLLM's persistent browser as well.
+// Route every plain user-facing http(s) link through OwLLM's persistent
+// browser — including future <a href="https://…"> anchors no page wired up
+// explicitly. Local file/download anchors are intentionally unaffected.
 if (isTauriContext()) installOwllmWebLinkInterceptor();
 
 function BootCover() {

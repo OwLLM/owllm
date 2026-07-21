@@ -21,7 +21,8 @@
 
 use crate::paths;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Default, Serialize, Clone)]
@@ -170,6 +171,55 @@ fn migrate_location_ownership(
     Ok(())
 }
 
+fn normalize_path_key(p: &str) -> String {
+    p.trim()
+        .trim_end_matches(['/', '\\'])
+        .replace('/', "\\")
+        .to_lowercase()
+}
+
+pub(crate) fn normalize_repo_url(input: &str) -> String {
+    let mut s = input.trim().to_string();
+    if s.is_empty() {
+        return String::new();
+    }
+    if let Some(rest) = s.strip_prefix("git@github.com:") {
+        s = format!("https://github.com/{rest}");
+    }
+    if let Some(rest) = s.strip_prefix("ssh://git@github.com/") {
+        s = format!("https://github.com/{rest}");
+    }
+    if let Some((scheme_user, rest)) = s.split_once('@') {
+        if scheme_user.starts_with("https://") && rest.starts_with("github.com/") {
+            s = format!("https://{rest}");
+        }
+    }
+    s = s.trim_end_matches('/').trim_end_matches(".git").to_string();
+    s.to_lowercase()
+}
+
+fn git_origin_url(location: &str) -> String {
+    let host = crate::agent_tools::host_cwd(location);
+    let dir = Path::new(&host);
+    if !dir.is_dir() {
+        return String::new();
+    }
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(["remote", "get-url", "origin"]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => {
+            normalize_repo_url(&String::from_utf8_lossy(&out.stdout))
+        }
+        _ => String::new(),
+    }
+}
+
 fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
     // Open read-write so we can run the idempotent migration that
     // adds chat_json / agent_logs_json to pre-existing databases.
@@ -198,7 +248,7 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
              COALESCE(repo_url, ''), COALESCE(created_device_id, ''), \
              COALESCE(created_device_name, ''), trust_writes, \
              auto_approve_all, team_json, team_default_model_id, graph_json, \
-             chat_json, agent_logs_json, updated_at \
+             chat_json, agent_logs_json, updated_at, COALESCE(repo_url, '') \
              FROM agent_projects ORDER BY updated_at DESC",
         )
         .map_err(|e| format!("prepare: {e}"))?;
@@ -263,6 +313,133 @@ fn git_origin(location: &str) -> Option<String> {
     }
     let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!url.is_empty() && url.contains("github.com")).then_some(url)
+}
+
+#[derive(Deserialize)]
+pub struct ResolveProjectInput {
+    pub location: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+fn row_by_id(conn: &rusqlite::Connection, id: &str) -> Result<ProjectRow, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, name, description, location, COALESCE(repo_url, ''), \
+             COALESCE(created_device_id, ''), COALESCE(created_device_name, ''), \
+             trust_writes, auto_approve_all, team_json, team_default_model_id, graph_json, \
+             chat_json, agent_logs_json, updated_at \
+             FROM agent_projects WHERE id = ?1",
+        )
+        .map_err(|e| format!("prepare project row: {e}"))?;
+    stmt.query_row(rusqlite::params![id], |r| {
+        let team_json: String = r.get(9)?;
+        Ok(ProjectRow {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            description: r.get::<_, String>(2).unwrap_or_default(),
+            location: r.get::<_, String>(3).unwrap_or_default(),
+            repo_url: r.get::<_, String>(4).unwrap_or_default(),
+            created_device_id: r.get::<_, String>(5).unwrap_or_default(),
+            created_device_name: r.get::<_, String>(6).unwrap_or_default(),
+            trust_writes: r.get::<_, i64>(7).unwrap_or(0) != 0,
+            auto_approve_all: r.get::<_, i64>(8).unwrap_or(0) != 0,
+            team: serde_json::from_str(&team_json).unwrap_or_default(),
+            team_default_model_id: r.get::<_, String>(10).unwrap_or_default(),
+            graph_json: r.get::<_, String>(11).unwrap_or_default(),
+            chat_json: r.get::<_, String>(12).unwrap_or_default(),
+            agent_logs_json: r.get::<_, String>(13).unwrap_or_default(),
+            updated_at: r.get::<_, String>(14).unwrap_or_default(),
+        })
+    })
+    .map_err(|e| format!("read project row: {e}"))
+}
+
+#[tauri::command]
+pub async fn resolve_project_for_location(input: ResolveProjectInput) -> Result<ProjectRow, String> {
+    let Some(path) = project_db_path() else {
+        return Err("LLM/ tree not found".into());
+    };
+    let path2 = path.clone();
+    tokio::task::spawn_blocking(move || {
+        let location = input.location.trim().to_string();
+        if location.is_empty() {
+            return Err("project location is required".to_string());
+        }
+        let repo_url = git_origin_url(&location);
+        if let Some(parent) = path2.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+        }
+        let conn = rusqlite::Connection::open(&path2)
+            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        ensure_schema(&conn)?;
+        let path_key = normalize_path_key(&location);
+        let mut found: Option<(String, String)> = None;
+        {
+            let mut stmt = conn
+                .prepare("SELECT id, location, COALESCE(repo_url, '') FROM agent_projects")
+                .map_err(|e| format!("prepare project resolve: {e}"))?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1).unwrap_or_default(),
+                        r.get::<_, String>(2).unwrap_or_default(),
+                    ))
+                })
+                .map_err(|e| format!("query project resolve: {e}"))?;
+            for row in rows {
+                let (id, loc, repo) = row.map_err(|e| format!("project resolve row: {e}"))?;
+                let repo = normalize_repo_url(&repo);
+                if !loc.trim().is_empty() && normalize_path_key(&loc) == path_key {
+                    found = Some((id, repo));
+                    break;
+                }
+                if !repo_url.is_empty() && repo == repo_url {
+                    found = Some((id, repo));
+                    break;
+                }
+            }
+        }
+        if let Some((id, existing_repo_url)) = found {
+            conn.execute(
+                "UPDATE agent_projects SET location = ?2 WHERE id = ?1",
+                rusqlite::params![id, location],
+            )
+            .map_err(|e| format!("bind project location: {e}"))?;
+            if !repo_url.is_empty() && existing_repo_url.is_empty() {
+                let now = now_iso();
+                conn.execute(
+                    "UPDATE agent_projects SET repo_url = ?2, updated_at = ?3 WHERE id = ?1",
+                    rusqlite::params![id, repo_url, now],
+                )
+                .map_err(|e| format!("bind project repo url: {e}"))?;
+            }
+            return row_by_id(&conn, &id);
+        }
+
+        let id = new_id();
+        let now = now_iso();
+        let name = input
+            .name
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| {
+                Path::new(&crate::agent_tools::host_cwd(&location))
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| "Code project".to_string())
+            });
+        conn.execute(
+            "INSERT INTO agent_projects (id, name, description, location, repo_url, trust_writes, auto_approve_all, \
+             team_json, model_overrides_json, graph_json, created_at, updated_at, team_default_model_id) \
+             VALUES (?1, ?2, '', ?3, ?4, 0, 0, '[]', '{}', '', ?5, ?5, '')",
+            rusqlite::params![id, name, location, repo_url, now],
+        )
+        .map_err(|e| format!("insert resolved project: {e}"))?;
+        row_by_id(&conn, &id)
+    })
+    .await
+    .map_err(|e| format!("join error: {e}"))?
 }
 
 // ---------- Write API ----------
@@ -449,6 +626,7 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
         let self_name = std::env::var("COMPUTERNAME")
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| "This PC".to_string());
+        let repo_url = normalize_repo_url(&input.repo_url);
         conn.execute(
             "INSERT INTO agent_projects (id, name, description, location, location_device_id, repo_url, \
              created_device_id, created_device_name, trust_writes, auto_approve_all, team_json, \
@@ -460,7 +638,7 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
                 input.description,
                 input.location,
                 self_id,
-                input.repo_url,
+                repo_url,
                 self_id,
                 self_name,
                 input.trust_writes as i64,
@@ -478,7 +656,7 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
             name: input.name,
             description: input.description,
             location: input.location,
-            repo_url: input.repo_url,
+            repo_url,
             created_device_id: self_id,
             created_device_name: self_name,
             trust_writes: input.trust_writes,
@@ -550,7 +728,7 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
         }
         if let Some(v) = input.repo_url {
             sets.push("repo_url = ?");
-            params.push(Box::new(v));
+            params.push(Box::new(normalize_repo_url(&v)));
         }
         if let Some(v) = input.trust_writes {
             sets.push("trust_writes = ?");
@@ -640,6 +818,25 @@ pub async fn delete_project(id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn git_ok(cwd: &Path, args: &[&str]) {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(args)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {:?} failed: {}{}",
+            args,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
 
     #[test]
     fn migration_keeps_only_folders_that_exist_on_this_computer() {
@@ -681,5 +878,64 @@ mod tests {
         assert_eq!(valid_row.1, "device-here");
         assert_eq!(foreign_row, (String::new(), "device-here".into()));
         let _ = std::fs::remove_dir_all(valid);
+    }
+
+    #[test]
+    fn repo_url_normalization_matches_common_git_remote_forms() {
+        assert_eq!(
+            normalize_repo_url("git@github.com:OwLLM/LocaLLM.git\n"),
+            "https://github.com/owllm/locallm"
+        );
+        assert_eq!(
+            normalize_repo_url("https://token@github.com/OwLLM/LocaLLM.git"),
+            "https://github.com/owllm/locallm"
+        );
+        assert_eq!(
+            normalize_repo_url("ssh://git@github.com/OwLLM/LocaLLM/"),
+            "https://github.com/owllm/locallm"
+        );
+    }
+
+    #[test]
+    fn resolve_project_for_location_reuses_existing_project_by_git_origin() {
+        let _guard = TEST_ENV_LOCK.lock().expect("project test lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("state.db");
+        std::env::set_var("OWLLM_PROJECT_DB", &db);
+        let repo_a = tmp.path().join("repo-a");
+        let repo_b = tmp.path().join("repo-b");
+        std::fs::create_dir_all(&repo_a).unwrap();
+        std::fs::create_dir_all(&repo_b).unwrap();
+        git_ok(&repo_a, &["init", "-q"]);
+        git_ok(&repo_b, &["init", "-q"]);
+        git_ok(&repo_a, &["remote", "add", "origin", "git@github.com:OwLLM/Shared.git"]);
+        git_ok(&repo_b, &["remote", "add", "origin", "https://github.com/owllm/shared.git"]);
+
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            ensure_schema(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO agent_projects (id, name, location, repo_url, created_at, updated_at) \
+                 VALUES ('project-shared', 'Shared', ?1, ?2, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![
+                    repo_a.to_string_lossy().to_string(),
+                    normalize_repo_url("git@github.com:OwLLM/Shared.git"),
+                ],
+            )
+            .unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let row = rt
+            .block_on(resolve_project_for_location(ResolveProjectInput {
+                location: repo_b.to_string_lossy().to_string(),
+                name: Some("Shared clone".to_string()),
+            }))
+            .expect("resolve project");
+
+        assert_eq!(row.id, "project-shared");
+        assert_eq!(normalize_path_key(&row.location), normalize_path_key(&repo_b.to_string_lossy()));
+        assert_eq!(row.repo_url, "https://github.com/owllm/shared");
+        std::env::remove_var("OWLLM_PROJECT_DB");
     }
 }

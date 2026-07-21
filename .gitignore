@@ -174,3 +174,10 @@ runtime-data/
 owllm-desktop/rel*/
 # Scratch.
 owllm-desktop/tooltest/
+
+# OWLLM project-local runtime state. These files are recreated by the app and
+# must not become permanent Git changes. Keep durable project metadata such as
+# .owllm/project.json, .owllm/verify.json, skills, and assets trackable.
+.owllm-inbox/
+.owllm/brainstorm.json
+.owllm/eval-traces.jsonl

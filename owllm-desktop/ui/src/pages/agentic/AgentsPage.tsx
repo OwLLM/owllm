@@ -67,6 +67,8 @@ import {
   streamLocalChat,
   streamOpenAiApiWithTools,
   runCodexCliStream,
+  makeResponsiveHandlers,
+  makeUiYield,
   ensureCliWarm,
   clearCliWarm,
   withCliAuthRetry,
@@ -7286,6 +7288,10 @@ async function streamChatCompletion(
       sessionId, onSystemWarning, onTranscript, getSteer,
     );
   }
+  const responsive = makeResponsiveHandlers(onDelta, onThought);
+  onDelta = responsive.onDelta;
+  onThought = responsive.onThought;
+  try {
   if (provider === "anthropic") {
     return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   }
@@ -7357,20 +7363,23 @@ async function streamChatCompletion(
   // Tool activity is surfaced on the Thought tab through onThought (which
   // consumeOpenAISse already drives for delta.tool_calls). The cloud /
   // sub / API branches above are untouched.
-  return streamLocalChat({
-    port,
-    modelId,
-    systemPrompt,
-    userContent: openaiUserContent(effectiveText, images),
-    temperature,
-    signal,
-    onDelta,
-    onThought,
-    projectCwd,
-    history,
-    allowedTools,
-    getSteer,
-  });
+    return streamLocalChat({
+      port,
+      modelId,
+      systemPrompt,
+      userContent: openaiUserContent(effectiveText, images),
+      temperature,
+      signal,
+      onDelta,
+      onThought,
+      projectCwd,
+      history,
+      allowedTools,
+      getSteer,
+    });
+  } finally {
+    await responsive.flush();
+  }
 }
 
 /// Anthropic Messages API streaming. Format:
@@ -7608,12 +7617,15 @@ async function consumeAnthropicSse(
   let buf = "";
   let acc = "";
   const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; channel: string; role: string }>();
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -7893,12 +7905,15 @@ async function streamGemini(
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -7978,12 +7993,15 @@ async function consumeOpenAISse(
     genTail = (genTail + s).slice(-3600);
     return checkRunawayLine(genTail);
   };
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;

@@ -297,8 +297,16 @@ pub async fn finish_and_publish(
         args.push(m.trim().to_string());
     }
 
+    let script_for_diag = args.first().cloned().unwrap_or_else(|| "<unknown>".into());
+    let mode_for_diag = mode
+        .as_deref()
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or("<project-card/default>")
+        .to_string();
+    let bash = which_bash();
+    let bash_for_diag = bash.clone();
+
     let out = tokio::task::spawn_blocking(move || {
-        let bash = which_bash();
         let mut cmd = Command::new(&bash);
         if let Some(s) = sign {
             s.apply_to(&mut cmd);
@@ -330,14 +338,26 @@ pub async fn finish_and_publish(
     if ok {
         Ok(combined)
     } else {
-        let tail: String = combined
-            .chars()
-            .rev()
-            .take(2000)
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
+        let trimmed = combined.trim();
+        let tail: String = if trimmed.is_empty() {
+            let status = out
+                .status
+                .code()
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "terminated by signal".into());
+            format!(
+                "release command exited {status} without stdout/stderr\nrepo_dir: {repo_dir}\nscript: {script_for_diag}\nmode: {mode_for_diag}\nbash: {bash_for_diag}"
+            )
+        } else {
+            combined
+                .chars()
+                .rev()
+                .take(2000)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect()
+        };
         Err(format!("finish_and_publish did not complete:\n{tail}"))
     }
 }

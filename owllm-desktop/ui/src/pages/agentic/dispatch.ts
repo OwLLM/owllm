@@ -60,6 +60,106 @@ type ClaudeStreamEvent =
   | { kind: "toolResult"; toolUseId: string; content: string; isError: boolean }
   | { kind: "error"; message: string };
 
+const UI_STREAM_FRAME_MS = 16;
+const UI_STREAM_YIELD_MS = 12;
+
+function nowMs(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+function nextUiFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+export function makeUiYield(intervalMs = UI_STREAM_YIELD_MS): () => Promise<void> {
+  let last = nowMs();
+  return async () => {
+    const n = nowMs();
+    if (n - last < intervalMs) return;
+    last = n;
+    await nextUiFrame();
+  };
+}
+
+type ResponsiveHandlers = {
+  onDelta: StreamHandler;
+  onThought?: ThoughtHandler;
+  flush: () => Promise<void>;
+};
+
+export function makeResponsiveHandlers(onDelta: StreamHandler, onThought?: ThoughtHandler): ResponsiveHandlers {
+  let text = "";
+  const thoughts = new Map<string, { channel: string; role: string; delta: string }>();
+  let scheduled = false;
+  let waiters: Array<() => void> = [];
+
+  const finishWaiters = () => {
+    const done = waiters;
+    waiters = [];
+    for (const resolve of done) resolve();
+  };
+  const flushNow = () => {
+    scheduled = false;
+    if (text) {
+      const d = text;
+      text = "";
+      onDelta(d);
+    }
+    if (onThought && thoughts.size) {
+      const batch = [...thoughts.values()];
+      thoughts.clear();
+      for (const item of batch) onThought(item.channel, item.role, item.delta);
+    } else {
+      thoughts.clear();
+    }
+    finishWaiters();
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => flushNow());
+    } else {
+      setTimeout(flushNow, UI_STREAM_FRAME_MS);
+    }
+  };
+
+  return {
+    onDelta(delta: string) {
+      if (!delta) return;
+      text += delta;
+      schedule();
+    },
+    onThought: onThought
+      ? (channel: string, role: string, delta: string) => {
+          const key = `${channel}\u0000${role}`;
+          const cur = thoughts.get(key);
+          thoughts.set(key, {
+            channel,
+            role,
+            delta: (cur?.delta ?? "") + (delta ?? ""),
+          });
+          schedule();
+        }
+      : undefined,
+    async flush() {
+      if (!scheduled && !text && thoughts.size === 0) return;
+      await new Promise<void>((resolve) => {
+        waiters.push(resolve);
+        if (!scheduled) schedule();
+      });
+    },
+  };
+}
+
 // Run claude --print --output-format stream-json and route events to
 // the user-facing reply (onDelta) + Thought tab (onThought). Returns
 // the assembled assistant text on completion. Used whenever the
@@ -93,14 +193,15 @@ async function runClaudeCliStream(args: {
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
+  const responsive = makeResponsiveHandlers(args.onDelta, args.onThought);
   const ch = new Channel<ClaudeStreamEvent>();
   ch.onmessage = (msg) => {
     switch (msg.kind) {
       case "text":
-        args.onDelta(msg.delta);
+        responsive.onDelta(msg.delta);
         break;
       case "thinking":
-        args.onThought("thinking", "🧠 thinking", msg.delta);
+        responsive.onThought?.("thinking", "🧠 thinking", msg.delta);
         break;
       case "toolUse": {
         // Special-case SendUserMessage — that's the agent asking the
@@ -111,7 +212,7 @@ async function runClaudeCliStream(args: {
         if (msg.name === "SendUserMessage") {
           const question = parseUserMessageInput(msg.input);
           if (args.onAskUser) args.onAskUser(question);
-          args.onThought("ask-user", "❓ agent asks", question);
+          responsive.onThought?.("ask-user", "❓ agent asks", question);
           break;
         }
         // One Thought entry per tool invocation. Channel id encodes
@@ -119,7 +220,7 @@ async function runClaudeCliStream(args: {
         // can land under the same block (see toolResult below).
         const channel = `tool:${msg.name}:${msg.toolUseId}`;
         const body = msg.input ? `${msg.input}` : "";
-        args.onThought(channel, `🛠 ${msg.name}`, body);
+        responsive.onThought?.(channel, `🛠 ${msg.name}`, body);
         break;
       }
       case "toolResult": {
@@ -134,29 +235,33 @@ async function runClaudeCliStream(args: {
         // renderer shows the true status instead of guessing from the result
         // text — a grep for "error"/"denied" returns those words and was being
         // mislabeled "Failed".
-        args.onThought(channel, msg.isError ? "↩ error" : "↩ result", snippet);
+        responsive.onThought?.(channel, msg.isError ? "↩ error" : "↩ result", snippet);
         break;
       }
       case "error":
-        args.onThought("cli-error", "⚠ cli", msg.message);
+        responsive.onThought?.("cli-error", "⚠ cli", msg.message);
         break;
     }
   };
-  return await invoke<string>("claude_cli_stream", {
-    systemPrompt: args.systemPrompt,
-    userMessage: args.userMessage,
-    cwd: args.cwd ?? null,
-    autoApprove: args.autoApprove ?? false,
-    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
-    model: args.model ?? null,
-    effort: args.effort ?? null,
-    sessionId: args.sessionId ?? null,
-    // Default ON — matches VS Code Claude Code where the agent can
-    // always ask the user a question mid-turn. Callers can pass false
-    // explicitly to disable when truly autonomous behaviour is wanted.
-    briefMode: args.briefMode ?? true,
-    onEvent: ch,
-  });
+  try {
+    return await invoke<string>("claude_cli_stream", {
+      systemPrompt: args.systemPrompt,
+      userMessage: args.userMessage,
+      cwd: args.cwd ?? null,
+      autoApprove: args.autoApprove ?? false,
+      allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      model: args.model ?? null,
+      effort: args.effort ?? null,
+      sessionId: args.sessionId ?? null,
+      // Default ON — matches VS Code Claude Code where the agent can
+      // always ask the user a question mid-turn. Callers can pass false
+      // explicitly to disable when truly autonomous behaviour is wanted.
+      briefMode: args.briefMode ?? true,
+      onEvent: ch,
+    });
+  } finally {
+    await responsive.flush();
+  }
 }
 
 /// Run `codex exec --json` and route its event stream to the reply
@@ -180,18 +285,19 @@ export async function runCodexCliStream(args: {
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
+  const responsive = makeResponsiveHandlers(args.onDelta, args.onThought);
   const ch = new Channel<ClaudeStreamEvent>();
   ch.onmessage = (msg) => {
     switch (msg.kind) {
       case "text":
-        args.onDelta(msg.delta);
+        responsive.onDelta(msg.delta);
         break;
       case "thinking":
-        args.onThought("thinking", "🧠 thinking", msg.delta);
+        responsive.onThought?.("thinking", "🧠 thinking", msg.delta);
         break;
       case "toolUse": {
         const channel = `tool:${msg.name}:${msg.toolUseId}`;
-        args.onThought(channel, `🛠 ${msg.name}`, msg.input ? `${msg.input}` : "");
+        responsive.onThought?.(channel, `🛠 ${msg.name}`, msg.input ? `${msg.input}` : "");
         break;
       }
       case "toolResult": {
@@ -199,24 +305,28 @@ export async function runCodexCliStream(args: {
         const snippet = msg.content.length > 800
           ? msg.content.slice(0, 800) + "\n…(truncated)"
           : msg.content;
-        args.onThought(channel, "↩ result", snippet);
+        responsive.onThought?.(channel, "↩ result", snippet);
         break;
       }
       case "error":
-        args.onThought("cli-error", "⚠ cli", msg.message);
+        responsive.onThought?.("cli-error", "⚠ cli", msg.message);
         break;
     }
   };
-  return await invoke<string>("codex_cli_stream", {
-    systemPrompt: args.systemPrompt,
-    userMessage: args.userMessage,
-    cwd: args.cwd ?? null,
-    imagePaths: args.imagePaths ?? null,
-    model: args.model ?? null,
-    effort: args.effort ?? null,
-    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
-    onEvent: ch,
-  });
+  try {
+    return await invoke<string>("codex_cli_stream", {
+      systemPrompt: args.systemPrompt,
+      userMessage: args.userMessage,
+      cwd: args.cwd ?? null,
+      imagePaths: args.imagePaths ?? null,
+      model: args.model ?? null,
+      effort: args.effort ?? null,
+      allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      onEvent: ch,
+    });
+  } finally {
+    await responsive.flush();
+  }
 }
 
 /// Best-effort extraction of the message text from a SendUserMessage
@@ -2028,45 +2138,52 @@ export async function streamChatCompletion(
       sessionId, onSystemWarning, onTranscript, getSteer,
     );
   }
+  const responsive = makeResponsiveHandlers(onDelta, onThought);
+  onDelta = responsive.onDelta;
+  onThought = responsive.onThought;
   let reply: string;
-  if (provider === "anthropic") {
-    reply = await streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
-  } else if (provider === "openai") {
-    reply = await streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
-  } else if (provider === "moonshot") {
-    reply = await streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
-  } else if (provider === "gemini") {
-    reply = await streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history);
-  } else if (provider === "xai") {
-    reply = await streamXai(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
-  } else if (OPENAI_COMPAT_PROVIDERS[provider]) {
-    const cfg = OPENAI_COMPAT_PROVIDERS[provider];
-    reply = await streamOpenAICompatible({
-      url: cfg.url, keyName: cfg.keyName, modelId: bareId,
-      systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images, providerLabel: cfg.label,
-      projectCwd, allowedTools,
-    });
-  } else {
-    // ---- Local llama-server path (GGUF) ----
-    // Native tool-calling ONLY: the model's own chat template (llama-server
-    // --jinja) renders the `tools` array and parses the model's structured
-    // delta.tool_calls back for us. No XML catalog injected, no dialect
-    // parsing. Cloud/sub/API branches above are untouched.
-    reply = await streamLocalChat({
-      port,
-      modelId,
-      systemPrompt,
-      userContent: openaiUserContent(effectiveText, images),
-      temperature,
-      signal,
-      onDelta,
-      onThought,
-      projectCwd,
-      history,
-      allowedTools,
-      getSteer,
-    });
+  try {
+    if (provider === "anthropic") {
+      reply = await streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
+    } else if (provider === "openai") {
+      reply = await streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
+    } else if (provider === "moonshot") {
+      reply = await streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
+    } else if (provider === "gemini") {
+      reply = await streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history);
+    } else if (provider === "xai") {
+      reply = await streamXai(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
+    } else if (OPENAI_COMPAT_PROVIDERS[provider]) {
+      const cfg = OPENAI_COMPAT_PROVIDERS[provider];
+      reply = await streamOpenAICompatible({
+        url: cfg.url, keyName: cfg.keyName, modelId: bareId,
+        systemPrompt, userMessage: effectiveText, temperature,
+        signal, onDelta, history, onThought, images, providerLabel: cfg.label,
+        projectCwd, allowedTools,
+      });
+    } else {
+      // ---- Local llama-server path (GGUF) ----
+      // Native tool-calling ONLY: the model's own chat template (llama-server
+      // --jinja) renders the `tools` array and parses the model's structured
+      // delta.tool_calls back for us. No XML catalog injected, no dialect
+      // parsing. Cloud/sub/API branches above are untouched.
+      reply = await streamLocalChat({
+        port,
+        modelId,
+        systemPrompt,
+        userContent: openaiUserContent(effectiveText, images),
+        temperature,
+        signal,
+        onDelta,
+        onThought,
+        projectCwd,
+        history,
+        allowedTools,
+        getSteer,
+      });
+    }
+  } finally {
+    await responsive.flush();
   }
   // Model-agnostic usage tally: every provider (local, API keys, CLIs)
   // gets a row per completed turn so the USAGE panel has real numbers
@@ -2148,6 +2265,9 @@ export async function fetchNetRetry(doFetch: () => Promise<Response>, signal: Ab
 }
 
 export async function streamLocalChat(p: StreamLocalChatParams): Promise<string> {
+  const responsive = makeResponsiveHandlers(p.onDelta, p.onThought);
+  const emitDelta = responsive.onDelta;
+  const emitThought = responsive.onThought;
   const openaiTools = await formatToolsForOpenAI(p.allowedTools);
   // Instrumentation: the exact tools advertised to llama-server this turn.
   // If agentic tool-calling misbehaves, open devtools — this shows whether
@@ -2207,12 +2327,14 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // when the stream stops. Local generation only (where tok/s reflects the
   // user's own hardware and is the meaningful number).
   const genTick = makeGenMeter();
-  const countingDelta: StreamHandler = (d) => { genTick(); p.onDelta(d); };
+  const countingDelta: StreamHandler = (d) => { genTick(); emitDelta(d); };
   const countingThought: ThoughtHandler = (channel, role, delta) => {
     if (delta) genTick();
-    p.onThought?.(channel, role, delta);
+    emitThought?.(channel, role, delta);
   };
+  const maybeYield = makeUiYield();
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    await maybeYield();
     if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
     let resp: Response | undefined;
     const loadDeadline = Date.now() + LOAD_RETRY_MS;
@@ -2297,15 +2419,18 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       const v = validateCall(c);
       if (v.ok) valid.push(c);
       else { invalid.push({ name: c.name, error: v.error }); p.events?.onValidationError?.(c.name, v.error); }
+      await maybeYield();
     }
     const results: ToolExecResult[] = [];
     for (const c of valid) {
+      await maybeYield();
       if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
       p.events?.onToolCall?.(c, turn);
       // eslint-disable-next-line no-await-in-loop
       const r = await executeToolCall(c, p.projectCwd ?? "");
       results.push(r);
       p.events?.onToolResult?.(c, r, turn);
+      await maybeYield();
     }
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
@@ -2363,6 +2488,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       if (p.signal.aborted) throw e;
     }
   }
+  await responsive.flush();
   return lastReply;
 }
 
@@ -2382,6 +2508,10 @@ export async function streamOpenAiApiWithTools(args: {
   keyName?: string;
   providerLabel?: string;
 }): Promise<string> {
+  const responsive = makeResponsiveHandlers(args.onDelta, args.onThought);
+  const onDelta = responsive.onDelta;
+  const onThought = responsive.onThought;
+  const maybeYield = makeUiYield();
   const sep = args.modelId.indexOf(":");
   const wireModel = sep === -1 ? args.modelId : args.modelId.slice(0, sep);
   const effort = sep === -1 ? null : args.modelId.slice(sep + 1);
@@ -2404,6 +2534,7 @@ export async function streamOpenAiApiWithTools(args: {
   let lastReply = "";
   let answeredWithoutTools = false;
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    await maybeYield();
     if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
     const nativeCalls: RawNativeCall[] = [];
     const resp = await fetchNetRetry(() => fetch(apiUrl, {
@@ -2420,7 +2551,7 @@ export async function streamOpenAiApiWithTools(args: {
       }),
       signal: args.signal,
     }), args.signal);
-    lastReply = await consumeOpenAISse(resp, args.onDelta, args.onThought, nativeCalls);
+    lastReply = await consumeOpenAISse(resp, onDelta, onThought, nativeCalls);
     if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
     const calls = canonicalizeNativeCalls(nativeCalls, { firstRequiredArg });
     if (calls.length === 0) { answeredWithoutTools = true; break; }
@@ -2430,12 +2561,15 @@ export async function streamOpenAiApiWithTools(args: {
       const v = validateCall(c);
       if (v.ok) valid.push(c);
       else invalid.push({ name: c.name, error: v.error });
+      await maybeYield();
     }
     const results: ToolExecResult[] = [];
     for (const c of valid) {
+      await maybeYield();
       if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
       const r = await executeToolCall(c, args.projectCwd ?? "");
       results.push(r);
+      await maybeYield();
     }
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
@@ -2463,9 +2597,10 @@ export async function streamOpenAiApiWithTools(args: {
       }),
       signal: args.signal,
     }), args.signal);
-    const finalText = await consumeOpenAISse(resp, args.onDelta, args.onThought, []);
+    const finalText = await consumeOpenAISse(resp, onDelta, onThought, []);
     if (finalText.trim()) lastReply = finalText;
   }
+  await responsive.flush();
   return lastReply;
 }
 
@@ -2671,12 +2806,15 @@ async function consumeAnthropicSse(
   // Indexed by content block index; tracks what kind each block is so
   // the matching content_block_delta can be routed correctly.
   const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; channel: string; role: string }>();
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -3021,12 +3159,15 @@ async function streamGemini(
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -3153,7 +3294,9 @@ async function consumeOpenAISse(
     if (line.length < 2500) return false;
     return !/[.!?](\s|$)/.test(line.slice(-400));
   };
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     let res: ReadableStreamReadResult<Uint8Array>;
     try {
       res = await readWithTimeout();
@@ -3171,6 +3314,7 @@ async function consumeOpenAISse(
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;

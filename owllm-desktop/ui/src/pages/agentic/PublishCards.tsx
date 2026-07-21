@@ -8,7 +8,14 @@ import { parseProjectCard, type ProjectCard } from "./cardLint";
 type ReadyCheck = { id: string; label: string; ok: boolean; detail: string };
 // Compact `git status --porcelain -b` summary from git.rs — cheap and local,
 // unlike publish_readiness which probes the network (ls-remote / gh).
-type GitStatusInfo = { isRepo: boolean; branch: string; ahead: number; behind: number; total: number };
+type GitStatusInfo = {
+  isRepo: boolean;
+  branch: string;
+  ahead: number;
+  behind: number;
+  total: number;
+  nuisanceFiles: string[];
+};
 type ReleaseVisibility = "publish" | "draft" | "dry-run";
 type PublishMode = "host" | "ci";
 
@@ -408,7 +415,8 @@ export default function PublishCards({
   // One click hands the failure to the coder agent instead of making the user
   // copy-paste PUBLISH_FAILED output into the chat. Carries BOTH the last
   // failed action's full output and any unmet readiness checks.
-  const hasFixableIssue = activity?.kind === "err" || readyFails.length > 0;
+  const nuisanceFiles = git?.nuisanceFiles ?? [];
+  const hasFixableIssue = activity?.kind === "err" || readyFails.length > 0 || nuisanceFiles.length > 0;
   const fixWithAgent = () => {
     if (!onFixIssues) return;
     const parts: string[] = [];
@@ -418,6 +426,15 @@ export default function PublishCards({
     }
     if (readyFails.length > 0) {
       parts.push(`Publish readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);
+    }
+    if (nuisanceFiles.length > 0) {
+      parts.push(
+        "OWLLM detected app-generated runtime files that are still tracked by Git and can repeatedly dirty or block Commit / Merge / Push:\n" +
+        nuisanceFiles.map((path) => `- ${path}`).join("\n") +
+        "\n\nClean them safely: add precise ignore rules and remove only these runtime paths from Git tracking while preserving their working-tree copies. " +
+        "Do not delete or ignore durable project data such as .owllm/project.json, .owllm/verify.json, .owllm/skills/, .owllm/assets/, or user source files. " +
+        "Verify the resulting Git status and the rule-based release workflow.",
+      );
     }
     const outcome = onFixIssues(
       "The rule-based release buttons (Commit / Merge / Push / Publish) hit a problem in this repository. " +
@@ -467,6 +484,11 @@ export default function PublishCards({
               >
                 {git.total > 0 ? `● ${git.total}` : "✓ clean"}
               </span>
+            </div>
+          )}
+          {nuisanceFiles.length > 0 && (
+            <div style={{ padding: "3px 5px", borderRadius: 5, background: "rgba(255,217,122,0.1)", color: "#ffd97a", fontSize: 10.5, lineHeight: 1.4 }}>
+              {nuisanceFiles.length} tracked OWLLM runtime file{nuisanceFiles.length === 1 ? "" : "s"} can keep Git dirty. Use Fix with agent to safely de-track them.
             </div>
           )}
           <div style={{ display: "flex", gap: 6, width: "100%" }}>

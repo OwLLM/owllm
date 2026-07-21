@@ -412,6 +412,7 @@ pub fn run() {
             overlay_frame::overlay_frame_capture_geometry,
             projects::list_projects,
             projects::create_project,
+            projects::resolve_project_for_location,
             projects::update_project,
             projects::delete_project,
             memory::agent_memory_get,

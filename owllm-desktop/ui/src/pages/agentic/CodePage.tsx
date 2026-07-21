@@ -21,7 +21,7 @@ import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
-import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
+import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
 import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
@@ -192,6 +192,7 @@ type OpenProjectPagesDetail = {
   handled: boolean;
 };
 const OPEN_PROJECT_PAGES_EVENT = "owllm:code:open-project-pages";
+type ProjectScopeRow = { id: string; location: string; repo_url?: string };
 const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
 const PAGE_SESSION_PREFIX = "owllm:code:page:";
@@ -877,15 +878,31 @@ function CodeWorkspace({ pageId, onTitle }: {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
+  const normProjectPath = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+  const fallbackProjectScope = (folder: string) => `code:${normProjectPath(folder)}`;
+  const resolveFolderProjectScope = async (folder: string, apply = true): Promise<string> => {
+    const clean = folder.trim();
+    if (!clean) return "";
+    const name = clean.replace(/^.*[\\/]/, "") || "Code project";
+    const row = await invoke<ProjectScopeRow>("resolve_project_for_location", {
+      input: { location: clean, name },
+    });
+    const id = row.id || fallbackProjectScope(clean);
+    if (apply) {
+      setRuleScope((prev) => (prev.id === id && prev.shared ? prev : { id, shared: true }));
+      try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: id })); }
+      catch { setDirectives([]); }
+    }
+    return id;
+  };
   // Resolve the rules/notebook scope whenever the folder changes: prefer the
   // matching AGENTIC project id (shared rule set + notebook with the team),
   // fall back to a stable per-folder key.
   useEffect(() => {
     const folder = (projectRoot || workspace || "").trim();
-    const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
     if (!folder) { lastScopeFolderRef.current = ""; setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
-    const nf = norm(folder);
-    const fallbackId = `code:${nf}`;
+    const nf = normProjectPath(folder);
+    const fallbackId = fallbackProjectScope(folder);
     // Folder switched → drop the previous project's scope IMMEDIATELY so its
     // notebook and rules can never linger on screen while the async project
     // lookup runs (or if it hangs). The lookup below only UPGRADES this to the
@@ -902,9 +919,8 @@ function CodeWorkspace({ pageId, onTitle }: {
       let id = fallbackId;
       let shared = false;
       try {
-        const rows = await invoke<{ id: string; location: string }[]>("list_projects");
-        const hit = (rows || []).find((r) => r.location && norm(r.location) === nf);
-        if (hit) { id = hit.id; shared = true; }
+        id = await resolveFolderProjectScope(folder, false);
+        shared = true;
       } catch { /* no projects table reachable — per-folder scope */ }
       if (!alive) return;
       setRuleScope((prev) => (prev.id === id && prev.shared === shared ? prev : { id, shared }));
@@ -1756,14 +1772,28 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
 
   const enrichSecondaryCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
-    const scope = memoryScope();
+    const scope = await resolveMemoryScope();
     const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (!scope || !user.trim()) return { text: user, pack: empty };
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(user);
+    await refreshTeamMemorySnapshot();
     const pack = await retrieveScopedTeamMemoryPack(scope, user, 8, false);
     return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
-  const memoryScope = () => ruleScopeRef.current.id || projectRoot || workspace || "";
+  const memoryScope = () => ruleScopeRef.current.id || ((projectRoot || workspace) ? fallbackProjectScope(projectRoot || workspace) : "");
+  const resolveMemoryScope = async (): Promise<string> => {
+    const current = ruleScopeRef.current;
+    if (current.shared && current.id) return current.id;
+    const folder = (projectRoot || workspace || "").trim();
+    if (!folder) return current.id || "";
+    try {
+      return await resolveFolderProjectScope(folder);
+    } catch {
+      return current.id || fallbackProjectScope(folder);
+    }
+  };
 
   const memoryLabel = (pack: TeamMemoryPack): string =>
     pack.total > 0 ? `${pack.factCount} fact${pack.factCount === 1 ? "" : "s"} · ${pack.worklogCount} worklog` : "no hits";
@@ -1788,16 +1818,23 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
 
   const enrichCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
-    const scope = memoryScope();
+    const scope = await resolveMemoryScope();
     const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (!scope || !user.trim()) return { text: user, pack: empty };
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(user);
+    await refreshTeamMemorySnapshot();
     const pack = await retrieveScopedTeamMemoryPack(scope, user, 8, false);
     return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
-  const logCodeWork = async (instruction: string, result: string) => {
-    const scope = memoryScope();
-    await logScopedTeamWork(scope, "code", instruction, result);
+  const logCodeWork = async (agent: string, instruction: string, result: string) => {
+    const scope = await resolveMemoryScope();
+    if (!scope || !result.trim()) return;
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(instruction);
+    await harvestMemoryWrites(result);
+    await logScopedTeamWork(scope, agent, instruction, stripMemoryDirectives(result));
   };
 
   // One agent turn against the SELECTED model. Routes by provider exactly like
@@ -1928,7 +1965,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     try {
       setStatus(`Coding in ${workspace}`);
       const reply = await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
-      await logCodeWork(text || "(see attached image)", reply);
+      await logCodeWork("code", text || "(see attached image)", reply);
       replyText = reply;
       ok = true;
     } catch (e) {
@@ -2052,6 +2089,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     try {
       setStatus(`Second agent working in ${workspace}`);
       replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
+      await logCodeWork("code_second", text, replyText);
     } catch (e) {
       const err = e as { name?: string; message?: string };
       aborted = err.name === "AbortError";
@@ -2195,14 +2233,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
-        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
+        const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
+        await logCodeWork("code_chat", text || "(see attached image)", reply);
       } else {
         // Pass a working dir so pasted images can be saved into it for the model
         // to read (codex -i / claude file-ref). Use the workspace if one is
         // selected, else the WSL scratch — without ANY cwd the image is dropped
         // ("I can't inspect the image"), which is the bug on a no-folder chat.
         const chatCwd = workspace || chatScratchRef.current || undefined;
-        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
+        const reply = await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
+        await logCodeWork("code_chat", text || "(see attached image)", reply);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -2255,11 +2295,12 @@ function CodeWorkspace({ pageId, onTitle }: {
         setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
         setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
         try {
-          await runTurn(
+          const stepReply = await runTurn(
             CODING_SYSTEM(workspace),
             `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
             [], ctrl.signal, { withEvents: true },
           );
+          await logCodeWork("code", plan[i].title, stepReply);
           setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "done" } : t)));
         } catch (e) {
           const err = e as { name?: string };
@@ -2546,7 +2587,6 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
               {catalogError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 9 }}>{catalogError}</div>}
             </section>
-
             <div style={{ display: "flex", flexDirection: "column", gap: 24, width: "100%", minWidth: 0 }}>
               {/* START — VS Code-style action rows */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
@@ -2595,7 +2635,7 @@ function CodeWorkspace({ pageId, onTitle }: {
 
               {/* RECENT — projects (name + path), VS Code style */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Local folders</div>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Projects</div>
                 <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, maxHeight: 420, overflowY: "auto", paddingRight: 2 }}>
                   {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
                     <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — use Local actions above to get started.</div>

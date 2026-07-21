@@ -70,6 +70,11 @@ for (const releaseFile of [
 if (!release.includes("tokio::task::spawn_blocking")) {
   fail("host publishing no longer runs off the async UI command executor");
 }
+if (!release.includes("release command exited {status} without stdout/stderr") ||
+    !release.includes("repo_dir: {repo_dir}") ||
+    !release.includes("script: {script_for_diag}")) {
+  fail("finish_and_publish can still return the blank wrapper with no actionable diagnostics");
+}
 
 // Exercise the exact refresh/status sequence in a real temporary repository:
 // content-identical rewrites stay clean, while a genuine edit remains visible

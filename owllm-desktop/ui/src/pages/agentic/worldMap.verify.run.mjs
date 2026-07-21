@@ -40,6 +40,10 @@ try {
   const consentStore = memory();
   presence.savePresenceEnabled(true, consentStore);
   check("Anonymous presence choice persists", presence.readPresenceEnabled(consentStore) === true);
+  const self = { device_id: "self", name: "This device" };
+  const paired = [{ device_id: "peer", name: "Peer" }];
+  check("Fleet includes the current installation", presence.includeSelfDevice(self, paired).map((device) => device.device_id).join(",") === "self,peer");
+  check("Fleet does not duplicate the current installation", presence.includeSelfDevice(self, [self, ...paired]).length === 2);
 
   const sanitized = presence.sanitizePresenceNodes([
     { id: "ok", region: "EU West", latitude: 48, longitude: 9, lastSeen: "now", github_login: "must-not-leak" },
@@ -69,8 +73,15 @@ try {
   check("Gamify replaces Arena with World Map", modules.includes('key: "world-map"') && modules.includes("component: WorldMapPage") && !modules.includes("component: ArenaPage"));
   check("Home links directly to World Map", home.includes('label: "World Map"') && home.includes('targetPage: "world-map"'));
   check("World Map renders a bundled Three.js globe", page.includes("new THREE.WebGLRenderer") && page.includes("new THREE.SphereGeometry") && page.includes("OrbitControls"));
-  check("Globe follows the selected GUI accent", page.includes('getPropertyValue("--accent")') && page.includes("earthTexture(accent)"));
+  check("Globe bundles photographic Earth texture layers", page.includes("EARTH_TEXTURES.day") && page.includes("EARTH_TEXTURES.normal") && page.includes("EARTH_TEXTURES.specular") && page.includes("EARTH_TEXTURES.clouds"));
+  check("Globe uses calibrated color and tone mapping", page.includes("THREE.SRGBColorSpace") && page.includes("THREE.ACESFilmicToneMapping") && page.includes("THREE.HemisphereLight"));
+  check("Globe follows the readable selected GUI accent", page.includes('getPropertyValue("--accent-ink")') && page.includes("accent={colors.accentInk}"));
   check("My Fleet consumes real paired-device state", page.includes("getIdentity()") && page.includes("listDevices()") && page.includes("device.is_self"));
+  check("My Fleet always includes the current installation", page.includes("fleetWithSelf(identity, devices)") && page.includes("is_self: true"));
+  check("Fleet satellites have aligned orbit paths and labels", page.includes("orbitPosition({ ...orbit") && page.includes("satelliteLabel(node.label"));
+  for (const asset of ["earth-day.jpg", "earth-normal.jpg", "earth-specular.jpg", "earth-clouds.png"]) {
+    check(`Bundled Earth asset exists: ${asset}`, fs.statSync(path.join(UI, "../public/world-map", asset)).size > 100_000);
+  }
   check("Public mode has an explicit anonymous-presence control", page.includes('type="checkbox"') && page.includes("sendAnonymousHeartbeat"));
   check("Unavailable service is disclosed", page.includes("World presence service is not connected yet."));
   check("New navigation labels have all eight locales", /\["World Map",(?:[^\]]*,){6}[^\]]*\]/.test(actions) && /\["Live World",(?:[^\]]*,){6}[^\]]*\]/.test(actions));

@@ -4,12 +4,18 @@
   "main": "src/index.js",
   "compatibility_date": "2026-07-21",
   "workers_dev": true,
-  "d1_databases": [
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "WORLD_PRESENCE",
+        "class_name": "WorldPresence"
+      }
+    ]
+  },
+  "migrations": [
     {
-      "binding": "DB"
+      "tag": "v1",
+      "new_sqlite_classes": ["WorldPresence"]
     }
-  ],
-  "triggers": {
-    "crons": ["*/10 * * * *"]
-  }
+  ]
 }

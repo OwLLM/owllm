@@ -8,13 +8,12 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { useLocalization } from "../../localization";
 import { getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from "../advanced/remoteDevices";
 import {
-  loadWorldPresence,
   includeSelfDevice,
   readPresenceEnabled,
   readWorldMapMode,
   savePresenceEnabled,
   saveWorldMapMode,
-  sendAnonymousHeartbeat,
+  subscribeWorldPresence,
   type PublicPresenceNode,
   type WorldMapMode,
 } from "./worldPresence";
@@ -462,24 +461,29 @@ export default function WorldMapPage() {
   useEffect(() => { saveWorldMapMode(mode); setSelected(null); }, [mode]);
 
   useEffect(() => {
-    const controller = new AbortController();
-    const refresh = async () => {
-      setLoading(true);
-      try {
-        const snapshot = await loadWorldPresence(controller.signal);
-        setConfigured(snapshot.configured);
+    setLoading(true);
+    return subscribeWorldPresence({
+      onSnapshot: (snapshot) => {
         setPublicNodes(snapshot.nodes);
         setError("");
-      } catch (reason) {
-        setConfigured(true);
-        setError(String(reason));
-      } finally {
         setLoading(false);
-      }
-    };
-    void refresh();
-    const timer = window.setInterval(refresh, 30_000);
-    return () => { controller.abort(); window.clearInterval(timer); };
+      },
+      onStatus: (status) => {
+        setConfigured(status.configured);
+        if (!status.configured) {
+          setPublicNodes([]);
+          setLoading(false);
+        } else if (!status.connected) {
+          setPublicNodes([]);
+          if (status.error) {
+            setError(status.error);
+            setLoading(false);
+          }
+        } else {
+          setError("");
+        }
+      },
+    });
   }, []);
 
   const loadFleet = async (showLoading = false) => {
@@ -518,16 +522,9 @@ export default function WorldMapPage() {
     if (mode === "fleet") void loadFleet(false);
   }, [mode]);
 
-  const togglePresence = async (enabled: boolean) => {
+  const togglePresence = (enabled: boolean) => {
     setPresenceEnabled(enabled);
     savePresenceEnabled(enabled);
-    try {
-      const sent = await sendAnonymousHeartbeat(enabled);
-      if (!sent) setConfigured(false);
-      setError("");
-    } catch (reason) {
-      setError(String(reason));
-    }
   };
 
   const nodes = useMemo<GlobeNode[]>(() => mode === "world"
@@ -614,7 +611,7 @@ export default function WorldMapPage() {
 
             {mode === "world" && (
               <label style={{ ...panelStyle(), padding: 15, display: "flex", gap: 11, cursor: "pointer", alignItems: "flex-start" }}>
-                <input type="checkbox" checked={presenceEnabled} onChange={(event) => void togglePresence(event.target.checked)} style={{ marginTop: 3, width: 17, height: 17, accentColor: "var(--accent)" }} />
+                <input type="checkbox" checked={presenceEnabled} onChange={(event) => togglePresence(event.target.checked)} style={{ marginTop: 3, width: 17, height: 17, accentColor: "var(--accent)" }} />
                 <span>
                   <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 750 }}>{t("Appear anonymously")}</span>
                   <span style={{ display: "block", marginTop: 4, color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45 }}>{t("Shares no name, account, device, project, prompt, or exact coordinates.")}</span>

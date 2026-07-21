@@ -52,7 +52,7 @@ import {
   readChatFontStep, saveChatFontStep,
 } from "./chatFontPreferences";
 import ActionIcon from "./components/ActionIcon";
-import { installWorldPresenceHeartbeat } from "./pages/gamify/worldPresence";
+import { installWorldPresenceConnection } from "./pages/gamify/worldPresence";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -1803,7 +1803,7 @@ export default function AppShell() {
 // installed yet. Dismissing it (Skip or Install) records `wizard.completed`
 // in localStorage so subsequent launches stay clean.
 function WorldPresenceRunner() {
-  useEffect(() => installWorldPresenceHeartbeat(), []);
+  useEffect(() => installWorldPresenceConnection(), []);
   return null;
 }
 

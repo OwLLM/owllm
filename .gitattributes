@@ -18,6 +18,8 @@
 *.tsx text eol=lf
 *.mjs text eol=lf
 *.sh text eol=lf
+.gitattributes text eol=lf
+services/world-presence/** text eol=lf
 
 # Release metadata is rewritten by the host publisher. Keep it LF even when
 # core.autocrlf=true so a completed/aborted version bump cannot leave a

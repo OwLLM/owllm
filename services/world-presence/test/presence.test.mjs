@@ -1,99 +1,141 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
 import test from "node:test";
-import { coarseLocation, createMemoryPresenceStore, handlePresenceRequest } from "../src/index.js";
+import { Miniflare } from "miniflare";
+import { coarseLocation, snapshotFromSockets } from "../src/index.js";
 
-const NOW = Date.parse("2026-07-21T12:00:00.000Z");
-
-function locatedRequest(method, token = "") {
-  const request = new Request("https://presence.example/v1/presence", {
-    method,
-    headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-  });
-  Object.defineProperty(request, "cf", {
-    value: { country: "KR", regionCode: "11", latitude: "37.5665", longitude: "126.9780" },
-  });
-  return request;
+function socketWithAttachment(value) {
+  return { deserializeAttachment: () => value };
 }
 
-async function body(response) {
-  return response.status === 204 ? null : response.json();
+function nextMessage(socket) {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error("timed out waiting for WebSocket message")), 2_000);
+    socket.addEventListener("message", (event) => {
+      clearTimeout(timeout);
+      resolve(JSON.parse(String(event.data)));
+    }, { once: true });
+  });
 }
 
-test("coarse location is stable, bounded, and does not expose exact coordinates", () => {
-  const first = coarseLocation({ country: "KR", regionCode: "11", latitude: 37.5665, longitude: 126.978 }, "node-a");
-  const second = coarseLocation({ country: "KR", regionCode: "11", latitude: 37.5665, longitude: 126.978 }, "node-a");
+async function withService(run) {
+  const mf = new Miniflare({
+    modules: true,
+    scriptPath: new URL("../src/index.js", import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, (match) => match.slice(1)),
+    compatibilityDate: "2026-07-21",
+    durableObjects: { WORLD_PRESENCE: { className: "WorldPresence", useSQLite: true } },
+  });
+  try { await run(mf); }
+  finally { await mf.dispose(); }
+}
+
+async function connect(mf, role, cf = {}) {
+  const response = await mf.dispatchFetch(`https://presence.example/v1/presence/connect?role=${role}`, {
+    headers: { Upgrade: "websocket" },
+    cf,
+  });
+  assert.equal(response.status, 101);
+  assert.ok(response.webSocket);
+  response.webSocket.accept();
+  return response.webSocket;
+}
+
+test("coarse location is stable, bounded, and never exposes exact coordinates", () => {
+  const input = { country: "KR", regionCode: "11", latitude: 37.5665, longitude: 126.978 };
+  const first = coarseLocation(input, "node-a");
+  const second = coarseLocation(input, "node-a");
   assert.deepEqual(first, second);
   assert.equal(first.region, "KR · 11");
-  assert.notEqual(first.latitude, 37.5665);
-  assert.notEqual(first.longitude, 126.978);
+  assert.notEqual(first.latitude, input.latitude);
+  assert.notEqual(first.longitude, input.longitude);
   assert.ok(first.latitude >= -85 && first.latitude <= 85);
   assert.ok(first.longitude >= -180 && first.longitude <= 180);
 });
 
-test("anonymous heartbeat issues a token and refreshes one public node", async () => {
-  const store = createMemoryPresenceStore();
-  const runtime = { now: () => NOW };
-  const createdResponse = await handlePresenceRequest(locatedRequest("POST"), store, runtime);
-  const created = await body(createdResponse);
-  assert.equal(createdResponse.status, 200);
-  assert.match(created.token, /^[a-f0-9]{64}$/);
-  assert.equal(Object.keys(created.node).sort().join(","), "id,lastSeen,latitude,longitude,region");
-  assert.equal(store.records.size, 1);
-
-  const refreshedResponse = await handlePresenceRequest(locatedRequest("POST", created.token), store, { now: () => NOW + 60_000 });
-  const refreshed = await body(refreshedResponse);
-  assert.equal(refreshed.token, created.token);
-  assert.equal(refreshed.node.id, created.node.id);
-  assert.equal(store.records.size, 1);
+test("snapshots expose only anonymous public fields and reject invalid nodes", () => {
+  const snapshot = snapshotFromSockets([
+    socketWithAttachment({ role: "presence", id: "good", region: "KR", latitude: 36, longitude: 128, connectedAt: "now", secret: "no" }),
+    socketWithAttachment({ role: "presence", id: "bad", region: "bad", latitude: 190, longitude: 0, connectedAt: "now" }),
+    socketWithAttachment({ role: "viewer", id: "viewer" }),
+  ], Date.parse("2026-07-21T12:00:00Z"));
+  assert.equal(snapshot.type, "snapshot");
+  assert.equal(snapshot.nodes.length, 1);
+  assert.deepEqual(Object.keys(snapshot.nodes[0]).sort(), ["id", "lastSeen", "latitude", "longitude", "region"]);
 });
 
-test("snapshot contains active public fields only and expiry removes stale nodes", async () => {
-  const store = createMemoryPresenceStore();
-  const created = await body(await handlePresenceRequest(locatedRequest("POST"), store, { now: () => NOW }));
-  const live = await body(await handlePresenceRequest(new Request("https://presence.example/v1/presence"), store, { now: () => NOW + 10 * 60_000 }));
-  assert.equal(live.nodes.length, 1);
-  assert.equal(live.nodes[0].id, created.node.id);
-  assert.equal(Object.hasOwn(live.nodes[0], "token"), false);
-
-  const expired = await body(await handlePresenceRequest(new Request("https://presence.example/v1/presence"), store, { now: () => NOW + 16 * 60_000 }));
-  assert.equal(expired.nodes.length, 0);
-  assert.equal(store.records.size, 0);
+test("health endpoint identifies the hibernating WebSocket transport", async () => {
+  await withService(async (mf) => {
+    const response = await mf.dispatchFetch("https://presence.example/health");
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      ok: true,
+      service: "owllm-world-presence",
+      transport: "hibernating-websocket",
+    });
+  });
 });
 
-test("delete is immediate, authenticated by opaque token, and idempotent", async () => {
-  const store = createMemoryPresenceStore();
-  const created = await body(await handlePresenceRequest(locatedRequest("POST"), store, { now: () => NOW }));
-  assert.equal(store.records.size, 1);
-  const deleted = await handlePresenceRequest(new Request("https://presence.example/v1/presence", {
-    method: "DELETE",
-    headers: { Authorization: `Bearer ${created.token}` },
-  }), store, { now: () => NOW });
-  assert.equal(deleted.status, 204);
-  assert.equal(store.records.size, 0);
+test("viewer receives an empty initial snapshot", async () => {
+  await withService(async (mf) => {
+    const viewer = await connect(mf, "viewer");
+    const snapshot = await nextMessage(viewer);
+    assert.equal(snapshot.type, "snapshot");
+    assert.deepEqual(snapshot.nodes, []);
+    viewer.close(1000, "done");
+  });
 });
 
-test("new anonymous nodes are capacity-bounded", async () => {
-  const store = createMemoryPresenceStore();
-  store.count = async () => 5_000;
-  const response = await handlePresenceRequest(locatedRequest("POST"), store, { now: () => NOW });
-  assert.equal(response.status, 429);
-  assert.deepEqual(await body(response), { error: "presence_capacity_reached" });
+test("presence connection broadcasts one coarse anonymous upsert to viewers", async () => {
+  await withService(async (mf) => {
+    const viewer = await connect(mf, "viewer");
+    await nextMessage(viewer);
+    const update = nextMessage(viewer);
+    const presence = await connect(mf, "presence", {
+      country: "KR",
+      regionCode: "11",
+      latitude: "37.5665",
+      longitude: "126.9780",
+    });
+    const change = await update;
+    assert.equal(change.type, "upsert");
+    assert.match(change.node.id, /^[a-f0-9]{24}$/);
+    assert.equal(change.node.region, "KR · 11");
+    assert.notEqual(change.node.latitude, 37.5665);
+    assert.deepEqual(Object.keys(change.node).sort(), ["id", "lastSeen", "latitude", "longitude", "region"]);
+    presence.close(1000, "invisible");
+    viewer.close(1000, "done");
+  });
 });
 
-test("service exposes CORS preflight and rejects missing edge geolocation", async () => {
-  const store = createMemoryPresenceStore();
-  const preflight = await handlePresenceRequest(new Request("https://presence.example/v1/presence", { method: "OPTIONS" }), store);
-  assert.equal(preflight.status, 204);
-  assert.equal(preflight.headers.get("Access-Control-Allow-Origin"), "*");
-  assert.match(preflight.headers.get("Access-Control-Allow-Headers"), /Authorization/);
-
-  const unavailable = await handlePresenceRequest(new Request("https://presence.example/v1/presence", { method: "POST" }), store);
-  assert.equal(unavailable.status, 503);
-  assert.deepEqual(await body(unavailable), { error: "coarse_location_unavailable" });
+test("closing a presence socket broadcasts its immediate removal", async () => {
+  await withService(async (mf) => {
+    const presence = await connect(mf, "presence", { country: "IT", regionCode: "62", latitude: "41.9", longitude: "12.5" });
+    const viewer = await connect(mf, "viewer");
+    assert.equal((await nextMessage(viewer)).nodes.length, 1);
+    const update = nextMessage(viewer);
+    presence.close(1000, "invisible");
+    const change = await update;
+    assert.equal(change.type, "remove");
+    assert.match(change.id, /^[a-f0-9]{24}$/);
+    viewer.close(1000, "done");
+  });
 });
 
-test("source never reads or stores IP or client identity fields", async () => {
-  const source = await import("node:fs/promises").then((fs) => fs.readFile(new URL("../src/index.js", import.meta.url), "utf8"));
+test("HTTP presence calls and invalid roles fail closed", async () => {
+  await withService(async (mf) => {
+    const plain = await mf.dispatchFetch("https://presence.example/v1/presence/connect?role=viewer");
+    assert.equal(plain.status, 426);
+    const invalid = await mf.dispatchFetch("https://presence.example/v1/presence/connect?role=admin", { headers: { Upgrade: "websocket" } });
+    assert.equal(invalid.status, 400);
+  });
+});
+
+test("service has no database, heartbeat, IP, identity, or retained-presence path", async () => {
+  const source = await fs.readFile(new URL("../src/index.js", import.meta.url), "utf8");
+  const config = await fs.readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8");
   assert.doesNotMatch(source, /CF-Connecting-IP|x-forwarded-for|github|device_name|project|prompt/i);
-  assert.match(source, /sha256\(token/);
+  assert.doesNotMatch(source, /INSERT INTO|CREATE TABLE|expires_at|scheduled\s*\(/i);
+  assert.doesNotMatch(config, /d1_databases|crons/i);
+  assert.match(source, /acceptWebSocket/);
+  assert.match(config, /new_sqlite_classes/);
 });

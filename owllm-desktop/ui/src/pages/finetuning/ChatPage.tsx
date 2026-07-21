@@ -51,7 +51,7 @@ import { canonicalizeNativeCalls, type RawNativeCall } from "../agentic/toolNorm
 import { isolationBadge } from "../agentic/isolationBadge";
 import { wslIsolationGet } from "../agentic/wslIsolation";
 import { samplingFor } from "../agentic/modelProfiles";
-import { streamChatCompletion, providerFor, fileToImageAttachment, type Attachment, type HistoryItem } from "../agentic/dispatch";
+import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachments, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, type Attachment, type HistoryItem } from "../agentic/dispatch";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { makeGenMeter } from "../../utils/genStats";
@@ -101,6 +101,7 @@ type Role = "user" | "assistant" | "system";
 type ChatMsg = {
   role: Role;
   content: string;
+  context?: string;
   /// Qwen 3 / DeepSeek-R1 / o-series reasoning text. Routed here
   /// instead of into `content` so the wall of "Let me think… Actually
   /// let me reconsider…" doesn't dump into the visible chat. Rendered
@@ -273,15 +274,25 @@ export default function ChatPage() {
   // Pasted images, attached to the next send (broadcast to all columns). Only
   // cloud / CLI / API models receive them (vision); local models ignore them.
   // Same shared fileToImageAttachment + Attachment shape as the Code/agentic chats.
-  const [chatImages, setChatImages] = useState<Attachment[]>([]);
+  const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState("");
+  const chatFileRef = useRef<HTMLInputElement>(null);
+  const addComposerFiles = async (files: FileList | File[]) => {
+    for (const file of Array.from(files)) {
+      try {
+        const attachment = await fileToChatAttachment(file);
+        setChatAttachments((current) => [...current, attachment]);
+        setAttachmentError("");
+      } catch (error) {
+        setAttachmentError(String((error as { message?: string })?.message ?? error));
+      }
+    }
+  };
   const onComposerPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []).filter(f => f.type.startsWith("image/"));
+    const files = Array.from(e.clipboardData?.files ?? []);
     if (files.length === 0) return;
     e.preventDefault();
-    files.forEach(async (f) => {
-      try { const a = await fileToImageAttachment(f); setChatImages(x => [...x, a]); }
-      catch (err) { console.warn("[finetune chat] image paste failed", err); }
-    });
+    void addComposerFiles(files);
   };
   const [converse, setConverse] = useState<boolean>(persisted.converse ?? false);
   const [maxTurns, setMaxTurns] = useState<number>(persisted.maxTurns ?? 20);
@@ -641,7 +652,11 @@ export default function ChatPage() {
 
   // Send the same user text to one column. Returns the assistant
   // reply when the stream completes (used by the M2M loop).
-  async function sendOne(col: Column, userText: string, images: Attachment[] = []): Promise<string> {
+  async function sendOne(col: Column, userText: string, attachments: Attachment[] = []): Promise<string> {
+    const images = imageAttachments(attachments);
+    const effectiveUserText = appendDocumentAttachmentText(userText, attachments);
+    const documentNames = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleUserText = documentNames.length ? `${userText}${userText ? "\n\n" : ""}📄 ${documentNames.join(", ")}` : userText;
     // The stream runs in the ChatRuntime store (above the router) so it
     // survives this page unmounting if the user navigates away mid-
     // generation. The store owns the AbortController + reader + busy
@@ -693,10 +708,10 @@ export default function ChatPage() {
       const priorC = colMsgs(col.id);
       const historyC: HistoryItem[] = priorC
         .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+        .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
       mutateMsgs(col.id, (msgs) => [
         ...msgs,
-        { role: "user", content: userText, ts: Date.now() },
+        { role: "user", content: visibleUserText, context: effectiveUserText, ts: Date.now() },
         { role: "assistant", content: "", ts: Date.now() },
       ]);
       chatRuntime.setError(SID(col.id), null);
@@ -711,7 +726,7 @@ export default function ChatPage() {
         reply = await streamChatCompletion(
           0, wantedModelId, wantedProvider,
           col.system || "You are a helpful assistant. Answer directly and concisely.",
-          userText, col.temperature, signal,
+          effectiveUserText, col.temperature, signal,
           (d) => appendAssistant(col.id, d),
           scratchDirRef.current || undefined,   // projectCwd = scratch sandbox
           historyC,
@@ -767,7 +782,7 @@ export default function ChatPage() {
       updateCol(col.id, { error: "No server running and no servable model picked. Pick a local/tuned model first." });
       return;
     }
-    const userMsg: ChatMsg = { role: "user", content: userText, ts: Date.now() };
+    const userMsg: ChatMsg = { role: "user", content: visibleUserText, context: effectiveUserText, ts: Date.now() };
     // Read the live message list from the store (col.messages from the
     // captured columns snapshot is stale now that messages live in the
     // store).
@@ -810,7 +825,7 @@ export default function ChatPage() {
       // explicitly above.
       ...next
         .filter((m) => m.role === "user" || m.role === "assistant")
-        .map((m) => ({ role: m.role, content: m.content })),
+        .map((m) => ({ role: m.role, content: m.context || m.content })),
     ];
     // Tool-turn budget — MUST match the agent chat (streamLocalChat in
     // dispatch.ts uses 16). The old cap of 4 was why the fine-tuning chat
@@ -1307,25 +1322,25 @@ export default function ChatPage() {
   async function sendAll() {
     for (const id of ["A", "B", "C"] as const) chatRuntime.setError(SID(id), null);
     const text = draft.trim();
-    if (!text && chatImages.length === 0) return;
+    if (!text && chatAttachments.length === 0) return;
     setDraft("");
-    const imgs = chatImages;
-    setChatImages([]);
+    const attachments = chatAttachments;
+    setChatAttachments([]);
     if (converse && count >= 2) {
       // Start the M2M loop instead of broadcasting to all columns.
-      void runConverse(text);
+      void runConverse(text, attachments);
       return;
     }
     const active = columns.slice(0, count);
     // Fire all columns concurrently. We snapshot the current
     // columns array (not state-after-setColumns) so each parallel call
     // starts from the same baseline.
-    await Promise.all(active.map((c) => sendOne(c, text, imgs)));
+    await Promise.all(active.map((c) => sendOne(c, text, attachments)));
   }
 
   // M2M: alternate A and B. C is ignored even when count===3 because
   // the legacy Qt M2M only used the first two columns.
-  async function runConverse(opening: string) {
+  async function runConverse(opening: string, openingAttachments: Attachment[] = []) {
     if (m2mRunningRef.current) return;
     m2mRunningRef.current = true;
     let speaker: "A" | "B" = "A";
@@ -1334,7 +1349,7 @@ export default function ChatPage() {
     while (turns < maxTurns && m2mRunningRef.current) {
       const col = columns.find((c) => c.id === speaker);
       if (!col) break;
-      const reply = await sendOne(col, lastReply);
+      const reply = await sendOne(col, lastReply, turns === 0 ? openingAttachments : []);
       if (!reply) break;
       lastReply = reply;
       speaker = speaker === "A" ? "B" : "A";
@@ -1776,14 +1791,19 @@ export default function ChatPage() {
                 ))}
               </div>
             )}
-            {chatImages.length > 0 && (
+            {chatAttachments.length > 0 && (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap", padding: "6px 8px 0" }}>
-                {chatImages.map((a, i) => (
+                {chatAttachments.map((a, i) => (
                   <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6, border: "1px solid rgba(122,162,255,0.35)", background: "rgba(122,162,255,0.12)", color: "#9ad9ff", borderRadius: 12, padding: "2px 6px 2px 8px", fontSize: 11, fontWeight: 700 }}>
-                    🖼 {a.filename ?? "image"}
-                    <button onClick={() => setChatImages(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border: "none", background: "transparent", color: "#9ad9ff", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>×</button>
+                    {a.kind === "image" ? "🖼" : "📄"} {a.filename ?? (a.kind === "image" ? "image" : "document")}
+                    <button onClick={() => setChatAttachments(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border: "none", background: "transparent", color: "#9ad9ff", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>×</button>
                   </span>
                 ))}
+              </div>
+            )}
+            {attachmentError && (
+              <div role="alert" style={{ margin: "6px 8px 0", padding: "6px 8px", borderRadius: 7, border: "1px solid rgba(var(--error-rgb),0.5)", background: "rgba(var(--error-rgb),0.1)", color: "var(--error)", fontSize: 11 }}>
+                {attachmentError}
               </div>
             )}
             <textarea
@@ -1808,12 +1828,14 @@ export default function ChatPage() {
             <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", borderTop: "1px solid var(--border)" }}>
               <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>{chatMode === "agent" ? "Agent can use tools" : chatMode === "edit" ? "Edit-focused prompt" : "Ask-only prompt"}</span>
               <div style={{ flex: 1 }} />
+              <input ref={chatFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addComposerFiles(e.target.files); e.target.value = ""; }} />
+              <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={footerComposerBtn}>📎 Attach</button>
               <button onClick={resetAll} title="Clear all transcripts" style={footerComposerBtn}>Clear</button>
               <button onClick={saveJson} title="Save chat as JSON" style={footerComposerBtn}>Save</button>
               {anyBusy ? (
                 <button onClick={stopAll} style={{ ...footerComposerBtn, borderColor: "#f44336", color: "#ffb0b0" }}>Stop</button>
               ) : (
-                (() => { const canSend = !!draft.trim() || chatImages.length > 0; return (
+                (() => { const canSend = !!draft.trim() || chatAttachments.length > 0; return (
                 <button onClick={sendComposer} disabled={!canSend} style={{
                   ...footerComposerBtn,
                   background: canSend ? "var(--accent)" : "var(--bg-surface)",

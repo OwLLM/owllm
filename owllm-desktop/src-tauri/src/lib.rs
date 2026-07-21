@@ -39,6 +39,7 @@ mod data_layer;
 mod dialog;
 mod directives;
 mod discord;
+mod documents;
 mod email;
 mod env_manager;
 mod finetuning;
@@ -363,6 +364,10 @@ pub fn run() {
             browser::browser_ensure,
             browser::browser_start,
             browser::browser_open_url,
+            browser::browser_open_tab,
+            browser::browser_list_tabs,
+            browser::browser_select_tab,
+            browser::browser_close_tab,
             browser::browser_cmd,
             browser::browser_stop,
             browser::browser_status,
@@ -485,6 +490,7 @@ pub fn run() {
             finetuning::train_status,
             finetuning::dataset_check,
             finetuning::dataset_ingest,
+            documents::document_extract,
             finetuning::dataset_save,
             finetuning::dataset_default_dir,
             finetuning::abliterate_start,

@@ -15,7 +15,8 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type BrowserStatus = { running: boolean; url: string; device: string };
+type BrowserTab = { id: number; title: string; url: string; active: boolean };
+type BrowserStatus = { running: boolean; url: string; device: string; active_tab_id?: number; tabs?: BrowserTab[] };
 type PageInfo = { url?: string; title?: string; ready?: string };
 type CredMeta = { origin: string; username: string; note: string; ts: number };
 type Detected = { id: string; name: string; profile: string; count: number; supported: boolean; note: string };
@@ -67,13 +68,28 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
     setBusy(true); setErr("");
     try {
       await invoke("browser_ensure");
-      await invoke("browser_start");
-      await invoke("browser_cmd", { action: "navigate", params: { url: u } });
+      await invoke("browser_open_tab", { url: u, activate: true });
       await invoke("browser_focus");
       await refreshStatus();
       await refreshPage();
     } catch (e) { setErr(String(e)); }
     finally { setBusy(false); }
+  };
+
+  const selectBrowserTab = async (tabId: number) => {
+    try {
+      await invoke("browser_select_tab", { tabId });
+      await refreshStatus();
+      await refreshPage();
+    } catch (e) { setErr(String(e)); }
+  };
+  const closeBrowserTab = async (tabId: number) => {
+    try {
+      await invoke("browser_close_tab", { tabId });
+      await refreshStatus();
+      if (status?.tabs?.length === 1) setPage(null);
+      else await refreshPage();
+    } catch (e) { setErr(String(e)); }
   };
 
   const showWindow = async () => { try { await invoke("browser_start"); await invoke("browser_focus"); await refreshStatus(); } catch (e) { setErr(String(e)); } };
@@ -219,6 +235,18 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
       <div style={{ padding: 10, overflow: "auto", ...(inline ? { flex: 1, minHeight: 0 } : {}) }}>
         {tab === "browse" && (
           <>
+            {!!status?.tabs?.length && (
+              <div style={{ display: "flex", gap: 4, marginBottom: 8, overflowX: "auto" }}>
+                {status.tabs.map((browserTab) => (
+                  <div key={browserTab.id} style={{ display: "flex", alignItems: "center", minWidth: 0, border: "1px solid " + (browserTab.active ? "rgba(var(--accent-rgb),0.45)" : "var(--border)"), borderRadius: 7, background: browserTab.active ? "rgba(var(--accent-rgb),0.12)" : "var(--bg-surface)" }}>
+                    <button onClick={() => void selectBrowserTab(browserTab.id)} title={browserTab.url} style={{ maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", border: 0, background: "transparent", color: browserTab.active ? "var(--accent-ink)" : "var(--fg-muted)", cursor: "pointer", fontSize: 10.5, padding: "4px 7px" }}>
+                      {browserTab.title || browserTab.url || "New tab"}
+                    </button>
+                    {status.tabs.length > 1 && <button onClick={() => void closeBrowserTab(browserTab.id)} title="Close tab" style={{ border: 0, background: "transparent", color: "var(--fg-muted)", cursor: "pointer", padding: "3px 6px" }}>×</button>}
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <input value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void navigate(); }}
                 placeholder="open a URL (e.g. github.com) — agents inherit this session" style={field} />

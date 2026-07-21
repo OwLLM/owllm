@@ -19,7 +19,7 @@ import { chatRuntime } from "../../runtime/chatRuntime";
 import { setRunActivity } from "../../runtime/runActivity";
 import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -389,7 +389,7 @@ const CODE_RECENTS_MAX = 12;
 // The "New chat" surface keeps a list of past conversations in localStorage so
 // they survive tab switches AND app restarts (the chat used to be plain useState
 // that evaporated). Each thread is one conversation; the newest is first.
-type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string; images?: { src: string; alt?: string }[] };
+type ChatMsg = { role: "user" | "assistant"; content: string; context?: string; thinking?: string; images?: { src: string; alt?: string }[] };
 type ChatThread = {
   id: string; title: string; ts: number; messages: ChatMsg[];
   createdDeviceId?: string; createdDeviceName?: string;
@@ -627,12 +627,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setChatDraft = (v: string) => setChatField("draft", v);
   const setChatBusy = (v: boolean) => setChatField("busy", v);
   const [showHistory, setShowHistory] = useState(false);
-  const [chatImages, setChatImages] = useState<Attachment[]>([]);
+  const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
   // Project-coding composer image attachments (paste / drag-drop / picker) — the
   // same capability the just-chat box and the agentic/fine-tuning chats have, so
   // every chat behaves the same. Sent with the next message, then cleared.
-  const [codeImages, setCodeImages] = useState<Attachment[]>([]);
+  const [codeAttachments, setCodeAttachments] = useState<Attachment[]>([]);
   const codeFileRef = useRef<HTMLInputElement | null>(null);
   // Composer textareas — refs so "Forward" can drop the text into the target
   // agent's draft and focus it for editing before Send (compose-then-send).
@@ -701,23 +701,23 @@ function CodeWorkspace({ pageId, onTitle }: {
       createdDeviceId: deviceIdentity.device_id,
       createdDeviceName: deviceIdentity.name,
     }, ...cs]);
-    setChatId(id); setShowHistory(false); setChatImages([]); setChatDraft("");
+    setChatId(id); setShowHistory(false); setChatAttachments([]); setChatDraft("");
   };
   const deleteThread = (id: string) => { setChats((cs) => cs.filter((c) => c.id !== id)); if (chatId === id) setChatId(""); };
 
-  // Paste (Ctrl+V) an image from the clipboard into the chat, or pick files.
+  // Paste/drop/pick images and documents. Documents are parsed locally before
+  // they enter state, so corrupt/unsupported files surface immediately.
   const addChatFiles = async (files: FileList | File[]) => {
     for (const f of Array.from(files)) {
-      if (!f.type.startsWith("image/")) continue;
-      try { const a = await fileToImageAttachment(f); setChatImages((x) => [...x, a]); }
+      try { const a = await fileToChatAttachment(f); setChatAttachments((x) => [...x, a]); }
       catch (e: any) { setStatus(String(e?.message ?? e)); }
     }
   };
   const onChatPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
-    if (imgs.length === 0) return; // let normal text paste through
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return; // let normal text paste through
     e.preventDefault();
-    void addChatFiles(imgs);
+    void addChatFiles(files);
   };
   // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
   // shared chatRuntime store so it survives leaving this page and coming back.
@@ -1846,13 +1846,14 @@ function CodeWorkspace({ pageId, onTitle }: {
     user: string,
     history: HistoryItem[],
     signal: AbortSignal,
-    opts?: { silent?: boolean; withEvents?: boolean; images?: ReturnType<typeof imageAttachments> },
+    opts?: { silent?: boolean; withEvents?: boolean; attachments?: Attachment[] },
   ): Promise<string> => {
     const provider = providerFor(modelId, availableModels);
     const isLocal = provider === "local" || provider === "tuned";
     const dDelta = opts?.silent ? () => {} : onDelta;
     const dThought = opts?.silent ? () => {} : onThought;
-    const imgs = opts?.images ?? [];
+    const attachments = opts?.attachments ?? [];
+    const imgs = imageAttachments(attachments);
     // CHAT mode (right-column selector): discuss/review only — read-only
     // tools, and the system prompt forbids edits/state-changing commands.
     const chatOnly = agentMode === "chat";
@@ -1866,7 +1867,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     const sys = system + formatDirectivesBlock(directivesRef.current)
       + (browserLine ? `\n\n${browserLine}` : "")
       + (chatOnly ? "\n\nMODE: CHAT — discuss, review, plan and answer questions ONLY. Do NOT edit or create files, and do NOT run commands that change any state. You may read files and search to ground your answers." : "");
-    const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(user);
+    const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     if (!opts?.silent) showMemoryPack(pack);
     if (isLocal) {
       const port = await ensureServer(modelId);
@@ -1922,16 +1923,21 @@ function CodeWorkspace({ pageId, onTitle }: {
   const send = async (textOverride?: string) => {
     const fromComposer = textOverride === undefined;
     const text = (textOverride ?? draft).trim();
-    const images = fromComposer ? imageAttachments(codeImages) : [];
-    if (!text && images.length === 0) return;
+    const attachments = fromComposer ? codeAttachments : [];
+    const images = imageAttachments(attachments);
+    if (!text && attachments.length === 0) return;
     if (busySendRef.current) {
       // Coder is mid-turn → the message becomes a ⚡ steer (VS Code-style),
       // injected between tool calls on local models, at turn end otherwise —
-      // never silently dropped. (Images can't ride a steer — text only.)
-      if (text) {
-        steerRef.current.push(text);
-        if (fromComposer) setDraft("");
-        setMessages((msgs) => [...msgs, { role: "user", content: `⚡ queued to steer the run → ${text}`, ts: Date.now() }]);
+      // never silently dropped. Extracted documents are text and can ride the
+      // steer; image bytes still cannot.
+      const steerText = appendDocumentAttachmentText(text, attachments);
+      if (steerText.trim()) {
+        steerRef.current.push(steerText);
+        if (fromComposer) { setDraft(""); setCodeAttachments([]); }
+        const names = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+        const visible = names.length ? `${text}${text ? " · " : ""}📄 ${names.join(", ")}` : text;
+        setMessages((msgs) => [...msgs, { role: "user", content: `⚡ queued to steer the run → ${visible}`, context: steerText, ts: Date.now() }]);
       }
       return;
     }
@@ -1945,16 +1951,18 @@ function CodeWorkspace({ pageId, onTitle }: {
     };
     if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { blockSend("No model selected — pick one above."); return; }
-    if (fromComposer) { setDraft(""); setCodeImages([]); autoFeedHopsRef.current = 0; }
+    if (fromComposer) { setDraft(""); setCodeAttachments([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const history: HistoryItem[] = messages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
     // The bubble shows the actual images as clickable thumbnails; the same
     // images also ride to the model via runTurn.
-    setMessages((msgs) => [...msgs, { role: "user", content: text, ts: Date.now(), images: images.length ? attachmentThumbs(images) : undefined }]);
+    const attachmentNames = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleText = attachmentNames.length ? `${text}${text ? "\n\n" : ""}📄 ${attachmentNames.join(", ")}` : text;
+    setMessages((msgs) => [...msgs, { role: "user", content: visibleText, context: appendDocumentAttachmentText(text, attachments), ts: Date.now(), images: images.length ? attachmentThumbs(images) : undefined }]);
     // Immediately show the user that something is happening, so the timer is not
     // the only visible change. The placeholder is replaced by real tokens/tools.
     setMessages((msgs) => [...msgs, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
@@ -1964,8 +1972,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     let replyText = "";
     try {
       setStatus(`Coding in ${workspace}`);
-      const reply = await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
-      await logCodeWork("code", text || "(see attached image)", reply);
+      const reply = await runTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
+      await logCodeWork("code", text || "(read the attached file)", reply);
       replyText = reply;
       ok = true;
     } catch (e) {
@@ -2081,7 +2089,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     secondaryAbortRef.current = ctrl;
     const history: HistoryItem[] = secondaryMessages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
     setSecondaryMessages((m) => [...m, { role: "user", content: text, ts: Date.now() }]);
     setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
     let aborted = false;
@@ -2186,22 +2194,25 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
   const sendChat = async () => {
     const text = chatDraft.trim();
-    const images = imageAttachments(chatImages);
-    if ((!text && images.length === 0) || chatBusy) return;
+    const attachments = chatAttachments;
+    const images = imageAttachments(attachments);
+    if ((!text && attachments.length === 0) || chatBusy) return;
     if (!modelId) { setStatus("Pick a model above first."); return; }
     setChatDraft("");
-    setChatImages([]);
+    setChatAttachments([]);
     setChatBusy(true);
     const ctrl = new AbortController();
     justChatAbort = ctrl;
     // The visible bubble shows the actual images as clickable thumbnails; the
     // same images also ride to the model via the multimodal content below.
-    const userMsg: ChatMsg = { role: "user", content: text, images: images.length ? attachmentThumbs(images) : undefined };
+    const documentNames = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleText = documentNames.length ? `${text}${text ? "\n\n" : ""}📄 ${documentNames.join(", ")}` : text;
+    const userMsg: ChatMsg = { role: "user", content: visibleText, context: appendDocumentAttachmentText(text, attachments), images: images.length ? attachmentThumbs(images) : undefined };
     const asstMsg: ChatMsg = { role: "assistant", content: "" };
     // Resolve/create the active thread; history = its current messages.
     let tid = chatId;
     const existing = chats.find((c) => c.id === tid);
-    const history: HistoryItem[] = (existing?.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
+    const history: HistoryItem[] = (existing?.messages ?? []).map((m) => ({ role: m.role, content: m.context || m.content }));
     if (existing) {
       updateThread(tid, (m) => [...m, userMsg, asstMsg], threadTitle(text || "Image"));
     } else {
@@ -2228,7 +2239,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     });
     try {
       const provider = providerFor(modelId, availableModels);
-      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(text);
+      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments));
       showMemoryPack(pack);
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
@@ -2424,11 +2435,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     setDraft((d) => (d.trim() ? `${d.replace(/\s*$/, "")} @${rel} ` : `@${rel} `));
     if (activeAbs) dropTab(activeAbs);
   };
-  // Project-composer image attachments — mirror addChatFiles (just-chat box).
+  // Project-composer attachments — mirror addChatFiles (just-chat box).
   const addCodeFiles = async (files: FileList | File[]) => {
     for (const f of Array.from(files)) {
-      if (!f.type.startsWith("image/")) continue;
-      try { const a = await fileToImageAttachment(f); setCodeImages((x) => [...x, a]); }
+      try { const a = await fileToChatAttachment(f); setCodeAttachments((x) => [...x, a]); }
       catch (e: any) { setStatus(String(e?.message ?? e)); }
     }
   };
@@ -2492,32 +2502,32 @@ function CodeWorkspace({ pageId, onTitle }: {
           })}
         </div>
         <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
-          {chatImages.length > 0 && (
+          {chatAttachments.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {chatImages.map((a, i) => (
-                <div key={i} style={{ position: "relative", width: 56, height: 56, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border-strong)" }}>
-                  <img src={`data:${a.mime};base64,${a.data_b64}`} alt={a.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                  <button onClick={() => setChatImages((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+              {chatAttachments.map((a, i) => (
+                <div key={i} style={{ position: "relative", minWidth: a.kind === "image" ? 56 : 150, height: 56, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: a.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
+                  {a.kind === "image" ? <img src={`data:${a.mime};base64,${a.data_b64}`} alt={a.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {a.filename ?? "document"}</span>}
+                  <button onClick={() => setChatAttachments((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
                 </div>
               ))}
             </div>
           )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-            <input ref={chatFileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
-            <button onClick={() => chatFileRef.current?.click()} title="Attach image (or just paste one)" style={{ ...btn, height: 38, width: 38, justifyContent: "center", padding: 0, fontSize: 16 }}>📎</button>
+            <input ref={chatFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
+            <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 38, width: 38, justifyContent: "center", padding: 0, fontSize: 16 }}>📎</button>
             <textarea
               value={chatDraft}
               onChange={(e) => setChatDraft(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
               onPaste={onChatPaste}
-              placeholder="Message…  (paste or attach an image, Enter to send, Shift+Enter for newline)"
+              placeholder="Message…  (paste or attach images/documents, Enter to send)"
               rows={1}
               style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "9px 12px", lineHeight: 1.5 }}
             />
             {chatBusy ? (
               <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "var(--error)" }}>Stop</button>
             ) : (
-              <button onClick={sendChat} disabled={!chatDraft.trim() && chatImages.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatImages.length) ? 1 : 0.5 }}>Send</button>
+              <button onClick={sendChat} disabled={!chatDraft.trim() && chatAttachments.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatAttachments.length) ? 1 : 0.5 }}>Send</button>
             )}
           </div>
         </div>
@@ -3302,28 +3312,28 @@ function CodeWorkspace({ pageId, onTitle }: {
         : { flexShrink: 0 }}>
       <div
         onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) { e.preventDefault(); } }}
-        onDrop={(e) => { const f = Array.from(e.dataTransfer?.files ?? []).filter((x) => x.type.startsWith("image/")); if (f.length) { e.preventDefault(); void addCodeFiles(f); } }}
+        onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
         style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
       >
-        {codeImages.length > 0 && (
+        {codeAttachments.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {codeImages.map((img, i) => (
-              <div key={i} style={{ position: "relative", width: 48, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)" }}>
-                <img src={`data:${img.mime};base64,${img.data_b64}`} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                <button onClick={() => setCodeImages((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+            {codeAttachments.map((attachment, i) => (
+              <div key={i} style={{ position: "relative", minWidth: attachment.kind === "image" ? 48 : 150, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: attachment.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
+                {attachment.kind === "image" ? <img src={`data:${attachment.mime};base64,${attachment.data_b64}`} alt={attachment.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {attachment.filename ?? "document"}</span>}
+                <button onClick={() => setCodeAttachments((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
               </div>
             ))}
           </div>
         )}
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <input ref={codeFileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+          <input ref={codeFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
-          <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
+          <button onClick={() => codeFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
             ref={codeDraftRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}
+            onPaste={(e) => { const files = Array.from(e.clipboardData?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
             placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
             rows={3}
@@ -3336,12 +3346,12 @@ function CodeWorkspace({ pageId, onTitle }: {
                plan → Kanban plan/act, auto → act directly, chat → discuss only. */
             <button
               onClick={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
-              disabled={(!draft.trim() && (agentMode === "plan" || codeImages.length === 0)) || preparing}
+              disabled={(!draft.trim() && (agentMode === "plan" || codeAttachments.length === 0)) || preparing}
               title={preparing ? "Preparing the workspace — unlocks in a moment"
                 : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
                 : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
                 : "Act directly — read, edit and run in the workspace"}
-              style={{ ...btn, background: "var(--accent)", color: "var(--accent-fg)", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeImages.length)) && !preparing) ? 1 : 0.5 }}
+              style={{ ...btn, background: "var(--accent)", color: "var(--accent-fg)", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeAttachments.length)) && !preparing) ? 1 : 0.5 }}
             >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
           )}
         </div>

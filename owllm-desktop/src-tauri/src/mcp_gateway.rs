@@ -609,43 +609,53 @@ fn ct_eq(a: &[u8], b: &[u8]) -> bool {
 /// capability a local/API agent has. Kept deliberately small and stable.
 fn tool_specs() -> Vec<Value> {
     let idx = json!({ "type": "integer", "description": "Element index from the latest browser_snapshot." });
+    let tab = json!({ "type": "integer", "description": "Browser tab id from browser_open or browser_tabs. Omit to use the user's active tab." });
     vec![
         json!({ "name": "browser_open",
-            "description": "Open the agent browser (a native OwLLM window) and navigate to a URL. Use this before other browser tools. Localhost/dev-server URLs are supported.",
-            "inputSchema": { "type": "object", "properties": { "url": { "type": "string", "description": "URL to open. Scheme optional (https assumed; http for localhost)." } }, "required": ["url"] } }),
+            "description": "Open a URL in a new OwLLM browser tab and return its tab id. Existing user tabs are not replaced. Localhost/dev-server URLs are supported.",
+            "inputSchema": { "type": "object", "properties": { "url": { "type": "string", "description": "URL to open. Scheme optional (https assumed; http for localhost)." }, "activate": { "type": "boolean", "description": "Select the new tab visibly. Defaults false so the user's current tab is not interrupted." } }, "required": ["url"] } }),
+        json!({ "name": "browser_tabs",
+            "description": "List every open browser tab with its stable id, title, URL and active state.",
+            "inputSchema": { "type": "object", "properties": {} } }),
+        json!({ "name": "browser_tab_select",
+            "description": "Select a browser tab visibly for the user. Agent actions do not require selection; pass tab_id directly instead.",
+            "inputSchema": { "type": "object", "properties": { "tab_id": tab }, "required": ["tab_id"] } }),
+        json!({ "name": "browser_tab_close",
+            "description": "Close one browser tab without affecting the others.",
+            "inputSchema": { "type": "object", "properties": { "tab_id": tab }, "required": ["tab_id"] } }),
         json!({ "name": "browser_navigate",
-            "description": "Navigate the already-open agent browser to a URL.",
-            "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] } }),
+            "description": "Navigate one browser tab to a URL. Pass tab_id to avoid changing a tab the user is working in.",
+            "inputSchema": { "type": "object", "properties": { "url": { "type": "string" }, "tab_id": tab }, "required": ["url"] } }),
         json!({ "name": "browser_snapshot",
             "description": "Return an indexed list of the page's interactive elements (links, buttons, inputs). Read this to SEE the page, then act by index.",
-            "inputSchema": { "type": "object", "properties": {} } }),
+            "inputSchema": { "type": "object", "properties": { "tab_id": tab } } }),
         json!({ "name": "browser_click",
             "description": "Click an interactive element by its index from the latest snapshot.",
-            "inputSchema": { "type": "object", "properties": { "index": idx }, "required": ["index"] } }),
+            "inputSchema": { "type": "object", "properties": { "index": idx, "tab_id": tab }, "required": ["index"] } }),
         json!({ "name": "browser_fill",
             "description": "Type text into an input/textarea by index.",
-            "inputSchema": { "type": "object", "properties": { "index": idx, "text": { "type": "string" } }, "required": ["index", "text"] } }),
+            "inputSchema": { "type": "object", "properties": { "index": idx, "text": { "type": "string" }, "tab_id": tab }, "required": ["index", "text"] } }),
         json!({ "name": "browser_select",
             "description": "Choose an option in a <select> by index and option value or label.",
-            "inputSchema": { "type": "object", "properties": { "index": idx, "value": { "type": "string" } }, "required": ["index", "value"] } }),
+            "inputSchema": { "type": "object", "properties": { "index": idx, "value": { "type": "string" }, "tab_id": tab }, "required": ["index", "value"] } }),
         json!({ "name": "browser_press",
             "description": "Press a keyboard key on the focused element (e.g. Enter, Tab, Escape).",
-            "inputSchema": { "type": "object", "properties": { "key": { "type": "string" } }, "required": ["key"] } }),
+            "inputSchema": { "type": "object", "properties": { "key": { "type": "string" }, "tab_id": tab }, "required": ["key"] } }),
         json!({ "name": "browser_get_text",
             "description": "Return the visible text of the current page.",
-            "inputSchema": { "type": "object", "properties": {} } }),
+            "inputSchema": { "type": "object", "properties": { "tab_id": tab } } }),
         json!({ "name": "browser_back",
             "description": "Go back one entry in the browser history.",
-            "inputSchema": { "type": "object", "properties": {} } }),
+            "inputSchema": { "type": "object", "properties": { "tab_id": tab } } }),
         json!({ "name": "browser_reload",
             "description": "Reload the current page.",
-            "inputSchema": { "type": "object", "properties": {} } }),
+            "inputSchema": { "type": "object", "properties": { "tab_id": tab } } }),
         json!({ "name": "browser_device",
             "description": "Switch device emulation: desktop, iphone, android or tablet (viewport size + mobile user-agent).",
             "inputSchema": { "type": "object", "properties": { "device": { "type": "string", "enum": ["desktop", "iphone", "android", "tablet"] } }, "required": ["device"] } }),
         json!({ "name": "browser_screenshot",
             "description": "Describe the current page (title/URL/state summary). The browser window is natively visible to the user; agents act via browser_snapshot.",
-            "inputSchema": { "type": "object", "properties": {} } }),
+            "inputSchema": { "type": "object", "properties": { "tab_id": tab } } }),
         json!({ "name": "browser_close",
             "description": "Close the agent browser window.",
             "inputSchema": { "type": "object", "properties": {} } }),
@@ -690,6 +700,15 @@ fn as_index(args: &Value, key: &str) -> Value {
     }
 }
 
+fn as_optional_index(args: &Value, key: &str) -> Value {
+    match args.get(key) {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::Number(n)) => Value::Number(n.clone()),
+        Some(Value::String(s)) => s.parse::<u64>().map(Value::from).unwrap_or(Value::Null),
+        _ => Value::Null,
+    }
+}
+
 fn as_str(args: &Value, key: &str) -> String {
     args.get(key)
         .and_then(Value::as_str)
@@ -703,49 +722,57 @@ fn as_str(args: &Value, key: &str) -> String {
 fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String> {
     match name {
         "browser_open" => {
-            let _ = crate::browser::browser_start(app.clone());
-            crate::browser::browser_cmd(
+            crate::browser::browser_open_tab(
                 app.clone(),
-                "navigate".into(),
-                json!({ "url": as_str(args, "url") }),
+                as_str(args, "url"),
+                args.get("activate").and_then(Value::as_bool),
             )
         }
+        "browser_tabs" => crate::browser::browser_list_tabs(app.clone()),
+        "browser_tab_select" => crate::browser::browser_select_tab(
+            app.clone(),
+            as_optional_index(args, "tab_id").as_u64().unwrap_or(0),
+        ),
+        "browser_tab_close" => crate::browser::browser_close_tab(
+            app.clone(),
+            as_optional_index(args, "tab_id").as_u64().unwrap_or(0),
+        ),
         "browser_navigate" => crate::browser::browser_cmd(
             app.clone(),
             "navigate".into(),
-            json!({ "url": as_str(args, "url") }),
+            json!({ "url": as_str(args, "url"), "tab_id": as_optional_index(args, "tab_id") }),
         ),
         "browser_snapshot" => {
-            crate::browser::browser_cmd(app.clone(), "snapshot".into(), json!({}))
+            crate::browser::browser_cmd(app.clone(), "snapshot".into(), json!({ "tab_id": as_optional_index(args, "tab_id") }))
         }
         "browser_get_text" => {
-            crate::browser::browser_cmd(app.clone(), "get_text".into(), json!({}))
+            crate::browser::browser_cmd(app.clone(), "get_text".into(), json!({ "tab_id": as_optional_index(args, "tab_id") }))
         }
-        "browser_back" => crate::browser::browser_cmd(app.clone(), "back".into(), json!({})),
-        "browser_reload" => crate::browser::browser_cmd(app.clone(), "reload".into(), json!({})),
+        "browser_back" => crate::browser::browser_cmd(app.clone(), "back".into(), json!({ "tab_id": as_optional_index(args, "tab_id") })),
+        "browser_reload" => crate::browser::browser_cmd(app.clone(), "reload".into(), json!({ "tab_id": as_optional_index(args, "tab_id") })),
         "browser_click" => crate::browser::browser_cmd(
             app.clone(),
             "click".into(),
-            json!({ "index": as_index(args, "index") }),
+            json!({ "index": as_index(args, "index"), "tab_id": as_optional_index(args, "tab_id") }),
         ),
         "browser_fill" => crate::browser::browser_cmd(
             app.clone(),
             "fill".into(),
-            json!({ "index": as_index(args, "index"), "text": as_str(args, "text") }),
+            json!({ "index": as_index(args, "index"), "text": as_str(args, "text"), "tab_id": as_optional_index(args, "tab_id") }),
         ),
         "browser_select" => crate::browser::browser_cmd(
             app.clone(),
             "select".into(),
-            json!({ "index": as_index(args, "index"), "value": as_str(args, "value") }),
+            json!({ "index": as_index(args, "index"), "value": as_str(args, "value"), "tab_id": as_optional_index(args, "tab_id") }),
         ),
         "browser_press" => crate::browser::browser_cmd(
             app.clone(),
             "press".into(),
-            json!({ "key": as_str(args, "key") }),
+            json!({ "key": as_str(args, "key"), "tab_id": as_optional_index(args, "tab_id") }),
         ),
         "browser_device" => crate::browser::browser_set_device(app.clone(), as_str(args, "device")),
         "browser_screenshot" => {
-            crate::browser::browser_cmd(app.clone(), "screenshot".into(), json!({}))
+            crate::browser::browser_cmd(app.clone(), "screenshot".into(), json!({ "tab_id": as_optional_index(args, "tab_id") }))
         }
         "browser_close" => crate::browser::browser_stop(app.clone()),
         "kvm_node" => {

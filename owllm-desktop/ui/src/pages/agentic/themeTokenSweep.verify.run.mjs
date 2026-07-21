@@ -159,7 +159,7 @@ const agents = readLF(path.join(SRC, "pages/agentic/AgentsPage.tsx"));
 const sendBtnAt = agents.indexOf('"Stop the in-flight dispatch"');
 check(sendBtnAt !== -1, "AgentsPage send button located");
 const sendBtn = agents.slice(sendBtnAt, sendBtnAt + 1200);
-check(sendBtn.includes('draft.trim() ? "var(--accent)"') && sendBtn.includes('"var(--accent-fg)"'),
+check(sendBtn.includes('(draft.trim() || attachments.length ? "var(--accent)"') && sendBtn.includes('"var(--accent-fg)"'),
   "send button ready state consumes accent + accent-fg tokens");
 check(!/#ffd97a|#3cf26b|#ff8c4a|#1a1404|#0a1505|#7d6f4b/i.test(sendBtn),
   "send button carries no hardcoded amber/green/orange state colours");

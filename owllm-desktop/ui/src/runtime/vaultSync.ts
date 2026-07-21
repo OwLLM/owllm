@@ -36,6 +36,8 @@ const DENY_EXACT = new Set<string>([
   "owllm:sync-device",       // this device's id
   "owllm.wizard.completed",  // per-device module setup
   "owllm:cloud-models-remote", // regenerated from the remote catalogue
+  "owllm:world-map:presence-enabled", // consent is independent per device
+  "owllm:world-map:presence-token",   // anonymous server token is device-local
   // Open tabs and their selected project are workspace UI on THIS computer.
   // Project/chat content syncs separately through SQLite; syncing these keys
   // made another PC's open projects suddenly become this PC's open pages.

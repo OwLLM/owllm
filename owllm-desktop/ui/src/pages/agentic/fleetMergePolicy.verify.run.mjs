@@ -33,7 +33,7 @@ if (!fleet.includes("text_conflict_keeps_page_hunk_and_nonoverlapping_main_edit"
 if (!fleet.includes("let _merge_guard = lock.lock()") || !fleet.includes("fn repo_git_lock")) {
   fail("same-repository merges are not serialized against index races");
 }
-if (!fleet.includes("fn prepare_identical_untracked_collisions") ||
+if (!fleet.includes("fn prepare_untracked_collisions") ||
     !fleet.includes('["hash-object", "--", path]') ||
     !fleet.includes("branch_blob.trim() == disk_blob.trim()") ||
     !fleet.includes("backup.discard()")) {
@@ -43,6 +43,11 @@ if (!fleet.includes("contents differ from the page branch") ||
     !fleet.includes("differing_untracked_branch_addition_is_preserved_and_blocks_merge") ||
     !fleet.includes("identical_untracked_branch_addition_is_adopted_by_merge")) {
   fail("untracked collision safety or regression coverage is missing");
+}
+if (!fleet.includes("preserve_after_merge") ||
+    !fleet.includes("backup.restore_preserved()") ||
+    !fleet.includes("differing_untracked_app_state_is_preserved_and_does_not_block_merge")) {
+  fail("differing app-owned state is not preserved across worktree merges");
 }
 if (!fleet.includes("fn prepare_identical_tracked_collisions") ||
     !fleet.includes("IdenticalTrackedBackup") ||

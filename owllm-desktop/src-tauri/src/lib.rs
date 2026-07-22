@@ -118,9 +118,32 @@ fn install_crash_log_hook() {
     }));
 }
 
+/// WebKitGTK's DMA-BUF renderer has recurring failures with proprietary NVIDIA
+/// drivers, including SIGBUS exits on Jetson/arm64. Apply WebKit's supported
+/// fallback before the GTK/WebKit process tree starts, but only on NVIDIA Linux
+/// and never override an explicit operator choice.
+#[cfg(target_os = "linux")]
+fn configure_linux_webkit_renderer() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
+        return;
+    }
+    let has_nvidia_driver = std::path::Path::new("/proc/driver/nvidia/version").is_file()
+        || std::path::Path::new("/sys/module/nvidia/version").exists();
+    if has_nvidia_driver {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        eprintln!(
+            "[owllm] NVIDIA Linux detected; WebKitGTK DMA-BUF renderer disabled for stability"
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_linux_webkit_renderer() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_crash_log_hook();
+    configure_linux_webkit_renderer();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.

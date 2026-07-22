@@ -167,6 +167,7 @@ function schedulePush(): void {
 // last-writer-wins per project. When it imports a newer copy from another
 // device we fire owllm:projects:refresh so the Agents page reloads.
 let _projSyncing = false;
+let _projectSyncTimer: ReturnType<typeof setTimeout> | null = null;
 export async function syncProjectsNow(): Promise<boolean> {
   if (!_enabled || _projSyncing) return false;
   _projSyncing = true;
@@ -183,6 +184,15 @@ export async function syncProjectsNow(): Promise<boolean> {
   } finally {
     _projSyncing = false;
   }
+}
+
+function scheduleProjectSync(): void {
+  if (!_enabled) return;
+  if (_projectSyncTimer) clearTimeout(_projectSyncTimer);
+  _projectSyncTimer = setTimeout(() => {
+    _projectSyncTimer = null;
+    void syncProjectsNow();
+  }, 4000);
 }
 
 // Remote-device records (public metadata: name, OS, version, LAN endpoint,
@@ -332,11 +342,17 @@ function wireListeners(): void {
   if (_listenersWired) return;
   _listenersWired = true;
   const onHide = () => { if (document.visibilityState === "hidden") { void pushNow(); void syncProjectsNow(); } };
+  const onMemoryChanged = () => scheduleProjectSync();
   document.addEventListener("visibilitychange", onHide);
+  window.addEventListener("owllm:memory:changed", onMemoryChanged as EventListener);
   window.addEventListener("beforeunload", () => { void pushNow(); void syncProjectsNow(); });
   window.setInterval(() => {
     if (!_enabled) return;
     const j = JSON.stringify(snapshot());
     if (j !== _lastSnapshotJson) schedulePush();
   }, 5000);
+  // SQLite changes do not affect the localStorage snapshot above. Periodically
+  // reconcile projects/facts as a backstop for native memory writes and abrupt
+  // exits; event-driven writes normally sync after the 4-second debounce.
+  window.setInterval(() => { if (_enabled) void syncProjectsNow(); }, 60_000);
 }

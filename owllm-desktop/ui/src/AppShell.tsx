@@ -415,7 +415,7 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
   // the "becomes solid black sometimes" flash. Drop the fill on Linux so only
   // the neon strokes + corner art remain (the intended glass look); the bands
   // stay on opaque platforms where they read as chrome, not black.
-  const bandBg = LINUX_TRANSPARENT_WINDOW ? "transparent" : FRAME_BG;
+  const bandBg = FRAME_BG;
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
@@ -1386,13 +1386,11 @@ function WindowAccentEdge() {
   );
 }
 
-// The accent edge hugs the WINDOW boundary, which is only the visible app
-// edge when the window is opaque (all platforms now: Windows/macOS/Linux).
-// The old Linux build shipped a TRANSPARENT window larger than the in-page
-// HybridFrame, and the border drew a floating orange rectangle in mid-air.
-// Linux switched to an opaque window + optional overlay frame, so the accent
-// edge is correct everywhere.
-const LINUX_TRANSPARENT_WINDOW = false;
+// Linux uses one opaque WebKitGTK window. The transparent overlay is disabled
+// there because it is unstable on NVIDIA/Jetson, but that must not make the
+// opaque main window draw HybridFrame's formerly-transparent outer margin as a
+// thick solid rectangle. Detect Linux once and render the app content directly.
+const IS_LINUX = typeof navigator !== "undefined" && /Linux/i.test(navigator.userAgent);
 
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
@@ -1755,10 +1753,12 @@ export default function AppShell() {
       <EmailBridgeRunner />
       <WebhookBridgeRunner />
       <ResizeEdges />
-      {(overlayFrame || !LINUX_TRANSPARENT_WINDOW) && <WindowAccentEdge />}
+      {!IS_LINUX && <WindowAccentEdge />}
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
-        : <HybridFrame
+        : IS_LINUX
+          ? <div data-ui="LinuxMainContent" style={{ width: "100%", height: "100%", background: "var(--bg-panel)" }}>{appContent}</div>
+          : <HybridFrame
             outerW={vp.w}
             outerH={vp.h}
             showWatcherHint={watcherHint}

@@ -554,23 +554,50 @@ pub async fn github_repo_url(cwd: String) -> Result<String, String> {
 /// Materialize a portable project on THIS computer. The caller chooses a
 /// parent folder; the repository name becomes a new child directory. We never
 /// reuse a peer device's absolute path.
+fn canonical_github_clone_url(input: &str) -> Result<(String, String), String> {
+    let raw = input.trim();
+    let path = raw
+        .strip_prefix("https://github.com/")
+        .or_else(|| raw.strip_prefix("git@github.com:"))
+        .or_else(|| raw.strip_prefix("ssh://git@github.com/"))
+        .ok_or_else(|| {
+            "Enter a GitHub repository URL such as https://github.com/owner/repository.".to_string()
+        })?;
+    if path.contains(['?', '#', '@']) {
+        return Err(
+            "The GitHub repository URL must not contain credentials, a query, or a fragment."
+                .to_string(),
+        );
+    }
+    let clean = path.trim_end_matches('/').trim_end_matches(".git");
+    let parts = clean.split('/').collect::<Vec<_>>();
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if parts.len() != 2 || !parts.iter().all(|part| valid_part(part)) {
+        return Err(
+            "Enter a GitHub repository URL containing exactly an owner and repository name."
+                .to_string(),
+        );
+    }
+    Ok((
+        format!("https://github.com/{}/{}.git", parts[0], parts[1]),
+        parts[1].to_string(),
+    ))
+}
+
 #[tauri::command]
 pub async fn github_clone_project(repo_url: String, parent: String) -> Result<String, String> {
-    let repo_url = repo_url.trim().to_string();
-    if !repo_url.contains("github.com") {
-        return Err("This project has no valid GitHub repository.".to_string());
-    }
+    let (repo_url, leaf) = canonical_github_clone_url(&repo_url)?;
     let parent = std::path::PathBuf::from(parent.trim());
     if !parent.is_dir() {
         return Err("Choose an existing parent folder on this computer.".to_string());
     }
-    let leaf = repo_url
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .rsplit(['/', ':'])
-        .next()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("project");
     let destination = parent.join(leaf);
     if destination.exists() {
         return Err(format!(
@@ -592,7 +619,9 @@ pub async fn github_clone_project(repo_url: String, parent: String) -> Result<St
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let out = cmd.output().map_err(|e| format!("couldn't run git clone: {e}"))?;
+        let out = cmd
+            .output()
+            .map_err(|e| format!("couldn't run git clone: {e}"))?;
         if !out.status.success() {
             let _ = std::fs::remove_dir_all(&destination);
             return Err(format!(
@@ -645,4 +674,35 @@ pub async fn github_disconnect(distro: Option<String>) -> Result<(), String> {
     .await
     .map_err(|e| format!("join error: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_github_clone_url;
+
+    #[test]
+    fn clone_url_accepts_supported_github_forms() {
+        assert_eq!(
+            canonical_github_clone_url("https://github.com/OwLLM/owllm").unwrap(),
+            ("https://github.com/OwLLM/owllm.git".into(), "owllm".into())
+        );
+        assert_eq!(
+            canonical_github_clone_url("git@github.com:OwLLM/owllm.git").unwrap(),
+            ("https://github.com/OwLLM/owllm.git".into(), "owllm".into())
+        );
+    }
+
+    #[test]
+    fn clone_url_rejects_unsafe_or_ambiguous_hosts_and_paths() {
+        for url in [
+            "https://evilgithub.com/owner/repo",
+            "http://github.com/owner/repo",
+            "https://github.com/owner/repo/extra",
+            "https://github.com/owner/repo?token=secret",
+            "https://token@github.com/owner/repo",
+            "https://github.com/../repo",
+        ] {
+            assert!(canonical_github_clone_url(url).is_err(), "accepted {url}");
+        }
+    }
 }

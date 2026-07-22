@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
 const mem = fs.readFileSync(path.join(HERE, "localTools.ts"), "utf8");
+const vaultSync = fs.readFileSync(path.resolve(HERE, "../../runtime/vaultSync.ts"), "utf8");
 
 let failed = 0;
 function check(name, ok) {
@@ -42,6 +43,18 @@ check(
   "Memory tools and Code page both hit team_memory_search, not a page-local store",
   /case "memory_search"[\s\S]*team_memory_search/.test(mem)
     && /retrieveScopedTeamMemoryPack[\s\S]*team_memory_search/.test(mem),
+);
+check(
+  "Successful implementation work is conservatively promoted into synced facts",
+  mem.includes("autoCurateScopedTeamFact")
+    && mem.includes('tags: "auto-curated,implementation"')
+    && /logScopedTeamWork[\s\S]*autoCurateScopedTeamFact/.test(mem),
+);
+check(
+  "Fact writes trigger project-vault sync with a periodic SQLite backstop",
+  mem.includes('CustomEvent("owllm:memory:changed")')
+    && vaultSync.includes('addEventListener("owllm:memory:changed"')
+    && vaultSync.includes("60_000"),
 );
 
 if (failed) process.exit(1);

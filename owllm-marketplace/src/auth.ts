@@ -12,6 +12,12 @@ export function createAuthRouter(): Router {
   router.get('/github', (req: Request, res: Response) => {
     const state = crypto.randomBytes(16).toString('hex');
     req.session.oauthState = state;
+    const returnTo = typeof req.query.return_to === 'string' ? req.query.return_to : '';
+    if (isSafeReturnPath(returnTo)) {
+      req.session.oauthReturnTo = returnTo;
+    } else {
+      delete req.session.oauthReturnTo;
+    }
     const url = new URL('https://github.com/login/oauth/authorize');
     url.searchParams.set('client_id', getCtx(req).config.githubClientId);
     url.searchParams.set('state', state);
@@ -46,12 +52,14 @@ export function createAuthRouter(): Router {
         user = ctx.store.updateLogin(githubId, gh.login, gh.email);
       }
 
+      const redirectTo = isSafeReturnPath(req.session.oauthReturnTo ?? '') ? req.session.oauthReturnTo! : '/auth/me';
       req.session.regenerate((err) => {
         if (err) return next(err);
         req.session.userId = user.github_id;
+        delete req.session.oauthReturnTo;
         req.session.save((saveErr) => {
           if (saveErr) return next(saveErr);
-          res.redirect('/auth/me');
+          res.redirect(redirectTo);
         });
       });
     } catch (err) {
@@ -72,4 +80,8 @@ export function createAuthRouter(): Router {
   });
 
   return router;
+}
+
+function isSafeReturnPath(value: string): boolean {
+  return value.startsWith('/') && !value.startsWith('//') && !value.includes('\\');
 }

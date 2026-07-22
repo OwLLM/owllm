@@ -37,6 +37,7 @@ const HOST_LABEL = HOST_IS_WINDOWS
     : navigator.userAgent.includes("Linux")
       ? "Linux"
       : "Host";
+const ACCOUNT_ONBOARDING_KEY = "owllm:accounts:onboarding-provider";
 
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
 // transcription pipeline (binary + ggml-base.bin model) and exposes an
@@ -678,10 +679,11 @@ function RouteRow({
 // Provider container — header + N route rows.
 // -----------------------------------------------------------------------
 function ProviderCard({
-  provider, cards, onConnect, onInstall, onDisconnect, onTest,
+  provider, cards, highlighted, onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
   cards: Record<string, CardState>;
+  highlighted?: boolean;
   onConnect: (route: RouteSpec) => void;
   onInstall: (route: RouteSpec) => void;
   onDisconnect: (route: RouteSpec) => void;
@@ -690,11 +692,16 @@ function ProviderCard({
   const Logo = provider.Logo;
   return (
     <div
+      data-provider-key={provider.key}
+      data-onboarding-highlighted={highlighted ? "true" : undefined}
       style={{
         background: `linear-gradient(180deg, ${provider.accentTop} 0%, ${PAGE_BG} 60%, ${PAGE_BG} 100%)`,
         borderRadius: 14,
         padding: "18px 20px 14px 20px",
-        boxShadow: "0 4px 24px rgba(0,0,0,0.47)",
+        border: highlighted ? `2px solid ${provider.accent}` : "2px solid transparent",
+        boxShadow: highlighted
+          ? `0 0 0 3px color-mix(in srgb, ${provider.accent} 22%, transparent), 0 8px 30px rgba(0,0,0,0.52)`
+          : "0 4px 24px rgba(0,0,0,0.47)",
         display: "flex", flexDirection: "column",
         minHeight: 220,
       }}
@@ -923,6 +930,27 @@ export default function AccountsPage() {
     Object.fromEntries(allRoutes.map((r) => [r.key, { ...initialCardState }])),
   );
   const [dialogFor, setDialogFor] = useState<{ route: RouteSpec; provider: ProviderSpec } | null>(null);
+  const [onboardingProvider, setOnboardingProvider] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(ACCOUNT_ONBOARDING_KEY) ?? "";
+      return saved === "api" || PROVIDERS.some((provider) => provider.key === saved) ? saved : "";
+    }
+    catch { return ""; }
+  });
+
+  useEffect(() => {
+    if (!onboardingProvider || onboardingProvider === "api") return;
+    const id = window.setTimeout(() => {
+      document.querySelector<HTMLElement>(`[data-provider-key="${onboardingProvider}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 120);
+    return () => window.clearTimeout(id);
+  }, [onboardingProvider]);
+
+  const dismissOnboardingHint = () => {
+    try { sessionStorage.removeItem(ACCOUNT_ONBOARDING_KEY); } catch { /* ignore */ }
+    setOnboardingProvider("");
+  };
 
   // Responsive layout: at narrow widths the 340 px right rail crushes
   // the card grid (cards visually overlap as they fall below their
@@ -1231,6 +1259,32 @@ export default function AccountsPage() {
         (CLI login or web portal) and API key. Install / Connect output streams
         live into the right-side log — no pop-out console.
       </div>
+      {onboardingProvider && (
+        <div data-ui="AccountOnboardingHint" style={{
+          display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+          padding: "11px 14px", borderRadius: 11,
+          background: "rgba(var(--accent-rgb),0.11)",
+          border: "1px solid var(--accent-strong)", color: "var(--fg)",
+        }}>
+          <span aria-hidden="true" style={{ fontSize: 20 }}>✨</span>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 800, color: "var(--fg-strong)" }}>
+              {onboardingProvider === "api"
+                ? "Add the API key you already use"
+                : `Connect your ${PROVIDERS.find((provider) => provider.key === onboardingProvider)?.name ?? "subscription"} account`}
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginTop: 2, lineHeight: 1.4 }}>
+              {onboardingProvider === "api"
+                ? "Choose a provider below, then use its API row. API usage is billed separately by that provider."
+                : "Use the Subscription row in the highlighted card. Install its CLI if needed, then Connect and finish the provider’s browser login."}
+            </div>
+          </div>
+          <button onClick={dismissOnboardingHint} style={{
+            padding: "7px 11px", borderRadius: 7, border: "1px solid var(--border-strong)",
+            background: "var(--bg-elevated)", color: "var(--fg)", cursor: "pointer", fontWeight: 700,
+          }}>Got it</button>
+        </div>
+      )}
       <VoiceRuntimePanel />
       <KvmNodePanel />
 
@@ -1275,6 +1329,7 @@ export default function AccountsPage() {
               key={provider.key}
               provider={provider}
               cards={cards}
+              highlighted={onboardingProvider === provider.key}
               onConnect={(r) => handleConnect(r, provider)}
               onInstall={(r) => handleInstall(r, provider)}
               onDisconnect={(r) => handleDisconnect(r, provider)}

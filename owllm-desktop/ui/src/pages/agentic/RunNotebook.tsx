@@ -536,7 +536,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       [steps[ai], steps[bi]] = [steps[bi], steps[ai]];
       return { ...prev, steps };
     });
-  const feedStep = (s: NotebookStep) => {
+  const feedStep = (s: NotebookStep, claimQueue = false) => {
     const res = onFeed(s.text, s.id);
     setFeedNotice({ id: s.id, kind: res });
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
@@ -547,6 +547,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     updateNotebook((prev) => ({
       ...prev,
       steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined } : step),
+      ...(claimQueue && prev.autoFeed ? { autoFeedOwner: surfaceId } : {}),
       ...(prev.autoFeed && (prev.autoFeedStartedAt == null || prev.autoFeedFinishedAt != null)
         ? { autoFeedStartedAt: now, autoFeedFinishedAt: undefined, autoFeedStopped: false }
         : {}),
@@ -577,7 +578,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       window.setTimeout(() => setQueueNotice(null), 6000);
       return;
     }
-    feedStep(first);
+    // Start queue is an explicit request to drive the sequence from THIS
+    // page. Claim ownership with the first persisted step so a stale owner
+    // left by a closed page cannot dispatch card one and then strand card two.
+    feedStep(first, true);
   };
 
   const startEdit = (s: NotebookStep) => { setEditingStepId(s.id); setEditingText(s.text); };

@@ -34,6 +34,10 @@ check(onboarding.includes("ChatGPT Plus / Pro") && onboarding.includes("Claude P
   && onboarding.includes("Google AI Pro / Ultra") && onboarding.includes("Kimi")
   && onboarding.includes("SuperGrok / X Premium+"),
   "subscription choices are described using plans people recognize");
+check(onboarding.includes('data-ui="OnboardingAccountLoginPanel"') &&
+      onboarding.includes('data-ui="OnboardingInlineSubscriptionChoices"') &&
+      onboarding.includes("OwLLM opens the existing Accounts page with that provider highlighted"),
+  "AI account login choices are prominent on the first onboarding screen");
 check(onboarding.includes("I have API keys") && onboarding.includes("I want local models"),
   "API-billed and local-only access paths are first-class choices");
 check(onboarding.includes('sessionStorage.setItem(ACCOUNT_ONBOARDING_KEY, provider)')

@@ -52,6 +52,53 @@ const DENY_PREFIX = [
   "owllm:agents:page:",
 ];
 
+// The notebook blob (owllm:agents:notebook:<pid>) DOES sync — its notes, plan
+// and steps are shared content — but its RUN-LEASE fields must not. Those name
+// the live window that owns the running queue; syncing them would make a peer
+// PC think its own window owns a queue it never started (and two windows could
+// then drive the one team). We strip them on push and preserve the LOCAL lease
+// on adopt, so content converges while the lease stays device-local.
+const NOTEBOOK_KEY_PREFIX = "owllm:agents:notebook:";
+const NOTEBOOK_RUN_LEASE_FIELDS = [
+  "autoFeed", "autoFeedOwner", "autoFeedHeartbeat", "autoFeedStartedAt", "autoFeedFinishedAt", "autoFeedStopped",
+];
+
+/// Return the notebook blob value with its device-local run-lease fields
+/// removed, ready to sync. Non-notebook keys and unparseable values pass
+/// through untouched. Exported for the notebookSync verifier.
+export function stripNotebookLease(key: string, value: string): string {
+  if (!key.startsWith(NOTEBOOK_KEY_PREFIX)) return value;
+  try {
+    const obj = JSON.parse(value);
+    if (!obj || typeof obj !== "object") return value;
+    for (const f of NOTEBOOK_RUN_LEASE_FIELDS) delete obj[f];
+    return JSON.stringify(obj);
+  } catch {
+    return value; // not JSON we understand — never corrupt it
+  }
+}
+
+/// Merge an adopted notebook blob with the local one, KEEPING this device's
+/// live run-lease. Content (notes/plan/steps) comes from remote; the lease
+/// stays local so an in-flight queue on this PC is never hijacked by a sync.
+/// Exported for the notebookSync verifier.
+export function mergeNotebookLease(key: string, remoteValue: string): string {
+  if (!key.startsWith(NOTEBOOK_KEY_PREFIX)) return remoteValue;
+  try {
+    const remote = JSON.parse(remoteValue);
+    if (!remote || typeof remote !== "object") return remoteValue;
+    let local: any = null;
+    try { const rawLocal = localStorage.getItem(key); if (rawLocal) local = JSON.parse(rawLocal); } catch { local = null; }
+    for (const f of NOTEBOOK_RUN_LEASE_FIELDS) {
+      if (local && local[f] !== undefined) remote[f] = local[f];
+      else delete remote[f];
+    }
+    return JSON.stringify(remote);
+  } catch {
+    return remoteValue;
+  }
+}
+
 function isSyncable(key: string): boolean {
   if (DENY_EXACT.has(key)) return false;
   if (DENY_PREFIX.some((p) => key.startsWith(p))) return false;
@@ -93,7 +140,7 @@ function snapshot(): Record<string, string> {
       const k = localStorage.key(i);
       if (!k || !isSyncable(k)) continue;
       const v = localStorage.getItem(k);
-      if (v != null) out[k] = v;
+      if (v != null) out[k] = stripNotebookLease(k, v);
     }
   } catch { /* private mode */ }
   return out;
@@ -126,14 +173,24 @@ async function pullAndAdopt(): Promise<boolean> {
   if (blob.syncedAt <= getLast()) return false;
   // Adopt: write each synced key. We DON'T delete local-only keys — a merge,
   // not a mirror, so device-local prefs survive.
+  const adoptedNotebookPids: string[] = [];
   for (const [k, v] of Object.entries(blob.data || {})) {
     // Old vault blobs can still contain page/folder bindings from versions
     // before the deny-list was corrected. Never re-import them.
     if (!isSyncable(k)) continue;
-    try { localStorage.setItem(k, v); } catch { /* quota */ }
+    // Keep this device's live queue lease; adopt only the peer's content.
+    try { localStorage.setItem(k, mergeNotebookLease(k, v)); } catch { /* quota */ }
+    if (k.startsWith(NOTEBOOK_KEY_PREFIX)) adoptedNotebookPids.push(k.slice(NOTEBOOK_KEY_PREFIX.length));
   }
   setLast(blob.syncedAt);
   try { await invoke("vault_align"); } catch { /* best effort */ }
+  // When we DON'T do a full reload (the user has already interacted), open
+  // notebook surfaces hold stale in-memory steps even though localStorage now
+  // has the adopted copy. Tell them to reload so the queue reflects work a
+  // peer PC already completed instead of showing done steps as pending.
+  for (const pid of adoptedNotebookPids) {
+    try { window.dispatchEvent(new CustomEvent("owllm:notebook-changed", { detail: { projectId: pid } })); } catch { /* non-browser */ }
+  }
   return true;
 }
 

@@ -428,21 +428,87 @@ console.log("case 7: autoFeedWouldRun respects owner + pending");
   check("false when the toggle is off", autoFeedWouldRun(PID, "agents:main") === false);
 }
 
-// ---- 8. the toggle claims ownership; OFF from ANY page removes it ----
-console.log("case 8: toggle claims / releases ownership across pages");
+// ---- 8. the owning window drives; a live spectator must take over to control ----
+console.log("case 8: a live queue owner locks other windows until they take over");
 {
   localStorage.setItem(KEY, JSON.stringify({ text: "", plan: PLAN, steps: [{ id: "s1", text: "step", status: "pending", ts: 1 }], autoFeed: false, digest: [] }));
   const m1 = mount({ surfaceId: "code:p1" });
   clickEl(document.querySelector("input[type=checkbox]"));
   check("checking ON records this page as owner", blob().autoFeed === true && blob().autoFeedOwner === "code:p1");
+  check("turning it on beats a heartbeat", typeof blob().autoFeedHeartbeat === "number");
   act(() => m1.root.unmount());
   const m2 = mount({ surfaceId: "code:p2" });
-  check("another page shows it as driven elsewhere", textOf(document.body).includes("another page drives"));
-  check("that page cannot pop the queue", NB.takeNextAutoStep(PID, "code:p2") === null);
+  check("another window is locked to the live owner", textOf(document.body).includes("Queue runs in another window"));
+  check("the spectator cannot pop the queue", NB.takeNextAutoStep(PID, "code:p2") === null);
+  check("no auto-feed checkbox for the spectator", !document.querySelector("input[type=checkbox]"));
+  clickEl(buttons().find((b) => textOf(b).includes("Take over")));
+  check("taking over hands the queue to this window", blob().autoFeedOwner === "code:p2");
+  check("after takeover the checkbox is back", !!document.querySelector("input[type=checkbox]"));
   clickEl(document.querySelector("input[type=checkbox]"));
-  check("unchecking from the OTHER page stops it everywhere", blob().autoFeed === false && blob().autoFeedOwner === undefined);
-  clickEl(document.querySelector("input[type=checkbox]"));
-  check("re-checking hands the queue to this page", blob().autoFeed === true && blob().autoFeedOwner === "code:p2");
+  check("the new owner can stop it", blob().autoFeed === false && blob().autoFeedOwner === undefined);
+  act(() => m2.root.unmount());
+}
+
+// ---- 8b. a STALE owner (window closed mid-queue → heartbeat lapsed) does NOT
+//          lock other windows: Start queue takes over instead of stranding. ----
+console.log("case 8b: a stale (dead) owner never strands the queue");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN, steps: [{ id: "s1", text: "step", status: "pending", ts: 1 }],
+    autoFeed: true, autoFeedOwner: "code:dead-window", autoFeedHeartbeat: 1, // ancient beat
+    digest: [],
+  }));
+  const { root } = mount({ surfaceId: "code:live-window" });
+  check("a lapsed owner does not lock this window", !textOf(document.body).includes("Queue runs in another window"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("Start queue is enabled to take over a dead owner", !!startBtn && !startBtn.disabled);
+  act(() => root.unmount());
+}
+
+// ---- 9. a queue started in another WINDOW is ghosted (read-only) here ----
+console.log("case 9: a queue owned by another window is ghosted here");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: true, autoFeedOwner: "code:other-window", autoFeedHeartbeat: Date.now() }));
+  const { root } = mount({ surfaceId: "code:this-window" });
+  check("shows the queue runs in another window", textOf(document.body).includes("Queue runs in another window"));
+  check("no auto-feed checkbox while locked", !document.querySelector("input[type=checkbox]"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("Start queue is disabled here", !!startBtn && startBtn.disabled);
+  const stepFeed = buttons().find((b) => textOf(b) === "Feed" || textOf(b).includes("Re-feed") || /(^|>)Feed$/.test(textOf(b)));
+  check("per-step Feed is disabled here", !!stepFeed && stepFeed.disabled);
+  const takeOver = buttons().find((b) => textOf(b).includes("Take over"));
+  check("a Take over control is offered", !!takeOver);
+  clickEl(takeOver);
+  check("taking over makes THIS window the owner", blob().autoFeedOwner === "code:this-window");
+  act(() => root.unmount());
+}
+
+// ---- 9b. the OWNING window keeps full control (not ghosted) ----
+console.log("case 9b: the owning window is not ghosted");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: true, autoFeedOwner: "code:mine", autoFeedHeartbeat: Date.now() }));
+  const { root } = mount({ surfaceId: "code:mine" });
+  check("owner sees no locked banner", !textOf(document.body).includes("Queue runs in another window"));
+  check("owner keeps the auto-feed checkbox", !!document.querySelector("input[type=checkbox]"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("owner Start queue is enabled", !!startBtn && !startBtn.disabled);
+  act(() => root.unmount());
+}
+
+// ---- 9c. an idle Start queue claims the lease even with auto-feed OFF, so a
+//          plain (non-auto) queue is still owned by the starting window ----
+console.log("case 9c: Start queue claims the window lease even with auto-feed off");
+{
+  localStorage.setItem(KEY, JSON.stringify({ text: "", plan: PLAN, steps: [{ id: "s1", text: "only step", status: "pending", ts: 1 }], autoFeed: false, digest: [] }));
+  const { root } = mount({ surfaceId: "code:starter", onFeed: () => "dispatched" });
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("starting claims ownership without turning auto-feed on", blob().autoFeedOwner === "code:starter" && blob().autoFeed !== true);
+  act(() => root.unmount());
+  // A different window now sees the in-flight (sent, unfinished) queue as locked.
+  const m2 = mount({ surfaceId: "code:bystander" });
+  check("another window is locked out of the in-flight queue", textOf(document.body).includes("Queue runs in another window"));
   act(() => m2.root.unmount());
 }
 

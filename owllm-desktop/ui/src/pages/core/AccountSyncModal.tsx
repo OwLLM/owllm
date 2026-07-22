@@ -258,7 +258,7 @@ export default function AccountSyncModal() {
     >
       <style>{`@keyframes owllm-spin { to { transform: rotate(360deg); } }`}</style>
       <div style={{
-        width: "min(560px, 94%)", maxHeight: "90%",
+        width: "min(760px, 96%)", maxHeight: "90%",
         background: "var(--bg-panel)",
         border: "2px solid rgba(var(--accent-rgb),0.78)",
         borderRadius: 16, boxShadow: "0 28px 70px rgba(0,0,0,0.6)",
@@ -444,6 +444,50 @@ export default function AccountSyncModal() {
               )}
             </div>
           )}
+
+          <div data-ui="OnboardingAccountLoginPanel" style={{
+            background: "linear-gradient(135deg, rgba(var(--accent-rgb),0.13), var(--bg-card))",
+            border: "1px solid rgba(var(--accent-rgb),0.42)",
+            borderRadius: 12,
+            padding: 14,
+            display: "flex",
+            flexDirection: "column",
+            gap: 11,
+          }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 850, color: "var(--fg-strong)" }}>Set up your AI account login</div>
+              <div style={{ fontSize: 12, color: "var(--fg-muted)", marginTop: 4, lineHeight: 1.5 }}>
+                Pick the subscription or API path you actually use. OwLLM opens the existing Accounts page with that provider highlighted so login is not hidden in the GitHub area.
+              </div>
+            </div>
+            <div data-ui="OnboardingInlineSubscriptionChoices" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 9 }}>
+              {SUBSCRIPTION_CHOICES.map((choice) => (
+                <button key={choice.key} onClick={() => openAccountSetup(choice.key)} style={choiceCard}>
+                  <span aria-hidden="true" style={choiceIcon}>{choice.icon}</span>
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>{choice.name}</span>
+                    <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>{choice.detail}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 9 }}>
+              <button onClick={() => openAccountSetup("api")} style={choiceCard}>
+                <span aria-hidden="true" style={choiceIcon}>API</span>
+                <span>
+                  <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>I have API keys</span>
+                  <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>Usage-billed provider APIs</span>
+                </span>
+              </button>
+              <button onClick={openLocalSetup} style={choiceCard}>
+                <span aria-hidden="true" style={choiceIcon}>CPU</span>
+                <span>
+                  <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>I want local models</span>
+                  <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>Private, offline inference on this computer</span>
+                </span>
+              </button>
+            </div>
+          </div>
 
           {err && (
             <div style={{

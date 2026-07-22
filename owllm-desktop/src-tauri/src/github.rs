@@ -44,6 +44,19 @@ pub struct GithubConnect {
     pub gh_configured: bool,
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubRepository {
+    pub full_name: String,
+    pub name: String,
+    pub owner_login: String,
+    pub private: bool,
+    pub html_url: String,
+    pub clone_url: String,
+    pub updated_at: String,
+    pub description: Option<String>,
+}
+
 /// Validate a token against the GitHub API and return (login, numeric id).
 /// Uses host `curl` so we don't pull in an HTTP client. A rejected token
 /// yields a JSON `{message: "Bad credentials"}` which we surface verbatim.
@@ -85,6 +98,70 @@ fn curl_github_user(token: &str) -> Result<(String, i64), String> {
             .unwrap_or("unknown error");
         Err(format!("GitHub rejected the token: {msg}"))
     }
+}
+
+fn curl_github_repositories(token: &str) -> Result<Vec<GithubRepository>, String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-s",
+        "-H",
+        &format!("Authorization: Bearer {token}"),
+        "-H",
+        "User-Agent: owllm-desktop",
+        "-H",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
+    ]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("couldn't run curl to reach GitHub: {e}"))?;
+    let body = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(body.trim()).map_err(|_| {
+        format!(
+            "GitHub returned a non-JSON repository response (offline?): {}",
+            body.chars().take(200).collect::<String>()
+        )
+    })?;
+    if let Some(msg) = v.get("message").and_then(|x| x.as_str()) {
+        return Err(format!("GitHub couldn't list repositories: {msg}"));
+    }
+    let rows = v.as_array().ok_or_else(|| {
+        "GitHub returned an unexpected repository list response.".to_string()
+    })?;
+    let mut repos = Vec::new();
+    for row in rows {
+        let full_name = row.get("full_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let name = row.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let owner_login = row
+            .pointer("/owner/login")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let html_url = row.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let clone_url = row.get("clone_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        if full_name.is_empty() || name.is_empty() || owner_login.is_empty() || clone_url.is_empty() {
+            continue;
+        }
+        repos.push(GithubRepository {
+            full_name,
+            name,
+            owner_login,
+            private: row.get("private").and_then(|x| x.as_bool()).unwrap_or(false),
+            html_url,
+            clone_url,
+            updated_at: row.get("updated_at").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            description: row.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()),
+        });
+    }
+    Ok(repos)
 }
 
 /// Write git credentials + identity into the distro, and (best effort) log
@@ -167,6 +244,15 @@ pub fn github_status() -> GithubStatus {
     let connected = crate::accounts::accounts_get_secret("GITHUB_TOKEN".to_string()).is_some();
     let login = crate::accounts::accounts_get_secret("GITHUB_LOGIN".to_string());
     GithubStatus { connected, login }
+}
+
+#[tauri::command]
+pub async fn github_list_repositories() -> Result<Vec<GithubRepository>, String> {
+    let token = crate::accounts::accounts_get_secret("GITHUB_TOKEN".to_string())
+        .ok_or_else(|| "Sign in with GitHub first to choose from your repositories.".to_string())?;
+    tokio::task::spawn_blocking(move || curl_github_repositories(&token))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
 }
 
 /// Connect a GitHub account: validate the token, persist it, and wire git +

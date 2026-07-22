@@ -39,7 +39,8 @@ import {
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
 import { isolationBadge } from "./isolationBadge";
-import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubStatus } from "./github";
+import { githubStatus, githubConnect, githubDisconnect, githubListRepositories, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubRepository, type GithubStatus } from "./github";
+import { openSyncOnboarding } from "../core/AccountSyncModal";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
   sandboxProvision, sandboxLoginStatus, sandboxConvertProject,
@@ -1432,6 +1433,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [ghMsg, setGhMsg] = useState("");
   const [ghOpen, setGhOpen] = useState(false);
   const [importRepoUrl, setImportRepoUrl] = useState("");
+  const [githubRepos, setGithubRepos] = useState<GithubRepository[]>([]);
+  const [githubReposBusy, setGithubReposBusy] = useState(false);
+  const [selectedGithubRepo, setSelectedGithubRepo] = useState("");
   const [importBusy, setImportBusy] = useState(false);
   const [importMsg, setImportMsg] = useState("");
   // Reloads on mount, on the in-window `github-changed` broadcast (an
@@ -1451,6 +1455,41 @@ function CodeWorkspace({ pageId, onTitle }: {
       window.removeEventListener(GITHUB_CHANGED_EVENT, load);
     };
   }, []);
+  useEffect(() => {
+    if (!gh?.connected) {
+      setGithubRepos([]);
+      setSelectedGithubRepo("");
+      return;
+    }
+    let dead = false;
+    setGithubReposBusy(true);
+    githubListRepositories()
+      .then((repos) => {
+        if (dead) return;
+        setGithubRepos(repos);
+        setSelectedGithubRepo((cur) => cur || repos[0]?.fullName || "");
+      })
+      .catch((e) => {
+        if (!dead) setImportMsg(`Could not load GitHub repositories: ${String((e as Error)?.message ?? e)}`);
+      })
+      .finally(() => { if (!dead) setGithubReposBusy(false); });
+    return () => { dead = true; };
+  }, [gh?.connected, gh?.login]);
+  const refreshGithubRepositories = async () => {
+    if (!gh?.connected || githubReposBusy) return;
+    setGithubReposBusy(true);
+    setImportMsg("Refreshing your GitHub repositories...");
+    try {
+      const repos = await githubListRepositories();
+      setGithubRepos(repos);
+      setSelectedGithubRepo((cur) => cur || repos[0]?.fullName || "");
+      setImportMsg(repos.length ? `Loaded ${repos.length} GitHub repositories.` : "No repositories are visible to this GitHub account.");
+    } catch (e) {
+      setImportMsg(`Could not load GitHub repositories: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      setGithubReposBusy(false);
+    }
+  };
   const connectGithub = async () => {
     if (ghBusy || !ghToken.trim()) return;
     setGhBusy(true);
@@ -1482,13 +1521,18 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
 
   const importGithubProject = async () => {
-    const repoUrl = importRepoUrl.trim();
-    if (importBusy || !repoUrl) return;
+    const selectedRepo = gh?.connected ? githubRepos.find((repo) => repo.fullName === selectedGithubRepo) : null;
+    const repoUrl = selectedRepo?.cloneUrl || importRepoUrl.trim();
+    if (importBusy) return;
+    if (!repoUrl) {
+      setImportMsg(gh?.connected ? "Select one of your GitHub repositories first." : "Sign in with GitHub, or paste a public repository URL.");
+      return;
+    }
     setImportBusy(true);
     setImportMsg("Choose the local parent folder for this clone…");
     try {
       const parent = await invoke<string | null>("pick_folder", {
-        title: "Choose where to clone this GitHub project",
+        title: selectedRepo ? `Choose where to clone ${selectedRepo.fullName}` : "Choose where to clone this GitHub project",
       });
       if (!parent) {
         setImportMsg("Import cancelled — no local folder was changed.");
@@ -1497,6 +1541,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       setImportMsg("Cloning from GitHub and creating the local project binding…");
       const location = await invoke<string>("github_clone_project", { repoUrl, parent });
       setImportRepoUrl("");
+      setSelectedGithubRepo("");
       setImportMsg(`Imported to ${location}`);
       await refreshProjectCatalog();
       await openWorkspace(location);
@@ -2643,11 +2688,36 @@ function CodeWorkspace({ pageId, onTitle }: {
                   ))}
                   <div data-ui="ImportFromGitHubCard" style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 9, minWidth: 0, padding: 15, borderRadius: 14, border: "1px solid rgba(126,231,255,.38)", background: "radial-gradient(circle at 100% 0%,rgba(126,231,255,.16),transparent 48%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 28px rgba(0,0,0,.14)" }}>
                     <div style={{ display: "flex", gap: 9, alignItems: "center" }}><span style={{ color: "#7ee7ff", fontSize: 20, textShadow: "0 0 14px rgba(126,231,255,.8)" }}>⇣</span><b style={{ color: "var(--fg-strong)", fontSize: 13.5 }}>Import from GitHub</b></div>
-                    <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>Paste a repository URL, choose a local parent folder, and OwLLM will clone it and tie the resulting folder to a managed project on this computer.</div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <input value={importRepoUrl} onChange={(e) => setImportRepoUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void importGithubProject(); }} placeholder="https://github.com/owner/repository" aria-label="GitHub repository URL" style={{ flex: 1, minWidth: 0, height: 34, padding: "0 10px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12 }} />
-                      <button onClick={() => void importGithubProject()} disabled={importBusy || !importRepoUrl.trim()} style={{ ...btn, height: 34, padding: "0 13px", borderColor: "rgba(126,231,255,.5)", color: "#7ee7ff", opacity: importBusy || !importRepoUrl.trim() ? .5 : 1 }}>{importBusy ? "Importing…" : "Choose folder & import"}</button>
+                    <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>
+                      {gh?.connected
+                        ? `Choose one of @${gh.login}'s GitHub repositories, then choose the local folder where this PC should clone it.`
+                        : "Sign in with GitHub to choose from your repositories. Public URL import stays available as a fallback."}
                     </div>
+                    {gh?.connected ? (
+                      <div data-ui="GitHubRepositoryPicker" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <select value={selectedGithubRepo} onChange={(e) => setSelectedGithubRepo(e.target.value)} disabled={githubReposBusy || githubRepos.length === 0} aria-label="GitHub repository" style={{ flex: 1, minWidth: 0, height: 34, padding: "0 10px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12 }}>
+                            {githubRepos.length === 0 && <option value="">{githubReposBusy ? "Loading GitHub repositories..." : "No repositories found"}</option>}
+                            {githubRepos.map((repo) => (
+                              <option key={repo.fullName} value={repo.fullName}>{repo.fullName}{repo.private ? " (private)" : ""}</option>
+                            ))}
+                          </select>
+                          <button onClick={refreshGithubRepositories} disabled={githubReposBusy} style={{ ...btn, height: 34, padding: "0 11px", color: "#7ee7ff" }}>{githubReposBusy ? "Loading..." : "Refresh"}</button>
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <button onClick={() => void importGithubProject()} disabled={importBusy || !selectedGithubRepo} style={{ ...btn, height: 34, padding: "0 13px", borderColor: "rgba(126,231,255,.5)", color: "#7ee7ff", opacity: importBusy || !selectedGithubRepo ? .5 : 1 }}>{importBusy ? "Importing..." : "Choose folder & import selected repo"}</button>
+                          <button onClick={() => openWebUrl(`https://github.com/${gh.login}?tab=repositories`).catch(() => {})} style={{ ...btn, height: 34, padding: "0 11px", color: "var(--fg-muted)" }}>Open GitHub repositories</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div data-ui="SignedOutGithubImport" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <button onClick={openSyncOnboarding} style={{ ...btn, height: 34, justifyContent: "center", borderColor: "rgba(126,231,255,.5)", color: "#7ee7ff" }}>Sign in with GitHub to select a repository</button>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <input value={importRepoUrl} onChange={(e) => setImportRepoUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void importGithubProject(); }} placeholder="Public fallback: https://github.com/owner/repository" aria-label="Public GitHub repository URL" style={{ flex: 1, minWidth: 0, height: 34, padding: "0 10px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12 }} />
+                          <button onClick={() => void importGithubProject()} disabled={importBusy || !importRepoUrl.trim()} style={{ ...btn, height: 34, padding: "0 13px", color: "var(--fg-muted)", opacity: importBusy || !importRepoUrl.trim() ? .5 : 1 }}>{importBusy ? "Importing..." : "Import public URL"}</button>
+                        </div>
+                      </div>
+                    )}
                     {importMsg && <div style={{ color: importMsg.startsWith("Import failed") ? "var(--error)" : "var(--fg-muted)", fontSize: 10.5, lineHeight: 1.4 }}>{importMsg}</div>}
                   </div>
                 </div>

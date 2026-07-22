@@ -938,131 +938,134 @@ pub async fn repo_commit(
     .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Git surfaces credential-helper failures as `fatal:` lines on stderr even
-/// when the operation itself succeeded (exit 0) — e.g. a stale sandbox-written
-/// `credential.helper store --file=<linux path>` in the shared repo config
-/// dies on the post-push approve phase. Embedding that noise in a SUCCESS
-/// message makes the Publisher card read as failed. Strip only those known
-/// cosmetic lines; error paths keep the full untouched output.
-fn strip_credential_noise(out: &str) -> String {
-    out.lines()
-        .filter(|l| !(l.contains("credential storage lock") || l.contains("credential store")))
-        .collect::<Vec<_>>()
-        .join("\n")
-        .trim()
-        .to_string()
+/// Turn a sync_core outcome into the user-facing rail message. Conflict and
+/// verify failures are Err so the card shows them as actionable failures, but
+/// their text states explicitly that nothing was lost.
+fn format_sync_result(
+    r: Result<crate::sync_core::SyncReport, crate::sync_core::SyncError>,
+) -> Result<String, String> {
+    use crate::sync_core::SyncError;
+    match r {
+        Ok(rep) => Ok(match rep.action {
+            "up-to-date" => format!("Up to date. {}", rep.detail),
+            "pushed" => format!("Pushed. {}", rep.detail),
+            "fast-forwarded" => format!("Updated local checkout. {}", rep.detail),
+            _ => format!("Synchronized. {}", rep.detail),
+        }),
+        Err(SyncError::Conflict {
+            files,
+            recovery_ref,
+        }) => Err(format!(
+            "Sync stopped on a real content conflict — the same lines changed here and on origin. \
+             Nothing was lost: local commits are untouched (recovery ref {recovery_ref}) and origin \
+             was not modified. Resolve these files, commit, then sync again:\n{}",
+            files
+                .iter()
+                .map(|f| format!("  - {f}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        )),
+        Err(SyncError::VerifyFailed { output }) => Err(format!(
+            "The integrated commit failed verification, so it was NOT pushed:\n{output}"
+        )),
+        Err(SyncError::Git(msg)) => Err(msg),
+    }
 }
 
-/// Push the current branch to origin. Fast-forward-only on the remote side,
-/// refusing to overwrite history. Lightweight counterpart to repo_merge for
-/// the "Push" card in the Code page rail.
+fn sync_blocking(host: String, target: Option<String>, verify: Option<String>) -> Result<String, String> {
+    let path = std::path::PathBuf::from(&host);
+    let lock = crate::fleet::repo_git_lock(&path);
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let target = target
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| t.trim().to_string())
+        .unwrap_or_else(|| "main".to_string());
+    let verify = verify.filter(|v| !v.trim().is_empty());
+    format_sync_result(crate::sync_core::sync_repo(&path, &target, verify.as_deref()))
+}
+
+/// The cross-PC synchronization transaction: fetch → classify → integrate
+/// diverged histories on a temporary worktree (plain three-way merge, no side
+/// preference) → optional verify → push with moved-remote retry → fast-forward
+/// the local checkout. Never force-pushes, never resolves a source conflict
+/// automatically. `↑N ↓M` divergence is a normal input here, not an error.
+#[tauri::command]
+pub async fn repo_sync(
+    repo_dir: String,
+    target: Option<String>,
+    verify: Option<String>,
+) -> Result<String, String> {
+    let host = crate::agent_tools::host_cwd(&repo_dir);
+    tokio::task::spawn_blocking(move || sync_blocking(host, target, verify))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
+}
+
+/// Push = synchronize the CURRENT branch with its origin counterpart. Delegates
+/// to the sync transaction so a diverged remote integrates instead of dead-ending.
 #[tauri::command]
 pub async fn repo_push(repo_dir: String) -> Result<String, String> {
     let host = crate::agent_tools::host_cwd(&repo_dir);
     tokio::task::spawn_blocking(move || {
-        let (cur_ok, cur) = run_git(&host, &["rev-parse", "--abbrev-ref", "HEAD"]);
-        if !cur_ok {
+        let (cur_ok, cur) = run_git(&host, &["symbolic-ref", "--short", "-q", "HEAD"]);
+        if !cur_ok || cur.trim().is_empty() {
             return Err(format!("not on a branch:\n{cur}"));
         }
-        let branch = cur.trim();
-        let (p_ok, p_out) = run_git(&host, &["push", "origin", branch]);
-        if p_ok {
-            let p_out = strip_credential_noise(&p_out);
-            if p_out.is_empty() {
-                Ok(format!("Pushed {branch} to origin."))
-            } else {
-                Ok(format!("Pushed {branch} to origin.\n{p_out}"))
-            }
-        } else if p_out.contains("Everything up-to-date") {
-            Ok("Everything up-to-date.".into())
-        } else {
-            Err(format!("git push failed:\n{p_out}"))
-        }
+        let branch = cur.trim().to_string();
+        sync_blocking(host, Some(branch), None)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Fast-forward-only merge: push HEAD to the target branch on origin, refusing
-/// anything that isn't a clean fast-forward. NEVER force-pushes — if the target
-/// has diverged, it errors with the reason instead of rewriting history.
+/// Merge-to-target = the same sync transaction against `target` (default main).
+/// Kept under its historical name for existing callers; behavior is the full
+/// coordinator, not the old fast-forward-only push.
 #[tauri::command]
 pub async fn repo_merge(repo_dir: String, target: Option<String>) -> Result<String, String> {
     let host = crate::agent_tools::host_cwd(&repo_dir);
-    tokio::task::spawn_blocking(move || {
-        let target = target
-            .filter(|t| !t.trim().is_empty())
-            .map(|t| t.trim().to_string())
-            .unwrap_or_else(|| "main".to_string());
-        let (f_ok, f_out) = run_git(&host, &["fetch", "origin", &target]);
-        if !f_ok {
-            return Err(format!("git fetch origin {target} failed:\n{f_out}"));
-        }
-        let (anc_ok, _) = run_git(
-            &host,
-            &[
-                "merge-base",
-                "--is-ancestor",
-                &format!("origin/{target}"),
-                "HEAD",
-            ],
-        );
-        if !anc_ok {
-            return Err(format!(
-                "origin/{target} is NOT an ancestor of HEAD — a fast-forward isn't possible. \
-                 Rebase or merge {target} into your branch first; this button never force-pushes."
-            ));
-        }
-        let (p_ok, p_out) = run_git(
-            &host,
-            &["push", "origin", &format!("HEAD:refs/heads/{target}")],
-        );
-        if !p_ok {
-            return Err(format!("git push failed:\n{p_out}"));
-        }
-        // Best-effort: move the LOCAL target branch pointer too, so the local
-        // checkout doesn't read as behind. Skipped when target is checked out.
-        let (cur_ok, cur) = run_git(&host, &["rev-parse", "--abbrev-ref", "HEAD"]);
-        if cur_ok && cur != target {
-            let _ = run_git(&host, &["branch", "-f", &target, "HEAD"]);
-        }
-        let p_out = strip_credential_noise(&p_out);
-        Ok(format!(
-            "Fast-forwarded '{target}' to HEAD and pushed.\n{p_out}"
-        ))
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
+    tokio::task::spawn_blocking(move || sync_blocking(host, target, None))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
 }
 
 #[cfg(all(test, windows))]
 mod tests {
-    use super::strip_credential_noise;
+    use super::format_sync_result;
     use super::{acquire_publish_lease, disk_free_bytes_for_path};
+    use crate::sync_core::{SyncError, SyncReport};
 
     #[test]
-    fn strips_cosmetic_credential_lines_keeps_push_summary() {
-        let out = "fatal: unable to get credential storage lock in 1000 ms: No such file or directory\n\
-                   To https://github.com/ruigro/LLM-Studio.git\n\
-                   \x20\x20\x201ec502a1..efb98b41  main -> main";
-        let clean = strip_credential_noise(out);
-        assert!(!clean.contains("credential storage lock"));
-        assert!(clean.contains("main -> main"));
-        assert!(clean.contains("To https://github.com/ruigro/LLM-Studio.git"));
+    fn conflict_result_names_files_and_recovery_ref() {
+        let err = format_sync_result(Err(SyncError::Conflict {
+            files: vec!["src/app.ts".into(), "src/lib.rs".into()],
+            recovery_ref: "refs/owllm/recovery/sync-1-abc12345".into(),
+        }))
+        .unwrap_err();
+        assert!(err.contains("Nothing was lost"));
+        assert!(err.contains("refs/owllm/recovery/sync-1-abc12345"));
+        assert!(err.contains("src/app.ts"));
+        assert!(err.contains("src/lib.rs"));
     }
 
     #[test]
-    fn strips_write_credential_store_variant() {
-        let out = "fatal: unable to write credential store: Device or resource busy\nEverything up-to-date";
-        assert_eq!(strip_credential_noise(out), "Everything up-to-date");
+    fn verify_failure_states_push_was_withheld() {
+        let err = format_sync_result(Err(SyncError::VerifyFailed {
+            output: "1 test failed".into(),
+        }))
+        .unwrap_err();
+        assert!(err.contains("NOT pushed"));
+        assert!(err.contains("1 test failed"));
     }
 
     #[test]
-    fn passes_real_errors_untouched() {
-        let out = " ! [rejected]          main -> main (fetch first)\nerror: failed to push some refs";
-        let clean = strip_credential_noise(out);
-        assert!(clean.contains("[rejected]"));
-        assert!(clean.contains("failed to push some refs"));
+    fn integrated_result_reads_as_synchronized() {
+        let ok = format_sync_result(Ok(SyncReport {
+            action: "integrated",
+            detail: "Histories had diverged; merged both sides.".into(),
+        }))
+        .unwrap();
+        assert!(ok.starts_with("Synchronized."));
     }
 
     #[test]

@@ -1,0 +1,15 @@
+# Standalone two-clone regression harness for the cross-PC sync coordinator.
+# NOT a workspace member of the app: Rust *test* binaries fail to launch in this
+# dev environment (STATUS_ENTRYPOINT_NOT_FOUND), so the proof runs as a normal
+# `cargo run` binary that includes src/sync_core.rs via #[path].
+# Run it with: node owllm-desktop/ui/src/pages/agentic/syncCoordinator.verify.run.mjs --live
+[package]
+name = "sync-harness"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[[bin]]
+name = "sync-harness"
+path = "src/main.rs"

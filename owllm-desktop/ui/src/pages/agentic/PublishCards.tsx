@@ -326,9 +326,12 @@ export default function PublishCards({
   // checkout. Push that checkout, not the page branch again. The old routing
   // let Commit + Merge + Push all report success while origin/main never moved.
   const pushDir = isolated && projectRoot ? projectRoot : gitDir;
-  const doPush = () => run("Pushing to origin", () => invoke("repo_push", { repoDir: pushDir }));
+  // repo_push and repo_sync both run the cross-PC sync transaction in the
+  // backend: diverged histories (↑N ↓M) integrate on a temporary worktree via a
+  // plain three-way merge instead of dead-ending on "not a fast-forward".
+  const doPush = () => run("Syncing with origin", () => invoke("repo_push", { repoDir: pushDir }));
 
-  const doMerge = () => run(isolated ? "Merging worktree" : `Merging to ${mergeTarget}`, async () => {
+  const doMerge = () => run(isolated ? "Merging worktree" : `Syncing with ${mergeTarget}`, async () => {
     if (isolated && projectRoot && branch && gitDir) {
       const fin = await invoke<WtFinalize>("fleet_worktree_finalize", {
         worktreePath: gitDir, agentName: "code", summary: "Code page session",
@@ -339,10 +342,13 @@ export default function PublishCards({
       });
       if (mg.status === "merged") return `Merged ${mg.filesChanged} file(s) into ${projectRoot.replace(/^.*[\\/]/, "")}`;
       if (mg.status === "noChanges") return "Nothing new to merge — already up to date.";
-      if (mg.status === "conflict") throw new Error(`conflict in: ${mg.files.join(", ")}`);
+      if (mg.status === "conflict") throw new Error(
+        `Real overlapping edits — nothing was auto-dropped. Both sides are preserved ` +
+        `(the page branch keeps its commits). Resolve these files, then merge again:\n` +
+        mg.files.map((f) => `  - ${f}`).join("\n"));
       throw new Error(mg.message);
     }
-    return invoke<string>("repo_merge", { repoDir: gitDir, target: mergeTarget });
+    return invoke<string>("repo_sync", { repoDir: gitDir, target: mergeTarget });
   });
 
   const signPayload = settings.sign.thumbprint.trim() || settings.sign.subject.trim()
@@ -365,6 +371,12 @@ export default function PublishCards({
           : `This bumps the version, commits, tags, and pushes. The repository's GitHub Actions workflow will build and publish a public release.`) +
         (settings.mode === "host" && !signed ? "\n\nNo signing certificate is configured, so this build will be UNSIGNED." : "")
       )) return "Cancelled.";
+      // Publish rides on the same sync transaction first: a diverged origin
+      // integrates (or stops on a real conflict) BEFORE the long build, instead
+      // of failing mid-release or building a stale checkout.
+      if (hasRemote) {
+        await invoke("repo_sync", { repoDir, target: "main" });
+      }
       return invoke("finish_and_publish", {
         repoDir,
         notes: pubNotes,
@@ -508,10 +520,10 @@ export default function PublishCards({
                 disabled={disabled || loading}
                 title={isolated
                   ? `Merge this page's worktree back into ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`
-                  : `Fast-forward ${mergeTarget} to HEAD on origin`}
+                  : `Synchronize with origin/${mergeTarget}: pushes when ahead, fast-forwards when behind, and safely merges diverged histories — never force-pushes, never drops either side`}
                 style={{ ...chipBtn, flex: 1, color: "#7ff0c5" }}
               >
-                {loading ? "⏳" : "⤴"} Merge
+                {loading ? "⏳" : isolated ? "⤴" : "⇅"} {isolated ? "Merge" : "Sync"}
               </button>
             )}
           </div>
@@ -521,10 +533,10 @@ export default function PublishCards({
                 onClick={doPush}
                 disabled={disabled || loading}
                 title={isolated && projectRoot
-                  ? `Push the merged project checkout (${projectRoot.replace(/^.*[\\/]/, "")}) to origin`
+                  ? `Sync the merged project checkout (${projectRoot.replace(/^.*[\\/]/, "")}) with origin — handles ahead, behind, and diverged histories`
                   : git && git.ahead > 0
-                    ? `Push ${git.ahead} commit(s) on ${git.branch || branch || "current"} to origin`
-                    : `Push ${git?.branch || branch || "current"} to origin`}
+                    ? `Sync ${git.ahead} commit(s) on ${git.branch || branch || "current"} with origin — a diverged remote integrates safely instead of failing`
+                    : `Sync ${git?.branch || branch || "current"} with origin`}
                 style={{ ...chipBtn, flex: 1 }}
               >
                 {loading ? "⏳" : "↑"} Push

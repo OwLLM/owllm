@@ -391,8 +391,23 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   never clobbers a peer's.
 - **Publish pipeline**: rule-based host-side release (used to ship OWLLM
   itself and any user project via the Project Card).
+- **Cross-PC sync coordinator** (`sync_core.rs`, `repo_sync` command): the
+  release rail's Sync/Push actions run one transaction — fetch → classify
+  (synced/ahead/behind/diverged) → integrate diverged histories on a temporary
+  worktree with a plain three-way merge → optional verify on the integrated
+  commit → push with moved-remote retry → fast-forward the local checkout.
+  Never force-pushes; never auto-picks a side of a real conflict (a recovery
+  ref + untouched branches preserve both). `↑N ↓M` divergence is a normal
+  input, not an error. Publish runs the same transaction before building.
+  Generic for ANY repo — zero project-specific knowledge in the Rust core.
+  Proven by a standalone two-clone harness (`src-tauri/sync-harness/`, run via
+  `syncCoordinator.verify.run.mjs --live`) driving a real bare remote + two
+  clones through divergence, same-file merges, conflicts, mid-sync races,
+  dirty files, and verify-gated pushes.
 - **Fleet** (`fleet.rs`): git-worktree substrate for parallel agents/pages;
-  diff/merge/finalize; orphan sweep.
+  diff/merge/finalize; orphan sweep. Worktree merges use plain three-way
+  merging — real overlapping edits return a Conflict with both sides
+  preserved; only disposable app runtime files auto-resolve.
 
 ## Support & UX
 

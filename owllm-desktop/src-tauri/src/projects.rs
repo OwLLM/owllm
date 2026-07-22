@@ -31,7 +31,12 @@ pub struct ProjectRow {
     pub name: String,
     pub description: String,
     pub location: String,
+    /// Shared portable identity. Unlike `location`, this follows the project
+    /// across devices and is the only safe way to materialize it on a new PC.
     pub repo_url: String,
+    /// Stable origin metadata for the UI. Folder bindings remain per-device.
+    pub created_device_id: String,
+    pub created_device_name: String,
     pub trust_writes: bool,
     pub auto_approve_all: bool,
     pub team: Vec<String>,
@@ -93,7 +98,10 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
             created_at TEXT NOT NULL,\
             updated_at TEXT NOT NULL,\
             team_default_model_id TEXT NOT NULL DEFAULT '',\
-            repo_url TEXT NOT NULL DEFAULT ''\
+            location_device_id TEXT NOT NULL DEFAULT ''\
+            ,repo_url TEXT NOT NULL DEFAULT ''\
+            ,created_device_id TEXT NOT NULL DEFAULT ''\
+            ,created_device_name TEXT NOT NULL DEFAULT ''\
         )",
         [],
     )
@@ -111,9 +119,55 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         [],
     );
     let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN location_device_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
         "ALTER TABLE agent_projects ADD COLUMN repo_url TEXT NOT NULL DEFAULT ''",
         [],
     );
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN created_device_id TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE agent_projects ADD COLUMN created_device_name TEXT NOT NULL DEFAULT ''",
+        [],
+    );
+    // Migrate the old global location column into a binding owned by THIS
+    // computer. Previous sync releases copied foreign absolute paths into every
+    // DB and then stamped them into each device's vault map. A path that does
+    // not exist here is therefore not a usable local binding: ghost it once.
+    if let Some(self_id) = crate::remote_devices::self_device_id() {
+        migrate_location_ownership(conn, &self_id)?;
+    }
+    Ok(())
+}
+
+fn migrate_location_ownership(
+    conn: &rusqlite::Connection,
+    self_id: &str,
+) -> Result<(), String> {
+    let mut legacy = conn
+        .prepare(
+            "SELECT id, location FROM agent_projects \
+             WHERE COALESCE(location_device_id, '') = ''",
+        )
+        .map_err(|e| format!("prepare location migration: {e}"))?;
+    let rows = legacy
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| format!("query location migration: {e}"))?
+        .filter_map(Result::ok)
+        .collect::<Vec<_>>();
+    drop(legacy);
+    for (id, location) in rows {
+        let valid = !location.trim().is_empty() && std::path::Path::new(&location).is_dir();
+        conn.execute(
+            "UPDATE agent_projects SET location = ?2, location_device_id = ?3 WHERE id = ?1",
+            rusqlite::params![id, if valid { location } else { String::new() }, self_id],
+        )
+        .map_err(|e| format!("migrate project location: {e}"))?;
+    }
     Ok(())
 }
 
@@ -207,9 +261,11 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
                 name: r.get(1)?,
                 description: r.get::<_, String>(2).unwrap_or_default(),
                 location: r.get::<_, String>(3).unwrap_or_default(),
-                repo_url: r.get::<_, String>(12).unwrap_or_default(),
-                trust_writes: r.get::<_, i64>(4).unwrap_or(0) != 0,
-                auto_approve_all: r.get::<_, i64>(5).unwrap_or(0) != 0,
+                repo_url: r.get::<_, String>(4).unwrap_or_default(),
+                created_device_id: r.get::<_, String>(5).unwrap_or_default(),
+                created_device_name: r.get::<_, String>(6).unwrap_or_default(),
+                trust_writes: r.get::<_, i64>(7).unwrap_or(0) != 0,
+                auto_approve_all: r.get::<_, i64>(8).unwrap_or(0) != 0,
                 team,
                 team_default_model_id: r.get::<_, String>(10).unwrap_or_default(),
                 graph_json: r.get::<_, String>(11).unwrap_or_default(),
@@ -294,130 +350,6 @@ fn row_by_id(conn: &rusqlite::Connection, id: &str) -> Result<ProjectRow, String
             chat_json: r.get::<_, String>(12).unwrap_or_default(),
             agent_logs_json: r.get::<_, String>(13).unwrap_or_default(),
             updated_at: r.get::<_, String>(14).unwrap_or_default(),
-        })
-    })
-    .map_err(|e| format!("read project row: {e}"))
-}
-
-#[tauri::command]
-pub async fn resolve_project_for_location(input: ResolveProjectInput) -> Result<ProjectRow, String> {
-    let Some(path) = project_db_path() else {
-        return Err("LLM/ tree not found".into());
-    };
-    let path2 = path.clone();
-    tokio::task::spawn_blocking(move || {
-        let location = input.location.trim().to_string();
-        if location.is_empty() {
-            return Err("project location is required".to_string());
-        }
-        let repo_url = git_origin_url(&location);
-        if let Some(parent) = path2.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
-        }
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
-        ensure_schema(&conn)?;
-        let path_key = normalize_path_key(&location);
-        let mut found: Option<(String, String)> = None;
-        {
-            let mut stmt = conn
-                .prepare("SELECT id, location, COALESCE(repo_url, '') FROM agent_projects")
-                .map_err(|e| format!("prepare project resolve: {e}"))?;
-            let rows = stmt
-                .query_map([], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1).unwrap_or_default(),
-                        r.get::<_, String>(2).unwrap_or_default(),
-                    ))
-                })
-                .map_err(|e| format!("query project resolve: {e}"))?;
-            for row in rows {
-                let (id, loc, repo) = row.map_err(|e| format!("project resolve row: {e}"))?;
-                let repo = normalize_repo_url(&repo);
-                if !loc.trim().is_empty() && normalize_path_key(&loc) == path_key {
-                    found = Some((id, repo));
-                    break;
-                }
-                if !repo_url.is_empty() && repo == repo_url {
-                    found = Some((id, repo));
-                    break;
-                }
-            }
-        }
-        if let Some((id, existing_repo_url)) = found {
-            conn.execute(
-                "UPDATE agent_projects SET location = ?2 WHERE id = ?1",
-                rusqlite::params![id, location],
-            )
-            .map_err(|e| format!("bind project location: {e}"))?;
-            if !repo_url.is_empty() && existing_repo_url.is_empty() {
-                let now = now_iso();
-                conn.execute(
-                    "UPDATE agent_projects SET repo_url = ?2, updated_at = ?3 WHERE id = ?1",
-                    rusqlite::params![id, repo_url, now],
-                )
-                .map_err(|e| format!("bind project repo url: {e}"))?;
-            }
-            return row_by_id(&conn, &id);
-        }
-
-        let id = new_id();
-        let now = now_iso();
-        let name = input
-            .name
-            .filter(|n| !n.trim().is_empty())
-            .unwrap_or_else(|| {
-                Path::new(&crate::agent_tools::host_cwd(&location))
-                    .file_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_else(|| "Code project".to_string())
-            });
-        conn.execute(
-            "INSERT INTO agent_projects (id, name, description, location, repo_url, trust_writes, auto_approve_all, \
-             team_json, model_overrides_json, graph_json, created_at, updated_at, team_default_model_id) \
-             VALUES (?1, ?2, '', ?3, ?4, 0, 0, '[]', '{}', '', ?5, ?5, '')",
-            rusqlite::params![id, name, location, repo_url, now],
-        )
-        .map_err(|e| format!("insert resolved project: {e}"))?;
-        row_by_id(&conn, &id)
-    })
-    .await
-    .map_err(|e| format!("join error: {e}"))?
-}
-
-#[derive(Deserialize)]
-pub struct ResolveProjectInput {
-    pub location: String,
-    #[serde(default)]
-    pub name: Option<String>,
-}
-
-fn row_by_id(conn: &rusqlite::Connection, id: &str) -> Result<ProjectRow, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT id, name, description, location, COALESCE(repo_url, ''), trust_writes, \
-             auto_approve_all, team_json, team_default_model_id, graph_json, \
-             chat_json, agent_logs_json, updated_at \
-             FROM agent_projects WHERE id = ?1",
-        )
-        .map_err(|e| format!("prepare project row: {e}"))?;
-    stmt.query_row(rusqlite::params![id], |r| {
-        let team_json: String = r.get(7)?;
-        Ok(ProjectRow {
-            id: r.get(0)?,
-            name: r.get(1)?,
-            description: r.get::<_, String>(2).unwrap_or_default(),
-            location: r.get::<_, String>(3).unwrap_or_default(),
-            repo_url: r.get::<_, String>(4).unwrap_or_default(),
-            trust_writes: r.get::<_, i64>(5).unwrap_or(0) != 0,
-            auto_approve_all: r.get::<_, i64>(6).unwrap_or(0) != 0,
-            team: serde_json::from_str(&team_json).unwrap_or_default(),
-            team_default_model_id: r.get::<_, String>(8).unwrap_or_default(),
-            graph_json: r.get::<_, String>(9).unwrap_or_default(),
-            chat_json: r.get::<_, String>(10).unwrap_or_default(),
-            agent_logs_json: r.get::<_, String>(11).unwrap_or_default(),
-            updated_at: r.get::<_, String>(12).unwrap_or_default(),
         })
     })
     .map_err(|e| format!("read project row: {e}"))
@@ -690,17 +622,25 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
         let now = now_iso();
         let team_json = serde_json::to_string(&input.team).unwrap_or("[]".into());
 
+        let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
+        let self_name = std::env::var("COMPUTERNAME")
+            .or_else(|_| std::env::var("HOSTNAME"))
+            .unwrap_or_else(|_| "This PC".to_string());
         let repo_url = normalize_repo_url(&input.repo_url);
         conn.execute(
-            "INSERT INTO agent_projects (id, name, description, location, repo_url, trust_writes, auto_approve_all, \
-             team_json, model_overrides_json, graph_json, created_at, updated_at, team_default_model_id) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '{}', ?9, ?10, ?10, ?11)",
+            "INSERT INTO agent_projects (id, name, description, location, location_device_id, repo_url, \
+             created_device_id, created_device_name, trust_writes, auto_approve_all, team_json, \
+             model_overrides_json, graph_json, created_at, updated_at, team_default_model_id) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '{}', ?12, ?13, ?13, ?14)",
             rusqlite::params![
                 id,
                 input.name,
                 input.description,
                 input.location,
+                self_id,
                 repo_url,
+                self_id,
+                self_name,
                 input.trust_writes as i64,
                 input.auto_approve_all as i64,
                 team_json,
@@ -717,6 +657,8 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
             description: input.description,
             location: input.location,
             repo_url,
+            created_device_id: self_id,
+            created_device_name: self_name,
             trust_writes: input.trust_writes,
             auto_approve_all: input.auto_approve_all,
             team: input.team,
@@ -783,10 +725,6 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
             params.push(Box::new(
                 crate::remote_devices::self_device_id().unwrap_or_default(),
             ));
-        }
-        if let Some(v) = input.repo_url {
-            sets.push("repo_url = ?");
-            params.push(Box::new(normalize_repo_url(&v)));
         }
         if let Some(v) = input.repo_url {
             sets.push("repo_url = ?");
@@ -898,6 +836,48 @@ mod tests {
             String::from_utf8_lossy(&out.stdout),
             String::from_utf8_lossy(&out.stderr)
         );
+    }
+
+    #[test]
+    fn migration_keeps_only_folders_that_exist_on_this_computer() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        ensure_schema(&conn).unwrap();
+        let valid = std::env::temp_dir().join(format!(
+            "owllm-project-binding-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&valid).unwrap();
+        let missing = valid.with_extension("missing");
+        conn.execute(
+            "INSERT INTO agent_projects \
+             (id, name, location, location_device_id, created_at, updated_at) VALUES \
+             ('valid', 'valid', ?1, '', 'x', 'x'), \
+             ('foreign', 'foreign', ?2, '', 'x', 'x')",
+            rusqlite::params![
+                valid.to_string_lossy().to_string(),
+                missing.to_string_lossy().to_string()
+            ],
+        )
+        .unwrap();
+        migrate_location_ownership(&conn, "device-here").unwrap();
+        let valid_row: (String, String) = conn
+            .query_row(
+                "SELECT location, location_device_id FROM agent_projects WHERE id = 'valid'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let foreign_row: (String, String) = conn
+            .query_row(
+                "SELECT location, location_device_id FROM agent_projects WHERE id = 'foreign'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(valid_row.0, valid.to_string_lossy());
+        assert_eq!(valid_row.1, "device-here");
+        assert_eq!(foreign_row, (String::new(), "device-here".into()));
+        let _ = std::fs::remove_dir_all(valid);
     }
 
     #[test]

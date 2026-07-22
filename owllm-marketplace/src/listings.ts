@@ -526,13 +526,26 @@ export function serializeListing(listing: Listing) {
   };
 }
 
+function serializePublicListing(listing: Listing, creatorLogin: string) {
+  return {
+    ...serializeListing(listing),
+    creator: {
+      github_login: creatorLogin,
+      profile_url: `https://github.com/${encodeURIComponent(creatorLogin)}`,
+    },
+  };
+}
+
 export function createListingsRouter(): Router {
   const router = Router();
 
   router.get('/', (req: Request, res: Response) => {
     const ctx = getCtx(req);
-    const listings = ctx.listings.listPublic();
-    res.json({ listings: listings.map(serializeListing) });
+    const listings = ctx.listings.listPublic().flatMap((listing) => {
+      const creator = ctx.store.findByGitHubId(listing.creator_github_id);
+      return creator ? [serializePublicListing(listing, creator.github_login)] : [];
+    });
+    res.set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300').json({ listings });
   });
 
   router.get('/:slug', (req: Request, res: Response) => {
@@ -543,7 +556,14 @@ export function createListingsRouter(): Router {
       res.status(404).json({ error: 'listing not found' });
       return;
     }
-    res.json({ listing: serializeListing(listing) });
+    const creator = ctx.store.findByGitHubId(listing.creator_github_id);
+    if (!creator) {
+      res.status(404).json({ error: 'listing not found' });
+      return;
+    }
+    res
+      .set('Cache-Control', 'public, max-age=60, stale-while-revalidate=300')
+      .json({ listing: serializePublicListing(listing, creator.github_login) });
   });
 
   return router;

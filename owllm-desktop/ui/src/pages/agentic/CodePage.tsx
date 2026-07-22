@@ -24,7 +24,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
@@ -180,18 +180,6 @@ type WtCreate =
 
 // ---- Multi-page shell state (the tab strip) --------------------------------
 type CodePageMeta = { id: string; title: string };
-type ProjectCatalogRow = {
-  id: string; name: string; description: string; location: string;
-  repo_url: string; created_device_id: string; created_device_name: string;
-  team: string[]; trust_writes: boolean; auto_approve_all: boolean;
-  team_default_model_id: string; graph_json: string; chat_json: string;
-  agent_logs_json: string; updated_at: string;
-};
-type OpenProjectPagesDetail = {
-  project: Pick<ProjectCatalogRow, "id" | "name" | "location">;
-  handled: boolean;
-};
-const OPEN_PROJECT_PAGES_EVENT = "owllm:code:open-project-pages";
 type ProjectScopeRow = { id: string; location: string; repo_url?: string };
 const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
@@ -1972,8 +1960,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     let replyText = "";
     try {
       setStatus(`Coding in ${workspace}`);
-      const reply = await runTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
-      await logCodeWork("code", text || "(read the attached file)", reply);
+      const reply = await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
+      await logCodeWork("code", text || "(see attached image)", reply);
       replyText = reply;
       ok = true;
     } catch (e) {
@@ -2024,13 +2012,10 @@ function CodeWorkspace({ pageId, onTitle }: {
         const leftover = drainSteer();
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
         if (ok) {
-          const st = takeNextAutoStep(ruleScopeRef.current.id, notebookSurfaceId);
-          if (st) {
+          continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId, (st) => {
             notebookStepRef.current = st.id;
             void sendRef.current?.(st.text);
-          } else {
-            markNotebookAutoFeedFinished(ruleScopeRef.current.id, notebookSurfaceId);
-          }
+          });
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
           setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }
@@ -2552,51 +2537,6 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: "1px solid rgba(var(--accent-rgb),0.48)", background: "linear-gradient(120deg,rgba(var(--accent-rgb),0.13),var(--bg-card))", boxShadow: "0 0 34px rgba(var(--accent-rgb),0.09)" }}>
-              <span style={{ fontSize: 28 }}>🐙</span>
-              <div style={{ flex: 1, minWidth: 260 }}>
-                <b style={{ color: "var(--fg-strong)", fontSize: 14 }}>GitHub keeps code, Project Cards and memory consistent across PCs</b>
-                <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>Projects without a repository remain tied to their creator computer and appear ghosted elsewhere.</div>
-              </div>
-              <button onClick={openNewProject} style={{ ...btn, height: 40, padding: "0 16px", border: "none", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: 10 }}>+ New GitHub-first project</button>
-            </div>
-
-            <section>
-              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
-                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>Managed projects</div>
-                <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>{deviceIdentity.name}</span>
-              </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 13 }}>
-                {catalogProjects.map((project) => {
-                  const local = projectAvailability(project) === "local";
-                  const selectedGhost = ghostProjectId === project.id && !local;
-                  return (
-                    <button key={project.id} onClick={() => { void openCatalogProject(project); }} disabled={catalogBusy} style={{
-                      minHeight: 150, padding: 16, borderRadius: 15, textAlign: "left",
-                      border: `1px solid ${selectedGhost ? "var(--warn)" : local ? "var(--border)" : "var(--border-strong)"}`,
-                      background: selectedGhost ? "rgba(var(--warn-rgb),.09)" : "var(--bg-card)",
-                      opacity: local ? 1 : .58, filter: local ? "none" : "saturate(.55)",
-                      cursor: catalogBusy ? "wait" : "pointer", boxShadow: local ? "0 10px 28px rgba(0,0,0,.12)" : "none",
-                    }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                        <span style={{ fontSize: 21 }}>{local ? "⌁" : "◌"}</span>
-                        <b style={{ color: "var(--fg-strong)", fontSize: 15, flex: 1 }}>{project.name}</b>
-                        <span style={{ color: local ? "var(--ok)" : "var(--warn)", fontSize: 10, fontWeight: 900 }}>{local ? "READY" : "GHOSTED"}</span>
-                      </div>
-                      <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 9 }}>
-                        {local ? project.location : `Created on ${projectOriginLabel(project)} · no local folder on ${deviceIdentity.name}`}
-                      </div>
-                      <div style={{ color: project.repo_url ? "var(--accent-ink)" : "var(--warn)", fontSize: 11, marginTop: 9 }}>
-                        {project.repo_url ? `🐙 ${project.repo_url.replace(/^https?:\/\//, "")}` : "No GitHub repo · available only on its creator PC"}
-                      </div>
-                      {!local && <div style={{ color: "var(--fg-strong)", fontSize: 11.5, fontWeight: 750, marginTop: 10 }}>{project.repo_url ? "Click to clone into a new folder on this PC →" : "Create the repo on the source PC before opening here"}</div>}
-                    </button>
-                  );
-                })}
-                {catalogProjects.length === 0 && <div style={{ padding: 20, border: "1px dashed var(--border-strong)", borderRadius: 14, color: "var(--fg-muted)", fontSize: 12.5 }}>No managed projects yet. Create one or open an existing GitHub checkout below.</div>}
-              </div>
-              {catalogError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 9 }}>{catalogError}</div>}
-            </section>
             <div style={{ display: "flex", flexDirection: "column", gap: 24, width: "100%", minWidth: 0 }}>
               {/* START — VS Code-style action rows */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>

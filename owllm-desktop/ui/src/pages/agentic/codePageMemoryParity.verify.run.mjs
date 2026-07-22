@@ -33,7 +33,7 @@ check(
 );
 check(
   "Primary, secondary, chat, and planned Code turns write shared work-state",
-  /logCodeWork\("code", text \|\| "\([^"]*attached (?:image|file)[^"]*\)", reply\)/.test(src)
+  /logCodeWork\("code", text \|\| "\([^"]*attached image[^"]*\)", reply\)/.test(src)
     && /logCodeWork\("code_second", text, replyText\)/.test(src)
     && /logCodeWork\("code_chat", text \|\| "\([^"]*attached image[^"]*\)", reply\)/.test(src)
     && /logCodeWork\("code", plan\[i\]\.title, stepReply\)/.test(src),

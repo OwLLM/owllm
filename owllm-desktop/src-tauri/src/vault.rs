@@ -540,6 +540,11 @@ struct VaultProject {
     /// path to show up on a Mac). New devices read `locations[self_device_id]`
     /// and otherwise start GHOSTED (empty path) until the user picks a folder.
     location: String,
+    /// Portable Git remote identity for matching a cloned folder on another
+    /// device back to the same project row. Device paths are local; repo URL is
+    /// shared.
+    #[serde(default)]
+    repo_url: String,
     /// Per-device folder paths, keyed by `device_id`. Each machine records ONLY
     /// its own entry on export and never clobbers a peer's, so changing the
     /// folder on one device can't break the path on another. `#[serde(default)]`
@@ -817,10 +822,7 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
         .prepare(
             "SELECT id, name, description, team_json, model_overrides_json, graph_json, \
              COALESCE(chat_json,''), COALESCE(agent_logs_json,''), team_default_model_id, \
-             created_at, updated_at, location, COALESCE(location_device_id, ''), \
-             COALESCE(repo_url, ''), COALESCE(created_device_id, ''), \
-             COALESCE(created_device_name, '') \
-             FROM agent_projects",
+             created_at, updated_at, location, COALESCE(repo_url, '') FROM agent_projects",
         )
         .map_err(|e| format!("prepare export: {e}"))?;
     let rows = stmt
@@ -837,14 +839,8 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
                 team_default_model_id: r.get::<_, String>(8).unwrap_or_default(),
                 created_at: r.get::<_, String>(9).unwrap_or_default(),
                 updated_at: r.get::<_, String>(10).unwrap_or_default(),
-                repo_url: r.get::<_, String>(13).unwrap_or_default(),
-                created_device_id: r.get::<_, String>(14).unwrap_or_default(),
-                created_device_name: r.get::<_, String>(15).unwrap_or_default(),
-                location: if r.get::<_, String>(12).unwrap_or_default() == self_id {
-                    r.get::<_, String>(11).unwrap_or_default()
-                } else {
-                    String::new()
-                },
+                location: r.get::<_, String>(11).unwrap_or_default(),
+                repo_url: r.get::<_, String>(12).unwrap_or_default(),
                 locations: HashMap::new(),
                 team_memory_json: String::new(),
                 directives_json: String::new(),
@@ -930,8 +926,8 @@ fn import_project(
                 "INSERT INTO agent_projects (id, name, description, location, location_device_id, repo_url, \
                  created_device_id, created_device_name, trust_writes, \
                  auto_approve_all, team_json, model_overrides_json, graph_json, created_at, \
-                 updated_at, team_default_model_id, chat_json, agent_logs_json) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 updated_at, team_default_model_id, chat_json, agent_logs_json, repo_url) \
+                 VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 rusqlite::params![
                     p.id,
                     p.name,
@@ -953,6 +949,7 @@ fn import_project(
                     p.team_default_model_id,
                     p.chat_json,
                     p.agent_logs_json,
+                    crate::projects::normalize_repo_url(&p.repo_url),
                 ],
             )
             .map_err(|e| format!("insert project: {e}"))?;
@@ -962,10 +959,9 @@ fn import_project(
             if p.updated_at > *local {
                 // Remote is newer → adopt CONTENT, keep local path + trust flags.
                 conn.execute(
-                    "UPDATE agent_projects SET name = ?2, description = ?3, repo_url = ?4, \
-                     created_device_id = ?5, created_device_name = ?6, team_json = ?7, \
-                     model_overrides_json = ?8, graph_json = ?9, chat_json = ?10, \
-                     agent_logs_json = ?11, team_default_model_id = ?12, updated_at = ?13 \
+                    "UPDATE agent_projects SET name = ?2, description = ?3, team_json = ?4, \
+                     model_overrides_json = ?5, graph_json = ?6, chat_json = ?7, \
+                     agent_logs_json = ?8, team_default_model_id = ?9, updated_at = ?10, repo_url = ?11 \
                      WHERE id = ?1",
                     rusqlite::params![
                         p.id,
@@ -981,6 +977,7 @@ fn import_project(
                         p.agent_logs_json,
                         p.team_default_model_id,
                         p.updated_at,
+                        crate::projects::normalize_repo_url(&p.repo_url),
                     ],
                 )
                 .map_err(|e| format!("update project: {e}"))?;

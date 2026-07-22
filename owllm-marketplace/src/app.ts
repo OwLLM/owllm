@@ -10,6 +10,7 @@ import {
   createCreatorListingsRouter,
   createAdminListingsRouter,
 } from './listings.js';
+import { createPublicMarketplaceRouter } from './public.js';
 import './types.js';
 
 export function createApp(ctx: AppContext): Express {
@@ -41,6 +42,7 @@ export function createApp(ctx: AppContext): Express {
   app.use('/listings', createListingsRouter());
   app.use('/admin', createAdminRouter());
   app.use('/admin/listings', createAdminListingsRouter());
+  app.use('/', createPublicMarketplaceRouter());
 
   app.get('/health', (_req: Request, res: Response) => {
     res.json({ ok: true });

@@ -44,11 +44,6 @@ if (!fleet.includes("contents differ from the page branch") ||
     !fleet.includes("identical_untracked_branch_addition_is_adopted_by_merge")) {
   fail("untracked collision safety or regression coverage is missing");
 }
-if (!fleet.includes("preserve_after_merge") ||
-    !fleet.includes("backup.restore_preserved()") ||
-    !fleet.includes("differing_untracked_app_state_is_preserved_and_does_not_block_merge")) {
-  fail("differing app-owned state is not preserved across worktree merges");
-}
 if (!fleet.includes("fn prepare_identical_tracked_collisions") ||
     !fleet.includes("IdenticalTrackedBackup") ||
     !fleet.includes("identical_tracked_local_edits_are_adopted_by_merge") ||

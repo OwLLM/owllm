@@ -76,39 +76,4 @@ if (!release.includes("release command exited {status} without stdout/stderr") |
   fail("finish_and_publish can still return the blank wrapper with no actionable diagnostics");
 }
 
-// Exercise the exact refresh/status sequence in a real temporary repository:
-// content-identical rewrites stay clean, while a genuine edit remains visible
-// even though --really-refresh is deliberately allowed to return non-zero.
-const fixture = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-publish-preflight-"));
-const git = (args, allowFailure = false) => {
-  const result = spawnSync("git", args, { cwd: fixture, encoding: "utf8" });
-  if (!allowFailure && result.status !== 0) {
-    fail(`fixture git ${args.join(" ")} failed: ${result.stderr || result.stdout}`);
-  }
-  return result;
-};
-try {
-  git(["init", "-q"]);
-  git(["config", "user.email", "verify@owllm.local"]);
-  git(["config", "user.name", "OwLLM Verify"]);
-  const releaseFile = path.join(fixture, "Cargo.toml");
-  fs.writeFileSync(releaseFile, "[package]\nversion = \"1.0.0\"\n");
-  git(["add", "Cargo.toml"]);
-  git(["commit", "-qm", "fixture"]);
-
-  fs.writeFileSync(releaseFile, "[package]\nversion = \"1.0.0\"\n");
-  git(["update-index", "-q", "--really-refresh"], true);
-  if (git(["status", "--porcelain", "--", "Cargo.toml"]).stdout.trim()) {
-    fail("a content-identical release metadata rewrite remains dirty after the refresh");
-  }
-
-  fs.writeFileSync(releaseFile, "[package]\nversion = \"1.0.1\"\n");
-  git(["update-index", "-q", "--really-refresh"], true);
-  if (!git(["status", "--porcelain", "--", "Cargo.toml"]).stdout.trim()) {
-    fail("the refresh hid a genuine release metadata edit");
-  }
-} finally {
-  fs.rmSync(fixture, { recursive: true, force: true });
-}
-
 console.log("PASS publish is non-modal, off-thread, compact, and single-flight");

@@ -23,6 +23,9 @@ describe('config', () => {
 
   afterEach(() => {
     rmSync(tmpDir, { recursive: true, force: true });
+    for (const key of Object.keys(process.env)) {
+      if (!(key in originalEnv)) delete process.env[key];
+    }
     for (const [key, value] of Object.entries(originalEnv)) {
       if (value === undefined) {
         delete process.env[key];
@@ -47,6 +50,16 @@ describe('config', () => {
     const config = loadConfig();
     expect(config.adminGitHubIds).toEqual(new Set(['123', '456']));
     expect(config.trustProxy).toBe(1);
+  });
+
+  it('accepts an HTTPS public marketplace origin and removes its trailing slash', () => {
+    process.env.PUBLIC_BASE_URL = 'https://marketplace.example.com/';
+    expect(loadConfig().publicBaseUrl).toBe('https://marketplace.example.com');
+  });
+
+  it('rejects a non-HTTPS public marketplace origin', () => {
+    process.env.PUBLIC_BASE_URL = 'http://marketplace.example.com';
+    expect(() => loadConfig()).toThrow('PUBLIC_BASE_URL must use HTTPS');
   });
 
   it('throws when SESSION_SECRET is too short', () => {

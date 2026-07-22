@@ -18,7 +18,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -8588,13 +8588,10 @@ export function AgentsPage({
         if (++tries <= 8) setTimeout(attempt, 800);
         return;
       }
-      const step = takeNextAutoStep(pid, notebookSurfaceId);
-      if (step) {
+      continueNotebookAutoFeed(pid, notebookSurfaceId, (step) => {
         notebookStepRef.current = step.id;
         void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
-      } else {
-        markNotebookAutoFeedFinished(pid, notebookSurfaceId);
-      }
+      });
     };
     setTimeout(attempt, 800);
   };
@@ -10882,6 +10879,13 @@ export function AgentsPage({
       } catch { /* no brief yet — proceed without */ }
     }
 
+    // Resolve Notebook continuation exactly once from `finally`. This run has
+    // several legitimate early-return paths (no routable specialist, no
+    // specialist reply, auth/preflight stop). When continuation lived only at
+    // the bottom of the happy path those returns silently stranded auto-feed
+    // after its first card.
+    let notebookRunCompletedCleanly = false;
+    let notebookPauseReason = "the run ended before completing";
     try {
       // ===== Preflight: a referenced file the sandbox can't read → AUTO-INGEST it =====
       // The #1 silent 20-minute time-sink: the goal points at a file OUTSIDE the
@@ -11181,8 +11185,8 @@ export function AgentsPage({
         setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now(), seq: nextSeq() }]);
         setPhase("done");
         setRunEndedAt(Date.now());
-        if (okRun) scheduleNotebookAutoFeed(); // 📓 clean finish → next pending step
-        else notifyAutoFeedPaused("the solo run did not finish cleanly");
+        notebookRunCompletedCleanly = okRun;
+        if (!okRun) notebookPauseReason = "the solo run did not finish cleanly";
         return;
       }
 
@@ -12512,12 +12516,12 @@ export function AgentsPage({
       } catch { /* tracing must never break a run */ }
 
       setPhase("done");
-      scheduleNotebookAutoFeed(); // 📓 clean finish → next pending step
+      notebookRunCompletedCleanly = true;
     } catch (e: any) {
       if (e?.name === "AbortError") {
         setRunError("Stopped.");
         appendLog("system", { role: "system", color: "#ff8c8c", text: "⏹ Stopped by user." });
-        notifyAutoFeedPaused("the run was stopped");
+        notebookPauseReason = "the run was stopped";
       } else {
         const clean = cleanAgentError(e);
         setRunError(clean);
@@ -12526,7 +12530,7 @@ export function AgentsPage({
           role: "system", color: "#ff8c8c", text: `⚠ ${clean}`,
           action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
         });
-        notifyAutoFeedPaused("the run ended with an error");
+        notebookPauseReason = "the run ended with an error";
       }
       setPhase("idle");
     } finally {
@@ -12544,6 +12548,11 @@ export function AgentsPage({
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
         markNotebookStepFinished(selectedProjectId, sid, now);
       }
+      // Busy/reentrancy flags are clear now, so every exit path makes one
+      // deterministic Notebook decision. A clean run advances the next card;
+      // any other outcome leaves pending cards untouched and explains the pause.
+      if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();
+      else notifyAutoFeedPaused(notebookPauseReason);
       clearActive();
       abortRef.current = null;
       agentRunAborts.delete(agentSessId);

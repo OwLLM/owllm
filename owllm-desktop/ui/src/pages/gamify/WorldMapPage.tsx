@@ -47,6 +47,29 @@ const EARTH_TEXTURES = {
   clouds: "/world-map/earth-clouds.png",
 } as const;
 
+// Direction of the subsolar point (where the sun is directly overhead right now)
+// in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
+// real UTC clock. The equirectangular Earth map places longitude 0 at +X and the
+// north pole at +Y (standard Three.js SphereGeometry UVs), giving:
+//   dir = (cosφ·cosλ, sinφ, -cosφ·sinλ)   where φ = solar declination, λ = subsolar longitude.
+function subsolarLocalDir(now: Date, target: THREE.Vector3): THREE.Vector3 {
+  const dayMs = 86_400_000;
+  const yearStart = Date.UTC(now.getUTCFullYear(), 0, 0);
+  const dayOfYear = (Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - yearStart) / dayMs;
+  // Seasonal declination (±23.44°), simple axial-tilt approximation.
+  const decl = -23.44 * Math.cos((2 * Math.PI / 365) * (dayOfYear + 10));
+  const utcHours = now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
+  // Subsolar longitude (east positive): sun over 0° at 12:00 UTC, +15°/hour westward.
+  const subsolarLon = -(utcHours - 12) * 15;
+  const phi = decl * Math.PI / 180;
+  const lam = subsolarLon * Math.PI / 180;
+  return target.set(
+    Math.cos(phi) * Math.cos(lam),
+    Math.sin(phi),
+    -Math.cos(phi) * Math.sin(lam),
+  );
+}
+
 function hashNumber(value: string): number {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
@@ -266,6 +289,12 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
         specularMap: earthSpecular,
         specular: new THREE.Color(0x557799),
         shininess: 18,
+        // Faint self-illumination of the land/ocean so the night hemisphere reads
+        // as a dim twilit Earth rather than pure black. The day map modulates it,
+        // so continents glow softly; on the sunlit side it is negligible.
+        emissive: new THREE.Color(0x2a3a55),
+        emissiveMap: earthMap,
+        emissiveIntensity: 0.32,
       }),
     );
     earthGroup.add(globe);
@@ -315,10 +344,16 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       sizeAttenuation: true,
     })));
 
-    scene.add(new THREE.HemisphereLight(0x91bdff, 0x071224, 1.25));
-    scene.add(new THREE.AmbientLight(0x8aaee0, 0.42));
+    // Ground color lifted from near-black so the shadowed hemisphere keeps a dim
+    // blue twilight fill instead of collapsing to black.
+    scene.add(new THREE.HemisphereLight(0x91bdff, 0x1b2a44, 1.3));
+    scene.add(new THREE.AmbientLight(0x8aaee0, 0.5));
+    // Sun tracks the real subsolar point each frame (see animate loop); this is
+    // just the initial placement so the first rendered frame is already correct.
     const sunLight = new THREE.DirectionalLight(0xffffff, 3.9);
-    sunLight.position.set(5.8, 2.6, 7.2);
+    const sunLocal = new THREE.Vector3();
+    const sunQuat = new THREE.Quaternion();
+    sunLight.position.copy(subsolarLocalDir(new Date(), sunLocal)).multiplyScalar(10);
     scene.add(sunLight);
     const rimLight = new THREE.PointLight(new THREE.Color(accent), 1.6, 20);
     rimLight.position.set(-6, -1.5, -5);
@@ -445,6 +480,12 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       clouds.rotation.y = elapsed * 0.024 - 0.34;
       atmosphere.rotation.y = elapsed * 0.018;
       outerGlow.rotation.y = -elapsed * 0.006;
+
+      // Real-clock sun: aim the light at the current subsolar point, expressed in
+      // the globe's live world orientation so the lit hemisphere stays over the
+      // true daylit geography as the globe rotates.
+      subsolarLocalDir(new Date(), sunLocal).applyQuaternion(globe.getWorldQuaternion(sunQuat));
+      sunLight.position.copy(sunLocal).multiplyScalar(10);
 
       pulseMeshes.forEach((mesh) => {
         const scale = 0.78 + (Math.sin(elapsed * 2.4 + mesh.userData.offset) + 1) * 0.22;

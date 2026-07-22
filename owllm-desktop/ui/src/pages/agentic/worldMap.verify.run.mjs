@@ -185,6 +185,13 @@ try {
     page.includes("pointerDown") && /if \(!isClickGesture\(event\.clientX - downX, event\.clientY - downY\)\) return;/.test(page));
   check("Globe bundles photographic Earth texture layers", page.includes("EARTH_TEXTURES.day") && page.includes("EARTH_TEXTURES.normal") && page.includes("EARTH_TEXTURES.specular") && page.includes("EARTH_TEXTURES.clouds"));
   check("Globe uses calibrated color and tone mapping", page.includes("THREE.SRGBColorSpace") && page.includes("THREE.ACESFilmicToneMapping") && page.includes("THREE.HemisphereLight"));
+  // The day/night terminator must follow the real UTC clock: the sun is aimed at
+  // the computed subsolar point every frame, not pinned to a fixed position.
+  check("Sun tracks the real subsolar point from the UTC clock",
+    page.includes("subsolarLocalDir(new Date(), sunLocal)") && /sunLight\.position\.copy\(sunLocal\)/.test(page) && !/sunLight\.position\.set\(5\.8/.test(page));
+  // The shadowed hemisphere must stay dimly visible (twilight), not pure black.
+  check("Night hemisphere is softly lit, not pitch black",
+    page.includes("emissiveMap: earthMap") && /emissiveIntensity:\s*0\.3/.test(page));
   check("Globe follows the readable selected GUI accent", page.includes('getPropertyValue("--accent-ink")') && page.includes("accent={colors.accentInk}"));
   check("My Fleet consumes real paired-device state", page.includes("getIdentity()") && page.includes("listDevices()") && page.includes("device.is_self"));
   check("My Fleet always includes the current installation", page.includes("fleetWithSelf(identity, devices)") && page.includes("is_self: true"));

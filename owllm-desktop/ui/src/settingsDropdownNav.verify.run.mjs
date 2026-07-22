@@ -22,21 +22,42 @@ function check(condition, message) {
 const popupStart = src.indexOf('data-ui="HeaderSettingsPopup"');
 check(popupStart !== -1, "the Settings dropdown (HeaderSettingsPopup) exists");
 // The dropdown closes at the `)}` that ends its `settingsOpen && ( ... )` block,
-// just before the Marketplace button in the header. Scope to that region.
-const popupEnd = src.indexOf('data-ui="MarketplaceButton"', popupStart);
-check(popupEnd > popupStart, "the Settings dropdown region is bounded before the Marketplace button");
+// just before the header mode toggles (visibleToggles.map). Scope to that region.
+const popupEnd = src.indexOf('visibleToggles.map', popupStart);
+check(popupEnd > popupStart, "the Settings dropdown region is bounded before the header mode toggles");
 const popup = src.slice(popupStart, popupEnd);
+
+// --- Marketplace entry: moved into the dropdown, before the Certificates row ---
+const marketIdx = popup.indexOf('data-ui="MarketplaceButton"');
+check(marketIdx !== -1, "the dropdown contains the Marketplace entry (MarketplaceButton)");
+check(/MarketplaceButton[\s\S]*?onOpenMarketplace\(\)/.test(popup),
+  "the Marketplace entry opens the marketplace (onOpenMarketplace)");
 
 // --- Label text ---
 const signingIdx = popup.indexOf('data-ui="SettingsSigningRow"');
 check(signingIdx !== -1, "the dropdown contains the Signing/credential entry (SettingsSigningRow)");
 check(popup.includes(">Certificates and Logs in<"),
   'the Signing entry label reads exactly "Certificates and Logs in"');
+check(marketIdx < signingIdx,
+  "the Marketplace entry is positioned before the Certificates and Logs in entry");
 
-// The entry opens the existing Signing page via the shared navigate event —
-// no bespoke route, no modules.ts rename.
-check(/SettingsSigningRow[\s\S]*?owllm:navigate[\s\S]*?key:\s*"signing"/.test(popup),
-  "the Signing entry navigates to the existing Signing page (key: signing)");
+// The entry opens the Signing hub as a centered popup (PageModal) — it is no
+// longer a header tab, so this dropdown row is its only entry point.
+check(/SettingsSigningRow[\s\S]*?onOpenSigning\(\)/.test(popup),
+  "the Signing entry opens the Signing popup (onOpenSigning)");
+// The onOpenSigning prop is wired to open the SigningModal at the render site.
+check(/onOpenSigning=\{\(\) => setSigningModalOpen\(true\)\}/.test(src),
+  "onOpenSigning is wired to open the Signing popup");
+
+// The Signing popup is actually rendered (PageModal → SigningModal → SigningPage).
+check(/signingModalOpen && \([\s\S]*?dataUi="SigningModal"[\s\S]*?<SigningPage \/>/.test(src),
+  "the Signing popup (SigningModal) renders the SigningPage component");
+
+// Signing is no longer a header SubTab — it must not appear in any module's
+// page list (removed from ADVANCED.pages so it never renders in SubTabs).
+const modules = fs.readFileSync(path.join(HERE, "core", "modules.ts"), "utf8");
+check(!/key:\s*"signing"/.test(modules),
+  "the Signing page is removed from the header tabs (not in modules.ts pages)");
 
 // --- Layout: its own separate line (full-width block row) ---
 const signingBlock = popup.slice(signingIdx, popup.indexOf("</button>", signingIdx));

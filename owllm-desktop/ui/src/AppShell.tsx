@@ -36,6 +36,7 @@ import WebhookBridgeRunner from "./bridges/WebhookBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
 import { setLocalServerKey } from "./pages/agentic/inferenceEndpoint";
 import BridgesPage from "./pages/agentic/BridgesPage";
+import SigningPage from "./pages/advanced/SigningPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
 import AccountSyncModal, { openSyncOnboarding } from "./pages/core/AccountSyncModal";
@@ -593,7 +594,7 @@ const HEADER_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
 function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
-  onOpenMarketplace,
+  onOpenMarketplace, onOpenSigning,
   onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
@@ -610,6 +611,7 @@ function ModeBar({
   onPickTextColor: (color: TextColorSelection) => void;
   onOpenServer: () => void;
   onOpenMarketplace: () => void;
+  onOpenSigning: () => void;
   /// The Watcher (P0-8): in overlay-frame mode the decorative owl window is
   /// click-through, so the centered OWLLM title (directly beneath the owl)
   /// doubles as the summon point.
@@ -943,14 +945,33 @@ function ModeBar({
                 })()}
               </div>
 
+              {/* Marketplace entry — opens the OWLLM Marketplace (external web)
+                  on its own separate line, positioned before the Certificates
+                  and GitHub container rows. Moved here from the header cluster. */}
+              <button
+                data-ui="MarketplaceButton"
+                onClick={() => { setSettingsOpen(false); onOpenMarketplace(); }}
+                title="Open OWLLM Marketplace"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🛍️</span>
+                <span style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 13.5 }}>Marketplace</span>
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
               {/* Signing / credential hub entry — its own separate line,
                   positioned immediately before the GitHub container so that
                   container stays the last item of the dropdown in every state.
-                  Opens the existing Signing page via the shared navigate event
-                  (no modes.ts change; the page tab is unaffected). */}
+                  Opens the Signing hub as a centered popup (PageModal) — it is
+                  no longer a header tab, so this dropdown row is its only entry. */}
               <button
                 data-ui="SettingsSigningRow"
-                onClick={() => { setSettingsOpen(false); window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "signing" } })); }}
+                onClick={() => { setSettingsOpen(false); onOpenSigning(); }}
                 title="Certificates (Apple + Windows signing) and provider portal web-logins"
                 style={{
                   display: "flex", alignItems: "center", gap: 10, width: "100%",
@@ -1018,15 +1039,6 @@ function ModeBar({
         {/* Mode toggles — single-active. Click toggles back to "home" if
             the same mode is clicked twice. Hidden when the mode isn't
             installed (per getInstalledModes() in modules.ts). */}
-        <button
-          data-ui="MarketplaceButton"
-          onClick={onOpenMarketplace}
-          title="Open OWLLM Marketplace"
-          style={{ ...baseBtn, width: 128 }}
-        >
-          <span>Marketplace</span>
-        </button>
-
         {visibleToggles.map(t => (
           <button
             key={t.id}
@@ -1443,6 +1455,7 @@ export default function AppShell() {
   const [mode, setMode] = useState<ActiveMode>(initialNavigation.mode);
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
   const [bridgesModalOpen, setBridgesModalOpen] = useState<boolean>(false);
+  const [signingModalOpen, setSigningModalOpen] = useState<boolean>(false);
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
   const theme = useTheme();
   const [keepFrameVisible, setKeepFrameVisible] = useState<boolean>(() => readKeepFrameVisible());
@@ -1671,6 +1684,7 @@ export default function AppShell() {
       // (no-longer-rendered-inline) tab.
       if (key === "server") { setServerModalOpen(true); return; }
       if (key === "bridges") { setBridgesModalOpen(true); return; }
+      if (key === "signing") { setSigningModalOpen(true); return; }
       // Find which module owns this page key so we can light up the
       // matching ModeBar toggle alongside the SubTabs row.
       for (const m of ALL_MODULES) {
@@ -1736,6 +1750,7 @@ export default function AppShell() {
             textColor={theme.textColor}
             onPickTextColor={theme.setTextColor}
             onOpenServer={() => setServerModalOpen(true)}
+            onOpenSigning={() => setSigningModalOpen(true)}
             onOpenMarketplace={() => {
               openWebUrl(MARKETPLACE_URL)
                 .catch((error) => console.error("Could not open OWLLM Marketplace", error));
@@ -1826,6 +1841,15 @@ export default function AppShell() {
           onClose={() => setBridgesModalOpen(false)}
         >
           <BridgesPage />
+        </PageModal>
+      )}
+      {signingModalOpen && (
+        <PageModal
+          title="🖊 Signing & credentials"
+          dataUi="SigningModal"
+          onClose={() => setSigningModalOpen(false)}
+        >
+          <SigningPage />
         </PageModal>
       )}
       <TutorialRecorder enabled={true} />

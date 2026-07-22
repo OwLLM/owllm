@@ -150,8 +150,9 @@ console.log("case 0: run completion paths cannot depend on a later React render"
 check("Code busy state synchronizes the imperative lock", codePageSrc.includes("const setBusy = (v: boolean) => {\n    // Keep the imperative send gate") && codePageSrc.includes("busySendRef.current = v;"));
 check("Code send gates on the synchronous lock", codePageSrc.includes("if (busySendRef.current) {"));
 check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();"));
-check("Code finishes the notebook sequence after its final auto-fed step", codePageSrc.includes("markNotebookAutoFeedFinished(ruleScopeRef.current.id, notebookSurfaceId);"));
-check("Agents finishes the notebook sequence after its final auto-fed step", agentsPageSrc.includes("markNotebookAutoFeedFinished(pid, notebookSurfaceId);"));
+check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();") && agentsPageSrc.includes("else notifyAutoFeedPaused(notebookPauseReason);"));
+check("Code uses the shared auto-feed continuation", codePageSrc.includes("continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId"));
+check("Agents uses the shared auto-feed continuation", agentsPageSrc.includes("continueNotebookAutoFeed(pid, notebookSurfaceId"));
 check("Watcher help and bug actions have accessible names", watcherSrc.includes('aria-label="Help using the app"') && watcherSrc.includes('aria-label="Report a bug"'));
 check("Watcher actions use bundled SVG icons", watcherSrc.includes('<ActionIcon name="help"') && watcherSrc.includes('<ActionIcon name="bug"') && !watcherSrc.includes(">🐞 Report this as a bug"));
 check("Existing-project brainstorm ends in the Notebook", brainstormSrc.includes('data-ui="BrainstormOpenNotebook"') && brainstormSrc.includes("seedNotebookFromBrief(projectId, briefTextOnDisk)"));
@@ -370,6 +371,19 @@ console.log("case 6: takeNextAutoStep is gated per surface");
   check("its step is still pending", blob().steps.find((s) => s.id === "s2")?.status === "pending");
   const second = takeNextAutoStep(PID, "agents:main");
   check("the owner keeps walking the queue", second?.id === "s2");
+}
+
+// ---- 6b. Repeated clean run completions walk beyond the first card ----
+console.log("case 6b: clean completions walk the complete auto-feed queue");
+{
+  seed();
+  const dispatched = [];
+  const dispatch = (step) => dispatched.push(step.id);
+  check("first completion dispatches card one", NB.continueNotebookAutoFeed(PID, "agents:main", dispatch) === "dispatched" && dispatched.join(",") === "s1");
+  NB.markNotebookStepFinished(PID, "s1", 2000);
+  check("second completion dispatches card two", NB.continueNotebookAutoFeed(PID, "agents:main", dispatch) === "dispatched" && dispatched.join(",") === "s1,s2");
+  NB.markNotebookStepFinished(PID, "s2", 3000);
+  check("final completion closes the sequence", NB.continueNotebookAutoFeed(PID, "agents:main", dispatch) === "finished" && typeof blob().autoFeedFinishedAt === "number");
 }
 
 // ---- 7. autoFeedWouldRun mirrors the same gate ----

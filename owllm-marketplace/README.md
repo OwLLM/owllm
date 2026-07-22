@@ -2,6 +2,11 @@
 
 Dedicated web backend for the OWLLM marketplace.
 
+It also serves the public, server-rendered marketplace at `/`. Browsing,
+searching, category filters, project cards, and `/projects/:slug` detail pages
+work without an account or JavaScript. Only approved listings appear in public
+HTML, JSON, and `sitemap.xml` responses.
+
 ## Scope
 
 This service proves web identity and authorization using a **separate GitHub OAuth App** and **server-side sessions**. It does **not** read, store, or transmit the desktop `GITHUB_TOKEN` managed by `owllm-desktop/ui/src/pages/agentic/github.ts`.
@@ -50,6 +55,11 @@ npm test
 | Method | Path | Guard | Description |
 |--------|------|-------|-------------|
 | GET | `/health` | - | Health check |
+| GET | `/` | - | Anonymous approved-project browse/search page |
+| GET | `/projects/:slug` | - | Indexable approved-project detail page |
+| GET | `/listings` | - | Approved listings JSON |
+| GET | `/listings/:slug` | - | Approved listing JSON detail |
+| GET | `/sitemap.xml` | - | Approved public detail URLs only |
 | GET | `/auth/github` | - | Start OAuth flow |
 | GET | `/auth/github/callback` | - | OAuth callback |
 | GET | `/auth/me` | auth | Current user |

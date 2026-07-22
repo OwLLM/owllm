@@ -11,6 +11,7 @@ export interface Config {
   sessionMaxAgeMs: number;
   databasePath: string;
   adminGitHubIds: Set<string>;
+  publicBaseUrl?: string;
   trustProxy?: boolean | number;
 }
 
@@ -40,6 +41,20 @@ function parseTrustProxy(value: string | undefined): boolean | number | undefine
   return true;
 }
 
+function parsePublicBaseUrl(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`Invalid PUBLIC_BASE_URL: ${value}`);
+  }
+  if (parsed.protocol !== 'https:' && parsed.hostname !== 'localhost') {
+    throw new Error('PUBLIC_BASE_URL must use HTTPS');
+  }
+  return parsed.toString().replace(/\/$/, '');
+}
+
 export function loadConfig(): Config {
   const databasePath = requireEnv('DATABASE_PATH');
   const dir = dirname(databasePath);
@@ -61,6 +76,7 @@ export function loadConfig(): Config {
     })(),
     sessionMaxAgeMs: parseMs(process.env.SESSION_MAX_AGE_MS, 24 * 60 * 60 * 1000),
     databasePath,
+    publicBaseUrl: parsePublicBaseUrl(process.env.PUBLIC_BASE_URL),
     trustProxy: parseTrustProxy(process.env.TRUST_PROXY),
     adminGitHubIds: new Set(
       (process.env.ADMIN_GITHUB_IDS ?? '')

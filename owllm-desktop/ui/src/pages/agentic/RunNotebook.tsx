@@ -231,6 +231,23 @@ export function autoFeedWouldRun(projectId: string | null | undefined, surfaceId
   return nb.steps.some((s) => s.status === "pending");
 }
 
+/// Make the complete clean-run transition in one place: atomically claim the
+/// next pending card and hand it to the owning surface, or close the sequence
+/// timer after the final card. AgentsPage and CodePage both use this helper so
+/// their queue behavior cannot drift into separate one-card implementations.
+export function continueNotebookAutoFeed(
+  projectId: string | null | undefined,
+  surfaceId: string,
+  dispatch: (step: NotebookStep) => void,
+): "dispatched" | "finished" | "inactive" {
+  const step = takeNextAutoStep(projectId, surfaceId);
+  if (step) {
+    dispatch(step);
+    return "dispatched";
+  }
+  return markNotebookAutoFeedFinished(projectId, surfaceId) ? "finished" : "inactive";
+}
+
 /// Stamp when a notebook step was fed to the team. Safe to call from any surface;
 /// the blob is shared per project and the event re-syncs open surfaces.
 export function markNotebookStepStarted(projectId: string | null | undefined, stepId: string, startedAt: number = Date.now()): void {

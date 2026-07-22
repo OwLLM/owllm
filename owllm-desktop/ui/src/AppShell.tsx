@@ -939,15 +939,14 @@ function ModeBar({
                 })()}
               </div>
 
-              {/* GitHub account / sync — relocated here from the Home page and
-                  given a highlighted card (accent-tinted container, badge icon,
-                  bigger label, CTA pill) so signing in stands out. Opens the
-                  global AccountSyncModal, which owns the actual login / vault /
-                  disconnect flow. */}
+              {/* The same guided first-run journey stays discoverable here when
+                  identity is not connected. Once signed in this becomes the
+                  compact account-management entry rather than advertising
+                  onboarding the user has already completed. */}
               <button
                 data-ui="SettingsAccountRow"
                 onClick={() => { setSettingsOpen(false); openSyncOnboarding(); }}
-                title={account.connected ? "Manage sync / account" : "Sign in to sync your chats & settings across devices"}
+                title={account.connected ? "Manage sync / account" : "Finish GitHub and AI account setup"}
                 style={{
                   display: "flex", alignItems: "center", gap: 12, width: "100%",
                   marginTop: 14, padding: "12px 14px", borderRadius: 12, boxSizing: "border-box",
@@ -971,7 +970,10 @@ function ModeBar({
                   {account.connected ? (
                     <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--ok)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Synced as @{account.login}</span>
                   ) : (
-                    <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
+                    <>
+                      <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--fg-strong)" }}>Finish onboarding</span>
+                      <span style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.35 }}>GitHub sign-in and AI subscription setup</span>
+                    </>
                   )}
                 </span>
                 <span style={{
@@ -979,7 +981,7 @@ function ModeBar({
                   padding: "6px 12px", borderRadius: 999,
                   background: account.connected ? "rgba(34,197,94,0.18)" : "var(--accent)",
                   color: account.connected ? "#22c55e" : "var(--accent-fg)",
-                }}>{account.connected ? "Manage →" : "Sign in →"}</span>
+                }}>{account.connected ? "Manage →" : "Continue →"}</span>
               </button>
             </div>
           )}

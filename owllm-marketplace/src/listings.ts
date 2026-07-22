@@ -5,7 +5,7 @@ import type { AppContext } from './context.js';
 import { requireAuth, requireCreator, requireAdmin, getCtx } from './middleware.js';
 import './types.js';
 
-export type ListingStatus = 'pending' | 'approved' | 'rejected' | 'withdrawn';
+export type ListingStatus = 'draft' | 'pending' | 'approved' | 'rejected' | 'withdrawn';
 
 export interface Listing {
   id: number;
@@ -46,7 +46,9 @@ export interface ModerationHistoryEntry {
 
 export interface ListingStore {
   create(input: ListingInput, creatorGitHubId: string): Listing;
+  createDraft(input: ListingInput, creatorGitHubId: string): Listing;
   update(id: number, input: ListingInput, modifierGitHubId: string): Listing;
+  submit(id: number, actorGitHubId: string): Listing;
   setStatus(id: number, status: ListingStatus, actorGitHubId: string, note: string | null): Listing;
   withdraw(id: number, actorGitHubId: string, note: string | null): Listing;
   findById(id: number): Listing | undefined;
@@ -116,13 +118,14 @@ export function createListingStore(db: Database.Database): ListingStore {
       string,
       string | null,
       string,
+      string,
     ],
     Listing
   >(
     `INSERT INTO listings (
       creator_github_id, slug, title, short_description, full_description,
-      category, spdx_license, repo_url, demo_url, screenshots
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      category, spdx_license, repo_url, demo_url, screenshots, status
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     RETURNING *`,
   );
 
@@ -174,24 +177,11 @@ export function createListingStore(db: Database.Database): ListingStore {
 
   return {
     create(input, creatorGitHubId) {
-      const slug = generateSlug(input.title);
-      const demoUrl = normalizeOptionalUrl(input.demo_url);
-      const screenshotsJson = JSON.stringify(input.screenshots);
-      const row = insert.get(
-        creatorGitHubId,
-        slug,
-        input.title,
-        input.short_description,
-        input.full_description,
-        input.category,
-        input.spdx_license,
-        input.repo_url,
-        demoUrl,
-        screenshotsJson,
-      );
-      if (!row) throw new Error('Failed to create listing');
-      insertHistory.run(row.id, creatorGitHubId, 'submitted', 'Listing submitted for review');
-      return row;
+      return insertListing(input, creatorGitHubId, 'pending', 'submitted', 'Listing submitted for review');
+    },
+
+    createDraft(input, creatorGitHubId) {
+      return insertListing(input, creatorGitHubId, 'draft', 'draft_created', 'Draft created');
     },
 
     update(id, input, modifierGitHubId) {
@@ -239,6 +229,18 @@ export function createListingStore(db: Database.Database): ListingStore {
         insertHistory.run(row.id, modifierGitHubId, 'status_changed', `Returned to ${nextStatus} after edit`);
       }
       insertHistory.run(row.id, modifierGitHubId, 'updated', 'Listing updated');
+      return row;
+    },
+
+    submit(id, actorGitHubId) {
+      const existing = findById.get(id);
+      if (!existing) throw new Error('Listing not found');
+      if (existing.status === 'approved') throw new Error('approved listings are already public');
+      if (existing.status === 'withdrawn') throw new Error('withdrawn listings cannot be submitted');
+      if (existing.status === 'pending') return existing;
+      const row = setStatusStmt.get('pending', id);
+      if (!row) throw new Error('Listing not found');
+      insertHistory.run(row.id, actorGitHubId, 'submitted', 'Listing submitted for review');
       return row;
     },
 
@@ -290,6 +292,34 @@ export function createListingStore(db: Database.Database): ListingStore {
       return getHistory.all(listingId);
     },
   };
+
+  function insertListing(
+    input: ListingInput,
+    creatorGitHubId: string,
+    status: ListingStatus,
+    action: string,
+    note: string,
+  ): Listing {
+    const slug = generateSlug(input.title);
+    const demoUrl = normalizeOptionalUrl(input.demo_url);
+    const screenshotsJson = JSON.stringify(input.screenshots);
+    const row = insert.get(
+      creatorGitHubId,
+      slug,
+      input.title,
+      input.short_description,
+      input.full_description,
+      input.category,
+      input.spdx_license,
+      input.repo_url,
+      demoUrl,
+      screenshotsJson,
+      status,
+    );
+    if (!row) throw new Error('Failed to create listing');
+    insertHistory.run(row.id, creatorGitHubId, action, note);
+    return row;
+  }
 }
 
 function hasMaterialChange(

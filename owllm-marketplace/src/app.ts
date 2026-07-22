@@ -19,6 +19,7 @@ export function createApp(ctx: AppContext): Express {
     app.set('trust proxy', ctx.config.trustProxy);
   }
   app.use(express.json());
+  app.use(express.urlencoded({ extended: false }));
   app.use(
     session({
       store: new SQLiteSessionStore(ctx.db, ctx.config.sessionMaxAgeMs),

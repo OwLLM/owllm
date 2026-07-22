@@ -214,6 +214,36 @@ console.log("case 3: ▶ Start queue kicks off the step list");
   act(() => root.unmount());
 }
 
+// ---- 3a. Start queue is an explicit ownership takeover. A closed page can
+//          leave its persisted owner behind; card one must not run and then
+//          strand card two behind that stale owner. ----
+console.log("case 3a: Start queue takes over a stale auto-feed owner");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "code:closed-page" }));
+  const fed = [];
+  const { root } = mount({ surfaceId: "code:current-page", onFeed: (_t, id) => { fed.push(id); return "dispatched"; } });
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("first card dispatches from the current page", fed.join(",") === "s1");
+  check("idle Start queue claims the current page", blob().autoFeedOwner === "code:current-page");
+  NB.markNotebookStepFinished(PID, "s1", 2000);
+  check("next clean completion can dispatch card two", NB.continueNotebookAutoFeed(PID, "code:current-page", (step) => fed.push(step.id)) === "dispatched" && fed.join(",") === "s1,s2");
+  act(() => root.unmount());
+}
+
+console.log("case 3aa: Start queue waits for an already-running job");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "agents:closed-page" }));
+  const fed = [];
+  const { root } = mount({ surfaceId: "agents:current-page", running: true, onFeed: (_t, id) => { fed.push(id); return "dispatched"; } });
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("no card steers the live run", fed.length === 0 && blob().steps.every((s) => s.status === "pending"));
+  check("running Start queue claims the current page", blob().autoFeed && blob().autoFeedOwner === "agents:current-page");
+  check("current run completion dispatches card one", NB.continueNotebookAutoFeed(PID, "agents:current-page", (step) => fed.push(step.id)) === "dispatched" && fed.join(",") === "s1");
+  act(() => root.unmount());
+}
+
 // ---- 3b. notebook timing helpers stamp start/finish on the blob ----
 console.log("case 3b: markNotebookStepStarted / markNotebookStepFinished update the blob");
 {

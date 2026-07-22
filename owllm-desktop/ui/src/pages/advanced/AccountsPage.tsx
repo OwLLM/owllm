@@ -805,7 +805,7 @@ function RightRail({
       </div>
       <div style={{ flex: 1, minHeight: 0, display: tab === "terminal" ? "block" : "none" }}>
         {activeTerm
-          ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} autoSend={activeTerm.send} />
+          ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} autoSend={activeTerm.send} autoOpenAuthUrls />
           : <div style={{ padding: 14, color: "var(--fg-dim)", fontSize: 11, fontStyle: "italic" }}>
               Click Connect on any CLI-backed subscription to open a live terminal here.
             </div>}

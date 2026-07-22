@@ -27,7 +27,7 @@ const MIN_W = 420;
 
 type UsageWindow = { label: string; usedPct: number; resetsAt?: string | null };
 type UsageStat = { label: string; turns: number; tokensEst: number };
-type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[]; stats: UsageStat[] };
+type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[]; stats: UsageStat[]; balance?: string | null };
 
 /// "34k" / "1.2M" for the tokens-estimate stat.
 function compactNum(n: number): string {
@@ -189,19 +189,24 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.label}</span>
                 <span style={{ fontWeight: 700 }}>{Math.round(w.usedPct)}%</span>
               </div>
-              <div style={{ height: 4, borderRadius: 2, background: "var(--bg-surface)", overflow: "hidden" }}>
+              {/* Track: theme-agnostic translucent grey — var(--bg-surface) vanishes on black themes. */}
+              <div style={{ height: 4, borderRadius: 2, background: "rgba(148,158,178,0.30)", overflow: "hidden" }}>
                 <div style={{ height: "100%", width: `${Math.min(100, Math.max(0, w.usedPct))}%`, borderRadius: 2, background: w.usedPct >= 90 ? "#ff8c8c" : w.usedPct >= 70 ? "#ffd27a" : "var(--accent)" }} />
               </div>
               {resetsIn(w.resetsAt) && <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>{resetsIn(w.resetsAt)}</span>}
             </div>
           ))}
+          {/* Prepaid providers (Moonshot, DeepSeek…) report a balance, not quota windows. */}
+          {usage?.balance && (
+            <div style={{ fontSize: 11, color: "var(--fg)" }}>{usage.balance}</div>
+          )}
           {(usage?.stats?.length ?? 0) > 0 && usage!.stats.map((s, i) => (
             <div key={`s${i}`} style={{ display: "flex", alignItems: "baseline", fontSize: 11, color: "var(--fg)" }} title="This app's recorded traffic for this provider — token count is an estimate (~4 chars/token).">
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--fg-muted)" }}>{s.label}</span>
               <span>{s.turns} turns · ~{compactNum(s.tokensEst)} tok</span>
             </div>
           ))}
-          {usage && !usage.available && (usage.stats?.length ?? 0) === 0 && (
+          {usage && !usage.available && !usage.balance && (usage.stats?.length ?? 0) === 0 && (
             <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }} title={usage.note || ""}>
               no traffic recorded yet for this account
             </span>

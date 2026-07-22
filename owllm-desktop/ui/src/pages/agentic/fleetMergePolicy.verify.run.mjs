@@ -1,7 +1,9 @@
 #!/usr/bin/env node
-// Permanent regression gate for Code-page and Agentic fleet merges. Long-lived
-// worktrees routinely overlap a newer main branch; Merge must preserve both
-// non-overlapping work and deterministically retain the page inside conflicts.
+// Permanent regression gate for Code-page and Agentic fleet merges. Plain
+// three-way merging must preserve both sides' non-overlapping work, and a REAL
+// overlapping edit must STOP with both sides preserved — never silently prefer
+// one side (`-X theirs` is how integrated work got dropped: SmartImage ×3, the
+// v0.9.24 seven-file drop).
 
 import fs from "node:fs";
 import os from "node:os";
@@ -18,16 +20,18 @@ function fail(message) {
   process.exit(1);
 }
 
-if (!/["']-X["']\s*,\s*["']theirs["']/.test(fleet)) {
-  fail("squash merge no longer prefers the isolated page for overlapping hunks");
+if (/["']-X["']\s*,\s*["']theirs["']/.test(fleet)) {
+  fail("-X theirs is back — overlapping hunks would silently drop one side again");
 }
-if (!fleet.includes("fn resolve_user_conflicts_from_branch") ||
-    !fleet.includes('["checkout", branch, "--", path]') ||
-    !fleet.includes('["rm", "-f", "--ignore-unmatch", "--", path]')) {
-  fail("rename/delete/binary conflict fallback is missing");
+if (fleet.includes("fn resolve_user_conflicts_from_branch")) {
+  fail("the whole-file conflict fallback is back — it can discard valid main changes");
 }
-if (!fleet.includes("text_conflict_keeps_page_hunk_and_nonoverlapping_main_edit") ||
-    !fleet.includes("page_delete_wins_over_main_modify")) {
+if (!fleet.includes("return Ok(MergeOutcome::Conflict { files });")) {
+  fail("real source conflicts no longer stop the merge with both sides preserved");
+}
+if (!fleet.includes("overlapping_text_edits_stop_with_both_sides_preserved") ||
+    !fleet.includes("modify_delete_overlap_stops_with_both_sides_preserved") ||
+    !fleet.includes("mixed_merge_conflict_resolves_scratch_but_stops_on_source_overlap")) {
   fail("merge-policy unit coverage is missing");
 }
 if (!fleet.includes("let _merge_guard = lock.lock()") || !fleet.includes("fn repo_git_lock")) {
@@ -95,16 +99,21 @@ try {
   fs.writeFileSync(path.join(tmp, "feature.txt"),
     "header main\nkeep one\nkeep two\nkeep three\nshared main\nfooter\n");
   git("commit", "-am", "main edits");
-  git("merge", "--squash", "--no-commit", "-X", "theirs", "page");
 
+  // Plain three-way squash: the overlapping "shared" hunk must CONFLICT (both
+  // versions present in the markers), never auto-pick a side. Non-overlapping
+  // edits still land.
+  let merged = true;
+  try { git("merge", "--squash", "--no-commit", "page"); } catch { merged = false; }
+  if (merged) fail("overlapping same-hunk edits merged cleanly — the conflict contract is gone");
+  const unresolved = git("diff", "--name-only", "--diff-filter=U").toString().trim();
+  if (unresolved !== "feature.txt") fail(`expected feature.txt unresolved, got: ${unresolved}`);
   const actual = fs.readFileSync(path.join(tmp, "feature.txt"), "utf8").replace(/\r\n/g, "\n");
-  const expected = "header main\nkeep one\nkeep two\nkeep three\nshared page\nfooter\n";
-  if (actual !== expected) fail(`unexpected merged content: ${JSON.stringify(actual)}`);
-  if (git("diff", "--name-only", "--diff-filter=U").toString().trim()) {
-    fail("text merge left unresolved paths");
+  if (!actual.includes("shared main") || !actual.includes("shared page")) {
+    fail(`conflict markers must carry BOTH sides, got: ${JSON.stringify(actual)}`);
   }
 } finally {
   fs.rmSync(tmp, { recursive: true, force: true });
 }
 
-console.log("PASS fleet merges preserve main and prefer isolated page conflicts");
+console.log("PASS fleet merges use plain three-way merging and stop on real conflicts with both sides preserved");

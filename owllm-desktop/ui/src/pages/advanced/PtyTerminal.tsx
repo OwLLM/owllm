@@ -48,9 +48,14 @@ export type PtyTerminalProps = {
   /// banner settles (a real readiness signal, not a blind timer). Leave
   /// unset for one-shot login subcommands (codex login, gemini auth login).
   autoSend?: string;
+  /// Open the first http(s) URL the child prints in the Agent Browser.
+  /// ONLY for login/device-auth terminals (AccountsPage Connect flows).
+  /// Leave unset for general-purpose terminals — any command that prints a
+  /// URL (git, npm, curl…) would otherwise hijack the browser.
+  autoOpenAuthUrls?: boolean;
 };
 
-export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSend }: PtyTerminalProps) {
+export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSend, autoOpenAuthUrls }: PtyTerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -111,7 +116,7 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSen
     const decoder = new TextDecoder();
     let outputText = "";
     const openAuthUrlFrom = (bytes: Uint8Array) => {
-      if (authUrlOpened) return;
+      if (!autoOpenAuthUrls || authUrlOpened) return;
       outputText = (outputText + decoder.decode(bytes, { stream: true })).slice(-16_384);
       // Device-login URLs are sometimes wrapped in OSC-8 hyperlinks. Strip
       // terminal control sequences before matching, while preserving chunks so

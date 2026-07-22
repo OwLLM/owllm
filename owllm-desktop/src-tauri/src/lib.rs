@@ -71,6 +71,7 @@ mod skill_library;
 mod slack;
 mod state_mirror;
 mod support;
+mod sync_core;
 mod telegram;
 mod vault;
 mod webhook;
@@ -455,6 +456,7 @@ pub fn run() {
             release::repo_commit,
             release::repo_push,
             release::repo_merge,
+            release::repo_sync,
             memory::team_memory_read,
             memory::team_memory_delete,
             memory::team_memory_promote,

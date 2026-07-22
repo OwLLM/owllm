@@ -197,14 +197,27 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
   onSelect: (node: GlobeNode) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // Live inputs flow into the animation loop / rebuild through refs so that
+  // selecting a node, refreshing the fleet, or switching mode never re-runs
+  // the scene-building effect below. Rebuilding the WebGL renderer + Earth
+  // textures on every button click is what made the whole globe flash and
+  // restart — the GUI was hostage to the right-column buttons.
+  const nodesRef = useRef(nodes);
+  const selectedIdRef = useRef(selectedId);
+  const onSelectRef = useRef(onSelect);
+  const rebuildNodesRef = useRef<(() => void) | null>(null);
+  nodesRef.current = nodes;
+  selectedIdRef.current = selectedId;
+  onSelectRef.current = onSelect;
 
+  // Scene is built ONCE per theme accent. Node data / selection / pointer
+  // callbacks are read from refs, never from this effect's dependency array.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    const hasFleetSatellites = nodes.some((node) => node.kind === "fleet");
-    camera.position.set(0, 0.24, hasFleetSatellites ? 11.8 : 9.4);
+    camera.position.set(0, 0.24, 9.4);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
@@ -218,7 +231,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = hasFleetSatellites ? 8.4 : 5.8;
+    controls.minDistance = 5.8;
     controls.maxDistance = 15;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.32;
@@ -306,52 +319,86 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     rimLight.position.set(-6, -1.5, -5);
     scene.add(rimLight);
 
+    // Node layer — rebuilt in place (arrays are cleared + repopulated, never
+    // reassigned) so the animation loop and click handler keep working across
+    // rebuilds without re-running this effect.
     const clickable: THREE.Mesh[] = [];
     const pulseMeshes: THREE.Mesh[] = [];
     const orbitRings: { line: THREE.LineLoop; node: GlobeNode }[] = [];
     const nodeMeshes: { mesh: THREE.Mesh; halo: THREE.Mesh; label?: THREE.Sprite; node: GlobeNode; baseScale: number }[] = [];
+    let hasFleet = false;
 
-    nodes.forEach((node, index) => {
-      const color = node.online ? accent : 0x718096;
-      const isSelected = selectedId === node.id;
-      const baseScale = node.kind === "fleet" ? 1 : 1;
+    const disposeNodeObject = (object: any) => {
+      scene.remove(object);
+      object.geometry?.dispose?.();
+      const material = object.material;
+      if (Array.isArray(material)) material.forEach((m: any) => { m.map?.dispose?.(); m.dispose?.(); });
+      else if (material) { material.map?.dispose?.(); material.dispose?.(); }
+    };
 
-      if (node.kind === "fleet" && node.orbit) {
-        const orbit = node.orbit;
-        const ringGeometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 192 }, (_, i) =>
-          orbitPosition({ ...orbit, phase: i / 192 * Math.PI * 2, speed: 0 }, 0),
-        ));
-        const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: node.online ? 0.34 : 0.14 }));
-        scene.add(ring);
-        orbitRings.push({ line: ring, node });
-      }
+    const buildNodes = () => {
+      orbitRings.forEach(({ line }) => disposeNodeObject(line));
+      nodeMeshes.forEach(({ mesh, halo, label }) => { disposeNodeObject(mesh); disposeNodeObject(halo); if (label) disposeNodeObject(label); });
+      clickable.length = 0;
+      pulseMeshes.length = 0;
+      orbitRings.length = 0;
+      nodeMeshes.length = 0;
 
-      const geometry = node.kind === "fleet"
-        ? new THREE.OctahedronGeometry(0.15, 1)
-        : new THREE.SphereGeometry(0.07, 20, 16);
-      const material = new THREE.MeshStandardMaterial({
-        color,
-        emissive: new THREE.Color(color).multiplyScalar(node.online ? 0.6 : 0.1),
-        roughness: 0.3,
-        metalness: 0.4,
+      const list = nodesRef.current;
+      list.forEach((node, index) => {
+        const color = node.online ? accent : 0x718096;
+        const baseScale = node.kind === "fleet" ? 1 : 1;
+
+        if (node.kind === "fleet" && node.orbit) {
+          const orbit = node.orbit;
+          const ringGeometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 192 }, (_, i) =>
+            orbitPosition({ ...orbit, phase: i / 192 * Math.PI * 2, speed: 0 }, 0),
+          ));
+          const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: node.online ? 0.34 : 0.14 }));
+          scene.add(ring);
+          orbitRings.push({ line: ring, node });
+        }
+
+        const geometry = node.kind === "fleet"
+          ? new THREE.OctahedronGeometry(0.15, 1)
+          : new THREE.SphereGeometry(0.07, 20, 16);
+        const material = new THREE.MeshStandardMaterial({
+          color,
+          emissive: new THREE.Color(color).multiplyScalar(node.online ? 0.6 : 0.1),
+          roughness: 0.3,
+          metalness: 0.4,
+        });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.userData.node = node;
+        scene.add(mesh);
+        clickable.push(mesh);
+
+        const halo = new THREE.Mesh(
+          new THREE.SphereGeometry(node.kind === "fleet" ? 0.31 : 0.16, 24, 18),
+          new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
+        );
+        halo.userData.offset = index * 0.63;
+        scene.add(halo);
+        pulseMeshes.push(halo);
+
+        const label = node.kind === "fleet" ? satelliteLabel(node.label, new THREE.Color(color).getStyle()) : undefined;
+        if (label) scene.add(label);
+        nodeMeshes.push({ mesh, halo, label, node, baseScale });
       });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.userData.node = node;
-      scene.add(mesh);
-      clickable.push(mesh);
 
-      const halo = new THREE.Mesh(
-        new THREE.SphereGeometry(node.kind === "fleet" ? 0.31 : 0.16, 24, 18),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
-      );
-      halo.userData.offset = index * 0.63;
-      scene.add(halo);
-      pulseMeshes.push(halo);
+      // Reframe only when fleet-satellite presence actually changes (initial
+      // populate or a real mode switch) — not on selection or the 30s poll,
+      // so the user's current orbit/zoom is preserved.
+      const nextHasFleet = list.some((node) => node.kind === "fleet");
+      if (nextHasFleet !== hasFleet) {
+        hasFleet = nextHasFleet;
+        controls.minDistance = hasFleet ? 8.4 : 5.8;
+        camera.position.set(0, 0.24, hasFleet ? 11.8 : 9.4);
+      }
+    };
 
-      const label = node.kind === "fleet" ? satelliteLabel(node.label, new THREE.Color(color).getStyle()) : undefined;
-      if (label) scene.add(label);
-      nodeMeshes.push({ mesh, halo, label, node, baseScale });
-    });
+    rebuildNodesRef.current = buildNodes;
+    buildNodes();
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
@@ -361,7 +408,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObjects(clickable, false)[0];
-      if (hit?.object?.userData?.node) onSelect(hit.object.userData.node as GlobeNode);
+      if (hit?.object?.userData?.node) onSelectRef.current(hit.object.userData.node as GlobeNode);
     };
     renderer.domElement.addEventListener("pointerup", click);
 
@@ -391,7 +438,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       });
 
       nodeMeshes.forEach(({ mesh, halo, label, node, baseScale }) => {
-        const isSelected = selectedId === node.id;
+        const isSelected = selectedIdRef.current === node.id;
         const selectedScale = isSelected ? 1.55 : 1;
         if (node.kind === "fleet" && node.orbit) {
           const position = orbitPosition(node.orbit, elapsed);
@@ -414,6 +461,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     frame = requestAnimationFrame(animate);
 
     return () => {
+      rebuildNodesRef.current = null;
       cancelAnimationFrame(frame);
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener("pointerup", click);
@@ -424,13 +472,20 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       cloudMap.dispose();
       scene.traverse((object: any) => {
         object.geometry?.dispose?.();
-        if (Array.isArray(object.material)) object.material.forEach((material: any) => material.dispose?.());
-        else object.material?.dispose?.();
+        if (Array.isArray(object.material)) object.material.forEach((material: any) => { material.map?.dispose?.(); material.dispose?.(); });
+        else if (object.material) { object.material.map?.dispose?.(); object.material.dispose?.(); }
       });
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [accent, nodes, onSelect, selectedId]);
+  }, [accent]);
+
+  // Node-only rebuild when the node set changes (fleet refresh, mode switch,
+  // presence updates). Cheap: touches just the marker/orbit meshes, leaving
+  // the renderer, Earth textures, starfield, and camera view intact.
+  useEffect(() => {
+    rebuildNodesRef.current?.();
+  }, [nodes]);
 
   return <div ref={hostRef} data-ui="WorldMap:globe" style={{ position: "absolute", inset: 0 }} />;
 }

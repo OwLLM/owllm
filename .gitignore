@@ -165,6 +165,7 @@ owllm-desktop/resources/runtime/llama/
 owllm-desktop/resources/runtime/whisper.cpp/ggml-*.bin
 # Cargo target dir for the desktop crate — gigabytes, trivially rebuildable.
 owllm-desktop/src-tauri/target/
+owllm-desktop/src-tauri/sync-harness/target/
 owllm-desktop/.tauri-keys/
 # Local runtime install (models, python runtime, envs, state). Created on the
 # user's machine and resolved at runtime — never bundled from the repo. Was

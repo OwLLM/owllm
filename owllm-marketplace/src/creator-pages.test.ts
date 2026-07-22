@@ -213,6 +213,41 @@ describe('creator self-service pages', () => {
     expect(publicAfterUnpublish.text).not.toContain('Creator Flight Deck Pro');
   });
 
+  it('passes the submit → approve → anonymous browse smoke test with working GitHub and demo links', async () => {
+    const creator = request.agent(fixture.app);
+    await signIn(creator, { id: 42, login: 'alice' }, '/creators/submit');
+    await becomeCreator(creator);
+
+    mockGitHub({ id: 42, login: 'alice' }, [{ owner: 'alice', repo: 'flight-deck' }]);
+    await creator.post('/creators/submit').type('form').send({ ...form(), intent: 'submit' }).expect(302);
+    const [listing] = fixture.listings.listByCreator('42');
+    expect(listing.status).toBe('pending');
+
+    // A pending listing is absent from anonymous browse and its share page 404s.
+    const browseBefore = await request(fixture.app).get('/').expect(200);
+    expect(browseBefore.text).not.toContain('Creator Flight Deck');
+    await request(fixture.app).get(`/projects/${listing.slug}`).expect(404);
+
+    // Admin approves through the real moderation endpoint.
+    const admin = request.agent(fixture.app);
+    await signIn(admin, { id: 99, login: 'reviewer' }, '/admin/listings/pending');
+    await admin.post(`/admin/listings/${listing.id}/approve`).send({ reason: 'Launch approved' }).expect(200);
+    expect(fixture.listings.findById(listing.id)!.status).toBe('approved');
+
+    // Anonymous browse now lists it, without issuing a session cookie.
+    const browse = await request(fixture.app).get('/').expect(200);
+    expect(browse.headers['set-cookie']).toBeUndefined();
+    expect(browse.text).toContain('Creator Flight Deck');
+
+    // The public share page exposes working, safe GitHub source + live demo links.
+    const detail = await request(fixture.app).get(`/projects/${listing.slug}`).expect(200);
+    expect(detail.text).toContain('href="https://github.com/alice/flight-deck"');
+    expect(detail.text).toContain('View source repository');
+    expect(detail.text).toContain('href="https://demo.example.com/flight-deck"');
+    expect(detail.text).toContain('Open live demo');
+    expect(detail.text).toContain('rel="noopener noreferrer external"');
+  });
+
   it('renders responsive creator layouts for desktop and mobile widths', async () => {
     fixture.store.create('42', 'alice', null);
     fixture.store.setCreator('42', true);

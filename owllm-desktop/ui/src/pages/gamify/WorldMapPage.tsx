@@ -7,6 +7,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { useLocalization } from "../../localization";
 import { getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from "../advanced/remoteDevices";
+import { isClickGesture, nodeSignature } from "./globeStability";
 import {
   includeSelfDevice,
   readPresenceEnabled,
@@ -206,6 +207,10 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
   const selectedIdRef = useRef(selectedId);
   const onSelectRef = useRef(onSelect);
   const rebuildNodesRef = useRef<(() => void) | null>(null);
+  // Signature of the node set currently drawn on the globe. Guards the
+  // node-only rebuild so a new-but-identical `nodes` array (every 30s poll /
+  // presence snapshot) does not tear down and recreate the marker meshes.
+  const lastNodeSigRef = useRef<string>("");
   nodesRef.current = nodes;
   selectedIdRef.current = selectedId;
   onSelectRef.current = onSelect;
@@ -399,10 +404,18 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
 
     rebuildNodesRef.current = buildNodes;
     buildNodes();
+    lastNodeSigRef.current = nodeSignature(nodesRef.current);
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
+    // Remember where the press started so an orbit drag (pointer travels) is not
+    // mistaken for a node click on release — dragging to rotate must never fire
+    // a selection state update.
+    let downX = 0;
+    let downY = 0;
+    const pointerDown = (event: PointerEvent) => { downX = event.clientX; downY = event.clientY; };
     const click = (event: PointerEvent) => {
+      if (!isClickGesture(event.clientX - downX, event.clientY - downY)) return;
       const rect = renderer.domElement.getBoundingClientRect();
       pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
@@ -410,6 +423,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       const hit = raycaster.intersectObjects(clickable, false)[0];
       if (hit?.object?.userData?.node) onSelectRef.current(hit.object.userData.node as GlobeNode);
     };
+    renderer.domElement.addEventListener("pointerdown", pointerDown);
     renderer.domElement.addEventListener("pointerup", click);
 
     const resize = () => {
@@ -464,6 +478,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       rebuildNodesRef.current = null;
       cancelAnimationFrame(frame);
       resizeObserver.disconnect();
+      renderer.domElement.removeEventListener("pointerdown", pointerDown);
       renderer.domElement.removeEventListener("pointerup", click);
       controls.dispose();
       earthMap.dispose();
@@ -480,10 +495,16 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     };
   }, [accent]);
 
-  // Node-only rebuild when the node set changes (fleet refresh, mode switch,
-  // presence updates). Cheap: touches just the marker/orbit meshes, leaving
-  // the renderer, Earth textures, starfield, and camera view intact.
+  // Node-only rebuild when the node set actually changes (device online/offline,
+  // added/removed, mode switch). Cheap: touches just the marker/orbit meshes,
+  // leaving the renderer, Earth textures, starfield, and camera view intact.
+  // The signature guard skips rebuilds when the 30s poll / presence snapshot
+  // hands back a new array with identical content, so the node layer does not
+  // flicker on a timer.
   useEffect(() => {
+    const signature = nodeSignature(nodes);
+    if (signature === lastNodeSigRef.current) return;
+    lastNodeSigRef.current = signature;
     rebuildNodesRef.current?.();
   }, [nodes]);
 

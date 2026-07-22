@@ -22,6 +22,14 @@ const modulePath = path.join(temp, "worldPresence.mjs");
 fs.writeFileSync(modulePath, compiled);
 const presence = await import(pathToFileURL(modulePath).href);
 
+const stabilitySource = read("pages/gamify/globeStability.ts");
+const stabilityCompiled = ts.transpileModule(stabilitySource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const stabilityPath = path.join(temp, "globeStability.mjs");
+fs.writeFileSync(stabilityPath, stabilityCompiled);
+const stability = await import(pathToFileURL(stabilityPath).href);
+
 const memory = (initial = {}) => {
   const data = new Map(Object.entries(initial));
   return {
@@ -150,6 +158,31 @@ try {
   check("Globe scene is built once per accent, not per node/selection", /}, \[accent\]\);/.test(page) && !/\[accent, nodes, onSelect, selectedId\]/.test(page));
   check("Selection is read live from a ref (no scene rebuild on select)", page.includes("selectedIdRef.current === node.id"));
   check("Node changes trigger a node-only rebuild, not a renderer teardown", page.includes("rebuildNodesRef.current?.()") && /rebuildNodesRef\.current = buildNodes/.test(page));
+
+  // Regression: idle rotation must not flicker. The 30s fleet poll and each
+  // presence snapshot return a NEW array with identical content; the node layer
+  // must only rebuild when the node set actually changes, guarded by a stable
+  // signature — otherwise the marker meshes are torn down/recreated on a timer.
+  const nodesA = [
+    { id: "self", kind: "fleet", online: true, label: "This device" },
+    { id: "peer", kind: "fleet", online: false, label: "Peer" },
+  ];
+  const nodesA2 = nodesA.map((n) => ({ ...n })); // same content, new identities (poll result)
+  check("Identical node sets share one signature (no timer flicker)",
+    stability.nodeSignature(nodesA) === stability.nodeSignature(nodesA2));
+  check("Node coming online changes the signature (real rebuild)",
+    stability.nodeSignature(nodesA) !== stability.nodeSignature(nodesA.map((n) => n.id === "peer" ? { ...n, online: true } : n)));
+  check("Adding a node changes the signature (real rebuild)",
+    stability.nodeSignature(nodesA) !== stability.nodeSignature([...nodesA, { id: "new", kind: "world", online: true, label: "EU" }]));
+  check("Globe skips the node rebuild when the signature is unchanged",
+    /const signature = nodeSignature\(nodes\);/.test(page) && /if \(signature === lastNodeSigRef\.current\) return;/.test(page));
+
+  // Regression: dragging to orbit must not fire a selection state update. Only a
+  // near-stationary press counts as a click; a pointer that travelled is a drag.
+  check("A stationary press is a click", stability.isClickGesture(0, 0) === true && stability.isClickGesture(4, 4) === true);
+  check("A travelled pointer (orbit drag) is not a click", stability.isClickGesture(40, 5) === false && stability.isClickGesture(0, 30) === false);
+  check("Globe ignores drag gestures on pointerup (no select on orbit)",
+    page.includes("pointerDown") && /if \(!isClickGesture\(event\.clientX - downX, event\.clientY - downY\)\) return;/.test(page));
   check("Globe bundles photographic Earth texture layers", page.includes("EARTH_TEXTURES.day") && page.includes("EARTH_TEXTURES.normal") && page.includes("EARTH_TEXTURES.specular") && page.includes("EARTH_TEXTURES.clouds"));
   check("Globe uses calibrated color and tone mapping", page.includes("THREE.SRGBColorSpace") && page.includes("THREE.ACESFilmicToneMapping") && page.includes("THREE.HemisphereLight"));
   check("Globe follows the readable selected GUI accent", page.includes('getPropertyValue("--accent-ink")') && page.includes("accent={colors.accentInk}"));

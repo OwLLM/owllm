@@ -53,6 +53,7 @@ import {
 } from "./chatFontPreferences";
 import ActionIcon from "./components/ActionIcon";
 import { installWorldPresenceConnection } from "./pages/gamify/worldPresence";
+import { openWebUrl } from "./utils/openWebUrl";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -73,6 +74,7 @@ function isTauri(): boolean {
 const FRAME_VISIBILITY_STATE_KEY = "owllm:window-frame:visibility";
 const FRAME_IDLE_HIDE_MS = 1800;
 const FRAME_LEAVE_HIDE_MS = 700;
+const MARKETPLACE_URL = "https://marketplace.owllm.com/";
 
 function startDrag(e: React.MouseEvent) {
   if (e.button !== 0) return;
@@ -591,6 +593,7 @@ const HEADER_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
 function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
+  onOpenMarketplace,
   onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
@@ -606,6 +609,7 @@ function ModeBar({
   textColor: string;
   onPickTextColor: (color: TextColorSelection) => void;
   onOpenServer: () => void;
+  onOpenMarketplace: () => void;
   /// The Watcher (P0-8): in overlay-frame mode the decorative owl window is
   /// click-through, so the centered OWLLM title (directly beneath the owl)
   /// doubles as the summon point.
@@ -939,6 +943,27 @@ function ModeBar({
                 })()}
               </div>
 
+              {/* Signing / credential hub entry — its own separate line,
+                  positioned immediately before the GitHub container so that
+                  container stays the last item of the dropdown in every state.
+                  Opens the existing Signing page via the shared navigate event
+                  (no modes.ts change; the page tab is unaffected). */}
+              <button
+                data-ui="SettingsSigningRow"
+                onClick={() => { setSettingsOpen(false); window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "signing" } })); }}
+                title="Certificates (Apple + Windows signing) and provider portal web-logins"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🖊</span>
+                <span style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 13.5 }}>Certificates and Logs in</span>
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
               {/* The same guided first-run journey stays discoverable here when
                   identity is not connected. Once signed in this becomes the
                   compact account-management entry rather than advertising
@@ -993,6 +1018,15 @@ function ModeBar({
         {/* Mode toggles — single-active. Click toggles back to "home" if
             the same mode is clicked twice. Hidden when the mode isn't
             installed (per getInstalledModes() in modules.ts). */}
+        <button
+          data-ui="MarketplaceButton"
+          onClick={onOpenMarketplace}
+          title="Open OWLLM Marketplace"
+          style={{ ...baseBtn, width: 128 }}
+        >
+          <span>Marketplace</span>
+        </button>
+
         {visibleToggles.map(t => (
           <button
             key={t.id}
@@ -1702,6 +1736,10 @@ export default function AppShell() {
             textColor={theme.textColor}
             onPickTextColor={theme.setTextColor}
             onOpenServer={() => setServerModalOpen(true)}
+            onOpenMarketplace={() => {
+              openWebUrl(MARKETPLACE_URL)
+                .catch((error) => console.error("Could not open OWLLM Marketplace", error));
+            }}
             onWatcher={openWatcher}
             watcherHint={watcherHint && overlayFrame}
             keepFrameVisible={keepFrameVisible}

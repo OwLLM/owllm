@@ -47,6 +47,11 @@ pub struct DevicePublic {
     /// or network setup required; still metadata only (control needs a paired key).
     #[serde(default)]
     pub p2p_node_id: Option<String>,
+    /// Public heartbeat stamped when this device publishes its vault record.
+    /// Metadata only; it does not authorize control. Older app versions ignore
+    /// this unknown JSON field when they read records written by newer builds.
+    #[serde(default)]
+    pub published_at: Option<String>,
 }
 
 /// What a device can do — advertised to peers, informational (the real gate is

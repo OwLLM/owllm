@@ -30,6 +30,14 @@ const stabilityPath = path.join(temp, "globeStability.mjs");
 fs.writeFileSync(stabilityPath, stabilityCompiled);
 const stability = await import(pathToFileURL(stabilityPath).href);
 
+const livenessSource = read("pages/advanced/deviceLiveness.ts");
+const livenessCompiled = ts.transpileModule(livenessSource, {
+  compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+}).outputText;
+const livenessPath = path.join(temp, "deviceLiveness.mjs");
+fs.writeFileSync(livenessPath, livenessCompiled);
+const liveness = await import(pathToFileURL(livenessPath).href);
+
 const memory = (initial = {}) => {
   const data = new Map(Object.entries(initial));
   return {
@@ -71,6 +79,14 @@ try {
   const paired = [{ device_id: "peer", name: "Peer" }];
   check("Fleet includes the current installation", presence.includeSelfDevice(self, paired).map((device) => device.device_id).join(",") === "self,peer");
   check("Fleet does not duplicate the current installation", presence.includeSelfDevice(self, [self, ...paired]).length === 2);
+  const now = Date.parse("2026-07-23T12:00:00.000Z");
+  check("Fleet liveness treats this device as online", liveness.isDeviceOnline({ is_self: true, last_seen: null, endpoint: null }, now) === true);
+  check("Fleet liveness accepts fresh direct frames", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-23T11:58:00.000Z", endpoint: null }, now) === true);
+  check("Fleet liveness accepts fresh synced dialable metadata", liveness.isDeviceOnline({ is_self: false, last_seen: null, published_at: "2026-07-23T11:59:00.000Z", endpoint: "192.168.219.102:42445" }, now) === true);
+  check("Fleet liveness accepts fresh synced P2P metadata", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", published_at: "2026-07-23T11:59:00.000Z", endpoint: null, p2p_node_id: "node" }, now) === true);
+  check("Fleet liveness keeps legacy dialable records compatible", liveness.isDeviceOnline({ is_self: false, last_seen: null, endpoint: "192.168.219.102:42445" }, now) === true);
+  check("Fleet liveness rejects stale synced heartbeat records", liveness.isDeviceOnline({ is_self: false, last_seen: null, published_at: "2026-07-22T11:00:00.000Z", endpoint: "192.168.219.102:42445" }, now) === false);
+  check("Fleet liveness rejects stale records with no dial path", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", endpoint: null, endpoints: [], p2p_node_id: null }, now) === false);
 
   const sanitized = presence.sanitizePresenceNodes([
     { id: "ok", region: "EU West", latitude: 48, longitude: 9, lastSeen: "now", github_login: "must-not-leak" },
@@ -194,6 +210,9 @@ try {
     page.includes("emissiveMap: earthMap") && /emissiveIntensity:\s*0\.3/.test(page));
   check("Globe follows the readable selected GUI accent", page.includes('getPropertyValue("--accent-ink")') && page.includes("accent={colors.accentInk}"));
   check("My Fleet consumes real paired-device state", page.includes("getIdentity()") && page.includes("listDevices()") && page.includes("device.is_self"));
+  check("My Fleet and Devices share one online rule", page.includes('from "../advanced/deviceLiveness"') && page.includes("isDeviceOnline(device)") && read("pages/advanced/DevicesPage.tsx").includes('from "./deviceLiveness"'));
+  check("My Fleet refreshes immediately after device vault sync", page.includes('window.addEventListener("owllm:devices:refresh"') && page.includes('window.removeEventListener("owllm:devices:refresh"'));
+  check("Device vault records carry a publication heartbeat", read("../../src-tauri/src/remote_devices/protocol.rs").includes("published_at") && read("../../src-tauri/src/remote_devices/mod.rs").includes("rec.published_at = Some(now_rfc3339())"));
   check("My Fleet always includes the current installation", page.includes("fleetWithSelf(identity, devices)") && page.includes("is_self: true"));
   check("Fleet satellites have aligned orbit paths and labels", page.includes("orbitPosition({ ...orbit") && page.includes("satelliteLabel(node.label"));
   for (const asset of ["earth-day.jpg", "earth-normal.jpg", "earth-specular.jpg", "earth-clouds.png"]) {

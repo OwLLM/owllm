@@ -155,5 +155,6 @@ pub fn public_record(github_login: Option<String>) -> Result<DevicePublic, Strin
         relay: false,
         // Embedded P2P dial-by-id (iroh) — created on first use, vault-synced.
         p2p_node_id: super::p2p::node_id(),
+        published_at: None,
     })
 }

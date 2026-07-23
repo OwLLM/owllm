@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import LogBox from "../../components/LogBox";
 import RemoteTerminal from "./RemoteTerminal";
+import { isDeviceOnline } from "./deviceLiveness";
 import * as rd from "./remoteDevices";
 import type {
   CommandKind,
@@ -54,13 +55,6 @@ function relativeSeen(iso: string | null): string {
   if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
   if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
   return `${Math.floor(secs / 86400)}d ago`;
-}
-
-function isOnline(d: DeviceRecord): boolean {
-  if (d.is_self) return true;
-  if (!d.last_seen) return false;
-  const t = Date.parse(d.last_seen);
-  return !Number.isNaN(t) && Date.now() - t < 5 * 60 * 1000;
 }
 
 export default function DevicesPage() {
@@ -653,7 +647,7 @@ function DeviceList({
         {discoverMsg && <span style={{ fontSize: 10.5, color: "var(--fg-subtle)" }}>{discoverMsg}</span>}
       </div>
       {devices.map((d) => {
-        const online = isOnline(d);
+        const online = isDeviceOnline(d);
         const ts = trustState(d.device_id);
         const noAddress = !d.is_self && !(d.endpoints?.length || d.endpoint || d.p2p_node_id);
         return (

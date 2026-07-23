@@ -8,7 +8,14 @@ import { parseProjectCard, type ProjectCard } from "./cardLint";
 type ReadyCheck = { id: string; label: string; ok: boolean; detail: string };
 // Compact `git status --porcelain -b` summary from git.rs — cheap and local,
 // unlike publish_readiness which probes the network (ls-remote / gh).
-type GitStatusInfo = { isRepo: boolean; branch: string; ahead: number; behind: number; total: number };
+type GitStatusInfo = {
+  isRepo: boolean;
+  branch: string;
+  ahead: number;
+  behind: number;
+  total: number;
+  nuisanceFiles: string[];
+};
 type ReleaseVisibility = "publish" | "draft" | "dry-run";
 type PublishMode = "host" | "ci";
 
@@ -319,9 +326,12 @@ export default function PublishCards({
   // checkout. Push that checkout, not the page branch again. The old routing
   // let Commit + Merge + Push all report success while origin/main never moved.
   const pushDir = isolated && projectRoot ? projectRoot : gitDir;
-  const doPush = () => run("Pushing to origin", () => invoke("repo_push", { repoDir: pushDir }));
+  // repo_push and repo_sync both run the cross-PC sync transaction in the
+  // backend: diverged histories (↑N ↓M) integrate on a temporary worktree via a
+  // plain three-way merge instead of dead-ending on "not a fast-forward".
+  const doPush = () => run("Syncing with origin", () => invoke("repo_push", { repoDir: pushDir }));
 
-  const doMerge = () => run(isolated ? "Merging worktree" : `Merging to ${mergeTarget}`, async () => {
+  const doMerge = () => run(isolated ? "Merging worktree" : `Syncing with ${mergeTarget}`, async () => {
     if (isolated && projectRoot && branch && gitDir) {
       const fin = await invoke<WtFinalize>("fleet_worktree_finalize", {
         worktreePath: gitDir, agentName: "code", summary: "Code page session",
@@ -332,10 +342,13 @@ export default function PublishCards({
       });
       if (mg.status === "merged") return `Merged ${mg.filesChanged} file(s) into ${projectRoot.replace(/^.*[\\/]/, "")}`;
       if (mg.status === "noChanges") return "Nothing new to merge — already up to date.";
-      if (mg.status === "conflict") throw new Error(`conflict in: ${mg.files.join(", ")}`);
+      if (mg.status === "conflict") throw new Error(
+        `Real overlapping edits — nothing was auto-dropped. Both sides are preserved ` +
+        `(the page branch keeps its commits). Resolve these files, then merge again:\n` +
+        mg.files.map((f) => `  - ${f}`).join("\n"));
       throw new Error(mg.message);
     }
-    return invoke<string>("repo_merge", { repoDir: gitDir, target: mergeTarget });
+    return invoke<string>("repo_sync", { repoDir: gitDir, target: mergeTarget });
   });
 
   const signPayload = settings.sign.thumbprint.trim() || settings.sign.subject.trim()
@@ -358,6 +371,12 @@ export default function PublishCards({
           : `This bumps the version, commits, tags, and pushes. The repository's GitHub Actions workflow will build and publish a public release.`) +
         (settings.mode === "host" && !signed ? "\n\nNo signing certificate is configured, so this build will be UNSIGNED." : "")
       )) return "Cancelled.";
+      // Publish rides on the same sync transaction first: a diverged origin
+      // integrates (or stops on a real conflict) BEFORE the long build, instead
+      // of failing mid-release or building a stale checkout.
+      if (hasRemote) {
+        await invoke("repo_sync", { repoDir, target: "main" });
+      }
       return invoke("finish_and_publish", {
         repoDir,
         notes: pubNotes,
@@ -408,15 +427,26 @@ export default function PublishCards({
   // One click hands the failure to the coder agent instead of making the user
   // copy-paste PUBLISH_FAILED output into the chat. Carries BOTH the last
   // failed action's full output and any unmet readiness checks.
-  const hasFixableIssue = activity?.kind === "err" || readyFails.length > 0;
+  const nuisanceFiles = git?.nuisanceFiles ?? [];
+  const hasFixableIssue = activity?.kind === "err" || readyFails.length > 0 || nuisanceFiles.length > 0;
   const fixWithAgent = () => {
     if (!onFixIssues) return;
     const parts: string[] = [];
     if (activity?.kind === "err") {
-      parts.push(`The last release action failed with this output:\n\n${activity.msg}`);
+      const failedOutput = output?.kind === "err" ? output.body : activity.msg;
+      parts.push(`The last release action failed with this output:\n\n${failedOutput}`);
     }
     if (readyFails.length > 0) {
       parts.push(`Publish readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);
+    }
+    if (nuisanceFiles.length > 0) {
+      parts.push(
+        "OWLLM detected app-generated runtime files that are still tracked by Git and can repeatedly dirty or block Commit / Merge / Push:\n" +
+        nuisanceFiles.map((path) => `- ${path}`).join("\n") +
+        "\n\nClean them safely: add precise ignore rules and remove only these runtime paths from Git tracking while preserving their working-tree copies. " +
+        "Do not delete or ignore durable project data such as .owllm/project.json, .owllm/verify.json, .owllm/skills/, .owllm/assets/, or user source files. " +
+        "Verify the resulting Git status and the rule-based release workflow.",
+      );
     }
     const outcome = onFixIssues(
       "The rule-based release buttons (Commit / Merge / Push / Publish) hit a problem in this repository. " +
@@ -468,6 +498,11 @@ export default function PublishCards({
               </span>
             </div>
           )}
+          {nuisanceFiles.length > 0 && (
+            <div style={{ padding: "3px 5px", borderRadius: 5, background: "rgba(255,217,122,0.1)", color: "#ffd97a", fontSize: 10.5, lineHeight: 1.4 }}>
+              {nuisanceFiles.length} tracked OWLLM runtime file{nuisanceFiles.length === 1 ? "" : "s"} can keep Git dirty. Use Fix with agent to safely de-track them.
+            </div>
+          )}
           <div style={{ display: "flex", gap: 6, width: "100%" }}>
             {showCommit && (
               <button
@@ -485,10 +520,10 @@ export default function PublishCards({
                 disabled={disabled || loading}
                 title={isolated
                   ? `Merge this page's worktree back into ${projectRoot ? projectRoot.replace(/^.*[\\/]/, "") : "main"}`
-                  : `Fast-forward ${mergeTarget} to HEAD on origin`}
+                  : `Synchronize with origin/${mergeTarget}: pushes when ahead, fast-forwards when behind, and safely merges diverged histories — never force-pushes, never drops either side`}
                 style={{ ...chipBtn, flex: 1, color: "#7ff0c5" }}
               >
-                {loading ? "⏳" : "⤴"} Merge
+                {loading ? "⏳" : isolated ? "⤴" : "⇅"} {isolated ? "Merge" : "Sync"}
               </button>
             )}
           </div>
@@ -498,13 +533,13 @@ export default function PublishCards({
                 onClick={doPush}
                 disabled={disabled || loading}
                 title={isolated && projectRoot
-                  ? `Push the merged project checkout (${projectRoot.replace(/^.*[\\/]/, "")}) to origin`
+                  ? `Sync the merged project checkout (${projectRoot.replace(/^.*[\\/]/, "")}) with origin — handles ahead, behind, and diverged histories`
                   : git && git.ahead > 0
-                    ? `Push ${git.ahead} commit(s) on ${git.branch || branch || "current"} to origin`
-                    : `Push ${git?.branch || branch || "current"} to origin`}
+                    ? `Sync ${git.ahead} commit(s) on ${git.branch || branch || "current"} with origin — a diverged remote integrates safely instead of failing`
+                    : `Sync ${git?.branch || branch || "current"} with origin`}
                 style={{ ...chipBtn, flex: 1 }}
               >
-                {loading ? "⏳" : "↑"} Push{isolated ? " merged" : (git && git.ahead > 0 ? ` (${git.ahead})` : "")}
+                {loading ? "⏳" : "↑"} Push
               </button>
             )}
             {showPublish && (

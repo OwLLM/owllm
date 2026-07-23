@@ -26,6 +26,7 @@ use once_cell::sync::Lazy;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -104,9 +105,40 @@ pub enum PtyEvent {
 struct Slot {
     writer: Box<dyn Write + Send>,
     master: Box<dyn MasterPty + Send>,
+    killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
 }
 
 static SESSIONS: Lazy<Mutex<HashMap<String, Slot>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// PATH inherited by account-login PTYs.
+///
+/// Desktop launches on Linux/macOS get a deliberately small PATH, while the
+/// subscription CLIs can live in OwLLM's bundled Node module, ~/.local/bin, or
+/// ~/.grok/bin. `resolve_cli_command` can find the top-level shim in those
+/// locations, but a Node shebang such as `#!/usr/bin/env node` performs a
+/// second PATH lookup after spawn.
+fn pty_child_path() -> Option<OsString> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(node_dir) = crate::paths::module_node_dir() {
+        dirs.push(node_dir);
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".local").join("bin"));
+        dirs.push(home.join(".grok").join("bin"));
+    }
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    dirs.retain(|dir| dir.is_dir());
+    // AppImage prepends executables from its temporary mount. Those are for
+    // OwLLM itself, not external CLIs, and disappear when the app exits.
+    if let Some(app_dir) = std::env::var_os("APPDIR").map(PathBuf::from) {
+        dirs.retain(|dir| !dir.starts_with(&app_dir));
+    }
+    dirs.dedup();
+    std::env::join_paths(dirs).ok()
+}
 
 /// Spawn `cli` with `args` inside a fresh PTY. Returns the session
 /// id the React side passes back to pty_write / pty_resize / pty_kill.
@@ -151,17 +183,40 @@ pub fn pty_spawn(
             cmd.cwd(home);
         }
     }
-    // Make sure the child inherits the same PATH we already extended
-    // in accounts::which_extended — so kimi.exe lives where the CLI
-    // expects when invoked under the PTY shell.
-    if let Some(path) = std::env::var_os("PATH") {
+    // The resolved executable may itself be a Node/Python shim. Give that
+    // second-stage interpreter lookup the same bundled/user tool directories
+    // that resolve_cli_command searches.
+    if let Some(path) = pty_child_path() {
         cmd.env("PATH", path);
     }
+    #[cfg(target_os = "linux")]
+    for key in [
+        "APPDIR",
+        "APPIMAGE",
+        "ARGV0",
+        "LD_LIBRARY_PATH",
+        "PYTHONHOME",
+        "PYTHONPATH",
+    ] {
+        // AppRun exports these for OwLLM's bundled runtime. Passing them to a
+        // user's Python/native CLI makes it load modules and libraries from
+        // OwLLM's temporary AppImage mount instead of its own installation.
+        cmd.env_remove(key);
+    }
+    // The UI captures login URLs from PTY output and opens them in OwLLM's
+    // persistent browser. Give Python's webbrowser module (Kimi) a real
+    // successful no-op: an invalid command makes it fall through to xdg-open,
+    // which can hand an HTTPS URL to LibreOffice on Linux.
+    #[cfg(windows)]
+    cmd.env("BROWSER", "cmd.exe /c exit 0");
+    #[cfg(not(windows))]
+    cmd.env("BROWSER", "/usr/bin/true");
 
     let mut child = pair
         .slave
         .spawn_command(cmd)
         .map_err(|e| format!("spawn {cli}: {e}"))?;
+    let killer = child.clone_killer();
     // We don't need the slave end here; dropping it closes the
     // child-side fd so EOF on the master end propagates correctly
     // when the child exits.
@@ -177,7 +232,17 @@ pub fn pty_spawn(
         .map_err(|e| format!("clone_reader: {e}"))?;
 
     let session_id = uuid::Uuid::new_v4().to_string();
+    let session_for_exit = session_id.clone();
     let event_for_data = on_event.clone();
+
+    SESSIONS.lock().unwrap().insert(
+        session_id.clone(),
+        Slot {
+            writer,
+            master: pair.master,
+            killer,
+        },
+    );
 
     // Reader thread: pump pty output into the Channel.
     std::thread::spawn(move || {
@@ -204,15 +269,8 @@ pub fn pty_spawn(
             Err(_) => -1,
         };
         let _ = event_for_data.send(PtyEvent::Exit { code: Some(code) });
+        SESSIONS.lock().unwrap().remove(&session_for_exit);
     });
-
-    SESSIONS.lock().unwrap().insert(
-        session_id.clone(),
-        Slot {
-            writer,
-            master: pair.master,
-        },
-    );
     Ok(session_id)
 }
 
@@ -256,12 +314,13 @@ pub fn pty_resize(session_id: String, cols: u16, rows: u16) -> Result<(), String
 #[tauri::command]
 pub fn pty_kill(session_id: String) -> Result<(), String> {
     let mut sessions = SESSIONS.lock().unwrap();
-    if let Some(_slot) = sessions.remove(&session_id) {
-        // Dropping the master closes its read+write ends, which sends
-        // SIGHUP / closes ConPTY on Windows. The child then exits.
-        // We don't have a stored Child reference here (it's owned by
-        // the reader thread); that's fine — the thread will see EOF,
-        // wait on the child, and emit PtyEvent::Exit.
+    if let Some(mut slot) = sessions.remove(&session_id) {
+        // The reader thread owns the waitable Child, so retain an independent
+        // killer. Dropping the master alone does not stop a child while the
+        // reader clone still holds the PTY open.
+        slot.killer
+            .kill()
+            .map_err(|e| format!("pty_kill: {e}"))?;
     }
     Ok(())
 }

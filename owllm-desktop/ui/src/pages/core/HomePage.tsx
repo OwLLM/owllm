@@ -117,7 +117,7 @@ const LAUNCHERS: LauncherSpec[] = [
     actions: [
       { label: "Play",       targetPage: "gamify",     icon: "🎮" },
       { label: "Characters", targetPage: "characters", icon: "🧙" },
-      { label: "Arena",      targetPage: "arena",      icon: "🏟" },
+      { label: "World Map",  targetPage: "world-map",  icon: "🌐" },
       { label: "Quests",     targetPage: "gamify",     icon: "⭐" },
     ],
   },

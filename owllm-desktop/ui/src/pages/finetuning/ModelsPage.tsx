@@ -550,7 +550,7 @@ function DownloadedModelDetail({ item, onAddWeights, onChanged }: {
             })}
           </div>
         )}
-        <button onClick={onAddWeights} style={{ marginTop: 8, width: "100%", height: 28, borderRadius: 7, border: "1px dashed var(--accent)", background: "rgba(var(--accent-rgb),0.10)", color: "var(--accent)", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>➕ Add / download more weights…</button>
+        <button onClick={onAddWeights} style={{ marginTop: 8, width: "100%", height: 28, borderRadius: 7, border: "1px dashed var(--accent)", background: "rgba(var(--accent-rgb),0.10)", color: "var(--accent-ink)", fontSize: 11.5, fontWeight: 700, cursor: "pointer" }}>➕ Add / download more weights…</button>
       </div>
     </div>
   );

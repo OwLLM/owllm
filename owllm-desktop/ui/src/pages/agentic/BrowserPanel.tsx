@@ -15,7 +15,8 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
-type BrowserStatus = { running: boolean; url: string; device: string };
+type BrowserTab = { id: number; title: string; url: string; active: boolean };
+type BrowserStatus = { running: boolean; url: string; device: string; active_tab_id?: number; tabs?: BrowserTab[] };
 type PageInfo = { url?: string; title?: string; ready?: string };
 type CredMeta = { origin: string; username: string; note: string; ts: number };
 type Detected = { id: string; name: string; profile: string; count: number; supported: boolean; note: string };
@@ -67,13 +68,28 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
     setBusy(true); setErr("");
     try {
       await invoke("browser_ensure");
-      await invoke("browser_start");
-      await invoke("browser_cmd", { action: "navigate", params: { url: u } });
+      await invoke("browser_open_tab", { url: u, activate: true });
       await invoke("browser_focus");
       await refreshStatus();
       await refreshPage();
     } catch (e) { setErr(String(e)); }
     finally { setBusy(false); }
+  };
+
+  const selectBrowserTab = async (tabId: number) => {
+    try {
+      await invoke("browser_select_tab", { tabId });
+      await refreshStatus();
+      await refreshPage();
+    } catch (e) { setErr(String(e)); }
+  };
+  const closeBrowserTab = async (tabId: number) => {
+    try {
+      await invoke("browser_close_tab", { tabId });
+      await refreshStatus();
+      if (status?.tabs?.length === 1) setPage(null);
+      else await refreshPage();
+    } catch (e) { setErr(String(e)); }
   };
 
   const showWindow = async () => { try { await invoke("browser_start"); await invoke("browser_focus"); await refreshStatus(); } catch (e) { setErr(String(e)); } };
@@ -163,7 +179,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
         border: "1px solid " + (tab === id ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
         borderBottom: "none", borderRadius: "7px 7px 0 0",
         background: tab === id ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-        color: tab === id ? "var(--accent)" : "var(--fg-muted)",
+        color: tab === id ? "var(--accent-ink)" : "var(--fg-muted)",
       }}
     >{label}</button>
   );
@@ -219,6 +235,18 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
       <div style={{ padding: 10, overflow: "auto", ...(inline ? { flex: 1, minHeight: 0 } : {}) }}>
         {tab === "browse" && (
           <>
+            {!!status?.tabs?.length && (
+              <div style={{ display: "flex", gap: 4, marginBottom: 8, overflowX: "auto" }}>
+                {status.tabs.map((browserTab) => (
+                  <div key={browserTab.id} style={{ display: "flex", alignItems: "center", minWidth: 0, border: "1px solid " + (browserTab.active ? "rgba(var(--accent-rgb),0.45)" : "var(--border)"), borderRadius: 7, background: browserTab.active ? "rgba(var(--accent-rgb),0.12)" : "var(--bg-surface)" }}>
+                    <button onClick={() => void selectBrowserTab(browserTab.id)} title={browserTab.url} style={{ maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", border: 0, background: "transparent", color: browserTab.active ? "var(--accent-ink)" : "var(--fg-muted)", cursor: "pointer", fontSize: 10.5, padding: "4px 7px" }}>
+                      {browserTab.title || browserTab.url || "New tab"}
+                    </button>
+                    {status.tabs.length > 1 && <button onClick={() => void closeBrowserTab(browserTab.id)} title="Close tab" style={{ border: 0, background: "transparent", color: "var(--fg-muted)", cursor: "pointer", padding: "3px 6px" }}>×</button>}
+                  </div>
+                ))}
+              </div>
+            )}
             <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
               <input value={url} onChange={(e) => setUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void navigate(); }}
                 placeholder="open a URL (e.g. github.com) — agents inherit this session" style={field} />
@@ -240,7 +268,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                     fontSize: 10.5, padding: "2px 8px",
                     border: "1px solid " + (status?.device === id ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
                     background: status?.device === id ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-                    color: status?.device === id ? "var(--accent)" : "var(--fg-muted)",
+                    color: status?.device === id ? "var(--accent-ink)" : "var(--fg-muted)",
                   }}>{label}</button>
               ))}
             </div>
@@ -257,7 +285,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
                 Local dev servers work too (localhost:5173 opens as http), and the DEVICE chips preview mobile layouts.
               </div>
             )}
-            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)" }}>{scanMsg}</div>}
+            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent-ink)" }}>{scanMsg}</div>}
           </>
         )}
 
@@ -306,13 +334,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
               ))}
               {detected.length === 0 && <div style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>Press Rescan to detect browsers.</div>}
             </div>
-            <div style={{ marginTop: 8, paddingTop: 8, borderTop: "1px solid var(--border)", display: "flex", alignItems: "center", gap: 8 }}>
-              <div style={{ flex: 1, fontSize: 10.5, color: "var(--fg-muted)", lineHeight: 1.45 }}>
-                Chrome/Edge 127+ protect saved passwords with App-Bound Encryption, which can't be read directly. Export a CSV from the browser (Settings → Passwords → ⋮ → Export) and import it here.
-              </div>
-              <button className="btn" disabled={busy} onClick={() => void importCsv()} style={{ fontSize: 11, padding: "3px 10px", whiteSpace: "nowrap" }}>Import CSV…</button>
-            </div>
-            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent)" }}>{scanMsg}</div>}
+            {scanMsg && <div style={{ marginTop: 8, fontSize: 11, color: "var(--accent-ink)" }}>{scanMsg}</div>}
           </>
         )}
 

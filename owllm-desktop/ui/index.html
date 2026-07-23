@@ -16,16 +16,6 @@
     <div id="root">
       <div id="boot-splash" style="position:fixed;inset:0;background:#06080d;"></div>
     </div>
-    <script>
-      // Runs synchronously at parse, before the first paint (mirrors the
-      // overlay-frame.html inline-accent seed). WebView2 (Windows) and WKWebView
-      // (macOS) never report "Linux"; only webkit2gtk on Linux does.
-      try {
-        if (navigator.userAgent.indexOf("Linux") !== -1) {
-          document.getElementById("boot-splash").style.background = "transparent";
-        }
-      } catch (e) {}
-    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

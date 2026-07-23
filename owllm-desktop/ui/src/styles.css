@@ -62,6 +62,12 @@
      value because the much-brighter tinted-grey bg genuinely needs
      black on pale accents (amber, blue). */
   --bg-header-fg: #ffffff;
+  /* Adaptive readable accent for accent-coloured TEXT on app surfaces
+     (timers, active tabs, toggle labels). theme.ts computes one value
+     per mode; route the right one here so a black/near-black skin pick
+     never renders invisible text. Falls back to the raw accent if JS
+     hasn't set the vars yet. */
+  --accent-ink: var(--accent-ink-dark, var(--accent));
   /* headerPill background base — pills mix this with the accent so
      they sit slightly darker than the header band as a recess. Dark
      mode uses a near-black base; light mode (below) uses a light grey
@@ -119,6 +125,7 @@
      which it doesn't — producing black text on the dark band (unreadable)
      and a mismatched theme toggle. Only the BODY goes light below. */
   --bg-header-fg: #ffffff;
+  --accent-ink: var(--accent-ink-light, var(--accent));
   --header-pill-base: #14172a;
 
   /* Same idea as dark mode — every surface mixes ~4–10 % of the accent
@@ -256,7 +263,7 @@ input::placeholder, textarea::placeholder {
 }
 .owl-pulse-dot { animation: owl-pulse 1s ease-in-out infinite; }
 @keyframes owl-blink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
-.owl-cursor { animation: owl-blink 1s step-end infinite; color: var(--accent); font-weight: 700; }
+.owl-cursor { animation: owl-blink 1s step-end infinite; color: var(--accent-ink); font-weight: 700; }
 /* Application locale direction. Technical/user-authored content remains LTR
    and is excluded from automatic UI-copy localization. */
 html[dir="rtl"] body { direction: rtl; }
@@ -267,3 +274,17 @@ html[dir="rtl"] input[type="url"],
 html[dir="rtl"] input[type="email"],
 html[dir="rtl"] input[type="password"],
 html[dir="rtl"] input[type="number"] { direction: ltr; text-align: left; }
+/* Gamify World Map: keep the globe dominant on desktop, then stack the live
+   signal rail below it on narrow windows without changing node order. */
+.world-map-layout {
+  grid-template-columns: minmax(0, 1fr) minmax(250px, 310px);
+}
+
+@media (max-width: 900px) {
+  .world-map-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .world-map-globe-panel {
+    min-height: 460px !important;
+  }
+}

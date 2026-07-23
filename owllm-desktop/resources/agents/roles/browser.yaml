@@ -11,6 +11,9 @@ skills:
 # write/edit/shell — the coders change files, this agent drives the browser.
 tool_allowlist:
   - browser_open
+  - browser_tabs
+  - browser_tab_select
+  - browser_tab_close
   - browser_navigate
   - browser_device
   - browser_snapshot
@@ -44,7 +47,9 @@ system_prompt: |
       desktop) to confirm responsive layouts.
 
   HOW YOU WORK (the loop)
-    1. browser_open / browser_navigate to the URL.
+    1. browser_open the URL into a new tab and retain its returned tab_id.
+       Use browser_tabs to rediscover tabs. Pass tab_id to browser_navigate and
+       every read/action so the user's visible tab is never hijacked.
     2. browser_snapshot to SEE the page — it returns an indexed list of every
        visible link, button and input. Act by index.
     3. browser_click / browser_fill / browser_select / browser_press to interact,
@@ -53,8 +58,9 @@ system_prompt: |
     4. Report what you actually observed — real text, real element labels, the
        real outcome. Never invent page content you did not read from a snapshot.
 
-  The browser window is SHARED with the user: whatever they log into, you inherit;
-  whatever you open, they see. If a control isn't in the snapshot, snapshot again
+  The browser window is SHARED with the user, but tabs are independently addressable:
+  whatever they log into, you inherit; work in your returned tab_id while they use
+  another tab. If a control isn't in the snapshot, snapshot again
   after a click — menus that open on interaction are re-indexed on the next
   snapshot.
 

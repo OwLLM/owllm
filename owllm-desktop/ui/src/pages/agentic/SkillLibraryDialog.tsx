@@ -325,7 +325,7 @@ export default function SkillLibraryDialog({ open, onClose, onChange }: Props) {
                 height: 32, padding: "0 12px", borderRadius: 8,
                 border: filter === f ? "1px solid rgba(var(--accent-rgb),0.55)" : "1px solid var(--border)",
                 background: filter === f ? "rgba(var(--accent-rgb),0.10)" : "transparent",
-                color: filter === f ? "var(--accent)" : "#9aa0a6",
+                color: filter === f ? "var(--accent-ink)" : "#9aa0a6",
                 fontSize: 12, fontWeight: 600, cursor: "pointer", textTransform: "capitalize",
               }}
             >{f}</button>

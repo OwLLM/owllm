@@ -13,10 +13,12 @@ import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
 import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
+import { projectAvailability, projectCanRun, projectOriginLabel } from "./projectPortability";
 import BrainstormPanel from "./BrainstormPanel";
+import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -54,6 +56,9 @@ import {
   saveCliImages,
   resolveImageCwd,
   fileToImageAttachment,
+  fileToChatAttachment,
+  appendDocumentAttachmentText,
+  CHAT_ATTACHMENT_ACCEPT,
   openaiUserContent,
   anthropicUserContent,
   parseClaudeModelId,
@@ -66,6 +71,8 @@ import {
   streamLocalChat,
   streamOpenAiApiWithTools,
   runCodexCliStream,
+  makeResponsiveHandlers,
+  makeUiYield,
   ensureCliWarm,
   clearCliWarm,
   withCliAuthRetry,
@@ -126,6 +133,7 @@ const ICONS = "/Page_icons";
 // ---------- Backend shapes ----------
 type ProjectRow = {
   id: string; name: string; description: string; location: string;
+  repo_url: string; created_device_id: string; created_device_name: string;
   trust_writes: boolean; auto_approve_all: boolean;
   team: string[]; team_default_model_id: string;
   /// Routing graph blob — `{"edges": [{"source":"x","target":"y"}]}`.
@@ -357,6 +365,9 @@ type GoalMsg = {
   role: string;
   color: string;
   text: string;
+  /// Model-visible version of a user turn (for example extracted documents).
+  /// The UI keeps `text` concise while follow-up turns retain attachment context.
+  context?: string;
   /// Renderer hint. "thinking" → italic block, "tool" → monospace
   /// command-style block, undefined / "dispatch" / etc. → default reply look.
   kind?: "thinking" | "tool" | "dispatch";
@@ -933,7 +944,7 @@ function GoalRow({ onCancel, busy, onBrainstorm, hasBrief, brainstormReady, left
                    background: busy ? "rgba(255,140,140,0.20)" : "rgba(255,140,140,0.10)",
                    color: busy ? "#ff8c8c" : "#555", fontWeight:600, fontSize:14,
                    cursor: busy ? "pointer" : "not-allowed" }}>Cancel</button>
-        <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(var(--accent-rgb),0.18)", color:"var(--accent)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
+        <button data-ui="GoalVoiceBtn" title="Speak agent replies aloud — voice per agent. Click ▾ to switch engine." style={{ height:38, minWidth:64, padding:"0 6px", border:"none", borderRadius:8, background:"rgba(var(--accent-rgb),0.18)", color:"var(--accent-ink)", fontSize:16, display:"inline-flex", alignItems:"center", justifyContent:"center", gap:4 }}>🔊<span style={{ fontSize:11, opacity:0.7 }}>▾</span></button>
       </div>
     </div>
   );
@@ -992,7 +1003,7 @@ function FlowHeader({
         style={{
           height:28, padding:"0 10px", fontSize:11,
           background: on ? "rgba(var(--accent-rgb),0.22)" : undefined,
-          color: on ? "var(--accent)" : undefined,
+          color: on ? "var(--accent-ink)" : undefined,
           borderRadius:0,
         }}
       >{label}</button>
@@ -1073,7 +1084,7 @@ function FlowHeader({
             display:"flex", alignItems:"center", gap:6, height:28, padding:"0 11px",
             borderRadius:999, fontSize:12, fontWeight:700, cursor:"pointer",
             background:"rgba(var(--accent-rgb),0.12)", border:"1px solid rgba(var(--accent-rgb),0.45)",
-            color:"var(--accent)",
+            color:"var(--accent-ink)",
           }}
         >
           <span style={{ fontSize:13 }}>👥</span>
@@ -1957,7 +1968,7 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
     <div
       onClick={(e) => e.stopPropagation()}
       style={{
-        flex: 1, minHeight: 0, display: "flex", flexDirection: "column",
+        flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column",
         gap: 8, padding: 10, cursor: "default",
       }}
     >
@@ -2006,16 +2017,17 @@ function PublisherTilePanel({ cwd, rgb }: { cwd: string | null; rgb: string }) {
         onClick={(e) => { e.stopPropagation(); setSetupOpen(true); }}
         title="Repository settings + readiness details"
         style={{
-          display: "flex", alignItems: "center", gap: 8, width: "100%",
+          display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", width: "100%", minWidth: 0,
           padding: "6px 10px", flexShrink: 0,
           background: "rgba(0,0,0,0.30)",
           border: `1px solid rgba(${rgb},0.4)`, borderRadius: 7,
           color: "var(--fg)", fontSize: 11, fontWeight: 600, cursor: "pointer",
         }}
       >
-        <span>⚙ Set up repo</span>
-        <span style={{ flex: 1 }} />
+        <span style={{ flex: "0 0 auto", whiteSpace: "nowrap" }}>⚙ Set up repo</span>
+        <span style={{ flex: 1, minWidth: 0 }} />
         <span style={{
+          marginLeft: "auto", maxWidth: "100%", whiteSpace: "nowrap",
           fontSize: 9, fontWeight: 800, letterSpacing: 0.5, textTransform: "uppercase",
           padding: "1px 7px", borderRadius: 4,
           color: ready ? "#3cf26b" : "#ffd97a",
@@ -2843,7 +2855,7 @@ function AgentEditorModal({
               padding: "6px 18px", borderRadius: 6,
               border: "1px solid var(--accent)",
               background: (saving || !templateId) ? "rgba(var(--accent-rgb),0.25)" : "var(--accent)",
-              color: (saving || !templateId) ? "#7d8595" : "var(--bg-elevated)",
+              color: (saving || !templateId) ? "var(--fg-muted)" : "var(--accent-fg)",
               cursor: (saving || !templateId) ? "default" : "pointer",
               fontSize: 13, fontWeight: 700,
             }}
@@ -3171,7 +3183,7 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
               padding:"4px 14px", borderRadius:6,
               border:"1px solid var(--accent)",
               background: newText.trim() ? "var(--accent)" : "rgba(var(--accent-rgb),0.25)",
-              color: newText.trim() ? "var(--bg-elevated)" : "#7d8595",
+              color: newText.trim() ? "var(--accent-fg)" : "var(--fg-muted)",
               fontSize:12, fontWeight:700,
               cursor: newText.trim() ? "pointer" : "not-allowed",
             }}
@@ -3206,7 +3218,7 @@ function DirectivesPanel({ projectId, directives, onChanged, onClose }: {
                         autoFocus
                         style={{ flex:1, padding:"2px 6px", borderRadius:4, border:"1px solid var(--border-strong)", background:"var(--bg-input)", color:"var(--fg)", fontSize:13 }}
                       />
-                      <button onClick={saveEdit} disabled={busy} style={{ padding:"2px 8px", fontSize:11, fontWeight:700, borderRadius:4, border:"1px solid var(--accent)", background:"var(--accent)", color:"var(--bg-elevated)", cursor:"pointer" }}>Save</button>
+                      <button onClick={saveEdit} disabled={busy} style={{ padding:"2px 8px", fontSize:11, fontWeight:700, borderRadius:4, border:"1px solid var(--accent)", background:"var(--accent)", color:"var(--accent-fg)", cursor:"pointer" }}>Save</button>
                       <button onClick={() => setEditingId(null)} disabled={busy} style={{ padding:"2px 6px", fontSize:11, borderRadius:4, border:"1px solid var(--border-strong)", background:"#1a2030", color:"var(--fg)", cursor:"pointer" }}>Cancel</button>
                     </>
                   ) : (
@@ -4024,7 +4036,7 @@ function GraphCanvas({
   // (below) still own left-button behaviour on their own elements via
   // stopPropagation, so they don't fight with the hook.
   const view = useCanvasGestures({ minZoom: 0.25, maxZoom: 3.0, factor: 1.12 });
-  const { pan, zoom, setPan, containerRef, onMouseDown: onContainerMouseDown, onWheel: onContainerWheel, panDragging } = view;
+  const { pan, zoom, setPan, setZoom, containerRef, onMouseDown: onContainerMouseDown, onWheel: onContainerWheel, panDragging } = view;
 
   // Active-state pulse so the green ring on a streaming node breathes
   // (static 40 %-opacity ring used to be easy to miss against the dark
@@ -4166,6 +4178,33 @@ function GraphCanvas({
     return out;
   })();
 
+  // Fit every saved/manual layout into the CURRENT viewport. Absolute graph
+  // coordinates are persisted per project and can outlive a window resize,
+  // a side-column change, or a profile restored on another PC. Previously the
+  // root kept the old measured pixel width and those valid coordinates were
+  // simply clipped, producing a half-canvas/black-panel layout. Reframing the
+  // view preserves the user's positions while ensuring every card is visible.
+  const fitGraphToViewport = () => {
+    if (!team || team.agents.length === 0 || w <= 0 || h <= 0) return;
+    const points = team.agents
+      .map((agent) => effective.get(agent.name))
+      .filter((p): p is { x: number; y: number } => !!p);
+    if (points.length === 0) return;
+    const fit = computeGraphViewportFit(points, w, h, NODE_W, NODE_H);
+    if (!fit) return;
+    setZoom(fit.zoom);
+    setPan(fit.pan);
+  };
+  const positionMembershipKey = positions
+    ? Array.from(positions.keys()).sort().join("|")
+    : "auto";
+  useLayoutEffect(() => {
+    fitGraphToViewport();
+  // Values do not participate deliberately: dragging a card must not re-fit
+  // under the pointer. A team/viewport change or initial saved-map load does.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [team?.id, w, h, soloLayout, positionMembershipKey]);
+
   // Convert a client-space (mouse event) coordinate to inner-content
   // coordinates accounting for pan + zoom. Used by every interaction
   // that needs to know "what content point is the cursor over".
@@ -4234,7 +4273,7 @@ function GraphCanvas({
 
   if (!team || team.agents.length === 0) {
     return (
-      <div data-ui="GraphCanvas" style={{ position:"relative", width:w, height:h, background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--fg-subtle)", fontSize:13 }}>
+      <div data-ui="GraphCanvas" style={{ position:"relative", width:"100%", height:"100%", background:"linear-gradient(180deg, #101522 0%, #06080d 100%)", display:"flex", alignItems:"center", justifyContent:"center", color:"var(--fg-subtle)", fontSize:13 }}>
         No agents on this team yet. Pick a template via <b style={{ margin:"0 4px" }}>Team…</b>.
       </div>
     );
@@ -4385,7 +4424,7 @@ function GraphCanvas({
       onWheel={onContainerWheel}
       onContextMenu={(e) => e.preventDefault()}
       style={{
-        position:"relative", width:w, height:h,
+        position:"relative", width:"100%", height:"100%",
         background:"linear-gradient(180deg, #101522 0%, #06080d 100%)",
         overflow:"hidden",
         // Middle-click on Windows triggers an "auto-scroll" wheel cursor.
@@ -4723,6 +4762,18 @@ function GraphCanvas({
           );
         })}
       </div>
+      <button
+        data-ui="GraphFitViewport"
+        onClick={(event) => { event.stopPropagation(); fitGraphToViewport(); }}
+        title="Fit the complete team graph in this window"
+        style={{
+          position:"absolute", left:10, top:10, zIndex:60,
+          padding:"5px 9px", borderRadius:7,
+          border:"1px solid var(--border-strong)",
+          background:"rgba(8,12,20,0.82)", color:"var(--fg)",
+          fontSize:11, fontWeight:700, cursor:"pointer",
+        }}
+      >Fit graph</button>
       {/* Empty-state hint */}
       {liveEdges.length === 0 && !drag && (
         <div style={{ position:"absolute", bottom:8, left:0, right:0, textAlign:"center", color:"var(--fg-subtle)", fontSize:11, pointerEvents:"none" }}>
@@ -4861,7 +4912,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
           style={{
             marginLeft: 28, marginTop: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700,
             borderRadius: 6, border: "1px solid var(--accent)", background: "rgba(var(--accent-rgb),0.16)",
-            color: "var(--accent)", cursor: "pointer",
+            color: "var(--accent-ink)", cursor: "pointer",
           }}
         >
           ⟳ Restart WSL networking
@@ -4877,7 +4928,7 @@ function renderReplyEntry(m: GoalMsg, i: number, focus: string, orchName: string
           style={{
             marginLeft: 28, marginTop: 6, padding: "5px 12px", fontSize: 12, fontWeight: 700,
             borderRadius: 6, border: "1px solid var(--accent)", background: "rgba(var(--accent-rgb),0.16)",
-            color: "var(--accent)", cursor: "pointer",
+            color: "var(--accent-ink)", cursor: "pointer",
           }}
         >
           ⟳ Retry
@@ -4980,7 +5031,7 @@ function ChatInputDock({
   draft: string;
   setDraft: (v: string) => void;
   inputRef: React.RefObject<HTMLTextAreaElement>;
-  onSend: (images: Attachment[]) => void;
+  onSend: (attachments: Attachment[]) => void;
   busy: boolean;
   autoApprove: boolean;
   onToggleAutoApprove: () => void;
@@ -5019,18 +5070,25 @@ function ChatInputDock({
     { name: "/clear",     description: "Clear the draft text",              action: () => setDraft("") },
   ], [autoApprove, onSwitchTab, onToggleAutoApprove, setDraft]);
 
-  // Pasted images for the team chat (parity with the Code + fine-tuning chats).
-  // Sent on the next message via onSend(images); cleared after. Same shared
-  // fileToImageAttachment + Attachment shape used everywhere.
-  const [images, setImages] = useState<Attachment[]>([]);
+  // Files for the next team-chat turn. Images retain their bytes; documents are
+  // parsed locally and carry extracted text only.
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const addDockFiles = async (files: FileList | File[]) => {
+    for (const file of Array.from(files)) {
+      try {
+        const attachment = await fileToChatAttachment(file);
+        setAttachments((current) => [...current, attachment]);
+      } catch (error) {
+        flashNote(String((error as { message?: string })?.message ?? error));
+      }
+    }
+  };
   const onDockPaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
-    const files = Array.from(e.clipboardData?.files ?? []).filter(f => f.type.startsWith("image/"));
+    const files = Array.from(e.clipboardData?.files ?? []);
     if (files.length === 0) return;
     e.preventDefault();
-    files.forEach(async (f) => {
-      try { const a = await fileToImageAttachment(f); setImages(x => [...x, a]); }
-      catch (err) { console.warn("[agentic chat] image paste failed", err); }
-    });
+    void addDockFiles(files);
   };
 
   // Droplist state — open whenever the draft is exactly "/" or starts
@@ -5101,23 +5159,7 @@ function ChatInputDock({
     }
   };
 
-  // + attach — opens the OS file picker via the rfd-backed Tauri
-  // command we already use elsewhere (Browse… on the LocationRow).
-  // The desktop dispatch path is text-only today, so we drop the
-  // path into the draft as a hint; the orchestrator can read the
-  // file via its read_file tool.
-  const onAttach = async () => {
-    try {
-      const path = await invoke<string | null>("pick_file", { title: "Attach a file", filters: null });
-      if (path && typeof path === "string") {
-        const sep = draft.endsWith("\n") || draft.length === 0 ? "" : "\n";
-        setDraft(`${draft}${sep}Attached file: \`${path}\``);
-        flashNote(`Attached: ${path.split(/[/\\]/).pop()}`);
-      }
-    } catch (e) {
-      flashNote(`File picker failed: ${String(e)}`);
-    }
-  };
+  const onAttach = () => fileInputRef.current?.click();
 
   // Send / Stop: when idle, send the draft (slash commands run
   // inline). When busy, fire owllm:dispatch-abort which AgentsPage
@@ -5136,7 +5178,7 @@ function ChatInputDock({
       return;
     }
     const t = draft.trim();
-    if (!t && images.length === 0) return;
+    if (!t && attachments.length === 0) return;
     if (t.startsWith("/")) {
       const exact = slashCommands.find(c => c.name.toLowerCase() === t.toLowerCase());
       if (exact) { runCommand(exact); return; }
@@ -5152,14 +5194,15 @@ function ChatInputDock({
       // up and auto-send once the model finishes loading. Clear the
       // textarea so the user knows we accepted it.
       try {
-        window.dispatchEvent(new CustomEvent("owllm:dock:park-draft", { detail: { text: t } }));
+        window.dispatchEvent(new CustomEvent("owllm:dock:park-draft", { detail: { text: appendDocumentAttachmentText(t, attachments) } }));
       } catch {}
       setDraft("");
+      setAttachments([]);
       onLoadModel();
       return;
     }
-    onSend(images);
-    setImages([]);
+    onSend(attachments);
+    setAttachments([]);
   };
 
   return (
@@ -5208,12 +5251,12 @@ function ChatInputDock({
         borderRadius:12,
         overflow:"hidden",
       }}>
-        {images.length > 0 && (
+        {attachments.length > 0 && (
           <div style={{ display:"flex", gap:6, flexWrap:"wrap", padding:"8px 12px 0" }}>
-            {images.map((a, i) => (
+            {attachments.map((a, i) => (
               <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:6, border:"1px solid rgba(122,162,255,0.35)", background:"rgba(122,162,255,0.12)", color:"#9ad9ff", borderRadius:12, padding:"2px 6px 2px 8px", fontSize:11, fontWeight:700 }}>
-                🖼 {a.filename ?? "image"}
-                <button onClick={() => setImages(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border:"none", background:"transparent", color:"#9ad9ff", cursor:"pointer", fontSize:13, lineHeight:1, padding:0 }}>×</button>
+                {a.kind === "image" ? "🖼" : "📄"} {a.filename ?? (a.kind === "image" ? "image" : "document")}
+                <button onClick={() => setAttachments(x => x.filter((_, j) => j !== i))} title="Remove" style={{ border:"none", background:"transparent", color:"#9ad9ff", cursor:"pointer", fontSize:13, lineHeight:1, padding:0 }}>×</button>
               </span>
             ))}
           </div>
@@ -5232,7 +5275,7 @@ function ChatInputDock({
                 // While a run is active, Enter QUEUES the message to steer the run
                 // (onSend → onSupSend enqueues). handleSend()-when-busy is Stop, so
                 // route around it here; the ■ button remains the way to stop.
-                if (busy && draft.trim()) onSend(images);
+                if (busy && (draft.trim() || attachments.length)) onSend(attachments);
                 else handleSend();
               }
             }}
@@ -5281,7 +5324,7 @@ function ChatInputDock({
           <button
             type="button"
             onClick={onAttach}
-            title="Attach a file"
+            title="Attach images or documents"
             style={{
               width:28, height:28, background:"transparent",
               border:"1px solid var(--border)", borderRadius:6,
@@ -5289,6 +5332,14 @@ function ChatInputDock({
               display:"flex", alignItems:"center", justifyContent:"center",
             }}
           >+</button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={CHAT_ATTACHMENT_ACCEPT}
+            multiple
+            style={{ display: "none" }}
+            onChange={(e) => { if (e.target.files) void addDockFiles(e.target.files); e.target.value = ""; }}
+          />
           <button
             type="button"
             onClick={() => setPaletteOpen(v => !v)}
@@ -5296,7 +5347,7 @@ function ChatInputDock({
             style={{
               width:28, height:28, background: showPalette ? "rgba(var(--accent-rgb),0.18)" : "transparent",
               border:"1px solid var(--border)", borderRadius:6,
-              color: showPalette ? "var(--accent)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
+              color: showPalette ? "var(--accent-ink)" : "var(--fg-muted)", cursor:"pointer", fontSize:13, fontWeight:700,
               display:"flex", alignItems:"center", justifyContent:"center",
             }}
           >/</button>
@@ -5311,7 +5362,7 @@ function ChatInputDock({
               background: autoApprove ? "rgba(var(--accent-rgb),0.18)" : "transparent",
               border: `1px solid ${autoApprove ? "rgba(var(--accent-rgb),0.55)" : "var(--border)"}`,
               borderRadius:6,
-              color: autoApprove ? "var(--accent)" : "var(--fg-muted)",
+              color: autoApprove ? "var(--accent-ink)" : "var(--fg-muted)",
               cursor:"pointer", fontSize:11, fontWeight:600,
             }}
           >
@@ -5321,21 +5372,21 @@ function ChatInputDock({
           <button
             type="button"
             onClick={handleSend}
-            disabled={!busy && !loadingModel && !draft.trim()}
+            disabled={!busy && !loadingModel && !draft.trim() && attachments.length === 0}
             title={busy
               ? "Stop the in-flight dispatch"
               : loadingModel
                 ? "Loading model into VRAM — click sends as soon as ready"
                 : needsLoad
                   ? "First click loads the local model, then auto-sends. Subsequent clicks send immediately."
-                  : (draft.trim() ? "Send message" : "Type something to send")}
+                  : (draft.trim() || attachments.length ? "Send message" : "Type something or attach a document")}
             style={{
               width: (needsLoad || loadingModel) ? 76 : 32, height:28,
-              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
-              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() ? "var(--accent-fg)" : "var(--fg-muted)"),
+              background: busy ? "var(--warn)" : loadingModel ? "rgba(var(--accent-rgb),0.40)" : needsLoad ? "var(--ok)" : (draft.trim() || attachments.length ? "var(--accent)" : "rgba(var(--accent-rgb),0.18)"),
+              color: busy ? "#ffffff" : loadingModel ? "var(--fg)" : needsLoad ? "#ffffff" : (draft.trim() || attachments.length ? "var(--accent-fg)" : "var(--fg-muted)"),
               border:"1px solid " + (busy ? "var(--warn)" : needsLoad ? "var(--ok)" : "rgba(var(--accent-rgb),0.55)"),
               borderRadius:6,
-              cursor: (busy || loadingModel || draft.trim()) ? "pointer" : "not-allowed",
+              cursor: (busy || loadingModel || draft.trim() || attachments.length) ? "pointer" : "not-allowed",
               fontSize: (needsLoad || loadingModel) ? 11 : 14, fontWeight:800,
               display:"flex", alignItems:"center", justifyContent:"center", gap: 4,
             }}
@@ -7033,7 +7084,7 @@ function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
     if (m.role === "system" || m.role === "error" || m.role === "dispatch") continue;
     out.push({
       role: m.role === "you" ? "user" : "assistant",
-      content: m.text,
+      content: m.context || m.text,
     });
   }
   return out;
@@ -7264,7 +7315,7 @@ async function streamChatCompletion(
     );
   }
   const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning, onTranscript),
+    await transcribeAudioAttachments(appendDocumentAttachmentText(userMessage, attachments), attachments, onSystemWarning, onTranscript),
     images,
   );
 
@@ -7283,6 +7334,10 @@ async function streamChatCompletion(
       sessionId, onSystemWarning, onTranscript, getSteer,
     );
   }
+  const responsive = makeResponsiveHandlers(onDelta, onThought);
+  onDelta = responsive.onDelta;
+  onThought = responsive.onThought;
+  try {
   if (provider === "anthropic") {
     return streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
   }
@@ -7354,20 +7409,23 @@ async function streamChatCompletion(
   // Tool activity is surfaced on the Thought tab through onThought (which
   // consumeOpenAISse already drives for delta.tool_calls). The cloud /
   // sub / API branches above are untouched.
-  return streamLocalChat({
-    port,
-    modelId,
-    systemPrompt,
-    userContent: openaiUserContent(effectiveText, images),
-    temperature,
-    signal,
-    onDelta,
-    onThought,
-    projectCwd,
-    history,
-    allowedTools,
-    getSteer,
-  });
+    return streamLocalChat({
+      port,
+      modelId,
+      systemPrompt,
+      userContent: openaiUserContent(effectiveText, images),
+      temperature,
+      signal,
+      onDelta,
+      onThought,
+      projectCwd,
+      history,
+      allowedTools,
+      getSteer,
+    });
+  } finally {
+    await responsive.flush();
+  }
 }
 
 /// Anthropic Messages API streaming. Format:
@@ -7605,12 +7663,15 @@ async function consumeAnthropicSse(
   let buf = "";
   let acc = "";
   const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; channel: string; role: string }>();
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -7890,12 +7951,15 @@ async function streamGemini(
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -7975,12 +8039,15 @@ async function consumeOpenAISse(
     genTail = (genTail + s).slice(-3600);
     return checkRunawayLine(genTail);
   };
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -8521,11 +8588,10 @@ export function AgentsPage({
         if (++tries <= 8) setTimeout(attempt, 800);
         return;
       }
-      const step = takeNextAutoStep(pid, notebookSurfaceId);
-      if (step) {
+      continueNotebookAutoFeed(pid, notebookSurfaceId, (step) => {
         notebookStepRef.current = step.id;
         void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
-      }
+      });
     };
     setTimeout(attempt, 800);
   };
@@ -8833,6 +8899,9 @@ export function AgentsPage({
   // After every mutation we refetch list_projects so the combo box +
   // selection stay accurate.
   const [newProjOpen, setNewProjOpen] = useState(false);
+  const [projectHubOpen, setProjectHubOpen] = useState(false);
+  const [projectMaterializing, setProjectMaterializing] = useState(false);
+  const [projectMaterializeError, setProjectMaterializeError] = useState("");
   // The project popup is ONE dialog in two modes: "new" (create) and "edit"
   // (⚙ settings for the current project). Both open the same ProjectSettingsDialog.
   const [settingsMode, setSettingsMode] = useState<"new" | "edit">("edit");
@@ -8847,6 +8916,30 @@ export function AgentsPage({
       return [] as ProjectRow[];
     }
   };
+  const cloneSelectedProjectHere = async () => {
+    if (!selectedProject?.repo_url || projectMaterializing) return;
+    setProjectMaterializing(true);
+    setProjectMaterializeError("");
+    try {
+      const parent = await invoke<string | null>("pick_folder", {
+        title: `Choose where to clone ${selectedProject.name} on this computer`,
+      });
+      if (!parent) return;
+      const location = await invoke<string>("github_clone_project", {
+        repoUrl: selectedProject.repo_url,
+        parent,
+      });
+      await invoke("update_project", { input: { id: selectedProject.id, location } });
+      const rows = await reloadProjects();
+      const rebound = rows.find((p) => p.id === selectedProject.id);
+      setProjectLocationDraft(rebound?.location || location, selectedProject.id);
+      setProjectHubOpen(false);
+    } catch (e: any) {
+      setProjectMaterializeError(String(e?.message ?? e));
+    } finally {
+      setProjectMaterializing(false);
+    }
+  };
   const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
   const onProjectCreated = async (
     row: ProjectRow,
@@ -8858,6 +8951,7 @@ export function AgentsPage({
     const target = rows.find(p => p.id === row.id) ?? row;
     setSelectedProjectId(target.id);
     setProjectLocationDraft(target.location, target.id);
+    setProjectHubOpen(false);
     setPickedTeamId(null);
     setTrustWritesOverride(null);
     if (kickoff.action === "brainstorm") {
@@ -9290,8 +9384,13 @@ export function AgentsPage({
       // bleed into the new project's pane.
       setAgentThoughts(new Map());
     }
+  // Re-run when a project reload supplies its preserved DB transcript too.
+  // Folder rebinding keeps the same project id, so depending on id alone left
+  // an already-created empty runtime session blank even though chat_json and
+  // agent_logs_json were still intact. The sessionEmpty guard above prevents
+  // a reload from clobbering a live/non-empty conversation.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedProject?.id]);
+  }, [selectedProject?.id, selectedProject?.chat_json, selectedProject?.agent_logs_json]);
 
   // Active team: pickedTeamId wins; else project roster; else first
   // built-in template so the canvas is never empty.
@@ -9838,16 +9937,25 @@ export function AgentsPage({
   // log buffer. The dispatch loop above handles the orchestrator-led
   // flow; this lets the user sneak in a side note without re-running.
   const onSupSend = async (text: string, images: Attachment[] = []) => {
+    const visualImages = imageAttachments(images);
+    const documentNames = images.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleText = documentNames.length ? `${text}${text ? "\n\n" : ""}📄 ${documentNames.join(", ")}` : text;
     if (supSendBusyRef.current) {
       // A run is active → DON'T drop the message. Queue it as a mid-run steer;
       // dispatchGoal drains it at the next orchestrator boundary and feeds it in.
       // (Images aren't carried mid-run — text only.) Echo it so the user sees it
       // was captured, not ignored.
-      const t = text.trim();
+      const t = appendDocumentAttachmentText(text.trim(), images).trim();
       if (t) {
         steerQueueRef.current.push(t);
-        setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `⚡ queued to steer the run → ${t}`, ts: Date.now(), seq: nextSeq() }]);
+        setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `⚡ queued to steer the run → ${visibleText}`, context: t, ts: Date.now(), seq: nextSeq() }]);
       }
+      return;
+    }
+    if (!selectedProject || !projectCanRun({ ...selectedProject, location: runCwd })) {
+      setRunError(selectedProject?.repo_url
+        ? "Clone this project's GitHub repository on this PC before sending a message."
+        : "This remote project has no GitHub repository. Create it on the source PC before working here.");
       return;
     }
     // Remember this goal so a failed second-agent / forwarded send can offer a
@@ -9867,7 +9975,7 @@ export function AgentsPage({
     // Otherwise attaching a picture silently diverted the run to the read-only
     // single-assistant orchestrator below, skipping the solo-loop's publish
     // (the "I said publish but it switched to the orchestrator" bug).
-    if (text.trim() && activeTeam && (soloMode || images.length === 0)) {
+    if (text.trim() && activeTeam && (soloMode || visualImages.length === 0)) {
       const orchSpec = findOrchestratorSpec(activeTeam);
       const hasSpecialists = !!orchSpec && activeTeam.agents.some(a => a.name !== orchSpec.name);
       if (soloMode || hasSpecialists) {
@@ -9892,8 +10000,9 @@ export function AgentsPage({
           // it to the agent buffers, not supChat), then run. Mark any attached
           // images so the echoed turn matches what the single-assistant path shows.
           const echo: GoalMsg = { role: "you", color: "#9ad9ff",
-            text,
-            images: images.length > 0 ? attachmentThumbs(images) : undefined,
+            text: visibleText,
+            context: appendDocumentAttachmentText(text, images),
+            images: visualImages.length > 0 ? attachmentThumbs(visualImages) : undefined,
             ts: Date.now(), seq: nextSeq() };
           setSupChat(prev => [...prev, echo]);
           await dispatchGoal(text, priorHistory, images);
@@ -9928,8 +10037,9 @@ export function AgentsPage({
 
     const userMsg: GoalMsg = {
       role: "you", color: "#9ad9ff",
-      text,
-      images: images.length > 0 ? attachmentThumbs(images) : undefined,
+      text: visibleText,
+      context: appendDocumentAttachmentText(text, images),
+      images: visualImages.length > 0 ? attachmentThumbs(visualImages) : undefined,
       ts: Date.now(), seq: nextSeq(),
     };
     setSupChat(prev => [...prev, userMsg]);
@@ -10500,6 +10610,12 @@ export function AgentsPage({
     // when it's wired directly as the onRun handler.
     let text = (typeof overrideText === "string" ? overrideText : goal).trim();
     if (!text) return;
+    if (!selectedProject || !projectCanRun({ ...selectedProject, location: runCwd })) {
+      setRunError(selectedProject?.repo_url
+        ? "This project is not installed on this computer. Clone its GitHub repository here before running agents."
+        : "This project belongs to another computer and has no GitHub repository. Create and push the repository on the source computer first.");
+      return;
+    }
     // Key the shared team memory by this project's stable ID so it matches across
     // machines (and syncs via the vault) rather than by the per-PC folder path.
     setTeamMemoryScope(selectedProjectId);
@@ -10763,6 +10879,13 @@ export function AgentsPage({
       } catch { /* no brief yet — proceed without */ }
     }
 
+    // Resolve Notebook continuation exactly once from `finally`. This run has
+    // several legitimate early-return paths (no routable specialist, no
+    // specialist reply, auth/preflight stop). When continuation lived only at
+    // the bottom of the happy path those returns silently stranded auto-feed
+    // after its first card.
+    let notebookRunCompletedCleanly = false;
+    let notebookPauseReason = "the run ended before completing";
     try {
       // ===== Preflight: a referenced file the sandbox can't read → AUTO-INGEST it =====
       // The #1 silent 20-minute time-sink: the goal points at a file OUTSIDE the
@@ -11062,8 +11185,8 @@ export function AgentsPage({
         setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now(), seq: nextSeq() }]);
         setPhase("done");
         setRunEndedAt(Date.now());
-        if (okRun) scheduleNotebookAutoFeed(); // 📓 clean finish → next pending step
-        else notifyAutoFeedPaused("the solo run did not finish cleanly");
+        notebookRunCompletedCleanly = okRun;
+        if (!okRun) notebookPauseReason = "the solo run did not finish cleanly";
         return;
       }
 
@@ -12393,12 +12516,12 @@ export function AgentsPage({
       } catch { /* tracing must never break a run */ }
 
       setPhase("done");
-      scheduleNotebookAutoFeed(); // 📓 clean finish → next pending step
+      notebookRunCompletedCleanly = true;
     } catch (e: any) {
       if (e?.name === "AbortError") {
         setRunError("Stopped.");
         appendLog("system", { role: "system", color: "#ff8c8c", text: "⏹ Stopped by user." });
-        notifyAutoFeedPaused("the run was stopped");
+        notebookPauseReason = "the run was stopped";
       } else {
         const clean = cleanAgentError(e);
         setRunError(clean);
@@ -12407,7 +12530,7 @@ export function AgentsPage({
           role: "system", color: "#ff8c8c", text: `⚠ ${clean}`,
           action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
         });
-        notifyAutoFeedPaused("the run ended with an error");
+        notebookPauseReason = "the run ended with an error";
       }
       setPhase("idle");
     } finally {
@@ -12425,6 +12548,11 @@ export function AgentsPage({
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
         markNotebookStepFinished(selectedProjectId, sid, now);
       }
+      // Busy/reentrancy flags are clear now, so every exit path makes one
+      // deterministic Notebook decision. A clean run advances the next card;
+      // any other outcome leaves pending cards untouched and explains the pause.
+      if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();
+      else notifyAutoFeedPaused(notebookPauseReason);
       clearActive();
       abortRef.current = null;
       agentRunAborts.delete(agentSessId);
@@ -12723,6 +12851,136 @@ export function AgentsPage({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId]);
 
+  // A synced project without a folder binding on THIS device is intentionally
+  // non-runnable. Do not mount the canvas/composer at all: that previously let
+  // an empty cwd fall through to the app/install directory. The GitHub repo is
+  // the portable identity; cloning it creates a fresh local path for this PC.
+  if (projectHubOpen || !selectedProject || !projectCanRun({ ...selectedProject, location: locationDraft })) {
+    return (
+      <div data-ui="AgenticProjectHub" style={{
+        height: "100%", minHeight: 0, overflow: "auto", padding: "clamp(20px,4vw,54px)",
+        color: "var(--fg)", background:
+          "radial-gradient(circle at 84% 12%, rgba(var(--accent-rgb),0.13), transparent 34%), var(--bg-panel)",
+      }}>
+        <ProjectSettingsDialog
+          open={newProjOpen}
+          mode={settingsMode}
+          onClose={() => setNewProjOpen(false)}
+          teams={teams}
+          pickedTeamId={pickedTeamId}
+          onPickTeam={changeProjectTeam}
+          resolvedTeamLabel={activeTeamTemplate?.display ?? null}
+          onResetTeam={resetTeamToTemplate}
+          defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+          onCreated={onProjectCreated}
+          project={selectedProject}
+          location={locationDraft}
+          effectiveCwd={runCwd}
+          onChangeLocation={(value) => setProjectLocationDraft(value, selectedProjectId, true)}
+          trustWrites={trustWrites}
+          onToggleTrustWrites={() => setTrustWritesOverride(v => !(v ?? selectedProject?.trust_writes ?? false))}
+          fullAccess={fullAccess}
+          onToggleFullAccess={onToggleFullAccess}
+          bridgeOn={bridgeOn}
+          isolationRequested={isolationRequested}
+          onAfterRename={() => { void reloadProjects(); }}
+          onAfterDelete={() => { void reloadProjects().then(rows => { setSelectedProjectId(rows[0]?.id ?? ""); setPickedTeamId(null); }); }}
+        />
+        <div style={{ maxWidth: 1180, margin: "0 auto", display: "flex", flexDirection: "column", gap: 22 }}>
+          <div style={{ display: "flex", gap: 18, alignItems: "flex-end", flexWrap: "wrap" }}>
+            <div style={{ flex: 1, minWidth: 280 }}>
+              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.6, textTransform: "uppercase" }}>
+                Agentic project command center
+              </div>
+              <h1 style={{ margin: "7px 0 5px", color: "var(--fg-strong)", fontSize: "clamp(27px,4vw,44px)", lineHeight: 1.05 }}>
+                GitHub carries the project. This PC carries its folder.
+              </h1>
+              <div style={{ color: "var(--fg-muted)", maxWidth: 760, lineHeight: 1.6, fontSize: 13.5 }}>
+                Chats, team memory and project rules can follow your account. An absolute folder never does.
+                Projects from another computer stay ghosted until their repository is cloned locally.
+              </div>
+            </div>
+            <button onClick={onNewProject} style={{
+              height: 44, padding: "0 18px", border: "none", borderRadius: 12,
+              background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 850, cursor: "pointer",
+              boxShadow: "0 0 26px rgba(var(--accent-rgb),0.22)",
+            }}>+ New GitHub-first project</button>
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(250px,1fr))", gap: 14 }}>
+            {projects.map((p) => {
+              const local = projectAvailability(p) === "local";
+              const selected = p.id === selectedProjectId;
+              return (
+                <button key={p.id} onClick={() => {
+                  setSelectedProjectId(p.id);
+                  setProjectLocationDraft(p.location || "", p.id);
+                  setPickedTeamId(null);
+                  setProjectMaterializeError("");
+                  if (projectAvailability(p) === "local") setProjectHubOpen(false);
+                }} style={{
+                  minHeight: 142, padding: 16, textAlign: "left", cursor: "pointer", borderRadius: 15,
+                  border: `1px solid ${selected ? "var(--accent)" : "var(--border)"}`,
+                  background: selected ? "rgba(var(--accent-rgb),0.10)" : "var(--bg-card)",
+                  opacity: local ? 1 : 0.58, filter: local ? "none" : "saturate(.55)",
+                  boxShadow: selected ? "0 0 25px rgba(var(--accent-rgb),0.12)" : "none",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <span style={{ fontSize: 20 }}>{local ? "🟢" : "◌"}</span>
+                    <b style={{ color: "var(--fg-strong)", fontSize: 15, flex: 1 }}>{p.name}</b>
+                    <span style={{ color: local ? "var(--ok)" : "var(--warn)", fontSize: 10.5, fontWeight: 800 }}>
+                      {local ? "THIS PC" : "REMOTE"}
+                    </span>
+                  </div>
+                  <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 9 }}>
+                    {local ? p.location : `Created on ${projectOriginLabel(p)}`}
+                  </div>
+                  <div style={{ color: p.repo_url ? "var(--accent-ink)" : "var(--warn)", fontSize: 11, marginTop: 8 }}>
+                    {p.repo_url ? `🐙 ${p.repo_url.replace(/^https?:\/\//, "")}` : "No GitHub repository — not portable"}
+                  </div>
+                </button>
+              );
+            })}
+            {projects.length === 0 && (
+              <div style={{ padding: 24, border: "1px dashed var(--border-strong)", borderRadius: 15, color: "var(--fg-muted)" }}>
+                No projects yet. Create one and keep the recommended private GitHub repository enabled.
+              </div>
+            )}
+          </div>
+
+          {selectedProject && !locationDraft.trim() && (
+            <div data-ui="GhostProjectNotice" style={{
+              padding: "20px 22px", borderRadius: 16, background: "var(--bg-card)",
+              border: "1px solid var(--warn)", display: "flex", alignItems: "center",
+              gap: 18, flexWrap: "wrap", boxShadow: "0 14px 40px rgba(0,0,0,.18)",
+            }}>
+              <div style={{ fontSize: 34, opacity: .75 }}>◌</div>
+              <div style={{ flex: 1, minWidth: 260 }}>
+                <div style={{ color: "var(--fg-strong)", fontSize: 17, fontWeight: 850 }}>
+                  {selectedProject.name} is not installed on this PC
+                </div>
+                <div style={{ color: "var(--fg-muted)", fontSize: 12.5, lineHeight: 1.55, marginTop: 4 }}>
+                  Its original folder belongs to <b>{projectOriginLabel(selectedProject)}</b> and is never reused here.
+                  {selectedProject.repo_url
+                    ? " Clone the GitHub repository to create a new local folder and bind only this computer."
+                    : " This project has no GitHub repository. On the source computer, create and push the repo first; then sync again."}
+                </div>
+                {projectMaterializeError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 8 }}>{projectMaterializeError}</div>}
+              </div>
+              {selectedProject.repo_url && (
+                <button onClick={cloneSelectedProjectHere} disabled={projectMaterializing} style={{
+                  height: 42, padding: "0 17px", borderRadius: 11, border: "none",
+                  background: "var(--accent)", color: "var(--accent-fg)", fontWeight: 800,
+                  cursor: projectMaterializing ? "wait" : "pointer", opacity: projectMaterializing ? .65 : 1,
+                }}>{projectMaterializing ? "Cloning…" : "🐙 Clone on this PC"}</button>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div style={{ display:"flex", flexDirection:"column", height:"100%", minHeight:0 }}>
       {directivesPanelOpen && selectedProjectId && (
@@ -12764,6 +13022,11 @@ export function AgentsPage({
         // crowd the old project strip now lives in the ⚙ ProjectSettingsDialog.
         leftSlot={
           <div style={{ display:"flex", alignItems:"center", gap:6, flexShrink:0 }}>
+            <button
+              onClick={() => setProjectHubOpen(true)}
+              title="Open the full project manager"
+              style={{ height:38, padding:"0 11px", border:"1px solid var(--border)", borderRadius:10, background:"var(--bg-card)", color:"var(--accent-ink)", fontSize:12, fontWeight:800, cursor:"pointer" }}
+            >⌁ Projects</button>
             <span style={{ fontSize:15 }} title="Project">📁</span>
             <select
               data-ui="ProjectCombo"
@@ -12780,8 +13043,17 @@ export function AgentsPage({
             >
               {projects.length === 0
                 ? <option value="">(no projects — + New)</option>
-                : projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                : projects.map(p => (
+                  <option key={p.id} value={p.id}>
+                    {p.location ? p.name : `◌ ${p.name} — ${p.repo_url ? "clone GitHub repo" : "source PC only"}`}
+                  </option>
+                ))}
             </select>
+            {selectedProject && (
+              <span title={`Created on ${projectOriginLabel(selectedProject)}. The active folder is bound only to this PC.`} style={{ fontSize: 10.5, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>
+                🖥 {projectOriginLabel(selectedProject)}
+              </span>
+            )}
             <button
               data-ui="ProjectSettingsBtn"
               onClick={onOpenSettings}
@@ -12943,6 +13215,12 @@ export function AgentsPage({
         initialIdea={brainstormSeed}
         onBriefSaved={() => setHasBriefForProject(true)}
         projectId={selectedProjectId}
+        hasTeam={!!activeTeam?.agents.length}
+        onOpenNotebook={() => {
+          setBrainstormOpen(false);
+          setBrainstormSeed("");
+          window.setTimeout(() => window.dispatchEvent(new CustomEvent("owllm:open-run-notebook")), 0);
+        }}
         // Apply the assembled roster to THIS project (persists), then clear any
         // template override + reload so the canvas shows the new team.
         onTeamApplied={() => { setPickedTeamId(null); reloadProjects(); }}

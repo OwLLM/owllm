@@ -454,6 +454,14 @@ export function useNeedsFirstRunWizard(): {
       cancelled = true;
     };
   }, []);
+  useEffect(() => {
+    const dismissForCloudSetup = () => {
+      try { localStorage.setItem("owllm.wizard.completed", "1"); } catch { /* ignore */ }
+      setNeeded(false);
+    };
+    window.addEventListener("owllm:skip-module-wizard", dismissForCloudSetup);
+    return () => window.removeEventListener("owllm:skip-module-wizard", dismissForCloudSetup);
+  }, []);
   return {
     needed,
     setDismissed: () => {

@@ -73,7 +73,7 @@ export default function KvmNodePanel() {
         <span style={{ fontSize: 11, color: "var(--fg-muted)", flex: 1 }}>
           let agents see + operate a remote computer through a NanoKVM/PiKVM (kvm_node tool)
         </span>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: status?.enabled ? "var(--accent)" : "var(--fg-muted)" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: status?.enabled ? "var(--accent-ink)" : "var(--fg-muted)" }}>
           <input
             type="checkbox"
             checked={status?.enabled ?? false}
@@ -119,7 +119,7 @@ export default function KvmNodePanel() {
                 <span style={{ fontWeight: 700 }}>{n.host}</span>
                 {n.port != null && <span style={{ color: "var(--fg-muted)" }}>:{n.port}</span>}
                 <span style={{ color: "var(--fg-muted)" }}>{n.username || "(no user)"}</span>
-                <span style={{ color: n.hasPassword ? "var(--accent)" : "#ffcf5a" }}>{n.hasPassword ? "🔒 password saved" : "⚠ no password"}</span>
+                <span style={{ color: n.hasPassword ? "var(--accent-ink)" : "#ffcf5a" }}>{n.hasPassword ? "🔒 password saved" : "⚠ no password"}</span>
                 <span style={{ flex: 1 }} />
                 <button className="ghost-btn" onClick={() => { setNHost(n.host); setNUser(n.username); setNPort(n.port != null ? String(n.port) : ""); setNPass(""); }} title="Load into the form to update (leave password blank to keep it)" style={{ height: 18, padding: "0 6px", fontSize: 10.5 }}>edit</button>
                 <button className="ghost-btn" onClick={() => void deleteNode(n.host)} title="Remove this saved Node" style={{ height: 18, width: 18, padding: 0, fontSize: 10, color: "#ff8c8c" }}>✕</button>

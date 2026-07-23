@@ -62,6 +62,7 @@ export const BUNDLED_CLOUD_CATALOGUE: CloudCatalogue = {
     { id: "gpt-4o-mini",   display: "GPT-4o mini",    api: true },
   ],
   kimi: [
+    { id: "kimi-k3",          display: "Kimi K3",                sub: true, api: true },
     { id: "kimi-k2.7",        display: "Kimi K2.7",              sub: true, api: true },
     { id: "kimi-k2.6",        display: "Kimi K2.6",              sub: true, api: true },
     { id: "kimi-k2.5",        display: "Kimi K2.5 (multimodal)", sub: true, api: true },

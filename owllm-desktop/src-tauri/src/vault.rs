@@ -527,6 +527,13 @@ struct VaultProject {
     team_default_model_id: String,
     created_at: String,
     updated_at: String,
+    /// Portable project identity. Local paths never cross devices; this does.
+    #[serde(default)]
+    repo_url: String,
+    #[serde(default)]
+    created_device_id: String,
+    #[serde(default)]
+    created_device_name: String,
     /// LEGACY single path. Kept for back-compat with vault files/clients written
     /// before `locations` existed, but a folder path is device-LOCAL and is no
     /// longer adopted from here on a fresh device (that caused a Windows `C:\…`
@@ -805,11 +812,15 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
     }
     crate::projects::ensure_schema(&conn)?;
     let _ = crate::memory::ensure_schema(&conn);
+    let self_id = crate::remote_devices::self_device_id().unwrap_or_default();
     let mut stmt = conn
         .prepare(
             "SELECT id, name, description, team_json, model_overrides_json, graph_json, \
              COALESCE(chat_json,''), COALESCE(agent_logs_json,''), team_default_model_id, \
-             created_at, updated_at, location FROM agent_projects",
+             created_at, updated_at, location, COALESCE(location_device_id, ''), \
+             COALESCE(repo_url, ''), COALESCE(created_device_id, ''), \
+             COALESCE(created_device_name, '') \
+             FROM agent_projects",
         )
         .map_err(|e| format!("prepare export: {e}"))?;
     let rows = stmt
@@ -826,7 +837,14 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
                 team_default_model_id: r.get::<_, String>(8).unwrap_or_default(),
                 created_at: r.get::<_, String>(9).unwrap_or_default(),
                 updated_at: r.get::<_, String>(10).unwrap_or_default(),
-                location: r.get::<_, String>(11).unwrap_or_default(),
+                repo_url: r.get::<_, String>(13).unwrap_or_default(),
+                created_device_id: r.get::<_, String>(14).unwrap_or_default(),
+                created_device_name: r.get::<_, String>(15).unwrap_or_default(),
+                location: if r.get::<_, String>(12).unwrap_or_default() == self_id {
+                    r.get::<_, String>(11).unwrap_or_default()
+                } else {
+                    String::new()
+                },
                 locations: HashMap::new(),
                 team_memory_json: String::new(),
                 directives_json: String::new(),
@@ -884,31 +902,45 @@ fn import_project(
     let insert_location = p
         .locations
         .get(self_id)
+        .filter(|path| std::path::Path::new(path).is_dir())
         .cloned()
         .unwrap_or_default();
-    let local_updated: Option<String> = match conn.query_row(
-        "SELECT updated_at FROM agent_projects WHERE id = ?",
+    let local_row: Option<(String, String, String, String)> = match conn.query_row(
+        "SELECT updated_at, location, COALESCE(location_device_id, ''), COALESCE(repo_url, '') \
+         FROM agent_projects WHERE id = ?",
         rusqlite::params![p.id],
-        |r| r.get::<_, String>(0),
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        },
     ) {
-        Ok(s) => Some(s),
+        Ok(row) => Some(row),
         Err(rusqlite::Error::QueryReturnedNoRows) => None,
         Err(e) => return Err(format!("probe project: {e}")),
     };
     // 1) Upsert the project row FIRST so it's guaranteed to exist before the
     //    sub-table merges below (which UPDATE flags on agent_projects).
-    let changed = match &local_updated {
+    let mut changed = match &local_row {
         None => {
             conn.execute(
-                "INSERT INTO agent_projects (id, name, description, location, trust_writes, \
+                "INSERT INTO agent_projects (id, name, description, location, location_device_id, repo_url, \
+                 created_device_id, created_device_name, trust_writes, \
                  auto_approve_all, team_json, model_overrides_json, graph_json, created_at, \
                  updated_at, team_default_model_id, chat_json, agent_logs_json) \
-                 VALUES (?1, ?2, ?3, ?4, 0, 0, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
                 rusqlite::params![
                     p.id,
                     p.name,
                     p.description,
                     insert_location,
+                    self_id,
+                    crate::projects::normalize_repo_url(&p.repo_url),
+                    p.created_device_id,
+                    p.created_device_name,
                     p.team_json,
                     p.model_overrides_json,
                     p.graph_json,
@@ -926,18 +958,22 @@ fn import_project(
             .map_err(|e| format!("insert project: {e}"))?;
             true
         }
-        Some(local) => {
+        Some((local, _, _, _)) => {
             if p.updated_at > *local {
                 // Remote is newer → adopt CONTENT, keep local path + trust flags.
                 conn.execute(
-                    "UPDATE agent_projects SET name = ?2, description = ?3, team_json = ?4, \
-                     model_overrides_json = ?5, graph_json = ?6, chat_json = ?7, \
-                     agent_logs_json = ?8, team_default_model_id = ?9, updated_at = ?10 \
+                    "UPDATE agent_projects SET name = ?2, description = ?3, repo_url = ?4, \
+                     created_device_id = ?5, created_device_name = ?6, team_json = ?7, \
+                     model_overrides_json = ?8, graph_json = ?9, chat_json = ?10, \
+                     agent_logs_json = ?11, team_default_model_id = ?12, updated_at = ?13 \
                      WHERE id = ?1",
                     rusqlite::params![
                         p.id,
                         p.name,
                         p.description,
+                        crate::projects::normalize_repo_url(&p.repo_url),
+                        p.created_device_id,
+                        p.created_device_name,
                         p.team_json,
                         p.model_overrides_json,
                         p.graph_json,
@@ -954,12 +990,71 @@ fn import_project(
             }
         }
     };
+    // Reconcile a legacy/existing row's folder binding independently of the
+    // content timestamp. Old versions stored one global `location`, so merely
+    // protecting brand-new imports left already-contaminated rows pointing at
+    // a peer PC forever.
+    if let Some((_, local_location, owner, local_repo)) = &local_row {
+        // Repo identity is portable and may be discovered after the project's
+        // content timestamp was written. Reconcile it independently so another
+        // device cannot overwrite a newly-discovered origin with blank.
+        if local_repo.trim().is_empty() && !p.repo_url.trim().is_empty() {
+            conn.execute(
+                "UPDATE agent_projects SET repo_url = ?2 WHERE id = ?1",
+                rusqlite::params![p.id, p.repo_url],
+            )
+            .map_err(|e| format!("reconcile project repo: {e}"))?;
+            changed = true;
+        }
+        let desired = p.locations.get(self_id).cloned();
+        let local_is_real = !local_location.trim().is_empty()
+            && std::path::Path::new(local_location).is_dir();
+        let belongs_to_peer = p
+            .locations
+            .iter()
+            .any(|(device, path)| device != self_id && path == local_location);
+        let reconciled = match desired {
+            // Schema migration has already validated this computer's binding.
+            // owner=self + empty is an intentional tombstone for a foreign or
+            // nonexistent path, even if an older release stamped that same bad
+            // path into this device's vault map.
+            _ if owner == self_id => None,
+            // Restore the same-device record after reinstall/ghosting, but a
+            // currently valid local folder wins: the user may just have moved
+            // it and this sync is what will publish the new binding.
+            Some(path)
+                if local_location.trim().is_empty()
+                    || (!local_is_real && path != *local_location) =>
+            {
+                Some(path)
+            }
+            Some(_) => None,
+            // Definitely inherited from another machine and not a real folder
+            // here: ghost it. If the identical path really exists on both PCs,
+            // keep it as a legitimate legacy local binding and export will add
+            // this device's own map entry below.
+            None if belongs_to_peer && !local_is_real => Some(String::new()),
+            // Unmapped legacy paths remain local and are claimed on export.
+            None => None,
+        };
+        if let Some(path) = reconciled {
+            if path != *local_location {
+                conn.execute(
+                    "UPDATE agent_projects SET location = ?2, location_device_id = ?3 WHERE id = ?1",
+                    rusqlite::params![p.id, path, self_id],
+                )
+                .map_err(|e| format!("reconcile project location: {e}"))?;
+                changed = true;
+            }
+        }
+    }
     // 2) Merge the shared team-memory — INDEPENDENT of the project's updated_at
     //    (memory writes don't bump it). Per-entry last-writer-wins.
     if !p.team_memory_json.trim().is_empty() {
         if let Ok(entries) = serde_json::from_str::<Vec<VaultMemEntry>>(&p.team_memory_json) {
             let _ = crate::memory::ensure_schema(conn);
             merge_team_memory(conn, &p.id, &entries);
+            let _ = crate::memory::reindex_team_memory_scope(conn, &p.id);
         }
     }
     // 3) Merge the rule set — unit last-writer-wins by directives_updated_at
@@ -1323,16 +1418,17 @@ mod tests {
     fn import_uses_this_devices_recorded_path() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::projects::ensure_schema(&conn).unwrap();
-        let vp = vp_with(
-            "p2",
-            &[("device-A", r"D:\x"), ("device-B", "/Users/me/proj")],
-        );
+        let local = std::env::temp_dir().join(format!("owllm-vault-p2-{}", std::process::id()));
+        std::fs::create_dir_all(&local).unwrap();
+        let local_text = local.to_string_lossy().to_string();
+        let vp = vp_with("p2", &[("device-A", r"D:\x"), ("device-B", &local_text)]);
         assert!(import_project(&conn, &vp, "device-B").unwrap());
-        assert_eq!(row_location(&conn, "p2"), "/Users/me/proj");
+        assert_eq!(row_location(&conn, "p2"), local_text);
+        let _ = std::fs::remove_dir_all(local);
     }
 
-    // An EXISTING local project keeps its own device-local path even when a
-    // newer remote arrives (content follows, path does not).
+    // An EXISTING legacy local project keeps an unmapped path even when a
+    // newer remote arrives; export will claim it for this device.
     #[test]
     fn import_keeps_existing_local_path() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -1347,5 +1443,70 @@ mod tests {
         vp.updated_at = "2026-02-01T00:00:00Z".into(); // remote newer → adopt content
         assert!(import_project(&conn, &vp, "device-B").unwrap());
         assert_eq!(row_location(&conn, "p3"), "/Users/me/local");
+    }
+
+    #[test]
+    fn import_clears_existing_foreign_legacy_path() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::projects::ensure_schema(&conn).unwrap();
+        let foreign = std::env::temp_dir()
+            .join("owllm-path-that-must-not-exist")
+            .to_string_lossy()
+            .to_string();
+        conn.execute(
+            "INSERT INTO agent_projects (id, name, location, created_at, updated_at) \
+             VALUES ('p4', 'proj', ?1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            rusqlite::params![foreign],
+        )
+        .unwrap();
+        let vp = vp_with("p4", &[("device-A", &foreign)]);
+        assert!(import_project(&conn, &vp, "device-B").unwrap());
+        assert_eq!(row_location(&conn, "p4"), "");
+    }
+
+    #[test]
+    fn import_restores_this_devices_path_on_existing_row() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::projects::ensure_schema(&conn).unwrap();
+        let local = std::env::temp_dir().join(format!("owllm-vault-p5-{}", std::process::id()));
+        std::fs::create_dir_all(&local).unwrap();
+        let local_text = local.to_string_lossy().to_string();
+        conn.execute(
+            "INSERT INTO agent_projects (id, name, location, created_at, updated_at) \
+             VALUES ('p5', 'proj', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let vp = vp_with("p5", &[("device-B", &local_text)]);
+        assert!(import_project(&conn, &vp, "device-B").unwrap());
+        assert_eq!(row_location(&conn, "p5"), local_text);
+        let _ = std::fs::remove_dir_all(local);
+    }
+
+    #[test]
+    fn import_adopts_portable_repo_without_adopting_peer_path() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::projects::ensure_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO agent_projects (id, name, location, location_device_id, repo_url, created_at, updated_at) \
+             VALUES ('portable', 'proj', '', 'device-B', '', '2026-01-01T00:00:00Z', '2026-03-01T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        let mut vp = vp_with("portable", &[("device-A", r"D:\peer\repo")]);
+        vp.repo_url = "https://github.com/acme/project.git".into();
+        // Older content timestamp on purpose: repo identity reconciles
+        // independently and the peer's absolute folder still does not.
+        vp.updated_at = "2026-02-01T00:00:00Z".into();
+        assert!(import_project(&conn, &vp, "device-B").unwrap());
+        let row: (String, String) = conn
+            .query_row(
+                "SELECT location, repo_url FROM agent_projects WHERE id = 'portable'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row.0, "");
+        assert_eq!(row.1, "https://github.com/acme/project.git");
     }
 }

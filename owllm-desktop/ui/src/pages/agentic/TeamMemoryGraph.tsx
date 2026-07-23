@@ -247,7 +247,7 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
             border: "1px solid var(--border-strong)", borderRadius: 7, cursor: "pointer",
             fontSize: 11.5, fontWeight: 600,
             background: showWorklog ? "rgba(var(--accent-rgb),0.18)" : "rgba(6,8,13,0.6)",
-            color: showWorklog ? "var(--accent)" : "var(--fg-muted)",
+            color: showWorklog ? "var(--accent-ink)" : "var(--fg-muted)",
           }}
         >{showWorklog ? "📋 Worklog shown — hide" : `📋 Show worklog (${worklogCount})`}</button>
       )}
@@ -280,7 +280,7 @@ export default function TeamMemoryGraph({ entries }: { entries: MemEntry[] }) {
             <div style={{ fontSize: 13, color: "var(--fg)" }}>{selected.label}</div>
           ) : (
             <>
-              {selected.ekey && <div style={{ display: "inline-block", fontSize: 10, fontWeight: 700, color: "var(--accent)", background: "rgba(var(--accent-rgb),0.12)", borderRadius: 5, padding: "1px 6px", marginBottom: 6 }}>{selected.ekey}</div>}
+              {selected.ekey && <div style={{ display: "inline-block", fontSize: 10, fontWeight: 700, color: "var(--accent-ink)", background: "rgba(var(--accent-rgb),0.12)", borderRadius: 5, padding: "1px 6px", marginBottom: 6 }}>{selected.ekey}</div>}
               <div style={{ fontSize: 12.5, color: "var(--fg)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{selected.content}</div>
               {selected.tags && <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 8 }}>🏷 {selected.tags}</div>}
               {selected.author && <div style={{ fontSize: 10, color: "var(--fg-muted)", marginTop: 2 }}>✍ {selected.author}</div>}

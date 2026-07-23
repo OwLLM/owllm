@@ -1303,7 +1303,7 @@ function AbliterateInfoModal({ onClose }: { onClose: () => void }) {
             style={{
               padding: "8px 18px",
               background: "linear-gradient(180deg, var(--accent) 0%, var(--accent) 100%)",
-              border: "none", color: "#fff",
+              border: "none", color: "var(--accent-fg)",
               borderRadius: 6, fontSize: 13, fontWeight: 700, cursor: "pointer",
             }}
           >Got it</button>

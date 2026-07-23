@@ -11,7 +11,7 @@
 //     as `notebook` by CodePage so all its wiring stays in one place).
 //   • bottom container: USAGE on top (VS Code-style — provider quota bars
 //     where a quota API exists + the app's own recorded traffic for EVERY
-//     model), then the agent MODE (plan / auto / chat) + Terminal toggle.
+//     model), then the agent MODE (plan / auto / chat) + Browser toggle.
 import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { type Directive } from "./dispatch";
@@ -21,11 +21,13 @@ export type CodeAgentMode = "plan" | "auto" | "chat";
 
 const WIDTH_KEY = "owllm:code:sidew";
 const TAB_KEY = "owllm:code:sidetab";
-const MIN_W = 300;
+// The inline Notebook contains multi-line working notes and step editors.
+// At 300px their usable typing width fell below 250px after card padding.
+const MIN_W = 420;
 
 type UsageWindow = { label: string; usedPct: number; resetsAt?: string | null };
 type UsageStat = { label: string; turns: number; tokensEst: number };
-type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[]; stats: UsageStat[] };
+type AccountUsage = { available: boolean; provider: string; note: string; windows: UsageWindow[]; stats: UsageStat[]; balance?: string | null };
 
 /// "34k" / "1.2M" for the tokens-estimate stat.
 function compactNum(n: number): string {
@@ -57,9 +59,6 @@ type Props = {
   /// Agent mode — drives what the composer's primary button does.
   mode: CodeAgentMode;
   onModeChange: (m: CodeAgentMode) => void;
-  /// Terminal popup (owned by CodePage; the button here just toggles it).
-  terminalOpen: boolean;
-  onToggleTerminal: () => void;
   /// Agent Browser popup (owned by CodePage; the button here just toggles it).
   browserOpen: boolean;
   onToggleBrowser: () => void;
@@ -69,14 +68,14 @@ type Props = {
   notebook: ReactNode;
 };
 
-export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, mode, onModeChange, terminalOpen, onToggleTerminal, browserOpen, onToggleBrowser, usageProvider, notebook }: Props) {
-  // ---- Resizable width: default 15% of the window, floor at the original 300px ----
+export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onDirectivesChanged, mode, onModeChange, browserOpen, onToggleBrowser, usageProvider, notebook }: Props) {
+  // ---- Resizable width: make the Notebook comfortably writable by default. ----
   const [width, setWidth] = useState<number>(() => {
     try {
       const saved = parseInt(localStorage.getItem(WIDTH_KEY) || "", 10);
       if (Number.isFinite(saved) && saved >= MIN_W) return saved;
     } catch { /* default below */ }
-    return Math.max(MIN_W, Math.round(window.innerWidth * 0.20));
+    return Math.max(MIN_W, Math.round(window.innerWidth * 0.28));
   });
   const dragRef = useRef<{ startX: number; startW: number } | null>(null);
   const onDragStart = (e: React.MouseEvent) => {
@@ -135,7 +134,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
         border: "1px solid " + (tab === t ? "rgba(var(--accent-rgb),0.4)" : "var(--border)"),
         borderBottom: "none", borderRadius: "8px 8px 0 0",
         background: tab === t ? "rgba(var(--accent-rgb),0.12)" : "transparent",
-        color: tab === t ? "var(--accent)" : "var(--fg-muted)",
+        color: tab === t ? "var(--accent-ink)" : "var(--fg-muted)",
       }}
     >{label}</button>
   );
@@ -177,7 +176,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
         </div>
       )}
 
-      {/* ---- Bottom utility container: USAGE on top, then mode + terminal ---- */}
+      {/* ---- Bottom utility container: USAGE on top, then mode + browser. ---- */}
       <div style={{ display: "flex", flexDirection: "column", gap: 6, border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", background: "var(--bg-input)", flexShrink: 0 }}>
         {/* USAGE — like VS Code: provider quota bars when the account
             reports them, plus the app's own recorded traffic for EVERY
@@ -190,19 +189,24 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
                 <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{w.label}</span>
                 <span style={{ fontWeight: 700 }}>{Math.round(w.usedPct)}%</span>
               </div>
-              <div style={{ height: 4, borderRadius: 2, background: "var(--bg-surface)", overflow: "hidden" }}>
+              {/* Track: theme-agnostic translucent grey — var(--bg-surface) vanishes on black themes. */}
+              <div style={{ height: 4, borderRadius: 2, background: "rgba(148,158,178,0.30)", overflow: "hidden" }}>
                 <div style={{ height: "100%", width: `${Math.min(100, Math.max(0, w.usedPct))}%`, borderRadius: 2, background: w.usedPct >= 90 ? "#ff8c8c" : w.usedPct >= 70 ? "#ffd27a" : "var(--accent)" }} />
               </div>
               {resetsIn(w.resetsAt) && <span style={{ fontSize: 10, color: "var(--fg-muted)" }}>{resetsIn(w.resetsAt)}</span>}
             </div>
           ))}
+          {/* Prepaid providers (Moonshot, DeepSeek…) report a balance, not quota windows. */}
+          {usage?.balance && (
+            <div style={{ fontSize: 11, color: "var(--fg)" }}>{usage.balance}</div>
+          )}
           {(usage?.stats?.length ?? 0) > 0 && usage!.stats.map((s, i) => (
             <div key={`s${i}`} style={{ display: "flex", alignItems: "baseline", fontSize: 11, color: "var(--fg)" }} title="This app's recorded traffic for this provider — token count is an estimate (~4 chars/token).">
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--fg-muted)" }}>{s.label}</span>
               <span>{s.turns} turns · ~{compactNum(s.tokensEst)} tok</span>
             </div>
           ))}
-          {usage && !usage.available && (usage.stats?.length ?? 0) === 0 && (
+          {usage && !usage.available && !usage.balance && (usage.stats?.length ?? 0) === 0 && (
             <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }} title={usage.note || ""}>
               no traffic recorded yet for this account
             </span>
@@ -219,7 +223,7 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
                 style={{
                   height: 26, padding: "0 9px", fontSize: 11, fontWeight: 700, cursor: "pointer", border: "none",
                   background: mode === m.id ? "rgba(var(--accent-rgb),0.22)" : "transparent",
-                  color: mode === m.id ? "var(--accent)" : "var(--fg-muted)",
+                  color: mode === m.id ? "var(--accent-ink)" : "var(--fg-muted)",
                 }}
               >{m.label}</button>
             ))}
@@ -229,14 +233,8 @@ export default function CodeSidePanel({ scopeId, sharedWithTeam, directives, onD
             className="btn"
             onClick={onToggleBrowser}
             title="View + drive the agents' shared web browser (browser_* tools) — see the live page, open URLs, stop the daemon."
-            style={{ fontSize: 11, padding: "3px 10px", ...(browserOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
+            style={{ fontSize: 11, padding: "3px 10px", ...(browserOpen ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
           >🌐 Browser</button>
-          <button
-            className="btn"
-            onClick={onToggleTerminal}
-            title="Open a terminal in the workspace folder — floats above the app (this app only). Drag its title bar to move it; — hides it without killing the shell."
-            style={{ fontSize: 11, padding: "3px 10px", ...(terminalOpen ? { borderColor: "var(--accent)", color: "var(--accent)" } : {}) }}
-          >🖥 Terminal</button>
         </div>
       </div>
     </div>

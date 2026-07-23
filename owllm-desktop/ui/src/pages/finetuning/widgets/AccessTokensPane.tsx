@@ -18,13 +18,10 @@ import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openWebUrl } from "../../../utils/openWebUrl";
 
-// Open in OwLLM's browser. There is intentionally no OS-browser fallback.
+// Keep user-facing links in OwLLM's persistent browser so the login profile
+// can be reused by future browser actions.
 async function openExternal(url: string) {
-  try {
-    await openWebUrl(url);
-  } catch (error) {
-    console.error("Could not open the OwLLM browser", error);
-  }
+  await openWebUrl(url);
 }
 
 type Tab = "tokens" | "info";
@@ -200,7 +197,7 @@ function TokensTab(p: {
         style={{
           padding: "6px 10px",
           background: "linear-gradient(180deg, var(--accent) 0%, var(--accent) 100%)",
-          color: "#fff",
+          color: "var(--accent-fg)",
           border: "none",
           borderRadius: 4,
           fontSize: 11,

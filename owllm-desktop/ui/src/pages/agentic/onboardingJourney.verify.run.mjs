@@ -22,8 +22,14 @@ const shell = read("../../AppShell.tsx");
 
 check(onboarding.includes('ONBOARDING_COMPLETE_KEY = "owllm:onboarding:v2:complete"'),
   "the guided journey has a dedicated persisted completion gate");
-check(onboarding.includes("if (firstRun)") && onboarding.includes('setStage("identity")') && onboarding.includes("setOpen(true)"),
-  "a fresh install opens at the identity step");
+check(onboarding.includes("if (firstRun)") && onboarding.includes("setOpen(true)"),
+  "a fresh install auto-opens the journey");
+check(onboarding.includes('data-ui="OnboardingColumns"') && onboarding.includes("Your GitHub identity")
+  && onboarding.includes("Connect your AI") && onboarding.includes("Start creating"),
+  "the journey shows its three steps as side-by-side columns");
+check(onboarding.includes('startCreating("code")') && onboarding.includes('startCreating("agents")')
+  && onboarding.includes('detail: { key: pageKey }'),
+  "step three launches straight into the Coding page or the Agentic Team");
 check(onboarding.includes("githubDeviceStart()") && onboarding.includes("githubDevicePoll(d.deviceCode)"),
   "GitHub sign-in reuses the existing secure device flow");
 check(onboarding.includes('GITHUB_SIGNUP_URL = "https://github.com/signup"') && onboarding.includes("Create a GitHub account"),
@@ -34,7 +40,7 @@ check(onboarding.includes("ChatGPT Plus / Pro") && onboarding.includes("Claude P
   && onboarding.includes("Google AI Pro / Ultra") && onboarding.includes("Kimi")
   && onboarding.includes("SuperGrok / X Premium+"),
   "subscription choices are described using plans people recognize");
-check(onboarding.includes('data-ui="OnboardingAccountLoginPanel"') &&
+check(onboarding.includes('dataUi="OnboardingAccountLoginPanel"') &&
       onboarding.includes('data-ui="OnboardingInlineSubscriptionChoices"') &&
       onboarding.includes("OwLLM opens the existing Accounts page with that provider highlighted"),
   "AI account login choices are prominent on the first onboarding screen");

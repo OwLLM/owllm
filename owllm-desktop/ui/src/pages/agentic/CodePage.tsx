@@ -19,14 +19,16 @@ import { chatRuntime } from "../../runtime/chatRuntime";
 import { setRunActivity } from "../../runtime/runActivity";
 import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToImageAttachment, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
 import type { ToolCall, ToolExecResult } from "./localTools";
-import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, type TeamMemoryPack } from "./localTools";
+import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
+import { projectAvailability, projectOriginLabel } from "./projectPortability";
+import { savedPageIdsForLocalProject } from "./codeProjectPages";
 import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
@@ -37,7 +39,8 @@ import {
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
 import { isolationBadge } from "./isolationBadge";
-import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubStatus } from "./github";
+import { githubStatus, githubConnect, githubDisconnect, githubListRepositories, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubRepository, type GithubStatus } from "./github";
+import { openSyncOnboarding } from "../core/AccountSyncModal";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
   sandboxProvision, sandboxLoginStatus, sandboxConvertProject,
@@ -109,6 +112,12 @@ type CodeState = {
   draft: string;
   busy: boolean;
   status: string;
+  /// Portable project identity + origin label. The absolute workspace remains
+  /// local to this device and is denied from vault sync.
+  projectId?: string;
+  repoUrl?: string;
+  createdDeviceId?: string;
+  createdDeviceName?: string;
   // ---- per-page git-worktree isolation (every page = its own branch off HEAD) ----
   projectRoot?: string;    // the REAL repo the worktree was cut from (merge target)
   branch?: string;         // the worktree's branch
@@ -172,18 +181,104 @@ type WtCreate =
 
 // ---- Multi-page shell state (the tab strip) --------------------------------
 type CodePageMeta = { id: string; title: string };
+type ProjectCatalogRow = {
+  id: string; name: string; description: string; location: string;
+  repo_url: string; created_device_id: string; created_device_name: string;
+  team: string[]; trust_writes: boolean; auto_approve_all: boolean;
+  team_default_model_id: string; graph_json: string; chat_json: string;
+  agent_logs_json: string; updated_at: string;
+};
+type OpenProjectPagesDetail = {
+  project: Pick<ProjectCatalogRow, "id" | "name" | "location">;
+  handled: boolean;
+};
+const OPEN_PROJECT_PAGES_EVENT = "owllm:code:open-project-pages";
+type ProjectScopeRow = { id: string; location: string; repo_url?: string };
 const PAGES_KEY = "owllm:code:pages";
 const ACTIVE_PAGE_KEY = "owllm:code:activePage";
 const PAGE_SESSION_PREFIX = "owllm:code:page:";
 function newPageId(): string { return `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
+
+function hasRecoverablePageState(s: Partial<CodeState>): boolean {
+  return Boolean(
+    s.workspace
+    || s.projectRoot
+    || s.chatMode
+    || s.pageRename
+    || s.draft
+    || (Array.isArray(s.messages) && s.messages.length > 0)
+    || (Array.isArray(s.secondaryMessages) && s.secondaryMessages.length > 0)
+    || (Array.isArray(s.tasks) && s.tasks.length > 0)
+  );
+}
+
+function recoveredPageTitle(s: Partial<CodeState>): string {
+  const parts = (s.projectRoot || s.workspace || "").split(/[\\/]/).filter(Boolean);
+  // An isolated worktree ends in <project>/<page>/code. Older records may not
+  // carry projectRoot, so recover the project name from that stable layout.
+  const folder = s.projectRoot
+    ? parts[parts.length - 1]
+    : parts[parts.length - 1] === "code" && parts.length >= 3
+      ? parts[parts.length - 3]
+      : parts[parts.length - 1];
+  const rename = (s.pageRename || "").trim();
+  return folder ? (rename ? `${folder}(${rename})` : folder) : rename || "Recovered page";
+}
+
 function loadPages(): CodePageMeta[] {
+  let pages: CodePageMeta[] = [];
   try {
     const a = JSON.parse(localStorage.getItem(PAGES_KEY) || "[]");
-    return Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
-  } catch { return []; }
+    pages = Array.isArray(a) ? a.filter((p) => p && typeof p.id === "string") : [];
+  } catch { /* rebuild from the per-page records below */ }
+
+  // The catalog and the sessions are separate localStorage writes. A crash,
+  // profile migration or old narrow state mirror can therefore leave complete
+  // sessions orphaned behind an empty/partial catalog. Reconstruct missing tabs
+  // from every substantive per-page record before React gets a chance to save a
+  // default one-page catalog over the evidence.
+  try {
+    const known = new Set(pages.map((p) => p.id));
+    const recovered: CodePageMeta[] = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith(PAGE_SESSION_PREFIX)) continue;
+      const id = key.slice(PAGE_SESSION_PREFIX.length);
+      if (!id || known.has(id)) continue;
+      const raw = localStorage.getItem(key);
+      if (!raw) continue;
+      const state = JSON.parse(raw) as Partial<CodeState>;
+      if (!hasRecoverablePageState(state)) continue;
+      known.add(id);
+      recovered.push({ id, title: recoveredPageTitle(state) });
+    }
+    recovered.sort((a, b) => a.id.localeCompare(b.id));
+    pages = [...pages, ...recovered];
+  } catch { /* one malformed record must not block the Code page */ }
+  return pages;
 }
 function savePages(pages: CodePageMeta[]): void {
   try { localStorage.setItem(PAGES_KEY, JSON.stringify(pages)); } catch { /* best effort */ }
+}
+
+// Project rows and Coding tabs are persisted separately. Opening a project
+// should restore every saved page that belongs to this device's checkout, not
+// replace the current page with a blank worktree. Exact local-path matching is
+// intentional: a repo URL/project id may refer to a different PC's checkout,
+// whose absolute paths must never become runnable here.
+function savedPageMetasForLocalProject(project: Pick<ProjectCatalogRow, "location">): CodePageMeta[] {
+  const catalog = new Map(loadPages().map((page) => [page.id, page]));
+  return savedPageIdsForLocalProject(localStorage, project.location, PAGE_SESSION_PREFIX)
+    .map((id) => {
+      const known = catalog.get(id);
+      if (known) return known;
+      try {
+        const state = JSON.parse(localStorage.getItem(pageSessionKey(id)) || "{}") as Partial<CodeState>;
+        return { id, title: recoveredPageTitle(state) };
+      } catch {
+        return { id, title: "Recovered page" };
+      }
+    });
 }
 
 const PSYCHEDELIC_AURA_STOPS = "#3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b";
@@ -295,8 +390,11 @@ const CODE_RECENTS_MAX = 12;
 // The "New chat" surface keeps a list of past conversations in localStorage so
 // they survive tab switches AND app restarts (the chat used to be plain useState
 // that evaporated). Each thread is one conversation; the newest is first.
-type ChatMsg = { role: "user" | "assistant"; content: string; thinking?: string; images?: { src: string; alt?: string }[] };
-type ChatThread = { id: string; title: string; ts: number; messages: ChatMsg[] };
+type ChatMsg = { role: "user" | "assistant"; content: string; context?: string; thinking?: string; images?: { src: string; alt?: string }[] };
+type ChatThread = {
+  id: string; title: string; ts: number; messages: ChatMsg[];
+  createdDeviceId?: string; createdDeviceName?: string;
+};
 const CHATS_KEY = "owllm:code:chats";
 const CHATS_MAX = 60;
 // The just-chat surface is GLOBAL (one thread list shared by every page). Its
@@ -354,14 +452,20 @@ function loadCodeSession(ws: string): CodeState | null {
     const raw = localStorage.getItem(codeSessionKey(ws));
     if (!raw) return null;
     const s = JSON.parse(raw) as Partial<CodeState>;
-    return closeStaleTimer({ ...DEFAULT_CODE_STATE, ...s, workspace: ws, busy: false });
+    return closeStaleTimer({
+      ...DEFAULT_CODE_STATE,
+      ...s,
+      projectRoot: s.projectRoot || ws,
+      busy: false,
+    });
   } catch { return null; }
 }
 
 function saveCodeSession(s: CodeState | null | undefined): void {
-  if (!s || !s.workspace) return; // no folder → nothing to save (onboarding state)
+  const root = (s?.projectRoot || s?.workspace || "").trim();
+  if (!s || !root) return; // no folder → nothing to save (onboarding state)
   try {
-    localStorage.setItem(codeSessionKey(s.workspace), JSON.stringify({ ...s, busy: false }, dropImages));
+    localStorage.setItem(codeSessionKey(root), JSON.stringify({ ...s, busy: false }, dropImages));
   } catch { /* quota / unavailable — best effort */ }
 }
 
@@ -524,12 +628,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setChatDraft = (v: string) => setChatField("draft", v);
   const setChatBusy = (v: boolean) => setChatField("busy", v);
   const [showHistory, setShowHistory] = useState(false);
-  const [chatImages, setChatImages] = useState<Attachment[]>([]);
+  const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
   // Project-coding composer image attachments (paste / drag-drop / picker) — the
   // same capability the just-chat box and the agentic/fine-tuning chats have, so
   // every chat behaves the same. Sent with the next message, then cleared.
-  const [codeImages, setCodeImages] = useState<Attachment[]>([]);
+  const [codeAttachments, setCodeAttachments] = useState<Attachment[]>([]);
   const codeFileRef = useRef<HTMLInputElement | null>(null);
   // Composer textareas — refs so "Forward" can drop the text into the target
   // agent's draft and focus it for editing before Send (compose-then-send).
@@ -593,24 +697,28 @@ function CodeWorkspace({ pageId, onTitle }: {
       : c));
   const newChat = () => {
     const id = newThreadId();
-    setChats((cs) => [{ id, title: "New chat", ts: Date.now(), messages: [] }, ...cs]);
-    setChatId(id); setShowHistory(false); setChatImages([]); setChatDraft("");
+    setChats((cs) => [{
+      id, title: "New chat", ts: Date.now(), messages: [],
+      createdDeviceId: deviceIdentity.device_id,
+      createdDeviceName: deviceIdentity.name,
+    }, ...cs]);
+    setChatId(id); setShowHistory(false); setChatAttachments([]); setChatDraft("");
   };
   const deleteThread = (id: string) => { setChats((cs) => cs.filter((c) => c.id !== id)); if (chatId === id) setChatId(""); };
 
-  // Paste (Ctrl+V) an image from the clipboard into the chat, or pick files.
+  // Paste/drop/pick images and documents. Documents are parsed locally before
+  // they enter state, so corrupt/unsupported files surface immediately.
   const addChatFiles = async (files: FileList | File[]) => {
     for (const f of Array.from(files)) {
-      if (!f.type.startsWith("image/")) continue;
-      try { const a = await fileToImageAttachment(f); setChatImages((x) => [...x, a]); }
+      try { const a = await fileToChatAttachment(f); setChatAttachments((x) => [...x, a]); }
       catch (e: any) { setStatus(String(e?.message ?? e)); }
     }
   };
   const onChatPaste = (e: ClipboardEvent<HTMLTextAreaElement>) => {
-    const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/"));
-    if (imgs.length === 0) return; // let normal text paste through
+    const files = Array.from(e.clipboardData?.files ?? []);
+    if (files.length === 0) return; // let normal text paste through
     e.preventDefault();
-    void addChatFiles(imgs);
+    void addChatFiles(files);
   };
   // SESSION state (conversation, Kanban, workspace, model, draft) lives in the
   // shared chatRuntime store so it survives leaving this page and coming back.
@@ -631,11 +739,35 @@ function CodeWorkspace({ pageId, onTitle }: {
     // Persist EVERY mutation (debounced) under this page id, with a final flush
     // after unmount / stream-end — the "coded for an hour, closed the app,
     // nothing saved" fix, now per page.
-    chatRuntime.registerPersister(SID, (payload) => savePageSession(pageId, payload as CodeState));
+    chatRuntime.registerPersister(SID, (payload) => {
+      const state = payload as CodeState;
+      savePageSession(pageId, state);
+      // A second, project-root keyed copy makes "Recent projects → reopen"
+      // restore the conversation even when its old page catalog was lost.
+      saveCodeSession(state);
+    });
   }
   // Recent projects, for the onboarding screen shown when no folder is open.
   const [recents, setRecents] = useState<string[]>(getCodeRecents);
   const [recentsMeta, setRecentsMeta] = useState<Record<string, RecentMeta>>(getRecentsMeta);
+  const [catalogProjects, setCatalogProjects] = useState<ProjectCatalogRow[]>([]);
+  const [catalogBusy, setCatalogBusy] = useState(false);
+  const [catalogError, setCatalogError] = useState("");
+  const [ghostProjectId, setGhostProjectId] = useState("");
+  const [deviceIdentity, setDeviceIdentity] = useState<{ device_id: string; name: string }>({ device_id: "", name: "This PC" });
+  const refreshProjectCatalog = () =>
+    invoke<ProjectCatalogRow[]>("list_projects")
+      .then((rows) => { setCatalogProjects(rows); return rows; })
+      .catch(() => [] as ProjectCatalogRow[]);
+  useEffect(() => {
+    void refreshProjectCatalog();
+    void invoke<{ device_id: string; name: string }>("device_get_identity")
+      .then((d) => setDeviceIdentity(d))
+      .catch(() => {});
+    const refresh = () => { void refreshProjectCatalog(); };
+    window.addEventListener("owllm:projects:refresh", refresh);
+    return () => window.removeEventListener("owllm:projects:refresh", refresh);
+  }, []);
   // Inline rename: which recent is being renamed + the draft text.
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -747,15 +879,31 @@ function CodeWorkspace({ pageId, onTitle }: {
     mq.addEventListener("change", onChange);
     return () => mq.removeEventListener("change", onChange);
   }, []);
+  const normProjectPath = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+  const fallbackProjectScope = (folder: string) => `code:${normProjectPath(folder)}`;
+  const resolveFolderProjectScope = async (folder: string, apply = true): Promise<string> => {
+    const clean = folder.trim();
+    if (!clean) return "";
+    const name = clean.replace(/^.*[\\/]/, "") || "Code project";
+    const row = await invoke<ProjectScopeRow>("resolve_project_for_location", {
+      input: { location: clean, name },
+    });
+    const id = row.id || fallbackProjectScope(clean);
+    if (apply) {
+      setRuleScope((prev) => (prev.id === id && prev.shared ? prev : { id, shared: true }));
+      try { setDirectives(await invoke<Directive[]>("directives_list", { projectId: id })); }
+      catch { setDirectives([]); }
+    }
+    return id;
+  };
   // Resolve the rules/notebook scope whenever the folder changes: prefer the
   // matching AGENTIC project id (shared rule set + notebook with the team),
   // fall back to a stable per-folder key.
   useEffect(() => {
     const folder = (projectRoot || workspace || "").trim();
-    const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
     if (!folder) { lastScopeFolderRef.current = ""; setRuleScope({ id: "", shared: false }); setDirectives([]); return; }
-    const nf = norm(folder);
-    const fallbackId = `code:${nf}`;
+    const nf = normProjectPath(folder);
+    const fallbackId = fallbackProjectScope(folder);
     // Folder switched → drop the previous project's scope IMMEDIATELY so its
     // notebook and rules can never linger on screen while the async project
     // lookup runs (or if it hangs). The lookup below only UPGRADES this to the
@@ -772,9 +920,8 @@ function CodeWorkspace({ pageId, onTitle }: {
       let id = fallbackId;
       let shared = false;
       try {
-        const rows = await invoke<{ id: string; location: string }[]>("list_projects");
-        const hit = (rows || []).find((r) => r.location && norm(r.location) === nf);
-        if (hit) { id = hit.id; shared = true; }
+        id = await resolveFolderProjectScope(folder, false);
+        shared = true;
       } catch { /* no projects table reachable — per-folder scope */ }
       if (!alive) return;
       setRuleScope((prev) => (prev.id === id && prev.shared === shared ? prev : { id, shared }));
@@ -920,6 +1067,42 @@ function CodeWorkspace({ pageId, onTitle }: {
   // events only while the user is near the bottom (contentKey = message count).
   const transcriptSticky = useStickyScroll(messages.length, workspace);
 
+  const ensureCatalogProject = async (dir: string, preferredName?: string): Promise<ProjectCatalogRow | null> => {
+    const norm = (p: string) => p.replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+    const rows = await invoke<ProjectCatalogRow[]>("list_projects").catch(() => catalogProjects);
+    const existing = rows.find((p) => p.location && norm(p.location) === norm(dir));
+    let repoUrl = await invoke<string>("github_repo_url", { cwd: dir }).catch(() => "");
+    if (existing) {
+      if (repoUrl && repoUrl !== existing.repo_url) {
+        await invoke("update_project", { input: { id: existing.id, repo_url: repoUrl } });
+      }
+      const next = { ...existing, repo_url: repoUrl || existing.repo_url };
+      setCatalogProjects(rows.map((p) => p.id === next.id ? next : p));
+      return next;
+    }
+    try {
+      const row = await invoke<ProjectCatalogRow>("create_project", {
+        input: {
+          name: preferredName || dir.replace(/^.*[\\/]/, "") || "Coding project",
+          description: "Coding workspace",
+          location: dir,
+          repo_url: repoUrl,
+          create_location: false,
+          project_kind: "coding",
+          team: [],
+          graph_json: "",
+          team_default_model_id: "",
+          trust_writes: true,
+          auto_approve_all: false,
+        },
+      });
+      setCatalogProjects((prev) => [row, ...prev.filter((p) => p.id !== row.id)]);
+      return row;
+    } catch {
+      return null;
+    }
+  };
+
   // Switch the page to a project folder: save whatever's open now, then load
   // THAT folder's saved session (conversation + Kanban + draft + model), or
   // start a fresh one carrying the current model selection over. Updates the
@@ -931,6 +1114,15 @@ function CodeWorkspace({ pageId, onTitle }: {
   const openWorkspace = async (dir: string) => {
     if (!dir || busy) return;
     const name = dir.replace(/^.*[\\/]/, "");
+    const catalogProject = await ensureCatalogProject(dir, name);
+    const normPath = (p: string | undefined) =>
+      (p || "").replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
+    const reopeningCurrent = normPath(stx.projectRoot || stx.workspace) === normPath(dir);
+    // Prefer the live page when it already owns this project. Otherwise recover
+    // the latest project-root copy written by the persister. This is evaluated
+    // BEFORE the preparing state so opening a folder can never blank the chat.
+    const recovered = reopeningCurrent ? stx : loadCodeSession(dir);
+    const base = recovered ?? DEFAULT_CODE_STATE;
     // Switching THIS page to a different project: drop the old worktree in the
     // BACKGROUND so it doesn't block (or leak). Unmerged work is the user's to
     // merge before switching.
@@ -943,9 +1135,18 @@ function CodeWorkspace({ pageId, onTitle }: {
     // invoke below is async (runs on a Rust thread), so the UI stays responsive.
     // Re-opening the SAME project (worktree self-heal / re-pick) keeps the
     // page's rename; switching to a different project starts unnamed.
-    const keepRename = (stx.projectRoot === dir || stx.workspace === dir) ? stx.pageRename : undefined;
+    const keepRename = reopeningCurrent ? stx.pageRename : undefined;
     chatRuntime.setPayload(SID, () => ({
-      ...DEFAULT_CODE_STATE, projectRoot: dir, workspace: "", modelId, pageRename: keepRename,
+      ...base,
+      projectId: catalogProject?.id || base.projectId,
+      repoUrl: catalogProject?.repo_url || base.repoUrl,
+      createdDeviceId: catalogProject?.created_device_id || base.createdDeviceId || deviceIdentity.device_id,
+      createdDeviceName: catalogProject?.created_device_name || base.createdDeviceName || deviceIdentity.name,
+      projectRoot: dir,
+      workspace: "",
+      modelId: base.modelId || modelId,
+      pageRename: keepRename,
+      busy: false,
       preparing: true,
       status: `⏳ Preparing a private workspace for ${name} on its own branch… (you can type your request now)`,
     }));
@@ -979,12 +1180,17 @@ function CodeWorkspace({ pageId, onTitle }: {
         status: `Not a git repo — editing this folder directly (no isolation). Run "git init" in it to enable per-page worktrees.`,
       }));
     } else if (outcome.status === "dirtyWorkingTree") {
-      chatRuntime.setPayload(SID, () => ({
-        ...DEFAULT_CODE_STATE,
+      chatRuntime.setPayload(SID, (p) => ({
+        ...((p as CodeState) ?? base),
+        preparing: false,
         status: `"${name}" has uncommitted changes — commit or stash them first, then reopen so the worktree includes them.\n${outcome.details.split("\n").slice(0, 3).join("\n")}`,
       }));
     } else {
-      chatRuntime.setPayload(SID, () => ({ ...DEFAULT_CODE_STATE, status: `Couldn't create the worktree: ${outcome.message}` }));
+      chatRuntime.setPayload(SID, (p) => ({
+        ...((p as CodeState) ?? base),
+        preparing: false,
+        status: `Couldn't create the worktree: ${outcome.message}`,
+      }));
     }
   };
 
@@ -1007,6 +1213,37 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (typeof dir === "string" && dir) openWorkspace(dir);
     } catch (e) {
       setStatus(`Folder picker failed: ${e}`);
+    }
+  };
+
+  const openCatalogProject = async (project: ProjectCatalogRow) => {
+    setCatalogError("");
+    setGhostProjectId(project.id);
+    if (project.location.trim()) {
+      const detail: OpenProjectPagesDetail = { project, handled: false };
+      window.dispatchEvent(new CustomEvent<OpenProjectPagesDetail>(OPEN_PROJECT_PAGES_EVENT, { detail }));
+      if (detail.handled) return;
+      await openWorkspace(project.location);
+      return;
+    }
+    if (!project.repo_url) return; // stays ghosted with the source-PC guidance.
+    setCatalogBusy(true);
+    try {
+      const parent = await invoke<string | null>("pick_folder", {
+        title: `Choose where to clone ${project.name} on this computer`,
+      });
+      if (!parent) return;
+      const location = await invoke<string>("github_clone_project", {
+        repoUrl: project.repo_url,
+        parent,
+      });
+      await invoke("update_project", { input: { id: project.id, location } });
+      await refreshProjectCatalog();
+      await openWorkspace(location);
+    } catch (e: any) {
+      setCatalogError(String(e?.message ?? e));
+    } finally {
+      setCatalogBusy(false);
     }
   };
 
@@ -1195,6 +1432,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [ghBusy, setGhBusy] = useState(false);
   const [ghMsg, setGhMsg] = useState("");
   const [ghOpen, setGhOpen] = useState(false);
+  const [importRepoUrl, setImportRepoUrl] = useState("");
+  const [githubRepos, setGithubRepos] = useState<GithubRepository[]>([]);
+  const [githubReposBusy, setGithubReposBusy] = useState(false);
+  const [selectedGithubRepo, setSelectedGithubRepo] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importMsg, setImportMsg] = useState("");
   // Reloads on mount, on the in-window `github-changed` broadcast (an
   // immediate connect/disconnect/authorize from ANY surface — the Account Sync
   // modal, the support drawer, the device-flow), and on window focus (covers
@@ -1212,6 +1455,41 @@ function CodeWorkspace({ pageId, onTitle }: {
       window.removeEventListener(GITHUB_CHANGED_EVENT, load);
     };
   }, []);
+  useEffect(() => {
+    if (!gh?.connected) {
+      setGithubRepos([]);
+      setSelectedGithubRepo("");
+      return;
+    }
+    let dead = false;
+    setGithubReposBusy(true);
+    githubListRepositories()
+      .then((repos) => {
+        if (dead) return;
+        setGithubRepos(repos);
+        setSelectedGithubRepo((cur) => cur || repos[0]?.fullName || "");
+      })
+      .catch((e) => {
+        if (!dead) setImportMsg(`Could not load GitHub repositories: ${String((e as Error)?.message ?? e)}`);
+      })
+      .finally(() => { if (!dead) setGithubReposBusy(false); });
+    return () => { dead = true; };
+  }, [gh?.connected, gh?.login]);
+  const refreshGithubRepositories = async () => {
+    if (!gh?.connected || githubReposBusy) return;
+    setGithubReposBusy(true);
+    setImportMsg("Refreshing your GitHub repositories...");
+    try {
+      const repos = await githubListRepositories();
+      setGithubRepos(repos);
+      setSelectedGithubRepo((cur) => cur || repos[0]?.fullName || "");
+      setImportMsg(repos.length ? `Loaded ${repos.length} GitHub repositories.` : "No repositories are visible to this GitHub account.");
+    } catch (e) {
+      setImportMsg(`Could not load GitHub repositories: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      setGithubReposBusy(false);
+    }
+  };
   const connectGithub = async () => {
     if (ghBusy || !ghToken.trim()) return;
     setGhBusy(true);
@@ -1239,6 +1517,38 @@ function CodeWorkspace({ pageId, onTitle }: {
       setGhMsg(`Couldn't disconnect: ${e}`);
     } finally {
       setGhBusy(false);
+    }
+  };
+
+  const importGithubProject = async () => {
+    const selectedRepo = gh?.connected ? githubRepos.find((repo) => repo.fullName === selectedGithubRepo) : null;
+    const repoUrl = selectedRepo?.cloneUrl || importRepoUrl.trim();
+    if (importBusy) return;
+    if (!repoUrl) {
+      setImportMsg(gh?.connected ? "Select one of your GitHub repositories first." : "Sign in with GitHub, or paste a public repository URL.");
+      return;
+    }
+    setImportBusy(true);
+    setImportMsg("Choose the local parent folder for this clone…");
+    try {
+      const parent = await invoke<string | null>("pick_folder", {
+        title: selectedRepo ? `Choose where to clone ${selectedRepo.fullName}` : "Choose where to clone this GitHub project",
+      });
+      if (!parent) {
+        setImportMsg("Import cancelled — no local folder was changed.");
+        return;
+      }
+      setImportMsg("Cloning from GitHub and creating the local project binding…");
+      const location = await invoke<string>("github_clone_project", { repoUrl, parent });
+      setImportRepoUrl("");
+      setSelectedGithubRepo("");
+      setImportMsg(`Imported to ${location}`);
+      await refreshProjectCatalog();
+      await openWorkspace(location);
+    } catch (e) {
+      setImportMsg(`Import failed: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      setImportBusy(false);
     }
   };
 
@@ -1278,7 +1588,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     setNpName("");
     setNpFolder("");
     setNpIsolate(false); // host folders are instant; isolation is an explicit choice
-    setNpCreateRepo(false);
+    setNpCreateRepo(!!gh?.connected);
     setNpBusy(false);
     setNpOpen(true);
     // Mirror Accounts logins into the sandbox, THEN show what's available —
@@ -1332,6 +1642,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           setStatus(`🐙 Project created, but the GitHub repo could not be set up: ${String((e as Error)?.message ?? e)} — retry from the Publisher card's ⚙ Set up repo.`);
         }
       }
+      if (createdPath) await ensureCatalogProject(createdPath, npName.trim() || undefined);
     } catch (e) {
       setStatus(`Couldn't create project: ${e}`);
     } finally {
@@ -1535,14 +1846,28 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
 
   const enrichSecondaryCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
-    const scope = memoryScope();
+    const scope = await resolveMemoryScope();
     const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (!scope || !user.trim()) return { text: user, pack: empty };
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(user);
+    await refreshTeamMemorySnapshot();
     const pack = await retrieveScopedTeamMemoryPack(scope, user, 8, false);
     return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
-  const memoryScope = () => ruleScopeRef.current.id || projectRoot || workspace || "";
+  const memoryScope = () => ruleScopeRef.current.id || ((projectRoot || workspace) ? fallbackProjectScope(projectRoot || workspace) : "");
+  const resolveMemoryScope = async (): Promise<string> => {
+    const current = ruleScopeRef.current;
+    if (current.shared && current.id) return current.id;
+    const folder = (projectRoot || workspace || "").trim();
+    if (!folder) return current.id || "";
+    try {
+      return await resolveFolderProjectScope(folder);
+    } catch {
+      return current.id || fallbackProjectScope(folder);
+    }
+  };
 
   const memoryLabel = (pack: TeamMemoryPack): string =>
     pack.total > 0 ? `${pack.factCount} fact${pack.factCount === 1 ? "" : "s"} · ${pack.worklogCount} worklog` : "no hits";
@@ -1567,16 +1892,23 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
 
   const enrichCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
-    const scope = memoryScope();
+    const scope = await resolveMemoryScope();
     const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (!scope || !user.trim()) return { text: user, pack: empty };
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(user);
+    await refreshTeamMemorySnapshot();
     const pack = await retrieveScopedTeamMemoryPack(scope, user, 8, false);
     return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
-  const logCodeWork = async (instruction: string, result: string) => {
-    const scope = memoryScope();
-    await logScopedTeamWork(scope, "code", instruction, result);
+  const logCodeWork = async (agent: string, instruction: string, result: string) => {
+    const scope = await resolveMemoryScope();
+    if (!scope || !result.trim()) return;
+    setTeamMemoryScope(scope);
+    setTeamMemoryGoal(instruction);
+    await harvestMemoryWrites(result);
+    await logScopedTeamWork(scope, agent, instruction, stripMemoryDirectives(result));
   };
 
   // One agent turn against the SELECTED model. Routes by provider exactly like
@@ -1588,13 +1920,14 @@ function CodeWorkspace({ pageId, onTitle }: {
     user: string,
     history: HistoryItem[],
     signal: AbortSignal,
-    opts?: { silent?: boolean; withEvents?: boolean; images?: ReturnType<typeof imageAttachments> },
+    opts?: { silent?: boolean; withEvents?: boolean; attachments?: Attachment[] },
   ): Promise<string> => {
     const provider = providerFor(modelId, availableModels);
     const isLocal = provider === "local" || provider === "tuned";
     const dDelta = opts?.silent ? () => {} : onDelta;
     const dThought = opts?.silent ? () => {} : onThought;
-    const imgs = opts?.images ?? [];
+    const attachments = opts?.attachments ?? [];
+    const imgs = imageAttachments(attachments);
     // CHAT mode (right-column selector): discuss/review only — read-only
     // tools, and the system prompt forbids edits/state-changing commands.
     const chatOnly = agentMode === "chat";
@@ -1608,7 +1941,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     const sys = system + formatDirectivesBlock(directivesRef.current)
       + (browserLine ? `\n\n${browserLine}` : "")
       + (chatOnly ? "\n\nMODE: CHAT — discuss, review, plan and answer questions ONLY. Do NOT edit or create files, and do NOT run commands that change any state. You may read files and search to ground your answers." : "");
-    const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(user);
+    const { text: enrichedUser, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(user, attachments));
     if (!opts?.silent) showMemoryPack(pack);
     if (isLocal) {
       const port = await ensureServer(modelId);
@@ -1664,16 +1997,21 @@ function CodeWorkspace({ pageId, onTitle }: {
   const send = async (textOverride?: string) => {
     const fromComposer = textOverride === undefined;
     const text = (textOverride ?? draft).trim();
-    const images = fromComposer ? imageAttachments(codeImages) : [];
-    if (!text && images.length === 0) return;
+    const attachments = fromComposer ? codeAttachments : [];
+    const images = imageAttachments(attachments);
+    if (!text && attachments.length === 0) return;
     if (busySendRef.current) {
       // Coder is mid-turn → the message becomes a ⚡ steer (VS Code-style),
       // injected between tool calls on local models, at turn end otherwise —
-      // never silently dropped. (Images can't ride a steer — text only.)
-      if (text) {
-        steerRef.current.push(text);
-        if (fromComposer) setDraft("");
-        setMessages((msgs) => [...msgs, { role: "user", content: `⚡ queued to steer the run → ${text}`, ts: Date.now() }]);
+      // never silently dropped. Extracted documents are text and can ride the
+      // steer; image bytes still cannot.
+      const steerText = appendDocumentAttachmentText(text, attachments);
+      if (steerText.trim()) {
+        steerRef.current.push(steerText);
+        if (fromComposer) { setDraft(""); setCodeAttachments([]); }
+        const names = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+        const visible = names.length ? `${text}${text ? " · " : ""}📄 ${names.join(", ")}` : text;
+        setMessages((msgs) => [...msgs, { role: "user", content: `⚡ queued to steer the run → ${visible}`, context: steerText, ts: Date.now() }]);
       }
       return;
     }
@@ -1687,16 +2025,18 @@ function CodeWorkspace({ pageId, onTitle }: {
     };
     if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
     if (!modelId) { blockSend("No model selected — pick one above."); return; }
-    if (fromComposer) { setDraft(""); setCodeImages([]); autoFeedHopsRef.current = 0; }
+    if (fromComposer) { setDraft(""); setCodeAttachments([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
     abortRef.current = ctrl;
     const history: HistoryItem[] = messages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
     // The bubble shows the actual images as clickable thumbnails; the same
     // images also ride to the model via runTurn.
-    setMessages((msgs) => [...msgs, { role: "user", content: text, ts: Date.now(), images: images.length ? attachmentThumbs(images) : undefined }]);
+    const attachmentNames = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleText = attachmentNames.length ? `${text}${text ? "\n\n" : ""}📄 ${attachmentNames.join(", ")}` : text;
+    setMessages((msgs) => [...msgs, { role: "user", content: visibleText, context: appendDocumentAttachmentText(text, attachments), ts: Date.now(), images: images.length ? attachmentThumbs(images) : undefined }]);
     // Immediately show the user that something is happening, so the timer is not
     // the only visible change. The placeholder is replaced by real tokens/tools.
     setMessages((msgs) => [...msgs, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
@@ -1706,8 +2046,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     let replyText = "";
     try {
       setStatus(`Coding in ${workspace}`);
-      const reply = await runTurn(CODING_SYSTEM(workspace), text || "(see attached image)", history, ctrl.signal, { withEvents: true, images });
-      await logCodeWork(text || "(see attached image)", reply);
+      const reply = await runTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
+      await logCodeWork("code", text || "(read the attached file)", reply);
       replyText = reply;
       ok = true;
     } catch (e) {
@@ -1758,11 +2098,10 @@ function CodeWorkspace({ pageId, onTitle }: {
         const leftover = drainSteer();
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
         if (ok) {
-          const st = takeNextAutoStep(ruleScopeRef.current.id, notebookSurfaceId);
-          if (st) {
+          continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId, (st) => {
             notebookStepRef.current = st.id;
             void sendRef.current?.(st.text);
-          }
+          });
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
           setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }
@@ -1821,7 +2160,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     secondaryAbortRef.current = ctrl;
     const history: HistoryItem[] = secondaryMessages
       .filter((m) => m.role === "user" || (m.role === "assistant" && !m.kind && !m.placeholder && m.content.trim()))
-      .map((m) => ({ role: m.role as "user" | "assistant", content: m.content }));
+      .map((m) => ({ role: m.role as "user" | "assistant", content: m.context || m.content }));
     setSecondaryMessages((m) => [...m, { role: "user", content: text, ts: Date.now() }]);
     setSecondaryMessages((m) => [...m, { role: "assistant", content: "⏳ Starting…", placeholder: true, ts: Date.now() }]);
     let aborted = false;
@@ -1829,6 +2168,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     try {
       setStatus(`Second agent working in ${workspace}`);
       replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
+      await logCodeWork("code_second", text, replyText);
     } catch (e) {
       const err = e as { name?: string; message?: string };
       aborted = err.name === "AbortError";
@@ -1925,28 +2265,35 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
   const sendChat = async () => {
     const text = chatDraft.trim();
-    const images = imageAttachments(chatImages);
-    if ((!text && images.length === 0) || chatBusy) return;
+    const attachments = chatAttachments;
+    const images = imageAttachments(attachments);
+    if ((!text && attachments.length === 0) || chatBusy) return;
     if (!modelId) { setStatus("Pick a model above first."); return; }
     setChatDraft("");
-    setChatImages([]);
+    setChatAttachments([]);
     setChatBusy(true);
     const ctrl = new AbortController();
     justChatAbort = ctrl;
     // The visible bubble shows the actual images as clickable thumbnails; the
     // same images also ride to the model via the multimodal content below.
-    const userMsg: ChatMsg = { role: "user", content: text, images: images.length ? attachmentThumbs(images) : undefined };
+    const documentNames = attachments.filter((a) => a.kind === "document").map((a) => a.filename ?? "document");
+    const visibleText = documentNames.length ? `${text}${text ? "\n\n" : ""}📄 ${documentNames.join(", ")}` : text;
+    const userMsg: ChatMsg = { role: "user", content: visibleText, context: appendDocumentAttachmentText(text, attachments), images: images.length ? attachmentThumbs(images) : undefined };
     const asstMsg: ChatMsg = { role: "assistant", content: "" };
     // Resolve/create the active thread; history = its current messages.
     let tid = chatId;
     const existing = chats.find((c) => c.id === tid);
-    const history: HistoryItem[] = (existing?.messages ?? []).map((m) => ({ role: m.role, content: m.content }));
+    const history: HistoryItem[] = (existing?.messages ?? []).map((m) => ({ role: m.role, content: m.context || m.content }));
     if (existing) {
       updateThread(tid, (m) => [...m, userMsg, asstMsg], threadTitle(text || "Image"));
     } else {
       tid = newThreadId();
       setChatId(tid);
-      setChats((cs) => [{ id: tid, title: threadTitle(text || "Image"), ts: Date.now(), messages: [userMsg, asstMsg] }, ...cs]);
+      setChats((cs) => [{
+        id: tid, title: threadTitle(text || "Image"), ts: Date.now(), messages: [userMsg, asstMsg],
+        createdDeviceId: deviceIdentity.device_id,
+        createdDeviceName: deviceIdentity.name,
+      }, ...cs]);
     }
     const onD = (d: string) => updateThread(tid, (m) => {
       const c = [...m];
@@ -1963,19 +2310,21 @@ function CodeWorkspace({ pageId, onTitle }: {
     });
     try {
       const provider = providerFor(modelId, availableModels);
-      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(text);
+      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments));
       showMemoryPack(pack);
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
-        await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
+        const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
+        await logCodeWork("code_chat", text || "(see attached image)", reply);
       } else {
         // Pass a working dir so pasted images can be saved into it for the model
         // to read (codex -i / claude file-ref). Use the workspace if one is
         // selected, else the WSL scratch — without ANY cwd the image is dropped
         // ("I can't inspect the image"), which is the bug on a no-folder chat.
         const chatCwd = workspace || chatScratchRef.current || undefined;
-        await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
+        const reply = await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
+        await logCodeWork("code_chat", text || "(see attached image)", reply);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -2028,11 +2377,12 @@ function CodeWorkspace({ pageId, onTitle }: {
         setStatus(`Step ${i + 1}/${plan.length}: ${plan[i].title}`);
         setMessages((m) => [...m, { role: "assistant", content: `\n### Step ${i + 1}: ${plan[i].title}\n`, ts: Date.now() }]);
         try {
-          await runTurn(
+          const stepReply = await runTurn(
             CODING_SYSTEM(workspace),
             `Overall goal: ${goal}\n\nDo THIS step now (only this step): ${plan[i].title}`,
             [], ctrl.signal, { withEvents: true },
           );
+          await logCodeWork("code", plan[i].title, stepReply);
           setTasks((ts) => ts.map((t) => (t.id === i ? { ...t, status: "done" } : t)));
         } catch (e) {
           const err = e as { name?: string };
@@ -2156,11 +2506,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     setDraft((d) => (d.trim() ? `${d.replace(/\s*$/, "")} @${rel} ` : `@${rel} `));
     if (activeAbs) dropTab(activeAbs);
   };
-  // Project-composer image attachments — mirror addChatFiles (just-chat box).
+  // Project-composer attachments — mirror addChatFiles (just-chat box).
   const addCodeFiles = async (files: FileList | File[]) => {
     for (const f of Array.from(files)) {
-      if (!f.type.startsWith("image/")) continue;
-      try { const a = await fileToImageAttachment(f); setCodeImages((x) => [...x, a]); }
+      try { const a = await fileToChatAttachment(f); setCodeAttachments((x) => [...x, a]); }
       catch (e: any) { setStatus(String(e?.message ?? e)); }
     }
   };
@@ -2174,6 +2523,9 @@ function CodeWorkspace({ pageId, onTitle }: {
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
           <button onClick={() => setChatMode(false)} title="Back to Start" style={{ ...btn, height: 30, padding: "0 10px" }}>← Start</button>
           <button onClick={newChat} title="New conversation" style={{ ...btn, height: 30, padding: "0 10px", fontWeight: 700 }}>＋ New</button>
+          <span title="This no-project chat is stored on its creator computer." style={{ fontSize: 10.5, color: "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px" }}>
+            🖥 {chats.find((c) => c.id === chatId)?.createdDeviceName || deviceIdentity.name}
+          </span>
           {/* History dropdown — past conversations (persisted) */}
           <div style={{ position: "relative" }}>
             <button onClick={() => setShowHistory((v) => !v)} title="Past conversations" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg)" }}>🕘 History{chats.length ? ` (${chats.length})` : ""}</button>
@@ -2188,6 +2540,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       onMouseLeave={(e) => (e.currentTarget.style.background = c.id === chatId ? "var(--bg-input)" : "transparent")}
                       style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 7, cursor: "pointer", background: c.id === chatId ? "var(--bg-input)" : "transparent" }}>
                       <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</span>
+                      <span title="Creator PC" style={{ fontSize: 10, color: "var(--fg-subtle)", whiteSpace: "nowrap" }}>🖥 {c.createdDeviceName || "legacy"}</span>
                       <span style={{ fontSize: 10.5, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>{c.messages.length}</span>
                       <button onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete" style={{ ...btn, height: 22, padding: "0 6px", color: "var(--fg-muted)", fontSize: 11 }}>✕</button>
                     </div>
@@ -2220,32 +2573,32 @@ function CodeWorkspace({ pageId, onTitle }: {
           })}
         </div>
         <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
-          {chatImages.length > 0 && (
+          {chatAttachments.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              {chatImages.map((a, i) => (
-                <div key={i} style={{ position: "relative", width: 56, height: 56, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border-strong)" }}>
-                  <img src={`data:${a.mime};base64,${a.data_b64}`} alt={a.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                  <button onClick={() => setChatImages((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+              {chatAttachments.map((a, i) => (
+                <div key={i} style={{ position: "relative", minWidth: a.kind === "image" ? 56 : 150, height: 56, borderRadius: 8, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: a.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
+                  {a.kind === "image" ? <img src={`data:${a.mime};base64,${a.data_b64}`} alt={a.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {a.filename ?? "document"}</span>}
+                  <button onClick={() => setChatAttachments((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
                 </div>
               ))}
             </div>
           )}
           <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-            <input ref={chatFileRef} type="file" accept="image/*" multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
-            <button onClick={() => chatFileRef.current?.click()} title="Attach image (or just paste one)" style={{ ...btn, height: 38, width: 38, justifyContent: "center", padding: 0, fontSize: 16 }}>📎</button>
+            <input ref={chatFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
+            <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 38, width: 38, justifyContent: "center", padding: 0, fontSize: 16 }}>📎</button>
             <textarea
               value={chatDraft}
               onChange={(e) => setChatDraft(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } }}
               onPaste={onChatPaste}
-              placeholder="Message…  (paste or attach an image, Enter to send, Shift+Enter for newline)"
+              placeholder="Message…  (paste or attach images/documents, Enter to send)"
               rows={1}
               style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "9px 12px", lineHeight: 1.5 }}
             />
             {chatBusy ? (
               <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "var(--error)" }}>Stop</button>
             ) : (
-              <button onClick={sendChat} disabled={!chatDraft.trim() && chatImages.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatImages.length) ? 1 : 0.5 }}>Send</button>
+              <button onClick={sendChat} disabled={!chatDraft.trim() && chatAttachments.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatAttachments.length) ? 1 : 0.5 }}>Send</button>
             )}
           </div>
         </div>
@@ -2259,39 +2612,120 @@ function CodeWorkspace({ pageId, onTitle }: {
   // get-started screen: open a folder, or reopen a recent project.
   if (!workspace && !preparing) {
     return (
-      <div style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
+      <div data-ui="CodingProjectHub" style={{ padding: "8px 10px 10px", height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
         <div style={{ flex: 1, minHeight: 0, display: "flex", justifyContent: "center", overflowY: "auto" }}>
-          <div style={{ width: "100%", maxWidth: 760, display: "flex", flexDirection: "column", gap: 30, padding: "48px 36px" }}>
+          <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 30, padding: "36px 36px" }}>
             <div>
-              <div style={{ fontSize: 30, fontWeight: 800, color: "var(--fg-strong)", letterSpacing: -0.4 }}>OwLLM Code</div>
+              <div style={{ color: "var(--accent-ink)", fontSize: 12, fontWeight: 900, letterSpacing: 1.8, textTransform: "uppercase" }}>Portable coding command center</div>
+              <div style={{ fontSize: "clamp(30px,4vw,48px)", fontWeight: 850, color: "var(--fg-strong)", letterSpacing: -0.8, lineHeight: 1.05, marginTop: 7 }}>OwLLM Coding</div>
               <div style={{ fontSize: 13.5, color: "var(--fg-muted)", marginTop: 5, lineHeight: 1.5 }}>
-                Your local AI coding workspace — open a folder and your model reads, searches, edits and runs commands right inside it.
+                GitHub is the project identity. Each computer creates its own local clone; OwLLM never reuses another PC's absolute folder.
               </div>
             </div>
 
-            <div style={{ display: "flex", gap: 52, alignItems: "flex-start", width: "100%", flexWrap: "wrap" }}>
+            <div data-ui="GitHubConnectionStatus" style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: `1px solid ${gh?.connected ? "rgba(77,224,155,.58)" : "rgba(255,105,120,.58)"}`, background: gh?.connected ? "linear-gradient(120deg,rgba(77,224,155,.15),var(--bg-card))" : "linear-gradient(120deg,rgba(255,105,120,.13),var(--bg-card))", boxShadow: gh?.connected ? "0 0 34px rgba(77,224,155,.10)" : "0 0 34px rgba(255,105,120,.08)" }}>
+              <span aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 999, background: gh?.connected ? "#4de09b" : "#ff6978", boxShadow: gh?.connected ? "0 0 14px rgba(77,224,155,.9)" : "0 0 14px rgba(255,105,120,.8)" }} />
+              <div style={{ flex: 1, minWidth: 260 }}>
+                <b style={{ color: "var(--fg-strong)", fontSize: 14 }}>{gh?.connected ? `GitHub connected as ${gh.login}` : "GitHub not connected"}</b>
+                <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>{gh?.connected ? "Repository access is ready for imports, managed projects and sandbox pushes." : "Public repositories can still be imported. Connect GitHub for private repositories and pushes."}</div>
+              </div>
+              <button onClick={() => { if (gh?.connected) void disconnectGithub(); else { setGhOpen((v) => !v); setGhMsg(""); } }} disabled={ghBusy} style={{ border: "none", background: "transparent", color: gh?.connected ? "#4de09b" : "#ff8792", fontSize: 11.5, fontWeight: 750, cursor: ghBusy ? "wait" : "pointer", textDecoration: "underline", padding: 4 }}>{gh?.connected ? "Disconnect" : "Connect GitHub"}</button>
+            </div>
+
+            <div data-ui="CodingProjectColumns" style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", alignItems: "start", gap: 22, width: "100%", minWidth: 0 }}>
+            <section style={{ gridColumn: 2, gridRow: 1, minWidth: 0 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>Managed projects</div>
+                <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>{deviceIdentity.name}</span>
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: 13 }}>
+                {catalogProjects.map((project) => {
+                  const local = projectAvailability(project) === "local";
+                  const selectedGhost = ghostProjectId === project.id && !local;
+                  return (
+                    <button key={project.id} onClick={() => { void openCatalogProject(project); }} disabled={catalogBusy} style={{
+                      minHeight: 150, padding: 16, borderRadius: 15, textAlign: "left",
+                      border: `1px solid ${selectedGhost ? "var(--warn)" : local ? "var(--border)" : "var(--border-strong)"}`,
+                      background: selectedGhost ? "rgba(var(--warn-rgb),.09)" : "var(--bg-card)",
+                      opacity: local ? 1 : .58, filter: local ? "none" : "saturate(.55)",
+                      cursor: catalogBusy ? "wait" : "pointer", boxShadow: local ? "0 10px 28px rgba(0,0,0,.12)" : "none",
+                    }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <span style={{ fontSize: 21 }}>{local ? "⌁" : "◌"}</span>
+                        <b style={{ color: "var(--fg-strong)", fontSize: 15, flex: 1 }}>{project.name}</b>
+                        <span style={{ color: local ? "var(--ok)" : "var(--warn)", fontSize: 10, fontWeight: 900 }}>{local ? "READY" : "GHOSTED"}</span>
+                      </div>
+                      <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 9 }}>
+                        {local ? project.location : `Created on ${projectOriginLabel(project)} · no local folder on ${deviceIdentity.name}`}
+                      </div>
+                      <div style={{ color: project.repo_url ? "var(--accent-ink)" : "var(--warn)", fontSize: 11, marginTop: 9 }}>
+                        {project.repo_url ? `🐙 ${project.repo_url.replace(/^https?:\/\//, "")}` : "No GitHub repo · available only on its creator PC"}
+                      </div>
+                      {!local && <div style={{ color: "var(--fg-strong)", fontSize: 11.5, fontWeight: 750, marginTop: 10 }}>{project.repo_url ? "Click to clone into a new folder on this PC →" : "Create the repo on the source PC before opening here"}</div>}
+                    </button>
+                  );
+                })}
+                {catalogProjects.length === 0 && <div style={{ padding: 20, border: "1px dashed var(--border-strong)", borderRadius: 14, color: "var(--fg-muted)", fontSize: 12.5 }}>No managed projects yet. Create one or open an existing GitHub checkout below.</div>}
+              </div>
+              {catalogError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 9 }}>{catalogError}</div>}
+            </section>
+            <div style={{ gridColumn: 1, gridRow: 1, display: "flex", flexDirection: "column", gap: 24, width: "100%", minWidth: 0 }}>
               {/* START — VS Code-style action rows */}
-              <div style={{ flex: "1 1 250px", minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Start</div>
-                {([
-                  { icon: "🆕", label: "New project…", onClick: openNewProject },
-                  { icon: "📁", label: "Open a project folder…", onClick: pickWorkspace },
-                  { icon: "💬", label: "New chat (no project)", onClick: startChat },
-                  { icon: "🐙", label: gh?.connected ? `GitHub — ${gh.login}` : "Connect GitHub…", onClick: () => { setGhOpen((v) => !v); setGhMsg(""); } },
-                ]).map((a) => (
-                  <button key={a.label} onClick={a.onClick}
-                    onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
-                    onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                    style={{ display: "flex", alignItems: "center", gap: 11, background: "transparent", border: "none", padding: "7px 8px", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>
-                    <span style={{ fontSize: 15, width: 18, textAlign: "center" }}>{a.icon}</span>
-                    <span style={{ color: "var(--accent)", fontWeight: 500, fontSize: 13.5 }}>{a.label}</span>
-                  </button>
-                ))}
+              <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", marginBottom: 10 }}>Local actions</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, width: "100%" }}>
+                  {([
+                    { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: openNewProject },
+                    { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
+                    { icon: "◌", label: "New chat", detail: "Start a conversation without giving the model access to a project folder.", onClick: startChat },
+                  ]).map((a) => (
+                    <button key={a.label} onClick={a.onClick}
+                      style={{ minHeight: 118, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, minWidth: 0, padding: 14, borderRadius: 14, cursor: "pointer", textAlign: "left", color: "var(--fg)", border: "1px solid rgba(var(--accent-rgb),.28)", background: "radial-gradient(circle at 100% 0%,rgba(var(--accent-rgb),.16),transparent 52%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px rgba(0,0,0,.12)" }}>
+                      <span style={{ fontSize: 20, color: "var(--accent-ink)", textShadow: "0 0 14px rgba(var(--accent-rgb),.8)" }}>{a.icon}</span>
+                      <span style={{ color: "var(--fg-strong)", fontWeight: 800, fontSize: 13.5 }}>{a.label}</span>
+                      <span style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>{a.detail}</span>
+                    </button>
+                  ))}
+                  <div data-ui="ImportFromGitHubCard" style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 9, minWidth: 0, padding: 15, borderRadius: 14, border: "1px solid rgba(126,231,255,.38)", background: "radial-gradient(circle at 100% 0%,rgba(126,231,255,.16),transparent 48%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 28px rgba(0,0,0,.14)" }}>
+                    <div style={{ display: "flex", gap: 9, alignItems: "center" }}><span style={{ color: "#7ee7ff", fontSize: 20, textShadow: "0 0 14px rgba(126,231,255,.8)" }}>⇣</span><b style={{ color: "var(--fg-strong)", fontSize: 13.5 }}>Import from GitHub</b></div>
+                    <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>
+                      {gh?.connected
+                        ? `Choose one of @${gh.login}'s GitHub repositories, then choose the local folder where this PC should clone it.`
+                        : "Sign in with GitHub to choose from your repositories. Public URL import stays available as a fallback."}
+                    </div>
+                    {gh?.connected ? (
+                      <div data-ui="GitHubRepositoryPicker" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <select value={selectedGithubRepo} onChange={(e) => setSelectedGithubRepo(e.target.value)} disabled={githubReposBusy || githubRepos.length === 0} aria-label="GitHub repository" style={{ flex: 1, minWidth: 0, height: 34, padding: "0 10px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12 }}>
+                            {githubRepos.length === 0 && <option value="">{githubReposBusy ? "Loading GitHub repositories..." : "No repositories found"}</option>}
+                            {githubRepos.map((repo) => (
+                              <option key={repo.fullName} value={repo.fullName}>{repo.fullName}{repo.private ? " (private)" : ""}</option>
+                            ))}
+                          </select>
+                          <button onClick={refreshGithubRepositories} disabled={githubReposBusy} style={{ ...btn, height: 34, padding: "0 11px", color: "#7ee7ff" }}>{githubReposBusy ? "Loading..." : "Refresh"}</button>
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <button onClick={() => void importGithubProject()} disabled={importBusy || !selectedGithubRepo} style={{ ...btn, height: 34, padding: "0 13px", borderColor: "rgba(126,231,255,.5)", color: "#7ee7ff", opacity: importBusy || !selectedGithubRepo ? .5 : 1 }}>{importBusy ? "Importing..." : "Choose folder & import selected repo"}</button>
+                          <button onClick={() => openWebUrl(`https://github.com/${gh.login}?tab=repositories`).catch(() => {})} style={{ ...btn, height: 34, padding: "0 11px", color: "var(--fg-muted)" }}>Open GitHub repositories</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div data-ui="SignedOutGithubImport" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <button onClick={openSyncOnboarding} style={{ ...btn, height: 34, justifyContent: "center", borderColor: "rgba(126,231,255,.5)", color: "#7ee7ff" }}>Sign in with GitHub to select a repository</button>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <input value={importRepoUrl} onChange={(e) => setImportRepoUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void importGithubProject(); }} placeholder="Public fallback: https://github.com/owner/repository" aria-label="Public GitHub repository URL" style={{ flex: 1, minWidth: 0, height: 34, padding: "0 10px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12 }} />
+                          <button onClick={() => void importGithubProject()} disabled={importBusy || !importRepoUrl.trim()} style={{ ...btn, height: 34, padding: "0 13px", color: "var(--fg-muted)", opacity: importBusy || !importRepoUrl.trim() ? .5 : 1 }}>{importBusy ? "Importing..." : "Import public URL"}</button>
+                        </div>
+                      </div>
+                    )}
+                    {importMsg && <div style={{ color: importMsg.startsWith("Import failed") ? "var(--error)" : "var(--fg-muted)", fontSize: 10.5, lineHeight: 1.4 }}>{importMsg}</div>}
+                  </div>
+                </div>
                 {/* GitHub connect form (inline, opens under the row) */}
                 {ghOpen && !gh?.connected && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 8, margin: "4px 0 0 28px", padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8, maxWidth: 520, padding: "10px 12px", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8 }}>
                     <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5 }}>Paste a GitHub token so agents can clone private repos and push from inside the sandbox.</div>
-                    <button onClick={() => { openWebUrl(GITHUB_TOKEN_URL).catch((error) => console.error("Could not open the OwLLM browser", error)); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent)" }}>↗ Create a token (repo scope)</button>
+                    <button onClick={() => { openWebUrl(GITHUB_TOKEN_URL).catch(() => {}); }} style={{ ...btn, height: 28, justifyContent: "center", color: "var(--accent-ink)" }}>↗ Create a token (repo scope)</button>
                     <input type="password" value={ghToken} onChange={(e) => setGhToken(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") connectGithub(); }} placeholder="ghp_… or github_pat_…" style={{ height: 32, background: "var(--bg-surface)", border: "1px solid var(--border-strong)", borderRadius: 6, color: "var(--fg)", fontSize: 13, padding: "0 10px" }} />
                     <div style={{ display: "flex", gap: 8 }}>
                       <button onClick={connectGithub} disabled={ghBusy || !ghToken.trim()} style={{ ...btn, height: 32, flex: 1, justifyContent: "center", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: ghBusy || !ghToken.trim() ? 0.6 : 1 }}>{ghBusy ? "⏳ Connecting…" : "Connect"}</button>
@@ -2299,8 +2733,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                     </div>
                   </div>
                 )}
-                {gh?.connected && <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 24, width: "fit-content", margin: "2px 0 0 28px", padding: "0 10px", color: "var(--fg-muted)", fontSize: 11 }}>Disconnect</button>}
-                {ghMsg && <div style={{ margin: "4px 0 0 28px", fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
+                {ghMsg && <div style={{ marginTop: 6, fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
                 {/* Isolation status — compact line */}
                 <div style={{ marginTop: 18, fontSize: 11.5, lineHeight: 1.5, color: sbox?.available ? "#7ff0c5" : "var(--fg-muted)" }}>
                   {sbox === null ? "⏳ Checking isolation (WSL)…"
@@ -2314,11 +2747,11 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
 
               {/* RECENT — projects (name + path), VS Code style */}
-              <div style={{ flex: "1 1 320px", minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Recent</div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: 360, overflowY: "auto", paddingRight: 2 }}>
+              <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
+                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Projects</div>
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: 8, maxHeight: 420, overflowY: "auto", paddingRight: 2 }}>
                   {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
-                    <div style={{ fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — create one on the left to get started.</div>
+                    <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — use Local actions above to get started.</div>
                   )}
                   {/* Isolated projects that aren't already in recents */}
                   {isolation.enabled && sboxProjects.filter((p) => !recents.includes(p.path)).map((p) => (
@@ -2326,7 +2759,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                       key={p.path}
                       onClick={() => openWorkspace(p.path)}
                       title={p.innerPath}
-                      style={{ display: "block", textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
+                        style={{ display: "block", minWidth: 0, textAlign: "left", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: "8px 10px", color: "var(--fg)", cursor: "pointer" }}
                     >
                       <div style={{ fontSize: 13, fontWeight: 600, color: "var(--fg-strong)" }}>🐧 {p.name}</div>
                       <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.innerPath}</div>
@@ -2338,7 +2771,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                     return (
                       <div
                         key={ws}
-                        style={{ display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
+                        style={{ minWidth: 0, display: "flex", alignItems: "center", gap: 8, background: "var(--bg-input)", border: `1px solid ${pinned ? "var(--accent)" : "var(--border-strong)"}`, borderRadius: 8, padding: "8px 10px" }}
                       >
                         {isRenaming ? (
                           <input
@@ -2362,7 +2795,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                             <div style={{ fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{ws}</div>
                           </button>
                         )}
-                        <button onClick={() => togglePin(ws)} title={pinned ? "Unpin" : "Pin to top"} style={{ ...btn, height: 26, padding: "0 8px", color: pinned ? "var(--accent)" : "var(--fg-muted)" }}>📌</button>
+                        <button onClick={() => togglePin(ws)} title={pinned ? "Unpin" : "Pin to top"} style={{ ...btn, height: 26, padding: "0 8px", color: pinned ? "var(--accent-ink)" : "var(--fg-muted)" }}>📌</button>
                         <button onClick={() => startRename(ws)} title="Rename (display only — folder is unchanged)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✎</button>
                         <button onClick={() => removeRecent(ws)} title="Remove from recent projects (keeps files on disk)" style={{ ...btn, height: 26, padding: "0 8px", color: "var(--fg-muted)" }}>✕</button>
                       </div>
@@ -2371,6 +2804,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                 </div>
 
               </div>
+            </div>
             </div>
           </div>
         </div>
@@ -2513,28 +2947,10 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
         <button onClick={closeProject} disabled={busy} title="Back to the project list (your files stay on disk)" style={btn}>← Projects</button>
         <button onClick={pickWorkspace} disabled={busy} title={workspace ? `Current: ${workspace}\nClick to switch to another folder` : "Open a project folder"} style={{ ...btn, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis" }}>📁 {wsShort} ⇄</button>
-        {/* Terminal controls, right beside the project path (user spec): a real
-            PTY shell in THIS workspace. ⌨ toggles it; ⤢/⤡ docks it above the
-            composer (default) or pops it out to the floating popup. */}
-        {workspace && (
-          <button
-            onClick={() => { if (!termOpen) { setTermOpen(true); setTermHidden(false); } else setTermHidden((h) => !h); }}
-            title={!termOpen ? `Open a terminal in ${wsShort}` : (termHidden ? "Show the terminal" : "Hide the terminal (shell keeps running)")}
-            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap",
-              ...(termOpen && !termHidden ? { background: "var(--accent)", color: "var(--accent-fg)", border: "none", fontWeight: 700 } : { color: "var(--fg-muted)" }) }}
-          >
-            ⌨ Terminal
-          </button>
-        )}
-        {workspace && termOpen && (
-          <button
-            onClick={() => setTermDocked((d) => !d)}
-            title={termDocked ? "Pop out to a floating window" : "Dock above the message box"}
-            style={{ ...btn, height: 26, width: 30, padding: 0, fontSize: 13, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
-          >
-            {termDocked ? "⤢" : "⤡"}
-          </button>
-        )}
+        <span title={`This chat was created on ${stx.createdDeviceName || deviceIdentity.name}. Its active folder belongs only to this computer.`} style={{ fontSize: 10.5, fontWeight: 750, color: "var(--fg-muted)", background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px", whiteSpace: "nowrap" }}>
+          🖥 {stx.createdDeviceName || deviceIdentity.name}
+        </span>
+        {stx.repoUrl && <span title={stx.repoUrl} style={{ fontSize: 10.5, fontWeight: 750, color: "var(--accent-ink)", whiteSpace: "nowrap" }}>🐙 GitHub</span>}
         {/* Project Memory — same shared surface (TeamMemoryModal) and same
             project scope both code agents read/write, matching the Agents page's
             🧠 Memory button. Scoped event so only THIS page's modal opens (the
@@ -2946,12 +3362,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         )}
       </div>
 
-      {/* Status line — expands to multiple lines for the per-credential
-          sync report (P1-2); stays a single ellipsized line otherwise. */}
-      <div style={status.includes("\n")
-        ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6, flexShrink: 0 }
-        : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>{status}</div>
-
       {/* Docked terminal — a real PTY shell in the workspace, sitting right
           above the message box (user spec). Same shell as the popup; ⤢ moves
           it out to the floating window. Kept mounted while hidden so the shell
@@ -2977,6 +3387,25 @@ function CodeWorkspace({ pageId, onTitle }: {
         </div>
       )}
 
+      {/* Status + Terminal line — sits directly above the composer (the input
+          chatbox). The "Coding in …" info is on the left; the Terminal toggle
+          is on the top-right of the input area, full text. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        <div style={status.includes("\n")
+          ? { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
+          : { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
+        <button
+          onClick={() => {
+            // Hidden shells re-open; visible shells hide.
+            if (!termOpen) { setTermOpen(true); setTermHidden(false); }
+            else setTermHidden((hidden) => !hidden);
+          }}
+          title="Open the workspace terminal"
+          aria-label="Open terminal"
+          style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
+        >Terminal</button>
+      </div>
+
       {/* Composer row — lives in the SAME column as the chat panes, so it is
           always exactly as wide as the chat window. DIVIDED (fine-tune-chat
           style) when the second agent is open side-by-side: primary composer
@@ -2987,28 +3416,28 @@ function CodeWorkspace({ pageId, onTitle }: {
         : { flexShrink: 0 }}>
       <div
         onDragOver={(e) => { if (Array.from(e.dataTransfer?.items ?? []).some((it) => it.kind === "file")) { e.preventDefault(); } }}
-        onDrop={(e) => { const f = Array.from(e.dataTransfer?.files ?? []).filter((x) => x.type.startsWith("image/")); if (f.length) { e.preventDefault(); void addCodeFiles(f); } }}
+        onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
         style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
       >
-        {codeImages.length > 0 && (
+        {codeAttachments.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-            {codeImages.map((img, i) => (
-              <div key={i} style={{ position: "relative", width: 48, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)" }}>
-                <img src={`data:${img.mime};base64,${img.data_b64}`} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                <button onClick={() => setCodeImages((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
+            {codeAttachments.map((attachment, i) => (
+              <div key={i} style={{ position: "relative", minWidth: attachment.kind === "image" ? 48 : 150, height: 48, borderRadius: 6, overflow: "hidden", border: "1px solid var(--border-strong)", background: "var(--bg-input)", display: "flex", alignItems: "center", justifyContent: "center", padding: attachment.kind === "image" ? 0 : "0 24px 0 10px", boxSizing: "border-box", color: "var(--fg)", fontSize: 11, fontWeight: 700 }}>
+                {attachment.kind === "image" ? <img src={`data:${attachment.mime};base64,${attachment.data_b64}`} alt={attachment.filename} style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <span>📄 {attachment.filename ?? "document"}</span>}
+                <button onClick={() => setCodeAttachments((x) => x.filter((_, j) => j !== i))} title="Remove" style={{ position: "absolute", top: 2, right: 2, width: 16, height: 16, borderRadius: 8, border: "none", background: "rgba(0,0,0,0.65)", color: "#fff", fontSize: 11, lineHeight: 1, cursor: "pointer", padding: 0 }}>×</button>
               </div>
             ))}
           </div>
         )}
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
-          <input ref={codeFileRef} type="file" accept="image/*" multiple style={{ display: "none" }}
+          <input ref={codeFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
-          <button onClick={() => codeFileRef.current?.click()} title="Attach image(s)" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
+          <button onClick={() => codeFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
             ref={codeDraftRef}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
-            onPaste={(e) => { const imgs = Array.from(e.clipboardData?.files ?? []).filter((f) => f.type.startsWith("image/")); if (imgs.length) { e.preventDefault(); void addCodeFiles(imgs); } }}
+            onPaste={(e) => { const files = Array.from(e.clipboardData?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
             onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); if (agentMode === "plan" && !busy) { void planAndExecute(); } else { void send(); } } }}
             placeholder={preparing ? "Type your request while the workspace finishes preparing…" : workspace ? (agentMode === "chat" ? "Ask, discuss, review — nothing is modified in chat mode…" : "Describe the change, bug, or feature… (paste/drop images too)") : "Pick a workspace folder first…"}
             rows={3}
@@ -3021,12 +3450,12 @@ function CodeWorkspace({ pageId, onTitle }: {
                plan → Kanban plan/act, auto → act directly, chat → discuss only. */
             <button
               onClick={() => { if (agentMode === "plan") { void planAndExecute(); } else { void send(); } }}
-              disabled={(!draft.trim() && (agentMode === "plan" || codeImages.length === 0)) || preparing}
+              disabled={(!draft.trim() && (agentMode === "plan" || codeAttachments.length === 0)) || preparing}
               title={preparing ? "Preparing the workspace — unlocks in a moment"
                 : agentMode === "plan" ? "Break the goal into ordered steps, then build them one by one (Kanban)"
                 : agentMode === "chat" ? "Discuss/review only — no edits, no state-changing commands"
                 : "Act directly — read, edit and run in the workspace"}
-              style={{ ...btn, background: "var(--accent)", color: "var(--accent-fg)", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeImages.length)) && !preparing) ? 1 : 0.5 }}
+              style={{ ...btn, background: "var(--accent)", color: "var(--accent-fg)", border: "none", height: 44, padding: "0 16px", fontWeight: 700, opacity: ((draft.trim() || (agentMode !== "plan" && codeAttachments.length)) && !preparing) ? 1 : 0.5 }}
             >{preparing ? "⏳ Preparing…" : agentMode === "plan" ? "📋 Plan" : agentMode === "chat" ? "💬 Chat" : "Send"}</button>
           )}
         </div>
@@ -3050,13 +3479,6 @@ function CodeWorkspace({ pageId, onTitle }: {
             onDirectivesChanged={reloadDirectives}
             mode={agentMode}
             onModeChange={setAgentMode}
-            terminalOpen={termOpen && !termHidden}
-            onToggleTerminal={() => {
-              // Closed → open. Hidden → re-show (shell was kept alive).
-              // Visible → hide (shell stays alive; ✕ on the popup kills it).
-              if (!termOpen) { setTermOpen(true); setTermHidden(false); }
-              else setTermHidden((h) => !h);
-            }}
             browserOpen={browserOpen}
             onToggleBrowser={() => setBrowserOpen((v) => !v)}
             usageProvider={providerFor(modelId, availableModels)}
@@ -3213,6 +3635,22 @@ export default function CodePage() {
   const active = pages.find((p) => p.id === activeId) ?? pages[0];
   useEffect(() => { savePages(pages); }, [pages]);
   useEffect(() => { try { if (active) localStorage.setItem(ACTIVE_PAGE_KEY, active.id); } catch { /* best effort */ } }, [active]);
+  useEffect(() => {
+    const openSavedProjectPages = (event: Event) => {
+      const detail = (event as CustomEvent<OpenProjectPagesDetail>).detail;
+      if (!detail?.project?.location) return;
+      const saved = savedPageMetasForLocalProject(detail.project);
+      if (saved.length === 0) return;
+      detail.handled = true;
+      setPages((current) => {
+        const known = new Set(current.map((page) => page.id));
+        return [...current, ...saved.filter((page) => !known.has(page.id))];
+      });
+      setActiveId(saved[0].id);
+    };
+    window.addEventListener(OPEN_PROJECT_PAGES_EVENT, openSavedProjectPages);
+    return () => window.removeEventListener(OPEN_PROJECT_PAGES_EVENT, openSavedProjectPages);
+  }, []);
 
   const setTitle = (id: string, title: string) =>
     setPages((ps) => ps.map((p) => (p.id === id ? (p.title === title ? p : { ...p, title }) : p)));

@@ -29,7 +29,7 @@ import { useAutoResize } from "../../hooks/useAutoResize";
 import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
-import { formatDuration, formatClock } from "./RunTimer";
+import { formatDuration, formatClock, useTick } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import ActionIcon from "../../components/ActionIcon";
 
@@ -59,6 +59,19 @@ export type NotebookState = {
   /// feeding notebook steps). The surface whose toggle turned auto-feed on
   /// owns it; unchecking from ANY page stops it everywhere.
   autoFeedOwner?: string;
+  /// Liveness beacon the OWNER window stamps every few seconds while it drives
+  /// an active queue. Other windows treat the lease as held only while this is
+  /// fresh — so a window closed/crashed mid-queue stops ghosting the rest and
+  /// any window can take over, but a genuinely live owner keeps its exclusive
+  /// hold. Device-local: stripped before the blob syncs (see vaultSync).
+  autoFeedHeartbeat?: number;
+  /// Wall-clock bounds for one whole auto-fed queue run. Unlike the queue
+  /// total below, this includes the gaps between jobs as well as their work.
+  autoFeedStartedAt?: number;
+  autoFeedFinishedAt?: number;
+  /// A user may turn auto-feed off before the queue is empty. Keep that
+  /// distinct from a naturally completed sequence in the timing display.
+  autoFeedStopped?: boolean;
   digest: Array<{ role: "you" | "digest"; text: string }>;
   /// User-picked digest model (per project). Empty/undefined = inherit the
   /// surface's default (team model → server model), same rule as before.
@@ -72,6 +85,18 @@ export type NotebookState = {
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
 const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [] };
 const keyFor = (projectId: string) => `owllm:agents:notebook:${projectId}`;
+// The auto-feed/owner/sequence-clock fields below are the notebook's RUN-LEASE:
+// they live IN this blob so tabs on THIS PC coordinate the queue through it, but
+// vaultSync strips them before syncing to the user's other PCs (the queue owner
+// is a live per-window concept — a peer PC must never inherit it, or its own
+// window would think it owns a queue it never started). See vaultSync.ts →
+// NOTEBOOK_RUN_LEASE_FIELDS / stripNotebookLease.
+const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+// Queue-lease liveness: the owner window beats every HEARTBEAT_MS; other windows
+// treat the lease as held only while the last beat is within LEASE_TTL_MS (a
+// couple of missed beats are tolerated before a lock releases to a takeover).
+const NOTEBOOK_HEARTBEAT_MS = 8_000;
+const NOTEBOOK_LEASE_TTL_MS = 20_000;
 
 export function loadNotebook(projectId: string | null | undefined): NotebookState {
   if (!projectId) return { ...EMPTY };
@@ -91,6 +116,10 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
         : [],
       autoFeed: p.autoFeed === true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
+      autoFeedHeartbeat: typeof p.autoFeedHeartbeat === "number" ? p.autoFeedHeartbeat : undefined,
+      autoFeedStartedAt: typeof p.autoFeedStartedAt === "number" ? p.autoFeedStartedAt : undefined,
+      autoFeedFinishedAt: typeof p.autoFeedFinishedAt === "number" ? p.autoFeedFinishedAt : undefined,
+      autoFeedStopped: p.autoFeedStopped === true,
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
       digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
@@ -118,12 +147,96 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return null;
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
+  const now = Date.now();
   next.status = "sent";
-  next.startedAt = Date.now();
+  next.startedAt = now;
   next.finishedAt = undefined;
+  if (nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) {
+    nb.autoFeedStartedAt = now;
+    nb.autoFeedFinishedAt = undefined;
+    nb.autoFeedStopped = false;
+  }
   if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
   saveNotebook(projectId, nb);
   return next;
+}
+
+/// Convert the ordered `## Plan` in BRIEF.md into feedable implementation
+/// steps. Brainstormer is required to write this section, but the fallback
+/// still gives the team one useful job instead of ending at a dead-end CTA.
+export function briefImplementationSteps(brief: string): string[] {
+  const lines = brief.replace(/\r\n/g, "\n").split("\n");
+  const steps: string[] = [];
+  let inPlan = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    if (/^#{1,3}\s+(?:implementation\s+)?plan\s*$/i.test(line)) {
+      inPlan = true;
+      continue;
+    }
+    if (inPlan && /^#{1,3}\s+/.test(line)) break;
+    if (!inPlan) continue;
+    const numbered = line.match(/^\d+[.)]\s+(.{3,})$/);
+    const task = line.match(/^[-*]\s+\[[ xX]\]\s+(.{3,})$/);
+    const text = (numbered?.[1] ?? task?.[1] ?? "").trim();
+    if (text) steps.push(text);
+  }
+  return steps.length
+    ? steps.slice(0, 12)
+    : ["Implement the approved plan in BRIEF.md, follow its ordered scope, and run the verification described there."];
+}
+
+/// Finish an in-project brainstorm by preparing that SAME project's Notebook.
+/// Existing queue/history stays intact; only new, non-duplicate plan steps are
+/// appended. The brief itself becomes the living plan when the user has not
+/// already written one.
+export function seedNotebookFromBrief(projectId: string | null | undefined, brief: string): number {
+  if (!projectId || !brief.trim()) return 0;
+  const nb = loadNotebook(projectId);
+  const known = new Set(nb.steps.map((s) => s.text.trim().toLocaleLowerCase()).filter(Boolean));
+  const now = Date.now();
+  const additions = briefImplementationSteps(brief).filter((text) => {
+    const key = text.trim().toLocaleLowerCase();
+    if (!key || known.has(key)) return false;
+    known.add(key);
+    return true;
+  });
+  if (!nb.plan.trim()) nb.plan = brief.trim();
+  nb.steps.push(...additions.map((text, index) => ({
+    id: `${newStepId()}${index.toString(36)}`,
+    text,
+    status: "pending" as const,
+    ts: now + index,
+  })));
+  saveNotebook(projectId, nb);
+  return additions.length;
+}
+
+/// Start the wall-clock timer for an auto-fed queue when a caller is not also
+/// persisting its first step. The UI writes both atomically; later queue jobs
+/// are covered by takeNextAutoStep.
+export function markNotebookAutoFeedStarted(projectId: string | null | undefined, startedAt: number = Date.now()): void {
+  if (!projectId) return;
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeed || (nb.autoFeedStartedAt != null && nb.autoFeedFinishedAt == null)) return;
+  nb.autoFeedStartedAt = startedAt;
+  nb.autoFeedFinishedAt = undefined;
+  nb.autoFeedStopped = false;
+  saveNotebook(projectId, nb);
+}
+
+/// Freeze the whole-sequence timer only after the owner finishes the final
+/// auto-fed job. Pending or in-flight sent steps mean the sequence continues.
+export function markNotebookAutoFeedFinished(projectId: string | null | undefined, surfaceId: string, finishedAt: number = Date.now()): boolean {
+  if (!projectId) return false;
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeed || (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) || nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) return false;
+  const stillActive = nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null));
+  if (stillActive) return false;
+  nb.autoFeedFinishedAt = finishedAt;
+  nb.autoFeedStopped = false;
+  saveNotebook(projectId, nb);
+  return true;
 }
 
 /// True when auto-feed is on with pending steps and THIS surface may drive it
@@ -134,6 +247,23 @@ export function autoFeedWouldRun(projectId: string | null | undefined, surfaceId
   if (!nb.autoFeed) return false;
   if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return false;
   return nb.steps.some((s) => s.status === "pending");
+}
+
+/// Make the complete clean-run transition in one place: atomically claim the
+/// next pending card and hand it to the owning surface, or close the sequence
+/// timer after the final card. AgentsPage and CodePage both use this helper so
+/// their queue behavior cannot drift into separate one-card implementations.
+export function continueNotebookAutoFeed(
+  projectId: string | null | undefined,
+  surfaceId: string,
+  dispatch: (step: NotebookStep) => void,
+): "dispatched" | "finished" | "inactive" {
+  const step = takeNextAutoStep(projectId, surfaceId);
+  if (step) {
+    dispatch(step);
+    return "dispatched";
+  }
+  return markNotebookAutoFeedFinished(projectId, surfaceId) ? "finished" : "inactive";
 }
 
 /// Stamp when a notebook step was fed to the team. Safe to call from any surface;
@@ -175,12 +305,21 @@ function formatStepTiming(s: NotebookStep): string | null {
   return translateUiText(`started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`);
 }
 
-const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+function formatAutoFeedTiming(nb: NotebookState): string | null {
+  if (nb.autoFeedStartedAt == null) return null;
+  const finishedAt = nb.autoFeedFinishedAt;
+  const elapsed = formatDuration((finishedAt ?? Date.now()) - nb.autoFeedStartedAt);
+  if (finishedAt != null) {
+    const outcome = nb.autoFeedStopped ? "stopped" : "finished";
+    return `Auto-feed ${outcome} • started ${formatClock(nb.autoFeedStartedAt)} • finished ${formatClock(finishedAt)} • ${elapsed}`;
+  }
+  return `Auto-feed running • started ${formatClock(nb.autoFeedStartedAt)} • ${elapsed}`;
+}
 
 type KanbanPlan = { now: string; next: string; later: string };
 const EMPTY_KANBAN: KanbanPlan = { now: "", next: "", later: "" };
 const KANBAN_COLUMNS: Array<{ key: keyof KanbanPlan; label: string; hint: string; color: string }> = [
-  { key: "now", label: "Now", hint: "active implementation batch", color: "var(--accent)" },
+  { key: "now", label: "Now", hint: "active implementation batch", color: "var(--accent-ink)" },
   { key: "next", label: "Next", hint: "queued after Now", color: "var(--ok)" },
   { key: "later", label: "Later", hint: "parked / optional", color: "var(--warn)" },
 ];
@@ -313,6 +452,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   /// Same transient outcome for the Kanban NOW-batch button (keyed separately —
   /// lanes have no step id).
   const [laneNotice, setLaneNotice] = useState<{ key: keyof KanbanPlan; kind: "queued" | "dispatched" | "no-team" } | null>(null);
+  /// Transient whole-queue outcome for Start Queue clicked while a run is
+  /// already in progress — tells the user the queue is deferred until the
+  /// current job finishes instead of steering it now.
+  const [queueNotice, setQueueNotice] = useState<"waiting" | null>(null);
   const [editingStepId, setEditingStepId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   // Digest proposals live IN the notebook blob (nb.proposed / nb.proposedPlan)
@@ -323,6 +466,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   activeRef.current = active;
   const projRef = useRef(projectId);
   projRef.current = projectId;
+  useTick(nb.autoFeedStartedAt != null && nb.autoFeedFinishedAt == null);
 
   const kanbanPlan = useMemo(() => parseKanbanPlan(nb.plan), [nb.plan]);
   const brainstormRef = useAutoResize<HTMLTextAreaElement>(nb.text, { minRows: 4, maxRows: 16 });
@@ -354,6 +498,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     setDigestError("");
     setEditingStepId(null);
     setFeedNotice(null);
+    setQueueNotice(null);
   }, [projectId]);
 
   const updateNotebook = (makeNext: (prev: NotebookState) => NotebookState) => {
@@ -409,14 +554,26 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       [steps[ai], steps[bi]] = [steps[bi], steps[ai]];
       return { ...prev, steps };
     });
-  const feedStep = (s: NotebookStep) => {
+  const feedStep = (s: NotebookStep, claimQueue = false) => {
     const res = onFeed(s.text, s.id);
     setFeedNotice({ id: s.id, kind: res });
     window.setTimeout(() => setFeedNotice((n) => (n && n.id === s.id ? null : n)), 6000);
     if (res === "no-team") return;
     const now = Date.now();
-    setStep(s.id, { status: "sent", startedAt: now, finishedAt: undefined });
-    markNotebookStepStarted(projectId, s.id, now);
+    // Persist the first step and sequence clock together. Separate writes can
+    // race React's queued state updater and erase the just-started sequence.
+    updateNotebook((prev) => ({
+      ...prev,
+      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined } : step),
+      // Claiming the queue makes THIS window its owner even when auto-feed is
+      // off: a started queue is driven by one window, and every other open
+      // window (another tab here or the app on another PC) ghosts its run
+      // controls until this one finishes or hands the lease over.
+      ...(claimQueue ? { autoFeedOwner: surfaceId, autoFeedHeartbeat: now } : {}),
+      ...(prev.autoFeed && (prev.autoFeedStartedAt == null || prev.autoFeedFinishedAt != null)
+        ? { autoFeedStartedAt: now, autoFeedFinishedAt: undefined, autoFeedStopped: false }
+        : {}),
+    }));
   };
   /// Feed a whole Kanban lane as one goal. The board is the plan of record, so
   /// the lane content is NEVER cleared or consumed — only read.
@@ -433,7 +590,20 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   /// what kicks the chain off while the team is idle.
   const startQueue = () => {
     const first = nb.steps.find((s) => s.status === "pending");
-    if (first) feedStep(first);
+    if (!first) return;
+    if (running) {
+      // Agent is already running — claim auto-feed ownership so the queue
+      // starts automatically as soon as the current job finishes, without
+      // steering the live run now.
+      updateNotebook((prev) => ({ ...prev, autoFeed: true, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
+      setQueueNotice("waiting");
+      window.setTimeout(() => setQueueNotice(null), 6000);
+      return;
+    }
+    // Start queue is an explicit request to drive the sequence from THIS
+    // page. Claim ownership with the first persisted step so a stale owner
+    // left by a closed page cannot dispatch card one and then strand card two.
+    feedStep(first, true);
   };
 
   const startEdit = (s: NotebookStep) => { setEditingStepId(s.id); setEditingText(s.text); };
@@ -527,10 +697,43 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     }
     return parts.join(" · ");
   }, [queueTiming]);
+  const autoFeedTimingText = formatAutoFeedTiming(nb);
   // The active feed shows only unfinished, actionable cards. Finished steps
   // (checked off OR fed-and-completed) drop out of the feed into the Archive tab.
   const activeSteps = useMemo(() => nb.steps.filter((s) => !isStepArchived(s)), [nb.steps]);
   const doneSteps = useMemo(() => nb.steps.filter((s) => isStepArchived(s)), [nb.steps]);
+  // ---- Window-owned queue lease (device-local; never synced) --------------
+  // Once a window starts the queue (Start queue / auto-feed), it OWNS the run:
+  // only that window feeds the team from this list. Every other open window on
+  // the same project — another tab here or the app on another PC — becomes a
+  // read-only spectator so two windows can never steer the one team at once.
+  // A queue is "active" while its owner still has pending or in-flight steps.
+  // The owner is a surface id that stays on THIS device (vaultSync denies the
+  // run-lease key), so a peer PC sees the lock but can Take over if the owning
+  // window is gone.
+  const queueActive = useMemo(
+    () => !!nb.autoFeedOwner && nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null)),
+    [nb.autoFeedOwner, nb.steps],
+  );
+  // The owner is only "live" while its heartbeat is fresh. A window closed or
+  // crashed mid-queue stops beating: its lease goes stale so other windows
+  // un-ghost and Start queue takes over (never stranding the list behind a dead
+  // owner), while a genuinely live owner keeps its exclusive hold. useTick keeps
+  // this re-evaluating so a lock releases on its own once the beat lapses.
+  const leaseLive = nb.autoFeedHeartbeat != null && (Date.now() - nb.autoFeedHeartbeat) < NOTEBOOK_LEASE_TTL_MS;
+  useTick(queueActive && nb.autoFeedOwner !== surfaceId && nb.autoFeedHeartbeat != null);
+  const lockedElsewhere = queueActive && nb.autoFeedOwner !== surfaceId && leaseLive;
+  const takeOverQueue = () => updateNotebook((prev) => ({ ...prev, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
+  // While THIS window owns an active queue, beat the heartbeat so peers keep
+  // seeing the lease held. Stops when the queue ends or ownership moves away.
+  useEffect(() => {
+    if (nb.autoFeedOwner !== surfaceId || !queueActive) return;
+    const stamp = () => updateNotebook((prev) => (prev.autoFeedOwner === surfaceId ? { ...prev, autoFeedHeartbeat: Date.now() } : prev));
+    stamp();
+    const t = window.setInterval(stamp, NOTEBOOK_HEARTBEAT_MS);
+    return () => window.clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [nb.autoFeedOwner, surfaceId, queueActive]);
   // Human-readable INHERITED digest model (the default when no override is
   // picked): the raw id with any file path stripped.
   const digestModelLabel = useMemo(() => {
@@ -559,7 +762,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     width: "100%", resize: "none", overflow: "hidden",
     background: "var(--bg-input)", color: "var(--fg)",
     border: "1px solid var(--border-strong)", borderRadius: 8,
-    padding: 10, fontSize: 12.5, lineHeight: 1.55, outline: "none",
+    padding: 10, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.55, outline: "none",
   };
 
   const panel = (
@@ -578,24 +781,47 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             {running ? (inline ? "run live — steps steer it" : "team is running — fed steps steer it live") : (inline ? "idle — steps start a run" : "team idle — fed steps start a run")}
           </span>
           <div style={{ flex: 1 }} />
-          {(() => {
-            // Ownership-aware toggle: ON from here claims the queue for THIS
-            // page; OFF from anywhere stops it everywhere. When another page
-            // owns it, this page shows it amber — uncheck to stop, re-check
-            // to take over driving from here.
-            const ownedElsewhere = nb.autoFeed && !!nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId;
-            return (
-              <label
-                title={ownedElsewhere
-                  ? "Auto-feed is driven by another page on this project. Uncheck to stop it everywhere; check again afterwards to drive it from this page."
-                  : "When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it. Only the page that turns this on feeds the queue."}
-                style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: ownedElsewhere ? "var(--warn)" : nb.autoFeed ? "var(--ok)" : "var(--fg-muted)", cursor: "pointer" }}
-              >
-                <input type="checkbox" checked={nb.autoFeed} onChange={(e) => update({ autoFeed: e.target.checked, autoFeedOwner: e.target.checked ? surfaceId : undefined })} />
-                {ownedElsewhere ? "Auto-feed (another page drives)" : "Auto-feed next step"}
-              </label>
-            );
-          })()}
+          {lockedElsewhere ? (
+            // This window is a spectator: another window owns the running queue.
+            // Ghost the toggle and offer an explicit takeover (for when the
+            // owning window — e.g. on another PC — is gone) instead of letting
+            // two windows drive the one team.
+            <div data-ui="NotebookQueueLocked" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span title="The queue is being driven by another open window on this project. Its run controls are read-only here to avoid two windows steering the same team." style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 12, fontWeight: 700, color: "var(--warn)" }}>
+                <ActionIcon name="monitor" size={13} />Queue runs in another window
+              </span>
+              <button
+                onClick={takeOverQueue}
+                title="Take over driving the queue from this window (use only if the other window is closed or stuck)."
+                style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+              >Take over here</button>
+            </div>
+          ) : (
+            <label
+              title="When a run finishes cleanly, the next pending step is dispatched automatically — write the roadmap, the team walks it. Only the window that turns this on feeds the queue."
+              style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: nb.autoFeed ? "var(--ok)" : "var(--fg-muted)", cursor: "pointer" }}
+            >
+              <input
+                type="checkbox"
+                checked={nb.autoFeed}
+                onChange={(e) => {
+                  const enabled = e.target.checked;
+                  const stoppedAt = Date.now();
+                  updateNotebook((prev) => enabled
+                    ? { ...prev, autoFeed: true, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }
+                    : {
+                        ...prev,
+                        autoFeed: false,
+                        autoFeedOwner: undefined,
+                        ...(prev.autoFeedStartedAt != null && prev.autoFeedFinishedAt == null
+                          ? { autoFeedFinishedAt: stoppedAt, autoFeedStopped: true }
+                          : {}),
+                      });
+                }}
+              />
+              Auto-feed next step
+            </label>
+          )}
           {!inline && <button className="ghost-btn" onClick={() => setOpen(false)} title="Close" aria-label="Close" style={{ height: 26, width: 28, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="close" size={14} /></button>}
         </div>
 
@@ -682,12 +908,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               </div>
               {SHOW_KANBAN && proposedPlan && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 10, background: "rgba(var(--accent-rgb),0.08)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 8 }}>
-                  <div style={{ fontSize: 11, color: "var(--accent)", fontWeight: 700 }}>Proposed plan</div>
+                  <div style={{ fontSize: 11, color: "var(--accent-ink)", fontWeight: 700 }}>Proposed plan</div>
                   <div style={{ fontSize: 12, lineHeight: 1.5, whiteSpace: "pre-wrap", wordBreak: "break-word", color: "var(--fg)" }}>{proposedPlan}</div>
                   <div style={{ display: "flex", gap: 8 }}>
                     <button
                       onClick={() => update({ plan: normalizeKanbanPlan(proposedPlan), text: "", proposedPlan: "" })}
-                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(var(--accent-rgb),0.45)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                      style={{ height: 26, padding: "0 12px", border: "1px solid rgba(var(--accent-rgb),0.45)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent-ink)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
                     >Save plan + clear notes</button>
                     <button className="ghost-btn" onClick={() => update({ proposedPlan: "" })} title="Discard the proposed plan" style={{ height: 26, padding: "0 10px", fontSize: 11 }}>Discard</button>
                   </div>
@@ -769,7 +995,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           onClick={() => feedLane("now")}
                           disabled={!kanbanPlan.now.trim()}
                           title={running ? "Feed the whole NOW batch — steers the running team at its next boundary. The board keeps its cards." : "Start the whole NOW batch as a new goal. The board keeps its cards."}
-                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--accent-rgb),0.5)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent)", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
+                          style={{ height: 24, padding: "0 10px", border: "1px solid rgba(var(--accent-rgb),0.5)", borderRadius: 6, background: "rgba(var(--accent-rgb),0.12)", color: "var(--accent-ink)", fontSize: 11, fontWeight: 700, cursor: kanbanPlan.now.trim() ? "pointer" : "default", opacity: kanbanPlan.now.trim() ? 1 : 0.45 }}
                         ><ActionIcon name="bolt" size={13} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start batch</button>
                         {laneNotice?.key === "now" && (
                           <span style={{
@@ -795,19 +1021,49 @@ export default function RunNotebook({ projectId, projectName, active = true, run
               <ActionIcon name="target" size={15} />
               <span>Next steps</span>
               {queueTimingText && (
-                <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
+                <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent-ink)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
               )}
               <span style={{ fontSize: 10, fontWeight: 700, color: pendingCount ? "var(--ok)" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
               {pendingCount > 0 && (
                 <button
                   onClick={startQueue}
-                  title={nb.autoFeed
-                    ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
-                    : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
-                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: "var(--ok)", color: "#ffffff", fontSize: 11, fontWeight: 700, cursor: "pointer", textTransform: "none", letterSpacing: 0 }}
+                  disabled={lockedElsewhere}
+                  title={lockedElsewhere
+                    ? "The queue is already running in another window on this project. Take over from the header to drive it here."
+                    : running
+                      ? "Queue is waiting for the current run to finish before starting"
+                      : nb.autoFeed
+                        ? "Feed the first pending step now — auto-feed walks the rest of the list, one step per clean run"
+                        : "Feed the first pending step now (turn on auto-feed to walk the whole list automatically)"}
+                  style={{ height: 24, padding: "0 10px", border: "none", borderRadius: 6, background: lockedElsewhere ? "var(--bg-surface)" : running ? "var(--warn)" : "var(--ok)", color: lockedElsewhere ? "var(--fg-muted)" : "#ffffff", fontSize: 11, fontWeight: 700, cursor: lockedElsewhere ? "not-allowed" : "pointer", opacity: lockedElsewhere ? 0.6 : 1, textTransform: "none", letterSpacing: 0 }}
                 ><ActionIcon name="play" size={12} style={{ display: "inline", verticalAlign: "-2px", marginRight: 4 }} />Start queue</button>
               )}
+              {queueNotice && (
+                <span style={{
+                  fontSize: 10.5, fontWeight: 700, borderRadius: 999, padding: "2px 8px",
+                  color: "var(--warn)",
+                  border: "1px solid rgba(var(--warn-rgb),0.45)",
+                }}>
+                  queued — starts after the current run
+                </span>
+              )}
             </div>
+
+            {autoFeedTimingText && (
+              <div
+                data-ui="NotebookAutoFeedTiming"
+                title="Total wall-clock time for this auto-fed notebook sequence"
+                style={{
+                  marginTop: 8, display: "inline-flex", alignItems: "center", alignSelf: "flex-start", gap: 5,
+                  maxWidth: "100%", padding: "4px 8px", borderRadius: 6, fontSize: 10.5, fontWeight: 700,
+                  fontVariantNumeric: "tabular-nums", color: "var(--accent-ink)",
+                  background: "rgba(var(--accent-rgb),0.10)", border: "1px solid rgba(var(--accent-rgb),0.30)",
+                }}
+              >
+                <ActionIcon name="clock" size={12} />
+                <span>{autoFeedTimingText}</span>
+              </div>
+            )}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {/* Active/Archive tabs — done steps live ONLY on the archive tab
@@ -824,7 +1080,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     onClick={() => setStepsTab(t.key)}
                     style={{
                       height: 28, padding: "0 12px", border: "none", background: "transparent",
-                      borderBottom: stepsTab === t.key ? "2px solid var(--accent)" : "2px solid transparent",
+                      borderBottom: stepsTab === t.key ? "2px solid var(--accent-ink)" : "2px solid transparent",
                       color: stepsTab === t.key ? "var(--fg-strong)" : "var(--fg-muted)",
                       fontSize: 11.5, fontWeight: 700, cursor: "pointer",
                     }}
@@ -899,9 +1155,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       {s.status !== "done" && (
                         <button
                           onClick={() => feedStep(s)}
+                          disabled={lockedElsewhere}
                           aria-label={s.status === "sent" ? "Re-feed" : "Feed"}
-                          title={running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
-                          style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: "pointer" }}
+                          title={lockedElsewhere
+                            ? "The queue is running in another window on this project — feeding is read-only here. Take over from the header to feed from this window."
+                            : running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
+                          style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: lockedElsewhere ? "not-allowed" : "pointer", opacity: lockedElsewhere ? 0.5 : 1 }}
                         ><ActionIcon name="bolt" size={12} />{s.status === "sent" ? "Re-feed" : "Feed"}</button>
                       )}
                       {feedNotice?.id === s.id && (

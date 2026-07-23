@@ -18,8 +18,9 @@
 //        → git add -A; git commit -m "[<agent>] <summary>"
 //        → returns commit sha + count of files changed
 //   4. fleet_worktree_merge(path, project_cwd, agent, branch)
-//        → from project_cwd: git merge --squash -X theirs <branch>; commit
-//        → overlapping hunks deterministically keep the isolated page's work
+//        → from project_cwd: git merge --squash <branch>; commit
+//        → plain three-way merge; real overlapping edits return Conflict
+//          with both sides preserved (never silently prefer one side)
 //   5. fleet_worktree_remove(path, branch, keep_on_failure)
 //
 // Non-git projects: every command returns an `Outcome::NotAGitRepo`
@@ -52,7 +53,7 @@ fn fleet_root() -> Option<PathBuf> {
 /// index lock; concurrent calls otherwise fail with "Unable to create
 /// '.git/index.lock': File exists", which surfaced as "Couldn't create the
 /// worktree" when opening a second page on a project. Keyed by the repo path.
-fn repo_git_lock(repo: &Path) -> Arc<Mutex<()>> {
+pub(crate) fn repo_git_lock(repo: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let key = repo.to_string_lossy().to_string();
@@ -63,19 +64,19 @@ fn repo_git_lock(repo: &Path) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// App-managed scratch that must NEVER wedge the worktree workflow: the image
-/// inbox (`.owllm-inbox/`, where the app itself writes pasted/agent images) and
-/// the project card dir (`.owllm/`). These are tracked in some repos and the app
+/// App-managed runtime files that must NEVER wedge the worktree workflow. These
+/// are tracked in some repos and the app
 /// rewrites them, so a `git status` on the source is perpetually "dirty" through
 /// no fault of the user — which used to make EVERY `fleet_worktree_create` bounce
-/// with DirtyWorkingTree. The worktree is cut from HEAD regardless, so ignoring
-/// these in the guard changes nothing about what lands in the worktree.
+/// with DirtyWorkingTree. Deliberately do not classify the whole `.owllm/`
+/// directory as scratch: Project Cards, verify config, skills, and media assets
+/// are durable project data which users must be able to commit and share.
 pub(crate) fn is_app_scratch(path: &str) -> bool {
     let p = path.trim().trim_start_matches("./").replace('\\', "/");
     p == ".owllm-inbox"
-        || p == ".owllm"
         || p.starts_with(".owllm-inbox/")
-        || p.starts_with(".owllm/")
+        || p == ".owllm/brainstorm.json"
+        || p == ".owllm/eval-traces.jsonl"
 }
 
 /// Extract the file path from one `git status --porcelain` line, resolving the
@@ -117,35 +118,6 @@ fn resolve_app_scratch_conflicts(cwd: &Path, conflicts: &str) -> Result<(), Stri
         if !ok {
             return Err(format!(
                 "could not resolve app-owned merge conflict {path}: {}",
-                err.trim()
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Finish conflicts the recursive strategy cannot resolve (for example
-/// modify/delete, rename/delete, add/add binary files). The isolated branch is
-/// the user's explicit page/session output, so its final state is authoritative
-/// for an irreducible path: restore the branch's file, or remove the path when
-/// the branch deleted it. Text conflicts are normally handled more precisely by
-/// `-X theirs`, which preserves current-main edits outside overlapping hunks.
-fn resolve_user_conflicts_from_branch(
-    cwd: &Path,
-    branch: &str,
-    conflicts: &[String],
-) -> Result<(), String> {
-    for path in conflicts {
-        let branch_path = format!("{branch}:{path}");
-        let (exists_on_branch, _, _) = git(cwd, &["cat-file", "-e", &branch_path])?;
-        let (ok, _, err) = if exists_on_branch {
-            git(cwd, &["checkout", branch, "--", path])?
-        } else {
-            git(cwd, &["rm", "-f", "--ignore-unmatch", "--", path])?
-        };
-        if !ok {
-            return Err(format!(
-                "could not apply the isolated page's version of {path}: {}",
                 err.trim()
             ));
         }
@@ -233,21 +205,48 @@ fn sync_current_branch_from_origin(cwd: &Path) -> Result<(), String> {
 /// Keep them recoverable outside the checkout while the branch adds the same
 /// blobs. The guard restores them on an early return; a successful merge
 /// discards only the verified-identical backup.
-struct IdenticalUntrackedBackup {
+struct UntrackedCollisionBackup {
     cwd: PathBuf,
     root: PathBuf,
     paths: Vec<String>,
+    preserve_after_merge: Vec<String>,
     restore_on_drop: bool,
 }
 
-impl IdenticalUntrackedBackup {
+impl UntrackedCollisionBackup {
+    /// Runtime state belongs to the destination checkout. If a page branch
+    /// accidentally tracks an older copy, restore the destination's live file
+    /// after Git has applied and unstaged the branch copy.
+    fn restore_preserved(&mut self) -> Result<(), String> {
+        for path in &self.preserve_after_merge {
+            let from = self.root.join(path);
+            let to = self.cwd.join(path);
+            if !from.exists() {
+                continue;
+            }
+            if to.exists() {
+                std::fs::remove_file(&to)
+                    .map_err(|e| format!("could not remove merged app state {path}: {e}"))?;
+            }
+            if let Some(parent) = to.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    format!("could not restore app state directory for {path}: {e}")
+                })?;
+            }
+            std::fs::rename(&from, &to)
+                .map_err(|e| format!("could not restore app-owned file {path} after merge: {e}"))?;
+        }
+        self.preserve_after_merge.clear();
+        Ok(())
+    }
+
     fn discard(mut self) {
         self.restore_on_drop = false;
         let _ = std::fs::remove_dir_all(&self.root);
     }
 }
 
-impl Drop for IdenticalUntrackedBackup {
+impl Drop for UntrackedCollisionBackup {
     fn drop(&mut self) {
         if !self.restore_on_drop {
             return;
@@ -267,13 +266,52 @@ impl Drop for IdenticalUntrackedBackup {
     }
 }
 
-/// Move only byte-identical untracked files that the branch is about to add.
-/// A differing file is user content, so leave every path untouched and return
-/// an actionable error instead of Git's generic "would be overwritten" block.
-fn prepare_identical_untracked_collisions(
+/// A project checkout can contain uncommitted tracked edits that are byte-for-byte
+/// identical to the page branch being merged. Git still aborts before the squash
+/// starts ("local changes would be overwritten"). Back up only those identical
+/// files, reset them to HEAD so Git can apply the branch, and restore on failure.
+struct IdenticalTrackedBackup {
+    cwd: PathBuf,
+    root: PathBuf,
+    paths: Vec<String>,
+    restore_on_drop: bool,
+}
+
+impl IdenticalTrackedBackup {
+    fn discard(mut self) {
+        self.restore_on_drop = false;
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+impl Drop for IdenticalTrackedBackup {
+    fn drop(&mut self) {
+        if !self.restore_on_drop {
+            return;
+        }
+        for path in &self.paths {
+            let from = self.root.join(path);
+            let to = self.cwd.join(path);
+            if !from.exists() {
+                continue;
+            }
+            if let Some(parent) = to.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::copy(from, to);
+        }
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Move untracked files that the branch is about to add when it is safe to do
+/// so. Byte-identical source assets are adopted. App-owned runtime state is
+/// preserved regardless of content and restored after the merge. Any other
+/// differing file is user content, so it remains untouched and blocks.
+fn prepare_untracked_collisions(
     cwd: &Path,
     branch: &str,
-) -> Result<Option<IdenticalUntrackedBackup>, String> {
+) -> Result<Option<UntrackedCollisionBackup>, String> {
     let (ok, added, err) = git(
         cwd,
         &[
@@ -293,6 +331,7 @@ fn prepare_identical_untracked_collisions(
     }
 
     let mut identical = Vec::new();
+    let mut preserve = Vec::new();
     let mut differing = Vec::new();
     for path in added.split('\0').filter(|p| !p.is_empty()) {
         let disk_path = cwd.join(path);
@@ -301,6 +340,10 @@ fn prepare_identical_untracked_collisions(
         }
         let (tracked, _, _) = git(cwd, &["ls-files", "--error-unmatch", "--", path])?;
         if tracked {
+            continue;
+        }
+        if is_app_scratch(path) {
+            preserve.push(path.to_string());
             continue;
         }
         let branch_path = format!("{branch}:{path}");
@@ -319,7 +362,7 @@ fn prepare_identical_untracked_collisions(
             differing.join(", ")
         ));
     }
-    if identical.is_empty() {
+    if identical.is_empty() && preserve.is_empty() {
         return Ok(None);
     }
 
@@ -342,7 +385,7 @@ fn prepare_identical_untracked_collisions(
         std::process::id()
     ));
     let mut moved = Vec::new();
-    for path in &identical {
+    for path in identical.iter().chain(preserve.iter()) {
         let from = cwd.join(path);
         let to = root.join(path);
         if let Some(parent) = to.parent() {
@@ -350,10 +393,11 @@ fn prepare_identical_untracked_collisions(
                 .map_err(|e| format!("could not prepare untracked-file backup for {path}: {e}"))?;
         }
         if let Err(e) = std::fs::rename(&from, &to) {
-            let guard = IdenticalUntrackedBackup {
+            let guard = UntrackedCollisionBackup {
                 cwd: cwd.to_path_buf(),
                 root,
                 paths: moved,
+                preserve_after_merge: preserve.clone(),
                 restore_on_drop: true,
             };
             drop(guard);
@@ -364,10 +408,134 @@ fn prepare_identical_untracked_collisions(
         moved.push(path.clone());
     }
 
-    Ok(Some(IdenticalUntrackedBackup {
+    Ok(Some(UntrackedCollisionBackup {
         cwd: cwd.to_path_buf(),
         root,
         paths: moved,
+        preserve_after_merge: preserve,
+        restore_on_drop: true,
+    }))
+}
+
+/// Reset only tracked local edits whose on-disk bytes already match the page
+/// branch. Those edits are almost always leftovers from a previous failed
+/// release/merge attempt; letting Git abort on them wedges every retry.
+fn prepare_identical_tracked_collisions(
+    cwd: &Path,
+    branch: &str,
+) -> Result<Option<IdenticalTrackedBackup>, String> {
+    let (ok, changed, err) = git(cwd, &["diff", "--name-only", "-z", "HEAD", branch])?;
+    if !ok {
+        return Err(format!(
+            "could not inspect branch changes before merge: {}",
+            err.trim()
+        ));
+    }
+
+    let mut identical = Vec::new();
+    let mut differing = Vec::new();
+    for path in changed.split('\0').filter(|p| !p.is_empty()) {
+        let (tracked, _, _) = git(cwd, &["ls-files", "--error-unmatch", "--", path])?;
+        if !tracked {
+            continue;
+        }
+        let (unstaged_clean, _, _) = git(cwd, &["diff", "--quiet", "--", path])?;
+        let (staged_clean, _, _) = git(cwd, &["diff", "--cached", "--quiet", "--", path])?;
+        if unstaged_clean && staged_clean {
+            continue;
+        }
+        if !staged_clean {
+            differing.push(path.to_string());
+            continue;
+        }
+
+        let disk_path = cwd.join(path);
+        let branch_path = format!("{branch}:{path}");
+        let (branch_ok, branch_blob, _) = git(cwd, &["rev-parse", &branch_path])?;
+        let (disk_ok, disk_blob, _) = git(cwd, &["hash-object", "--", path])?;
+        if disk_path.is_file() && branch_ok && disk_ok && branch_blob.trim() == disk_blob.trim() {
+            identical.push(path.to_string());
+        } else {
+            differing.push(path.to_string());
+        }
+    }
+
+    if !differing.is_empty() {
+        return Err(format!(
+            "merge would overwrite tracked local changes whose contents differ from the page branch; commit or stash them first: {}",
+            differing.join(", ")
+        ));
+    }
+    if identical.is_empty() {
+        return Ok(None);
+    }
+
+    let (git_dir_ok, git_dir, git_dir_err) = git(cwd, &["rev-parse", "--absolute-git-dir"])?;
+    if !git_dir_ok {
+        return Err(format!(
+            "could not locate the repository metadata for tracked-file backup: {}",
+            git_dir_err.trim()
+        ));
+    }
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let root = PathBuf::from(git_dir.trim()).join(format!(
+        "owllm-merge-tracked-{}-{nonce}",
+        std::process::id()
+    ));
+    let mut backed_up = Vec::new();
+    for path in &identical {
+        let from = cwd.join(path);
+        let to = root.join(path);
+        if let Some(parent) = to.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                let guard = IdenticalTrackedBackup {
+                    cwd: cwd.to_path_buf(),
+                    root,
+                    paths: backed_up,
+                    restore_on_drop: true,
+                };
+                drop(guard);
+                return Err(format!(
+                    "could not prepare tracked-file backup for {path}: {e}"
+                ));
+            }
+        }
+        if let Err(e) = std::fs::copy(&from, &to) {
+            let guard = IdenticalTrackedBackup {
+                cwd: cwd.to_path_buf(),
+                root,
+                paths: backed_up,
+                restore_on_drop: true,
+            };
+            drop(guard);
+            return Err(format!(
+                "could not preserve identical tracked file {path}: {e}"
+            ));
+        }
+        let (reset_ok, _, reset_err) = git(cwd, &["checkout", "--", path])?;
+        if !reset_ok {
+            let guard = IdenticalTrackedBackup {
+                cwd: cwd.to_path_buf(),
+                root,
+                paths: backed_up,
+                restore_on_drop: true,
+            };
+            drop(guard);
+            return Err(format!(
+                "could not reset identical tracked file {path} before merge: {}",
+                reset_err.trim()
+            ));
+        }
+        backed_up.push(path.clone());
+    }
+
+    Ok(Some(IdenticalTrackedBackup {
+        cwd: cwd.to_path_buf(),
+        root,
+        paths: backed_up,
         restore_on_drop: true,
     }))
 }
@@ -499,6 +667,18 @@ fn git(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
     Ok(r)
 }
 
+fn git_failure_message(action: &str, stdout: &str, stderr: &str) -> String {
+    let stderr = stderr.trim();
+    let stdout = stdout.trim();
+    let detail = match (stderr.is_empty(), stdout.is_empty()) {
+        (false, false) => format!("{stderr}\n{stdout}"),
+        (false, true) => stderr.to_string(),
+        (true, false) => stdout.to_string(),
+        (true, true) => "git exited non-zero without stdout/stderr".to_string(),
+    };
+    format!("{action}: {detail}")
+}
+
 // ------------------------------------------------------------------
 // 1. CREATE — per-agent worktree on a fresh branch
 // ------------------------------------------------------------------
@@ -569,7 +749,7 @@ pub async fn fleet_worktree_create(
     // venvs, build output) — a 20-40s stall on a real project, which is exactly
     // why opening a Code page on a recent folder felt frozen. Untracked files
     // aren't in HEAD anyway, so not warning about them costs nothing.
-    // App-managed scratch (.owllm-inbox/, .owllm/) is filtered out: the app keeps
+    // App-managed runtime scratch is filtered out: the app keeps
     // those "dirty" on its own, and blocking on them wedged the Code page.
     let (_, status_out, _) = git(&cwd, &["status", "--porcelain", "--untracked-files=no"])?;
     let dirty: Vec<&str> = status_out
@@ -581,9 +761,13 @@ pub async fn fleet_worktree_create(
             details: dirty.into_iter().take(20).collect::<Vec<_>>().join("\n"),
         });
     }
-    if let Err(message) = sync_current_branch_from_origin(&cwd) {
-        return Ok(CreateOutcome::Error { message });
-    }
+    // Opening a Coding page is a local operation: its private worktree is cut
+    // from the checkout the user actually has on this device. A local branch
+    // may legitimately be ahead of or diverged from origin while work is in
+    // progress; forcing remote reconciliation here made those projects
+    // impossible to open even though Agentic could use the same folder.
+    // Remote-history safety still runs at integration time (merge/publish),
+    // where rewriting or publishing divergent history would be consequential.
     // Resolve the current HEAD SHA so the merge step later can squash
     // from exactly this base.
     let (ok, base_sha, err) = git(&cwd, &["rev-parse", "HEAD"])?;
@@ -692,8 +876,10 @@ pub async fn fleet_worktree_finalize(
     if let Err(message) = unstage_app_scratch(&wt) {
         return Ok(FinalizeOutcome::Error { message });
     }
-    // Check if anything to commit.
-    let (_, staged, _) = git(&wt, &["status", "--porcelain"])?;
+    // Check if anything staged remains after OWLLM runtime scratch was removed
+    // from the index. Full porcelain still includes unstaged scratch files,
+    // which made scratch-only worktrees call `git commit` with nothing staged.
+    let (_, staged, _) = git(&wt, &["diff", "--cached", "--name-only"])?;
     if staged.trim().is_empty() {
         return Ok(FinalizeOutcome::NoChanges);
     }
@@ -714,10 +900,10 @@ pub async fn fleet_worktree_finalize(
         format!("\n\n{}", summary.trim())
     };
     let msg = format!("{}{}", subject, body);
-    let (ok, _, err) = git(&wt, &["commit", "-m", &msg])?;
+    let (ok, out, err) = git(&wt, &["commit", "-m", &msg])?;
     if !ok {
         return Ok(FinalizeOutcome::Error {
-            message: format!("git commit failed: {}", err.trim()),
+            message: git_failure_message("git commit failed", &out, &err),
         });
     }
     let (_, sha_out, _) = git(&wt, &["rev-parse", "HEAD"])?;
@@ -763,7 +949,7 @@ pub async fn fleet_worktree_diff(
 // 4. MERGE — squash-merge the agent's branch back into project_cwd
 // ------------------------------------------------------------------
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum MergeOutcome {
     /// Cleanly merged + committed in project_cwd.
@@ -773,6 +959,11 @@ pub enum MergeOutcome {
     },
     /// Nothing to merge — the agent didn't change anything (No-op).
     NoChanges,
+    /// Real overlapping edits. Both sides are preserved untouched — the page
+    /// branch keeps its commits and the project checkout is reset to HEAD.
+    Conflict {
+        files: Vec<String>,
+    },
     Error {
         message: String,
     },
@@ -816,19 +1007,20 @@ fn fleet_worktree_merge_blocking(
     if let Err(message) = sync_current_branch_from_origin(&cwd) {
         return Ok(MergeOutcome::Error { message });
     }
-    let untracked_backup = match prepare_identical_untracked_collisions(&cwd, &branch) {
+    let mut untracked_backup = match prepare_untracked_collisions(&cwd, &branch) {
         Ok(backup) => backup,
         Err(message) => return Ok(MergeOutcome::Error { message }),
     };
-    // Squash keeps the page's checkpoints as one project commit. Worktrees can
-    // remain open across many releases, so ordinary three-way conflicts are
-    // expected rather than exceptional. Keep current-main edits outside the
-    // overlap, and deterministically prefer the isolated page inside an
-    // overlapping hunk: that is the work the user just asked Merge to retain.
-    let (ok, _, err) = git(
-        &cwd,
-        &["merge", "--squash", "--no-commit", "-X", "theirs", &branch],
-    )?;
+    let tracked_backup = match prepare_identical_tracked_collisions(&cwd, &branch) {
+        Ok(backup) => backup,
+        Err(message) => return Ok(MergeOutcome::Error { message }),
+    };
+    // Squash keeps the page's checkpoints as one project commit. Plain
+    // three-way merge, no `-X theirs`: silently preferring one side inside an
+    // overlapping hunk is how integrated work got dropped (SmartImage ×3, the
+    // v0.9.24 seven-file drop). Only app-owned disposable runtime files are
+    // auto-resolved; a real source overlap stops with BOTH sides preserved.
+    let (ok, _, err) = git(&cwd, &["merge", "--squash", "--no-commit", &branch])?;
     if !ok {
         let (_, conflicts, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         if conflicts.trim().is_empty() {
@@ -846,25 +1038,26 @@ fn fleet_worktree_merge_blocking(
         let (_, remaining, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         let files = user_conflict_files(&remaining);
         if !files.is_empty() {
-            if let Err(resolve_err) = resolve_user_conflicts_from_branch(&cwd, &branch, &files) {
-                let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
-                return Ok(MergeOutcome::Error {
-                    message: resolve_err,
-                });
-            }
+            // Page branch keeps its commits; project checkout returns to HEAD.
+            // The dropped backups restore any preserved files on this return.
+            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            return Ok(MergeOutcome::Conflict { files });
         }
         let (_, unresolved, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         if !unresolved.trim().is_empty() {
             let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
             return Ok(MergeOutcome::Error {
                 message: format!(
-                    "merge conflicts remained unresolved after applying the page-preferred policy: {}",
+                    "merge conflicts remained unresolved after runtime-file cleanup: {}",
                     unresolved.lines().collect::<Vec<_>>().join(", ")
                 ),
             });
         }
     }
     drop_staged_app_scratch(&cwd)?;
+    if let Some(backup) = untracked_backup.as_mut() {
+        backup.restore_preserved()?;
+    }
     // If `merge --squash` succeeded but staged nothing, the agent's
     // branch is a fast-forward of HEAD (no new commits to apply).
     let (_, staged, _) = git(&cwd, &["diff", "--cached", "--name-only"])?;
@@ -872,10 +1065,10 @@ fn fleet_worktree_merge_blocking(
         return Ok(MergeOutcome::NoChanges);
     }
     let msg = format!("[merge:{}] integrate parallel dispatch", agent_name);
-    let (ok, _, err) = git(&cwd, &["commit", "-m", &msg])?;
+    let (ok, out, err) = git(&cwd, &["commit", "-m", &msg])?;
     if !ok {
         return Ok(MergeOutcome::Error {
-            message: format!("git commit (merge) failed: {}", err.trim()),
+            message: git_failure_message("git commit (merge) failed", &out, &err),
         });
     }
     let (_, sha, _) = git(&cwd, &["rev-parse", "HEAD"])?;
@@ -883,6 +1076,9 @@ fn fleet_worktree_merge_blocking(
     let (_, show, _) = git(&cwd, &["show", "--name-only", "--format=", &commit_sha])?;
     let files_changed = show.lines().filter(|l| !l.trim().is_empty()).count() as u32;
     if let Some(backup) = untracked_backup {
+        backup.discard();
+    }
+    if let Some(backup) = tracked_backup {
         backup.discard();
     }
     Ok(MergeOutcome::Merged {
@@ -1015,8 +1211,9 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 #[cfg(test)]
 mod tests {
     use super::{
-        fleet_worktree_merge_blocking, is_app_scratch, porcelain_path,
-        sync_current_branch_from_origin, unstage_app_scratch, user_conflict_files, MergeOutcome,
+        fleet_worktree_finalize, fleet_worktree_merge_blocking, git_failure_message,
+        is_app_scratch, porcelain_path, sync_current_branch_from_origin, unstage_app_scratch,
+        user_conflict_files, FinalizeOutcome, MergeOutcome,
     };
     use std::{fs, path::Path, process::Command};
 
@@ -1061,12 +1258,17 @@ mod tests {
         // The perpetually-"dirty" app-managed paths that used to wedge creates.
         assert!(is_app_scratch(".owllm-inbox/image_1.png"));
         assert!(is_app_scratch(".owllm-inbox"));
-        assert!(is_app_scratch(".owllm/project.json"));
+        assert!(is_app_scratch(".owllm/brainstorm.json"));
+        assert!(is_app_scratch(".owllm/eval-traces.jsonl"));
         assert!(is_app_scratch("./.owllm-inbox/x.png"));
         assert!(is_app_scratch(".owllm-inbox\\image_1.png")); // porcelain can emit backslashes
                                                               // Real source changes must STILL block (branch cuts from HEAD).
         assert!(!is_app_scratch("src/main.rs"));
         assert!(!is_app_scratch("owllm-desktop/ui/src/App.tsx"));
+        assert!(!is_app_scratch(".owllm/project.json"));
+        assert!(!is_app_scratch(".owllm/verify.json"));
+        assert!(!is_app_scratch(".owllm/skills/example/SKILL.md"));
+        assert!(!is_app_scratch(".owllm/assets/mockup.png"));
         assert!(!is_app_scratch(".owllm-inbox-notes.md")); // sibling file, not the dir
         assert!(!is_app_scratch(".github/workflows/ci.yml"));
     }
@@ -1108,6 +1310,43 @@ mod tests {
             fs::read(root.join(".owllm-inbox/image_1.png")).unwrap(),
             b"runtime refresh"
         );
+    }
+
+    #[tokio::test]
+    async fn scratch_only_finalize_returns_no_changes() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"runtime refresh").unwrap();
+
+        let outcome = fleet_worktree_finalize(
+            root.to_string_lossy().to_string(),
+            "code".to_string(),
+            "Code page session".to_string(),
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(outcome, FinalizeOutcome::NoChanges));
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "M .owllm-inbox/image_1.png"
+        );
+    }
+
+    #[test]
+    fn git_failure_message_uses_stdout_when_stderr_is_empty() {
+        let message = git_failure_message(
+            "git commit failed",
+            "On branch main\nnothing to commit, working tree clean\n",
+            "",
+        );
+        assert!(message.contains("git commit failed: On branch main"));
+        assert!(message.contains("nothing to commit"));
     }
 
     #[test]
@@ -1161,7 +1400,10 @@ mod tests {
             ),
             vec!["owllm-desktop/src-tauri/src/release.rs".to_string()]
         );
-        assert!(user_conflict_files(".owllm-inbox/image_1.png\n.owllm/project.json\n").is_empty());
+        assert_eq!(
+            user_conflict_files(".owllm-inbox/image_1.png\n.owllm/project.json\n"),
+            vec![".owllm/project.json".to_string()]
+        );
     }
 
     #[test]
@@ -1235,7 +1477,163 @@ mod tests {
     }
 
     #[test]
-    fn mixed_merge_keeps_page_source_and_main_scratch_without_blocking() {
+    fn differing_untracked_app_state_is_preserved_and_does_not_block_merge() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent-state"]);
+        fs::create_dir_all(root.join(".owllm")).unwrap();
+        fs::write(
+            root.join(".owllm/brainstorm.json"),
+            b"older page transcript",
+        )
+        .unwrap();
+        fs::write(root.join("feature.txt"), b"real source change").unwrap();
+        git_ok(
+            root,
+            &["add", "-f", ".owllm/brainstorm.json", "feature.txt"],
+        );
+        git_ok(root, &["commit", "-m", "page source and runtime state"]);
+
+        git_ok(root, &["checkout", "main"]);
+        fs::create_dir_all(root.join(".owllm")).unwrap();
+        fs::write(
+            root.join(".owllm/brainstorm.json"),
+            b"newer local transcript",
+        )
+        .unwrap();
+
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "code".into(),
+            "agent-state".into(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            fs::read(root.join(".owllm/brainstorm.json")).unwrap(),
+            b"newer local transcript"
+        );
+        assert_eq!(
+            fs::read(root.join("feature.txt")).unwrap(),
+            b"real source change"
+        );
+        let tracked = Command::new("git")
+            .args(["ls-files", "--error-unmatch", ".owllm/brainstorm.json"])
+            .current_dir(root)
+            .status()
+            .unwrap();
+        assert!(
+            !tracked.success(),
+            "runtime transcript must remain untracked"
+        );
+    }
+
+    #[test]
+    fn identical_tracked_local_edits_are_adopted_by_merge() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        fs::create_dir_all(root.join("owllm-desktop/ui/src/pages/agentic")).unwrap();
+        fs::write(
+            root.join("owllm-desktop/ui/src/pages/agentic/publishResponsiveness.verify.run.mjs"),
+            "base\n",
+        )
+        .unwrap();
+        git_ok(root, &["add", "-A"]);
+        git_ok(root, &["commit", "-m", "add verifier"]);
+
+        git_ok(root, &["checkout", "-b", "agent-release-fix"]);
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "fixed release diagnostics\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("owllm-desktop/ui/src/pages/agentic/publishResponsiveness.verify.run.mjs"),
+            "fixed verifier anchor\n",
+        )
+        .unwrap();
+        git_ok(root, &["commit", "-am", "agent release fix"]);
+
+        git_ok(root, &["checkout", "main"]);
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "fixed release diagnostics\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("owllm-desktop/ui/src/pages/agentic/publishResponsiveness.verify.run.mjs"),
+            "fixed verifier anchor\n",
+        )
+        .unwrap();
+
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "code".into(),
+            "agent-release-fix".into(),
+        )
+        .unwrap();
+        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("owllm-desktop/src-tauri/src/release.rs")).unwrap(),
+            "fixed release diagnostics\n"
+        );
+        assert_eq!(
+            fs::read_to_string(
+                root.join(
+                    "owllm-desktop/ui/src/pages/agentic/publishResponsiveness.verify.run.mjs"
+                )
+            )
+            .unwrap(),
+            "fixed verifier anchor\n"
+        );
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout).trim(), "");
+    }
+
+    #[test]
+    fn differing_tracked_local_edits_are_preserved_and_block_merge() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        git_ok(root, &["checkout", "-b", "agent-release-fix"]);
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "agent release diagnostics\n",
+        )
+        .unwrap();
+        git_ok(root, &["commit", "-am", "agent release fix"]);
+
+        git_ok(root, &["checkout", "main"]);
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "local release diagnostics\n",
+        )
+        .unwrap();
+
+        let outcome = fleet_worktree_merge_blocking(
+            root.to_string_lossy().to_string(),
+            "code".into(),
+            "agent-release-fix".into(),
+        )
+        .unwrap();
+        match outcome {
+            MergeOutcome::Error { message } => {
+                assert!(message.contains("tracked local changes"));
+                assert!(message.contains("owllm-desktop/src-tauri/src/release.rs"));
+            }
+            _ => panic!("differing tracked local edit must block the merge"),
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("owllm-desktop/src-tauri/src/release.rs")).unwrap(),
+            "local release diagnostics\n"
+        );
+    }
+
+    #[test]
+    fn mixed_merge_conflict_resolves_scratch_but_stops_on_source_overlap() {
         let tmp = init_merge_repo();
         let root = tmp.path();
         git_ok(root, &["checkout", "-b", "agent"]);
@@ -1262,10 +1660,17 @@ mod tests {
             "agent".into(),
         )
         .unwrap();
-        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        // The scratch overlap must NOT surface as a user conflict, but the real
+        // source overlap must stop the merge with main's copy untouched.
+        match outcome {
+            MergeOutcome::Conflict { files } => {
+                assert_eq!(files, vec!["owllm-desktop/src-tauri/src/release.rs"]);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
         assert_eq!(
             fs::read_to_string(root.join("owllm-desktop/src-tauri/src/release.rs")).unwrap(),
-            "agent\n"
+            "main\n"
         );
         assert_eq!(
             fs::read(root.join(".owllm-inbox/image_1.png")).unwrap(),
@@ -1274,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    fn text_conflict_keeps_page_hunk_and_nonoverlapping_main_edit() {
+    fn overlapping_text_edits_stop_with_both_sides_preserved() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         git_ok(root, &["init", "-b", "main"]);
@@ -1311,15 +1716,24 @@ mod tests {
             "page".into(),
         )
         .unwrap();
-        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        // Same-hunk edits on both sides: NEVER silently prefer one. Main's file
+        // must be exactly what main committed, and the page branch keeps its
+        // commit so nothing is lost.
+        match outcome {
+            MergeOutcome::Conflict { files } => assert_eq!(files, vec!["feature.txt"]),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
         assert_eq!(
             fs::read_to_string(root.join("feature.txt")).unwrap(),
-            "header main\nkeep one\nkeep two\nkeep three\nshared page\nfooter\n"
+            "header main\nkeep one\nkeep two\nkeep three\nshared main\nfooter\n"
         );
+        let (ok, page_file, _) = super::git(root, &["show", "page:feature.txt"]).unwrap();
+        assert!(ok);
+        assert!(page_file.contains("shared page"));
     }
 
     #[test]
-    fn page_delete_wins_over_main_modify() {
+    fn modify_delete_overlap_stops_with_both_sides_preserved() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         git_ok(root, &["init", "-b", "main"]);
@@ -1344,8 +1758,16 @@ mod tests {
             "page".into(),
         )
         .unwrap();
-        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
-        assert!(!root.join("obsolete.txt").exists());
+        // Modify/delete is a REAL disagreement — stop, keep main's file on disk
+        // and the page's deletion on its branch.
+        match outcome {
+            MergeOutcome::Conflict { files } => assert_eq!(files, vec!["obsolete.txt"]),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("obsolete.txt")).unwrap(),
+            "main changed\n"
+        );
     }
 
     #[test]

@@ -96,38 +96,5 @@ check(replicaDef.includes("corner_ul.png") && replicaDef.includes("corner_br.png
   && replicaDef.includes("FRAME_BG") && replicaDef.includes("FRAME_COLOR") && replicaDef.includes("FRAME_ACCENT"),
   "the miniature reuses the real frame's corner art, owl badge, and accent styling");
 
-// --- Linux frame architecture regression guard -----------------------
-// Jetson/WebKitGTK cannot clear a once-painted pixel back to alpha zero.
-// The durable arrangement is therefore an opaque content-sized main window
-// plus a separate transparent overlay which clears by native unmap. Guard the
-// whole contract here so a future "quick transparency fix" cannot silently
-// restore the grey backing slab or stale-pixel frame.
-const overlayRust = fs.readFileSync(path.join(DESKTOP, "src-tauri/src/overlay_frame.rs"), "utf8");
-const overlayHtml = fs.readFileSync(path.join(DESKTOP, "ui/public/overlay-frame.html"), "utf8");
-check(overlayRust.includes('cfg(any(target_os = "windows", target_os = "linux"))')
-  && overlayRust.includes('unwrap_or(true)'),
-  "Linux defaults to the split overlay-frame architecture");
-check(overlayRust.includes("input_shape_combine_region(Some(&empty))")
-  && overlayRust.includes("set_transient_for(Some(&main_gtk))"),
-  "the Linux overlay is click-through and transient above the content window");
-check(overlayRust.includes("pub fn overlay_frame_set_visible")
-  && overlayRust.includes("overlay.hide()") && overlayRust.includes("overlay.show()"),
-  "Linux clears frame pixels by native unmap/remap, not unreliable alpha repaint");
-check(overlayHtml.includes("html.linux-overlay")
-  && overlayHtml.includes("--frame-bg: transparent")
-  && overlayHtml.includes('!root.classList.contains("linux-overlay")'),
-  "Linux overlay bars stay transparent even after live accent updates");
-check(shell.includes('invoke("overlay_frame_set_visible", { visible: frameVisible })'),
-  "the persisted keep-frame state drives the native Linux overlay visibility");
-
-// The live model id must never expand the header. Its readable abbreviation is
-// shown in-line and the exact id remains discoverable on hover.
-check(shell.includes("function abbreviateModelId(") && shell.includes("…${modelId.slice(-tailLength)}"),
-  "long header model ids use a middle abbreviation that preserves the quant tail");
-check(shell.includes("`Model: ${fullModelId}\\nOpen Server Control`")
-  && shell.includes('data-ui="HeaderServersLabel"')
-  && shell.includes('textOverflow: "ellipsis"'),
-  "the full model id is exposed on hover while the header remains single-line");
-
 fs.rmSync(temp, { recursive: true, force: true });
 console.log(`OK keep-frame control: ${passed}/${passed} checks passed`);

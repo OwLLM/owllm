@@ -23,6 +23,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { openWebUrl } from "../../utils/openWebUrl";
 
 type PtyEvent =
   | { kind: "data"; data: number[] }
@@ -47,9 +48,14 @@ export type PtyTerminalProps = {
   /// banner settles (a real readiness signal, not a blind timer). Leave
   /// unset for one-shot login subcommands (codex login, gemini auth login).
   autoSend?: string;
+  /// Open the first http(s) URL the child prints in the Agent Browser.
+  /// ONLY for login/device-auth terminals (AccountsPage Connect flows).
+  /// Leave unset for general-purpose terminals — any command that prints a
+  /// URL (git, npm, curl…) would otherwise hijack the browser.
+  autoOpenAuthUrls?: boolean;
 };
 
-export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSend }: PtyTerminalProps) {
+export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSend, autoOpenAuthUrls }: PtyTerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -106,6 +112,30 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSen
     // blind fixed delay. Fires exactly once per session.
     let autoSent = false;
     let autoSendTimer: number | undefined;
+    let authUrlOpened = false;
+    const decoder = new TextDecoder();
+    let outputText = "";
+    const openAuthUrlFrom = (bytes: Uint8Array) => {
+      if (!autoOpenAuthUrls || authUrlOpened) return;
+      outputText = (outputText + decoder.decode(bytes, { stream: true })).slice(-16_384);
+      // Device-login URLs are sometimes wrapped in OSC-8 hyperlinks. Strip
+      // terminal control sequences before matching, while preserving chunks so
+      // a URL split across two PTY reads is still found.
+      const plain = outputText
+        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+      const matches = plain.match(/https?:\/\/[^\s"'<>\\]+/g) ?? [];
+      for (const raw of matches) {
+        const url = raw.replace(/[),.;\]}]+$/, "");
+        authUrlOpened = true;
+        openWebUrl(url).catch((error) => {
+          term.write(`\r\n\x1b[31m[OwLLM browser error] ${String(error)}\x1b[0m\r\n`);
+        });
+        // A login command can later print help/fallback links. Keep the browser
+        // on the first authorization page instead of navigating it away.
+        return;
+      }
+    };
     const armAutoSend = () => {
       const payload = autoSendRef.current;
       if (autoSent || !payload || !sessionRef.current) return;
@@ -126,7 +156,9 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSen
         // The Rust side ships bytes as a JSON number array. Reassemble
         // into a Uint8Array for xterm so binary-safe ANSI sequences
         // survive (xterm decodes UTF-8 internally).
-        term.write(new Uint8Array(evt.data));
+        const bytes = new Uint8Array(evt.data);
+        term.write(bytes);
+        openAuthUrlFrom(bytes);
         armAutoSend();
       } else if (evt.kind === "exit") {
         // Soft visual hint at exit; the parent decides whether to

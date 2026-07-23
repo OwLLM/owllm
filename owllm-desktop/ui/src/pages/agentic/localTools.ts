@@ -232,7 +232,7 @@ export async function refreshBrowserState(): Promise<void> {
   const CAP =
     "AGENT BROWSER — you CAN drive a real in-app browser: open pages (incl. localhost + live sites), " +
     "read them, and click/fill/select to complete tasks and forms. These tools are ALREADY in your " +
-    "available tool list — CALL THEM DIRECTLY. Their names are browser_open, browser_navigate, " +
+    "available tool list — CALL THEM DIRECTLY. Their names are browser_open, browser_tabs, browser_tab_select, browser_tab_close, browser_navigate, " +
     "browser_snapshot (indexed element list), browser_get_text, browser_click, browser_fill, browser_select, " +
     "browser_press, browser_device — OR the same names prefixed mcp__owllm__ (e.g. mcp__owllm__browser_snapshot). " +
     "Look in your tools for any name containing 'browser_' and invoke it. IF (and only if) you are the Claude " +
@@ -240,8 +240,8 @@ export async function refreshBrowserState(): Promise<void> {
     "or any other CLI there is NO ToolSearch tool: do not hunt for one — the mcp__owllm__browser_* tools are " +
     "already callable, so just call them. DISREGARD any team-memory note claiming browser tools are unavailable " +
     "from the CLI/team — that is STALE and false; the tools are wired. Never claim you cannot see the browser — " +
-    "If you need to open or test a URL, call browser_open first. If the user already opened a page, " +
-    "call browser_snapshot (or mcp__owllm__browser_snapshot) first, then report what you actually see.";
+    "browser_open returns a stable tab ID; pass tab_id to later actions so the user's active tab is never hijacked. " +
+    "If the user already opened a page, call browser_tabs then browser_snapshot for the intended tab before reporting what you see.";
   try {
     const st = await invoke<{ running: boolean; url: string; device: string }>("browser_status");
     if (st && st.running) {
@@ -394,6 +394,55 @@ export async function logTeamWork(agent: string, instruction: string, result: st
   await logScopedTeamWork(_teamMemoryScope || "", agent, instruction, result);
 }
 
+function notifySharedMemoryChanged(): void {
+  try { window.dispatchEvent(new CustomEvent("owllm:memory:changed")); } catch { /* non-browser/test */ }
+}
+
+function stableMemoryKey(text: string): string {
+  let hash = 0x811c9dc5;
+  for (const ch of text) {
+    hash ^= ch.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `auto_work_${(hash >>> 0).toString(36)}`;
+}
+
+function redactMemorySecrets(text: string): string {
+  return text
+    .replace(/\b(?:ghp|github_pat|glpat|sk)-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_TOKEN]")
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, "$1[REDACTED_TOKEN]")
+    .replace(/\b(password|passwd|secret|api[_ -]?key|token)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]");
+}
+
+// Promote a successful implementation summary into the durable, synced fact
+// store. Previously only an exact `[REMEMBER]` line or a memory_write tool call
+// could grow the fact count, so ordinary completed features remained local
+// worklog forever. Keep this conservative and clearly tagged: questions,
+// errors, chats, and vague/short replies remain worklog-only.
+export async function autoCurateScopedTeamFact(scope: string, agent: string, instruction: string, result: string): Promise<boolean> {
+  if (!scope || /chat/i.test(agent) || /^\(error:/i.test(result.trim())) return false;
+  const implementation = /\b(implemented|fixed|added|updated|changed|created|removed|refactored|migrated|published|shipped|verified|tests? pass(?:ed)?|build pass(?:ed)?|completed)\b/i;
+  if (result.trim().length < 80 || !implementation.test(result)) return false;
+  const task = instruction.replace(/\s+/g, " ").trim().slice(0, 260);
+  const outcome = redactMemorySecrets(stripMemoryDirectives(result))
+    .replace(/\s+/g, " ").trim().slice(0, 1000);
+  if (!task || !outcome) return false;
+  try {
+    const id = await withMemoryTimeout(invoke<number>("team_memory_write", {
+      scope,
+      content: `TASK: ${task}\nOUTCOME: ${outcome}`,
+      key: stableMemoryKey(`${agent}\0${task.toLowerCase()}`),
+      tags: "auto-curated,implementation",
+      author: agent,
+    }), 0);
+    if (id <= 0) return false;
+    notifySharedMemoryChanged();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function logScopedTeamWork(scope: string, agent: string, instruction: string, result: string): Promise<void> {
   if (!result || !result.trim()) return;
   // Don't record FAILED turns into the shared work-state. The loop research is
@@ -407,6 +456,7 @@ export async function logScopedTeamWork(scope: string, agent: string, instructio
       invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) }),
       0,
     );
+    await autoCurateScopedTeamFact(scope, agent, instruction, result);
     if (scope === (_teamMemoryScope || "")) await refreshTeamMemorySnapshot();
   } catch { /* memory must never break a run */ }
 }
@@ -619,6 +669,7 @@ export async function harvestMemoryWrites(reply: string): Promise<number> {
     } catch { /* best-effort per directive */ }
   }
   if (written > 0) await refreshTeamMemorySnapshot();
+  if (written > 0) notifySharedMemoryChanged();
   return written;
 }
 
@@ -1376,9 +1427,30 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       "that keeps the user's cookies/logins across calls (not a headless scrape). " +
       "Works for the public web AND local dev servers (localhost:5173, 127.0.0.1:3000 " +
       "default to http) — use it to check a web app you are building. " +
-      "Starts the browser if needed, then navigates. After this, call browser_snapshot " +
-      "to get the indexed list of interactive elements before clicking or filling.",
-    args: [{ name: "url", required: true, description: "URL to open (e.g. https://example.com or localhost:5173).", aliases: ["link", "address", "uri", "href", "u"] }],
+      "Starts the browser if needed, opens a NEW background tab, and returns its tab ID. " +
+      "Pass that tab_id to later tools so the user can keep working in another tab.",
+    args: [
+      { name: "url", required: true, description: "URL to open (e.g. https://example.com or localhost:5173).", aliases: ["link", "address", "uri", "href", "u"] },
+      { name: "activate", required: false, description: "Set true to visibly select the new tab; defaults false.", aliases: ["focus", "select"] },
+    ],
+  },
+  {
+    name: "browser_tabs",
+    aliases: ["list_browser_tabs", "browser_tab_list", "tabs"],
+    description: "List all open browser tabs with stable IDs, URLs, titles, and active state.",
+    args: [],
+  },
+  {
+    name: "browser_tab_select",
+    aliases: ["select_browser_tab", "browser_switch_tab", "switch_tab"],
+    description: "Visibly select a browser tab. Agent actions can stay in the background by passing tab_id directly.",
+    args: [{ name: "tab_id", required: true, description: "Tab ID returned by browser_open or browser_tabs.", aliases: ["tab", "id"] }],
+  },
+  {
+    name: "browser_tab_close",
+    aliases: ["close_browser_tab", "browser_close_tab", "close_tab"],
+    description: "Close one browser tab without affecting the other open tabs.",
+    args: [{ name: "tab_id", required: true, description: "Tab ID returned by browser_open or browser_tabs.", aliases: ["tab", "id"] }],
   },
   {
     name: "browser_navigate",
@@ -1387,7 +1459,10 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       "Navigate the already-open persistent browser to a new URL (same logged-in " +
       "session; localhost URLs default to http). Call browser_snapshot afterward " +
       "to re-read the interactive elements.",
-    args: [{ name: "url", required: true, description: "URL to navigate to (web or localhost).", aliases: ["link", "address", "uri", "href", "u"] }],
+    args: [
+      { name: "url", required: true, description: "URL to navigate to (web or localhost).", aliases: ["link", "address", "uri", "href", "u"] },
+      { name: "tab_id", required: false, description: "Target tab ID; omit to use the visible active tab.", aliases: ["tab", "id"] },
+    ],
   },
   {
     name: "browser_device",
@@ -1408,7 +1483,7 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       "(links, buttons, inputs) with their index numbers. You act on elements BY INDEX " +
       "with browser_click / browser_fill / browser_select — ALWAYS call this first to " +
       "get fresh indexes before interacting, and again after the page changes.",
-    args: [],
+    args: [{ name: "tab_id", required: false, description: "Target tab ID; omit to use the visible active tab.", aliases: ["tab", "id"] }],
   },
   {
     name: "browser_click",
@@ -1416,7 +1491,10 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     description:
       "Click the interactive element at the given index from the latest browser_snapshot. " +
       "Snapshot first to get the index; the page may change, so snapshot again after.",
-    args: [{ name: "index", required: true, description: "Element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] }],
+    args: [
+      { name: "index", required: true, description: "Element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] },
+      { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
+    ],
   },
   {
     name: "browser_fill",
@@ -1427,6 +1505,7 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     args: [
       { name: "index", required: true, description: "Input element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] },
       { name: "text", required: true, description: "The text to type into the field.", aliases: ["value", "content", "input", "str"] },
+      { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
     ],
   },
   {
@@ -1435,7 +1514,10 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     description:
       "Press a keyboard key in the persistent browser (e.g. 'Enter', 'Tab', 'Escape', " +
       "'ArrowDown'). Use after browser_fill to submit a form or trigger a handler.",
-    args: [{ name: "key", required: true, description: "Key name to press, e.g. 'Enter' or 'Escape'.", aliases: ["k", "keyname", "button"] }],
+    args: [
+      { name: "key", required: true, description: "Key name to press, e.g. 'Enter' or 'Escape'.", aliases: ["k", "keyname", "button"] },
+      { name: "tab_id", required: false, description: "Target tab ID; omit to use the visible active tab.", aliases: ["tab", "id"] },
+    ],
   },
   {
     name: "browser_select",
@@ -1446,6 +1528,7 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     args: [
       { name: "index", required: true, description: "Select element index from the latest browser_snapshot.", aliases: ["idx", "i", "element", "element_index", "n"] },
       { name: "value", required: true, description: "The option value to select.", aliases: ["option", "val", "choice"] },
+      { name: "tab_id", required: false, description: "Target tab ID used for that snapshot.", aliases: ["tab", "id"] },
     ],
   },
   {
@@ -1455,7 +1538,7 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
       "Report the current page (URL + title + load state) of the persistent browser. " +
       "The browser is a visible window; use browser_snapshot for the element list and " +
       "browser_get_text to read page content.",
-    args: [],
+    args: [{ name: "tab_id", required: false, description: "Target tab ID; omit to use the visible active tab.", aliases: ["tab", "id"] }],
   },
   {
     name: "browser_get_text",
@@ -1463,19 +1546,19 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     description:
       "Return the visible text content of the current page in the persistent browser. " +
       "Use to read article/body content rather than the interactive-element list.",
-    args: [],
+    args: [{ name: "tab_id", required: false, description: "Target tab ID; omit to use the visible active tab.", aliases: ["tab", "id"] }],
   },
   {
     name: "browser_back",
     aliases: ["go_back", "browser_history_back", "navigate_back"],
     description: "Go back one entry in the persistent browser's history. Snapshot afterward to re-read elements.",
-    args: [],
+    args: [{ name: "tab_id", required: false, description: "Target tab ID; omit to use the visible active tab.", aliases: ["tab", "id"] }],
   },
   {
     name: "browser_reload",
     aliases: ["reload", "browser_refresh", "refresh_page"],
     description: "Reload the current page in the persistent browser. Snapshot afterward to re-read elements.",
-    args: [],
+    args: [{ name: "tab_id", required: false, description: "Target tab ID; omit to use the visible active tab.", aliases: ["tab", "id"] }],
   },
   {
     name: "browser_close",
@@ -1978,6 +2061,7 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         });
         // Keep the injected snapshot warm so later agents in this run see it.
         await refreshTeamMemorySnapshot();
+        notifySharedMemoryChanged();
         const k = call.args.key ? ` under key "${call.args.key}"` : "";
         return { ok: true, output: `Saved to team memory${k} (#${id}).` };
       }
@@ -1992,14 +2076,28 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         return { ok: true, output: entry.content };
       }
       case "browser_open": {
-        // Real persistent logged-in browser: ensure the daemon, start it, then navigate.
+        // A fresh, addressable tab keeps the user's visible tab undisturbed.
         await invoke("browser_ensure");
-        await invoke("browser_start");
-        const result = await invoke<string>("browser_cmd", { action: "navigate", params: { url: call.args.url } });
+        const result = await invoke<string>("browser_open_tab", {
+          url: call.args.url,
+          activate: call.args.activate === "true",
+        });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_tabs": {
+        const result = await invoke<string>("browser_list_tabs");
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_tab_select": {
+        const result = await invoke<string>("browser_select_tab", { tabId: Number(call.args.tab_id) });
+        return { ok: true, output: truncate(result, 8000) };
+      }
+      case "browser_tab_close": {
+        const result = await invoke<string>("browser_close_tab", { tabId: Number(call.args.tab_id) });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_navigate": {
-        const result = await invoke<string>("browser_cmd", { action: "navigate", params: { url: call.args.url } });
+        const result = await invoke<string>("browser_cmd", { action: "navigate", params: { url: call.args.url, tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_device": {
@@ -2007,39 +2105,39 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_snapshot": {
-        const result = await invoke<string>("browser_cmd", { action: "snapshot", params: {} });
+        const result = await invoke<string>("browser_cmd", { action: "snapshot", params: { tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_click": {
-        const result = await invoke<string>("browser_cmd", { action: "click", params: { index: Number(call.args.index) } });
+        const result = await invoke<string>("browser_cmd", { action: "click", params: { index: Number(call.args.index), tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_fill": {
-        const result = await invoke<string>("browser_cmd", { action: "fill", params: { index: Number(call.args.index), text: call.args.text } });
+        const result = await invoke<string>("browser_cmd", { action: "fill", params: { index: Number(call.args.index), text: call.args.text, tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_press": {
-        const result = await invoke<string>("browser_cmd", { action: "press", params: { key: call.args.key } });
+        const result = await invoke<string>("browser_cmd", { action: "press", params: { key: call.args.key, tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_select": {
-        const result = await invoke<string>("browser_cmd", { action: "select", params: { index: Number(call.args.index), value: call.args.value } });
+        const result = await invoke<string>("browser_cmd", { action: "select", params: { index: Number(call.args.index), value: call.args.value, tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_screenshot": {
-        const result = await invoke<string>("browser_cmd", { action: "screenshot", params: {} });
+        const result = await invoke<string>("browser_cmd", { action: "screenshot", params: { tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_get_text": {
-        const result = await invoke<string>("browser_cmd", { action: "get_text", params: {} });
+        const result = await invoke<string>("browser_cmd", { action: "get_text", params: { tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_back": {
-        const result = await invoke<string>("browser_cmd", { action: "back", params: {} });
+        const result = await invoke<string>("browser_cmd", { action: "back", params: { tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_reload": {
-        const result = await invoke<string>("browser_cmd", { action: "reload", params: {} });
+        const result = await invoke<string>("browser_cmd", { action: "reload", params: { tab_id: call.args.tab_id ?? null } });
         return { ok: true, output: truncate(result, 8000) };
       }
       case "browser_close": {

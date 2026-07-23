@@ -60,6 +60,106 @@ type ClaudeStreamEvent =
   | { kind: "toolResult"; toolUseId: string; content: string; isError: boolean }
   | { kind: "error"; message: string };
 
+const UI_STREAM_FRAME_MS = 16;
+const UI_STREAM_YIELD_MS = 12;
+
+function nowMs(): number {
+  return typeof performance !== "undefined" && typeof performance.now === "function"
+    ? performance.now()
+    : Date.now();
+}
+
+function nextUiFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => resolve());
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+export function makeUiYield(intervalMs = UI_STREAM_YIELD_MS): () => Promise<void> {
+  let last = nowMs();
+  return async () => {
+    const n = nowMs();
+    if (n - last < intervalMs) return;
+    last = n;
+    await nextUiFrame();
+  };
+}
+
+type ResponsiveHandlers = {
+  onDelta: StreamHandler;
+  onThought?: ThoughtHandler;
+  flush: () => Promise<void>;
+};
+
+export function makeResponsiveHandlers(onDelta: StreamHandler, onThought?: ThoughtHandler): ResponsiveHandlers {
+  let text = "";
+  const thoughts = new Map<string, { channel: string; role: string; delta: string }>();
+  let scheduled = false;
+  let waiters: Array<() => void> = [];
+
+  const finishWaiters = () => {
+    const done = waiters;
+    waiters = [];
+    for (const resolve of done) resolve();
+  };
+  const flushNow = () => {
+    scheduled = false;
+    if (text) {
+      const d = text;
+      text = "";
+      onDelta(d);
+    }
+    if (onThought && thoughts.size) {
+      const batch = [...thoughts.values()];
+      thoughts.clear();
+      for (const item of batch) onThought(item.channel, item.role, item.delta);
+    } else {
+      thoughts.clear();
+    }
+    finishWaiters();
+  };
+  const schedule = () => {
+    if (scheduled) return;
+    scheduled = true;
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => flushNow());
+    } else {
+      setTimeout(flushNow, UI_STREAM_FRAME_MS);
+    }
+  };
+
+  return {
+    onDelta(delta: string) {
+      if (!delta) return;
+      text += delta;
+      schedule();
+    },
+    onThought: onThought
+      ? (channel: string, role: string, delta: string) => {
+          const key = `${channel}\u0000${role}`;
+          const cur = thoughts.get(key);
+          thoughts.set(key, {
+            channel,
+            role,
+            delta: (cur?.delta ?? "") + (delta ?? ""),
+          });
+          schedule();
+        }
+      : undefined,
+    async flush() {
+      if (!scheduled && !text && thoughts.size === 0) return;
+      await new Promise<void>((resolve) => {
+        waiters.push(resolve);
+        if (!scheduled) schedule();
+      });
+    },
+  };
+}
+
 // Run claude --print --output-format stream-json and route events to
 // the user-facing reply (onDelta) + Thought tab (onThought). Returns
 // the assembled assistant text on completion. Used whenever the
@@ -93,14 +193,15 @@ async function runClaudeCliStream(args: {
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
+  const responsive = makeResponsiveHandlers(args.onDelta, args.onThought);
   const ch = new Channel<ClaudeStreamEvent>();
   ch.onmessage = (msg) => {
     switch (msg.kind) {
       case "text":
-        args.onDelta(msg.delta);
+        responsive.onDelta(msg.delta);
         break;
       case "thinking":
-        args.onThought("thinking", "🧠 thinking", msg.delta);
+        responsive.onThought?.("thinking", "🧠 thinking", msg.delta);
         break;
       case "toolUse": {
         // Special-case SendUserMessage — that's the agent asking the
@@ -111,7 +212,7 @@ async function runClaudeCliStream(args: {
         if (msg.name === "SendUserMessage") {
           const question = parseUserMessageInput(msg.input);
           if (args.onAskUser) args.onAskUser(question);
-          args.onThought("ask-user", "❓ agent asks", question);
+          responsive.onThought?.("ask-user", "❓ agent asks", question);
           break;
         }
         // One Thought entry per tool invocation. Channel id encodes
@@ -119,7 +220,7 @@ async function runClaudeCliStream(args: {
         // can land under the same block (see toolResult below).
         const channel = `tool:${msg.name}:${msg.toolUseId}`;
         const body = msg.input ? `${msg.input}` : "";
-        args.onThought(channel, `🛠 ${msg.name}`, body);
+        responsive.onThought?.(channel, `🛠 ${msg.name}`, body);
         break;
       }
       case "toolResult": {
@@ -134,29 +235,33 @@ async function runClaudeCliStream(args: {
         // renderer shows the true status instead of guessing from the result
         // text — a grep for "error"/"denied" returns those words and was being
         // mislabeled "Failed".
-        args.onThought(channel, msg.isError ? "↩ error" : "↩ result", snippet);
+        responsive.onThought?.(channel, msg.isError ? "↩ error" : "↩ result", snippet);
         break;
       }
       case "error":
-        args.onThought("cli-error", "⚠ cli", msg.message);
+        responsive.onThought?.("cli-error", "⚠ cli", msg.message);
         break;
     }
   };
-  return await invoke<string>("claude_cli_stream", {
-    systemPrompt: args.systemPrompt,
-    userMessage: args.userMessage,
-    cwd: args.cwd ?? null,
-    autoApprove: args.autoApprove ?? false,
-    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
-    model: args.model ?? null,
-    effort: args.effort ?? null,
-    sessionId: args.sessionId ?? null,
-    // Default ON — matches VS Code Claude Code where the agent can
-    // always ask the user a question mid-turn. Callers can pass false
-    // explicitly to disable when truly autonomous behaviour is wanted.
-    briefMode: args.briefMode ?? true,
-    onEvent: ch,
-  });
+  try {
+    return await invoke<string>("claude_cli_stream", {
+      systemPrompt: args.systemPrompt,
+      userMessage: args.userMessage,
+      cwd: args.cwd ?? null,
+      autoApprove: args.autoApprove ?? false,
+      allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      model: args.model ?? null,
+      effort: args.effort ?? null,
+      sessionId: args.sessionId ?? null,
+      // Default ON — matches VS Code Claude Code where the agent can
+      // always ask the user a question mid-turn. Callers can pass false
+      // explicitly to disable when truly autonomous behaviour is wanted.
+      briefMode: args.briefMode ?? true,
+      onEvent: ch,
+    });
+  } finally {
+    await responsive.flush();
+  }
 }
 
 /// Run `codex exec --json` and route its event stream to the reply
@@ -180,18 +285,19 @@ export async function runCodexCliStream(args: {
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
+  const responsive = makeResponsiveHandlers(args.onDelta, args.onThought);
   const ch = new Channel<ClaudeStreamEvent>();
   ch.onmessage = (msg) => {
     switch (msg.kind) {
       case "text":
-        args.onDelta(msg.delta);
+        responsive.onDelta(msg.delta);
         break;
       case "thinking":
-        args.onThought("thinking", "🧠 thinking", msg.delta);
+        responsive.onThought?.("thinking", "🧠 thinking", msg.delta);
         break;
       case "toolUse": {
         const channel = `tool:${msg.name}:${msg.toolUseId}`;
-        args.onThought(channel, `🛠 ${msg.name}`, msg.input ? `${msg.input}` : "");
+        responsive.onThought?.(channel, `🛠 ${msg.name}`, msg.input ? `${msg.input}` : "");
         break;
       }
       case "toolResult": {
@@ -199,24 +305,28 @@ export async function runCodexCliStream(args: {
         const snippet = msg.content.length > 800
           ? msg.content.slice(0, 800) + "\n…(truncated)"
           : msg.content;
-        args.onThought(channel, "↩ result", snippet);
+        responsive.onThought?.(channel, "↩ result", snippet);
         break;
       }
       case "error":
-        args.onThought("cli-error", "⚠ cli", msg.message);
+        responsive.onThought?.("cli-error", "⚠ cli", msg.message);
         break;
     }
   };
-  return await invoke<string>("codex_cli_stream", {
-    systemPrompt: args.systemPrompt,
-    userMessage: args.userMessage,
-    cwd: args.cwd ?? null,
-    imagePaths: args.imagePaths ?? null,
-    model: args.model ?? null,
-    effort: args.effort ?? null,
-    allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
-    onEvent: ch,
-  });
+  try {
+    return await invoke<string>("codex_cli_stream", {
+      systemPrompt: args.systemPrompt,
+      userMessage: args.userMessage,
+      cwd: args.cwd ?? null,
+      imagePaths: args.imagePaths ?? null,
+      model: args.model ?? null,
+      effort: args.effort ?? null,
+      allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      onEvent: ch,
+    });
+  } finally {
+    await responsive.flush();
+  }
 }
 
 /// Best-effort extraction of the message text from a SendUserMessage
@@ -446,10 +556,13 @@ export async function appendAgentMemory(
 // only, Anthropic + llama-server have no audio path at all) and gives
 // every provider the same "I see the audio said X" experience.
 export type Attachment = {
-  kind: "image" | "audio";
+  kind: "image" | "audio" | "document";
   mime: string;
   data_b64: string;
   filename?: string;
+  /// Extracted locally before dispatch. Document bytes never go to a provider.
+  text?: string;
+  truncated?: boolean;
 };
 export type AgentSpec = {
   name: string;
@@ -698,6 +811,7 @@ export type TeamTemplateBackend = { id: string; path: string; built_in: boolean;
 export type AgentRoleBackend    = { id: string; path: string; built_in: boolean; data: any };
 export type ProjectRow = {
   id: string; name: string; description: string; location: string;
+  repo_url: string; created_device_id: string; created_device_name: string;
   trust_writes: boolean; auto_approve_all: boolean;
   team: string[]; team_default_model_id: string;
   graph_json: string;
@@ -1544,6 +1658,93 @@ export function imageAttachments(atts?: Attachment[]): Attachment[] {
   return (atts ?? []).filter(a => a.kind === "image");
 }
 
+export function documentAttachments(atts?: Attachment[]): Attachment[] {
+  return (atts ?? []).filter(a => a.kind === "document" && !!a.text?.trim());
+}
+
+export const CHAT_ATTACHMENT_ACCEPT = [
+  "image/*", ".pdf", ".txt", ".text", ".md", ".markdown", ".doc", ".docx",
+  ".rtf", ".odt", ".html", ".htm", ".csv", ".tsv", ".json", ".jsonl",
+  ".xml", ".yaml", ".yml", ".log", ".ini", ".cfg", ".toml", ".sql",
+  ".pptx", ".xlsx",
+].join(",");
+
+export const MAX_CHAT_DOCUMENT_BYTES = 32 * 1024 * 1024;
+const MAX_DOCUMENT_CONTEXT_CHARS = 240_000;
+
+type DocumentExtraction = { text: string; format: string; truncated: boolean };
+
+function fileDataBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const fr = new FileReader();
+    fr.onload = () => {
+      const dataUrl = String(fr.result ?? "");
+      const comma = dataUrl.indexOf(",");
+      resolve(comma >= 0 ? dataUrl.slice(comma + 1) : "");
+    };
+    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
+    fr.readAsDataURL(file);
+  });
+}
+
+/// Parse one picker/drop/paste file into the shared attachment shape. Images
+/// keep their native bytes; documents are extracted offline by Rust and retain
+/// only text, so no document bytes are sent to a model provider.
+export async function fileToChatAttachment(file: File): Promise<Attachment> {
+  if (file.type.startsWith("image/")) return fileToImageAttachment(file);
+  if (file.size > MAX_CHAT_DOCUMENT_BYTES) {
+    throw new Error(`Couldn't attach "${file.name}": document is ${(file.size / 1024 / 1024).toFixed(1)} MB; limit is ${MAX_CHAT_DOCUMENT_BYTES / 1024 / 1024} MB.`);
+  }
+  try {
+    const result = await invoke<DocumentExtraction>("document_extract", {
+      filename: file.name,
+      mime: file.type || "application/octet-stream",
+      dataB64: await fileDataBase64(file),
+    });
+    return {
+      kind: "document",
+      mime: file.type || "application/octet-stream",
+      data_b64: "",
+      filename: file.name || `document.${result.format}`,
+      text: result.text,
+      truncated: result.truncated,
+    };
+  } catch (error) {
+    const detail = String((error as { message?: string })?.message ?? error);
+    throw new Error(`Couldn't attach "${file.name}": ${detail}`);
+  }
+}
+
+/// Fold extracted documents into the user turn for every local/API/CLI model.
+/// Markers preserve filenames and tell the model the text is attached reference
+/// material, not hidden system instructions. A total cap prevents a collection
+/// of large files from silently overflowing the model context.
+export function appendDocumentAttachmentText(userMessage: string, atts?: Attachment[]): string {
+  const docs = documentAttachments(atts);
+  if (docs.length === 0) return userMessage;
+  let remaining = MAX_DOCUMENT_CONTEXT_CHARS;
+  const blocks: string[] = [];
+  for (const [index, doc] of docs.entries()) {
+    if (remaining <= 0) {
+      blocks.push(`[Attached document ${index + 1}: ${doc.filename ?? "document"} omitted because the combined document limit was reached.]`);
+      continue;
+    }
+    const source = doc.text!.trim();
+    const body = source.slice(0, remaining);
+    remaining -= body.length;
+    const clipped = body.length < source.length || !!doc.truncated;
+    blocks.push([
+      `[Attached document ${index + 1}: ${doc.filename ?? "document"}${clipped ? " — text truncated to fit chat context" : ""}]`,
+      "<attached-document>", body, "</attached-document>",
+    ].join("\n"));
+  }
+  const context = [
+    "The user attached the following locally extracted documents. Read them as reference material for this request and cite filenames when useful.",
+    ...blocks,
+  ].join("\n\n");
+  return userMessage.trim() ? `${userMessage}\n\n${context}` : context;
+}
+
 /// Max size of a pasted chat image. Larger ones are rejected with a clear error
 /// instead of silently bloating the request.
 export const MAX_CHAT_IMAGE_BYTES = 12 * 1024 * 1024;
@@ -1557,14 +1758,7 @@ export async function fileToImageAttachment(file: File): Promise<Attachment> {
   if (file.size > MAX_CHAT_IMAGE_BYTES) {
     throw new Error(`Image is ${(file.size / 1024 / 1024).toFixed(1)} MB — limit is ${MAX_CHAT_IMAGE_BYTES / 1024 / 1024} MB.`);
   }
-  const dataUrl = await new Promise<string>((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => resolve(String(fr.result));
-    fr.onerror = () => reject(fr.error ?? new Error("read failed"));
-    fr.readAsDataURL(file);
-  });
-  const comma = dataUrl.indexOf(",");
-  return { kind: "image", mime, data_b64: comma >= 0 ? dataUrl.slice(comma + 1) : "", filename: file.name || "pasted.png" };
+  return { kind: "image", mime, data_b64: await fileDataBase64(file), filename: file.name || "pasted.png" };
 }
 export function audioAttachments(atts?: Attachment[]): Attachment[] {
   return (atts ?? []).filter(a => a.kind === "audio");
@@ -2009,7 +2203,7 @@ export async function streamChatCompletion(
   // and we only need to worry about image parts per provider.
   const images = imageAttachments(attachments);
   const effectiveText = appendImageAttachmentNotes(
-    await transcribeAudioAttachments(userMessage, attachments, onSystemWarning, onTranscript),
+    await transcribeAudioAttachments(appendDocumentAttachmentText(userMessage, attachments), attachments, onSystemWarning, onTranscript),
     images,
   );
 
@@ -2027,45 +2221,52 @@ export async function streamChatCompletion(
       sessionId, onSystemWarning, onTranscript, getSteer,
     );
   }
+  const responsive = makeResponsiveHandlers(onDelta, onThought);
+  onDelta = responsive.onDelta;
+  onThought = responsive.onThought;
   let reply: string;
-  if (provider === "anthropic") {
-    reply = await streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
-  } else if (provider === "openai") {
-    reply = await streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
-  } else if (provider === "moonshot") {
-    reply = await streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
-  } else if (provider === "gemini") {
-    reply = await streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history);
-  } else if (provider === "xai") {
-    reply = await streamXai(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
-  } else if (OPENAI_COMPAT_PROVIDERS[provider]) {
-    const cfg = OPENAI_COMPAT_PROVIDERS[provider];
-    reply = await streamOpenAICompatible({
-      url: cfg.url, keyName: cfg.keyName, modelId: bareId,
-      systemPrompt, userMessage: effectiveText, temperature,
-      signal, onDelta, history, onThought, images, providerLabel: cfg.label,
-      projectCwd, allowedTools,
-    });
-  } else {
-    // ---- Local llama-server path (GGUF) ----
-    // Native tool-calling ONLY: the model's own chat template (llama-server
-    // --jinja) renders the `tools` array and parses the model's structured
-    // delta.tool_calls back for us. No XML catalog injected, no dialect
-    // parsing. Cloud/sub/API branches above are untouched.
-    reply = await streamLocalChat({
-      port,
-      modelId,
-      systemPrompt,
-      userContent: openaiUserContent(effectiveText, images),
-      temperature,
-      signal,
-      onDelta,
-      onThought,
-      projectCwd,
-      history,
-      allowedTools,
-      getSteer,
-    });
+  try {
+    if (provider === "anthropic") {
+      reply = await streamAnthropic(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, autoApprove, onThought, allowedTools, images, sessionId);
+    } else if (provider === "openai") {
+      reply = await streamOpenAI(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, history, onThought, images, projectCwd, allowedTools);
+    } else if (provider === "moonshot") {
+      reply = await streamMoonshot(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
+    } else if (provider === "gemini") {
+      reply = await streamGemini(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history);
+    } else if (provider === "xai") {
+      reply = await streamXai(bareId, { forceSub, forceApi }, systemPrompt, effectiveText, temperature, signal, onDelta, projectCwd, history, onThought, images, allowedTools);
+    } else if (OPENAI_COMPAT_PROVIDERS[provider]) {
+      const cfg = OPENAI_COMPAT_PROVIDERS[provider];
+      reply = await streamOpenAICompatible({
+        url: cfg.url, keyName: cfg.keyName, modelId: bareId,
+        systemPrompt, userMessage: effectiveText, temperature,
+        signal, onDelta, history, onThought, images, providerLabel: cfg.label,
+        projectCwd, allowedTools,
+      });
+    } else {
+      // ---- Local llama-server path (GGUF) ----
+      // Native tool-calling ONLY: the model's own chat template (llama-server
+      // --jinja) renders the `tools` array and parses the model's structured
+      // delta.tool_calls back for us. No XML catalog injected, no dialect
+      // parsing. Cloud/sub/API branches above are untouched.
+      reply = await streamLocalChat({
+        port,
+        modelId,
+        systemPrompt,
+        userContent: openaiUserContent(effectiveText, images),
+        temperature,
+        signal,
+        onDelta,
+        onThought,
+        projectCwd,
+        history,
+        allowedTools,
+        getSteer,
+      });
+    }
+  } finally {
+    await responsive.flush();
   }
   // Model-agnostic usage tally: every provider (local, API keys, CLIs)
   // gets a row per completed turn so the USAGE panel has real numbers
@@ -2147,6 +2348,9 @@ export async function fetchNetRetry(doFetch: () => Promise<Response>, signal: Ab
 }
 
 export async function streamLocalChat(p: StreamLocalChatParams): Promise<string> {
+  const responsive = makeResponsiveHandlers(p.onDelta, p.onThought);
+  const emitDelta = responsive.onDelta;
+  const emitThought = responsive.onThought;
   const openaiTools = await formatToolsForOpenAI(p.allowedTools);
   // Instrumentation: the exact tools advertised to llama-server this turn.
   // If agentic tool-calling misbehaves, open devtools — this shows whether
@@ -2206,12 +2410,14 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // when the stream stops. Local generation only (where tok/s reflects the
   // user's own hardware and is the meaningful number).
   const genTick = makeGenMeter();
-  const countingDelta: StreamHandler = (d) => { genTick(); p.onDelta(d); };
+  const countingDelta: StreamHandler = (d) => { genTick(); emitDelta(d); };
   const countingThought: ThoughtHandler = (channel, role, delta) => {
     if (delta) genTick();
-    p.onThought?.(channel, role, delta);
+    emitThought?.(channel, role, delta);
   };
+  const maybeYield = makeUiYield();
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    await maybeYield();
     if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
     let resp: Response | undefined;
     const loadDeadline = Date.now() + LOAD_RETRY_MS;
@@ -2296,15 +2502,18 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       const v = validateCall(c);
       if (v.ok) valid.push(c);
       else { invalid.push({ name: c.name, error: v.error }); p.events?.onValidationError?.(c.name, v.error); }
+      await maybeYield();
     }
     const results: ToolExecResult[] = [];
     for (const c of valid) {
+      await maybeYield();
       if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
       p.events?.onToolCall?.(c, turn);
       // eslint-disable-next-line no-await-in-loop
       const r = await executeToolCall(c, p.projectCwd ?? "");
       results.push(r);
       p.events?.onToolResult?.(c, r, turn);
+      await maybeYield();
     }
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
@@ -2362,6 +2571,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       if (p.signal.aborted) throw e;
     }
   }
+  await responsive.flush();
   return lastReply;
 }
 
@@ -2381,6 +2591,10 @@ export async function streamOpenAiApiWithTools(args: {
   keyName?: string;
   providerLabel?: string;
 }): Promise<string> {
+  const responsive = makeResponsiveHandlers(args.onDelta, args.onThought);
+  const onDelta = responsive.onDelta;
+  const onThought = responsive.onThought;
+  const maybeYield = makeUiYield();
   const sep = args.modelId.indexOf(":");
   const wireModel = sep === -1 ? args.modelId : args.modelId.slice(0, sep);
   const effort = sep === -1 ? null : args.modelId.slice(sep + 1);
@@ -2403,6 +2617,7 @@ export async function streamOpenAiApiWithTools(args: {
   let lastReply = "";
   let answeredWithoutTools = false;
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    await maybeYield();
     if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
     const nativeCalls: RawNativeCall[] = [];
     const resp = await fetchNetRetry(() => fetch(apiUrl, {
@@ -2419,7 +2634,7 @@ export async function streamOpenAiApiWithTools(args: {
       }),
       signal: args.signal,
     }), args.signal);
-    lastReply = await consumeOpenAISse(resp, args.onDelta, args.onThought, nativeCalls);
+    lastReply = await consumeOpenAISse(resp, onDelta, onThought, nativeCalls);
     if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
     const calls = canonicalizeNativeCalls(nativeCalls, { firstRequiredArg });
     if (calls.length === 0) { answeredWithoutTools = true; break; }
@@ -2429,12 +2644,15 @@ export async function streamOpenAiApiWithTools(args: {
       const v = validateCall(c);
       if (v.ok) valid.push(c);
       else invalid.push({ name: c.name, error: v.error });
+      await maybeYield();
     }
     const results: ToolExecResult[] = [];
     for (const c of valid) {
+      await maybeYield();
       if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
       const r = await executeToolCall(c, args.projectCwd ?? "");
       results.push(r);
+      await maybeYield();
     }
     const parts: string[] = [];
     if (valid.length > 0) parts.push(renderToolResultsForModel(valid, results));
@@ -2462,9 +2680,10 @@ export async function streamOpenAiApiWithTools(args: {
       }),
       signal: args.signal,
     }), args.signal);
-    const finalText = await consumeOpenAISse(resp, args.onDelta, args.onThought, []);
+    const finalText = await consumeOpenAISse(resp, onDelta, onThought, []);
     if (finalText.trim()) lastReply = finalText;
   }
+  await responsive.flush();
   return lastReply;
 }
 
@@ -2670,12 +2889,15 @@ async function consumeAnthropicSse(
   // Indexed by content block index; tracks what kind each block is so
   // the matching content_block_delta can be routed correctly.
   const blocks = new Map<number, { kind: "text" | "thinking" | "tool"; channel: string; role: string }>();
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -3020,12 +3242,15 @@ async function streamGemini(
   const dec = new TextDecoder();
   let buf = "";
   let acc = "";
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     const { done, value } = await reader.read();
     if (done) break;
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;
@@ -3152,7 +3377,9 @@ async function consumeOpenAISse(
     if (line.length < 2500) return false;
     return !/[.!?](\s|$)/.test(line.slice(-400));
   };
+  const maybeYield = makeUiYield();
   while (true) {
+    await maybeYield();
     let res: ReadableStreamReadResult<Uint8Array>;
     try {
       res = await readWithTimeout();
@@ -3170,6 +3397,7 @@ async function consumeOpenAISse(
     buf += dec.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf("\n")) >= 0) {
+      await maybeYield();
       const line = buf.slice(0, nl).replace(/\r$/, "");
       buf = buf.slice(nl + 1);
       if (!line.startsWith("data:")) continue;

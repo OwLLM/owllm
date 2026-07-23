@@ -21,7 +21,7 @@
 // regenerable caches, machine-specific workspace paths) are denied below.
 
 import { invoke } from "@tauri-apps/api/core";
-import { vaultStatus } from "../pages/agentic/github";
+import { vaultEnsure, vaultStatus } from "../pages/agentic/github";
 
 // Device-local marker of the newest blob we've adopted OR pushed. Compared
 // against the remote blob's syncedAt to decide whether to adopt. NOT synced.
@@ -36,10 +36,68 @@ const DENY_EXACT = new Set<string>([
   "owllm:sync-device",       // this device's id
   "owllm.wizard.completed",  // per-device module setup
   "owllm:cloud-models-remote", // regenerated from the remote catalogue
+  "owllm:world-map:presence-enabled", // consent is independent per device
+  "owllm:world-map:presence-token",   // anonymous server token is device-local
+  // Open tabs and their selected project are workspace UI on THIS computer.
+  // Project/chat content syncs separately through SQLite; syncing these keys
+  // made another PC's open projects suddenly become this PC's open pages.
+  "owllm:agents:pages",
+  "owllm:agents:activePage",
+  "owllm:assets:selectedProject",
 ]);
 // Prefixes for machine-specific state that shouldn't follow the user (paths
 // to WSL workspaces differ per device).
-const DENY_PREFIX = ["owllm:code:"];
+const DENY_PREFIX = [
+  "owllm:code:",
+  "owllm:agents:page:",
+];
+
+// The notebook blob (owllm:agents:notebook:<pid>) DOES sync — its notes, plan
+// and steps are shared content — but its RUN-LEASE fields must not. Those name
+// the live window that owns the running queue; syncing them would make a peer
+// PC think its own window owns a queue it never started (and two windows could
+// then drive the one team). We strip them on push and preserve the LOCAL lease
+// on adopt, so content converges while the lease stays device-local.
+const NOTEBOOK_KEY_PREFIX = "owllm:agents:notebook:";
+const NOTEBOOK_RUN_LEASE_FIELDS = [
+  "autoFeed", "autoFeedOwner", "autoFeedHeartbeat", "autoFeedStartedAt", "autoFeedFinishedAt", "autoFeedStopped",
+];
+
+/// Return the notebook blob value with its device-local run-lease fields
+/// removed, ready to sync. Non-notebook keys and unparseable values pass
+/// through untouched. Exported for the notebookSync verifier.
+export function stripNotebookLease(key: string, value: string): string {
+  if (!key.startsWith(NOTEBOOK_KEY_PREFIX)) return value;
+  try {
+    const obj = JSON.parse(value);
+    if (!obj || typeof obj !== "object") return value;
+    for (const f of NOTEBOOK_RUN_LEASE_FIELDS) delete obj[f];
+    return JSON.stringify(obj);
+  } catch {
+    return value; // not JSON we understand — never corrupt it
+  }
+}
+
+/// Merge an adopted notebook blob with the local one, KEEPING this device's
+/// live run-lease. Content (notes/plan/steps) comes from remote; the lease
+/// stays local so an in-flight queue on this PC is never hijacked by a sync.
+/// Exported for the notebookSync verifier.
+export function mergeNotebookLease(key: string, remoteValue: string): string {
+  if (!key.startsWith(NOTEBOOK_KEY_PREFIX)) return remoteValue;
+  try {
+    const remote = JSON.parse(remoteValue);
+    if (!remote || typeof remote !== "object") return remoteValue;
+    let local: any = null;
+    try { const rawLocal = localStorage.getItem(key); if (rawLocal) local = JSON.parse(rawLocal); } catch { local = null; }
+    for (const f of NOTEBOOK_RUN_LEASE_FIELDS) {
+      if (local && local[f] !== undefined) remote[f] = local[f];
+      else delete remote[f];
+    }
+    return JSON.stringify(remote);
+  } catch {
+    return remoteValue;
+  }
+}
 
 function isSyncable(key: string): boolean {
   if (DENY_EXACT.has(key)) return false;
@@ -47,16 +105,31 @@ function isSyncable(key: string): boolean {
   return key.startsWith("owllm:") || key.startsWith("owllm.");
 }
 
-function deviceId(): string {
+let _stableDeviceId: string | null = null;
+
+async function deviceId(): Promise<string> {
+  if (_stableDeviceId) return _stableDeviceId;
   try {
-    let d = localStorage.getItem(DEVICE_KEY);
-    if (!d) {
-      d = `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
-      localStorage.setItem(DEVICE_KEY, d);
-    }
-    return d;
+    // One identity system everywhere: Rust's persisted cryptographic device id
+    // also keys project.locations. The former random localStorage id vanished
+    // with the very profile migration it was supposed to identify.
+    _stableDeviceId = await invoke<string>("device_get_id");
+    try { localStorage.setItem(DEVICE_KEY, _stableDeviceId); } catch { /* marker only */ }
+    return _stableDeviceId;
   } catch {
-    return "unknown";
+    // Compatibility fallback for a damaged identity store. Keep it stable for
+    // this profile, but never generate a new id on every call.
+    try {
+      let d = localStorage.getItem(DEVICE_KEY);
+      if (!d) {
+        d = `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+        localStorage.setItem(DEVICE_KEY, d);
+      }
+      _stableDeviceId = d;
+      return d;
+    } catch {
+      return "unknown";
+    }
   }
 }
 
@@ -67,7 +140,7 @@ function snapshot(): Record<string, string> {
       const k = localStorage.key(i);
       if (!k || !isSyncable(k)) continue;
       const v = localStorage.getItem(k);
-      if (v != null) out[k] = v;
+      if (v != null) out[k] = stripNotebookLease(k, v);
     }
   } catch { /* private mode */ }
   return out;
@@ -96,15 +169,28 @@ async function pullAndAdopt(): Promise<boolean> {
   if (!raw) return false;
   let blob: Blob;
   try { blob = JSON.parse(raw) as Blob; } catch { return false; }
-  if (!blob?.syncedAt || blob.device === deviceId()) return false;
+  if (!blob?.syncedAt || blob.device === await deviceId()) return false;
   if (blob.syncedAt <= getLast()) return false;
   // Adopt: write each synced key. We DON'T delete local-only keys — a merge,
   // not a mirror, so device-local prefs survive.
+  const adoptedNotebookPids: string[] = [];
   for (const [k, v] of Object.entries(blob.data || {})) {
-    try { localStorage.setItem(k, v); } catch { /* quota */ }
+    // Old vault blobs can still contain page/folder bindings from versions
+    // before the deny-list was corrected. Never re-import them.
+    if (!isSyncable(k)) continue;
+    // Keep this device's live queue lease; adopt only the peer's content.
+    try { localStorage.setItem(k, mergeNotebookLease(k, v)); } catch { /* quota */ }
+    if (k.startsWith(NOTEBOOK_KEY_PREFIX)) adoptedNotebookPids.push(k.slice(NOTEBOOK_KEY_PREFIX.length));
   }
   setLast(blob.syncedAt);
   try { await invoke("vault_align"); } catch { /* best effort */ }
+  // When we DON'T do a full reload (the user has already interacted), open
+  // notebook surfaces hold stale in-memory steps even though localStorage now
+  // has the adopted copy. Tell them to reload so the queue reflects work a
+  // peer PC already completed instead of showing done steps as pending.
+  for (const pid of adoptedNotebookPids) {
+    try { window.dispatchEvent(new CustomEvent("owllm:notebook-changed", { detail: { projectId: pid } })); } catch { /* non-browser */ }
+  }
   return true;
 }
 
@@ -116,7 +202,7 @@ export async function pushNow(force = false): Promise<void> {
   const dataJson = JSON.stringify(data);
   if (!force && dataJson === _lastSnapshotJson) return;
   const syncedAt = Date.now();
-  const blob: Blob = { syncedAt, device: deviceId(), data };
+  const blob: Blob = { syncedAt, device: await deviceId(), data };
   try {
     await invoke("vault_write_state", { json: JSON.stringify(blob) });
     _lastSnapshotJson = dataJson;
@@ -138,6 +224,7 @@ function schedulePush(): void {
 // last-writer-wins per project. When it imports a newer copy from another
 // device we fire owllm:projects:refresh so the Agents page reloads.
 let _projSyncing = false;
+let _projectSyncTimer: ReturnType<typeof setTimeout> | null = null;
 export async function syncProjectsNow(): Promise<boolean> {
   if (!_enabled || _projSyncing) return false;
   _projSyncing = true;
@@ -154,6 +241,15 @@ export async function syncProjectsNow(): Promise<boolean> {
   } finally {
     _projSyncing = false;
   }
+}
+
+function scheduleProjectSync(): void {
+  if (!_enabled) return;
+  if (_projectSyncTimer) clearTimeout(_projectSyncTimer);
+  _projectSyncTimer = setTimeout(() => {
+    _projectSyncTimer = null;
+    void syncProjectsNow();
+  }, 4000);
 }
 
 // Remote-device records (public metadata: name, OS, version, LAN endpoint,
@@ -228,8 +324,26 @@ export async function startVaultSync(): Promise<void> {
   if (_started) return;
   _started = true;
   let st;
-  try { st = await vaultStatus(); } catch { return; }
-  if (!st?.cloned) return; // not connected / vault not set up → local-only
+  try {
+    st = await vaultStatus();
+    if (!st?.connected) return; // signed out → local-only
+    // A reinstall/profile repair can preserve the encrypted GitHub account
+    // while losing the local vault clone. Previously startup returned here
+    // forever, so projects on the user's existing remote vault never reached
+    // this PC unless they manually reopened the account modal. Self-heal the
+    // clone on every connected startup; vaultEnsure is idempotent.
+    if (!st.cloned) st = await vaultEnsure();
+  } catch (e) {
+    // Do not permanently latch startup off after a transient clone/network
+    // failure. A later account action (or the next launch) may retry safely.
+    _started = false;
+    console.warn("[vaultSync] vault startup failed", e);
+    return;
+  }
+  if (!st.cloned) {
+    _started = false;
+    return;
+  }
   _enabled = true;
 
   // 1) Adopt newer remote state, then reload (once) so every store repaints.
@@ -285,11 +399,17 @@ function wireListeners(): void {
   if (_listenersWired) return;
   _listenersWired = true;
   const onHide = () => { if (document.visibilityState === "hidden") { void pushNow(); void syncProjectsNow(); } };
+  const onMemoryChanged = () => scheduleProjectSync();
   document.addEventListener("visibilitychange", onHide);
+  window.addEventListener("owllm:memory:changed", onMemoryChanged as EventListener);
   window.addEventListener("beforeunload", () => { void pushNow(); void syncProjectsNow(); });
   window.setInterval(() => {
     if (!_enabled) return;
     const j = JSON.stringify(snapshot());
     if (j !== _lastSnapshotJson) schedulePush();
   }, 5000);
+  // SQLite changes do not affect the localStorage snapshot above. Periodically
+  // reconcile projects/facts as a backstop for native memory writes and abrupt
+  // exits; event-driven writes normally sync after the 4-second debounce.
+  window.setInterval(() => { if (_enabled) void syncProjectsNow(); }, 60_000);
 }

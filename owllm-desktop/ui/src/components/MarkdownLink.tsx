@@ -13,7 +13,7 @@ export default function MarkdownLink(props: any) {
   return (
     <a
       href={href}
-      style={{ color: "var(--accent)", textDecoration: "underline", cursor: "pointer" }}
+      style={{ color: "var(--accent-ink)", textDecoration: "underline", cursor: "pointer" }}
       title={href}
       onClick={(e) => {
         e.preventDefault();

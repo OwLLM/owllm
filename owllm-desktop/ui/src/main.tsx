@@ -7,6 +7,7 @@ import UpdateController from "./UpdatePrompt";
 import { ChatRuntimeProvider } from "./runtime/ChatRuntimeProvider";
 import { bootstrapTheme } from "./theme";
 import { bootstrapLocalization, LocalizationProvider } from "./localization";
+import { restoreStateMirror, startStateMirror } from "./runtime/stateMirror";
 import { installOwllmWebLinkInterceptor } from "./utils/openWebUrl";
 import "./styles.css";
 
@@ -28,8 +29,9 @@ function isTauriContext(): boolean {
   return Boolean(w.__TAURI_INTERNALS__ || w.__TAURI__ || w.__TAURI_METADATA__);
 }
 
-// Enforce the app-wide rule even for a future plain <a href="https://…">.
-// Local file/download anchors are intentionally unaffected.
+// Route every plain user-facing http(s) link through OwLLM's persistent
+// browser — including future <a href="https://…"> anchors no page wired up
+// explicitly. Local file/download anchors are intentionally unaffected.
 if (isTauriContext()) installOwllmWebLinkInterceptor();
 
 function BootCover() {
@@ -85,16 +87,29 @@ function BootCover() {
   ) : null;
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <LocalizationProvider>
-        <ChatRuntimeProvider>
-          <AppShell />
-        </ChatRuntimeProvider>
-      </LocalizationProvider>
-    </ErrorBoundary>
-    <UpdateController />
-    <BootCover />
-  </React.StrictMode>,
-);
+// Restore mirrored durable state (Coding pages, notebook, chat state) into
+// localStorage BEFORE the first render — pages read localStorage in their
+// useState initializers, so restoring later would miss the initial mount.
+// restoreStateMirror never throws and self-times-out, so boot can't hang.
+async function boot() {
+  try {
+    await restoreStateMirror();
+  } catch {
+    /* never block startup on recovery */
+  }
+  startStateMirror();
+  ReactDOM.createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+      <ErrorBoundary>
+        <LocalizationProvider>
+          <ChatRuntimeProvider>
+            <AppShell />
+          </ChatRuntimeProvider>
+        </LocalizationProvider>
+      </ErrorBoundary>
+      <UpdateController />
+      <BootCover />
+    </React.StrictMode>,
+  );
+}
+void boot();

@@ -892,6 +892,14 @@ pub fn init(app: &AppHandle) {
 // Tauri commands
 // ==================================================================
 
+/// Cheap stable identity for device-scoped UI/vault state. Unlike the old
+/// random localStorage id, this survives WebView profile migration and is the
+/// same id used by per-device project folder bindings.
+#[tauri::command]
+pub fn device_get_id() -> Result<String, String> {
+    self_device_id().ok_or_else(|| "device identity unavailable".to_string())
+}
+
 /// This device's public identity + live capability/enable state. Also starts the
 /// LAN listener when the feature is enabled (so the endpoint below is populated).
 #[tauri::command]

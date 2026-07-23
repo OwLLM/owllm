@@ -386,23 +386,21 @@ pub fn init_portable_mode() {
     );
 }
 
-/// Give every non-installed Windows copy its own WebView2 process/profile.
+/// Give every Windows copy its own explicit WebView2 process/profile.
 ///
 /// WebView2 keys its process group by the user-data folder, not by the path of
 /// the executable. Consequently a release exe copied into checkout B used to
 /// join the browser process owned by checkout A (or by the installed app). If
 /// that browser process stalled, both otherwise-independent builds appeared to
-/// freeze. Installed builds deliberately keep WebView2's normal app profile so
-/// upgrades retain localStorage/cookies. Source checkouts and loose/portable
-/// copies are keyed by their folder. Portable mode and explicit overrides win.
+/// freeze. Installed builds also need an explicit profile, but changing that
+/// profile must not abandon the app's localStorage-backed chats, notebooks and
+/// settings. Normal installs therefore seed a stable generation-2 profile from
+/// the richer of the legacy profile and the v0.8.97 isolated profile. Only the
+/// durable origin stores are copied; caches that can poison WebView startup are
+/// deliberately left behind. Source checkouts and loose copies remain keyed by
+/// their folder. Portable mode and explicit overrides win.
 #[cfg(windows)]
 pub fn init_isolated_webview_profile() {
-    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER")
-        .map(|v| !v.is_empty())
-        .unwrap_or(false)
-    {
-        return;
-    }
     let Some(exe) = std::env::current_exe().ok() else {
         return;
     };
@@ -412,6 +410,7 @@ pub fn init_isolated_webview_profile() {
     let Some(local) = std::env::var_os("LOCALAPPDATA") else {
         return;
     };
+    let installed = is_normal_windows_install(&exe);
     let canonical = scope.canonicalize().unwrap_or(scope);
     let normalized = canonical.to_string_lossy().to_lowercase();
     let digest = Sha256::digest(normalized.as_bytes());
@@ -419,10 +418,41 @@ pub fn init_isolated_webview_profile() {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect::<String>();
-    let profile = PathBuf::from(local)
-        .join("com.localllm.owllm-desktop")
-        .join("isolated-webview")
-        .join(key);
+    let app_root = PathBuf::from(local).join("com.localllm.owllm-desktop");
+
+    // A user-supplied profile override must win. The in-app updater also
+    // inherits this environment variable from the process it replaces,
+    // however, and v0.8.97 set it to our generation-1 `isolated-webview`
+    // directory. Treat only that OWLLM-owned v1 path as stale so the first
+    // post-update relaunch can perform the v2 memory migration immediately;
+    // otherwise recovery would happen only after the user fully exited and
+    // cold-started the app.
+    if let Some(configured) =
+        std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").filter(|v| !v.is_empty())
+    {
+        let inherited_v1 = installed && is_owllm_v1_profile(Path::new(&configured), &app_root);
+        if !inherited_v1 {
+            return;
+        }
+    }
+
+    if installed {
+        let profile = app_root.join("isolated-webview-v2").join(&key);
+        match prepare_installed_webview_profile(&app_root, &key, &profile) {
+            Ok(()) => std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", profile),
+            Err((source, error)) => {
+                eprintln!("[webview-profile] migration failed: {error}");
+                // Do not turn a recoverable migration error into missing user
+                // memory. Fall back to whichever source we selected.
+                if let Some(root) = source.and_then(|s| s.explicit_root) {
+                    std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", root);
+                }
+            }
+        }
+        return;
+    }
+
+    let profile = app_root.join("isolated-webview").join(key);
     let _ = std::fs::create_dir_all(&profile);
     std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", profile);
 }
@@ -451,12 +481,16 @@ fn webview_profile_scope(exe: &Path) -> Option<PathBuf> {
     if let Some(checkout) = checkout_root_for_exe(exe) {
         return Some(checkout);
     }
-    let dir = exe.parent()?.to_path_buf();
-    // Preserve the long-lived default WebView profile for the two normal
-    // installer destinations. Everything else is a side-by-side/loose copy
-    // and must not be coupled to that installed process.
-    let normalized = dir.to_string_lossy().replace('/', "\\").to_lowercase();
-    for base in [
+    exe.parent().map(Path::to_path_buf)
+}
+
+#[cfg(windows)]
+fn is_normal_windows_install(exe: &Path) -> bool {
+    let Some(dir) = exe.parent() else {
+        return false;
+    };
+    let normalized = normalize_windows_path(dir);
+    [
         std::env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .map(|p| p.join("Programs").join("OwLLM Desktop")),
@@ -469,13 +503,128 @@ fn webview_profile_scope(exe: &Path) -> Option<PathBuf> {
     ]
     .into_iter()
     .flatten()
-    {
-        let installed = base.to_string_lossy().replace('/', "\\").to_lowercase();
-        if normalized == installed || normalized.starts_with(&(installed + "\\")) {
-            return None;
+    .any(|installed| {
+        let installed = normalize_windows_path(&installed);
+        normalized == installed || normalized.starts_with(&(installed + "\\"))
+    })
+}
+
+#[cfg(windows)]
+fn normalize_windows_path(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "\\").to_lowercase()
+}
+
+#[cfg(windows)]
+fn is_owllm_v1_profile(path: &Path, app_root: &Path) -> bool {
+    let configured = normalize_windows_path(path);
+    let v1_root = normalize_windows_path(&app_root.join("isolated-webview"));
+    configured == v1_root || configured.starts_with(&(v1_root + "\\"))
+}
+
+#[cfg(windows)]
+#[derive(Clone, Debug)]
+struct WebviewProfileSource {
+    /// Directory containing Default/Local Storage (the WebView2 EBWebView dir).
+    webview_dir: PathBuf,
+    /// Root passed through WEBVIEW2_USER_DATA_FOLDER. None means WebView2's
+    /// legacy default profile should be used without an environment override.
+    explicit_root: Option<PathBuf>,
+    score: u64,
+}
+
+#[cfg(windows)]
+fn prepare_installed_webview_profile(
+    app_root: &Path,
+    key: &str,
+    target_root: &Path,
+) -> Result<(), (Option<WebviewProfileSource>, String)> {
+    const MARKER: &str = ".owllm-profile-state-v2";
+    if target_root.join(MARKER).is_file() {
+        return Ok(());
+    }
+
+    let legacy = WebviewProfileSource {
+        webview_dir: app_root.join("EBWebView"),
+        explicit_root: None,
+        score: 0,
+    };
+    let isolated_root = app_root.join("isolated-webview").join(key);
+    let isolated = WebviewProfileSource {
+        webview_dir: isolated_root.join("EBWebView"),
+        explicit_root: Some(isolated_root),
+        score: 0,
+    };
+    let source = [legacy, isolated]
+        .into_iter()
+        .map(|mut candidate| {
+            candidate.score = durable_webview_state_size(&candidate.webview_dir);
+            candidate
+        })
+        .filter(|candidate| candidate.score > 0)
+        .max_by_key(|candidate| candidate.score);
+
+    let result = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(target_root)?;
+        if let Some(source) = source.as_ref() {
+            for relative in ["Default/Local Storage", "Default/IndexedDB"] {
+                let from = source.webview_dir.join(relative);
+                if from.is_dir() {
+                    copy_webview_state_dir(&from, &target_root.join("EBWebView").join(relative))?;
+                }
+            }
+        }
+        let source_note = source
+            .as_ref()
+            .map(|s| s.webview_dir.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "fresh-profile".to_string());
+        std::fs::write(target_root.join(MARKER), source_note)?;
+        Ok(())
+    })();
+
+    result.map_err(|e| (source, e.to_string()))
+}
+
+#[cfg(windows)]
+fn durable_webview_state_size(webview_dir: &Path) -> u64 {
+    ["Default/Local Storage", "Default/IndexedDB"]
+        .into_iter()
+        .map(|relative| directory_file_size(&webview_dir.join(relative)))
+        .sum()
+}
+
+#[cfg(windows)]
+fn directory_file_size(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => directory_file_size(&path),
+                Ok(kind) if kind.is_file() => entry.metadata().map(|m| m.len()).unwrap_or(0),
+                _ => 0,
+            }
+        })
+        .sum()
+}
+
+#[cfg(windows)]
+fn copy_webview_state_dir(source: &Path, target: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(target)?;
+    for entry in std::fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        let kind = entry.file_type()?;
+        if kind.is_dir() {
+            copy_webview_state_dir(&from, &to)?;
+        } else if kind.is_file() && entry.file_name().to_string_lossy() != "LOCK" {
+            std::fs::copy(from, to)?;
         }
     }
-    Some(dir)
+    Ok(())
 }
 
 /// Path to `llama-quantize.exe` — used by the GGUF export pipeline to
@@ -1213,7 +1362,10 @@ pub fn fine_tuned_dir_write() -> Option<PathBuf> {
 
 #[cfg(all(test, windows))]
 mod webview_profile_tests {
-    use super::{checkout_root_for_exe, webview_profile_scope};
+    use super::{
+        checkout_root_for_exe, is_normal_windows_install, is_owllm_v1_profile,
+        prepare_installed_webview_profile, webview_profile_scope,
+    };
 
     #[test]
     fn source_checkout_and_loose_copy_get_distinct_scopes() {
@@ -1239,7 +1391,7 @@ mod webview_profile_tests {
     }
 
     #[test]
-    fn normal_per_user_install_keeps_the_existing_profile() {
+    fn normal_per_user_install_gets_an_explicit_isolated_profile() {
         let Some(local) = std::env::var_os("LOCALAPPDATA") else {
             return;
         };
@@ -1247,6 +1399,115 @@ mod webview_profile_tests {
             .join("Programs")
             .join("OwLLM Desktop")
             .join("owllm-desktop.exe");
-        assert_eq!(webview_profile_scope(&exe), None);
+        assert_eq!(
+            webview_profile_scope(&exe),
+            exe.parent().map(std::path::Path::to_path_buf)
+        );
+        assert!(is_normal_windows_install(&exe));
+    }
+
+    #[test]
+    fn updater_inherited_v1_profile_is_migrated_but_explicit_overrides_win() {
+        let app_root =
+            std::path::PathBuf::from(r"C:\Users\test\AppData\Local\com.localllm.owllm-desktop");
+        assert!(is_owllm_v1_profile(
+            &app_root.join("isolated-webview").join("scope"),
+            &app_root,
+        ));
+        assert!(!is_owllm_v1_profile(
+            &app_root.join("isolated-webview-v2").join("scope"),
+            &app_root,
+        ));
+        assert!(!is_owllm_v1_profile(
+            std::path::Path::new(r"D:\Explicit\OwLLM-WebView"),
+            &app_root,
+        ));
+    }
+
+    fn write_state(root: &std::path::Path, relative: &str, bytes: usize) {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![b'x'; bytes]).unwrap();
+    }
+
+    #[test]
+    fn installed_profile_seeds_from_the_richer_legacy_state_without_caches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("com.localllm.owllm-desktop");
+        let legacy = app_root.join("EBWebView");
+        let v1 = app_root
+            .join("isolated-webview")
+            .join("scope")
+            .join("EBWebView");
+        let target = app_root.join("isolated-webview-v2").join("scope");
+
+        write_state(&legacy, "Default/Local Storage/leveldb/000003.log", 200);
+        write_state(&legacy, "Default/Cache/poisoned.bin", 500);
+        write_state(&v1, "Default/Local Storage/leveldb/000003.log", 20);
+
+        prepare_installed_webview_profile(&app_root, "scope", &target).unwrap();
+
+        assert_eq!(
+            std::fs::read(target.join("EBWebView/Default/Local Storage/leveldb/000003.log"))
+                .unwrap()
+                .len(),
+            200
+        );
+        assert!(!target.join("EBWebView/Default/Cache/poisoned.bin").exists());
+        let marker = std::fs::read_to_string(target.join(".owllm-profile-state-v2")).unwrap();
+        assert!(marker.ends_with("EBWebView"));
+    }
+
+    #[test]
+    fn installed_profile_preserves_v097_state_when_it_is_richer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("com.localllm.owllm-desktop");
+        let legacy = app_root.join("EBWebView");
+        let v1 = app_root
+            .join("isolated-webview")
+            .join("scope")
+            .join("EBWebView");
+        let target = app_root.join("isolated-webview-v2").join("scope");
+
+        write_state(&legacy, "Default/Local Storage/leveldb/000003.log", 20);
+        write_state(&v1, "Default/Local Storage/leveldb/000003.log", 240);
+
+        prepare_installed_webview_profile(&app_root, "scope", &target).unwrap();
+
+        assert_eq!(
+            std::fs::read(target.join("EBWebView/Default/Local Storage/leveldb/000003.log"))
+                .unwrap()
+                .len(),
+            240
+        );
+    }
+
+    #[test]
+    fn completed_profile_is_never_overwritten_on_later_launches() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app_root = tmp.path().join("com.localllm.owllm-desktop");
+        let target = app_root.join("isolated-webview-v2").join("scope");
+        let target_state = target.join("EBWebView");
+
+        write_state(
+            &target_state,
+            "Default/Local Storage/leveldb/000003.log",
+            40,
+        );
+        std::fs::write(target.join(".owllm-profile-state-v2"), "already-migrated").unwrap();
+        write_state(
+            &app_root.join("EBWebView"),
+            "Default/Local Storage/leveldb/000003.log",
+            500,
+        );
+
+        prepare_installed_webview_profile(&app_root, "scope", &target).unwrap();
+
+        assert_eq!(
+            std::fs::read(target_state.join("Default/Local Storage/leveldb/000003.log"))
+                .unwrap()
+                .len(),
+            40
+        );
     }
 }

@@ -37,6 +37,7 @@ const HOST_LABEL = HOST_IS_WINDOWS
     : navigator.userAgent.includes("Linux")
       ? "Linux"
       : "Host";
+const ACCOUNT_ONBOARDING_KEY = "owllm:accounts:onboarding-provider";
 
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
 // transcription pipeline (binary + ggml-base.bin model) and exposes an
@@ -218,17 +219,20 @@ function VoiceRuntimePanel() {
 /// what we hand portable-pty's CommandBuilder — PATH resolution
 /// happens there (or in Rust's which_extended fallback). Args mirror
 /// what subscription_cli_login used to pass when opening CMD:
-///   * claude/kimi: bare REPL — we auto-type `send` once it boots so
-///     Connect logs you in without you typing /login yourself.
-///   * codex: `login` subcommand (one-shot OAuth) — no REPL command.
+///   * claude: bare REPL — auto-type /login once it boots.
+///   * codex/kimi/grok: dedicated device-login command; PtyTerminal opens the
+///     emitted verification URL in OwLLM's browser.
 ///   * gemini: bare REPL + `/auth`, matching the official CLI flow.
 const LOGIN_CMD: Record<string, { cli: string; args: string[]; send?: string } | undefined> = {
   claude_cli: { cli: "claude", args: [], send: "/login\r" },
-  codex_cli:  { cli: "codex",  args: ["login"] },
-  kimi_cli:   { cli: "kimi",   args: [], send: "/login\r" },
+  // Device-code auth avoids localhost callbacks and system-browser launches.
+  // PtyTerminal opens the emitted URL in OwLLM's persistent browser instead.
+  codex_cli:  { cli: "codex",  args: ["login", "--device-auth"] },
+  // Current kimi-cli has a dedicated login command. The old bare-REPL +
+  // auto-typed /login recipe entered an agent shell instead of authenticating.
+  kimi_cli:   { cli: "kimi",   args: ["login", "--json"] },
   gemini_cli: { cli: "gemini", args: [], send: "/auth\r" },
-  // Grok Build: the bare REPL opens the browser sign-in on first run.
-  grok_cli:   { cli: "grok",   args: [] },
+  grok_cli:   { cli: "grok",   args: ["login", "--device-auth"] },
 };
 
 const PAGE_BG = "var(--bg-panel)";
@@ -237,6 +241,7 @@ const PAGE_BG = "var(--bg-panel)";
 // Backend types
 // -----------------------------------------------------------------------
 type AccountsStatus = {
+  host_os: string;
   anthropic_api_key: boolean;
   openai_api_key: boolean;
   moonshot_api_key: boolean;
@@ -674,10 +679,11 @@ function RouteRow({
 // Provider container — header + N route rows.
 // -----------------------------------------------------------------------
 function ProviderCard({
-  provider, cards, onConnect, onInstall, onDisconnect, onTest,
+  provider, cards, highlighted, onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
   cards: Record<string, CardState>;
+  highlighted?: boolean;
   onConnect: (route: RouteSpec) => void;
   onInstall: (route: RouteSpec) => void;
   onDisconnect: (route: RouteSpec) => void;
@@ -686,11 +692,16 @@ function ProviderCard({
   const Logo = provider.Logo;
   return (
     <div
+      data-provider-key={provider.key}
+      data-onboarding-highlighted={highlighted ? "true" : undefined}
       style={{
         background: `linear-gradient(180deg, ${provider.accentTop} 0%, ${PAGE_BG} 60%, ${PAGE_BG} 100%)`,
         borderRadius: 14,
         padding: "18px 20px 14px 20px",
-        boxShadow: "0 4px 24px rgba(0,0,0,0.47)",
+        border: highlighted ? `2px solid ${provider.accent}` : "2px solid transparent",
+        boxShadow: highlighted
+          ? `0 0 0 3px color-mix(in srgb, ${provider.accent} 22%, transparent), 0 8px 30px rgba(0,0,0,0.52)`
+          : "0 4px 24px rgba(0,0,0,0.47)",
         display: "flex", flexDirection: "column",
         minHeight: 220,
       }}
@@ -801,7 +812,7 @@ function RightRail({
       </div>
       <div style={{ flex: 1, minHeight: 0, display: tab === "terminal" ? "block" : "none" }}>
         {activeTerm
-          ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} autoSend={activeTerm.send} />
+          ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} autoSend={activeTerm.send} autoOpenAuthUrls />
           : <div style={{ padding: 14, color: "var(--fg-dim)", fontSize: 11, fontStyle: "italic" }}>
               Click Connect on any CLI-backed subscription to open a live terminal here.
             </div>}
@@ -919,6 +930,27 @@ export default function AccountsPage() {
     Object.fromEntries(allRoutes.map((r) => [r.key, { ...initialCardState }])),
   );
   const [dialogFor, setDialogFor] = useState<{ route: RouteSpec; provider: ProviderSpec } | null>(null);
+  const [onboardingProvider, setOnboardingProvider] = useState(() => {
+    try {
+      const saved = sessionStorage.getItem(ACCOUNT_ONBOARDING_KEY) ?? "";
+      return saved === "api" || PROVIDERS.some((provider) => provider.key === saved) ? saved : "";
+    }
+    catch { return ""; }
+  });
+
+  useEffect(() => {
+    if (!onboardingProvider || onboardingProvider === "api") return;
+    const id = window.setTimeout(() => {
+      document.querySelector<HTMLElement>(`[data-provider-key="${onboardingProvider}"]`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 120);
+    return () => window.clearTimeout(id);
+  }, [onboardingProvider]);
+
+  const dismissOnboardingHint = () => {
+    try { sessionStorage.removeItem(ACCOUNT_ONBOARDING_KEY); } catch { /* ignore */ }
+    setOnboardingProvider("");
+  };
 
   // Responsive layout: at narrow widths the 340 px right rail crushes
   // the card grid (cards visually overlap as they fall below their
@@ -939,6 +971,15 @@ export default function AccountsPage() {
   // its pty_kill in PtyTerminal's cleanup effect).
   const [activeTerm, setActiveTerm] = useState<ActiveTerminal | null>(null);
   const [railTab, setRailTab] = useState<RailTab>("log");
+  const [hostOs, setHostOs] = useState("");
+  const hostIsWindows = hostOs === "windows";
+  const hostLabel = hostOs === "windows"
+    ? "Windows"
+    : hostOs === "macos"
+      ? "macOS"
+      : hostOs === "linux"
+        ? "Linux"
+        : "Host";
 
   function reconcile(status: AccountsStatus) {
     setCards((prev) => {
@@ -977,7 +1018,10 @@ export default function AccountsPage() {
     const tick = async () => {
       try {
         const s = await invoke<AccountsStatus>("accounts_status");
-        if (!dead) reconcile(s);
+        if (!dead) {
+          setHostOs(s.host_os);
+          reconcile(s);
+        }
       } catch (e) {
         console.error("accounts_status failed", e);
       }
@@ -1010,20 +1054,10 @@ export default function AccountsPage() {
   function handleConnect(route: RouteSpec, provider: ProviderSpec) {
     if (route.kind === "subscription") {
       if (route.webOnly) {
-        // Open in the OwLLM in-app browser (NOT the system browser): its cookie
-        // store persists, so the sign-in survives and agents can use the session
-        // through the built-in browser. External-browser logins are deliberately
-        // forbidden because OwLLM and its browser tools cannot reuse them.
-        const url = route.webOnly.url;
-        logInfo(route.backend, `Opening ${url} in the OwLLM browser — sign in there; your session is saved and available to agents.`);
-        (async () => {
-          try {
-            await openWebUrl(url);
-            logInfo(route.backend, `${provider.name} opened in the OwLLM browser. Complete the sign-in there — the session stays logged in for agents that drive the browser.`);
-          } catch (e) {
-            logInfo(route.backend, `[error] OwLLM browser unavailable: ${e}`);
-          }
-        })();
+        logInfo(route.backend, `Opening ${route.webOnly.url} in your browser…`);
+        openWebUrl(route.webOnly.url).catch((e) => {
+          logInfo(route.backend, `[error] couldn't open browser: ${e}`);
+        });
         return;
       }
       // CLI-backed subscription: spawn the CLI inside our embedded
@@ -1035,10 +1069,10 @@ export default function AccountsPage() {
       }
       const hint: Record<string, string> = {
         claude_cli: "auto-running /login — complete the browser sign-in.",
-        codex_cli:  "follow the OAuth URL that appears.",
-        kimi_cli:   "auto-running /login — complete the browser sign-in.",
+        codex_cli:  "the device page opens in OwLLM's browser; enter the code shown here.",
+        kimi_cli:   "the authorization page opens in OwLLM's browser automatically.",
         gemini_cli: "auto-running /auth — choose Google sign-in, then complete the browser flow.",
-        grok_cli:   "first run opens the X / SuperGrok browser sign-in — complete it there.",
+        grok_cli:   "the xAI device page opens in OwLLM's browser; confirm the code shown here.",
       };
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
       setActiveTerm({
@@ -1185,17 +1219,17 @@ export default function AccountsPage() {
       const prefix = r.ok ? "✓" : "✗";
       const line = `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`;
       setCardState(route.key, { testing: false, testText: line, testOk: r.ok });
-      logInfo(route.backend, `${HOST_LABEL}: ${line}`);
+      logInfo(route.backend, `${hostLabel}: ${line}`);
     } catch (e: any) {
       const line = `✗  ${String(e?.message ?? e)}`;
       setCardState(route.key, { testing: false, testText: line, testOk: false });
-      logInfo(route.backend, `${HOST_LABEL}: ${line}`);
+      logInfo(route.backend, `${hostLabel}: ${line}`);
     }
     // Also probe the WSL sandbox — tells the user whether ISOLATED agents can
     // use this provider (creds mirrored into the distro). Non-fatal. Native
     // Linux/macOS have their own host/sandbox routing and must not show a fake
     // red WSL result.
-    if (!HOST_IS_WINDOWS) return;
+    if (!hostIsWindows) return;
     try {
       const w = await invoke<ProbeResult>("accounts_test_probe_wsl", { backend: route.backend });
       const wline = `${w.ok ? "✓" : "✗"}  ${w.detail}`;
@@ -1225,6 +1259,32 @@ export default function AccountsPage() {
         (CLI login or web portal) and API key. Install / Connect output streams
         live into the right-side log — no pop-out console.
       </div>
+      {onboardingProvider && (
+        <div data-ui="AccountOnboardingHint" style={{
+          display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap",
+          padding: "11px 14px", borderRadius: 11,
+          background: "rgba(var(--accent-rgb),0.11)",
+          border: "1px solid var(--accent-strong)", color: "var(--fg)",
+        }}>
+          <span aria-hidden="true" style={{ fontSize: 20 }}>✨</span>
+          <div style={{ flex: 1, minWidth: 220 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 800, color: "var(--fg-strong)" }}>
+              {onboardingProvider === "api"
+                ? "Add the API key you already use"
+                : `Connect your ${PROVIDERS.find((provider) => provider.key === onboardingProvider)?.name ?? "subscription"} account`}
+            </div>
+            <div style={{ fontSize: 11.5, color: "var(--fg-muted)", marginTop: 2, lineHeight: 1.4 }}>
+              {onboardingProvider === "api"
+                ? "Choose a provider below, then use its API row. API usage is billed separately by that provider."
+                : "Use the Subscription row in the highlighted card. Install its CLI if needed, then Connect and finish the provider’s browser login."}
+            </div>
+          </div>
+          <button onClick={dismissOnboardingHint} style={{
+            padding: "7px 11px", borderRadius: 7, border: "1px solid var(--border-strong)",
+            background: "var(--bg-elevated)", color: "var(--fg)", cursor: "pointer", fontWeight: 700,
+          }}>Got it</button>
+        </div>
+      )}
       <VoiceRuntimePanel />
       <KvmNodePanel />
 
@@ -1269,6 +1329,7 @@ export default function AccountsPage() {
               key={provider.key}
               provider={provider}
               cards={cards}
+              highlighted={onboardingProvider === provider.key}
               onConnect={(r) => handleConnect(r, provider)}
               onInstall={(r) => handleInstall(r, provider)}
               onDisconnect={(r) => handleDisconnect(r, provider)}

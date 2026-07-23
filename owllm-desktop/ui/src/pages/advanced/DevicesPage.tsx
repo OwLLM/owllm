@@ -415,7 +415,7 @@ function Header({ identity, onToggle }: { identity: DeviceIdentity | null; onTog
         </span>
       </div>
       <span style={{ flex: 1 }} />
-      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: identity?.env_override ? "default" : "pointer", color: enabled ? "var(--accent)" : "var(--fg-muted)" }}>
+      <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, cursor: identity?.env_override ? "default" : "pointer", color: enabled ? "var(--accent-ink)" : "var(--fg-muted)" }}>
         <input type="checkbox" checked={enabled} disabled={identity?.env_override} onChange={(e) => onToggle(e.target.checked)} />
         {enabled ? "remote control enabled" : "remote control disabled"}
         {identity?.env_override && <span title="Forced on by OWLLM_REMOTE_DEVICES."> (env)</span>}
@@ -604,7 +604,7 @@ function NetworkPanel({
             style={{ ...inputStyle, flex: 1, fontFamily: "monospace" }} />
           <button className="ghost-btn" onClick={onSaveRelay} style={{ fontSize: 11, padding: "2px 10px" }}>Save</button>
         </div>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, cursor: "pointer", color: identity.relay_serving ? "var(--accent)" : "var(--fg-muted)", marginTop: 2 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, cursor: "pointer", color: identity.relay_serving ? "var(--accent-ink)" : "var(--fg-muted)", marginTop: 2 }}>
           <input type="checkbox" checked={identity.relay_serving} onChange={(e) => onToggleServer(e.target.checked)} />
           Host a relay on this machine (bind 0.0.0.0:47772) — for an always-on box with a public URL/tunnel
           {identity.relay_serving && <span style={badge("var(--ok)")}>serving</span>}
@@ -613,7 +613,7 @@ function NetworkPanel({
 
       {/* Agent remote access */}
       <div style={{ borderTop: "1px solid var(--border)", marginTop: 8, paddingTop: 8 }}>
-        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: identity.agents_allowed ? "var(--accent)" : "var(--fg)" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer", color: identity.agents_allowed ? "var(--accent-ink)" : "var(--fg)" }}>
           <input type="checkbox" checked={identity.agents_allowed} onChange={(e) => onToggleAgents(e.target.checked)} />
           <b>Let agents use remote devices</b>
           {identity.agents_allowed && <span style={badge("var(--ok)")}>on</span>}

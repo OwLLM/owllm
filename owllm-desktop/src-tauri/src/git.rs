@@ -61,6 +61,9 @@ pub struct GitStatus {
     /// 100k+ untracked entries, and shipping them all over IPC each poll is
     /// what melts the webview — so `files` carries at most MAX_STATUS_FILES.
     pub total: u64,
+    /// App-generated runtime files that are still tracked by Git. They may be
+    /// clean now but become recurring dirty changes when OWLLM rewrites them.
+    pub nuisance_files: Vec<String>,
 }
 
 /// Cap on the per-poll `files` payload (see GitStatus::total).
@@ -77,6 +80,7 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
             behind: 0,
             files: Vec::new(),
             total: 0,
+            nuisance_files: Vec::new(),
         };
         // Cheap repo check first — non-repos return is_repo:false (not an error).
         match git(&dir, &["rev-parse", "--is-inside-work-tree"]) {
@@ -110,8 +114,7 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
                     }
                 }
             } else if line.len() > 3 {
-                // Skip OWLLM's own scratch (.owllm-inbox image drop, .owllm
-                // project state) so the publish card never reports a phantom
+                // Skip OWLLM's own runtime scratch so the publish card never reports a phantom
                 // "1 pending" that the user can't commit away — it's app
                 // runtime data, not a user change.
                 if crate::fleet::is_app_scratch(&line[3..]) {
@@ -126,6 +129,29 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
                 }
             }
         }
+        // Query only known runtime paths; scanning every tracked file on the
+        // Code page's five-second status poll is wasteful on large repos.
+        let nuisance_files = git(
+            &dir,
+            &[
+                "ls-files",
+                "--",
+                ".owllm-inbox",
+                ".owllm/brainstorm.json",
+                ".owllm/eval-traces.jsonl",
+            ],
+        )
+            .ok()
+            .filter(|(ok, _, _)| *ok)
+            .map(|(_, tracked, _)| {
+                tracked
+                    .lines()
+                    .map(str::trim)
+                    .filter(|path| crate::fleet::is_app_scratch(path))
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(GitStatus {
             is_repo: true,
             branch,
@@ -133,6 +159,7 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
             behind,
             files,
             total,
+            nuisance_files,
         })
     })
     .await
@@ -141,7 +168,47 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::truncate_on_char_boundary;
+    use super::{git_status, truncate_on_char_boundary};
+    use std::{fs, process::Command};
+
+    #[tokio::test]
+    async fn status_reports_tracked_runtime_but_keeps_project_card_committable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let git_ok = |args: &[&str]| {
+            assert!(Command::new("git")
+                .args(args)
+                .current_dir(root)
+                .status()
+                .unwrap()
+                .success());
+        };
+        git_ok(&["init", "-b", "main"]);
+        git_ok(&["config", "user.email", "git-status-test@owllm.local"]);
+        git_ok(&["config", "user.name", "OwLLM Git Status Test"]);
+        fs::create_dir_all(root.join(".owllm-inbox")).unwrap();
+        fs::create_dir_all(root.join(".owllm")).unwrap();
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"runtime").unwrap();
+        fs::write(root.join(".owllm/brainstorm.json"), b"{}\n").unwrap();
+        fs::write(root.join(".owllm/project.json"), b"{}\n").unwrap();
+        git_ok(&["add", "-A"]);
+        git_ok(&["commit", "-m", "fixture"]);
+
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"new runtime").unwrap();
+        fs::write(root.join(".owllm/project.json"), b"{\"goal\":\"ship\"}\n").unwrap();
+        let status = git_status(root.to_string_lossy().to_string()).await.unwrap();
+
+        assert_eq!(status.total, 1);
+        assert_eq!(status.files.len(), 1);
+        assert_eq!(status.files[0].path, ".owllm/project.json");
+        assert_eq!(
+            status.nuisance_files,
+            vec![
+                ".owllm-inbox/image_1.png".to_string(),
+                ".owllm/brainstorm.json".to_string(),
+            ]
+        );
+    }
 
     #[test]
     fn truncation_backs_off_to_a_char_boundary() {

@@ -39,6 +39,7 @@ mod data_layer;
 mod dialog;
 mod directives;
 mod discord;
+mod documents;
 mod email;
 mod env_manager;
 mod finetuning;
@@ -68,7 +69,9 @@ mod server;
 mod signing;
 mod skill_library;
 mod slack;
+mod state_mirror;
 mod support;
+mod sync_core;
 mod telegram;
 mod vault;
 mod webhook;
@@ -116,13 +119,42 @@ fn install_crash_log_hook() {
     }));
 }
 
+/// WebKitGTK's DMA-BUF renderer has recurring failures with proprietary NVIDIA
+/// drivers, including SIGBUS exits on Jetson/arm64. Apply WebKit's supported
+/// fallback before the GTK/WebKit process tree starts, but only on NVIDIA Linux
+/// and never override an explicit operator choice.
+#[cfg(target_os = "linux")]
+fn configure_linux_webkit_renderer() {
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
+        return;
+    }
+    let has_nvidia_driver = std::path::Path::new("/proc/driver/nvidia/version").is_file()
+        || std::path::Path::new("/sys/module/nvidia/version").exists();
+    if has_nvidia_driver {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        eprintln!(
+            "[owllm] NVIDIA Linux detected; WebKitGTK DMA-BUF renderer disabled for stability"
+        );
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn configure_linux_webkit_renderer() {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_crash_log_hook();
+    configure_linux_webkit_renderer();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
     // marker next to the exe) BEFORE the webview or any path helper runs, and
     // seed the whole env-override family so every data root lands on the stick.
     paths::init_portable_mode();
+    // Both migrations must happen BEFORE WebView2 starts. In particular, the
+    // legacy localStorage importer needs to copy/open old LevelDB stores while
+    // no browser process holds their LOCK file. Keeping this inside setup()
+    // made recovery work only when a developer repaired a machine manually.
+    bootstrap::migrate_user_state_if_needed();
+    state_mirror::import_legacy_webview_state_once();
     // WebView2 groups processes by profile rather than executable. A copied
     // local build must not join (and inherit a hang from) the installed app or
     // another checkout. Installed and portable profiles remain unchanged.
@@ -141,7 +173,6 @@ pub fn run() {
             // launches no-op. Runs synchronously before any module that
             // touches the SQLite state so we don't end up with two parallel
             // DBs on first launch.
-            bootstrap::migrate_user_state_if_needed();
             // Seed OWLLM's built-in skill packs (e.g. parallel-dispatch) into the
             // user skills dir if absent, so they're visible + editable in Studio
             // and equippable. Never clobbers a user-edited copy.
@@ -316,6 +347,7 @@ pub fn run() {
             kvm::kvm_node_list,
             kvm::kvm_node_delete,
             remote_devices::device_get_identity,
+            remote_devices::device_get_id,
             remote_devices::device_set_name,
             remote_devices::device_remote_enabled_get,
             remote_devices::device_remote_enabled_set,
@@ -356,6 +388,10 @@ pub fn run() {
             browser::browser_ensure,
             browser::browser_start,
             browser::browser_open_url,
+            browser::browser_open_tab,
+            browser::browser_list_tabs,
+            browser::browser_select_tab,
+            browser::browser_close_tab,
             browser::browser_cmd,
             browser::browser_stop,
             browser::browser_status,
@@ -385,6 +421,9 @@ pub fn run() {
             directives::directives_restore_defaults,
             directives::project_set_director_mode,
             directives::project_get_director_mode,
+            state_mirror::state_mirror_load,
+            state_mirror::state_mirror_save,
+            state_mirror::state_mirror_ack_recovery,
             fleet::path_is_dir,
             fleet::fleet_worktree_create,
             fleet::fleet_worktree_finalize,
@@ -402,6 +441,7 @@ pub fn run() {
             overlay_frame::overlay_frame_capture_geometry,
             projects::list_projects,
             projects::create_project,
+            projects::resolve_project_for_location,
             projects::update_project,
             projects::delete_project,
             memory::agent_memory_get,
@@ -416,6 +456,7 @@ pub fn run() {
             release::repo_commit,
             release::repo_push,
             release::repo_merge,
+            release::repo_sync,
             memory::team_memory_read,
             memory::team_memory_delete,
             memory::team_memory_promote,
@@ -474,6 +515,7 @@ pub fn run() {
             finetuning::train_status,
             finetuning::dataset_check,
             finetuning::dataset_ingest,
+            documents::document_extract,
             finetuning::dataset_save,
             finetuning::dataset_default_dir,
             finetuning::abliterate_start,
@@ -517,6 +559,9 @@ pub fn run() {
             github::github_device_start,
             github::github_device_poll,
             github::github_create_repo,
+            github::github_repo_url,
+            github::github_list_repositories,
+            github::github_clone_project,
             vault::vault_status,
             vault::vault_ensure,
             vault::vault_read_remote_state,

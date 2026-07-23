@@ -27793,6 +27793,26 @@ export const UI_CATALOG = [
     "O ID do time do seu workspace (começa com T). Encontre em slack.com/admin/settings."
   ],
   [
+    "Marketplace",
+    "市场",
+    "마켓플레이스",
+    "マーケットプレイス",
+    "السوق",
+    "Marketplace",
+    "मार्केटप्लेस",
+    "Marketplace"
+  ],
+  [
+    "Open OWLLM Marketplace",
+    "打开 OWLLM 市场",
+    "OWLLM 마켓플레이스 열기",
+    "OWLLM マーケットプレイスを開く",
+    "افتح سوق OWLLM",
+    "Apri OWLLM Marketplace",
+    "OWLLM मार्केटप्लेस खोलें",
+    "Abrir o OWLLM Marketplace"
+  ],
+  [
     "Zoom in",
     "放大",
     "확대",
@@ -27813,4 +27833,4 @@ export const UI_CATALOG = [
     "Diminuir zoom"
   ]
 ] as const;
-export const UI_CATALOG_COVERAGE = {"zh-CN":2781,"ko":2781,"ja":2781,"ar":2781,"it":2781,"hi":2781,"pt":2781} as const;
+export const UI_CATALOG_COVERAGE = {"zh-CN":2783,"ko":2783,"ja":2783,"ar":2783,"it":2783,"hi":2783,"pt":2783} as const;

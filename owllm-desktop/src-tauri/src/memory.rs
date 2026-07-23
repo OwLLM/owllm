@@ -19,6 +19,7 @@
 // shared across every run of the same project.
 
 use serde::Serialize;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn now_ms() -> i64 {
@@ -81,6 +82,29 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
             [],
         );
         normalize_existing_tags(conn);
+    }
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS team_memory_index (\
+            memory_id INTEGER NOT NULL,\
+            term TEXT NOT NULL,\
+            key_hit INTEGER NOT NULL DEFAULT 0,\
+            tag_hit INTEGER NOT NULL DEFAULT 0,\
+            content_hit INTEGER NOT NULL DEFAULT 0,\
+            content_len INTEGER NOT NULL DEFAULT 0,\
+            PRIMARY KEY(memory_id, term)\
+        );\
+        CREATE INDEX IF NOT EXISTS idx_team_memory_index_term ON team_memory_index(term);\
+        CREATE INDEX IF NOT EXISTS idx_team_memory_index_memory ON team_memory_index(memory_id);",
+    )
+    .map_err(|e| format!("ensure memory index schema: {e}"))?;
+    let indexed: i64 = conn
+        .query_row("SELECT count(*) FROM team_memory_index", [], |r| r.get(0))
+        .unwrap_or(0);
+    let rows: i64 = conn
+        .query_row("SELECT count(*) FROM team_memory", [], |r| r.get(0))
+        .unwrap_or(0);
+    if rows > 0 && indexed == 0 {
+        rebuild_team_memory_index(conn)?;
     }
     Ok(())
 }
@@ -308,6 +332,7 @@ pub async fn team_memory_write(
                         |r| r.get(0),
                     )
                     .map_err(|e| format!("select id: {e}"))?;
+                reindex_team_memory_row(&conn, id)?;
                 return Ok(id);
             }
         } else {
@@ -335,6 +360,7 @@ pub async fn team_memory_write(
                     rusqlite::params![tg, au, ts, id],
                 )
                 .map_err(|e| format!("touch duplicate: {e}"))?;
+                reindex_team_memory_row(&conn, id)?;
                 return Ok(id);
             }
         }
@@ -344,7 +370,9 @@ pub async fn team_memory_write(
             rusqlite::params![sc, k, content, tg, au, ts],
         )
         .map_err(|e| format!("insert: {e}"))?;
-        Ok(conn.last_insert_rowid())
+        let id = conn.last_insert_rowid();
+        reindex_team_memory_row(&conn, id)?;
+        Ok(id)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -378,6 +406,7 @@ pub async fn team_memory_log(
         )
         .map_err(|e| format!("insert worklog: {e}"))?;
         let id = conn.last_insert_rowid();
+        reindex_team_memory_row(&conn, id)?;
         // Keep only the newest `keep` worklog rows for this scope; opt-in
         // memory_write facts (kind='fact') are never pruned here.
         conn.execute(
@@ -387,6 +416,11 @@ pub async fn team_memory_log(
             rusqlite::params![sc, keep],
         )
         .map_err(|e| format!("prune worklog: {e}"))?;
+        conn.execute(
+            "DELETE FROM team_memory_index WHERE memory_id NOT IN (SELECT id FROM team_memory)",
+            [],
+        )
+        .map_err(|e| format!("prune memory index: {e}"))?;
         Ok(id)
     })
     .await
@@ -402,6 +436,160 @@ fn tokenize(s: &str) -> Vec<String> {
         .filter(|t| t.len() >= 2)
         .map(|t| t.to_string())
         .collect()
+}
+
+#[derive(Clone, Default)]
+struct RowTokens {
+    key: HashSet<String>,
+    tags: HashSet<String>,
+    content: HashSet<String>,
+    content_len: usize,
+}
+
+fn tokens_for_fields(key: &str, tags: &str, content: &str) -> RowTokens {
+    let content_tokens = tokenize(content);
+    RowTokens {
+        key: tokenize(key).into_iter().collect(),
+        tags: tokenize(tags).into_iter().collect(),
+        content: content_tokens.iter().cloned().collect(),
+        content_len: content_tokens.len(),
+    }
+}
+
+pub(crate) fn reindex_team_memory_row(
+    conn: &rusqlite::Connection,
+    id: i64,
+) -> Result<(), String> {
+    conn.execute(
+        "DELETE FROM team_memory_index WHERE memory_id = ?1",
+        rusqlite::params![id],
+    )
+    .map_err(|e| format!("clear memory index: {e}"))?;
+    let row = conn.query_row(
+        "SELECT mkey, tags, content FROM team_memory WHERE id = ?1",
+        rusqlite::params![id],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    );
+    let Ok((key, tags, content)) = row else {
+        return Ok(());
+    };
+    let toks = tokens_for_fields(&key, &tags, &content);
+    let mut terms = BTreeSet::new();
+    terms.extend(toks.key.iter().cloned());
+    terms.extend(toks.tags.iter().cloned());
+    terms.extend(toks.content.iter().cloned());
+    for term in terms {
+        conn.execute(
+            "INSERT OR REPLACE INTO team_memory_index \
+             (memory_id, term, key_hit, tag_hit, content_hit, content_len) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                id,
+                term,
+                if toks.key.contains(&term) { 1 } else { 0 },
+                if toks.tags.contains(&term) { 1 } else { 0 },
+                if toks.content.contains(&term) { 1 } else { 0 },
+                toks.content_len as i64,
+            ],
+        )
+        .map_err(|e| format!("insert memory index: {e}"))?;
+    }
+    Ok(())
+}
+
+fn rebuild_team_memory_index(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute("DELETE FROM team_memory_index", [])
+        .map_err(|e| format!("clear memory index: {e}"))?;
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM team_memory ORDER BY id")
+            .map_err(|e| format!("prepare memory index rebuild: {e}"))?;
+        let mapped = stmt
+            .query_map([], |r| r.get::<_, i64>(0))
+            .map_err(|e| format!("query memory index rebuild: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        mapped
+    };
+    for id in ids {
+        reindex_team_memory_row(conn, id)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn reindex_team_memory_scope(
+    conn: &rusqlite::Connection,
+    scope: &str,
+) -> Result<(), String> {
+    let sc = scope_of(scope);
+    let ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT id FROM team_memory WHERE scope = ?1 ORDER BY id")
+            .map_err(|e| format!("prepare memory scope reindex: {e}"))?;
+        let mapped = stmt
+            .query_map(rusqlite::params![sc], |r| r.get::<_, i64>(0))
+            .map_err(|e| format!("query memory scope reindex: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
+        mapped
+    };
+    for id in ids {
+        reindex_team_memory_row(conn, id)?;
+    }
+    Ok(())
+}
+
+fn load_index_tokens(
+    conn: &rusqlite::Connection,
+    rows: &[TeamMemoryEntry],
+) -> Result<HashMap<i64, RowTokens>, String> {
+    let mut out: HashMap<i64, RowTokens> = HashMap::new();
+    for row in rows {
+        let mut stmt = conn
+            .prepare(
+                "SELECT term, key_hit, tag_hit, content_hit, content_len \
+                 FROM team_memory_index WHERE memory_id = ?1",
+            )
+            .map_err(|e| format!("prepare memory index read: {e}"))?;
+        let idx = stmt
+            .query_map(rusqlite::params![row.id], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|e| format!("query memory index read: {e}"))?;
+        let mut toks = RowTokens::default();
+        for item in idx {
+            let (term, key_hit, tag_hit, content_hit, content_len) =
+                item.map_err(|e| format!("memory index row: {e}"))?;
+            if key_hit != 0 {
+                toks.key.insert(term.clone());
+            }
+            if tag_hit != 0 {
+                toks.tags.insert(term.clone());
+            }
+            if content_hit != 0 {
+                toks.content.insert(term);
+            }
+            toks.content_len = toks.content_len.max(content_len.max(0) as usize);
+        }
+        if toks.key.is_empty() && toks.tags.is_empty() && toks.content.is_empty() {
+            reindex_team_memory_row(conn, row.id)?;
+            toks = tokens_for_fields(&row.key, &row.tags, &row.content);
+        }
+        out.insert(row.id, toks);
+    }
+    Ok(out)
 }
 
 /// Keyword-scored retrieval over a project's shared memory — a dependency-free
@@ -457,24 +645,15 @@ pub async fn team_memory_search(
             all.truncate(lim);
             return Ok(all);
         }
-        // Pre-tokenize each row's fields once.
-        struct RowTokens {
-            key: std::collections::HashSet<String>,
-            tags: std::collections::HashSet<String>,
-            content: std::collections::HashSet<String>,
-            content_len: usize,
-        }
+        // Read the persisted RAG token index built by team_memory_write/log.
+        let token_map = load_index_tokens(&conn, &all)?;
         let toks: Vec<RowTokens> = all
             .iter()
             .map(|e| {
-                let content: Vec<String> = tokenize(&e.content);
-                let content_len = content.len();
-                RowTokens {
-                    key: tokenize(&e.key).into_iter().collect(),
-                    tags: tokenize(&e.tags).into_iter().collect(),
-                    content: content.into_iter().collect(),
-                    content_len,
-                }
+                token_map
+                    .get(&e.id)
+                    .cloned()
+                    .unwrap_or_else(|| tokens_for_fields(&e.key, &e.tags, &e.content))
             })
             .collect();
         let n = all.len() as f64;
@@ -537,12 +716,17 @@ pub async fn team_memory_promote(scope: String, id: i64) -> Result<usize, String
     let sc = scope_of(&scope);
     tokio::task::spawn_blocking(move || {
         let conn = open_db()?;
-        conn.execute(
-            "UPDATE team_memory SET kind = 'fact', tags = '' \
+        let updated = conn
+            .execute(
+                "UPDATE team_memory SET kind = 'fact', tags = '' \
              WHERE scope = ?1 AND id = ?2 AND kind = 'worklog'",
-            rusqlite::params![sc, id],
-        )
-        .map_err(|e| format!("promote: {e}"))
+                rusqlite::params![sc, id],
+            )
+            .map_err(|e| format!("promote: {e}"))?;
+        if updated > 0 {
+            reindex_team_memory_row(&conn, id)?;
+        }
+        Ok(updated)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -555,11 +739,20 @@ pub async fn team_memory_delete(scope: String, id: i64) -> Result<usize, String>
     let sc = scope_of(&scope);
     tokio::task::spawn_blocking(move || {
         let conn = open_db()?;
-        conn.execute(
-            "DELETE FROM team_memory WHERE scope = ?1 AND id = ?2",
-            rusqlite::params![sc, id],
-        )
-        .map_err(|e| format!("delete: {e}"))
+        let deleted = conn
+            .execute(
+                "DELETE FROM team_memory WHERE scope = ?1 AND id = ?2",
+                rusqlite::params![sc, id],
+            )
+            .map_err(|e| format!("delete: {e}"))?;
+        if deleted > 0 {
+            conn.execute(
+                "DELETE FROM team_memory_index WHERE memory_id = ?1",
+                rusqlite::params![id],
+            )
+            .map_err(|e| format!("delete memory index: {e}"))?;
+        }
+        Ok(deleted)
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -598,4 +791,123 @@ pub async fn team_memory_read(
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn temp_db(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "owllm-memory-{name}-{}-{}.db",
+            std::process::id(),
+            now_ms()
+        ))
+    }
+
+    fn with_project_db<T>(name: &str, f: impl FnOnce(&PathBuf) -> T) -> T {
+        let _guard = TEST_ENV_LOCK.lock().expect("memory test lock");
+        let path = temp_db(name);
+        std::env::set_var("OWLLM_PROJECT_DB", &path);
+        let out = f(&path);
+        std::env::remove_var("OWLLM_PROJECT_DB");
+        let _ = std::fs::remove_file(&path);
+        out
+    }
+
+    #[test]
+    fn code_page_worklog_is_retrievable_by_agent_after_reopen() {
+        with_project_db("code-to-agent", |_| {
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async {
+                let scope = "project-shared-memory";
+                team_memory_log(
+                    scope.to_string(),
+                    "code".to_string(),
+                    "TASK: wire invoice sync. DID: Added retry budget in invoice_sync.rs and verified rag parity.".to_string(),
+                    Some(100),
+                )
+                .await
+                .expect("code page writes worklog");
+
+                // Search reopens the same SQLite DB through open_db(), matching an
+                // app restart and the agent-facing RAG retrieval path.
+                let hits = team_memory_search(
+                    scope.to_string(),
+                    "invoice retry rag parity".to_string(),
+                    Some(5),
+                    None,
+                )
+                .await
+                .expect("agent searches shared memory");
+                assert!(hits.iter().any(|h| h.author == "code" && h.kind == "worklog"));
+            });
+        });
+    }
+
+    #[test]
+    fn agent_fact_is_retrievable_by_code_page_rag_after_reopen() {
+        with_project_db("agent-to-code", |_| {
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            rt.block_on(async {
+                let scope = "project-shared-memory";
+                let id = team_memory_write(
+                    scope.to_string(),
+                    "Build the portable launcher with npm run build:desktop before publishing."
+                        .to_string(),
+                    Some("portable_launcher_build".to_string()),
+                    Some("release desktop".to_string()),
+                    Some("publisher".to_string()),
+                )
+                .await
+                .expect("agent writes fact");
+
+                let hits = team_memory_search(
+                    scope.to_string(),
+                    "portable launcher desktop publish".to_string(),
+                    Some(5),
+                    Some(vec!["fact".to_string()]),
+                )
+                .await
+                .expect("code page searches shared memory");
+                assert_eq!(hits.first().map(|h| h.id), Some(id));
+            });
+        });
+    }
+
+    #[test]
+    fn memory_writes_persist_rag_index_rows() {
+        with_project_db("index", |path| {
+            let rt = tokio::runtime::Runtime::new().expect("runtime");
+            let id = rt.block_on(async {
+                team_memory_write(
+                    "project-index".to_string(),
+                    "Store vectorless rag tokens persistently for cross-surface retrieval."
+                        .to_string(),
+                    Some("rag_index_contract".to_string()),
+                    Some("memory rag".to_string()),
+                    Some("code".to_string()),
+                )
+                .await
+                .expect("write memory")
+            });
+
+            let conn = rusqlite::Connection::open(path).expect("open test db");
+            let count: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM team_memory_index WHERE memory_id = ?1 AND term IN ('rag', 'index', 'contract')",
+                    rusqlite::params![id],
+                    |r| r.get(0),
+                )
+                .expect("query memory index");
+            assert!(
+                count >= 3,
+                "expected persisted RAG index terms, got {count}"
+            );
+        });
+    }
 }

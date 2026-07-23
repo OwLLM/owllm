@@ -309,7 +309,7 @@ function OnboardingBanner({ onOpen, onDismiss }: { onOpen: () => void; onDismiss
       <button
         onClick={onOpen}
         style={{
-          background: "var(--accent)", color: "var(--fg-strong)", border: "none",
+          background: "var(--accent)", color: "var(--accent-fg)", border: "none",
           borderRadius: 8, padding: "6px 14px", fontWeight: 600,
           fontSize: 12, cursor: "pointer",
         }}
@@ -895,7 +895,7 @@ function TeamDetailPanel({
           onClick={() => onCreateProject(team.name)}
           style={{
             minHeight: 38,
-            background: "var(--accent)", color: "var(--fg-strong)",
+            background: "var(--accent)", color: "var(--accent-fg)",
             border: "none", borderRadius: 9, padding: "0 16px",
             fontWeight: 600, fontSize: 12, cursor: "pointer",
           }}
@@ -2460,7 +2460,7 @@ export default function StudioPage() {
                 onClick={handleNewAgent}
                 style={{
                   minHeight: 34,
-                  background: "var(--accent)", color: "var(--fg-strong)",
+                  background: "var(--accent)", color: "var(--accent-fg)",
                   border: "none", borderRadius: 8, padding: "0 16px",
                   fontWeight: 600, cursor: "pointer", fontSize: 12,
                 }}

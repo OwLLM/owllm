@@ -34,6 +34,17 @@ export type GithubConnect = {
   ghConfigured: boolean;
 };
 
+export type GithubRepository = {
+  fullName: string;
+  name: string;
+  ownerLogin: string;
+  private: boolean;
+  htmlUrl: string;
+  cloneUrl: string;
+  updatedAt: string;
+  description: string | null;
+};
+
 export async function githubStatus(): Promise<GithubStatus> {
   try {
     return await invoke<GithubStatus>("github_status");
@@ -52,6 +63,10 @@ export async function githubConnect(token: string, distro?: string | null): Prom
 export async function githubDisconnect(distro?: string | null): Promise<void> {
   await invoke("github_disconnect", { distro: distro ?? null });
   notifyGithubChanged();
+}
+
+export async function githubListRepositories(): Promise<GithubRepository[]> {
+  return invoke<GithubRepository[]>("github_list_repositories");
 }
 
 // ---- OAuth Device Flow ("Sign in with GitHub" — no token paste) ----------

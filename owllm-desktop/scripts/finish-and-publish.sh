@@ -218,6 +218,13 @@ CONF="$REPO/$VERSION_FILE"
 # uncommitted. That is never "real work" for What's New, and blocking on it
 # turns every release into a treadmill (build bumps lock → lock dirty → next
 # publish blocked). The bump commit still re-stages it via `git add $STAGE_PATH`.
+# On Windows hosts, release metadata can remain stat-dirty after a tool rewrites the
+# exact bytes already in the index. Plain `git status` reports that as modified
+# even though `git diff` is empty, blocking Publish forever. `--really-refresh`
+# re-hashes those entries before we decide whether real work is pending. Its
+# non-zero exit is expected when genuine changes exist; the scoped status below
+# still reports and blocks those changes.
+git update-index -q --really-refresh >/dev/null 2>&1 || true
 PENDING_STAGE="$(git status --porcelain -- "$STAGE_PATH" ':(exclude)*Cargo.lock' 2>/dev/null || true)"
 if [ -n "$PENDING_STAGE" ]; then
   echo "PUBLISH_FAILED: uncommitted release changes under '$STAGE_PATH' would be hidden inside the version-bump commit." >&2

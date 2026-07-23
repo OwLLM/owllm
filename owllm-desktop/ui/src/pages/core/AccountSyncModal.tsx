@@ -30,7 +30,20 @@ import {
   type VaultStatus,
 } from "../agentic/github";
 
-const SEEN_KEY = "owllm:sync-onboard-seen";
+const LEGACY_SEEN_KEY = "owllm:sync-onboard-seen";
+const ONBOARDING_COMPLETE_KEY = "owllm:onboarding:v2:complete";
+const ACCOUNT_ONBOARDING_KEY = "owllm:accounts:onboarding-provider";
+const GITHUB_SIGNUP_URL = "https://github.com/signup";
+
+type OnboardingStage = "identity" | "access";
+
+const SUBSCRIPTION_CHOICES = [
+  { key: "openai", icon: "◎", name: "ChatGPT Plus / Pro", detail: "Use your OpenAI Codex subscription" },
+  { key: "anthropic", icon: "A", name: "Claude Pro / Max", detail: "Use your Claude Code subscription" },
+  { key: "gemini", icon: "✦", name: "Google AI Pro / Ultra", detail: "Use your Gemini subscription" },
+  { key: "moonshot", icon: "K", name: "Kimi", detail: "Use your Kimi Code subscription" },
+  { key: "xai", icon: "𝕏", name: "SuperGrok / X Premium+", detail: "Use your Grok subscription" },
+] as const;
 
 function openExternal(url: string) {
   openWebUrl(url).catch((error) => console.error("Could not open the OwLLM browser", error));
@@ -43,6 +56,7 @@ export function openSyncOnboarding() {
 
 export default function AccountSyncModal() {
   const [open, setOpen] = React.useState(false);
+  const [stage, setStage] = React.useState<OnboardingStage>("identity");
   const [status, setStatus] = React.useState<GithubStatus | null>(null);
   const [token, setToken] = React.useState("");
   const [showToken, setShowToken] = React.useState(false);
@@ -64,9 +78,14 @@ export default function AccountSyncModal() {
   // First-run auto-open + manual reopen.
   React.useEffect(() => {
     let firstRun = false;
-    try { firstRun = !localStorage.getItem(SEEN_KEY); } catch { /* private mode */ }
-    if (firstRun) setOpen(true);
-    const onOpen = () => setOpen(true);
+    try { firstRun = !localStorage.getItem(ONBOARDING_COMPLETE_KEY); } catch { /* private mode */ }
+    if (firstRun) {
+      setOpen(true);
+    }
+    const onOpen = () => {
+      setStage("identity");
+      setOpen(true);
+    };
     window.addEventListener("owllm:open-sync", onOpen);
     return () => window.removeEventListener("owllm:open-sync", onOpen);
   }, []);
@@ -111,11 +130,46 @@ export default function AccountSyncModal() {
   }, []);
 
   const close = () => {
-    try { localStorage.setItem(SEEN_KEY, "1"); } catch { /* ignore */ }
     pollAlive.current = false; // stop any in-flight device-flow polling
     setDevice(null);
     setBusy(false); // never leave the button stuck on "Starting…"
     setOpen(false);
+  };
+
+  const completeOnboarding = () => {
+    try {
+      localStorage.setItem(ONBOARDING_COMPLETE_KEY, "1");
+      localStorage.setItem(LEGACY_SEEN_KEY, "1");
+    } catch { /* storage unavailable */ }
+  };
+
+  const finishLater = () => {
+    completeOnboarding();
+    try { localStorage.setItem("owllm.wizard.completed", "1"); } catch { /* ignore */ }
+    window.dispatchEvent(new CustomEvent("owllm:skip-module-wizard"));
+    close();
+  };
+
+  const openAccountSetup = (provider: string) => {
+    completeOnboarding();
+    try {
+      sessionStorage.setItem(ACCOUNT_ONBOARDING_KEY, provider);
+      // A cloud account does not need the large local-runtime download prompt.
+      localStorage.setItem("owllm.wizard.completed", "1");
+    } catch { /* storage unavailable */ }
+    window.dispatchEvent(new CustomEvent("owllm:skip-module-wizard"));
+    close();
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "accounts" } }));
+    }, 0);
+  };
+
+  const openLocalSetup = () => {
+    completeOnboarding();
+    close();
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "models" } }));
+    }, 0);
   };
 
   // Device Flow: ask GitHub for a code, open the browser, then poll until the
@@ -141,6 +195,7 @@ export default function AccountSyncModal() {
           setDevice(null); setBusy(false);
           setStatus({ connected: true, login: r.login });
           await ensureVault();
+          setStage("access");
           return;
         }
         if (r.status === "denied" || r.status === "expired" || r.status === "error") {
@@ -168,6 +223,7 @@ export default function AccountSyncModal() {
       setToken("");
       // Create + clone the private vault right away so the promise is real.
       await ensureVault();
+      setStage("access");
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -195,14 +251,14 @@ export default function AccountSyncModal() {
     <div
       onMouseDown={(e) => { if (e.target === e.currentTarget && !inFlow) close(); }}
       style={{
-        position: "fixed", inset: 0, zIndex: 9800,
+        position: "fixed", inset: 0, zIndex: 10020,
         background: "rgba(0,0,0,0.66)",
         display: "flex", alignItems: "center", justifyContent: "center",
       }}
     >
       <style>{`@keyframes owllm-spin { to { transform: rotate(360deg); } }`}</style>
       <div style={{
-        width: "min(560px, 94%)", maxHeight: "90%",
+        width: "min(760px, 96%)", maxHeight: "90%",
         background: "var(--bg-panel)",
         border: "2px solid rgba(var(--accent-rgb),0.78)",
         borderRadius: 16, boxShadow: "0 28px 70px rgba(0,0,0,0.6)",
@@ -221,10 +277,12 @@ export default function AccountSyncModal() {
           />
           <div>
             <div style={{ fontSize: 19, fontWeight: 800, letterSpacing: 0.4 }}>
-              Take OWLLM everywhere
+              {stage === "identity" ? "Welcome to OwLLM" : "Choose how you use AI"}
             </div>
             <div style={{ fontSize: 12.5, opacity: 0.85, marginTop: 2 }}>
-              Your chats &amp; setup, on every device — stored in your own GitHub.
+              {stage === "identity"
+                ? "Start with one secure identity — or continue locally."
+                : "We’ll take you to the right setup for what you already pay for."}
             </div>
           </div>
           <div style={{ flex: 1 }} />
@@ -239,6 +297,19 @@ export default function AccountSyncModal() {
         </div>
 
         <div style={{ padding: "18px 22px", overflow: "auto", display: "flex", flexDirection: "column", gap: 16 }}>
+          <div data-ui="OnboardingProgress" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+            {["1  Identity", "2  AI access"].map((label, index) => {
+              const active = (stage === "identity" ? 0 : 1) === index;
+              return <div key={label} style={{
+                padding: "7px 10px", borderRadius: 8, fontSize: 11.5, fontWeight: 800,
+                color: active ? "var(--accent-ink)" : "var(--fg-muted)",
+                background: active ? "rgba(var(--accent-rgb),0.14)" : "var(--bg-card)",
+                border: active ? "1px solid var(--accent-strong)" : "1px solid var(--border)",
+              }}>{label}</div>;
+            })}
+          </div>
+
+          {stage === "identity" ? <>
           {/* Why — synthetic, scannable benefit chips. */}
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
             {([
@@ -279,7 +350,7 @@ export default function AccountSyncModal() {
                 )}
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                <button onClick={close} style={primaryBtn}>Done</button>
+                <button onClick={() => setStage("access")} style={primaryBtn}>Continue to AI setup →</button>
                 {vault?.repoUrl && (
                   <button onClick={() => openExternal(vault.repoUrl!)} style={ghostBtn}>
                     View on GitHub
@@ -333,7 +404,7 @@ export default function AccountSyncModal() {
                 Opens GitHub in your browser — click Authorize and you’re in. Nothing to paste.
               </div>
               <div style={{ display: "flex", gap: 8, marginTop: 12, alignItems: "center" }}>
-                <button onClick={close} style={ghostBtn}>Maybe later</button>
+                <button onClick={() => openExternal(GITHUB_SIGNUP_URL)} style={ghostBtn}>Create a GitHub account</button>
                 <div style={{ flex: 1 }} />
                 <button
                   onClick={() => setShowTokenFallback((v) => !v)}
@@ -374,6 +445,50 @@ export default function AccountSyncModal() {
             </div>
           )}
 
+          <div data-ui="OnboardingAccountLoginPanel" style={{
+            background: "linear-gradient(135deg, rgba(var(--accent-rgb),0.13), var(--bg-card))",
+            border: "1px solid rgba(var(--accent-rgb),0.42)",
+            borderRadius: 12,
+            padding: 14,
+            display: "flex",
+            flexDirection: "column",
+            gap: 11,
+          }}>
+            <div>
+              <div style={{ fontSize: 15, fontWeight: 850, color: "var(--fg-strong)" }}>Set up your AI account login</div>
+              <div style={{ fontSize: 12, color: "var(--fg-muted)", marginTop: 4, lineHeight: 1.5 }}>
+                Pick the subscription or API path you actually use. OwLLM opens the existing Accounts page with that provider highlighted so login is not hidden in the GitHub area.
+              </div>
+            </div>
+            <div data-ui="OnboardingInlineSubscriptionChoices" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 9 }}>
+              {SUBSCRIPTION_CHOICES.map((choice) => (
+                <button key={choice.key} onClick={() => openAccountSetup(choice.key)} style={choiceCard}>
+                  <span aria-hidden="true" style={choiceIcon}>{choice.icon}</span>
+                  <span style={{ minWidth: 0 }}>
+                    <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>{choice.name}</span>
+                    <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>{choice.detail}</span>
+                  </span>
+                </button>
+              ))}
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 9 }}>
+              <button onClick={() => openAccountSetup("api")} style={choiceCard}>
+                <span aria-hidden="true" style={choiceIcon}>API</span>
+                <span>
+                  <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>I have API keys</span>
+                  <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>Usage-billed provider APIs</span>
+                </span>
+              </button>
+              <button onClick={openLocalSetup} style={choiceCard}>
+                <span aria-hidden="true" style={choiceIcon}>CPU</span>
+                <span>
+                  <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>I want local models</span>
+                  <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>Private, offline inference on this computer</span>
+                </span>
+              </button>
+            </div>
+          </div>
+
           {err && (
             <div style={{
               padding: "10px 12px", borderRadius: 8,
@@ -385,12 +500,56 @@ export default function AccountSyncModal() {
           {!connected && (
             <div style={{ textAlign: "center" }}>
               <button
-                onClick={close}
+                onClick={() => setStage("access")}
                 style={{ background: "none", border: "none", color: "var(--fg-muted)", fontSize: 12, cursor: "pointer", textDecoration: "underline" }}
               >
-                Keep everything on this device only
+                Continue without GitHub — keep everything on this device
               </button>
             </div>
+          )}
+          </> : (
+            <>
+              <div style={{ fontSize: 13, lineHeight: 1.55, color: "var(--fg-muted)" }}>
+                Choose the option that matches your account. OwLLM will never turn a consumer
+                subscription into an API key or pretend that one provider’s plan works with another.
+              </div>
+
+              <div data-ui="SubscriptionChoices" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 9 }}>
+                {SUBSCRIPTION_CHOICES.map((choice) => (
+                  <button key={choice.key} onClick={() => openAccountSetup(choice.key)} style={choiceCard}>
+                    <span aria-hidden="true" style={choiceIcon}>{choice.icon}</span>
+                    <span style={{ minWidth: 0 }}>
+                      <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>{choice.name}</span>
+                      <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>{choice.detail}</span>
+                    </span>
+                    <span aria-hidden="true" style={{ marginLeft: "auto", color: "var(--accent)", fontWeight: 900 }}>→</span>
+                  </button>
+                ))}
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 9 }}>
+                <button onClick={() => openAccountSetup("api")} style={choiceCard}>
+                  <span aria-hidden="true" style={choiceIcon}>🔑</span>
+                  <span>
+                    <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>I have API keys</span>
+                    <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>Usage-billed OpenAI, Anthropic, Gemini and other APIs</span>
+                  </span>
+                </button>
+                <button onClick={openLocalSetup} style={choiceCard}>
+                  <span aria-hidden="true" style={choiceIcon}>🖥</span>
+                  <span>
+                    <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 850 }}>I want local models</span>
+                    <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.4, marginTop: 2 }}>Private, offline inference using this computer</span>
+                  </span>
+                </button>
+              </div>
+
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <button onClick={() => setStage("identity")} style={ghostBtn}>← Back</button>
+                <div style={{ flex: 1 }} />
+                <button onClick={finishLater} style={ghostBtn}>Set up later</button>
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -410,5 +569,17 @@ const ghostBtn: React.CSSProperties = {
 const stepBtn: React.CSSProperties = {
   width: "100%", padding: "9px 12px", borderRadius: 9,
   border: "1px solid rgba(var(--accent-rgb),0.45)", background: "rgba(var(--accent-rgb),0.10)",
-  color: "var(--accent)", fontSize: 13, fontWeight: 700, cursor: "pointer", textAlign: "left",
+  color: "var(--accent-ink)", fontSize: 13, fontWeight: 700, cursor: "pointer", textAlign: "left",
+};
+const choiceCard: React.CSSProperties = {
+  display: "flex", alignItems: "center", gap: 11, minHeight: 68,
+  padding: "11px 12px", borderRadius: 11, textAlign: "left",
+  border: "1px solid var(--border-strong)", background: "var(--bg-card)",
+  color: "var(--fg)", cursor: "pointer",
+};
+const choiceIcon: React.CSSProperties = {
+  width: 34, height: 34, flexShrink: 0, borderRadius: 9,
+  display: "grid", placeItems: "center", fontSize: 17, fontWeight: 900,
+  background: "rgba(var(--accent-rgb),0.13)", color: "var(--accent-ink)",
+  border: "1px solid rgba(var(--accent-rgb),0.3)",
 };

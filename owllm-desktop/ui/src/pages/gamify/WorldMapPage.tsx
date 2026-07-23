@@ -6,6 +6,7 @@ import * as THREE from "three";
 // @ts-ignore: bundled Three.js example module
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { useLocalization } from "../../localization";
+import { isDeviceOnline } from "../advanced/deviceLiveness";
 import { getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from "../advanced/remoteDevices";
 import { isClickGesture, nodeSignature } from "./globeStability";
 import {
@@ -86,12 +87,6 @@ function fleetOrbit(id: string): OrbitParams {
     phase: ((h2 >>> 10) % 360) * Math.PI / 180,
     speed: (0.12 + ((h % 500) / 500) * 0.42) * (h % 2 === 0 ? 1 : -1),
   };
-}
-
-function recent(lastSeen: string | null): boolean {
-  if (!lastSeen) return false;
-  const value = Date.parse(lastSeen);
-  return Number.isFinite(value) && Date.now() - value < 5 * 60_000;
 }
 
 function latLonVector(latitude: number, longitude: number, radius: number) {
@@ -632,7 +627,13 @@ export default function WorldMapPage() {
     };
     void refresh();
     const timer = window.setInterval(refresh, 30_000);
-    return () => { alive = false; window.clearInterval(timer); };
+    const onDevicesRefresh = () => { void refresh(); };
+    window.addEventListener("owllm:devices:refresh", onDevicesRefresh);
+    return () => {
+      alive = false;
+      window.clearInterval(timer);
+      window.removeEventListener("owllm:devices:refresh", onDevicesRefresh);
+    };
   }, []);
 
   useEffect(() => {
@@ -655,7 +656,7 @@ export default function WorldMapPage() {
         kind: "world" as const,
       }))
     : fleet.map((device) => {
-        const online = device.is_self || recent(device.last_seen);
+        const online = isDeviceOnline(device);
         return {
           id: device.device_id,
           label: device.is_self || device.device_id === selfId ? t("This device") : device.name,

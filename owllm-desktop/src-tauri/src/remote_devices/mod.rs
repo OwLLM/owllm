@@ -581,6 +581,7 @@ pub fn self_public_record() -> Result<DevicePublic, String> {
     }
     rec.endpoint = rec.endpoints.first().cloned();
     rec.relay = relay::client_running();
+    rec.published_at = Some(now_rfc3339());
     Ok(rec)
 }
 

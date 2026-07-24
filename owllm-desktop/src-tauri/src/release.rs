@@ -7,6 +7,7 @@
 // script branches per-OS (all OS).
 
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Mutex, OnceLock};
@@ -97,6 +98,10 @@ impl SignCfg {
     }
 }
 
+fn wants_authenticode_checks(host_mode: bool, sign: &SignCfg) -> bool {
+    cfg!(windows) && host_mode && sign.has_signing()
+}
+
 /// One readiness probe result for the Publisher card's READY / NOT READY tag.
 #[derive(serde::Serialize, Clone)]
 pub struct ReadyCheck {
@@ -171,6 +176,42 @@ fn which_bash() -> String {
     "bash".to_string()
 }
 
+/// PATH for host release children. Desktop/AppImage launches commonly omit
+/// per-user tool directories even when the same tools work in a terminal.
+/// Keep release probes and the real publish script on the same augmented PATH
+/// so readiness cannot pass a tool that the build later fails to find.
+fn release_child_path() -> Option<OsString> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(node_dir) = crate::paths::module_node_dir() {
+        dirs.push(node_dir);
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+        let home = PathBuf::from(home);
+        dirs.push(home.join(".cargo").join("bin"));
+        dirs.push(home.join(".local").join("bin"));
+        dirs.push(home.join(".volta").join("bin"));
+    }
+    #[cfg(not(windows))]
+    for dir in ["/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"] {
+        dirs.push(PathBuf::from(dir));
+    }
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    dirs.retain(|dir| dir.is_dir());
+    if let Some(app_dir) = std::env::var_os("APPDIR").map(PathBuf::from) {
+        dirs.retain(|dir| !dir.starts_with(&app_dir));
+    }
+    dirs.dedup();
+    std::env::join_paths(dirs).ok()
+}
+
+fn prepare_release_command(cmd: &mut Command) {
+    if let Some(path) = release_child_path() {
+        cmd.env("PATH", path);
+    }
+}
+
 /// Build → sign → latest.json → gh release → verify, by running the canonical
 /// publish script on the host. `repo_dir` is the project root (the agent's cwd).
 /// Returns the script's combined output; errors if it didn't reach a success
@@ -197,6 +238,7 @@ pub async fn publish_release(
     let out = tokio::task::spawn_blocking(move || {
         let bash = which_bash();
         let mut cmd = Command::new(&bash);
+        prepare_release_command(&mut cmd);
         if let Some(s) = sign {
             s.apply_to(&mut cmd);
         }
@@ -308,6 +350,7 @@ pub async fn finish_and_publish(
 
     let out = tokio::task::spawn_blocking(move || {
         let mut cmd = Command::new(&bash);
+        prepare_release_command(&mut cmd);
         if let Some(s) = sign {
             s.apply_to(&mut cmd);
         }
@@ -365,8 +408,25 @@ pub async fn finish_and_publish(
 /// Run an arbitrary host command and return (success, combined output).
 /// Used by readiness probes for node/cargo/gh/signtool.
 fn run_probe(name: &str, args: &[&str]) -> (bool, String) {
-    let mut cmd = Command::new(name);
+    let program = if Path::new(name).components().count() > 1 {
+        PathBuf::from(name)
+    } else {
+        #[cfg(windows)]
+        let candidates = if Path::new(name).extension().is_none() {
+            vec![format!("{name}.exe"), name.to_string()]
+        } else {
+            vec![name.to_string()]
+        };
+        #[cfg(not(windows))]
+        let candidates = [name.to_string()];
+        candidates
+            .iter()
+            .find_map(|candidate| crate::accounts::which_extended(candidate))
+            .unwrap_or_else(|| PathBuf::from(name))
+    };
+    let mut cmd = Command::new(program);
     cmd.args(args);
+    prepare_release_command(&mut cmd);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -674,7 +734,11 @@ pub async fn publish_readiness(
             .unwrap_or("host")
             .eq_ignore_ascii_case("host");
         let sign_cfg = sign.unwrap_or_default();
-        let wants_sign = host_mode && sign_cfg.has_signing();
+        // Authenticode is a Windows release step. A shared Project Card can
+        // carry its Windows certificate selector on Linux/macOS, where the
+        // publish script intentionally ignores it; do not report impossible
+        // signtool/certificate-store failures on those hosts.
+        let wants_sign = wants_authenticode_checks(host_mode, &sign_cfg);
 
         let (repo_ok, repo_out) = run_git(&host, &["rev-parse", "--is-inside-work-tree"]);
         checks.push(ReadyCheck {
@@ -726,7 +790,28 @@ pub async fn publish_readiness(
             .and_then(|v| v.pointer("/release/repo").and_then(|r| r.as_str().map(String::from)))
             .filter(|r| !r.trim().is_empty());
         if let Some(target) = &card_repo {
-            let (tgt_ok, tgt_out) = run_probe("gh", &["repo", "view", target, "--json", "name"]);
+            let (gh_target_ok, gh_target_out) =
+                run_probe("gh", &["repo", "view", target, "--json", "name"]);
+            // Public release repositories are reachable without a gh login.
+            // Keep gh authentication as its own publish requirement below,
+            // rather than counting the same missing login twice here.
+            let public_url = format!(
+                "https://github.com/{}.git",
+                target.trim().trim_end_matches(".git")
+            );
+            let (git_target_ok, git_target_out) = if gh_target_ok {
+                (false, String::new())
+            } else {
+                run_git(&host, &["ls-remote", &public_url, "HEAD"])
+            };
+            let tgt_ok = gh_target_ok || git_target_ok;
+            let tgt_out = if gh_target_out.trim().is_empty() {
+                git_target_out
+            } else if git_target_out.trim().is_empty() {
+                gh_target_out
+            } else {
+                format!("{gh_target_out}; {git_target_out}")
+            };
             checks.push(ReadyCheck {
                 id: "target".into(),
                 label: "Release target repo reachable".into(),
@@ -1035,6 +1120,20 @@ pub async fn repo_merge(repo_dir: String, target: Option<String>) -> Result<Stri
     tokio::task::spawn_blocking(move || sync_blocking(host, target, None))
         .await
         .map_err(|e| format!("join error: {e}"))?
+}
+
+#[cfg(all(test, not(windows)))]
+mod non_windows_tests {
+    use super::{wants_authenticode_checks, SignCfg};
+
+    #[test]
+    fn windows_certificate_config_does_not_gate_other_platforms() {
+        let sign = SignCfg {
+            thumbprint: Some("windows-only-thumbprint".into()),
+            ..SignCfg::default()
+        };
+        assert!(!wants_authenticode_checks(true, &sign));
+    }
 }
 
 #[cfg(all(test, windows))]

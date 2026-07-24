@@ -749,6 +749,7 @@ function ModeBar({
               style={{
                 position: "absolute", left: 0, top: 58, width: 344,
                 padding: 12, borderRadius: 10,
+                maxHeight: "calc(100vh - 86px)", overflowY: "auto",
                 background: "var(--bg-panel)", color: "var(--fg)",
                 border: "1px solid rgba(var(--accent-rgb),0.65)",
                 boxShadow: "0 12px 32px rgba(0,0,0,0.48)",
@@ -982,6 +983,28 @@ function ModeBar({
               >
                 <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🖊</span>
                 <span style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 13.5 }}>Certificates and Logs in</span>
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
+              {/* Keep the guided setup independently discoverable after GitHub
+                  is connected. The account row below remains dedicated to
+                  sync/account management. */}
+              <button
+                data-ui="SettingsOnboardingRow"
+                onClick={() => { setSettingsOpen(false); openSyncOnboarding(); }}
+                title="Open the guided GitHub and AI account setup"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🧭</span>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>Finish onboarding</span>
+                  <span style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.35 }}>GitHub and AI account setup</span>
+                </span>
                 <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
               </button>
 

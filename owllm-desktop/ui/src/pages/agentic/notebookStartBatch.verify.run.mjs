@@ -512,5 +512,98 @@ console.log("case 9c: Start queue claims the window lease even with auto-feed of
   act(() => m2.root.unmount());
 }
 
+// ---- 8b. a STALE owner (window closed mid-queue → heartbeat lapsed) does NOT
+//          lock other windows: Start queue takes over instead of stranding. ----
+console.log("case 8b: a stale (dead) owner never strands the queue");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN, steps: [{ id: "s1", text: "step", status: "pending", ts: 1 }],
+    autoFeed: true, autoFeedOwner: "code:dead-window", autoFeedHeartbeat: 1, // ancient beat
+    digest: [],
+  }));
+  const { root } = mount({ surfaceId: "code:live-window" });
+  check("a lapsed owner does not lock this window", !textOf(document.body).includes("Queue runs in another window"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("Start queue is enabled to take over a dead owner", !!startBtn && !startBtn.disabled);
+  act(() => root.unmount());
+}
+
+// ---- 9. a queue started in another WINDOW is ghosted (read-only) here ----
+console.log("case 9: a queue owned by another window is ghosted here");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: true, autoFeedOwner: "code:other-window", autoFeedHeartbeat: Date.now() }));
+  const { root } = mount({ surfaceId: "code:this-window" });
+  check("shows the queue runs in another window", textOf(document.body).includes("Queue runs in another window"));
+  check("no auto-feed checkbox while locked", !document.querySelector("input[type=checkbox]"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("Start queue is disabled here", !!startBtn && startBtn.disabled);
+  const stepFeed = buttons().find((b) => textOf(b) === "Feed" || textOf(b).includes("Re-feed") || /(^|>)Feed$/.test(textOf(b)));
+  check("per-step Feed is disabled here", !!stepFeed && stepFeed.disabled);
+  const takeOver = buttons().find((b) => textOf(b).includes("Take over"));
+  check("a Take over control is offered", !!takeOver);
+  clickEl(takeOver);
+  check("taking over makes THIS window the owner", blob().autoFeedOwner === "code:this-window");
+  act(() => root.unmount());
+}
+
+// ---- 9b. the OWNING window keeps full control (not ghosted) ----
+console.log("case 9b: the owning window is not ghosted");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: true, autoFeedOwner: "code:mine", autoFeedHeartbeat: Date.now() }));
+  const { root } = mount({ surfaceId: "code:mine" });
+  check("owner sees no locked banner", !textOf(document.body).includes("Queue runs in another window"));
+  check("owner keeps the auto-feed checkbox", !!document.querySelector("input[type=checkbox]"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("owner Start queue is enabled", !!startBtn && !startBtn.disabled);
+  act(() => root.unmount());
+}
+
+// ---- 9c. an idle Start queue claims the lease even with auto-feed OFF, so a
+//          plain (non-auto) queue is still owned by the starting window ----
+console.log("case 9c: Start queue claims the window lease even with auto-feed off");
+{
+  localStorage.setItem(KEY, JSON.stringify({ text: "", plan: PLAN, steps: [{ id: "s1", text: "only step", status: "pending", ts: 1 }], autoFeed: false, digest: [] }));
+  const { root } = mount({ surfaceId: "code:starter", onFeed: () => "dispatched" });
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("starting claims ownership without turning auto-feed on", blob().autoFeedOwner === "code:starter" && blob().autoFeed !== true);
+  act(() => root.unmount());
+  // A different window now sees the in-flight (sent, unfinished) queue as locked.
+  const m2 = mount({ surfaceId: "code:bystander" });
+  check("another window is locked out of the in-flight queue", textOf(document.body).includes("Queue runs in another window"));
+  act(() => m2.root.unmount());
+}
+
+// ---- 10. Accepting the digest's proposed steps ("Add all + clear notes")
+//          MUST clear the working notes — even when the digest also set a
+//          proposedPlan. With the Kanban board hidden (SHOW_KANBAN=false) the
+//          plan's own clear button never renders, so a leftover proposedPlan
+//          used to strand the notes forever (the recurring "notes won't clear"
+//          complaint). ----
+console.log("case 10: Add all + clear notes actually clears the working notes");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "raw brainstorm notes the digest already consumed",
+    plan: PLAN,
+    steps: [],
+    autoFeed: false,
+    digest: [],
+    proposed: ["implement step A", "implement step B"],
+    // The exact trigger: a non-empty proposed plan the hidden board can't apply.
+    proposedPlan: "NOW:\n- something the hidden board would show",
+  }));
+  const { root } = mount({});
+  const addAll = buttons().find((b) => textOf(b).includes("Add all"));
+  check("Add all + clear notes button is present with proposed steps", !!addAll);
+  clickEl(addAll);
+  const after = blob();
+  check("all proposed steps are added to the list", after.steps.map((s) => s.text).join("|") === "implement step A|implement step B");
+  check("proposed steps are consumed", (after.proposed ?? []).length === 0);
+  check("working notes are cleared even with a leftover proposedPlan", after.text === "");
+  check("orphaned proposedPlan is cleared while the board is hidden", (after.proposedPlan ?? "") === "");
+  act(() => root.unmount());
+}
+
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

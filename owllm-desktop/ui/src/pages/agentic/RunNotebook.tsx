@@ -950,7 +950,16 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                               .map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i })),
                           ],
                           proposed: [],
-                          text: prev.proposedPlan ? prev.text : "",
+                          // Accepting the steps CONSUMES the working notes — the
+                          // digest already turned them into the listed steps.
+                          // Only keep the notes when the Kanban board is live AND
+                          // still holds an unapplied plan (its own "Save plan +
+                          // clear notes" button owns the clear then). With the
+                          // board hidden (SHOW_KANBAN=false) that button never
+                          // renders, so the notes must clear here or they strand
+                          // forever — the recurring "notes won't clear" bug.
+                          text: SHOW_KANBAN && prev.proposedPlan ? prev.text : "",
+                          proposedPlan: SHOW_KANBAN ? prev.proposedPlan : "",
                         }));
                       }}
                       style={{ height: 28, padding: "0 12px", border: "none", borderRadius: 7, background: "var(--ok)", color: "#ffffff", fontSize: 11, fontWeight: 700, cursor: "pointer" }}

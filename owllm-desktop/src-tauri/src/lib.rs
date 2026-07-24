@@ -236,24 +236,16 @@ pub fn run() {
             // blocks startup, no admin, no sparse (which modern WSL flags unsafe).
             std::thread::spawn(sandbox::auto_housekeep_startup);
             // Diagnostic: log the resolved paths on startup so missing
-            // models / disappeared user state can be triaged from the
-            // log file without F12 console acrobatics. Tries three
-            // candidate locations so even a stripped-env Tauri context
-            // gets ONE that succeeds.
+            // models / disappeared user state can be triaged without
+            // F12 console acrobatics. Never write beside the executable:
+            // on macOS that mutates the signed .app bundle and invalidates
+            // its code signature after the first launch.
             let dbg = paths::paths_debug();
             if let Ok(s) = serde_json::to_string_pretty(&dbg) {
-                let mut targets: Vec<std::path::PathBuf> = Vec::new();
-                if let Some(t) = std::env::var_os("TEMP") {
-                    targets.push(std::path::PathBuf::from(&t).join("owllm-paths.log"));
-                }
-                if let Some(t) = std::env::var_os("USERPROFILE") {
-                    targets.push(std::path::PathBuf::from(&t).join("owllm-paths.log"));
-                }
-                if let Ok(exe) = std::env::current_exe() {
-                    if let Some(p) = exe.parent() {
-                        targets.push(p.join("owllm-paths.log"));
-                    }
-                }
+                let mut targets = paths::user_data_root()
+                    .map(|root| vec![root.join("owllm-paths.log")])
+                    .unwrap_or_default();
+                targets.push(std::env::temp_dir().join("owllm-paths.log"));
                 for t in &targets {
                     if std::fs::write(t, &s).is_ok() {
                         eprintln!("[owllm] paths_debug written to {}", t.display());

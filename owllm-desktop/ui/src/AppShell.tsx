@@ -1099,32 +1099,19 @@ function ModeBar({
           <button
             key={t.id}
             data-ui={t.dataUi}
-            onClick={() => setMode(mode === t.id ? "home" : t.id)}
+            onClick={() => {
+              if (t.id === "gamify") {
+                window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "world-map" } }));
+                return;
+              }
+              setMode(mode === t.id ? "home" : t.id);
+            }}
             style={{ ...(mode === t.id ? active : baseBtn), width: t.width }}
           >
             <span style={{ fontSize: 14 }}>{t.emoji}</span>
             <span>{t.label}</span>
           </button>
         ))}
-
-        {/* Gamify → World Map shortcut. Jumps straight to the World Map
-            page/view (the globe) via the same `owllm:navigate` event the
-            Home tiles and cross-page links use, so AppShell flips to the
-            Gamify mode toggle and the world-map SubTab in one step —
-            normal navigation/history behaviour, no bespoke routing. Only
-            shown when Gamify is installed. Globe icon distinguishes it
-            from the 🎮 Gamify mode toggle above. */}
-        {installed.includes("gamify") && (
-          <button
-            data-ui="GamifyWorldMapButton"
-            onClick={() => window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "world-map" } }))}
-            title="World Map"
-            style={{ ...baseBtn, width: 91 }}
-          >
-            <span style={{ fontSize: 14 }}>🌐</span>
-            <span>Gamify</span>
-          </button>
-        )}
       </div>
 
       {/* Spacer for the grid column so the layout still flows; the

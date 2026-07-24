@@ -147,6 +147,47 @@ fn configure_linux_webkit_renderer() {
 #[cfg(not(target_os = "linux"))]
 fn configure_linux_webkit_renderer() {}
 
+/// Fit the initial macOS window inside the usable laptop desktop. The default
+/// 1400x960 window is taller than several Retina workspaces, so a centered,
+/// undecorated window starts under both the menu bar and Dock. Keep it windowed
+/// (the user explicitly did not want forced maximize), but reserve predictable
+/// menu/Dock space and leave manual resizes alone after this one startup fit.
+#[cfg(target_os = "macos")]
+fn fit_macos_main_window(window: &tauri::Window) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static FIT_ONCE: AtomicBool = AtomicBool::new(false);
+    if FIT_ONCE.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    if !scale.is_finite() || scale <= 0.0 {
+        return;
+    }
+    let monitor_size = monitor.size();
+    let monitor_position = monitor.position();
+    let screen_w = monitor_size.width as f64 / scale;
+    let screen_h = monitor_size.height as f64 / scale;
+    let screen_x = monitor_position.x as f64 / scale;
+    let screen_y = monitor_position.y as f64 / scale;
+
+    // 30px horizontal breathing room per side. Vertically, reserve the menu bar
+    // plus a normal visible Dock; 40px from the top keeps custom chrome clear.
+    let target_w = 1400.0_f64.min((screen_w - 60.0).max(1024.0));
+    let target_h = 840.0_f64.min((screen_h - 170.0).max(640.0));
+    let target_x = screen_x + ((screen_w - target_w) / 2.0).max(0.0);
+    let target_y = screen_y + 40.0;
+
+    let _ = window.set_size(tauri::LogicalSize::new(target_w, target_h));
+    let _ = window.set_position(tauri::LogicalPosition::new(target_x, target_y));
+}
+
+#[cfg(not(target_os = "macos"))]
+fn fit_macos_main_window(_window: &tauri::Window) {}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_crash_log_hook();
@@ -265,6 +306,7 @@ pub fn run() {
                     overlay_frame::wait_until_ready(std::time::Duration::from_millis(700));
                     let dispatch_window = show_window.clone();
                     let _ = show_window.run_on_main_thread(move || {
+                        fit_macos_main_window(&dispatch_window);
                         // Main FIRST, overlay second: the frame arriving a
                         // beat late is invisible; the overlay arriving early
                         // (or unpainted) is the startup white flash.

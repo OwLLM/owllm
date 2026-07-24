@@ -187,6 +187,11 @@ try {
   check("Globe scene is built once per accent, not per node/selection", /}, \[accent\]\);/.test(page) && !/\[accent, nodes, onSelect, selectedId\]/.test(page));
   check("Selection is read live from a ref (no scene rebuild on select)", page.includes("selectedIdRef.current === node.id"));
   check("Node changes trigger a node-only rebuild, not a renderer teardown", page.includes("rebuildNodesRef.current?.()") && /rebuildNodesRef\.current = buildNodes/.test(page));
+  check("Retina drawing buffer cannot resize the globe canvas CSS box",
+    page.includes('renderer.domElement.style.width = "100%"')
+      && page.includes('renderer.domElement.style.height = "100%"')
+      && page.includes('renderer.domElement.style.display = "block"')
+      && page.includes("renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))"));
 
   // Regression: idle rotation must not flicker. The 30s fleet poll and each
   // presence snapshot return a NEW array with identical content; the node layer

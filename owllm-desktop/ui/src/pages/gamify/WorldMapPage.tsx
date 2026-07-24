@@ -255,6 +255,13 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.18;
+    // Retina displays use a 2x drawing buffer. Keep the canvas' CSS box tied to
+    // the panel instead of letting its intrinsic (2x) pixel dimensions become
+    // its layout dimensions; otherwise macOS renders a double-sized canvas and
+    // the globe appears cropped into the lower-right corner.
+    renderer.domElement.style.width = "100%";
+    renderer.domElement.style.height = "100%";
+    renderer.domElement.style.display = "block";
     renderer.domElement.setAttribute("aria-label", "Interactive 3D OWLLM world map");
     renderer.domElement.setAttribute("role", "img");
     host.appendChild(renderer.domElement);

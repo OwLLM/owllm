@@ -57,7 +57,7 @@ pub struct KvmAuth {
 #[derive(Debug, Clone, Deserialize)]
 pub struct KvmTarget {
     /// May be omitted by the caller when exactly ONE Node is configured on the
-    /// Accounts page — kvm_node_exec fills it in. (Agents kept flailing trying
+    /// Devices page — kvm_node_exec fills it in. (Agents kept flailing trying
     /// to guess hosts/ports; the stored config is the source of truth.)
     #[serde(default)]
     pub host: String,
@@ -977,7 +977,7 @@ async fn dispatch(target: &KvmTarget, action: &str, params: &Value) -> Value {
 // Agents can't guess a NanoKVM's host/port/login, and requiring the model to
 // carry the web-UI password in every tool call is both unsafe and why "take a
 // screenshot of the KVM" kept failing to even log in. The user saves each
-// Node once on the Accounts page; kvm_node_exec autofills any field the caller
+// Node once on the Devices page; kvm_node_exec autofills any field the caller
 // omitted. The password goes through the same at-rest wrapper the account
 // secrets use (crypt::protect — DPAPI-encrypted on Windows; on other OSes
 // that wrapper is currently base64 passthrough, see crypt.rs) and is never
@@ -1172,7 +1172,7 @@ pub async fn kvm_node_exec(
 ) -> Result<Value, String> {
     if !feature_enabled() {
         return Err(
-            "OWLLM Node is disabled. Enable it on the Accounts page (OWLLM Node card) or set OWLLM_KVM_NODE=1 (default off).".to_string(),
+            "OWLLM Node is disabled. Enable it on the Devices page (OWLLM Node card) or set OWLLM_KVM_NODE=1 (default off).".to_string(),
         );
     }
 
@@ -1182,7 +1182,7 @@ pub async fn kvm_node_exec(
     // KVM" never even logged in.
     hydrate_target_from_store(&mut target);
     if target.host.trim().is_empty() {
-        return Err("no KVM host given and none saved — add a Node on the Accounts page (OWLLM Node card), or pass target.host.".to_string());
+        return Err("no KVM host given and none saved — add a Node on the Devices page (OWLLM Node card), or pass target.host.".to_string());
     }
     if target.transport.trim().is_empty() {
         target.transport = "websocket".to_string();

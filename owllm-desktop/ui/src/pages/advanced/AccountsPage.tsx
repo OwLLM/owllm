@@ -24,7 +24,6 @@ import {
   MistralLogo, TogetherLogo,
 } from "./brandLogos";
 import PtyTerminal from "./PtyTerminal";
-import KvmNodePanel from "./KvmNodePanel";
 import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
 import { openWebUrl } from "../../utils/openWebUrl";
@@ -1286,7 +1285,6 @@ export default function AccountsPage() {
         </div>
       )}
       <VoiceRuntimePanel />
-      <KvmNodePanel />
 
 
       <div

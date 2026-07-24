@@ -232,7 +232,11 @@ pub fn browser_import_scan() -> Vec<DetectedBrowser> {
                         // Don't advertise a login count we can't import —
                         // a real number next to "unsupported" reads as
                         // "this should work". Keep it 0 off-Windows.
-                        count: if supported { chromium_count(&profile) } else { 0 },
+                        count: if supported {
+                            chromium_count(&profile)
+                        } else {
+                            0
+                        },
                         supported,
                         note: if supported {
                             String::new()
@@ -288,12 +292,17 @@ pub fn browser_import_csv(path: String) -> Result<String, String> {
     let raw = std::fs::read_to_string(&path).map_err(|e| format!("could not read CSV: {e}"))?;
     let text = raw.strip_prefix('\u{feff}').unwrap_or(&raw); // drop a UTF-8 BOM
     let records = parse_csv(text);
-    let header = records.first().ok_or_else(|| "that CSV is empty".to_string())?;
+    let header = records
+        .first()
+        .ok_or_else(|| "that CSV is empty".to_string())?;
     let url_i = find_col(header, &["url", "website", "login_uri", "uri", "origin"])
         .ok_or_else(|| "no 'url' column in that CSV — export it from your browser's password manager (Chrome/Edge: Settings → Passwords → ⋮ → Export passwords)".to_string())?;
     let pass_i = find_col(header, &["password", "pass", "login_password"])
         .ok_or_else(|| "no 'password' column in that CSV".to_string())?;
-    let user_i = find_col(header, &["username", "user", "login", "email", "login_username"]);
+    let user_i = find_col(
+        header,
+        &["username", "user", "login", "email", "login_username"],
+    );
 
     let now = now_ms();
     let mut creds = Vec::new();

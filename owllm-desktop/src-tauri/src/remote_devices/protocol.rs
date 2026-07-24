@@ -322,9 +322,13 @@ pub enum WireReply {
     /// Pairing recorded (pending human approval). Carries the target's own public
     /// record so the controller learns its keys/id — this is what lets a manual
     /// "pair by IP" work with no vault discovery.
-    Paired { device: DevicePublic },
+    Paired {
+        device: DevicePublic,
+    },
     Result(SignedEnvelope),
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }
 
 // ------------------------------------------------------------------

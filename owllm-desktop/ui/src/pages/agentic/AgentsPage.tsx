@@ -100,7 +100,7 @@ import {
 // keeps only the cloud/sub/API routing and delegates the GGUF path to
 // streamLocalChat. stripFabricatedToolOutput is still used to clean the
 // SuperUser orchestrator's streamed reply.
-import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveTeamMemoryPack, logTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
+import { stripFabricatedToolOutput, LOCAL_TOOL_SPECS, setTeamMemoryScope, setTeamMemoryGoal, setLeanRun, getTeamMemorySnapshot, getBrowserStateLine, refreshTeamMemorySnapshot, harvestMemoryWrites, retrieveScopedTeamMemoryPack, logScopedTeamWork, runGate, runCardLint, ensureAllSkillsInstalled, harvestPublishRequest } from "./localTools";
 import { renderCardFindings } from "./cardLint";
 import { extractAbsPaths, isInsideRoot, suggestInRoot } from "./briefPreflight";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
@@ -113,6 +113,22 @@ import type { AgentDomain } from "./teamConfig";
 import { scoreRun, summarizeTrace, type RunTrace } from "./runTrace";
 import { TEAM_FIXTURES } from "./teamEvalFixtures";
 import { resolveAgentSkills, buildAgentSkillBlock } from "./skillRuntime";
+import {
+  applyDelegationPolicy,
+  assertProviderHonorsPersonalPolicy,
+  intersectRuntimeTools,
+  resolveRuntimeAgents,
+  runtimeMemoryKey,
+  runtimeModelId,
+  runtimeSkillIds,
+  type RuntimePersonalAgent,
+} from "./personalAgentRuntime";
+import {
+  emptyProjectAgentConfig,
+  type AgentProfileDoc,
+  type ProjectAgentConfigDoc,
+  type RevisionRef,
+} from "./personalAgentConfig";
 import { getServerCtx } from "../core/serverContext";
 import { isolationBadge } from "./isolationBadge";
 import { wslIsolationGet, isWslPath, wslStatus, winToWslMountUnc } from "./wslIsolation";
@@ -271,7 +287,11 @@ function buildGraphJson(opts: {
 }): string {
   return JSON.stringify({
     edges: opts.edges,
-    roster: opts.agents.map(a => ({ name: a.name, base: a.base })),
+    roster: opts.agents.map(a => ({
+      name: a.name,
+      base: a.base,
+      ...(a.profileRef ? { profileRef: a.profileRef } : {}),
+    })),
     agentModels: Object.fromEntries(opts.agentModels),
     agentVoices: Object.fromEntries(opts.agentVoices),
     agentSkills: Object.fromEntries(opts.agentSkills),
@@ -299,6 +319,8 @@ type ModelInfo = {
 type AgentSpec = {
   name: string;
   base: string;
+  profileRef?: RevisionRef;
+  runtimePersonal?: RuntimePersonalAgent;
   icon?: string | null;
   /// Team-structure role set in the Workbench (left column): "leader" = this agent
   /// may dispatch to its own members (a sub-orchestrator); "agent" = a worker that
@@ -644,6 +666,9 @@ function toTeam(t: TeamTemplateBackend): Team {
         // on the React side so usage doesn't pierce snake_case.
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
         extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
+        profileRef: a.profile_ref && typeof a.profile_ref.id === "string" && Number.isFinite(a.profile_ref.revision)
+          ? { id: a.profile_ref.id, revision: a.profile_ref.revision }
+          : undefined,
         role: a.role === "leader" ? "leader" : a.role === "agent" ? "agent" : undefined,
         color: typeof a.color === "string" && a.color.trim() ? a.color : undefined,
       }))
@@ -677,6 +702,7 @@ function projectToTeam(p: ProjectRow): Team {
   // read it back here. Older projects (no roster stored) fall back to base=name —
   // the name-contains rule in orchestratorOf still catches a renamed orchestrator.
   const baseByName = new Map<string, string>();
+  const profileByName = new Map<string, RevisionRef>();
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
       const parsed = JSON.parse(p.graph_json);
@@ -689,6 +715,9 @@ function projectToTeam(p: ProjectRow): Team {
         for (const r of parsed.roster) {
           if (r && typeof r.name === "string" && typeof r.base === "string" && r.base.trim()) {
             baseByName.set(r.name, r.base);
+            if (r.profileRef && typeof r.profileRef.id === "string" && Number.isFinite(r.profileRef.revision)) {
+              profileByName.set(r.name, { id: r.profileRef.id, revision: r.profileRef.revision });
+            }
           }
         }
       }
@@ -697,7 +726,11 @@ function projectToTeam(p: ProjectRow): Team {
     }
   }
   const agents: AgentSpec[] = dedupeAgentsByName(
-    p.team.map(n => ({ name: n, base: baseByName.get(n) ?? n })),
+    p.team.map(n => ({
+      name: n,
+      base: baseByName.get(n) ?? n,
+      profileRef: profileByName.get(n),
+    })),
   );
   return {
     id: `project:${p.id}`,
@@ -2575,7 +2608,7 @@ function AgentChatTile({
 // close, ✕ button) and adds Esc-to-close.
 function AgentEditorModal({
   agentName, displayName, icon,
-  initialModel, initialColor, initialPrompt,
+  initialModel, initialColor, initialPrompt, initialProfileRef, projectId,
   models, accountsStatus, serverState, effectiveTeamModel, providerFor,
   templateId, onPickModel, onPreviewColor, onClose, onSaved,
 }: {
@@ -2585,6 +2618,8 @@ function AgentEditorModal({
   initialModel: string;
   initialColor: string;
   initialPrompt: string;
+  initialProfileRef?: RevisionRef;
+  projectId: string;
   models: ModelInfo[];
   accountsStatus: AccountsStatusLite | null;
   serverState: ServerStatus;
@@ -2606,6 +2641,8 @@ function AgentEditorModal({
   onSaved: () => Promise<void> | void;
 }) {
   const [model, setModel] = useState(initialModel);
+  const [profiles, setProfiles] = useState<AgentProfileDoc[]>([]);
+  const [profileId, setProfileId] = useState(initialProfileRef?.id ?? "");
   const [color, setColor] = useState(initialColor);
   // Prompt is stored as ONE `extra_prompt` markdown string but edited as four
   // labelled sections — seed them once from the saved value, serialize on save.
@@ -2617,6 +2654,12 @@ function AgentEditorModal({
   const [saving, setSaving] = useState(false);
   const [organizing, setOrganizing] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<AgentProfileDoc[]>("personal_agent_list_profiles", {})
+      .then(setProfiles)
+      .catch(e => setErr(`Personal profiles unavailable: ${String((e as { message?: string })?.message ?? e)}`));
+  }, []);
 
   // ✨ Organize — split the current freeform prompt (everything, but chiefly the
   // General blob) into Mission / Rules / Definition of Done using the agent's own
@@ -2693,8 +2736,35 @@ function AgentEditorModal({
       if (color.trim()) out.color = color.trim(); else delete out.color;
       const prompt = serializeAgentPrompt({ general, mission, rules, dod });
       if (prompt.trim()) out.extra_prompt = prompt; else delete out.extra_prompt;
+      const selectedProfile = profiles.find(profile => profile.id === profileId);
+      if (selectedProfile) {
+        out.profile_ref = { id: selectedProfile.id, revision: selectedProfile.revision };
+      } else {
+        delete out.profile_ref;
+      }
       arr[idx] = out;
       data.agents = arr;
+      // The resolver requires the exact pinned profile revision to be attached
+      // to this project too. Keep that project document in sync with the team
+      // template so selecting a profile here immediately reaches live dispatch.
+      // Save this attachment FIRST: a CAS failure must not leave the template
+      // pointing at a profile the project resolver cannot resolve. If the later
+      // template write fails, an unused project attachment is harmless.
+      if (selectedProfile && projectId) {
+        const current = await invoke<ProjectAgentConfigDoc | null>(
+          "personal_agent_get_project_config",
+          { projectId },
+        );
+        const doc = current ?? emptyProjectAgentConfig(projectId);
+        const profileRefs = [
+          ...doc.profileRefs.filter(ref => ref.id !== selectedProfile.id),
+          { id: selectedProfile.id, revision: selectedProfile.revision },
+        ];
+        await invoke<ProjectAgentConfigDoc>("personal_agent_save_project_config", {
+          doc: { ...doc, profileRefs },
+          expectedRevision: current?.revision,
+        });
+      }
       await invoke<TeamTemplateBackend>("save_team_template", { fileStem: templateId, data });
       invoke("vault_sync_teams").catch(() => {});
       await onSaved();
@@ -2765,6 +2835,26 @@ function AgentEditorModal({
                   : "(use team / server model — none running)"
             }
           />
+        </div>
+
+        {/* Personal profile — exact revision pin, with legacy role fallback. */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <span style={lbl}>Personal agent profile</span>
+          <select
+            value={profileId}
+            onChange={e => setProfileId(e.target.value)}
+            style={{ height: 36, borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", padding: "0 10px" }}
+          >
+            <option value="">Legacy role / no personal profile</option>
+            {profiles.map(profile => (
+              <option key={profile.id} value={profile.id}>
+                {profile.displayName} · r{profile.revision}
+              </option>
+            ))}
+          </select>
+          <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>
+            Saving pins the selected profile's current revision to this agent and project.
+          </span>
         </div>
 
         {/* Card colour */}
@@ -6709,6 +6799,19 @@ const READONLY_LOCAL_TOOLS: string[] = [
   "read_file", "list_dir", "grep", "glob",
 ];
 
+function runtimeReadOnlyTools(
+  spec: AgentSpec | undefined,
+  roleByName: Map<string, RoleData>,
+): string[] | undefined {
+  if (!spec) return READONLY_LOCAL_TOOLS;
+  const roleTools = roleByName.get(spec.base)?.toolAllowlist;
+  const roleUnrestricted = !roleTools?.length || roleTools.some(tool => tool.toLowerCase() === "all");
+  const roleReadOnly = roleUnrestricted
+    ? READONLY_LOCAL_TOOLS
+    : READONLY_LOCAL_TOOLS.filter(tool => roleTools.includes(tool));
+  return intersectRuntimeTools(spec.runtimePersonal, roleReadOnly);
+}
+
 // Weak local models routinely emit a dispatch line for a TOOL — "@read_file:",
 // "@web_search:" — instead of either calling the tool or naming a teammate.
 // The orchestrator already owns those tools, so such lines are noise: drop any
@@ -6880,18 +6983,21 @@ function buildOrchestratorPrompt(
     ? ""
     : `  - ${CRITIC_AGENT_NAME} (critic): mandatory reviewer for architecture decisions, MCP/security boundaries, runtime/bootstrap changes, workflow topology, and any user request that mentions "critic" or "critical thinker". Use @${CRITIC_AGENT_NAME}: <question or plan to review>.`;
   const orchRole = roleByName.get(orch.base);
+  const personal = orch.runtimePersonal;
   // Layered guidance: prefer the role yaml's full system_prompt
   // (the canonical playbook), then the team-specific extra_prompt
   // appended below it, falling back to the role's one-line
   // description, then a hard-coded minimum if even that's missing.
   const orchBase =
-    orchRole?.systemPrompt ??
-    orchRole?.description ??
-    "Plan the work, dispatch one task at a time, integrate the results.";
+    personal?.effective.systemInstructions ||
+    (orchRole?.systemPrompt ??
+      orchRole?.description ??
+      "Plan the work, dispatch one task at a time, integrate the results.");
   const orchSystemPrompt = orch.extraPrompt
     ? `${orchBase}\n\n--- TEAM-SPECIFIC GUIDANCE ---\n${orch.extraPrompt}`
     : orchBase;
   const directivesBlock = formatDirectivesBlock(directives);
+  const personalRulesBlock = personal?.rulesBlock ?? "";
   const directorBlock = directorMode
     ? [
         "",
@@ -6967,11 +7073,14 @@ function buildOrchestratorPrompt(
       ].join("\n")
     : "";
   return [
-    `You are the orchestrator of the '${team.display}' team.`,
+    personal
+      ? `You are ${personal.effective.identity.name} (${personal.effective.role}), orchestrator of the '${team.display}' team. Runtime routing id: ${orch.name}.`
+      : `You are the orchestrator of the '${team.display}' team.`,
     "",
     orchSystemPrompt,
     briefBlock,
     directivesBlock,
+    personalRulesBlock,
     directorBlock,
     parallelBlock,
     (orchSkillBlock && orchSkillBlock.trim()) ? `\n${orchSkillBlock.trim()}` : "",
@@ -6996,9 +7105,9 @@ function buildOrchestratorPrompt(
     "",
     TEAM_OPERATING_CONTRACT,
     "",
-    TEAM_MEMORY_HINT,
+    (!personal || personal.memoryScope !== "none") ? TEAM_MEMORY_HINT : "",
     "  - As orchestrator, recover what the team already established from the snapshot below at the START of a run, and record key decisions (with `[REMEMBER ...]` or memory_write) so later runs and other agents inherit them.",
-    getTeamMemorySnapshot(),
+    personal ? personal.memorySnapshot : getTeamMemorySnapshot(),
     getBrowserStateLine(),
   ].join("\n");
 }
@@ -7019,17 +7128,20 @@ function buildSpecialistPrompt(
   lean?: boolean,
 ): string {
   const role = roleByName.get(spec.base);
+  const personal = spec.runtimePersonal;
   // Layer: role base prompt (from yaml) + team-specific spec
   // description + team-specific extra_prompt. All three are present
   // in well-curated teams like code_artisan; only the role base is
   // present for ad-hoc project rosters.
   const layers: string[] = [
-    `You are ${displayLabel(spec.name)} (${spec.base}) on the '${team.display}' team.`,
+    personal
+      ? `You are ${personal.effective.identity.name} (${personal.effective.role}) on the '${team.display}' team. Your stable runtime routing id is ${spec.name}.`
+      : `You are ${displayLabel(spec.name)} (${spec.base}) on the '${team.display}' team.`,
     "",
   ];
   // Canonical role system prompt from the yaml file is the strongest
   // signal — fall back to the one-line description when missing.
-  const roleBase = role?.systemPrompt ?? role?.description;
+  const roleBase = personal?.effective.systemInstructions || role?.systemPrompt || role?.description;
   if (roleBase) {
     layers.push(roleBase);
     layers.push("");
@@ -7050,10 +7162,13 @@ function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
+  if (personal?.rulesBlock) layers.push(personal.rulesBlock);
   layers.push(projectWorkspaceBlock(projectCwd));
   layers.push(TEAM_OPERATING_CONTRACT);
-  layers.push(lean ? TEAM_MEMORY_HINT_LEAN : TEAM_MEMORY_HINT);
-  const memSnapshot = getTeamMemorySnapshot();
+  if (!personal || personal.memoryScope !== "none") {
+    layers.push(lean ? TEAM_MEMORY_HINT_LEAN : TEAM_MEMORY_HINT);
+  }
+  const memSnapshot = personal ? personal.memorySnapshot : getTeamMemorySnapshot();
   if (memSnapshot) layers.push(memSnapshot);
   const browserLine = getBrowserStateLine();
   if (browserLine) layers.push(browserLine);
@@ -7293,6 +7408,7 @@ async function streamChatCompletion(
   const bareId = forceSub || forceApi || modelId.startsWith("auto/")
     ? modelId.slice(modelId.indexOf("/") + 1)
     : modelId;
+  assertProviderHonorsPersonalPolicy(provider, modelId, allowedTools);
 
   // Audio attachments collapse into the user message via Whisper.
   // Images stay on the side and get a provider-specific encoding.
@@ -9958,6 +10074,27 @@ export function AgentsPage({
         : "This remote project has no GitHub repository. Create it on the source PC before working here.");
       return;
     }
+    if (!activeTeam || activeTeam.agents.length === 0) {
+      setRunError("No team is loaded. Pick a team via 'Team…' or select a project with a roster.");
+      return;
+    }
+    let runtimeTeam: Team;
+    try {
+      const agents = await resolveRuntimeAgents(selectedProjectId, activeTeam.agents);
+      runtimeTeam = {
+        ...activeTeam,
+        agents,
+        edges: applyDelegationPolicy(agents, activeTeam.edges),
+      };
+    } catch (e: unknown) {
+      setRunError(`Personal agent configuration could not be resolved: ${String((e as { message?: string })?.message ?? e)}`);
+      return;
+    }
+    const effectiveModelFor = (spec: AgentSpec) => runtimeModelId(spec, modelFor(spec.name));
+    const effectiveToolsFor = (spec: AgentSpec) =>
+      intersectRuntimeTools(spec.runtimePersonal, roleByName.get(spec.base)?.toolAllowlist);
+    const directCriticSpec = runtimeTeam.agents.find(agent =>
+      agent.name === CRITIC_AGENT_NAME || agent.base === "critic" || agent.base === "critical_thinker");
     // Remember this goal so a failed second-agent / forwarded send can offer a
     // one-click "⟳ Retry" (re-runs it via onSupSend). Steers returned above, so
     // only genuine goals land here.
@@ -10135,9 +10272,9 @@ export function AgentsPage({
       try {
         criticReview = await streamChatCompletion(
           freshServerState.port ?? 0,
-          supModelId,
-          supProvider,
-          buildCriticalThinkerReviewPrompt(activeTeam, directives),
+          directCriticSpec ? effectiveModelFor(directCriticSpec) : supModelId,
+          providerFor(directCriticSpec ? effectiveModelFor(directCriticSpec) : supModelId),
+          buildCriticalThinkerReviewPrompt(runtimeTeam, directives),
           [
             "User message:",
             text,
@@ -10151,7 +10288,7 @@ export function AgentsPage({
           priorHistory,
           autoApprove,
           (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
-          READONLY_LOCAL_TOOLS,
+          runtimeReadOnlyTools(directCriticSpec, roleByName),
           undefined,
           getClaudeSession(selectedProjectId, CRITIC_NAME),
         );
@@ -10616,6 +10753,25 @@ export function AgentsPage({
         : "This project belongs to another computer and has no GitHub repository. Create and push the repository on the source computer first.");
       return;
     }
+    if (!activeTeam || activeTeam.agents.length === 0) {
+      setRunError("No team is loaded. Pick a team via 'Team…' or select a project with a roster.");
+      return;
+    }
+    let runtimeTeam: Team;
+    try {
+      const agents = await resolveRuntimeAgents(selectedProjectId, activeTeam.agents);
+      runtimeTeam = {
+        ...activeTeam,
+        agents,
+        edges: applyDelegationPolicy(agents, activeTeam.edges),
+      };
+    } catch (e: unknown) {
+      setRunError(`Personal agent configuration could not be resolved: ${String((e as { message?: string })?.message ?? e)}`);
+      return;
+    }
+    const effectiveModelFor = (spec: AgentSpec) => runtimeModelId(spec, modelFor(spec.name));
+    const effectiveToolsFor = (spec: AgentSpec) =>
+      intersectRuntimeTools(spec.runtimePersonal, roleByName.get(spec.base)?.toolAllowlist);
     // Key the shared team memory by this project's stable ID so it matches across
     // machines (and syncs via the vault) rather than by the per-PC folder path.
     setTeamMemoryScope(selectedProjectId);
@@ -10624,7 +10780,7 @@ export function AgentsPage({
     // Lean profile: solo and small (≤3-agent) runs get the trimmed injection stack
     // — shorter memory hint + halved snapshot/RAG budgets ("smallest safe
     // activation", docs/AGENTIC_DESIGN.md).
-    setLeanRun(soloMode || (activeTeam?.agents.length ?? 99) <= 3);
+    setLeanRun(soloMode || runtimeTeam.agents.length <= 3);
     // Warm the shared-memory snapshot so it's injected into the orchestrator's and
     // every specialist's prompt this run (readable on every model path).
     // STARTED here but NOT awaited: it used to block the whole dispatch before
@@ -10678,12 +10834,13 @@ export function AgentsPage({
     // Require the local server only when the orchestrator (or any
     // dispatched specialist) actually resolves to a local model. Cloud-
     // only teams should run without one.
-    const orchModelId = activeTeam ? modelFor(findOrchestratorSpec(activeTeam)!.name) : "";
+    const runtimeOrch = findOrchestratorSpec(runtimeTeam)!;
+    const orchModelId = effectiveModelFor(runtimeOrch);
     // "tuned" models live in LLM/fine_tuned/ and are served by the
     // same llama-server, so they need the local server up too.
     const isLocallyServed = (p: string) => p === "local" || p === "tuned";
     const needsLocal = isLocallyServed(providerFor(orchModelId))
-      || (activeTeam?.agents ?? []).some(a => isLocallyServed(providerFor(modelFor(a.name))));
+      || runtimeTeam.agents.some(a => isLocallyServed(providerFor(effectiveModelFor(a))));
     if (needsLocal) {
       // Decide which model the local server should be running. The
       // orchestrator's model wins; if it's not local we look for any
@@ -10691,8 +10848,8 @@ export function AgentsPage({
       // can't infer which weights to load" — that's user error.
       const localCandidates: string[] = [];
       if (isLocallyServed(providerFor(orchModelId))) localCandidates.push(orchModelId);
-      for (const a of activeTeam?.agents ?? []) {
-        const id = modelFor(a.name);
+      for (const a of runtimeTeam.agents) {
+        const id = effectiveModelFor(a);
         if (id && isLocallyServed(providerFor(id))) localCandidates.push(id);
       }
       // Fallback chain so Send always works when local is needed:
@@ -10727,11 +10884,6 @@ export function AgentsPage({
         }
         setRunError(null);
       }
-    }
-    if (!activeTeam || activeTeam.agents.length === 0) {
-      setRunError("No team is loaded. Pick a team via 'Team…' or select a project with a roster.");
-      dispatchInFlightRef.current = false;
-      return;
     }
     // Prompts below read the snapshot synchronously — make sure the refresh
     // kicked off at the top has landed (bounded by its own per-invoke timeout,
@@ -10792,7 +10944,7 @@ export function AgentsPage({
     abortRef.current = ctrl;
     agentRunAborts.set(agentSessId, ctrl); // reachable by Cancel after a page change
 
-    const orch = findOrchestratorSpec(activeTeam)!;
+    const orch = findOrchestratorSpec(runtimeTeam)!;
 
     // Auto-adjust the team into a structurally-valid config before running:
     // wire any agent that's unreachable from the orchestrator (its dispatches
@@ -10800,8 +10952,25 @@ export function AgentsPage({
     // surface what changed + what's missing (e.g. "no specialist can write
     // files"). Pure + idempotent — see teamConfig.normalizeTeam. The run uses
     // `runTeam` for all edge-driven logic (roster, wiring, hand-offs).
-    const { team: runTeam, changes: teamFixes, warnings: teamWarnings } =
-      normalizeTeam(activeTeam, roleByName);
+    const { team: normalizedTeam, changes: teamFixes, warnings: teamWarnings } =
+      normalizeTeam(runtimeTeam, roleByName);
+    const runTeam: Team = {
+      ...normalizedTeam,
+      edges: applyDelegationPolicy(normalizedTeam.agents, normalizedTeam.edges),
+    };
+    const canDelegateTo = (source: AgentSpec, targetName: string): boolean => {
+      const policy = source.runtimePersonal?.effective.delegation;
+      if (!policy) return true;
+      const target = runTeam.agents.find(agent => agent.name === targetName);
+      return !!policy.enabled && !!target?.profileRef?.id &&
+        policy.allowedProfileIds.includes(target.profileRef.id);
+    };
+    const criticSpecForRun = runTeam.agents.find(agent =>
+      agent.name === CRITIC_AGENT_NAME || agent.base === "critic" || agent.base === "critical_thinker");
+    const criticModelForRun = () => criticSpecForRun
+      ? effectiveModelFor(criticSpecForRun)
+      : modelFor(CRITIC_AGENT_NAME);
+    const criticToolsForRun = () => runtimeReadOnlyTools(criticSpecForRun, roleByName);
     for (const c of teamFixes) {
       appendThought(orch.name, { role: "system", color: "#7ff0c5", text: `🧩 auto-config: ${c}` });
     }
@@ -10981,7 +11150,10 @@ export function AgentsPage({
           ...(coder.extraSkills ?? []),
           ...(perAgentSkills.get(coder.name) ?? []),
         ];
-        const sBlock = await buildAgentSkillBlock(sIds);
+        const sBlock = await buildAgentSkillBlock(
+          runtimeSkillIds(coder, sIds),
+          !!coder.runtimePersonal,
+        );
         // ⚡ THE solo fix: whoever we picked is a TEAM specialist whose role prompt
         // may lane-lock it ("own ONLY the UI, NEVER edit Rust, flag the dependency").
         // Alone, that lock is fatal — it does its slice and hands the rest to agents
@@ -10999,16 +11171,21 @@ export function AgentsPage({
           "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
           "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
         ].join("\n");
-        const sPrompt = buildSpecialistPrompt(activeTeam!, coder, roleByName, directives, sBlock, projectCwd, true) + "\n" + SOLO_OVERRIDE;
-        const sAllowed = roleByName.get(coder.base)?.toolAllowlist;
-        const sMem = await loadAgentMemory(selectedProjectId, coder.name);
+        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, projectCwd, true) + "\n" + SOLO_OVERRIDE;
+        const sAllowed = effectiveToolsFor(coder);
+        const soloMemKey = runtimeMemoryKey(coder, selectedProjectId);
+        const sMem = soloMemKey
+          ? await loadAgentMemory(soloMemKey, coder.profileRef?.id ?? coder.name)
+          : [];
         // Continuity (memory-loss fix 2026-07-04): a chat-driven send carries the
         // visible conversation (priorHistory) — in solo mode the coder IS the
         // conversation partner, so that thread wins; per-agent memory is the
         // fallback for Run-button dispatches with no chat context.
         const sHist = priorHistory && priorHistory.length > 0 ? priorHistory
           : (sMem.length > 0 ? sMem : undefined);
-        const soloMemoryPack = await retrieveTeamMemoryPack(text);
+        const soloMemoryPack = soloMemKey
+          ? await retrieveScopedTeamMemoryPack(soloMemKey, text, 8, !coder.runtimePersonal)
+          : { scope: "", query: text, block: "", total: 0, factCount: 0, worklogCount: 0 };
         if (soloMemoryPack.total > 0) {
           appendThought(coder.name, {
             role: "memory",
@@ -11033,7 +11210,7 @@ export function AgentsPage({
           const turn = sSteer ? `${sBase}\n\n⚡ The user sent this WHILE you were working — address it too:\n${sSteer}` : sBase;
           try {
             sText = (await streamChatCompletion(
-              port, modelFor(coder.name), providerFor(modelFor(coder.name)),
+              port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
               sPrompt, turn, tempFor(coder, 0.3), ctrl.signal,
               (d) => streamLog(coder.name, d), projectCwd,
               sHist, autoApprove,
@@ -11058,7 +11235,7 @@ export function AgentsPage({
         // Tell the user plainly to re-login (with the exact step), and stop.
         if (isAuthError(sText)) {
           removeActive(coder.name);
-          const m = authReloginMessage(providerFor(modelFor(coder.name)));
+          const m = authReloginMessage(providerFor(effectiveModelFor(coder)));
           appendLog("system", { role: "system", color: "#ff8c8c", text: m });
           setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: m, ts: Date.now(), seq: nextSeq() }]);
           setRunError("Signed out (401) — re-login required.");
@@ -11075,7 +11252,7 @@ export function AgentsPage({
           addActive(coder.name);
           try {
             sText = (await streamChatCompletion(
-              port, modelFor(coder.name), providerFor(modelFor(coder.name)),
+              port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
               sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteer}`,
               tempFor(coder, 0.3), ctrl.signal,
               (d) => streamLog(coder.name, d), projectCwd,
@@ -11095,15 +11272,15 @@ export function AgentsPage({
         // NOT auto-publish — we surface the ask and stop, so nothing ships past a real
         // user gate. Otherwise the work ships as usual. -----
         let needsUserDecision = false;
-        if (sText && !isAuthError(sText) && !ctrl.signal.aborted) {
+        if (sText && !isAuthError(sText) && !ctrl.signal.aborted && canDelegateTo(coder, CRITIC_AGENT_NAME)) {
           const CRITIC_NAME = CRITIC_AGENT_NAME;
           addActive(CRITIC_NAME);
           appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
           try {
-            const criticModel = modelFor(CRITIC_NAME);
+            const criticModel = criticModelForRun();
             const review = (await streamChatCompletion(
               port, criticModel, providerFor(criticModel),
-              buildCriticalThinkerReviewPrompt(activeTeam, directives),
+              buildCriticalThinkerReviewPrompt(runTeam, directives),
               [
                 "The user's goal:", text, "",
                 "The solo coder's result (it did the whole task across ALL layers):", sText, "",
@@ -11116,7 +11293,7 @@ export function AgentsPage({
               (d) => streamLog(CRITIC_NAME, d), projectCwd,
               undefined, undefined,
               (c, r, d) => streamThought(CRITIC_NAME, c, r, d),
-              READONLY_LOCAL_TOOLS, undefined,
+              criticToolsForRun(), undefined,
               getClaudeSession(selectedProjectId, CRITIC_NAME),
             )).trim();
             if (review) {
@@ -11173,8 +11350,10 @@ export function AgentsPage({
         }
         removeActive(coder.name);
         const sFinal = sText + (sPub ? `\n\n[host publish]\n${sPub.slice(-600)}` : "");
-        await appendAgentMemory(selectedProjectId, coder.name, text, sFinal);
-        await logTeamWork(coder.name, text, sFinal + (sGate && sGate.status !== "unverified" ? `\n[verify: ${sGate.status}]` : ""));
+        if (soloMemKey) {
+          await appendAgentMemory(soloMemKey, coder.profileRef?.id ?? coder.name, text, sFinal);
+          await logScopedTeamWork(soloMemKey, coder.name, text, sFinal + (sGate && sGate.status !== "unverified" ? `\n[verify: ${sGate.status}]` : ""));
+        }
         speakAgentReply(coder.name, sText);
         setSupChat(prev => [...prev, { role: coder.name, color: colorForAgent(coder), text: sText, ts: Date.now(), seq: nextSeq() }]);
         // Minimal solo run report.
@@ -11212,10 +11391,13 @@ export function AgentsPage({
         ...(orch.extraSkills ?? []),
         ...(perAgentSkills.get(orch.name) ?? []),
       ];
-      const orchSkillBlock = await buildAgentSkillBlock(orchSkillIds);
+      const orchSkillBlock = await buildAgentSkillBlock(
+        runtimeSkillIds(orch, orchSkillIds),
+        !!orch.runtimePersonal,
+      );
       const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
-      const orchModel = modelFor(orch.name);
+      const orchModel = effectiveModelFor(orch);
       let orchReply: string;
       try {
         orchReply = await streamChatCompletion(
@@ -11227,7 +11409,7 @@ export function AgentsPage({
           // (essential for local-model orchestrators, which have no session memory).
           priorHistory, undefined,
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-          READONLY_LOCAL_TOOLS,
+          intersectRuntimeTools(orch.runtimePersonal, READONLY_LOCAL_TOOLS),
           // User-attached images/audio ride with the orchestrator only.
           // Specialists receive the orchestrator's reply (text), so they
           // don't need the raw bytes.
@@ -11257,7 +11439,7 @@ export function AgentsPage({
       }
       speakAgentReply(orch.name, orchReply);
       // Persist any `[REMEMBER ...]` facts the orchestrator wrote while planning.
-      await harvestMemoryWrites(orchReply);
+      await harvestMemoryWrites(orchReply, runtimeMemoryKey(orch, selectedProjectId));
 
       // Critical-thinker interception: if the orchestrator asks for
       // @critical_thinker or [NEED_USER_INPUT], route it to the real
@@ -11267,7 +11449,7 @@ export function AgentsPage({
       let criticWasConsulted = false;
       {
         const { question, cleaned } = extractUserInputRequest(orchReply);
-        if (question) {
+        if (question && canDelegateTo(orch, CRITIC_AGENT_NAME)) {
           criticWasConsulted = true;
           appendThought(orch.name, {
             role: "dispatch", color: "#ff9ad9",
@@ -11278,15 +11460,15 @@ export function AgentsPage({
           appendLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
           let criticReply = "";
           try {
-            const criticSys = buildCriticPrompt(activeTeam, directives);
+            const criticSys = buildCriticPrompt(runTeam, directives);
             criticReply = await streamChatCompletion(
-              port, orchModel, providerFor(orchModel),
+              port, criticModelForRun(), providerFor(criticModelForRun()),
               criticSys, question, criticTemp, ctrl.signal,
               (delta) => { criticReply += delta; streamLog(CRITIC_NAME, delta); },
               projectCwd,
               undefined, undefined,
               () => {},
-              READONLY_LOCAL_TOOLS,
+              criticToolsForRun(),
             );
             criticReply = (criticReply || "(no answer)").trim();
           } catch (e: any) {
@@ -11311,7 +11493,7 @@ export function AgentsPage({
               projectCwd,
               priorHistory, undefined,   // history: replans must keep the user's chat thread (memory-loss fix 2026-07-04)
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-              READONLY_LOCAL_TOOLS,
+              intersectRuntimeTools(orch.runtimePersonal, READONLY_LOCAL_TOOLS),
               undefined,
               getClaudeSession(selectedProjectId, orch.name),
             );
@@ -11323,6 +11505,12 @@ export function AgentsPage({
           // we intentionally don't surface it (the cleaned plan is
           // already in the orchestrator's log via streamLog deltas).
           void cleaned;
+        } else if (question) {
+          orchReply = cleaned;
+          appendThought(orch.name, {
+            role: "system", color: "#ffb74d",
+            text: "Personal-agent delegation policy denied the Critical Thinker handoff; continuing without it.",
+          });
         }
       }
 
@@ -11336,7 +11524,8 @@ export function AgentsPage({
       //     it gets up to 3 rounds to gate the plan and the orchestrator is told to
       //     satisfy it. Still hard-capped so it can't loop forever.
       // Director mode forces a review even if the orchestrator never says "critic".
-      if (!criticWasConsulted && (directorMode || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
+      if (!criticWasConsulted && canDelegateTo(orch, CRITIC_AGENT_NAME) &&
+          (directorMode || needsCriticalThinkerReview(`${text}\n${orchReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
         const MAX_PRE_ROUNDS = directorMode ? 3 : 2;
         for (let round = 0; round < MAX_PRE_ROUNDS && !ctrl.signal.aborted; round++) {
@@ -11351,10 +11540,10 @@ export function AgentsPage({
           let criticReview = "";
           let criticFailed = false;
           try {
-            const criticModel = modelFor(CRITIC_NAME);
+            const criticModel = criticModelForRun();
             criticReview = await streamChatCompletion(
               port, criticModel, providerFor(criticModel),
-              buildCriticalThinkerReviewPrompt(activeTeam, directives),
+              buildCriticalThinkerReviewPrompt(runTeam, directives),
               [
                 "The user's goal:",
                 text,
@@ -11371,7 +11560,7 @@ export function AgentsPage({
               projectCwd,
               undefined, undefined,
               (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
-              READONLY_LOCAL_TOOLS,
+              criticToolsForRun(),
               undefined,
               getClaudeSession(selectedProjectId, CRITIC_NAME),
             );
@@ -11417,7 +11606,7 @@ export function AgentsPage({
               projectCwd,
               priorHistory, undefined,   // history: replans must keep the user's chat thread (memory-loss fix 2026-07-04)
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-              READONLY_LOCAL_TOOLS,
+              intersectRuntimeTools(orch.runtimePersonal, READONLY_LOCAL_TOOLS),
               undefined,
               getClaudeSession(selectedProjectId, orch.name),
             );
@@ -11480,7 +11669,7 @@ export function AgentsPage({
           });
         }
         if (parse.dispatches.length === 0) {
-          const correction = unresolvedCorrectionMessage(parse.unresolved, activeTeam, orch.name);
+          const correction = unresolvedCorrectionMessage(parse.unresolved, runTeam, orch.name);
           appendLog("system", { role: "system", color: "#ff8c8c", text: `⚠ Dispatch lines named unknown agents — asking the orchestrator to re-emit with real names.` });
           addActive(orch.name);
           appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
@@ -11494,7 +11683,7 @@ export function AgentsPage({
               projectCwd,
               priorHistory, undefined,   // history: replans must keep the user's chat thread (memory-loss fix 2026-07-04)
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-              READONLY_LOCAL_TOOLS,
+              intersectRuntimeTools(orch.runtimePersonal, READONLY_LOCAL_TOOLS),
               undefined,
               getClaudeSession(selectedProjectId, orch.name),
             );
@@ -11540,7 +11729,7 @@ export function AgentsPage({
               projectCwd,
               priorHistory, undefined,   // history: replans must keep the user's chat thread (memory-loss fix 2026-07-04)
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-              READONLY_LOCAL_TOOLS,
+              intersectRuntimeTools(orch.runtimePersonal, READONLY_LOCAL_TOOLS),
               undefined,
               getClaudeSession(selectedProjectId, orch.name),
             );
@@ -11706,7 +11895,7 @@ export function AgentsPage({
       // Thought tab per dispatch so the user can see what happened.
       for (const d of dispatches) {
         if (!needWorktrees) { worktreeBySpec.set(d.agentName, null); continue; }
-        const spec = activeTeam.agents.find(a => a.name === d.agentName);
+        const spec = runTeam.agents.find(a => a.name === d.agentName);
         if (!spec) continue;
         let res: FleetCreateResult;
         try {
@@ -11764,7 +11953,7 @@ export function AgentsPage({
         finalize: FleetFinalizeResult | null;
       };
       const settled = await Promise.allSettled<SpecOutcome | null>(dispatches.map(async (d) => {
-        const startSpec = activeTeam.agents.find(a => a.name === d.agentName);
+        const startSpec = runTeam.agents.find(a => a.name === d.agentName);
         if (!startSpec) return null;
         // FAN-OUT: an agent hands its output to EVERY agent its arrows point to —
         // the run follows the graph the user drew. The whole tree from this
@@ -11785,13 +11974,11 @@ export function AgentsPage({
             (spec.role === "leader" || !!roleByName.get(spec.base)?.canDispatch) && spec.name !== orch.name &&
             (wiredDispatchTargets(runTeam, spec.name)?.size ?? 0) > 0;
           if (isLeader) return await runLeaderUnit(spec, instruction);
-          if (!activeTeam) return { name: spec.name, text: "" };
-
           addActive(spec.name);
           appendThought(spec.name, { role: "dispatch", color: "#a578ff", text: `📩 ${instruction}` });
           appendLog(spec.name, { role: spec.name, color: colorForAgent(spec), text: "" });
-          const specModel = modelFor(spec.name);
-          const allowed = roleByName.get(spec.base)?.toolAllowlist;
+          const specModel = effectiveModelFor(spec);
+          const allowed = effectiveToolsFor(spec);
           // Resolve this agent's equipped skills (template extra_skills + the
           // per-project graph_json grant) and inject them (budgeted progressive
           // disclosure). Skills not installed are skipped.
@@ -11800,16 +11987,24 @@ export function AgentsPage({
             ...(spec.extraSkills ?? []),                           // team template extra_skills
             ...(perAgentSkills.get(spec.name) ?? []),              // per-project grant
           ];
-          const skillBlock = await buildAgentSkillBlock(skillIds);
+          const skillBlock = await buildAgentSkillBlock(
+            runtimeSkillIds(spec, skillIds),
+            !!spec.runtimePersonal,
+          );
           // Per-agent memory: fold THIS agent's own prior turns (across dispatches
           // and across runs of this project) into its history so it's no longer a
           // stateless one-shot. Model-agnostic — feeds the universal history param.
-          const specMemory = await loadAgentMemory(selectedProjectId, spec.name);
+          const specMemKey = runtimeMemoryKey(spec, selectedProjectId);
+          const specMemory = specMemKey
+            ? await loadAgentMemory(specMemKey, spec.profileRef?.id ?? spec.name)
+            : [];
           // Shared work-state (RAG): pull what teammates already did RELEVANT to
           // this task (term-hit ranked) and prepend it to the instruction, so the
           // specialist is synchronized on the team's actual work instead of acting
           // on a context-free sticky note. Model-agnostic (rides the instruction).
-          const taskMem = await retrieveTeamMemoryPack(instruction);
+          const taskMem = specMemKey
+            ? await retrieveScopedTeamMemoryPack(specMemKey, instruction, 8, !spec.runtimePersonal)
+            : { scope: "", query: instruction, block: "", total: 0, factCount: 0, worklogCount: 0 };
           if (taskMem.total > 0) {
             appendThought(spec.name, {
               role: "memory",
@@ -11818,7 +12013,7 @@ export function AgentsPage({
             });
           }
           const enrichedInstruction = enrichInstructionWithMemory(taskMem.block, instruction);
-          const sysPrompt = buildSpecialistPrompt(activeTeam, spec, roleByName, directives, skillBlock, chainCwd, activeTeam.agents.length <= 3);
+          const sysPrompt = buildSpecialistPrompt(runTeam, spec, roleByName, directives, skillBlock, chainCwd, runTeam.agents.length <= 3);
           // PER-AGENT VERIFY-FIX LOOP (Build Shape slice 1, step 5+6): a coder does
           // not return one-shot. After it edits, the GATE runs the project's check
           // in the coder's own cwd; on a real FAILURE it gets the captured error and
@@ -11907,8 +12102,11 @@ export function AgentsPage({
           // for CLI agents. Gated to the publisher role so a stray sentinel from
           // another agent can't trigger a release.
           let specOut = specText;
-          const canPublish = spec.base === "publisher"
-            || (roleByName.get(spec.base)?.toolAllowlist ?? []).includes("publish_release");
+          const specEffectiveTools = effectiveToolsFor(spec);
+          const canPublish = spec.runtimePersonal
+            ? (specEffectiveTools ?? []).includes("publish_release")
+            : spec.base === "publisher"
+              || (roleByName.get(spec.base)?.toolAllowlist ?? []).includes("publish_release");
           if (canPublish) {
             // Publish from the MAIN repo, never a per-agent worktree.
             const pub = await harvestPublishRequest(specText, projectCwd);
@@ -11920,12 +12118,14 @@ export function AgentsPage({
             }
           }
           // Persist this exchange so the next dispatch remembers it (per-agent).
-          await appendAgentMemory(selectedProjectId, spec.name, instruction, specOut);
+          if (specMemKey) {
+            await appendAgentMemory(specMemKey, spec.profileRef?.id ?? spec.name, instruction, specOut);
+          }
           // STRUCTURED HANDOFF (step 6): record what the agent did AND its grounded
           // lane-verify result (not the agent's claim) into the shared work-state, so
           // the next agent / the run report inherit the real outcome.
           const laneTag = finalGate && finalGate.status !== "unverified" ? `\n[lane verify: ${finalGate.status}]` : "";
-          await logTeamWork(spec.name, instruction, specOut + laneTag);
+          if (specMemKey) await logScopedTeamWork(specMemKey, spec.name, instruction, specOut + laneTag);
           speakAgentReply(spec.name, specText);
           return { name: spec.name, text: specOut };
         }
@@ -11937,7 +12137,7 @@ export function AgentsPage({
         async function runLeaderUnit(leader: AgentSpec, instruction: string): Promise<{ name: string; text: string }> {
           if (!runTeam) return { name: leader.name, text: "" };
           const members = wiredDispatchTargets(runTeam, leader.name) ?? new Set<string>();
-          const leaderModel = modelFor(leader.name);
+          const leaderModel = effectiveModelFor(leader);
           const leaderPrompt = buildOrchestratorPrompt(
             runTeam, roleByName, leader, directives, false, undefined, false, undefined, undefined, perAgentSkills, projectCwd,
           );
@@ -11953,7 +12153,7 @@ export function AgentsPage({
               (delta) => streamLog(leader.name, delta),
               chainCwd, undefined, undefined,
               (channel, role, delta) => streamThought(leader.name, channel, role, delta),
-              READONLY_LOCAL_TOOLS, undefined,
+              intersectRuntimeTools(leader.runtimePersonal, READONLY_LOCAL_TOOLS), undefined,
               getClaudeSession(selectedProjectId, leader.name),
             )).trim();
           } catch (e: any) {
@@ -11985,7 +12185,7 @@ export function AgentsPage({
                 (delta) => streamLog(leader.name, delta),
                 chainCwd, undefined, undefined,
                 (channel, role, delta) => streamThought(leader.name, channel, role, delta),
-                undefined, undefined,
+                effectiveToolsFor(leader), undefined,
                 getClaudeSession(selectedProjectId, leader.name),
               )).trim();
             } catch { /* keep the concatenated fallback */ }
@@ -12001,7 +12201,6 @@ export function AgentsPage({
         const lastOutput = new Map<string, string>();   // no-progress detection
         const capNoticed = { global: false };            // emit the cap notice once
         async function runFrom(name: string, input: string): Promise<{ name: string; text: string }[]> {
-          if (!activeTeam) return [];
           const total = Array.from(runCount.values()).reduce((a, b) => a + b, 0);
           if (total >= MAX_CHAIN_HOPS) {                                // global backstop — LOUD
             if (runTraceRef.current) runTraceRef.current.capHit = true;
@@ -12019,7 +12218,7 @@ export function AgentsPage({
             return [];
           }
           runCount.set(name, (runCount.get(name) ?? 0) + 1);
-          const spec = activeTeam.agents.find(a => a.name === name);
+          const spec = runTeam.agents.find(a => a.name === name);
           if (!spec) return [];
           const out = await runAgent(spec, input);
           // Run-trace bookkeeping (Layer 2): record who ran (+ domain + count) and,
@@ -12109,7 +12308,7 @@ export function AgentsPage({
         setSupChat(prev => [
           ...prev,
           ...specialistReplies.map(r => {
-            const spec = activeTeam.agents.find(a => a.name === r.name);
+            const spec = runTeam.agents.find(a => a.name === r.name);
             return {
               role: r.name,
               color: spec ? colorForAgent(spec) : "#cbd5e1",
@@ -12143,7 +12342,7 @@ export function AgentsPage({
         "Now write the FINAL answer for the user. Be concise, structured, and quote the relevant specialist when useful. Do not dispatch again.",
       ].join("\n");
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
-      const finalModel = modelFor(orch.name);
+      const finalModel = effectiveModelFor(orch);
       let finalReply: string;
       try {
         finalReply = await streamChatCompletion(
@@ -12154,7 +12353,7 @@ export function AgentsPage({
           projectCwd,
           priorHistory, undefined,   // history: continuity for the final answer
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-          undefined,
+          effectiveToolsFor(orch),
           undefined,
           getClaudeSession(selectedProjectId, orch.name),
         );
@@ -12163,7 +12362,7 @@ export function AgentsPage({
       }
       speakAgentReply(orch.name, finalReply);
       // Persist any `[REMEMBER ...]` facts the orchestrator wrote in its final answer.
-      await harvestMemoryWrites(finalReply);
+      await harvestMemoryWrites(finalReply, runtimeMemoryKey(orch, selectedProjectId));
       // ----- Phase 3b: Critical Thinker post-review of the FINAL answer -----
       // The critic reviews the assembled answer and the orchestrator may revise.
       // Modes mirror the pre-dispatch loop:
@@ -12172,7 +12371,8 @@ export function AgentsPage({
       // STRICTLY NON-BLOCKING in both: a refusal, a satisfied verdict, or any
       // error ships the current answer as-is. The critic can improve the output,
       // never withhold it.
-      if (directorMode || needsCriticalThinkerReview(`${text}\n${finalReply}`)) {
+      if (canDelegateTo(orch, CRITIC_AGENT_NAME) &&
+          (directorMode || needsCriticalThinkerReview(`${text}\n${finalReply}`))) {
         const CRITIC_NAME = CRITIC_AGENT_NAME;
         const MAX_POST_ROUNDS = directorMode ? 2 : 1;
         for (let round = 0; round < MAX_POST_ROUNDS && !ctrl.signal.aborted; round++) {
@@ -12181,10 +12381,10 @@ export function AgentsPage({
           let postReview = "";
           let reviewFailed = false;
           try {
-            const criticModel = modelFor(CRITIC_NAME);
+            const criticModel = criticModelForRun();
             postReview = await streamChatCompletion(
               port, criticModel, providerFor(criticModel),
-              buildCriticalThinkerReviewPrompt(activeTeam, directives),
+              buildCriticalThinkerReviewPrompt(runTeam, directives),
               [
                 "The user's goal:",
                 text,
@@ -12201,7 +12401,7 @@ export function AgentsPage({
               projectCwd,
               undefined, undefined,
               (channel, role, delta) => streamThought(CRITIC_NAME, channel, role, delta),
-              READONLY_LOCAL_TOOLS,
+              criticToolsForRun(),
               undefined,
               getClaudeSession(selectedProjectId, CRITIC_NAME),
             );
@@ -12243,7 +12443,7 @@ export function AgentsPage({
               projectCwd,
               priorHistory, undefined,
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-              undefined,
+              effectiveToolsFor(orch),
               undefined,
               getClaudeSession(selectedProjectId, orch.name),
             );
@@ -12283,7 +12483,7 @@ export function AgentsPage({
             projectCwd,
             priorHistory, undefined,
             (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-            undefined,
+            effectiveToolsFor(orch),
             undefined,
             getClaudeSession(selectedProjectId, orch.name),
           );
@@ -12340,10 +12540,10 @@ export function AgentsPage({
       }
 
       // ----- Phase 5: auto-doc — if code changed AND team has docs -----
-      const docSpec = activeTeam.agents.find(
+      const docSpec = runTeam.agents.find(
         a => a.base === "documentation" || a.name === "documentation" || a.base === "docs" || a.name === "docs"
       );
-      if (docSpec && codeFilesChanged.size > 0 && !ctrl.signal.aborted) {
+      if (docSpec && canDelegateTo(orch, docSpec.name) && codeFilesChanged.size > 0 && !ctrl.signal.aborted) {
         appendThought(docSpec.name, {
           role: "fleet", color: "#7ff0c5",
           text: `📚 auto-dispatch: ${codeFilesChanged.size} code file${codeFilesChanged.size === 1 ? "" : "s"} changed — updating docs`,
@@ -12369,13 +12569,16 @@ export function AgentsPage({
           }
         } catch { /* fall back to shared cwd */ }
         const docCwd = docWt ? docWt.path : projectCwd;
-        const docAllowed = roleByName.get(docSpec.base)?.toolAllowlist;
+        const docAllowed = effectiveToolsFor(docSpec);
         const docSkillIds = [...(roleByName.get(docSpec.base)?.skillAllowlist ?? []), ...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
-        const docSkillBlock = await buildAgentSkillBlock(docSkillIds);
+        const docSkillBlock = await buildAgentSkillBlock(
+          runtimeSkillIds(docSpec, docSkillIds),
+          !!docSpec.runtimePersonal,
+        );
         try {
           await streamChatCompletion(
-            port, modelFor(docSpec.name), providerFor(modelFor(docSpec.name)),
-            buildSpecialistPrompt(activeTeam, docSpec, roleByName, directives, docSkillBlock, docCwd, activeTeam.agents.length <= 3),
+            port, effectiveModelFor(docSpec), providerFor(effectiveModelFor(docSpec)),
+            buildSpecialistPrompt(runTeam, docSpec, roleByName, directives, docSkillBlock, docCwd, runTeam.agents.length <= 3),
             docInstruction, tempFor(docSpec, 0.3), ctrl.signal,
             (delta) => streamLog(docSpec.name, delta),
             docCwd,
@@ -12440,7 +12643,7 @@ export function AgentsPage({
         // (exit 0), so it reads as "done". Catch it and tell the user to re-login
         // (with the exact step) instead of leaving a raw 401 in the transcript.
         if (isAuthError(finalReply)) {
-          const am = authReloginMessage(providerFor(modelFor(orch.name)));
+          const am = authReloginMessage(providerFor(effectiveModelFor(orch)));
           appendLog("system", { role: "system", color: "#ff8c8c", text: am });
           setSupChat(prev => [...prev, { role: "system", color: "#ff8c8c", text: am, ts: Date.now(), seq: nextSeq() }]);
           setRunError("Signed out (401) — re-login required.");
@@ -13259,6 +13462,8 @@ export function AgentsPage({
             initialModel={modelFor(name)}
             initialColor={spec.color ?? ""}
             initialPrompt={spec.extraPrompt ?? ""}
+            initialProfileRef={spec.profileRef}
+            projectId={selectedProjectId}
             models={models}
             accountsStatus={accountsStatus}
             serverState={serverState}

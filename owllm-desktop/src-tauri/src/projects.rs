@@ -144,10 +144,7 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     Ok(())
 }
 
-fn migrate_location_ownership(
-    conn: &rusqlite::Connection,
-    self_id: &str,
-) -> Result<(), String> {
+fn migrate_location_ownership(conn: &rusqlite::Connection, self_id: &str) -> Result<(), String> {
     let mut legacy = conn
         .prepare(
             "SELECT id, location FROM agent_projects \
@@ -356,7 +353,9 @@ fn row_by_id(conn: &rusqlite::Connection, id: &str) -> Result<ProjectRow, String
 }
 
 #[tauri::command]
-pub async fn resolve_project_for_location(input: ResolveProjectInput) -> Result<ProjectRow, String> {
+pub async fn resolve_project_for_location(
+    input: ResolveProjectInput,
+) -> Result<ProjectRow, String> {
     let Some(path) = project_db_path() else {
         return Err("LLM/ tree not found".into());
     };
@@ -818,9 +817,6 @@ pub async fn delete_project(id: String) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn git_ok(cwd: &Path, args: &[&str]) {
         let out = Command::new("git")
@@ -842,10 +838,8 @@ mod tests {
     fn migration_keeps_only_folders_that_exist_on_this_computer() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         ensure_schema(&conn).unwrap();
-        let valid = std::env::temp_dir().join(format!(
-            "owllm-project-binding-test-{}",
-            std::process::id()
-        ));
+        let valid =
+            std::env::temp_dir().join(format!("owllm-project-binding-test-{}", std::process::id()));
         std::fs::create_dir_all(&valid).unwrap();
         let missing = valid.with_extension("missing");
         conn.execute(
@@ -898,7 +892,9 @@ mod tests {
 
     #[test]
     fn resolve_project_for_location_reuses_existing_project_by_git_origin() {
-        let _guard = TEST_ENV_LOCK.lock().expect("project test lock");
+        let _guard = crate::memory::PROJECT_DB_TEST_ENV_LOCK
+            .lock()
+            .expect("project test lock");
         let tmp = tempfile::tempdir().expect("tempdir");
         let db = tmp.path().join("state.db");
         std::env::set_var("OWLLM_PROJECT_DB", &db);
@@ -908,8 +904,19 @@ mod tests {
         std::fs::create_dir_all(&repo_b).unwrap();
         git_ok(&repo_a, &["init", "-q"]);
         git_ok(&repo_b, &["init", "-q"]);
-        git_ok(&repo_a, &["remote", "add", "origin", "git@github.com:OwLLM/Shared.git"]);
-        git_ok(&repo_b, &["remote", "add", "origin", "https://github.com/owllm/shared.git"]);
+        git_ok(
+            &repo_a,
+            &["remote", "add", "origin", "git@github.com:OwLLM/Shared.git"],
+        );
+        git_ok(
+            &repo_b,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/owllm/shared.git",
+            ],
+        );
 
         {
             let conn = rusqlite::Connection::open(&db).unwrap();
@@ -934,7 +941,10 @@ mod tests {
             .expect("resolve project");
 
         assert_eq!(row.id, "project-shared");
-        assert_eq!(normalize_path_key(&row.location), normalize_path_key(&repo_b.to_string_lossy()));
+        assert_eq!(
+            normalize_path_key(&row.location),
+            normalize_path_key(&repo_b.to_string_lossy())
+        );
         assert_eq!(row.repo_url, "https://github.com/owllm/shared");
         std::env::remove_var("OWLLM_PROJECT_DB");
     }

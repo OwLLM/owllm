@@ -244,12 +244,7 @@ pub fn store_imported(incoming: Vec<BrowserCred>) -> Result<usize, String> {
 /// nothing worth saving and typing continues undisturbed.
 pub fn store_typed_login(payload: &str) -> Result<(), String> {
     let v: serde_json::Value = serde_json::from_str(payload).map_err(|e| e.to_string())?;
-    let str_of = |k: &str| {
-        v.get(k)
-            .and_then(|x| x.as_str())
-            .unwrap_or("")
-            .to_string()
-    };
+    let str_of = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
     let origin = normalize_origin(str_of("origin").trim());
     let password = str_of("password");
     if origin.is_empty() || password.is_empty() {

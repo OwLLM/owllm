@@ -5,6 +5,10 @@ type Point = { x: number; y: number };
 type ClickMark = Point & { id: number };
 
 type RecorderState = "idle" | "recording" | "paused" | "saving";
+
+function recorderIsActive(state: RecorderState): boolean {
+  return state === "recording" || state === "paused" || state === "saving";
+}
 type CaptureMode = "window" | "screen";
 
 const TOGGLE_EVENT = "owllm:tutorial-recorder-toggle";
@@ -420,7 +424,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   if (!enabled || !open) return null;
 
   const recording = state === "recording";
-  const active = state === "recording" || state === "paused" || state === "saving";
+  const active = recorderIsActive(state);
   const hidePanel = active;
 
   return (

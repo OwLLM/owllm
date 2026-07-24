@@ -45,7 +45,11 @@ pub struct LanDirectTransport {
 
 impl Transport for LanDirectTransport {
     async fn deliver(&self, frame: SignedEnvelope) -> Result<CommandResult, String> {
-        let reply = super::lan::post_wire(&self.endpoint, &super::protocol::WireMessage::Command(frame)).await?;
+        let reply = super::lan::post_wire(
+            &self.endpoint,
+            &super::protocol::WireMessage::Command(frame),
+        )
+        .await?;
         open_sealed_reply(reply)
     }
 }

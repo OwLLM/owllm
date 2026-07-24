@@ -122,7 +122,11 @@ fn unified_vram_from_ram() -> VramGpu {
     const MIB: u64 = 1024 * 1024;
     let total_mib = ((sys.total_memory() as f64 * 0.75) / MIB as f64) as u32;
     let used_mib = ((sys.used_memory() / MIB) as u32).min(total_mib);
-    VramGpu { index: 0, used_mib, total_mib }
+    VramGpu {
+        index: 0,
+        used_mib,
+        total_mib,
+    }
 }
 
 /// Max CUDA version the installed NVIDIA driver supports, parsed from the
@@ -542,7 +546,11 @@ fn is_integrated_gpu(name: &str) -> bool {
         return true;
     }
     // ARM SoC GPUs (Windows-on-ARM Snapdragon, Mali boards): always unified.
-    if n.contains("adreno") || n.contains("qualcomm") || n.contains("snapdragon") || n.contains("mali") {
+    if n.contains("adreno")
+        || n.contains("qualcomm")
+        || n.contains("snapdragon")
+        || n.contains("mali")
+    {
         return true;
     }
     // Intel iGPUs. NOT Arc — Arc cards have real dedicated VRAM.

@@ -63,7 +63,10 @@ pub fn candidate_ips() -> Vec<String> {
 /// Candidate "ip:port" endpoints for THIS device's listener (empty if not up).
 pub fn candidate_endpoints() -> Vec<String> {
     match current_port() {
-        Some(port) => candidate_ips().into_iter().map(|ip| format!("{ip}:{port}")).collect(),
+        Some(port) => candidate_ips()
+            .into_iter()
+            .map(|ip| format!("{ip}:{port}"))
+            .collect(),
         None => Vec::new(),
     }
 }
@@ -75,7 +78,11 @@ struct ListenerState {
 }
 
 static LISTENER: Lazy<Mutex<ListenerState>> = Lazy::new(|| {
-    Mutex::new(ListenerState { port: None, stop: Arc::new(AtomicBool::new(false)), thread: None })
+    Mutex::new(ListenerState {
+        port: None,
+        stop: Arc::new(AtomicBool::new(false)),
+        thread: None,
+    })
 });
 
 /// The port this device's listener is bound to, if running.
@@ -148,8 +155,10 @@ fn serve_loop(server: tiny_http::Server, stop: Arc<AtomicBool>, rt: tokio::runti
 }
 
 fn respond(req: tiny_http::Request, reply: &WireReply) {
-    let body = serde_json::to_string(reply).unwrap_or_else(|_| "{\"type\":\"error\",\"message\":\"encode\"}".into());
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    let body = serde_json::to_string(reply)
+        .unwrap_or_else(|_| "{\"type\":\"error\",\"message\":\"encode\"}".into());
+    let header =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
     let response = tiny_http::Response::from_string(body).with_header(header);
     let _ = req.respond(response);
 }
@@ -162,13 +171,23 @@ fn handle_request(mut req: tiny_http::Request, rt: &tokio::runtime::Handle) {
     }
     let mut body = String::new();
     if req.as_reader().read_to_string(&mut body).is_err() {
-        respond(req, &WireReply::Error { message: "unreadable body".into() });
+        respond(
+            req,
+            &WireReply::Error {
+                message: "unreadable body".into(),
+            },
+        );
         return;
     }
     let msg: WireMessage = match serde_json::from_str(&body) {
         Ok(m) => m,
         Err(e) => {
-            respond(req, &WireReply::Error { message: format!("bad wire message: {e}") });
+            respond(
+                req,
+                &WireReply::Error {
+                    message: format!("bad wire message: {e}"),
+                },
+            );
             return;
         }
     };
@@ -184,11 +203,15 @@ fn handle_request(mut req: tiny_http::Request, rt: &tokio::runtime::Handle) {
 /// this machine must still approve).
 pub(super) fn handle_pair(pr: PairRequest) -> WireReply {
     if !super::feature_enabled() {
-        return WireReply::Error { message: "remote device control is disabled on this machine".into() };
+        return WireReply::Error {
+            message: "remote device control is disabled on this machine".into(),
+        };
     }
     let expected_id = super::crypto::device_id_from_ed_pub_b64(&pr.from.ed25519_pub);
     if expected_id.as_deref() != Some(pr.from.device_id.as_str()) {
-        return WireReply::Error { message: "device id does not match ed25519 key".into() };
+        return WireReply::Error {
+            message: "device id does not match ed25519 key".into(),
+        };
     }
     if super::crypto::verify_detached(
         &pr.from.ed25519_pub,
@@ -197,7 +220,9 @@ pub(super) fn handle_pair(pr: PairRequest) -> WireReply {
     )
     .is_err()
     {
-        return WireReply::Error { message: "pairing signature invalid".into() };
+        return WireReply::Error {
+            message: "pairing signature invalid".into(),
+        };
     }
     // Record the requester in the registry (so it shows up) + the trust queue.
     let _ = super::registry::upsert(pr.from.clone(), false);
@@ -272,7 +297,10 @@ pub async fn post_wire(endpoint: &str, msg: &WireMessage) -> Result<WireReply, S
 
 /// Send a pairing request to a peer endpoint (controller side). Returns the
 /// peer's public record so the caller can add it to the registry.
-pub async fn send_pair(endpoint: &str, pr: PairRequest) -> Result<super::protocol::DevicePublic, String> {
+pub async fn send_pair(
+    endpoint: &str,
+    pr: PairRequest,
+) -> Result<super::protocol::DevicePublic, String> {
     match post_wire(endpoint, &WireMessage::Pair(pr)).await? {
         WireReply::Paired { device } => Ok(device),
         WireReply::Error { message } => Err(message),

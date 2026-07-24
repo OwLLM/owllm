@@ -50,6 +50,9 @@ import {
 type Msg = {
   role: "user" | "assistant" | "tool";
   content: string;
+  /// Model-facing content can differ from the visible bubble (for example,
+  /// document text is kept here while the bubble shows attachment names).
+  context?: string;
   thinking?: string;
   /// "meta" = page-generated notice (run timing footer, auto-feed pause note):
   /// rendered as a muted line, never sent to the model as history, and never

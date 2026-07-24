@@ -23,7 +23,6 @@ import {
   isMcpToolDisabled, setMcpToolDisabled,
 } from "../agentic/mcpSettings";
 import { sanitizeToolParameters } from "../agentic/localTools";
-import { openWebUrl } from "../../utils/openWebUrl";
 
 const ICONS = "/Page_icons";
 

@@ -184,6 +184,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
     >{label}</button>
   );
   const field: React.CSSProperties = { flex: 1, height: 26, fontSize: 12, padding: "0 8px", background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 7, color: "var(--fg)" };
+  const browserTabs = status?.tabs ?? [];
 
   return (
     <>
@@ -235,14 +236,14 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
       <div style={{ padding: 10, overflow: "auto", ...(inline ? { flex: 1, minHeight: 0 } : {}) }}>
         {tab === "browse" && (
           <>
-            {!!status?.tabs?.length && (
+            {!!browserTabs.length && (
               <div style={{ display: "flex", gap: 4, marginBottom: 8, overflowX: "auto" }}>
-                {status.tabs.map((browserTab) => (
+                {browserTabs.map((browserTab) => (
                   <div key={browserTab.id} style={{ display: "flex", alignItems: "center", minWidth: 0, border: "1px solid " + (browserTab.active ? "rgba(var(--accent-rgb),0.45)" : "var(--border)"), borderRadius: 7, background: browserTab.active ? "rgba(var(--accent-rgb),0.12)" : "var(--bg-surface)" }}>
                     <button onClick={() => void selectBrowserTab(browserTab.id)} title={browserTab.url} style={{ maxWidth: 150, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", border: 0, background: "transparent", color: browserTab.active ? "var(--accent-ink)" : "var(--fg-muted)", cursor: "pointer", fontSize: 10.5, padding: "4px 7px" }}>
                       {browserTab.title || browserTab.url || "New tab"}
                     </button>
-                    {status.tabs.length > 1 && <button onClick={() => void closeBrowserTab(browserTab.id)} title="Close tab" style={{ border: 0, background: "transparent", color: "var(--fg-muted)", cursor: "pointer", padding: "3px 6px" }}>×</button>}
+                    {browserTabs.length > 1 && <button onClick={() => void closeBrowserTab(browserTab.id)} title="Close tab" style={{ border: 0, background: "transparent", color: "var(--fg-muted)", cursor: "pointer", padding: "3px 6px" }}>×</button>}
                   </div>
                 ))}
               </div>

@@ -1,0 +1,183 @@
+{
+  "passed": 0,
+  "failed": 1,
+  "logs": [
+    {
+      "t": 1784832982437,
+      "kind": "step",
+      "message": "Navigate to Studio page"
+    },
+    {
+      "t": 1784832982711,
+      "kind": "console",
+      "message": "[debug] [vite] connecting..."
+    },
+    {
+      "t": 1784832982932,
+      "kind": "console",
+      "message": "[debug] [vite] connected."
+    },
+    {
+      "t": 1784832983240,
+      "kind": "console",
+      "message": "[info] Download the React DevTools for a better development experience: https://reactjs.org/link/react-devtools"
+    },
+    {
+      "t": 1784832983330,
+      "kind": "console",
+      "message": "[info] [cloudCatalogue] remote refresh skipped: SyntaxError: JSON.parse: unexpected end of data at line 1 column 1 of the JSON data"
+    },
+    {
+      "t": 1784832983330,
+      "kind": "console",
+      "message": "[info] [cloudCatalogue] remote refresh skipped: SyntaxError: JSON.parse: unexpected end of data at line 1 column 1 of the JSON data"
+    },
+    {
+      "t": 1784832984654,
+      "kind": "screenshot",
+      "message": "01-studio-initial",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-01-studio-initial.png"
+    },
+    {
+      "t": 1784832984654,
+      "kind": "step",
+      "message": "Switch to Agents view if needed"
+    },
+    {
+      "t": 1784832984691,
+      "kind": "console",
+      "message": "[error] Mock backend: unknown command mcp_list_all_tools JSHandle@object"
+    },
+    {
+      "t": 1784832984692,
+      "kind": "console",
+      "message": "[error] Mock backend: unknown command mcp_list_all_tools JSHandle@object"
+    },
+    {
+      "t": 1784832984692,
+      "kind": "click",
+      "message": "Agents"
+    },
+    {
+      "t": 1784832985177,
+      "kind": "screenshot",
+      "message": "02-studio-agents",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-02-studio-agents.png"
+    },
+    {
+      "t": 1784832985177,
+      "kind": "step",
+      "message": "Open Personal Agents dialog"
+    },
+    {
+      "t": 1784832985198,
+      "kind": "click",
+      "message": "Personal agents"
+    },
+    {
+      "t": 1784832985932,
+      "kind": "screenshot",
+      "message": "03-personal-agents-dialog",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-03-personal-agents-dialog.png"
+    },
+    {
+      "t": 1784832985932,
+      "kind": "step",
+      "message": "Switch to Teams + runs tab"
+    },
+    {
+      "t": 1784832985980,
+      "kind": "click",
+      "message": "Teams + runs"
+    },
+    {
+      "t": 1784832986703,
+      "kind": "screenshot",
+      "message": "04-teams-tab",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-04-teams-tab.png"
+    },
+    {
+      "t": 1784832986703,
+      "kind": "step",
+      "message": "Create a new team"
+    },
+    {
+      "t": 1784832986739,
+      "kind": "click",
+      "message": "New team"
+    },
+    {
+      "t": 1784832987101,
+      "kind": "fill",
+      "message": "Team name",
+      "details": "E2E Test Team"
+    },
+    {
+      "t": 1784832987129,
+      "kind": "fill",
+      "message": "Description",
+      "details": "Browser walkthrough team"
+    },
+    {
+      "t": 1784832987262,
+      "kind": "screenshot",
+      "message": "05-team-draft",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-05-team-draft.png"
+    },
+    {
+      "t": 1784832987263,
+      "kind": "step",
+      "message": "Add specialists"
+    },
+    {
+      "t": 1784832987286,
+      "kind": "click",
+      "message": "+ Specialist"
+    },
+    {
+      "t": 1784832987511,
+      "kind": "click",
+      "message": "+ Specialist"
+    },
+    {
+      "t": 1784832987827,
+      "kind": "screenshot",
+      "message": "06-team-members",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-06-team-members.png"
+    },
+    {
+      "t": 1784832987827,
+      "kind": "step",
+      "message": "Set delegation edges"
+    },
+    {
+      "t": 1784833525903,
+      "kind": "screenshot",
+      "message": "07-delegation-edges",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-07-delegation-edges.png"
+    },
+    {
+      "t": 1784833525903,
+      "kind": "step",
+      "message": "Save team"
+    },
+    {
+      "t": 1784833535906,
+      "kind": "error",
+      "message": "locator.waitFor: Timeout 10000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByText('Save team').first() to be visible\u001b[22m\n",
+      "details": "locator.waitFor: Timeout 10000ms exceeded.\nCall log:\n\u001b[2m  - waiting for getByText('Save team').first() to be visible\u001b[22m\n\n    at clickByText (/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough.mjs:328:25)\n    at /mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough.mjs:431:9"
+    },
+    {
+      "t": 1784833536014,
+      "kind": "screenshot",
+      "message": "ERROR-final",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-ERROR-final.png"
+    },
+    {
+      "t": 1784833536132,
+      "kind": "screenshot",
+      "message": "15-final",
+      "details": "/mnt/c/1_Git/LocaLLM/owllm-desktop/.screenshots/teams-walkthrough-15-final.png"
+    }
+  ]
+}

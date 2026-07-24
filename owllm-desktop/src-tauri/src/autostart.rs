@@ -68,19 +68,24 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[cfg(target_os = "windows")]
 fn set_windows(enabled: bool) -> Result<(), String> {
-    use std::process::Command;
     use std::os::windows::process::CommandExt;
+    use std::process::Command;
     if enabled {
         let exe = exe_path().ok_or("current exe path unavailable")?;
         // Quote the path so spaces survive; reg stores the /d value verbatim.
         let value = format!("\"{}\"", exe.display());
         let out = Command::new("reg")
-            .args(["add", RUN_KEY, "/v", APP_KEY, "/t", "REG_SZ", "/d", &value, "/f"])
+            .args([
+                "add", RUN_KEY, "/v", APP_KEY, "/t", "REG_SZ", "/d", &value, "/f",
+            ])
             .creation_flags(CREATE_NO_WINDOW)
             .output()
             .map_err(|e| format!("reg add: {e}"))?;
         if !out.status.success() {
-            return Err(format!("reg add failed: {}", String::from_utf8_lossy(&out.stderr)));
+            return Err(format!(
+                "reg add failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            ));
         }
     } else {
         let out = Command::new("reg")
@@ -96,8 +101,8 @@ fn set_windows(enabled: bool) -> Result<(), String> {
 
 #[cfg(target_os = "windows")]
 fn is_enabled_windows() -> bool {
-    use std::process::Command;
     use std::os::windows::process::CommandExt;
+    use std::process::Command;
     Command::new("reg")
         .args(["query", RUN_KEY, "/v", APP_KEY])
         .creation_flags(CREATE_NO_WINDOW)

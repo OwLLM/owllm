@@ -22,6 +22,9 @@ use serde::Serialize;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+#[cfg(test)]
+pub(crate) static PROJECT_DB_TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -285,6 +288,54 @@ pub struct TeamMemoryEntry {
     pub kind: String,
 }
 
+/// Capture a bounded, project-authorized context snapshot for immutable
+/// personal-agent team runs. Shared facts are scoped to `project_id`; private
+/// conversational turns are additionally scoped to `(project_id, agent_name)`.
+/// Callers persist the returned values inside their encrypted run snapshot and
+/// must never re-query them while that run executes.
+pub(crate) fn personal_agent_context_snapshot(
+    project_id: &str,
+    agent_name: &str,
+    include_shared: bool,
+    include_private: bool,
+) -> Result<Vec<String>, String> {
+    let conn = open_db()?;
+    let mut out = Vec::new();
+    if include_shared {
+        let mut stmt = conn
+            .prepare(
+                "SELECT content FROM team_memory WHERE scope = ?1 AND kind = 'fact' \
+                 ORDER BY id DESC LIMIT 20",
+            )
+            .map_err(|error| format!("prepare team context snapshot: {error}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![scope_of(project_id)], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| format!("query team context snapshot: {error}"))?;
+        for row in rows {
+            out.push(row.map_err(|error| format!("team context row: {error}"))?);
+        }
+    }
+    if include_private {
+        let mut stmt = conn
+            .prepare(
+                "SELECT content FROM agent_memory WHERE project_id = ?1 AND agent_name = ?2 \
+                 ORDER BY id DESC LIMIT 20",
+            )
+            .map_err(|error| format!("prepare private context snapshot: {error}"))?;
+        let rows = stmt
+            .query_map(rusqlite::params![project_id, agent_name], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(|error| format!("query private context snapshot: {error}"))?;
+        for row in rows {
+            out.push(row.map_err(|error| format!("private context row: {error}"))?);
+        }
+    }
+    Ok(out)
+}
+
 fn scope_of(s: &str) -> String {
     let t = s.trim();
     if t.is_empty() {
@@ -456,10 +507,7 @@ fn tokens_for_fields(key: &str, tags: &str, content: &str) -> RowTokens {
     }
 }
 
-pub(crate) fn reindex_team_memory_row(
-    conn: &rusqlite::Connection,
-    id: i64,
-) -> Result<(), String> {
+pub(crate) fn reindex_team_memory_row(conn: &rusqlite::Connection, id: i64) -> Result<(), String> {
     conn.execute(
         "DELETE FROM team_memory_index WHERE memory_id = ?1",
         rusqlite::params![id],
@@ -797,9 +845,6 @@ pub async fn team_memory_read(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::Mutex;
-
-    static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn temp_db(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -810,7 +855,7 @@ mod tests {
     }
 
     fn with_project_db<T>(name: &str, f: impl FnOnce(&PathBuf) -> T) -> T {
-        let _guard = TEST_ENV_LOCK.lock().expect("memory test lock");
+        let _guard = PROJECT_DB_TEST_ENV_LOCK.lock().expect("memory test lock");
         let path = temp_db(name);
         std::env::set_var("OWLLM_PROJECT_DB", &path);
         let out = f(&path);

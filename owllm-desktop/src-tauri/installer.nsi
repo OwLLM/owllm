@@ -640,6 +640,42 @@ Section WebView2
   ${EndIf}
 SectionEnd
 
+; The updater launches this installer immediately before the running app calls
+; process::exit(0).  On some Windows machines the image section (or security
+; software scanning it) keeps MAINBINARYNAME.exe write-locked for longer than
+; the stock CheckIfAppIsRunning macro's fixed 500 ms delay.  File then shows an
+; "Error opening file for writing" dialog; pressing Retry works only because it
+; supplies the missing delay.  Probe the exact destination file for up to 30 s
+; so normal slow teardown remains unattended.  Mode "a" requests write access
+; without truncating or writing to the existing executable.
+Function WaitForMainBinaryRelease
+  IfFileExists "$INSTDIR\${MAINBINARYNAME}.exe" 0 owllm_binary_released
+
+  StrCpy $R8 0
+  DetailPrint "Waiting for ${PRODUCTNAME} to finish closing..."
+
+  owllm_binary_release_retry:
+    ClearErrors
+    FileOpen $R9 "$INSTDIR\${MAINBINARYNAME}.exe" a
+    IfErrors owllm_binary_still_locked
+    FileClose $R9
+    Goto owllm_binary_released
+
+  owllm_binary_still_locked:
+    IntOp $R8 $R8 + 1
+    ${If} $R8 >= 120
+      ; Keep the wait bounded.  The normal File instruction below will retain
+      ; NSIS's actionable Abort/Retry/Ignore dialog for a persistent external
+      ; lock instead of leaving the installer hung forever.
+      DetailPrint "${PRODUCTNAME} executable is still locked after 30 seconds."
+      Goto owllm_binary_released
+    ${EndIf}
+    Sleep 250
+    Goto owllm_binary_release_retry
+
+  owllm_binary_released:
+FunctionEnd
+
 Section Install
   SetOutPath $INSTDIR
 
@@ -648,6 +684,7 @@ Section Install
   !endif
 
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  Call WaitForMainBinaryRelease
 
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"

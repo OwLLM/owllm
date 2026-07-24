@@ -721,13 +721,11 @@ fn as_str(args: &Value, key: &str) -> String {
 /// no second implementation.
 fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String> {
     match name {
-        "browser_open" => {
-            crate::browser::browser_open_tab(
-                app.clone(),
-                as_str(args, "url"),
-                args.get("activate").and_then(Value::as_bool),
-            )
-        }
+        "browser_open" => crate::browser::browser_open_tab(
+            app.clone(),
+            as_str(args, "url"),
+            args.get("activate").and_then(Value::as_bool),
+        ),
         "browser_tabs" => crate::browser::browser_list_tabs(app.clone()),
         "browser_tab_select" => crate::browser::browser_select_tab(
             app.clone(),
@@ -742,14 +740,26 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
             "navigate".into(),
             json!({ "url": as_str(args, "url"), "tab_id": as_optional_index(args, "tab_id") }),
         ),
-        "browser_snapshot" => {
-            crate::browser::browser_cmd(app.clone(), "snapshot".into(), json!({ "tab_id": as_optional_index(args, "tab_id") }))
-        }
-        "browser_get_text" => {
-            crate::browser::browser_cmd(app.clone(), "get_text".into(), json!({ "tab_id": as_optional_index(args, "tab_id") }))
-        }
-        "browser_back" => crate::browser::browser_cmd(app.clone(), "back".into(), json!({ "tab_id": as_optional_index(args, "tab_id") })),
-        "browser_reload" => crate::browser::browser_cmd(app.clone(), "reload".into(), json!({ "tab_id": as_optional_index(args, "tab_id") })),
+        "browser_snapshot" => crate::browser::browser_cmd(
+            app.clone(),
+            "snapshot".into(),
+            json!({ "tab_id": as_optional_index(args, "tab_id") }),
+        ),
+        "browser_get_text" => crate::browser::browser_cmd(
+            app.clone(),
+            "get_text".into(),
+            json!({ "tab_id": as_optional_index(args, "tab_id") }),
+        ),
+        "browser_back" => crate::browser::browser_cmd(
+            app.clone(),
+            "back".into(),
+            json!({ "tab_id": as_optional_index(args, "tab_id") }),
+        ),
+        "browser_reload" => crate::browser::browser_cmd(
+            app.clone(),
+            "reload".into(),
+            json!({ "tab_id": as_optional_index(args, "tab_id") }),
+        ),
         "browser_click" => crate::browser::browser_cmd(
             app.clone(),
             "click".into(),
@@ -771,9 +781,11 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
             json!({ "key": as_str(args, "key"), "tab_id": as_optional_index(args, "tab_id") }),
         ),
         "browser_device" => crate::browser::browser_set_device(app.clone(), as_str(args, "device")),
-        "browser_screenshot" => {
-            crate::browser::browser_cmd(app.clone(), "screenshot".into(), json!({ "tab_id": as_optional_index(args, "tab_id") }))
-        }
+        "browser_screenshot" => crate::browser::browser_cmd(
+            app.clone(),
+            "screenshot".into(),
+            json!({ "tab_id": as_optional_index(args, "tab_id") }),
+        ),
         "browser_close" => crate::browser::browser_stop(app.clone()),
         "kvm_node" => {
             // `target`/`params` may arrive as objects (per schema) or as JSON
@@ -829,7 +841,9 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
             out.push_str(&format!(
                 "device: {device} · decision: {} · exit_code: {}",
                 res.decision,
-                res.exit_code.map(|c| c.to_string()).unwrap_or_else(|| "n/a".into())
+                res.exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "n/a".into())
             ));
             Ok(out)
         }

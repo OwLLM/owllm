@@ -972,7 +972,11 @@ fn format_sync_result(
     }
 }
 
-fn sync_blocking(host: String, target: Option<String>, verify: Option<String>) -> Result<String, String> {
+fn sync_blocking(
+    host: String,
+    target: Option<String>,
+    verify: Option<String>,
+) -> Result<String, String> {
     let path = std::path::PathBuf::from(&host);
     let lock = crate::fleet::repo_git_lock(&path);
     let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
@@ -981,7 +985,11 @@ fn sync_blocking(host: String, target: Option<String>, verify: Option<String>) -
         .map(|t| t.trim().to_string())
         .unwrap_or_else(|| "main".to_string());
     let verify = verify.filter(|v| !v.trim().is_empty());
-    format_sync_result(crate::sync_core::sync_repo(&path, &target, verify.as_deref()))
+    format_sync_result(crate::sync_core::sync_repo(
+        &path,
+        &target,
+        verify.as_deref(),
+    ))
 }
 
 /// The cross-PC synchronization transaction: fetch → classify → integrate

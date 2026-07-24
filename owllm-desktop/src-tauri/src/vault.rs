@@ -1007,8 +1007,8 @@ fn import_project(
             changed = true;
         }
         let desired = p.locations.get(self_id).cloned();
-        let local_is_real = !local_location.trim().is_empty()
-            && std::path::Path::new(local_location).is_dir();
+        let local_is_real =
+            !local_location.trim().is_empty() && std::path::Path::new(local_location).is_dir();
         let belongs_to_peer = p
             .locations
             .iter()
@@ -1184,7 +1184,10 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let _ = run_git(
+            &["reset", "--hard", &format!("origin/{branch}")],
+            Some(&dir),
+        );
         let dev_dir = dir.join("state").join("devices");
         std::fs::create_dir_all(&dev_dir).map_err(|e| format!("mkdir devices: {e}"))?;
 
@@ -1206,8 +1209,11 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
         }
 
         // 2) publish OUR record.
-        std::fs::write(dev_dir.join(format!("{}.json", safe_id(&self_id))), self_json)
-            .map_err(|e| format!("write device record: {e}"))?;
+        std::fs::write(
+            dev_dir.join(format!("{}.json", safe_id(&self_id))),
+            self_json,
+        )
+        .map_err(|e| format!("write device record: {e}"))?;
 
         // 3) commit + push.
         commit_push(&dir, &branch)?;
@@ -1231,7 +1237,10 @@ pub async fn vault_sync_signing() -> Result<bool, String> {
     tokio::task::spawn_blocking(move || -> Result<bool, String> {
         let branch = current_branch(&dir);
         let _ = run_git(&["fetch", "origin", &branch], Some(&dir));
-        let _ = run_git(&["reset", "--hard", &format!("origin/{branch}")], Some(&dir));
+        let _ = run_git(
+            &["reset", "--hard", &format!("origin/{branch}")],
+            Some(&dir),
+        );
         let sdir = dir.join("state").join("signing");
         std::fs::create_dir_all(&sdir).map_err(|e| format!("mkdir signing: {e}"))?;
         let file = sdir.join("meta.json");

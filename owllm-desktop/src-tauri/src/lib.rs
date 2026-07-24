@@ -19,7 +19,11 @@ use tauri::Emitter;
 pub static APP_VERSION: once_cell::sync::Lazy<String> = once_cell::sync::Lazy::new(|| {
     serde_json::from_str::<serde_json::Value>(include_str!("../tauri.conf.json"))
         .ok()
-        .and_then(|v| v.get("version").and_then(|s| s.as_str()).map(str::to_string))
+        .and_then(|v| {
+            v.get("version")
+                .and_then(|s| s.as_str())
+                .map(str::to_string)
+        })
         .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string())
 });
 
@@ -44,9 +48,9 @@ mod email;
 mod env_manager;
 mod finetuning;
 mod fleet;
+mod gguf;
 mod git;
 mod github;
-mod gguf;
 mod hardware;
 mod huggingface;
 mod kvm;
@@ -58,6 +62,8 @@ mod models;
 mod modules;
 mod overlay_frame;
 mod paths;
+mod personal_agent_teams;
+mod personal_agents;
 mod projects;
 mod pty;
 mod readiness;
@@ -182,6 +188,7 @@ pub fn run() {
             // install ships with a rich, equippable skill set. Gated by a
             // sentinel; retries on a later launch if git/network is unavailable.
             bootstrap::provision_curated_skills_first_run();
+            personal_agent_teams::resume_pending(app.handle().clone());
             // Safe, no-risk disk housekeeping: if a WSL sandbox is already running
             // with large regenerable caches, trim them so the .vhdx doesn't balloon
             // unattended. Background + best-effort — never cold-starts WSL, never
@@ -318,6 +325,32 @@ pub fn run() {
             agents::delete_agent_definition,
             agents::list_skill_packs,
             agents::sync_project_skills,
+            personal_agents::personal_agent_list_profiles,
+            personal_agents::personal_agent_get_profile,
+            personal_agents::personal_agent_save_profile,
+            personal_agents::personal_agent_list_skills,
+            personal_agents::personal_agent_get_skill,
+            personal_agents::personal_agent_validate_skill,
+            personal_agents::personal_agent_save_skill,
+            personal_agents::personal_agent_list_rule_cards,
+            personal_agents::personal_agent_get_rule_card,
+            personal_agents::personal_agent_save_rule_card,
+            personal_agents::personal_agent_get_project_config,
+            personal_agents::personal_agent_save_project_config,
+            personal_agents::personal_agent_resolve,
+            personal_agents::personal_agent_export,
+            personal_agents::personal_agent_import,
+            personal_agent_teams::personal_agent_team_list,
+            personal_agent_teams::personal_agent_team_get,
+            personal_agent_teams::personal_agent_team_save,
+            personal_agent_teams::personal_agent_team_clone,
+            personal_agent_teams::personal_agent_team_archive,
+            personal_agent_teams::personal_agent_team_run_create,
+            personal_agent_teams::personal_agent_team_run_get,
+            personal_agent_teams::personal_agent_team_run_list,
+            personal_agent_teams::personal_agent_team_run_events,
+            personal_agent_teams::personal_agent_team_run_cancel,
+            personal_agent_teams::personal_agent_team_run_recover,
             bridges::load_bridge_configs,
             bridges::bridge_route_get,
             bridges::bridge_route_set,

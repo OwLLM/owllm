@@ -81,7 +81,9 @@ fn kind_str(k: CommandKind) -> &'static str {
 
 fn b64_decode(s: &str) -> Result<Vec<u8>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD.decode(s).map_err(|e| format!("base64 decode: {e}"))
+    STANDARD
+        .decode(s)
+        .map_err(|e| format!("base64 decode: {e}"))
 }
 
 /// Best-effort signed-in GitHub login (identity is *associated* with it, but
@@ -90,7 +92,9 @@ fn github_login() -> Option<String> {
     let p = crate::paths::owllm_config_home()?.join("agent_secrets.json");
     let txt = std::fs::read_to_string(p).ok()?;
     let v: Value = serde_json::from_str(&txt).ok()?;
-    v.get("GITHUB_LOGIN").and_then(Value::as_str).map(|s| s.to_string())
+    v.get("GITHUB_LOGIN")
+        .and_then(Value::as_str)
+        .map(|s| s.to_string())
 }
 
 // ------------------------------------------------------------------
@@ -164,7 +168,10 @@ fn begin_session_control(frame: &SignedEnvelope, session_id: &str) {
 }
 
 fn end_control(request_id: &str) {
-    CONTROL.lock().unwrap().retain(|s| s.request_id != request_id);
+    CONTROL
+        .lock()
+        .unwrap()
+        .retain(|s| s.request_id != request_id);
     emit_control();
 }
 
@@ -178,7 +185,12 @@ fn enabled_path() -> Option<PathBuf> {
 
 fn env_override() -> bool {
     std::env::var("OWLLM_REMOTE_DEVICES")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"))
+        .map(|v| {
+            matches!(
+                v.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
         .unwrap_or(false)
 }
 
@@ -245,7 +257,10 @@ fn relay_url() -> Option<String> {
 
 /// Whether agents may drive remote devices (default OFF).
 fn agents_allowed() -> bool {
-    load_config().get("agents_allowed").and_then(Value::as_bool).unwrap_or(false)
+    load_config()
+        .get("agents_allowed")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn set_agents_allowed_cfg(v: bool) -> Result<(), String> {
@@ -395,7 +410,10 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
 
     // Freshness — reject stale/pre-recorded frames.
     if (now_unix() - frame.ts).abs() > FRESHNESS_SECS {
-        let r = deny(&req.request_id, "stale request (outside the freshness window)");
+        let r = deny(
+            &req.request_id,
+            "stale request (outside the freshness window)",
+        );
         audit_inbound(&frame, &req, &r);
         return Ok(r);
     }
@@ -467,10 +485,16 @@ pub async fn handle_incoming(frame: SignedEnvelope) -> Result<CommandResult, Str
                 }
                 r
             }
-            _ => deny(&req.request_id, "shell permission required for interactive sessions"),
+            _ => deny(
+                &req.request_id,
+                "shell permission required for interactive sessions",
+            ),
         };
         let _ = registry::touch_last_seen(&frame.from_device);
-        if matches!(req.kind, CommandKind::SessionOpen | CommandKind::SessionClose) {
+        if matches!(
+            req.kind,
+            CommandKind::SessionOpen | CommandKind::SessionClose
+        ) {
             audit_inbound(&frame, &req, &result);
         }
         return Ok(result);
@@ -528,7 +552,8 @@ fn recipient_x_pub(to_device: &str) -> Result<[u8; 32], String> {
         .find(|d| d.public.device_id == to_device)
         .ok_or_else(|| "unknown target device (not in registry)".to_string())?;
     let raw = b64_decode(&rec.public.x25519_pub)?;
-    raw.try_into().map_err(|_| "target x25519 pub is not 32 bytes".to_string())
+    raw.try_into()
+        .map_err(|_| "target x25519 pub is not 32 bytes".to_string())
 }
 
 // ------------------------------------------------------------------
@@ -589,7 +614,9 @@ pub fn self_public_record() -> Result<DevicePublic, String> {
 /// project data (e.g. the on-disk folder path) inside the shared vault so each
 /// machine keeps its own path instead of adopting a peer's absolute path.
 pub fn self_device_id() -> Option<String> {
-    identity::load_or_create().ok().map(|me| me.secrets.device_id())
+    identity::load_or_create()
+        .ok()
+        .map(|me| me.secrets.device_id())
 }
 
 /// (device_id, pretty-JSON) of this device's public record — for the vault.
@@ -640,7 +667,12 @@ pub fn vault_verified(device_id: &str, ed25519_pub: &str) -> bool {
 /// is provably ours never waits on a human at THIS keyboard (the exact
 /// remote-machine deadlock: you can't approve on a PC you can't reach).
 /// Never downgrades: an already-Trusted controller keeps its edited policy.
-pub fn ensure_vault_autotrust(device_id: &str, name: &str, ed25519_pub: &str, x25519_pub: &str) -> bool {
+pub fn ensure_vault_autotrust(
+    device_id: &str,
+    name: &str,
+    ed25519_pub: &str,
+    x25519_pub: &str,
+) -> bool {
     if !vault_verified(device_id, ed25519_pub) {
         return false;
     }
@@ -673,7 +705,8 @@ pub fn ingest_peer_record(json: &str) -> Result<bool, String> {
     if peer.device_id == me.secrets.device_id() {
         return Ok(false);
     }
-    if crypto::device_id_from_ed_pub_b64(&peer.ed25519_pub).as_deref() != Some(peer.device_id.as_str())
+    if crypto::device_id_from_ed_pub_b64(&peer.ed25519_pub).as_deref()
+        != Some(peer.device_id.as_str())
     {
         return Err("device record id does not match its ed25519 key".into());
     }
@@ -714,7 +747,9 @@ fn target_endpoints(to_device: &str) -> Vec<String> {
     let Ok(self_pub) = self_public_record() else {
         return vec![];
     };
-    let Some(rec) = registry::list(&self_pub).into_iter().find(|d| d.public.device_id == to_device)
+    let Some(rec) = registry::list(&self_pub)
+        .into_iter()
+        .find(|d| d.public.device_id == to_device)
     else {
         return vec![];
     };
@@ -753,7 +788,12 @@ async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandRe
     let cands = target_endpoints(to_device);
     let mut last_err = String::new();
     for ep in &cands {
-        match (LanDirectTransport { endpoint: ep.clone() }).deliver(env.clone()).await {
+        match (LanDirectTransport {
+            endpoint: ep.clone(),
+        })
+        .deliver(env.clone())
+        .await
+        {
             Ok(r) => return Ok(r),
             Err(e) => last_err = e,
         }
@@ -762,7 +802,10 @@ async fn route_command(env: SignedEnvelope, to_device: &str) -> Result<CommandRe
     // 2) Embedded P2P (iroh): QUIC hole-punch direct, n0 public relays as
     //    fallback. Zero setup — works behind NATs and AP isolation.
     if let Some(node) = target_p2p_node(to_device) {
-        match (p2p::P2pTransport { node_id: node }).deliver(env.clone()).await {
+        match (p2p::P2pTransport { node_id: node })
+            .deliver(env.clone())
+            .await
+        {
             Ok(r) => return Ok(r),
             Err(e) => last_err = e,
         }
@@ -846,12 +889,18 @@ async fn await_approval(frame: &SignedEnvelope, req: &CommandRequest) -> bool {
         command: req.command.clone(),
         requested_at: now_rfc3339(),
     });
-    PENDING_TX.lock().unwrap().insert(req.request_id.clone(), tx);
+    PENDING_TX
+        .lock()
+        .unwrap()
+        .insert(req.request_id.clone(), tx);
     emit_approval();
 
     let decided = tokio::time::timeout(Duration::from_secs(APPROVAL_TIMEOUT_SECS), rx).await;
 
-    PENDING_META.lock().unwrap().retain(|p| p.request_id != req.request_id);
+    PENDING_META
+        .lock()
+        .unwrap()
+        .retain(|p| p.request_id != req.request_id);
     PENDING_TX.lock().unwrap().remove(&req.request_id);
     emit_approval();
 
@@ -1094,7 +1143,11 @@ pub async fn device_pair_by_address(endpoint: String) -> Result<DeviceRecord, St
         return Err("enter the peer's ip:port or node id".into());
     }
     let peer = pair_with_endpoint(&endpoint).await?;
-    Ok(DeviceRecord { public: peer, last_seen: Some(now_rfc3339()), is_self: false })
+    Ok(DeviceRecord {
+        public: peer,
+        last_seen: Some(now_rfc3339()),
+        is_self: false,
+    })
 }
 
 /// Approve a pending controller with an initial permission policy.
@@ -1159,7 +1212,14 @@ async fn send_request(to_device: &str, req: CommandRequest) -> Result<CommandRes
     let plaintext = serde_json::to_vec(&req).map_err(|e| e.to_string())?;
     let mut nonce = [0u8; 24];
     OsRng.fill_bytes(&mut nonce);
-    let env = crypto::seal(&me.secrets, to_device, &recipient_pub, &plaintext, now_unix(), &nonce)?;
+    let env = crypto::seal(
+        &me.secrets,
+        to_device,
+        &recipient_pub,
+        &plaintext,
+        now_unix(),
+        &nonce,
+    )?;
     let result = route_command(env, to_device).await?;
 
     let noisy = matches!(
@@ -1184,7 +1244,10 @@ async fn send_request(to_device: &str, req: CommandRequest) -> Result<CommandRes
 /// Gated by the agents-allowed switch; the target still enforces pairing + the
 /// shell policy. Used by both the local tool loop and the MCP gateway (so
 /// subscription-CLI agents get the same capability).
-pub async fn agent_device_exec(device_name_or_id: &str, command: &str) -> Result<CommandResult, String> {
+pub async fn agent_device_exec(
+    device_name_or_id: &str,
+    command: &str,
+) -> Result<CommandResult, String> {
     if !agents_allowed() {
         return Err("remote device access is disabled — enable 'Let agents use remote devices' on the Devices page".into());
     }
@@ -1195,7 +1258,9 @@ pub async fn agent_device_exec(device_name_or_id: &str, command: &str) -> Result
     let self_pub = self_public_record()?;
     let target = registry::list(&self_pub)
         .into_iter()
-        .find(|d| !d.is_self && (d.public.device_id == want || d.public.name.eq_ignore_ascii_case(want)))
+        .find(|d| {
+            !d.is_self && (d.public.device_id == want || d.public.name.eq_ignore_ascii_case(want))
+        })
         .ok_or_else(|| format!("no paired device '{want}' — pair it on the Devices page first"))?;
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
@@ -1230,7 +1295,11 @@ pub async fn device_session_open(
 
 /// Send keystrokes (base64) to an open remote session.
 #[tauri::command]
-pub async fn device_session_write(to_device: String, session: String, data: String) -> Result<CommandResult, String> {
+pub async fn device_session_write(
+    to_device: String,
+    session: String,
+    data: String,
+) -> Result<CommandResult, String> {
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind: CommandKind::SessionWrite,
@@ -1243,7 +1312,10 @@ pub async fn device_session_write(to_device: String, session: String, data: Stri
 
 /// Drain buffered output from an open remote session (base64 in `data`).
 #[tauri::command]
-pub async fn device_session_read(to_device: String, session: String) -> Result<CommandResult, String> {
+pub async fn device_session_read(
+    to_device: String,
+    session: String,
+) -> Result<CommandResult, String> {
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind: CommandKind::SessionRead,
@@ -1255,7 +1327,12 @@ pub async fn device_session_read(to_device: String, session: String) -> Result<C
 
 /// Resize an open remote session's PTY.
 #[tauri::command]
-pub async fn device_session_resize(to_device: String, session: String, cols: u16, rows: u16) -> Result<CommandResult, String> {
+pub async fn device_session_resize(
+    to_device: String,
+    session: String,
+    cols: u16,
+    rows: u16,
+) -> Result<CommandResult, String> {
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind: CommandKind::SessionResize,
@@ -1269,7 +1346,10 @@ pub async fn device_session_resize(to_device: String, session: String, cols: u16
 
 /// Close an open remote session.
 #[tauri::command]
-pub async fn device_session_close(to_device: String, session: String) -> Result<CommandResult, String> {
+pub async fn device_session_close(
+    to_device: String,
+    session: String,
+) -> Result<CommandResult, String> {
     let req = CommandRequest {
         request_id: uuid::Uuid::new_v4().to_string(),
         kind: CommandKind::SessionClose,

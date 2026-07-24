@@ -46,6 +46,29 @@ const EARTH_TEXTURES = {
   clouds: "/world-map/earth-clouds.png",
 } as const;
 
+// Direction of the subsolar point (where the sun is directly overhead right now)
+// in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
+// real UTC clock. The equirectangular Earth map places longitude 0 at +X and the
+// north pole at +Y (standard Three.js SphereGeometry UVs), giving:
+//   dir = (cosφ·cosλ, sinφ, -cosφ·sinλ)   where φ = solar declination, λ = subsolar longitude.
+function subsolarLocalDir(now: Date, target: THREE.Vector3): THREE.Vector3 {
+  const dayMs = 86_400_000;
+  const yearStart = Date.UTC(now.getUTCFullYear(), 0, 0);
+  const dayOfYear = (Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - yearStart) / dayMs;
+  // Seasonal declination (±23.44°), simple axial-tilt approximation.
+  const decl = -23.44 * Math.cos((2 * Math.PI / 365) * (dayOfYear + 10));
+  const utcHours = now.getUTCHours() + now.getUTCMinutes() / 60 + now.getUTCSeconds() / 3600;
+  // Subsolar longitude (east positive): sun over 0° at 12:00 UTC, +15°/hour westward.
+  const subsolarLon = -(utcHours - 12) * 15;
+  const phi = decl * Math.PI / 180;
+  const lam = subsolarLon * Math.PI / 180;
+  return target.set(
+    Math.cos(phi) * Math.cos(lam),
+    Math.sin(phi),
+    -Math.cos(phi) * Math.sin(lam),
+  );
+}
+
 function hashNumber(value: string): number {
   let hash = 2166136261;
   for (let i = 0; i < value.length; i++) hash = Math.imul(hash ^ value.charCodeAt(i), 16777619);
@@ -190,21 +213,39 @@ function useThemeColors() {
   return colors;
 }
 
-function Globe({ nodes, accent, selectedId, onSelect }: {
+function Globe({ nodes, accent, fleetMode, selectedId, onSelect }: {
   nodes: GlobeNode[];
   accent: string;
+  fleetMode: boolean;
   selectedId: string | null;
   onSelect: (node: GlobeNode) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
+  // Live data (presence snapshots, the 30s fleet refresh) and selection are read
+  // through refs so they update the node layer WITHOUT rebuilding the renderer,
+  // camera, controls or textures — otherwise every update reset the user's zoom.
+  const nodesRef = useRef(nodes);
+  const selectedRef = useRef(selectedId);
+  const onSelectRef = useRef(onSelect);
+  const syncNodesRef = useRef<() => void>(() => {});
+  onSelectRef.current = onSelect;
 
+  useEffect(() => {
+    nodesRef.current = nodes;
+    syncNodesRef.current();
+  }, [nodes]);
+
+  useEffect(() => {
+    selectedRef.current = selectedId;
+  }, [selectedId]);
+
+  // The scene is built once per accent/mode; node meshes are managed separately.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    const hasFleetSatellites = nodes.some((node) => node.kind === "fleet");
-    camera.position.set(0, 0.24, hasFleetSatellites ? 11.8 : 9.4);
+    camera.position.set(0, 0.24, fleetMode ? 11.8 : 6.2);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
@@ -218,8 +259,10 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = hasFleetSatellites ? 8.4 : 5.8;
-    controls.maxDistance = 15;
+    // Let the world zoom in much closer to the surface; fleet keeps the orbits
+    // in frame so satellites stay visible.
+    controls.minDistance = fleetMode ? 6.5 : 3.0;
+    controls.maxDistance = fleetMode ? 16 : 14;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.32;
 
@@ -248,6 +291,12 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
         specularMap: earthSpecular,
         specular: new THREE.Color(0x557799),
         shininess: 18,
+        // Faint self-illumination of the land/ocean so the night hemisphere reads
+        // as a dim twilit Earth rather than pure black. The day map modulates it,
+        // so continents glow softly; on the sunlit side it is negligible.
+        emissive: new THREE.Color(0x2a3a55),
+        emissiveMap: earthMap,
+        emissiveIntensity: 0.32,
       }),
     );
     earthGroup.add(globe);
@@ -297,61 +346,88 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       sizeAttenuation: true,
     })));
 
-    scene.add(new THREE.HemisphereLight(0x91bdff, 0x071224, 1.25));
-    scene.add(new THREE.AmbientLight(0x8aaee0, 0.42));
+    // Ground color lifted from near-black so the shadowed hemisphere keeps a dim
+    // blue twilight fill instead of collapsing to black.
+    scene.add(new THREE.HemisphereLight(0x91bdff, 0x1b2a44, 1.3));
+    scene.add(new THREE.AmbientLight(0x8aaee0, 0.5));
+    // Sun tracks the real subsolar point each frame (see animate loop); this is
+    // just the initial placement so the first rendered frame is already correct.
     const sunLight = new THREE.DirectionalLight(0xffffff, 3.9);
-    sunLight.position.set(5.8, 2.6, 7.2);
+    const sunLocal = new THREE.Vector3();
+    const sunQuat = new THREE.Quaternion();
+    sunLight.position.copy(subsolarLocalDir(new Date(), sunLocal)).multiplyScalar(10);
     scene.add(sunLight);
     const rimLight = new THREE.PointLight(new THREE.Color(accent), 1.6, 20);
     rimLight.position.set(-6, -1.5, -5);
     scene.add(rimLight);
 
+    const nodeLayer = new THREE.Group();
+    scene.add(nodeLayer);
     const clickable: THREE.Mesh[] = [];
     const pulseMeshes: THREE.Mesh[] = [];
     const orbitRings: { line: THREE.LineLoop; node: GlobeNode }[] = [];
     const nodeMeshes: { mesh: THREE.Mesh; halo: THREE.Mesh; label?: THREE.Sprite; node: GlobeNode; baseScale: number }[] = [];
 
-    nodes.forEach((node, index) => {
-      const color = node.online ? accent : 0x718096;
-      const isSelected = selectedId === node.id;
-      const baseScale = node.kind === "fleet" ? 1 : 1;
+    const disposeNodeObject = (object: any) => {
+      object.geometry?.dispose?.();
+      const material = object.material;
+      if (Array.isArray(material)) material.forEach((entry: any) => { entry.map?.dispose?.(); entry.dispose?.(); });
+      else if (material) { material.map?.dispose?.(); material.dispose?.(); }
+    };
 
-      if (node.kind === "fleet" && node.orbit) {
-        const orbit = node.orbit;
-        const ringGeometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 192 }, (_, i) =>
-          orbitPosition({ ...orbit, phase: i / 192 * Math.PI * 2, speed: 0 }, 0),
-        ));
-        const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: node.online ? 0.34 : 0.14 }));
-        scene.add(ring);
-        orbitRings.push({ line: ring, node });
-      }
+    // Rebuild only the node layer in place. The earth, lights, camera and
+    // controls are untouched, so incoming presence/fleet data never resets zoom.
+    const buildNodes = () => {
+      for (const child of [...nodeLayer.children]) { nodeLayer.remove(child); disposeNodeObject(child); }
+      clickable.length = 0;
+      pulseMeshes.length = 0;
+      orbitRings.length = 0;
+      nodeMeshes.length = 0;
 
-      const geometry = node.kind === "fleet"
-        ? new THREE.OctahedronGeometry(0.15, 1)
-        : new THREE.SphereGeometry(0.07, 20, 16);
-      const material = new THREE.MeshStandardMaterial({
-        color,
-        emissive: new THREE.Color(color).multiplyScalar(node.online ? 0.6 : 0.1),
-        roughness: 0.3,
-        metalness: 0.4,
+      nodesRef.current.forEach((node, index) => {
+        const color = node.online ? accent : 0x718096;
+        const baseScale = node.kind === "fleet" ? 1 : 1;
+
+        if (node.kind === "fleet" && node.orbit) {
+          const orbit = node.orbit;
+          const ringGeometry = new THREE.BufferGeometry().setFromPoints(Array.from({ length: 192 }, (_, i) =>
+            orbitPosition({ ...orbit, phase: i / 192 * Math.PI * 2, speed: 0 }, 0),
+          ));
+          const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: node.online ? 0.34 : 0.14 }));
+          nodeLayer.add(ring);
+          orbitRings.push({ line: ring, node });
+        }
+
+        const geometry = node.kind === "fleet"
+          ? new THREE.OctahedronGeometry(0.15, 1)
+          : new THREE.SphereGeometry(0.07, 20, 16);
+        const material = new THREE.MeshStandardMaterial({
+          color,
+          emissive: new THREE.Color(color).multiplyScalar(node.online ? 0.6 : 0.1),
+          roughness: 0.3,
+          metalness: 0.4,
+        });
+        const mesh = new THREE.Mesh(geometry, material);
+        mesh.userData.node = node;
+        nodeLayer.add(mesh);
+        clickable.push(mesh);
+
+        const halo = new THREE.Mesh(
+          new THREE.SphereGeometry(node.kind === "fleet" ? 0.31 : 0.16, 24, 18),
+          new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
+        );
+        halo.userData.offset = index * 0.63;
+        nodeLayer.add(halo);
+        pulseMeshes.push(halo);
+
+        const label = node.kind === "fleet" ? satelliteLabel(node.label, new THREE.Color(color).getStyle()) : undefined;
+        if (label) nodeLayer.add(label);
+        nodeMeshes.push({ mesh, halo, label, node, baseScale });
       });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.userData.node = node;
-      scene.add(mesh);
-      clickable.push(mesh);
+    };
 
-      const halo = new THREE.Mesh(
-        new THREE.SphereGeometry(node.kind === "fleet" ? 0.31 : 0.16, 24, 18),
-        new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
-      );
-      halo.userData.offset = index * 0.63;
-      scene.add(halo);
-      pulseMeshes.push(halo);
-
-      const label = node.kind === "fleet" ? satelliteLabel(node.label, new THREE.Color(color).getStyle()) : undefined;
-      if (label) scene.add(label);
-      nodeMeshes.push({ mesh, halo, label, node, baseScale });
-    });
+    syncNodesRef.current = buildNodes;
+    buildNodes();
 
     const raycaster = new THREE.Raycaster();
     const pointer = new THREE.Vector2();
@@ -361,7 +437,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       pointer.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
       raycaster.setFromCamera(pointer, camera);
       const hit = raycaster.intersectObjects(clickable, false)[0];
-      if (hit?.object?.userData?.node) onSelect(hit.object.userData.node as GlobeNode);
+      if (hit?.object?.userData?.node) onSelectRef.current(hit.object.userData.node as GlobeNode);
     };
     renderer.domElement.addEventListener("pointerup", click);
 
@@ -385,13 +461,20 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       atmosphere.rotation.y = elapsed * 0.018;
       outerGlow.rotation.y = -elapsed * 0.006;
 
+      // Real-clock sun: aim the light at the current subsolar point, expressed in
+      // the globe's live world orientation so the lit hemisphere stays over the
+      // true daylit geography as the globe rotates.
+      subsolarLocalDir(new Date(), sunLocal).applyQuaternion(globe.getWorldQuaternion(sunQuat));
+      sunLight.position.copy(sunLocal).multiplyScalar(10);
+
       pulseMeshes.forEach((mesh) => {
         const scale = 0.78 + (Math.sin(elapsed * 2.4 + mesh.userData.offset) + 1) * 0.22;
         mesh.scale.setScalar(scale);
       });
 
+      const currentSelected = selectedRef.current;
       nodeMeshes.forEach(({ mesh, halo, label, node, baseScale }) => {
-        const isSelected = selectedId === node.id;
+        const isSelected = currentSelected === node.id;
         const selectedScale = isSelected ? 1.55 : 1;
         if (node.kind === "fleet" && node.orbit) {
           const position = orbitPosition(node.orbit, elapsed);
@@ -414,6 +497,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     frame = requestAnimationFrame(animate);
 
     return () => {
+      syncNodesRef.current = () => {};
       cancelAnimationFrame(frame);
       resizeObserver.disconnect();
       renderer.domElement.removeEventListener("pointerup", click);
@@ -430,7 +514,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [accent, nodes, onSelect, selectedId]);
+  }, [accent, fleetMode]);
 
   return <div ref={hostRef} data-ui="WorldMap:globe" style={{ position: "absolute", inset: 0 }} />;
 }
@@ -579,7 +663,7 @@ export default function WorldMapPage() {
 
         <div className="world-map-layout" style={{ display: "grid", gap: 14, flex: 1, minHeight: 450 }}>
           <section className="world-map-globe-panel" style={{ ...panelStyle(), position: "relative", minHeight: 450, overflow: "hidden", background: "radial-gradient(circle at 50% 44%, #142b50 0%, #081326 38%, #020713 72%, #01030a 100%)" }}>
-            <Globe nodes={nodes} accent={colors.accentInk} selectedId={selected?.id ?? null} onSelect={setSelected} />
+            <Globe nodes={nodes} accent={colors.accentInk} fleetMode={mode === "fleet"} selectedId={selected?.id ?? null} onSelect={setSelected} />
             <div style={{ position: "absolute", top: 13, left: 13, display: "flex", gap: 8, pointerEvents: "none", flexWrap: "wrap" }}>
               <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid rgba(var(--accent-rgb),.28)", color: "var(--fg-strong)", fontSize: 11.5 }}>
                 <b style={{ color: "var(--accent-ink)" }}>{onlineCount}</b> {mode === "world" ? t("nodes online") : t("devices online")}
@@ -634,7 +718,7 @@ export default function WorldMapPage() {
               </div>
             )}
 
-            <div style={{ ...panelStyle(), padding: 15, flex: 1, minHeight: 180, overflow: "auto" }}>
+            <div style={{ ...panelStyle(), padding: 15, flex: 1, minHeight: 140, maxHeight: "56vh", overflowY: "auto" }}>
               <div style={{ color: "var(--fg-strong)", fontWeight: 750, fontSize: 13, marginBottom: 10 }}>{t("Network signals")}</div>
               {error && <div style={{ color: "var(--error)", fontSize: 11.5, marginBottom: 10 }}>{error}</div>}
               {nodes.length === 0 ? (

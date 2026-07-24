@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import LogBox from "../../components/LogBox";
+import KvmNodePanel from "./KvmNodePanel";
 import RemoteTerminal from "./RemoteTerminal";
 import { isDeviceOnline } from "./deviceLiveness";
 import * as rd from "./remoteDevices";
@@ -338,6 +339,9 @@ export default function DevicesPage() {
           discoverMsg={discoverMsg}
         />
       </section>
+
+      {/* Hardware KVM control belongs with the rest of the device fleet. */}
+      <KvmNodePanel />
 
       {/* Network / WAN reachability */}
       {identity && (

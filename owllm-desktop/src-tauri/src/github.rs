@@ -44,6 +44,19 @@ pub struct GithubConnect {
     pub gh_configured: bool,
 }
 
+#[derive(Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubRepository {
+    pub full_name: String,
+    pub name: String,
+    pub owner_login: String,
+    pub private: bool,
+    pub html_url: String,
+    pub clone_url: String,
+    pub updated_at: String,
+    pub description: Option<String>,
+}
+
 /// Validate a token against the GitHub API and return (login, numeric id).
 /// Uses host `curl` so we don't pull in an HTTP client. A rejected token
 /// yields a JSON `{message: "Bad credentials"}` which we surface verbatim.
@@ -85,6 +98,97 @@ fn curl_github_user(token: &str) -> Result<(String, i64), String> {
             .unwrap_or("unknown error");
         Err(format!("GitHub rejected the token: {msg}"))
     }
+}
+
+fn curl_github_repositories(token: &str) -> Result<Vec<GithubRepository>, String> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-s",
+        "-H",
+        &format!("Authorization: Bearer {token}"),
+        "-H",
+        "User-Agent: owllm-desktop",
+        "-H",
+        "X-GitHub-Api-Version: 2022-11-28",
+        "-H",
+        "Accept: application/vnd.github+json",
+        "https://api.github.com/user/repos?per_page=100&sort=updated&affiliation=owner,collaborator,organization_member",
+    ]);
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let out = cmd
+        .output()
+        .map_err(|e| format!("couldn't run curl to reach GitHub: {e}"))?;
+    let body = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(body.trim()).map_err(|_| {
+        format!(
+            "GitHub returned a non-JSON repository response (offline?): {}",
+            body.chars().take(200).collect::<String>()
+        )
+    })?;
+    if let Some(msg) = v.get("message").and_then(|x| x.as_str()) {
+        return Err(format!("GitHub couldn't list repositories: {msg}"));
+    }
+    let rows = v
+        .as_array()
+        .ok_or_else(|| "GitHub returned an unexpected repository list response.".to_string())?;
+    let mut repos = Vec::new();
+    for row in rows {
+        let full_name = row
+            .get("full_name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = row
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let owner_login = row
+            .pointer("/owner/login")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let html_url = row
+            .get("html_url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let clone_url = row
+            .get("clone_url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if full_name.is_empty() || name.is_empty() || owner_login.is_empty() || clone_url.is_empty()
+        {
+            continue;
+        }
+        repos.push(GithubRepository {
+            full_name,
+            name,
+            owner_login,
+            private: row
+                .get("private")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
+            html_url,
+            clone_url,
+            updated_at: row
+                .get("updated_at")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            description: row
+                .get("description")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
+        });
+    }
+    Ok(repos)
 }
 
 /// Write git credentials + identity into the distro, and (best effort) log
@@ -167,6 +271,15 @@ pub fn github_status() -> GithubStatus {
     let connected = crate::accounts::accounts_get_secret("GITHUB_TOKEN".to_string()).is_some();
     let login = crate::accounts::accounts_get_secret("GITHUB_LOGIN".to_string());
     GithubStatus { connected, login }
+}
+
+#[tauri::command]
+pub async fn github_list_repositories() -> Result<Vec<GithubRepository>, String> {
+    let token = crate::accounts::accounts_get_secret("GITHUB_TOKEN".to_string())
+        .ok_or_else(|| "Sign in with GitHub first to choose from your repositories.".to_string())?;
+    tokio::task::spawn_blocking(move || curl_github_repositories(&token))
+        .await
+        .map_err(|e| format!("join error: {e}"))?
 }
 
 /// Connect a GitHub account: validate the token, persist it, and wire git +
@@ -545,7 +658,11 @@ pub async fn github_repo_url(cwd: String) -> Result<String, String> {
             return Ok(String::new());
         }
         let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Ok(if url.contains("github.com") { url } else { String::new() })
+        Ok(if url.contains("github.com") {
+            url
+        } else {
+            String::new()
+        })
     })
     .await
     .map_err(|e| format!("join error: {e}"))?
@@ -554,23 +671,50 @@ pub async fn github_repo_url(cwd: String) -> Result<String, String> {
 /// Materialize a portable project on THIS computer. The caller chooses a
 /// parent folder; the repository name becomes a new child directory. We never
 /// reuse a peer device's absolute path.
+fn canonical_github_clone_url(input: &str) -> Result<(String, String), String> {
+    let raw = input.trim();
+    let path = raw
+        .strip_prefix("https://github.com/")
+        .or_else(|| raw.strip_prefix("git@github.com:"))
+        .or_else(|| raw.strip_prefix("ssh://git@github.com/"))
+        .ok_or_else(|| {
+            "Enter a GitHub repository URL such as https://github.com/owner/repository.".to_string()
+        })?;
+    if path.contains(['?', '#', '@']) {
+        return Err(
+            "The GitHub repository URL must not contain credentials, a query, or a fragment."
+                .to_string(),
+        );
+    }
+    let clean = path.trim_end_matches('/').trim_end_matches(".git");
+    let parts = clean.split('/').collect::<Vec<_>>();
+    let valid_part = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    };
+    if parts.len() != 2 || !parts.iter().all(|part| valid_part(part)) {
+        return Err(
+            "Enter a GitHub repository URL containing exactly an owner and repository name."
+                .to_string(),
+        );
+    }
+    Ok((
+        format!("https://github.com/{}/{}.git", parts[0], parts[1]),
+        parts[1].to_string(),
+    ))
+}
+
 #[tauri::command]
 pub async fn github_clone_project(repo_url: String, parent: String) -> Result<String, String> {
-    let repo_url = repo_url.trim().to_string();
-    if !repo_url.contains("github.com") {
-        return Err("This project has no valid GitHub repository.".to_string());
-    }
+    let (repo_url, leaf) = canonical_github_clone_url(&repo_url)?;
     let parent = std::path::PathBuf::from(parent.trim());
     if !parent.is_dir() {
         return Err("Choose an existing parent folder on this computer.".to_string());
     }
-    let leaf = repo_url
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .rsplit(['/', ':'])
-        .next()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or("project");
     let destination = parent.join(leaf);
     if destination.exists() {
         return Err(format!(
@@ -592,7 +736,9 @@ pub async fn github_clone_project(repo_url: String, parent: String) -> Result<St
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let out = cmd.output().map_err(|e| format!("couldn't run git clone: {e}"))?;
+        let out = cmd
+            .output()
+            .map_err(|e| format!("couldn't run git clone: {e}"))?;
         if !out.status.success() {
             let _ = std::fs::remove_dir_all(&destination);
             return Err(format!(
@@ -645,4 +791,35 @@ pub async fn github_disconnect(distro: Option<String>) -> Result<(), String> {
     .await
     .map_err(|e| format!("join error: {e}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_github_clone_url;
+
+    #[test]
+    fn clone_url_accepts_supported_github_forms() {
+        assert_eq!(
+            canonical_github_clone_url("https://github.com/OwLLM/owllm").unwrap(),
+            ("https://github.com/OwLLM/owllm.git".into(), "owllm".into())
+        );
+        assert_eq!(
+            canonical_github_clone_url("git@github.com:OwLLM/owllm.git").unwrap(),
+            ("https://github.com/OwLLM/owllm.git".into(), "owllm".into())
+        );
+    }
+
+    #[test]
+    fn clone_url_rejects_unsafe_or_ambiguous_hosts_and_paths() {
+        for url in [
+            "https://evilgithub.com/owner/repo",
+            "http://github.com/owner/repo",
+            "https://github.com/owner/repo/extra",
+            "https://github.com/owner/repo?token=secret",
+            "https://token@github.com/owner/repo",
+            "https://github.com/../repo",
+        ] {
+            assert!(canonical_github_clone_url(url).is_err(), "accepted {url}");
+        }
+    }
 }

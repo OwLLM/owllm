@@ -16,7 +16,9 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
 use super::policy::{authorize, decision_label};
-use super::protocol::{Authorization, CommandKind, CommandRequest, CommandResult, PermissionPolicy};
+use super::protocol::{
+    Authorization, CommandKind, CommandRequest, CommandResult, PermissionPolicy,
+};
 
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -78,7 +80,12 @@ async fn wait_cancel(rx: &mut watch::Receiver<bool>) {
     }
 }
 
-fn refused(req: &CommandRequest, decision: Authorization, msg: &str, started: Instant) -> CommandResult {
+fn refused(
+    req: &CommandRequest,
+    decision: Authorization,
+    msg: &str,
+    started: Instant,
+) -> CommandResult {
     CommandResult {
         request_id: req.request_id.clone(),
         ok: false,
@@ -87,7 +94,8 @@ fn refused(req: &CommandRequest, decision: Authorization, msg: &str, started: In
         exit_code: None,
         error: Some(msg.to_string()),
         decision: decision_label(decision).to_string(),
-        duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
+        duration_ms: started.elapsed().as_millis() as u64,
+        ..Default::default()
     }
 }
 
@@ -125,9 +133,12 @@ pub async fn execute(req: &CommandRequest, policy: &PermissionPolicy) -> Command
         | CommandKind::SessionWrite
         | CommandKind::SessionRead
         | CommandKind::SessionResize
-        | CommandKind::SessionClose => {
-            refused(req, Authorization::Denied, "session op mis-routed to executor", started)
-        }
+        | CommandKind::SessionClose => refused(
+            req,
+            Authorization::Denied,
+            "session op mis-routed to executor",
+            started,
+        ),
     }
 }
 
@@ -139,7 +150,9 @@ pub async fn execute_dangerous(req: &CommandRequest) -> CommandResult {
         CommandKind::FileWrite => run_file_write(req, started),
         // Admin runs as an (audited) shell command — the elevation semantics are
         // OS-specific; v1 treats it as an explicitly-approved privileged command.
-        CommandKind::Admin => run_process(req, clamp_timeout(req.timeout_ms), started, ProcKind::Shell).await,
+        CommandKind::Admin => {
+            run_process(req, clamp_timeout(req.timeout_ms), started, ProcKind::Shell).await
+        }
         _ => refused(req, Authorization::Denied, "not a dangerous kind", started),
     };
     // We're only here because the human approved it.
@@ -171,7 +184,8 @@ fn run_file_write(req: &CommandRequest, started: Instant) -> CommandResult {
             exit_code: Some(0),
             error: None,
             decision: "approved".into(),
-            duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
+            duration_ms: started.elapsed().as_millis() as u64,
+            ..Default::default()
         },
         Err(e) => finish_err(req, started, &format!("write failed: {e}")),
     }
@@ -182,7 +196,9 @@ fn run_file_write(req: &CommandRequest, started: Instant) -> CommandResult {
 // ------------------------------------------------------------------
 
 fn diagnostics(req: &CommandRequest, started: Instant) -> CommandResult {
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
     let wsl = wsl_summary();
     let text = format!(
         "OwLLM device diagnostics\n\
@@ -209,7 +225,8 @@ fn diagnostics(req: &CommandRequest, started: Instant) -> CommandResult {
         exit_code: Some(0),
         error: None,
         decision: "allowed".into(),
-        duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
+        duration_ms: started.elapsed().as_millis() as u64,
+        ..Default::default()
     }
 }
 
@@ -244,11 +261,17 @@ enum ProcKind {
 fn shell_invocation(command: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
-        ("cmd".to_string(), vec!["/C".to_string(), command.to_string()])
+        (
+            "cmd".to_string(),
+            vec!["/C".to_string(), command.to_string()],
+        )
     }
     #[cfg(not(windows))]
     {
-        ("sh".to_string(), vec!["-c".to_string(), command.to_string()])
+        (
+            "sh".to_string(),
+            vec!["-c".to_string(), command.to_string()],
+        )
     }
 }
 
@@ -321,7 +344,8 @@ async fn run_process(
         exit_code,
         error,
         decision: "allowed".into(),
-        duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
+        duration_ms: started.elapsed().as_millis() as u64,
+        ..Default::default()
     }
 }
 
@@ -342,7 +366,8 @@ fn finish_err(req: &CommandRequest, started: Instant, msg: &str) -> CommandResul
         exit_code: None,
         error: Some(msg.to_string()),
         decision: "allowed".into(),
-        duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
+        duration_ms: started.elapsed().as_millis() as u64,
+        ..Default::default()
     }
 }
 
@@ -354,7 +379,12 @@ async fn run_wsl(req: &CommandRequest, timeout_ms: u64, started: Instant) -> Com
     #[cfg(not(windows))]
     {
         let _ = timeout_ms;
-        return refused(req, Authorization::Allowed, "WSL is only available on Windows targets", started);
+        return refused(
+            req,
+            Authorization::Allowed,
+            "WSL is only available on Windows targets",
+            started,
+        );
     }
     #[cfg(windows)]
     {
@@ -362,16 +392,27 @@ async fn run_wsl(req: &CommandRequest, timeout_ms: u64, started: Instant) -> Com
             return refused(req, Authorization::Allowed, "empty command", started);
         }
         let Some(distro) = crate::wsl::best_linux_distro() else {
-            return refused(req, Authorization::Allowed, "no usable WSL distro on this device", started);
+            return refused(
+                req,
+                Authorization::Allowed,
+                "no usable WSL distro on this device",
+                started,
+            );
         };
         let script = req.command.clone();
         // run_in_distro_script is blocking; run it off-thread with a timeout.
         // Cancellation of an in-flight WSL command is best-effort in v1 (the
         // blocking task cannot be force-killed) — the timeout still bounds it.
-        let join = tokio::task::spawn_blocking(move || crate::wsl::run_in_distro_script(&distro, &script));
+        let join =
+            tokio::task::spawn_blocking(move || crate::wsl::run_in_distro_script(&distro, &script));
         let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), join).await;
         match result {
-            Err(_) => refused(req, Authorization::Allowed, &format!("WSL command timed out after {timeout_ms} ms"), started),
+            Err(_) => refused(
+                req,
+                Authorization::Allowed,
+                &format!("WSL command timed out after {timeout_ms} ms"),
+                started,
+            ),
             Ok(Err(_join_err)) => finish_err(req, started, "WSL task panicked"),
             Ok(Ok(Ok(out))) => CommandResult {
                 request_id: req.request_id.clone(),
@@ -381,7 +422,8 @@ async fn run_wsl(req: &CommandRequest, timeout_ms: u64, started: Instant) -> Com
                 exit_code: Some(0),
                 error: None,
                 decision: "allowed".into(),
-                duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
+                duration_ms: started.elapsed().as_millis() as u64,
+                ..Default::default()
             },
             Ok(Ok(Err(e))) => CommandResult {
                 request_id: req.request_id.clone(),
@@ -391,7 +433,8 @@ async fn run_wsl(req: &CommandRequest, timeout_ms: u64, started: Instant) -> Com
                 exit_code: None,
                 error: Some("WSL command failed".to_string()),
                 decision: "allowed".into(),
-                duration_ms: started.elapsed().as_millis() as u64, ..Default::default()
+                duration_ms: started.elapsed().as_millis() as u64,
+                ..Default::default()
             },
         }
     }

@@ -18,8 +18,9 @@
 //        → git add -A; git commit -m "[<agent>] <summary>"
 //        → returns commit sha + count of files changed
 //   4. fleet_worktree_merge(path, project_cwd, agent, branch)
-//        → from project_cwd: git merge --squash -X theirs <branch>; commit
-//        → overlapping hunks deterministically keep the isolated page's work
+//        → from project_cwd: git merge --squash <branch>; commit
+//        → plain three-way merge; real overlapping edits return Conflict
+//          with both sides preserved (never silently prefer one side)
 //   5. fleet_worktree_remove(path, branch, keep_on_failure)
 //
 // Non-git projects: every command returns an `Outcome::NotAGitRepo`
@@ -52,7 +53,7 @@ fn fleet_root() -> Option<PathBuf> {
 /// index lock; concurrent calls otherwise fail with "Unable to create
 /// '.git/index.lock': File exists", which surfaced as "Couldn't create the
 /// worktree" when opening a second page on a project. Keyed by the repo path.
-fn repo_git_lock(repo: &Path) -> Arc<Mutex<()>> {
+pub(crate) fn repo_git_lock(repo: &Path) -> Arc<Mutex<()>> {
     static LOCKS: OnceLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> = OnceLock::new();
     let map = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let key = repo.to_string_lossy().to_string();
@@ -117,35 +118,6 @@ fn resolve_app_scratch_conflicts(cwd: &Path, conflicts: &str) -> Result<(), Stri
         if !ok {
             return Err(format!(
                 "could not resolve app-owned merge conflict {path}: {}",
-                err.trim()
-            ));
-        }
-    }
-    Ok(())
-}
-
-/// Finish conflicts the recursive strategy cannot resolve (for example
-/// modify/delete, rename/delete, add/add binary files). The isolated branch is
-/// the user's explicit page/session output, so its final state is authoritative
-/// for an irreducible path: restore the branch's file, or remove the path when
-/// the branch deleted it. Text conflicts are normally handled more precisely by
-/// `-X theirs`, which preserves current-main edits outside overlapping hunks.
-fn resolve_user_conflicts_from_branch(
-    cwd: &Path,
-    branch: &str,
-    conflicts: &[String],
-) -> Result<(), String> {
-    for path in conflicts {
-        let branch_path = format!("{branch}:{path}");
-        let (exists_on_branch, _, _) = git(cwd, &["cat-file", "-e", &branch_path])?;
-        let (ok, _, err) = if exists_on_branch {
-            git(cwd, &["checkout", branch, "--", path])?
-        } else {
-            git(cwd, &["rm", "-f", "--ignore-unmatch", "--", path])?
-        };
-        if !ok {
-            return Err(format!(
-                "could not apply the isolated page's version of {path}: {}",
                 err.trim()
             ));
         }
@@ -977,7 +949,7 @@ pub async fn fleet_worktree_diff(
 // 4. MERGE — squash-merge the agent's branch back into project_cwd
 // ------------------------------------------------------------------
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum MergeOutcome {
     /// Cleanly merged + committed in project_cwd.
@@ -987,6 +959,11 @@ pub enum MergeOutcome {
     },
     /// Nothing to merge — the agent didn't change anything (No-op).
     NoChanges,
+    /// Real overlapping edits. Both sides are preserved untouched — the page
+    /// branch keeps its commits and the project checkout is reset to HEAD.
+    Conflict {
+        files: Vec<String>,
+    },
     Error {
         message: String,
     },
@@ -1038,15 +1015,12 @@ fn fleet_worktree_merge_blocking(
         Ok(backup) => backup,
         Err(message) => return Ok(MergeOutcome::Error { message }),
     };
-    // Squash keeps the page's checkpoints as one project commit. Worktrees can
-    // remain open across many releases, so ordinary three-way conflicts are
-    // expected rather than exceptional. Keep current-main edits outside the
-    // overlap, and deterministically prefer the isolated page inside an
-    // overlapping hunk: that is the work the user just asked Merge to retain.
-    let (ok, _, err) = git(
-        &cwd,
-        &["merge", "--squash", "--no-commit", "-X", "theirs", &branch],
-    )?;
+    // Squash keeps the page's checkpoints as one project commit. Plain
+    // three-way merge, no `-X theirs`: silently preferring one side inside an
+    // overlapping hunk is how integrated work got dropped (SmartImage ×3, the
+    // v0.9.24 seven-file drop). Only app-owned disposable runtime files are
+    // auto-resolved; a real source overlap stops with BOTH sides preserved.
+    let (ok, _, err) = git(&cwd, &["merge", "--squash", "--no-commit", &branch])?;
     if !ok {
         let (_, conflicts, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         if conflicts.trim().is_empty() {
@@ -1064,19 +1038,17 @@ fn fleet_worktree_merge_blocking(
         let (_, remaining, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         let files = user_conflict_files(&remaining);
         if !files.is_empty() {
-            if let Err(resolve_err) = resolve_user_conflicts_from_branch(&cwd, &branch, &files) {
-                let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
-                return Ok(MergeOutcome::Error {
-                    message: resolve_err,
-                });
-            }
+            // Page branch keeps its commits; project checkout returns to HEAD.
+            // The dropped backups restore any preserved files on this return.
+            let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
+            return Ok(MergeOutcome::Conflict { files });
         }
         let (_, unresolved, _) = git(&cwd, &["diff", "--name-only", "--diff-filter=U"])?;
         if !unresolved.trim().is_empty() {
             let _ = git(&cwd, &["reset", "--hard", "HEAD"]);
             return Ok(MergeOutcome::Error {
                 message: format!(
-                    "merge conflicts remained unresolved after applying the page-preferred policy: {}",
+                    "merge conflicts remained unresolved after runtime-file cleanup: {}",
                     unresolved.lines().collect::<Vec<_>>().join(", ")
                 ),
             });
@@ -1661,7 +1633,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_merge_keeps_page_source_and_main_scratch_without_blocking() {
+    fn mixed_merge_conflict_resolves_scratch_but_stops_on_source_overlap() {
         let tmp = init_merge_repo();
         let root = tmp.path();
         git_ok(root, &["checkout", "-b", "agent"]);
@@ -1688,10 +1660,17 @@ mod tests {
             "agent".into(),
         )
         .unwrap();
-        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        // The scratch overlap must NOT surface as a user conflict, but the real
+        // source overlap must stop the merge with main's copy untouched.
+        match outcome {
+            MergeOutcome::Conflict { files } => {
+                assert_eq!(files, vec!["owllm-desktop/src-tauri/src/release.rs"]);
+            }
+            other => panic!("expected Conflict, got {other:?}"),
+        }
         assert_eq!(
             fs::read_to_string(root.join("owllm-desktop/src-tauri/src/release.rs")).unwrap(),
-            "agent\n"
+            "main\n"
         );
         assert_eq!(
             fs::read(root.join(".owllm-inbox/image_1.png")).unwrap(),
@@ -1700,7 +1679,7 @@ mod tests {
     }
 
     #[test]
-    fn text_conflict_keeps_page_hunk_and_nonoverlapping_main_edit() {
+    fn overlapping_text_edits_stop_with_both_sides_preserved() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         git_ok(root, &["init", "-b", "main"]);
@@ -1737,15 +1716,24 @@ mod tests {
             "page".into(),
         )
         .unwrap();
-        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
+        // Same-hunk edits on both sides: NEVER silently prefer one. Main's file
+        // must be exactly what main committed, and the page branch keeps its
+        // commit so nothing is lost.
+        match outcome {
+            MergeOutcome::Conflict { files } => assert_eq!(files, vec!["feature.txt"]),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
         assert_eq!(
             fs::read_to_string(root.join("feature.txt")).unwrap(),
-            "header main\nkeep one\nkeep two\nkeep three\nshared page\nfooter\n"
+            "header main\nkeep one\nkeep two\nkeep three\nshared main\nfooter\n"
         );
+        let (ok, page_file, _) = super::git(root, &["show", "page:feature.txt"]).unwrap();
+        assert!(ok);
+        assert!(page_file.contains("shared page"));
     }
 
     #[test]
-    fn page_delete_wins_over_main_modify() {
+    fn modify_delete_overlap_stops_with_both_sides_preserved() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
         git_ok(root, &["init", "-b", "main"]);
@@ -1770,8 +1758,16 @@ mod tests {
             "page".into(),
         )
         .unwrap();
-        assert!(matches!(outcome, MergeOutcome::Merged { .. }));
-        assert!(!root.join("obsolete.txt").exists());
+        // Modify/delete is a REAL disagreement — stop, keep main's file on disk
+        // and the page's deletion on its branch.
+        match outcome {
+            MergeOutcome::Conflict { files } => assert_eq!(files, vec!["obsolete.txt"]),
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+        assert_eq!(
+            fs::read_to_string(root.join("obsolete.txt")).unwrap(),
+            "main changed\n"
+        );
     }
 
     #[test]

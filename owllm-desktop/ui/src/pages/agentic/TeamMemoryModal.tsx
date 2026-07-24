@@ -105,6 +105,7 @@ export default function TeamMemoryModal({
       await invoke<number>("team_memory_write", {
         scope, content, key: newKey.trim(), tags: newTags.trim(), author: "you",
       });
+      window.dispatchEvent(new CustomEvent("owllm:memory:changed"));
       setNewContent(""); setNewKey(""); setNewTags("");
       await reload();
     } catch (e: any) {
@@ -119,6 +120,7 @@ export default function TeamMemoryModal({
     setBusy(true);
     try {
       await invoke<number>("team_memory_delete", { scope, id });
+      window.dispatchEvent(new CustomEvent("owllm:memory:changed"));
       setEntries((prev) => prev.filter((e) => e.id !== id));
     } catch (e: any) {
       setErr(String(e?.message ?? e));
@@ -133,6 +135,7 @@ export default function TeamMemoryModal({
     setBusy(true);
     try {
       await invoke<number>("team_memory_promote", { scope, id });
+      window.dispatchEvent(new CustomEvent("owllm:memory:changed"));
       setEntries((prev) => prev.map((e) => (e.id === id ? { ...e, kind: "fact", tags: "" } : e)));
     } catch (e: any) {
       setErr(String(e?.message ?? e));

@@ -179,7 +179,10 @@ fn wait_cli_child(
                             if let Ok(mut b) = buf2.lock() {
                                 b.extend_from_slice(&chunk[..n]);
                             }
-                            act.store(started.elapsed().as_millis() as u64, AtomicOrdering::Relaxed);
+                            act.store(
+                                started.elapsed().as_millis() as u64,
+                                AtomicOrdering::Relaxed,
+                            );
                         }
                     }
                 }
@@ -187,10 +190,24 @@ fn wait_cli_child(
         }
         buf
     };
-    let stdout_buf = spawn_reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-    let stderr_buf = spawn_reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+    let stdout_buf = spawn_reader(
+        child
+            .stdout
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
+    let stderr_buf = spawn_reader(
+        child
+            .stderr
+            .take()
+            .map(|p| Box::new(p) as Box<dyn Read + Send>),
+    );
 
-    let take = |b: &Arc<Mutex<Vec<u8>>>| b.lock().map(|mut v| std::mem::take(&mut *v)).unwrap_or_default();
+    let take = |b: &Arc<Mutex<Vec<u8>>>| {
+        b.lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    };
 
     loop {
         if let Some(status) = child.try_wait()? {
@@ -205,9 +222,9 @@ fn wait_cli_child(
                 stderr: take(&stderr_buf),
             });
         }
-        let idle = started
-            .elapsed()
-            .saturating_sub(Duration::from_millis(last_activity.load(AtomicOrdering::Relaxed)));
+        let idle = started.elapsed().saturating_sub(Duration::from_millis(
+            last_activity.load(AtomicOrdering::Relaxed),
+        ));
         if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
             let _ = child.kill();
             let _ = child.wait();
@@ -624,15 +641,19 @@ pub async fn account_usage(provider: String) -> AccountUsage {
     if p.contains("moonshot") || p.contains("kimi") {
         return fetch_moonshot_balance(&provider, &stats).await;
     }
+    if p.contains("openai") || p.contains("codex") || p.contains("gpt") {
+        return fetch_codex_usage(&provider, &stats).await;
+    }
+    if p.contains("deepseek") {
+        return fetch_deepseek_balance(&provider, &stats).await;
+    }
 
-    // Everything else (OpenAI/Codex, Gemini, DeepSeek, xAI, Groq,
-    // Perplexity, Mistral, Together, local models) has no client-readable
-    // quota/balance API we can query with an API key. Return the app's own
-    // recorded traffic plus a short note so the panel isn't blank.
+    // Everything else (Gemini, xAI, Groq, Perplexity, Mistral, Together,
+    // local models) has no client-readable quota/balance API we can query
+    // with an API key. Return the app's own recorded traffic plus a short
+    // note so the panel isn't blank.
     let pretty = match p.as_str() {
-        "openai" | "codex" => "OpenAI / Codex",
         "gemini" => "Gemini",
-        "deepseek" => "DeepSeek",
         "xai" => "xAI",
         "groq" => "Groq",
         "perplexity" => "Perplexity",
@@ -882,6 +903,237 @@ async fn fetch_moonshot_balance(provider: &str, stats: &[UsageStat]) -> AccountU
     unavailable(&format!("balance endpoint unreachable ({last_err})"))
 }
 
+/// Label for a Codex quota window from its duration in seconds.
+fn codex_window_label(name: Option<&str>, window_secs: i64) -> String {
+    let span = if (550_000..=650_000).contains(&window_secs) {
+        "Week".to_string()
+    } else if window_secs > 0 && window_secs <= 86_400 {
+        format!("Session ({}h)", (window_secs + 1800) / 3600)
+    } else if window_secs > 0 {
+        format!("{}d window", window_secs / 86_400)
+    } else {
+        "Window".to_string()
+    };
+    match name {
+        Some(n) if !n.is_empty() => format!("{n} ({span})"),
+        _ => span,
+    }
+}
+
+/// Fetch OpenAI/Codex (ChatGPT subscription) usage windows — the same
+/// endpoint the Codex CLI's /status screen polls. The OAuth token comes
+/// from the Codex CLI's auth store ($CODEX_HOME/auth.json). Plain
+/// OPENAI_API_KEY accounts have no client-readable quota API; those fall
+/// through to the app's recorded traffic with an explanatory note.
+async fn fetch_codex_usage(provider: &str, stats: &[UsageStat]) -> AccountUsage {
+    let empty = || AccountUsage {
+        available: false,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows: Vec::new(),
+        stats: stats.to_vec(),
+        balance: None,
+    };
+    let unavailable = |note: &str| AccountUsage {
+        note: note.to_string(),
+        ..empty()
+    };
+
+    let codex_home = std::env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("USERPROFILE")
+                .or_else(|| std::env::var_os("HOME"))
+                .map(|h| PathBuf::from(h).join(".codex"))
+        });
+    let Some(auth_path) = codex_home.map(|d| d.join("auth.json")) else {
+        return unavailable("no home dir");
+    };
+    let Ok(raw) = std::fs::read_to_string(&auth_path) else {
+        return unavailable(
+            "Codex CLI is not logged in — quota needs the ChatGPT subscription login (codex login)",
+        );
+    };
+    let Ok(auth) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return unavailable("Codex auth.json unreadable");
+    };
+    let tokens = auth.get("tokens").cloned().unwrap_or_default();
+    let Some(token) = tokens
+        .get("access_token")
+        .and_then(|t| t.as_str())
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.to_string())
+    else {
+        return unavailable(
+            "Codex CLI is in API-key mode — OpenAI exposes no key-readable quota API; showing this app's recorded traffic",
+        );
+    };
+    let account_id = tokens
+        .get("account_id")
+        .and_then(|t| t.as_str())
+        .unwrap_or_default()
+        .to_string();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return unavailable(&format!("http client: {e}")),
+    };
+    let mut req = client
+        .get("https://chatgpt.com/backend-api/wham/usage")
+        .header("Authorization", format!("Bearer {token}"));
+    if !account_id.is_empty() {
+        req = req.header("chatgpt-account-id", account_id);
+    }
+    let resp = match req.send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            return unavailable(&format!(
+                "usage endpoint returned {} — the Codex login may have expired",
+                r.status()
+            ))
+        }
+        Err(e) => return unavailable(&format!("usage request failed: {e}")),
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return unavailable(&format!("usage response unreadable: {e}")),
+    };
+
+    // Shape (live-verified 2026-07): rate_limit.{primary,secondary}_window =
+    // { used_percent, limit_window_seconds, reset_at (unix secs) } plus
+    // additional_rate_limits[] = { limit_name, rate_limit: { … } }.
+    let mut windows = Vec::new();
+    let mut push_windows = |name: Option<&str>, rate_limit: &serde_json::Value| {
+        for key in ["primary_window", "secondary_window"] {
+            let win = &rate_limit[key];
+            let Some(used) = win.get("used_percent").and_then(|u| u.as_f64()) else {
+                continue;
+            };
+            let secs = win
+                .get("limit_window_seconds")
+                .and_then(|s| s.as_i64())
+                .unwrap_or(0);
+            let resets_at = win
+                .get("reset_at")
+                .and_then(|r| r.as_i64())
+                .and_then(|epoch| chrono::DateTime::<chrono::Utc>::from_timestamp(epoch, 0))
+                .map(|dt| dt.to_rfc3339());
+            windows.push(UsageWindow {
+                label: codex_window_label(name, secs),
+                used_pct: used.clamp(0.0, 100.0),
+                resets_at,
+            });
+        }
+    };
+    push_windows(None, &body["rate_limit"]);
+    if let Some(extra) = body
+        .get("additional_rate_limits")
+        .and_then(|a| a.as_array())
+    {
+        for item in extra {
+            let name = item.get("limit_name").and_then(|n| n.as_str());
+            push_windows(name, &item["rate_limit"]);
+        }
+    }
+    if windows.is_empty() {
+        return unavailable("usage endpoint returned no quota windows");
+    }
+
+    // Plans with purchasable credits: surface the balance line too.
+    let balance = body
+        .get("credits")
+        .filter(|c| c.get("has_credits").and_then(|h| h.as_bool()) == Some(true))
+        .and_then(|c| c.get("balance"))
+        .and_then(|b| b.as_str())
+        .map(|b| format!("Credits: {b}"));
+
+    AccountUsage {
+        available: true,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows,
+        stats: stats.to_vec(),
+        balance,
+    }
+}
+
+/// Fetch DeepSeek account balance from the documented endpoint
+/// (GET api.deepseek.com/user/balance). Needs the saved DEEPSEEK_API_KEY.
+async fn fetch_deepseek_balance(provider: &str, stats: &[UsageStat]) -> AccountUsage {
+    let empty = || AccountUsage {
+        available: false,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows: Vec::new(),
+        stats: stats.to_vec(),
+        balance: None,
+    };
+    let unavailable = |note: &str| AccountUsage {
+        note: note.to_string(),
+        ..empty()
+    };
+
+    let secrets = load_secrets();
+    let Some(key) = secrets
+        .get("DEEPSEEK_API_KEY")
+        .cloned()
+        .filter(|v| !v.trim().is_empty())
+    else {
+        return unavailable("DeepSeek API key not saved — showing this app's recorded traffic");
+    };
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return unavailable(&format!("http client: {e}")),
+    };
+    let resp = match client
+        .get("https://api.deepseek.com/user/balance")
+        .header("Authorization", format!("Bearer {key}"))
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => return unavailable(&format!("balance endpoint returned {}", r.status())),
+        Err(e) => return unavailable(&format!("balance request failed: {e}")),
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => return unavailable(&format!("balance response unreadable: {e}")),
+    };
+    // Expected: { "is_available": bool, "balance_infos": [ { "currency",
+    // "total_balance", "granted_balance", "topped_up_balance" } ] } — the
+    // amounts are strings in the documented response.
+    let Some(info) = body
+        .get("balance_infos")
+        .and_then(|b| b.as_array())
+        .and_then(|a| a.first())
+    else {
+        return unavailable("balance response had no balance_infos");
+    };
+    let field = |k: &str| info.get(k).and_then(|v| v.as_str()).unwrap_or("0");
+    let currency = info.get("currency").and_then(|c| c.as_str()).unwrap_or("");
+    let balance = format!(
+        "Available {} {currency} (granted {} · topped-up {})",
+        field("total_balance"),
+        field("granted_balance"),
+        field("topped_up_balance"),
+    );
+    AccountUsage {
+        available: false,
+        provider: provider.to_string(),
+        note: String::new(),
+        windows: Vec::new(),
+        stats: stats.to_vec(),
+        balance: Some(balance),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ProbeResult {
     pub ok: bool,
@@ -1075,13 +1327,7 @@ pub async fn accounts_test_probe_live(backend: String) -> ProbeResult {
                 "gpt-5.5".into(),
             ];
             append_codex_input_args(&mut args, None);
-            probe_cli_subscription(
-                find_codex_cli(),
-                args,
-                "Codex",
-                Some("ok"),
-            )
-            .await
+            probe_cli_subscription(find_codex_cli(), args, "Codex", Some("ok")).await
         }
         "kimi_cli" => {
             // Both legacy kimi-cli and current kimi-code support --print
@@ -1412,7 +1658,10 @@ async fn probe_cli_subscription(
             sanitize_appimage_env(&mut cmd);
             let mut child = cmd.spawn().map_err(|e| e.to_string())?;
             if let Some(text) = &stdin_owned {
-                let mut stdin = child.stdin.take().ok_or_else(|| "CLI stdin pipe missing".to_string())?;
+                let mut stdin = child
+                    .stdin
+                    .take()
+                    .ok_or_else(|| "CLI stdin pipe missing".to_string())?;
                 stdin
                     .write_all(text.as_bytes())
                     .map_err(|e| format!("write CLI prompt to stdin: {e}"))?;
@@ -2188,9 +2437,7 @@ fn cli_exit_err(cli: &str, code: i32, body: &str, stderr: &str) -> String {
     } else {
         "no stdout or stderr"
     };
-    format!(
-        "{cli} CLI exited {code} — {detail}"
-    )
+    format!("{cli} CLI exited {code} — {detail}")
 }
 
 /// One-shot completion via the OpenAI Codex CLI — the OpenAI-subscription
@@ -2387,10 +2634,7 @@ pub async fn codex_cli_complete(
 #[tauri::command]
 pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, String> {
     #[cfg(windows)]
-    if let Some((distro, _)) = cwd
-        .as_deref()
-        .and_then(crate::wsl::parse_wsl_unc)
-    {
+    if let Some((distro, _)) = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc) {
         return tokio::task::spawn_blocking(move || {
             crate::wsl::run_in_distro_script_user(
                 &distro,
@@ -2433,7 +2677,11 @@ pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, St
         if !out.status.success() {
             return Err(format!(
                 "Codex CLI upgrade failed: {}",
-                if stderr.trim().is_empty() { stdout.trim() } else { stderr.trim() }
+                if stderr.trim().is_empty() {
+                    stdout.trim()
+                } else {
+                    stderr.trim()
+                }
             ));
         }
         Ok(stdout.trim().to_string())
@@ -4243,7 +4491,10 @@ pub async fn cli_install_stream(
             "gemini_cli" => ("npm", vec!["install", "-g", "@google/gemini-cli"]),
             // Grok Build's macOS/Linux installer is a curl|bash shell pipeline
             // (the Windows PowerShell path is handled above in grok_native).
-            "grok_cli" => ("sh", vec!["-c", "curl -fsSL https://x.ai/cli/install.sh | bash"]),
+            "grok_cli" => (
+                "sh",
+                vec!["-c", "curl -fsSL https://x.ai/cli/install.sh | bash"],
+            ),
             other => return Err(format!("unknown CLI backend: {other}")),
         };
 
@@ -4995,9 +5246,10 @@ pub async fn kimi_cli_complete(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_codex_input_args, cli_exit_err, codex_should_grant_browser, is_browser_role_allowlist,
-        kimi_agent_yaml, kimi_config_has_default, kimi_config_model_keys,
-        kimi_output_auth_failed, kimi_output_llm_unset, kimi_output_mcp_failed,
+        append_codex_input_args, cli_exit_err, codex_should_grant_browser,
+        is_browser_role_allowlist, kimi_agent_yaml, kimi_config_has_default,
+        kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
+        kimi_output_mcp_failed,
     };
 
     #[test]

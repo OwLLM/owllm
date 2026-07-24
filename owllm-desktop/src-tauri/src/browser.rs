@@ -103,8 +103,7 @@ fn is_active_tab(id: u64) -> bool {
 }
 
 fn active_tab_id() -> Option<u64> {
-    TABS
-        .lock()
+    TABS.lock()
         .unwrap_or_else(|p| p.into_inner())
         .as_ref()
         .map(|tabs| tabs.active)
@@ -608,9 +607,8 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
 }
 
 fn get_window(app: &tauri::AppHandle) -> Option<Window> {
-    app.get_window(BROWSER_LABEL).or_else(|| {
-        active_tab_id().and_then(|id| app.get_window(&tab_label(id)))
-    })
+    app.get_window(BROWSER_LABEL)
+        .or_else(|| active_tab_id().and_then(|id| app.get_window(&tab_label(id))))
 }
 
 fn destroy_browser_windows(app: &tauri::AppHandle) -> Result<(), String> {
@@ -676,12 +674,13 @@ fn list_tabs(app: &tauri::AppHandle) -> Vec<BrowserTabInfo> {
             .order
             .iter()
             .filter_map(|id| {
-                app.get_webview(&tab_label(*id)).map(|webview| BrowserTabInfo {
-                    id: *id,
-                    title: tabs.titles.get(id).cloned().unwrap_or_default(),
-                    url: webview.url().map(|url| url.to_string()).unwrap_or_default(),
-                    active: *id == tabs.active,
-                })
+                app.get_webview(&tab_label(*id))
+                    .map(|webview| BrowserTabInfo {
+                        id: *id,
+                        title: tabs.titles.get(id).cloned().unwrap_or_default(),
+                        url: webview.url().map(|url| url.to_string()).unwrap_or_default(),
+                        active: *id == tabs.active,
+                    })
             })
             .collect();
     }
@@ -959,7 +958,10 @@ fn attach_tab(
             // vault write is queued — no I/O on the native callback thread.
             if let Some((action, data)) = parse_chrome_event(&title) {
                 if action == "cred" {
-                    queue_browser_ui(&wv.app_handle().clone(), BrowserUiEvent::TypedLogin { data });
+                    queue_browser_ui(
+                        &wv.app_handle().clone(),
+                        BrowserUiEvent::TypedLogin { data },
+                    );
                 }
                 return;
             }
@@ -1012,9 +1014,7 @@ fn attach_tab(
 /// to background; user/new-window requests select their new tab.
 fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, String> {
     let framed = app.get_webview(CHROME_LABEL).is_some();
-    let win = framed
-        .then(|| get_window(app))
-        .flatten();
+    let win = framed.then(|| get_window(app)).flatten();
     if TABS.lock().unwrap_or_else(|p| p.into_inner()).is_none() {
         return Err("browser has no tab session".to_string());
     }
@@ -1368,7 +1368,10 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
         match ev {
             WindowEvent::Resized(size) => queue_browser_ui(
                 &handle,
-                BrowserUiEvent::Layout { width: size.width, height: size.height },
+                BrowserUiEvent::Layout {
+                    width: size.width,
+                    height: size.height,
+                },
             ),
             WindowEvent::Destroyed => {
                 // Pure state drop — no window/webview work.
@@ -1463,7 +1466,10 @@ fn attach_legacy_tab(
             // the vault write is queued off the native callback thread.
             if let Some((action, data)) = parse_chrome_event(&title) {
                 if action == "cred" {
-                    queue_browser_ui(&win.app_handle().clone(), BrowserUiEvent::TypedLogin { data });
+                    queue_browser_ui(
+                        &win.app_handle().clone(),
+                        BrowserUiEvent::TypedLogin { data },
+                    );
                 }
                 return;
             }
@@ -1622,7 +1628,10 @@ pub fn browser_open_tab(
             .map_err(|e| format!("navigate failed: {e}"))?;
         0
     };
-    Ok(json!({ "tab_id": id, "url": url, "active": id == active_tab_id().unwrap_or(0) }).to_string())
+    Ok(
+        json!({ "tab_id": id, "url": url, "active": id == active_tab_id().unwrap_or(0) })
+            .to_string(),
+    )
 }
 
 #[tauri::command(async)]
@@ -1681,8 +1690,7 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
         .and_then(|wv| wv.url().ok())
         .map(|u| u.to_string())
         .unwrap_or_default();
-    destroy_browser_windows(&app)
-        .map_err(|e| format!("could not rebuild browser window: {e}"))?;
+    destroy_browser_windows(&app).map_err(|e| format!("could not rebuild browser window: {e}"))?;
     let deadline = Instant::now() + Duration::from_secs(5);
     while get_window(&app).is_some() {
         if Instant::now() > deadline {
@@ -1698,9 +1706,16 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
     let parsed = url.parse().map_err(|e| format!("bad url {url:?}: {e}"))?;
     build_window(&app, parsed)?;
     for tab in tabs_before.iter().filter(|tab| !tab.active) {
-        let restore_url = if tab.url.is_empty() { "about:blank" } else { &tab.url };
+        let restore_url = if tab.url.is_empty() {
+            "about:blank"
+        } else {
+            &tab.url
+        };
         if let Err(error) = new_tab(&app, restore_url, false) {
-            eprintln!("[browser] could not restore tab {} after device switch: {error}", tab.id);
+            eprintln!(
+                "[browser] could not restore tab {} after device switch: {error}",
+                tab.id
+            );
         }
     }
     Ok(format!(
@@ -1926,8 +1941,16 @@ mod tests {
             "https://huggingface.co/settings/tokens"
         );
         assert!(parse_web_url("http://localhost:5173").is_ok());
-        for bad in ["", "file:///tmp/model", "C:/models/model.gguf", "javascript:alert(1)"] {
-            assert!(parse_web_url(bad).is_err(), "{bad:?} must not open as web content");
+        for bad in [
+            "",
+            "file:///tmp/model",
+            "C:/models/model.gguf",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                parse_web_url(bad).is_err(),
+                "{bad:?} must not open as web content"
+            );
         }
     }
 
@@ -2036,8 +2059,14 @@ mod tests {
     #[test]
     fn explicit_tab_ids_parse_without_falling_back_to_active() {
         assert_eq!(tab_id_from_params(&json!({})).unwrap(), None);
-        assert_eq!(tab_id_from_params(&json!({ "tab_id": 42 })).unwrap(), Some(42));
-        assert_eq!(tab_id_from_params(&json!({ "tab_id": "7" })).unwrap(), Some(7));
+        assert_eq!(
+            tab_id_from_params(&json!({ "tab_id": 42 })).unwrap(),
+            Some(42)
+        );
+        assert_eq!(
+            tab_id_from_params(&json!({ "tab_id": "7" })).unwrap(),
+            Some(7)
+        );
         assert!(tab_id_from_params(&json!({ "tab_id": "current" })).is_err());
     }
 
@@ -2053,8 +2082,14 @@ mod tests {
             activate: false,
         });
         assert_eq!(batch.open_tabs.len(), 2);
-        assert_eq!(batch.open_tabs[0], ("https://one.example/".to_string(), true));
-        assert_eq!(batch.open_tabs[1], ("https://two.example/".to_string(), false));
+        assert_eq!(
+            batch.open_tabs[0],
+            ("https://one.example/".to_string(), true)
+        );
+        assert_eq!(
+            batch.open_tabs[1],
+            ("https://two.example/".to_string(), false)
+        );
     }
 
     #[test]

@@ -96,7 +96,7 @@ type DownloadedItem = {
   icons?: string;
   envKey?: string | null;
   isIncomplete?: boolean;
-  onboarding?: "READY" | "BUILDING" | "BROKEN" | "NEW";
+  onboarding?: "READY" | "BUILDING" | "BROKEN" | "NEW" | "RAW";
   compat?: { color: "green" | "orange" | "red" | "gray"; text: string; tooltip?: string } | null;
 };
 

@@ -57,8 +57,10 @@ export type DeviceRecord = {
   /// All dialable addresses (public → overlay → LAN). Empty = the device has
   /// never published while its listener was up → Pair can't dial it yet.
   endpoints?: string[];
+  relay?: boolean;
   /// Embedded P2P (iroh) endpoint id — dialable from anywhere when set.
   p2p_node_id?: string | null;
+  published_at?: string | null;
   last_seen: string | null;
   is_self: boolean;
 };

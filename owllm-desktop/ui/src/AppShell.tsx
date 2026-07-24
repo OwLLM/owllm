@@ -36,6 +36,7 @@ import WebhookBridgeRunner from "./bridges/WebhookBridgeRunner";
 import ServerPage from "./pages/core/ServerPage";
 import { setLocalServerKey } from "./pages/agentic/inferenceEndpoint";
 import BridgesPage from "./pages/agentic/BridgesPage";
+import SigningPage from "./pages/advanced/SigningPage";
 import TutorialRecorder, { toggleTutorialRecorder } from "./tutorial/TutorialRecorder";
 import ModuleWizard, { useNeedsFirstRunWizard } from "./pages/modules/ModuleWizard";
 import AccountSyncModal, { openSyncOnboarding } from "./pages/core/AccountSyncModal";
@@ -53,6 +54,7 @@ import {
 } from "./chatFontPreferences";
 import ActionIcon from "./components/ActionIcon";
 import { installWorldPresenceConnection } from "./pages/gamify/worldPresence";
+import { openWebUrl } from "./utils/openWebUrl";
 
 // tauri.conf.json now sets decorations:false again — the OS title
 // bar is completely hidden so the desktop shows through the cyan
@@ -73,6 +75,7 @@ function isTauri(): boolean {
 const FRAME_VISIBILITY_STATE_KEY = "owllm:window-frame:visibility";
 const FRAME_IDLE_HIDE_MS = 1800;
 const FRAME_LEAVE_HIDE_MS = 700;
+const MARKETPLACE_URL = "https://marketplace.owllm.com/";
 
 function startDrag(e: React.MouseEvent) {
   if (e.button !== 0) return;
@@ -415,7 +418,7 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
   // the "becomes solid black sometimes" flash. Drop the fill on Linux so only
   // the neon strokes + corner art remain (the intended glass look); the bands
   // stay on opaque platforms where they read as chrome, not black.
-  const bandBg = LINUX_TRANSPARENT_WINDOW ? "transparent" : FRAME_BG;
+  const bandBg = FRAME_BG;
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
       <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
@@ -591,6 +594,7 @@ const HEADER_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
 function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
+  onOpenMarketplace, onOpenSigning,
   onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
@@ -606,6 +610,8 @@ function ModeBar({
   textColor: string;
   onPickTextColor: (color: TextColorSelection) => void;
   onOpenServer: () => void;
+  onOpenMarketplace: () => void;
+  onOpenSigning: () => void;
   /// The Watcher (P0-8): in overlay-frame mode the decorative owl window is
   /// click-through, so the centered OWLLM title (directly beneath the owl)
   /// doubles as the summon point.
@@ -939,15 +945,54 @@ function ModeBar({
                 })()}
               </div>
 
-              {/* GitHub account / sync — relocated here from the Home page and
-                  given a highlighted card (accent-tinted container, badge icon,
-                  bigger label, CTA pill) so signing in stands out. Opens the
-                  global AccountSyncModal, which owns the actual login / vault /
-                  disconnect flow. */}
+              {/* Marketplace entry — opens the OWLLM Marketplace (external web)
+                  on its own separate line, positioned before the Certificates
+                  and GitHub container rows. Moved here from the header cluster. */}
+              <button
+                data-ui="MarketplaceButton"
+                onClick={() => { setSettingsOpen(false); onOpenMarketplace(); }}
+                title="Open OWLLM Marketplace"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🛍️</span>
+                <span style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 13.5 }}>Marketplace</span>
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
+              {/* Signing / credential hub entry — its own separate line,
+                  positioned immediately before the GitHub container so that
+                  container stays the last item of the dropdown in every state.
+                  Opens the Signing hub as a centered popup (PageModal) — it is
+                  no longer a header tab, so this dropdown row is its only entry. */}
+              <button
+                data-ui="SettingsSigningRow"
+                onClick={() => { setSettingsOpen(false); onOpenSigning(); }}
+                title="Certificates (Apple + Windows signing) and provider portal web-logins"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🖊</span>
+                <span style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 13.5 }}>Certificates and Logs in</span>
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
+              {/* The same guided first-run journey stays discoverable here when
+                  identity is not connected. Once signed in this becomes the
+                  compact account-management entry rather than advertising
+                  onboarding the user has already completed. */}
               <button
                 data-ui="SettingsAccountRow"
                 onClick={() => { setSettingsOpen(false); openSyncOnboarding(); }}
-                title={account.connected ? "Manage sync / account" : "Sign in to sync your chats & settings across devices"}
+                title={account.connected ? "Manage sync / account" : "Finish GitHub and AI account setup"}
                 style={{
                   display: "flex", alignItems: "center", gap: 12, width: "100%",
                   marginTop: 14, padding: "12px 14px", borderRadius: 12, boxSizing: "border-box",
@@ -971,7 +1016,10 @@ function ModeBar({
                   {account.connected ? (
                     <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--ok)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>Synced as @{account.login}</span>
                   ) : (
-                    <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--fg-strong)" }}>Sign in with GitHub</span>
+                    <>
+                      <span style={{ fontWeight: 800, fontSize: 14.5, color: "var(--fg-strong)" }}>Finish onboarding</span>
+                      <span style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.35 }}>GitHub sign-in and AI subscription setup</span>
+                    </>
                   )}
                 </span>
                 <span style={{
@@ -979,7 +1027,7 @@ function ModeBar({
                   padding: "6px 12px", borderRadius: 999,
                   background: account.connected ? "rgba(34,197,94,0.18)" : "var(--accent)",
                   color: account.connected ? "#22c55e" : "var(--accent-fg)",
-                }}>{account.connected ? "Manage →" : "Sign in →"}</span>
+                }}>{account.connected ? "Manage →" : "Continue →"}</span>
               </button>
             </div>
           )}
@@ -1386,13 +1434,11 @@ function WindowAccentEdge() {
   );
 }
 
-// The accent edge hugs the WINDOW boundary, which is only the visible app
-// edge when the window is opaque (all platforms now: Windows/macOS/Linux).
-// The old Linux build shipped a TRANSPARENT window larger than the in-page
-// HybridFrame, and the border drew a floating orange rectangle in mid-air.
-// Linux switched to an opaque window + optional overlay frame, so the accent
-// edge is correct everywhere.
-const LINUX_TRANSPARENT_WINDOW = false;
+// Linux uses one opaque WebKitGTK window. The transparent overlay is disabled
+// there because it is unstable on NVIDIA/Jetson, but that must not make the
+// opaque main window draw HybridFrame's formerly-transparent outer margin as a
+// thick solid rectangle. Detect Linux once and render the app content directly.
+const IS_LINUX = typeof navigator !== "undefined" && /Linux/i.test(navigator.userAgent);
 
 export default function AppShell() {
   const installed = useMemo(() => getInstalledModes(), []);
@@ -1409,6 +1455,7 @@ export default function AppShell() {
   const [mode, setMode] = useState<ActiveMode>(initialNavigation.mode);
   const [serverModalOpen, setServerModalOpen] = useState<boolean>(false);
   const [bridgesModalOpen, setBridgesModalOpen] = useState<boolean>(false);
+  const [signingModalOpen, setSigningModalOpen] = useState<boolean>(false);
   const [overlayFrame, setOverlayFrame] = useState<boolean>(false);
   const theme = useTheme();
   const [keepFrameVisible, setKeepFrameVisible] = useState<boolean>(() => readKeepFrameVisible());
@@ -1637,6 +1684,7 @@ export default function AppShell() {
       // (no-longer-rendered-inline) tab.
       if (key === "server") { setServerModalOpen(true); return; }
       if (key === "bridges") { setBridgesModalOpen(true); return; }
+      if (key === "signing") { setSigningModalOpen(true); return; }
       // Find which module owns this page key so we can light up the
       // matching ModeBar toggle alongside the SubTabs row.
       for (const m of ALL_MODULES) {
@@ -1702,6 +1750,11 @@ export default function AppShell() {
             textColor={theme.textColor}
             onPickTextColor={theme.setTextColor}
             onOpenServer={() => setServerModalOpen(true)}
+            onOpenSigning={() => setSigningModalOpen(true)}
+            onOpenMarketplace={() => {
+              openWebUrl(MARKETPLACE_URL)
+                .catch((error) => console.error("Could not open OWLLM Marketplace", error));
+            }}
             onWatcher={openWatcher}
             watcherHint={watcherHint && overlayFrame}
             keepFrameVisible={keepFrameVisible}
@@ -1755,10 +1808,12 @@ export default function AppShell() {
       <EmailBridgeRunner />
       <WebhookBridgeRunner />
       <ResizeEdges />
-      {(overlayFrame || !LINUX_TRANSPARENT_WINDOW) && <WindowAccentEdge />}
+      {!IS_LINUX && <WindowAccentEdge />}
       {overlayFrame
         ? <OverlayContentPanel>{appContent}</OverlayContentPanel>
-        : <HybridFrame
+        : IS_LINUX
+          ? <div data-ui="LinuxMainContent" style={{ width: "100%", height: "100%", background: "var(--bg-panel)" }}>{appContent}</div>
+          : <HybridFrame
             outerW={vp.w}
             outerH={vp.h}
             showWatcherHint={watcherHint}
@@ -1786,6 +1841,15 @@ export default function AppShell() {
           onClose={() => setBridgesModalOpen(false)}
         >
           <BridgesPage />
+        </PageModal>
+      )}
+      {signingModalOpen && (
+        <PageModal
+          title="🖊 Signing & credentials"
+          dataUi="SigningModal"
+          onClose={() => setSigningModalOpen(false)}
+        >
+          <SigningPage />
         </PageModal>
       )}
       <TutorialRecorder enabled={true} />

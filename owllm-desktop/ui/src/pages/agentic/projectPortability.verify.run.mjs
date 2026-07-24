@@ -43,6 +43,22 @@ check(portable.projectOriginLabel({ created_device_name: "FARNOTEBOOK001" }) ===
 const code = read(path.join(HERE, "CodePage.tsx"));
 check(code.includes('data-ui="CodingProjectHub"') && code.includes("Portable coding command center"),
   "Coding uses a full-page managed-project hub");
+check(code.includes('data-ui="CodingProjectColumns"') &&
+      code.includes('gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)"') &&
+      code.includes("gridColumn: 1") && code.includes("gridColumn: 2"),
+  "Coding separates local actions/projects and managed projects into two columns");
+check(code.includes('data-ui="GitHubConnectionStatus"') &&
+      code.includes("GitHub connected as") && code.includes("GitHub not connected"),
+  "GitHub connection is an informative green/red status card");
+check(code.includes('data-ui="ImportFromGitHubCard"') &&
+      code.includes('data-ui="GitHubRepositoryPicker"') &&
+      code.includes("githubListRepositories()") &&
+      code.includes("Choose folder & import selected repo"),
+  "Coding exposes a signed-in GitHub repository picker with local-folder binding");
+check(code.includes('data-ui="SignedOutGithubImport"') &&
+      code.includes("Sign in with GitHub to select a repository") &&
+      code.includes("Public fallback: https://github.com/owner/repository"),
+  "Coding keeps URL paste only as a signed-out public fallback");
 check(code.includes("projectAvailability(project)") && code.includes("GHOSTED"),
   "Coding renders remote projects as ghosted cards");
 check(code.includes('invoke<string>("github_clone_project"') &&
@@ -93,5 +109,13 @@ check(github.includes("pub async fn github_clone_project") &&
       github.includes('cmd.arg("clone")') &&
       github.includes("let destination = parent.join(leaf)"),
   "the clone command always creates a child folder under the chosen local parent");
+check(github.includes("pub async fn github_list_repositories") &&
+      github.includes("https://api.github.com/user/repos") &&
+      github.includes("GithubRepository"),
+  "signed-in imports load selectable repositories from the connected GitHub account");
+check(github.includes("canonical_github_clone_url") &&
+      github.includes('strip_prefix("https://github.com/")') &&
+      github.includes("must not contain credentials"),
+  "the import boundary rejects unsafe or ambiguous repository URLs");
 
 console.log(`\nall checks passed (${passed})`);

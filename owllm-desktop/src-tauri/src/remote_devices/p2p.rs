@@ -22,7 +22,9 @@ use iroh::{Endpoint, EndpointId, SecretKey};
 use once_cell::sync::Lazy;
 use rand::{rngs::OsRng, RngCore};
 
-use super::protocol::{CommandResult, DevicePublic, PairRequest, SignedEnvelope, WireMessage, WireReply};
+use super::protocol::{
+    CommandResult, DevicePublic, PairRequest, SignedEnvelope, WireMessage, WireReply,
+};
 use super::transport::{open_sealed_reply, Transport};
 
 const ALPN: &[u8] = b"owllm/remote-devices/v1";
@@ -59,7 +61,9 @@ fn b64(bytes: &[u8]) -> String {
 
 fn unb64(s: &str) -> Result<Vec<u8>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD.decode(s).map_err(|e| format!("base64 decode: {e}"))
+    STANDARD
+        .decode(s)
+        .map_err(|e| format!("base64 decode: {e}"))
 }
 
 /// Load the iroh secret key, generating (and persisting) one on first use.
@@ -91,7 +95,9 @@ fn load_or_create_secret() -> Result<SecretKey, String> {
 
 /// This device's p2p endpoint id (creates the keypair on first call).
 pub fn node_id() -> Option<String> {
-    load_or_create_secret().ok().map(|sk| sk.public().to_string())
+    load_or_create_secret()
+        .ok()
+        .map(|sk| sk.public().to_string())
 }
 
 /// True when `s` parses as an iroh endpoint id (vs an "ip:port" address).
@@ -166,7 +172,9 @@ async fn accept_loop(ep: Endpoint) {
         tokio::spawn(async move {
             let Ok(conn) = incoming.await else { return };
             while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-                let Ok(buf) = recv.read_to_end(MAX_FRAME).await else { break };
+                let Ok(buf) = recv.read_to_end(MAX_FRAME).await else {
+                    break;
+                };
                 let reply = handle_wire(&buf).await;
                 let bytes = serde_json::to_vec(&reply).unwrap_or_default();
                 if send.write_all(&bytes).await.is_err() {
@@ -184,7 +192,11 @@ async fn accept_loop(ep: Endpoint) {
 async fn handle_wire(buf: &[u8]) -> WireReply {
     let msg: WireMessage = match serde_json::from_slice(buf) {
         Ok(m) => m,
-        Err(e) => return WireReply::Error { message: format!("bad wire message: {e}") },
+        Err(e) => {
+            return WireReply::Error {
+                message: format!("bad wire message: {e}"),
+            }
+        }
     };
     match msg {
         WireMessage::Pair(pr) => super::lan::handle_pair(pr),
@@ -193,10 +205,12 @@ async fn handle_wire(buf: &[u8]) -> WireReply {
             let reply_to_device = frame.from_device.clone();
             let reply_to_x = frame.from_x25519_pub.clone();
             match super::handle_incoming(frame).await {
-                Ok(result) => match super::seal_result_for(&reply_to_device, &reply_to_x, &result) {
-                    Ok(sealed) => WireReply::Result(sealed),
-                    Err(e) => WireReply::Error { message: e },
-                },
+                Ok(result) => {
+                    match super::seal_result_for(&reply_to_device, &reply_to_x, &result) {
+                        Ok(sealed) => WireReply::Result(sealed),
+                        Err(e) => WireReply::Error { message: e },
+                    }
+                }
                 Err(e) => WireReply::Error { message: e },
             }
         }
@@ -218,9 +232,14 @@ pub async fn send_wire(node_id: &str, msg: &WireMessage) -> Result<WireReply, St
         .await
         .map_err(|_| "p2p connect timeout — peer offline or unreachable".to_string())?
         .map_err(|e| format!("p2p connect: {e}"))?;
-    let (mut send, mut recv) = conn.open_bi().await.map_err(|e| format!("p2p stream: {e}"))?;
+    let (mut send, mut recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| format!("p2p stream: {e}"))?;
     let bytes = serde_json::to_vec(msg).map_err(|e| e.to_string())?;
-    send.write_all(&bytes).await.map_err(|e| format!("p2p send: {e}"))?;
+    send.write_all(&bytes)
+        .await
+        .map_err(|e| format!("p2p send: {e}"))?;
     send.finish().map_err(|e| format!("p2p finish: {e}"))?;
     let buf = tokio::time::timeout(REPLY_TIMEOUT, recv.read_to_end(MAX_FRAME))
         .await

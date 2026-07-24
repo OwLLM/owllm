@@ -73,7 +73,10 @@ fn append_line(path: &Path, record: &Value) -> std::io::Result<()> {
     use std::io::Write;
     let line = serde_json::to_string(record)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
     writeln!(f, "{line}")
 }
 
@@ -86,7 +89,10 @@ pub fn write(record: &Value) {
                 let _ = std::fs::create_dir_all(parent);
             }
             if let Err(e) = append_line(&path, record) {
-                eprintln!("remote_devices audit write failed ({}): {e}", path.display());
+                eprintln!(
+                    "remote_devices audit write failed ({}): {e}",
+                    path.display()
+                );
             }
         }
         None => eprintln!("remote_devices audit skipped: could not resolve app data dir"),
@@ -95,15 +101,21 @@ pub fn write(record: &Value) {
 
 /// The last `limit` audit lines, newest last, for the UI viewer.
 pub fn tail(limit: usize) -> Vec<Value> {
-    let Some(path) = audit_path() else { return vec![] };
+    let Some(path) = audit_path() else {
+        return vec![];
+    };
     if limit == 0 {
         return vec![];
     }
 
     // The audit is append-only and can grow for months. Reading and parsing the
     // whole file just to render the newest rows used to stall the Devices page.
-    let Ok(mut file) = std::fs::File::open(&path) else { return vec![] };
-    let Ok(mut offset) = file.metadata().map(|m| m.len()) else { return vec![] };
+    let Ok(mut file) = std::fs::File::open(&path) else {
+        return vec![];
+    };
+    let Ok(mut offset) = file.metadata().map(|m| m.len()) else {
+        return vec![];
+    };
     let mut bytes = Vec::new();
     const CHUNK_BYTES: u64 = 64 * 1024;
 
@@ -158,7 +170,15 @@ mod tests {
     #[test]
     fn output_is_never_stored_raw() {
         let secret = "SUPER_SECRET_TOKEN_abc123";
-        let rec = record("inbound", "a", "b", "shell", "whoami", "allowed", &res(secret));
+        let rec = record(
+            "inbound",
+            "a",
+            "b",
+            "shell",
+            "whoami",
+            "allowed",
+            &res(secret),
+        );
         let serialized = serde_json::to_string(&rec).unwrap();
         // The raw output must not appear anywhere in the audit line.
         assert!(!serialized.contains(secret));
@@ -169,7 +189,15 @@ mod tests {
 
     #[test]
     fn command_line_is_recorded_for_accountability() {
-        let rec = record("inbound", "a", "b", "shell", "systeminfo", "allowed", &res(""));
+        let rec = record(
+            "inbound",
+            "a",
+            "b",
+            "shell",
+            "systeminfo",
+            "allowed",
+            &res(""),
+        );
         assert_eq!(rec["command"], json!("systeminfo"));
         assert_eq!(rec["dir"], json!("inbound"));
     }

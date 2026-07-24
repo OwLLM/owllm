@@ -50,7 +50,11 @@ pub struct RelayTransport {
 
 impl Transport for RelayTransport {
     async fn deliver(&self, frame: SignedEnvelope) -> Result<CommandResult, String> {
-        let pkt = RelayPacket { to: frame.to_device.clone(), corr: corr_id(), frame };
+        let pkt = RelayPacket {
+            to: frame.to_device.clone(),
+            corr: corr_id(),
+            frame,
+        };
         let client = http_client(SEND_WAIT + Duration::from_secs(15))?;
         let resp = client
             .post(format!("{}/relay/v1/send", self.url.trim_end_matches('/')))
@@ -64,7 +68,10 @@ impl Transport for RelayTransport {
         if !resp.status().is_success() {
             return Err(format!("relay send HTTP {}", resp.status().as_u16()));
         }
-        let reply: RelayReply = resp.json().await.map_err(|e| format!("relay reply decode: {e}"))?;
+        let reply: RelayReply = resp
+            .json()
+            .await
+            .map_err(|e| format!("relay reply decode: {e}"))?;
         // Open the target's sealed reply with THIS device's X25519 secret.
         let me = super::identity::load_or_create()?;
         let pt = super::crypto::open(&reply.frame, &me.secrets.x25519_secret)?;
@@ -117,7 +124,15 @@ async fn client_loop(url: String, my_id: String, stop: Arc<AtomicBool>) {
                 match super::handle_incoming(pkt.frame).await {
                     Ok(result) => {
                         if let Ok(sealed) = super::seal_result_for(&to_dev, &to_x, &result) {
-                            let _ = post_reply(&poll_client, &base, &RelayReply { corr, frame: sealed }).await;
+                            let _ = post_reply(
+                                &poll_client,
+                                &base,
+                                &RelayReply {
+                                    corr,
+                                    frame: sealed,
+                                },
+                            )
+                            .await;
                         }
                     }
                     // Integrity failure (forged/misrouted) — drop silently, no reply.
@@ -133,7 +148,11 @@ async fn client_loop(url: String, my_id: String, stop: Arc<AtomicBool>) {
     }
 }
 
-async fn poll_once(client: &reqwest::Client, base: &str, my_id: &str) -> Result<Option<RelayPacket>, String> {
+async fn poll_once(
+    client: &reqwest::Client,
+    base: &str,
+    my_id: &str,
+) -> Result<Option<RelayPacket>, String> {
     let resp = client
         .get(format!("{base}/relay/v1/poll"))
         .query(&[("device", my_id)])
@@ -142,12 +161,20 @@ async fn poll_once(client: &reqwest::Client, base: &str, my_id: &str) -> Result<
         .map_err(|e| format!("relay poll: {e}"))?;
     match resp.status().as_u16() {
         204 => Ok(None),
-        200 => resp.json::<RelayPacket>().await.map(Some).map_err(|e| format!("relay poll decode: {e}")),
+        200 => resp
+            .json::<RelayPacket>()
+            .await
+            .map(Some)
+            .map_err(|e| format!("relay poll decode: {e}")),
         s => Err(format!("relay poll HTTP {s}")),
     }
 }
 
-async fn post_reply(client: &reqwest::Client, base: &str, reply: &RelayReply) -> Result<(), String> {
+async fn post_reply(
+    client: &reqwest::Client,
+    base: &str,
+    reply: &RelayReply,
+) -> Result<(), String> {
     client
         .post(format!("{base}/relay/v1/reply"))
         .json(reply)
@@ -299,8 +326,13 @@ fn read_body(req: &mut tiny_http::Request) -> Option<String> {
 }
 
 fn reply_json(req: tiny_http::Request, code: u16, body: &str) {
-    let header = tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    let _ = req.respond(tiny_http::Response::from_string(body).with_status_code(code).with_header(header));
+    let header =
+        tiny_http::Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
+    let _ = req.respond(
+        tiny_http::Response::from_string(body)
+            .with_status_code(code)
+            .with_header(header),
+    );
 }
 
 fn handle(mut req: tiny_http::Request, state: &RelayServer) {
@@ -335,7 +367,10 @@ fn handle(mut req: tiny_http::Request, state: &RelayServer) {
             };
             match state.send_and_wait(pkt) {
                 Some(frame) => {
-                    let reply = RelayReply { corr: String::new(), frame };
+                    let reply = RelayReply {
+                        corr: String::new(),
+                        frame,
+                    };
                     reply_json(req, 200, &serde_json::to_string(&reply).unwrap_or_default());
                 }
                 None => reply_json(req, 504, "{\"error\":\"timeout\"}"),
@@ -353,7 +388,8 @@ fn handle(mut req: tiny_http::Request, state: &RelayServer) {
         }
         (tiny_http::Method::Get, "/relay/v1/health") => reply_json(req, 200, "{\"ok\":true}"),
         _ => {
-            let _ = req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
+            let _ =
+                req.respond(tiny_http::Response::from_string("not found").with_status_code(404));
         }
     }
 }

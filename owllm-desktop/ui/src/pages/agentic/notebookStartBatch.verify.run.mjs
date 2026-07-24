@@ -150,8 +150,9 @@ console.log("case 0: run completion paths cannot depend on a later React render"
 check("Code busy state synchronizes the imperative lock", codePageSrc.includes("const setBusy = (v: boolean) => {\n    // Keep the imperative send gate") && codePageSrc.includes("busySendRef.current = v;"));
 check("Code send gates on the synchronous lock", codePageSrc.includes("if (busySendRef.current) {"));
 check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();"));
-check("Code finishes the notebook sequence after its final auto-fed step", codePageSrc.includes("markNotebookAutoFeedFinished(ruleScopeRef.current.id, notebookSurfaceId);"));
-check("Agents finishes the notebook sequence after its final auto-fed step", agentsPageSrc.includes("markNotebookAutoFeedFinished(pid, notebookSurfaceId);"));
+check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();") && agentsPageSrc.includes("else notifyAutoFeedPaused(notebookPauseReason);"));
+check("Code uses the shared auto-feed continuation", codePageSrc.includes("continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId"));
+check("Agents uses the shared auto-feed continuation", agentsPageSrc.includes("continueNotebookAutoFeed(pid, notebookSurfaceId"));
 check("Watcher help and bug actions have accessible names", watcherSrc.includes('aria-label="Help using the app"') && watcherSrc.includes('aria-label="Report a bug"'));
 check("Watcher actions use bundled SVG icons", watcherSrc.includes('<ActionIcon name="help"') && watcherSrc.includes('<ActionIcon name="bug"') && !watcherSrc.includes(">🐞 Report this as a bug"));
 check("Existing-project brainstorm ends in the Notebook", brainstormSrc.includes('data-ui="BrainstormOpenNotebook"') && brainstormSrc.includes("seedNotebookFromBrief(projectId, briefTextOnDisk)"));
@@ -210,6 +211,36 @@ console.log("case 3: ▶ Start queue kicks off the step list");
   check("first step marked sent", after.steps.find((s) => s.id === "s1")?.status === "sent");
   check("first step has startedAt", typeof after.steps.find((s) => s.id === "s1")?.startedAt === "number");
   check("second step still pending", after.steps.find((s) => s.id === "s2")?.status === "pending");
+  act(() => root.unmount());
+}
+
+// ---- 3a. Start queue is an explicit ownership takeover. A closed page can
+//          leave its persisted owner behind; card one must not run and then
+//          strand card two behind that stale owner. ----
+console.log("case 3a: Start queue takes over a stale auto-feed owner");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "code:closed-page" }));
+  const fed = [];
+  const { root } = mount({ surfaceId: "code:current-page", onFeed: (_t, id) => { fed.push(id); return "dispatched"; } });
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("first card dispatches from the current page", fed.join(",") === "s1");
+  check("idle Start queue claims the current page", blob().autoFeedOwner === "code:current-page");
+  NB.markNotebookStepFinished(PID, "s1", 2000);
+  check("next clean completion can dispatch card two", NB.continueNotebookAutoFeed(PID, "code:current-page", (step) => fed.push(step.id)) === "dispatched" && fed.join(",") === "s1,s2");
+  act(() => root.unmount());
+}
+
+console.log("case 3aa: Start queue waits for an already-running job");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "agents:closed-page" }));
+  const fed = [];
+  const { root } = mount({ surfaceId: "agents:current-page", running: true, onFeed: (_t, id) => { fed.push(id); return "dispatched"; } });
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("no card steers the live run", fed.length === 0 && blob().steps.every((s) => s.status === "pending"));
+  check("running Start queue claims the current page", blob().autoFeed && blob().autoFeedOwner === "agents:current-page");
+  check("current run completion dispatches card one", NB.continueNotebookAutoFeed(PID, "agents:current-page", (step) => fed.push(step.id)) === "dispatched" && fed.join(",") === "s1");
   act(() => root.unmount());
 }
 
@@ -372,6 +403,19 @@ console.log("case 6: takeNextAutoStep is gated per surface");
   check("the owner keeps walking the queue", second?.id === "s2");
 }
 
+// ---- 6b. Repeated clean run completions walk beyond the first card ----
+console.log("case 6b: clean completions walk the complete auto-feed queue");
+{
+  seed();
+  const dispatched = [];
+  const dispatch = (step) => dispatched.push(step.id);
+  check("first completion dispatches card one", NB.continueNotebookAutoFeed(PID, "agents:main", dispatch) === "dispatched" && dispatched.join(",") === "s1");
+  NB.markNotebookStepFinished(PID, "s1", 2000);
+  check("second completion dispatches card two", NB.continueNotebookAutoFeed(PID, "agents:main", dispatch) === "dispatched" && dispatched.join(",") === "s1,s2");
+  NB.markNotebookStepFinished(PID, "s2", 3000);
+  check("final completion closes the sequence", NB.continueNotebookAutoFeed(PID, "agents:main", dispatch) === "finished" && typeof blob().autoFeedFinishedAt === "number");
+}
+
 // ---- 7. autoFeedWouldRun mirrors the same gate ----
 console.log("case 7: autoFeedWouldRun respects owner + pending");
 {
@@ -384,21 +428,87 @@ console.log("case 7: autoFeedWouldRun respects owner + pending");
   check("false when the toggle is off", autoFeedWouldRun(PID, "agents:main") === false);
 }
 
-// ---- 8. the toggle claims ownership; OFF from ANY page removes it ----
-console.log("case 8: toggle claims / releases ownership across pages");
+// ---- 8. the owning window drives; a live spectator must take over to control ----
+console.log("case 8: a live queue owner locks other windows until they take over");
 {
   localStorage.setItem(KEY, JSON.stringify({ text: "", plan: PLAN, steps: [{ id: "s1", text: "step", status: "pending", ts: 1 }], autoFeed: false, digest: [] }));
   const m1 = mount({ surfaceId: "code:p1" });
   clickEl(document.querySelector("input[type=checkbox]"));
   check("checking ON records this page as owner", blob().autoFeed === true && blob().autoFeedOwner === "code:p1");
+  check("turning it on beats a heartbeat", typeof blob().autoFeedHeartbeat === "number");
   act(() => m1.root.unmount());
   const m2 = mount({ surfaceId: "code:p2" });
-  check("another page shows it as driven elsewhere", textOf(document.body).includes("another page drives"));
-  check("that page cannot pop the queue", NB.takeNextAutoStep(PID, "code:p2") === null);
+  check("another window is locked to the live owner", textOf(document.body).includes("Queue runs in another window"));
+  check("the spectator cannot pop the queue", NB.takeNextAutoStep(PID, "code:p2") === null);
+  check("no auto-feed checkbox for the spectator", !document.querySelector("input[type=checkbox]"));
+  clickEl(buttons().find((b) => textOf(b).includes("Take over")));
+  check("taking over hands the queue to this window", blob().autoFeedOwner === "code:p2");
+  check("after takeover the checkbox is back", !!document.querySelector("input[type=checkbox]"));
   clickEl(document.querySelector("input[type=checkbox]"));
-  check("unchecking from the OTHER page stops it everywhere", blob().autoFeed === false && blob().autoFeedOwner === undefined);
-  clickEl(document.querySelector("input[type=checkbox]"));
-  check("re-checking hands the queue to this page", blob().autoFeed === true && blob().autoFeedOwner === "code:p2");
+  check("the new owner can stop it", blob().autoFeed === false && blob().autoFeedOwner === undefined);
+  act(() => m2.root.unmount());
+}
+
+// ---- 8b. a STALE owner (window closed mid-queue → heartbeat lapsed) does NOT
+//          lock other windows: Start queue takes over instead of stranding. ----
+console.log("case 8b: a stale (dead) owner never strands the queue");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN, steps: [{ id: "s1", text: "step", status: "pending", ts: 1 }],
+    autoFeed: true, autoFeedOwner: "code:dead-window", autoFeedHeartbeat: 1, // ancient beat
+    digest: [],
+  }));
+  const { root } = mount({ surfaceId: "code:live-window" });
+  check("a lapsed owner does not lock this window", !textOf(document.body).includes("Queue runs in another window"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("Start queue is enabled to take over a dead owner", !!startBtn && !startBtn.disabled);
+  act(() => root.unmount());
+}
+
+// ---- 9. a queue started in another WINDOW is ghosted (read-only) here ----
+console.log("case 9: a queue owned by another window is ghosted here");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: true, autoFeedOwner: "code:other-window", autoFeedHeartbeat: Date.now() }));
+  const { root } = mount({ surfaceId: "code:this-window" });
+  check("shows the queue runs in another window", textOf(document.body).includes("Queue runs in another window"));
+  check("no auto-feed checkbox while locked", !document.querySelector("input[type=checkbox]"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("Start queue is disabled here", !!startBtn && startBtn.disabled);
+  const stepFeed = buttons().find((b) => textOf(b) === "Feed" || textOf(b).includes("Re-feed") || /(^|>)Feed$/.test(textOf(b)));
+  check("per-step Feed is disabled here", !!stepFeed && stepFeed.disabled);
+  const takeOver = buttons().find((b) => textOf(b).includes("Take over"));
+  check("a Take over control is offered", !!takeOver);
+  clickEl(takeOver);
+  check("taking over makes THIS window the owner", blob().autoFeedOwner === "code:this-window");
+  act(() => root.unmount());
+}
+
+// ---- 9b. the OWNING window keeps full control (not ghosted) ----
+console.log("case 9b: the owning window is not ghosted");
+{
+  seed();
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: true, autoFeedOwner: "code:mine", autoFeedHeartbeat: Date.now() }));
+  const { root } = mount({ surfaceId: "code:mine" });
+  check("owner sees no locked banner", !textOf(document.body).includes("Queue runs in another window"));
+  check("owner keeps the auto-feed checkbox", !!document.querySelector("input[type=checkbox]"));
+  const startBtn = buttons().find((b) => textOf(b).includes("Start queue"));
+  check("owner Start queue is enabled", !!startBtn && !startBtn.disabled);
+  act(() => root.unmount());
+}
+
+// ---- 9c. an idle Start queue claims the lease even with auto-feed OFF, so a
+//          plain (non-auto) queue is still owned by the starting window ----
+console.log("case 9c: Start queue claims the window lease even with auto-feed off");
+{
+  localStorage.setItem(KEY, JSON.stringify({ text: "", plan: PLAN, steps: [{ id: "s1", text: "only step", status: "pending", ts: 1 }], autoFeed: false, digest: [] }));
+  const { root } = mount({ surfaceId: "code:starter", onFeed: () => "dispatched" });
+  clickEl(buttons().find((b) => textOf(b).includes("Start queue")));
+  check("starting claims ownership without turning auto-feed on", blob().autoFeedOwner === "code:starter" && blob().autoFeed !== true);
+  act(() => root.unmount());
+  // A different window now sees the in-flight (sent, unfinished) queue as locked.
+  const m2 = mount({ surfaceId: "code:bystander" });
+  check("another window is locked out of the in-flight queue", textOf(document.body).includes("Queue runs in another window"));
   act(() => m2.root.unmount());
 }
 

@@ -84,7 +84,7 @@ check(localTools.includes('name: "browser_tabs"') && localTools.includes('name: 
 check(gatewayRs.includes('"browser_tabs" => crate::browser::browser_list_tabs') &&
       /"browser_snapshot"[\s\S]{0,220}as_optional_index\(args, "tab_id"\)/.test(gatewayRs),
   "CLI/MCP agents receive the same tab management and tab-id routing");
-check(browserPanel.includes("status.tabs.map") && browserPanel.includes('invoke("browser_select_tab"') &&
+check(/status\?\.tabs/.test(browserPanel) && /browserTabs\.map\(/.test(browserPanel) && browserPanel.includes('invoke("browser_select_tab"') &&
       browserPanel.includes('invoke("browser_close_tab"'),
   "the in-app user browser panel exposes the same open/select/close tab surface");
 check(/const navigate[\s\S]{0,350}browser_open_tab[\s\S]{0,100}activate: true/.test(browserPanel),

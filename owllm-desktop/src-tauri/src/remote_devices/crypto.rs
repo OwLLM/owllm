@@ -35,11 +35,14 @@ fn b64(bytes: &[u8]) -> String {
 
 fn unb64(s: &str) -> Result<Vec<u8>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD.decode(s).map_err(|e| format!("base64 decode: {e}"))
+    STANDARD
+        .decode(s)
+        .map_err(|e| format!("base64 decode: {e}"))
 }
 
 fn arr32(v: &[u8], what: &str) -> Result<[u8; 32], String> {
-    v.try_into().map_err(|_| format!("{what}: expected 32 bytes, got {}", v.len()))
+    v.try_into()
+        .map_err(|_| format!("{what}: expected 32 bytes, got {}", v.len()))
 }
 
 // ------------------------------------------------------------------
@@ -62,7 +65,10 @@ impl DeviceSecrets {
         let mut xs = [0u8; 32];
         OsRng.fill_bytes(&mut ed);
         OsRng.fill_bytes(&mut xs);
-        DeviceSecrets { ed25519_seed: ed, x25519_secret: xs }
+        DeviceSecrets {
+            ed25519_seed: ed,
+            x25519_secret: xs,
+        }
     }
 
     fn signing_key(&self) -> SigningKey {
@@ -166,7 +172,13 @@ pub fn seal(
     let aad = env.aad();
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
     let ct = cipher
-        .encrypt(Nonce::from_slice(&gcm_nonce), Payload { msg: plaintext, aad: &aad })
+        .encrypt(
+            Nonce::from_slice(&gcm_nonce),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
         .map_err(|_| "seal: AEAD encrypt failed".to_string())?;
     env.ciphertext = b64(&ct);
 
@@ -211,12 +223,19 @@ pub fn open(env: &SignedEnvelope, my_x25519_secret: &[u8; 32]) -> Result<Vec<u8>
     let aad = env.aad();
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key));
     cipher
-        .decrypt(Nonce::from_slice(&gcm_nonce), Payload { msg: &ct, aad: &aad })
+        .decrypt(
+            Nonce::from_slice(&gcm_nonce),
+            Payload {
+                msg: &ct,
+                aad: &aad,
+            },
+        )
         .map_err(|_| "open: AEAD decrypt/verify failed".to_string())
 }
 
 fn arr64(v: &[u8], what: &str) -> Result<[u8; 64], String> {
-    v.try_into().map_err(|_| format!("{what}: expected 64 bytes, got {}", v.len()))
+    v.try_into()
+        .map_err(|_| format!("{what}: expected 64 bytes, got {}", v.len()))
 }
 
 // ------------------------------------------------------------------
@@ -286,7 +305,15 @@ mod tests {
         let controller = DeviceSecrets::generate();
         let target = DeviceSecrets::generate();
         let eavesdropper = DeviceSecrets::generate();
-        let env = seal(&controller, &target.device_id(), &target.x25519_public(), b"secret", 1, &nonce24()).unwrap();
+        let env = seal(
+            &controller,
+            &target.device_id(),
+            &target.x25519_public(),
+            b"secret",
+            1,
+            &nonce24(),
+        )
+        .unwrap();
         // A different X25519 secret derives a different key → decrypt fails.
         assert!(open(&env, &eavesdropper.x25519_secret).is_err());
     }
@@ -295,7 +322,15 @@ mod tests {
     fn tampered_ciphertext_is_rejected() {
         let controller = DeviceSecrets::generate();
         let target = DeviceSecrets::generate();
-        let mut env = seal(&controller, &target.device_id(), &target.x25519_public(), b"hello", 1, &nonce24()).unwrap();
+        let mut env = seal(
+            &controller,
+            &target.device_id(),
+            &target.x25519_public(),
+            b"hello",
+            1,
+            &nonce24(),
+        )
+        .unwrap();
         // Flip the ciphertext — signature no longer covers it AND the AEAD tag
         // fails. Either way, open() must refuse.
         env.ciphertext = b64(b"totally-different-bytes");
@@ -307,7 +342,15 @@ mod tests {
         let controller = DeviceSecrets::generate();
         let target = DeviceSecrets::generate();
         let attacker = DeviceSecrets::generate();
-        let mut env = seal(&controller, &target.device_id(), &target.x25519_public(), b"hello", 1, &nonce24()).unwrap();
+        let mut env = seal(
+            &controller,
+            &target.device_id(),
+            &target.x25519_public(),
+            b"hello",
+            1,
+            &nonce24(),
+        )
+        .unwrap();
         // Attacker re-signs the frame with THEIR key but leaves the victim's
         // from_* fields — signature won't verify against the claimed pubkey.
         let sig = attacker.signing_key().sign(&env.canonical_header());
@@ -319,7 +362,15 @@ mod tests {
     fn spoofed_device_id_is_rejected() {
         let controller = DeviceSecrets::generate();
         let target = DeviceSecrets::generate();
-        let mut env = seal(&controller, &target.device_id(), &target.x25519_public(), b"hi", 1, &nonce24()).unwrap();
+        let mut env = seal(
+            &controller,
+            &target.device_id(),
+            &target.x25519_public(),
+            b"hi",
+            1,
+            &nonce24(),
+        )
+        .unwrap();
         // Claim a different id than the key hashes to.
         env.from_device = "deadbeef".repeat(8);
         assert!(open(&env, &target.x25519_secret).is_err());

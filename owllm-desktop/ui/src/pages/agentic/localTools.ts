@@ -25,6 +25,12 @@ import {
 } from "./mcpSettings";
 import { bumpActivity } from "../../support/activityStats";
 import { loadSkillByRef, skillCatalogBrief, anySkillInstalled } from "./skillRuntime";
+import {
+  PERSONAL_POLICY_MARKER,
+  policyMemoryKey,
+  policySkillIds,
+  policyToolNames,
+} from "./personalAgentRuntime";
 import { formatWorkLogEntry, renderRelevantWork } from "./teamMemoryFormat";
 import { parseVerifyConfig, parseCardVerify, pickGateCommand, classifyGateStatus, detectVerifyCommand, type GateResult, type GateScope } from "./gate";
 import { parseProjectCard, lintProjectCard, type CardFinding, type CardFacts } from "./cardLint";
@@ -394,6 +400,55 @@ export async function logTeamWork(agent: string, instruction: string, result: st
   await logScopedTeamWork(_teamMemoryScope || "", agent, instruction, result);
 }
 
+function notifySharedMemoryChanged(): void {
+  try { window.dispatchEvent(new CustomEvent("owllm:memory:changed")); } catch { /* non-browser/test */ }
+}
+
+function stableMemoryKey(text: string): string {
+  let hash = 0x811c9dc5;
+  for (const ch of text) {
+    hash ^= ch.charCodeAt(0);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return `auto_work_${(hash >>> 0).toString(36)}`;
+}
+
+function redactMemorySecrets(text: string): string {
+  return text
+    .replace(/\b(?:ghp|github_pat|glpat|sk)-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_TOKEN]")
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, "$1[REDACTED_TOKEN]")
+    .replace(/\b(password|passwd|secret|api[_ -]?key|token)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]");
+}
+
+// Promote a successful implementation summary into the durable, synced fact
+// store. Previously only an exact `[REMEMBER]` line or a memory_write tool call
+// could grow the fact count, so ordinary completed features remained local
+// worklog forever. Keep this conservative and clearly tagged: questions,
+// errors, chats, and vague/short replies remain worklog-only.
+export async function autoCurateScopedTeamFact(scope: string, agent: string, instruction: string, result: string): Promise<boolean> {
+  if (!scope || /chat/i.test(agent) || /^\(error:/i.test(result.trim())) return false;
+  const implementation = /\b(implemented|fixed|added|updated|changed|created|removed|refactored|migrated|published|shipped|verified|tests? pass(?:ed)?|build pass(?:ed)?|completed)\b/i;
+  if (result.trim().length < 80 || !implementation.test(result)) return false;
+  const task = instruction.replace(/\s+/g, " ").trim().slice(0, 260);
+  const outcome = redactMemorySecrets(stripMemoryDirectives(result))
+    .replace(/\s+/g, " ").trim().slice(0, 1000);
+  if (!task || !outcome) return false;
+  try {
+    const id = await withMemoryTimeout(invoke<number>("team_memory_write", {
+      scope,
+      content: `TASK: ${task}\nOUTCOME: ${outcome}`,
+      key: stableMemoryKey(`${agent}\0${task.toLowerCase()}`),
+      tags: "auto-curated,implementation",
+      author: agent,
+    }), 0);
+    if (id <= 0) return false;
+    notifySharedMemoryChanged();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function logScopedTeamWork(scope: string, agent: string, instruction: string, result: string): Promise<void> {
   if (!result || !result.trim()) return;
   // Don't record FAILED turns into the shared work-state. The loop research is
@@ -407,6 +462,7 @@ export async function logScopedTeamWork(scope: string, agent: string, instructio
       invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) }),
       0,
     );
+    await autoCurateScopedTeamFact(scope, agent, instruction, result);
     if (scope === (_teamMemoryScope || "")) await refreshTeamMemorySnapshot();
   } catch { /* memory must never break a run */ }
 }
@@ -605,10 +661,11 @@ export function stripMemoryDirectives(text: string): string {
 /// team memory for the current scope, then refresh the snapshot so later agents in
 /// the SAME run see them. Best-effort, never throws. Returns how many were written.
 /// Works on every model path — the directive is just text in the reply.
-export async function harvestMemoryWrites(reply: string): Promise<number> {
+export async function harvestMemoryWrites(reply: string, scopeOverride?: string): Promise<number> {
   const dirs = parseMemoryDirectives(reply);
   if (!dirs.length) return 0;
-  const scope = _teamMemoryScope || "";
+  const scope = scopeOverride === undefined ? (_teamMemoryScope || "") : scopeOverride;
+  if (!scope) return 0;
   let written = 0;
   for (const d of dirs) {
     try {
@@ -618,7 +675,8 @@ export async function harvestMemoryWrites(reply: string): Promise<number> {
       written++;
     } catch { /* best-effort per directive */ }
   }
-  if (written > 0) await refreshTeamMemorySnapshot();
+  if (written > 0 && scope === (_teamMemoryScope || "")) await refreshTeamMemorySnapshot();
+  if (written > 0) notifySharedMemoryChanged();
   return written;
 }
 
@@ -722,8 +780,12 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
   // orchestrator passes undefined → every tool). A concrete list restricts
   // to exactly those names (local names like "shell" or MCP qualified names
   // like "mcp:github:create_issue"), honouring the role's tool_allowlist.
-  const allowSet = (allowed && allowed.length > 0 && !allowed.some((a) => a.toLowerCase() === "all"))
-    ? new Set(allowed)
+  const personalPolicy = allowed?.includes(PERSONAL_POLICY_MARKER) === true;
+  const effectiveAllowed = policyToolNames(allowed);
+  const allowSet = personalPolicy
+    ? new Set(effectiveAllowed ?? [])
+    : (effectiveAllowed && effectiveAllowed.length > 0 && !effectiveAllowed.some((a) => a.toLowerCase() === "all"))
+    ? new Set(effectiveAllowed)
     : null;
 
   // MCP master switch — when off, drop ALL MCP tools from the array (local
@@ -752,27 +814,31 @@ export async function formatToolsForOpenAI(allowed?: string[]): Promise<unknown[
   );
   // Advertise the skill tools (load_skill / list_skills) regardless of the
   // allowlist, but only when at least one skill pack is installed.
-  if (await anySkillInstalled()) {
-    for (const t of LOCAL_TOOL_SPECS.filter((t) => SKILL_TOOL_NAMES.has(t.name))) {
+  if ((!personalPolicy || allowSet?.has("load_skill") || allowSet?.has("list_skills")) && await anySkillInstalled()) {
+    for (const t of LOCAL_TOOL_SPECS.filter((t) =>
+      SKILL_TOOL_NAMES.has(t.name) && (!personalPolicy || allowSet?.has(t.name)))) {
       localTools.push(t);
     }
   }
   // Shared team-memory tools — always advertised (cross-cutting, never
   // allowlist-gated) so any agent can consult / contribute to the team's
   // common knowledge base.
-  for (const t of LOCAL_TOOL_SPECS.filter((t) => MEMORY_TOOL_NAMES.has(t.name))) {
+  for (const t of LOCAL_TOOL_SPECS.filter((t) =>
+    MEMORY_TOOL_NAMES.has(t.name) && (!personalPolicy || allowSet?.has(t.name)))) {
     localTools.push(t);
   }
   // Shared agent-browser tools — same rule. The browser is ONE window shared
   // with the user; an agent must always be able to look at it (browser_snapshot)
   // or open a page, regardless of its role allowlist.
-  for (const t of LOCAL_TOOL_SPECS.filter((t) => BROWSER_TOOL_NAMES.has(t.name))) {
+  for (const t of LOCAL_TOOL_SPECS.filter((t) =>
+    BROWSER_TOOL_NAMES.has(t.name) && (!personalPolicy || allowSet?.has(t.name)))) {
     localTools.push(t);
   }
   // KVM node control — cross-cutting like the browser: no role YAML names it,
   // so allowlist-gating hid it from every agent. The backend feature flag +
   // per-host consent (fail-closed) remain the real gate at exec time.
-  for (const t of LOCAL_TOOL_SPECS.filter((t) => KVM_TOOL_NAMES.has(t.name))) {
+  for (const t of LOCAL_TOOL_SPECS.filter((t) =>
+    KVM_TOOL_NAMES.has(t.name) && (!personalPolicy || allowSet?.has(t.name)))) {
     localTools.push(t);
   }
   // Keep the browser-state prompt line warm on every tool-catalog build (i.e.
@@ -1717,15 +1783,29 @@ export type ToolExecResult = {
 /// Run one native tool call. Thin wrapper that also counts failures into
 /// The Watcher's local activity stats (product telemetry: tool NAME only,
 /// never arguments or output — P0-8 Slice 4).
-export async function executeToolCall(call: ToolCall, projectCwd: string): Promise<ToolExecResult> {
-  const r = await executeToolCallInner(call, projectCwd);
+export async function executeToolCall(
+  call: ToolCall,
+  projectCwd: string,
+  allowedTools?: string[],
+): Promise<ToolExecResult> {
+  if (allowedTools?.includes(PERSONAL_POLICY_MARKER)) {
+    const permitted = new Set(policyToolNames(allowedTools) ?? []);
+    if (!permitted.has(call.name)) {
+      return { ok: false, output: `tool "${call.name}" denied by the personal agent's fail-closed allowlist` };
+    }
+  }
+  const r = await executeToolCallInner(call, projectCwd, allowedTools);
   if (!r.ok) {
     try { bumpActivity(`tool-fail:${call.name}`); } catch { /* stats must never break a turn */ }
   }
   return r;
 }
 
-async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise<ToolExecResult> {
+async function executeToolCallInner(
+  call: ToolCall,
+  projectCwd: string,
+  allowedTools?: string[],
+): Promise<ToolExecResult> {
   const cwd = projectCwd || undefined;
   // MCP-routed call: name is `mcp:<server>:<tool>`. Split, pass the
   // args dict through as the arguments object — most MCP tools use
@@ -1961,15 +2041,17 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
         return { ok: true, output: `screenshot saved: ${saved}` };
       }
       case "list_skills": {
-        const brief = await skillCatalogBrief();
+        const ids = policySkillIds(allowedTools);
+        const brief = await skillCatalogBrief(ids ?? [], ids);
         return { ok: true, output: `Available skills:\n${brief}\n\nLoad one with load_skill("<name>").` };
       }
       case "load_skill": {
         const ref = call.args.name ?? call.args.skill ?? "";
         if (!ref.trim()) return { ok: false, output: "load_skill: 'name' is required (the skill name or id)." };
-        const skill = await loadSkillByRef(ref);
+        const ids = policySkillIds(allowedTools);
+        const skill = await loadSkillByRef(ref, ids);
         if (!skill) {
-          const brief = await skillCatalogBrief();
+          const brief = await skillCatalogBrief(ids ?? [], ids);
           return { ok: false, output: `No skill matching "${ref}". Available skills:\n${brief}` };
         }
         if (!skill.body.trim()) {
@@ -1982,7 +2064,9 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
       }
       case "memory_search": {
         // Shared team memory, scoped to the stable project ID (Rust maps "" → "global").
-        const memScope = _teamMemoryScope || projectCwd || "";
+        const scoped = policyMemoryKey(allowedTools);
+        const memScope = scoped === undefined ? (_teamMemoryScope || projectCwd || "") : scoped;
+        if (!memScope) return { ok: false, output: "memory is disabled for this personal agent" };
         const entries = await invoke<RawTeamMemEntry[]>(
           "team_memory_search",
           { scope: memScope, query: call.args.query ?? "", limit: clampInt(call.args.limit, 8, 1, 50) },
@@ -2001,24 +2085,31 @@ async function executeToolCallInner(call: ToolCall, projectCwd: string): Promise
       case "memory_write": {
         const content = call.args.content ?? "";
         if (!content.trim()) return { ok: false, output: "memory_write: 'content' is required." };
+        const scoped = policyMemoryKey(allowedTools);
+        const memScope = scoped === undefined ? (_teamMemoryScope || projectCwd || "") : scoped;
+        if (!memScope) return { ok: false, output: "memory is disabled for this personal agent" };
         const id = await invoke<number>("team_memory_write", {
-          scope: _teamMemoryScope || projectCwd || "",
+          scope: memScope,
           content,
           key: call.args.key ?? "",
           tags: call.args.tags ?? "",
           author: "",
         });
         // Keep the injected snapshot warm so later agents in this run see it.
-        await refreshTeamMemorySnapshot();
+        if (scoped === undefined) await refreshTeamMemorySnapshot();
+        notifySharedMemoryChanged();
         const k = call.args.key ? ` under key "${call.args.key}"` : "";
         return { ok: true, output: `Saved to team memory${k} (#${id}).` };
       }
       case "memory_read": {
         const key = call.args.key ?? "";
         if (!key.trim()) return { ok: false, output: "memory_read: 'key' is required." };
+        const scoped = policyMemoryKey(allowedTools);
+        const memScope = scoped === undefined ? (_teamMemoryScope || projectCwd || "") : scoped;
+        if (!memScope) return { ok: false, output: "memory is disabled for this personal agent" };
         const entry = await invoke<{ id: number; key: string; content: string; tags: string; author: string; ts: number } | null>(
           "team_memory_read",
-          { scope: _teamMemoryScope || projectCwd || "", key },
+          { scope: memScope, key },
         );
         if (!entry) return { ok: true, output: `Team memory: nothing stored under key "${key}".` };
         return { ok: true, output: entry.content };

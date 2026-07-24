@@ -24,7 +24,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { takeNextAutoStep, autoFeedWouldRun, markNotebookStepFinished, markNotebookAutoFeedFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
@@ -39,7 +39,8 @@ import {
   isWslPath, type WslStatus, type WslIsolation, type WslProject, type WslToolchain,
 } from "./wslIsolation";
 import { isolationBadge } from "./isolationBadge";
-import { githubStatus, githubConnect, githubDisconnect, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubStatus } from "./github";
+import { githubStatus, githubConnect, githubDisconnect, githubListRepositories, GITHUB_TOKEN_URL, GITHUB_CHANGED_EVENT, type GithubRepository, type GithubStatus } from "./github";
+import { openSyncOnboarding } from "../core/AccountSyncModal";
 import {
   sandboxSyncLogins, sandboxStatus, sandboxCreateProject, sandboxListProjects,
   sandboxProvision, sandboxLoginStatus, sandboxConvertProject,
@@ -49,6 +50,9 @@ import {
 type Msg = {
   role: "user" | "assistant" | "tool";
   content: string;
+  /// Model-facing content can differ from the visible bubble (for example,
+  /// document text is kept here while the bubble shows attachment names).
+  context?: string;
   thinking?: string;
   /// "meta" = page-generated notice (run timing footer, auto-feed pause note):
   /// rendered as a muted line, never sent to the model as history, and never
@@ -1431,6 +1435,12 @@ function CodeWorkspace({ pageId, onTitle }: {
   const [ghBusy, setGhBusy] = useState(false);
   const [ghMsg, setGhMsg] = useState("");
   const [ghOpen, setGhOpen] = useState(false);
+  const [importRepoUrl, setImportRepoUrl] = useState("");
+  const [githubRepos, setGithubRepos] = useState<GithubRepository[]>([]);
+  const [githubReposBusy, setGithubReposBusy] = useState(false);
+  const [selectedGithubRepo, setSelectedGithubRepo] = useState("");
+  const [importBusy, setImportBusy] = useState(false);
+  const [importMsg, setImportMsg] = useState("");
   // Reloads on mount, on the in-window `github-changed` broadcast (an
   // immediate connect/disconnect/authorize from ANY surface — the Account Sync
   // modal, the support drawer, the device-flow), and on window focus (covers
@@ -1448,6 +1458,41 @@ function CodeWorkspace({ pageId, onTitle }: {
       window.removeEventListener(GITHUB_CHANGED_EVENT, load);
     };
   }, []);
+  useEffect(() => {
+    if (!gh?.connected) {
+      setGithubRepos([]);
+      setSelectedGithubRepo("");
+      return;
+    }
+    let dead = false;
+    setGithubReposBusy(true);
+    githubListRepositories()
+      .then((repos) => {
+        if (dead) return;
+        setGithubRepos(repos);
+        setSelectedGithubRepo((cur) => cur || repos[0]?.fullName || "");
+      })
+      .catch((e) => {
+        if (!dead) setImportMsg(`Could not load GitHub repositories: ${String((e as Error)?.message ?? e)}`);
+      })
+      .finally(() => { if (!dead) setGithubReposBusy(false); });
+    return () => { dead = true; };
+  }, [gh?.connected, gh?.login]);
+  const refreshGithubRepositories = async () => {
+    if (!gh?.connected || githubReposBusy) return;
+    setGithubReposBusy(true);
+    setImportMsg("Refreshing your GitHub repositories...");
+    try {
+      const repos = await githubListRepositories();
+      setGithubRepos(repos);
+      setSelectedGithubRepo((cur) => cur || repos[0]?.fullName || "");
+      setImportMsg(repos.length ? `Loaded ${repos.length} GitHub repositories.` : "No repositories are visible to this GitHub account.");
+    } catch (e) {
+      setImportMsg(`Could not load GitHub repositories: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      setGithubReposBusy(false);
+    }
+  };
   const connectGithub = async () => {
     if (ghBusy || !ghToken.trim()) return;
     setGhBusy(true);
@@ -1475,6 +1520,38 @@ function CodeWorkspace({ pageId, onTitle }: {
       setGhMsg(`Couldn't disconnect: ${e}`);
     } finally {
       setGhBusy(false);
+    }
+  };
+
+  const importGithubProject = async () => {
+    const selectedRepo = gh?.connected ? githubRepos.find((repo) => repo.fullName === selectedGithubRepo) : null;
+    const repoUrl = selectedRepo?.cloneUrl || importRepoUrl.trim();
+    if (importBusy) return;
+    if (!repoUrl) {
+      setImportMsg(gh?.connected ? "Select one of your GitHub repositories first." : "Sign in with GitHub, or paste a public repository URL.");
+      return;
+    }
+    setImportBusy(true);
+    setImportMsg("Choose the local parent folder for this clone…");
+    try {
+      const parent = await invoke<string | null>("pick_folder", {
+        title: selectedRepo ? `Choose where to clone ${selectedRepo.fullName}` : "Choose where to clone this GitHub project",
+      });
+      if (!parent) {
+        setImportMsg("Import cancelled — no local folder was changed.");
+        return;
+      }
+      setImportMsg("Cloning from GitHub and creating the local project binding…");
+      const location = await invoke<string>("github_clone_project", { repoUrl, parent });
+      setImportRepoUrl("");
+      setSelectedGithubRepo("");
+      setImportMsg(`Imported to ${location}`);
+      await refreshProjectCatalog();
+      await openWorkspace(location);
+    } catch (e) {
+      setImportMsg(`Import failed: ${String((e as Error)?.message ?? e)}`);
+    } finally {
+      setImportBusy(false);
     }
   };
 
@@ -2024,13 +2101,10 @@ function CodeWorkspace({ pageId, onTitle }: {
         const leftover = drainSteer();
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
         if (ok) {
-          const st = takeNextAutoStep(ruleScopeRef.current.id, notebookSurfaceId);
-          if (st) {
+          continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId, (st) => {
             notebookStepRef.current = st.id;
             void sendRef.current?.(st.text);
-          } else {
-            markNotebookAutoFeedFinished(ruleScopeRef.current.id, notebookSurfaceId);
-          }
+          });
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
           setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }
@@ -2552,21 +2626,22 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
             </div>
 
-            <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: "1px solid rgba(var(--accent-rgb),0.48)", background: "linear-gradient(120deg,rgba(var(--accent-rgb),0.13),var(--bg-card))", boxShadow: "0 0 34px rgba(var(--accent-rgb),0.09)" }}>
-              <span style={{ fontSize: 28 }}>🐙</span>
+            <div data-ui="GitHubConnectionStatus" style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", padding: "14px 16px", borderRadius: 15, border: `1px solid ${gh?.connected ? "rgba(77,224,155,.58)" : "rgba(255,105,120,.58)"}`, background: gh?.connected ? "linear-gradient(120deg,rgba(77,224,155,.15),var(--bg-card))" : "linear-gradient(120deg,rgba(255,105,120,.13),var(--bg-card))", boxShadow: gh?.connected ? "0 0 34px rgba(77,224,155,.10)" : "0 0 34px rgba(255,105,120,.08)" }}>
+              <span aria-hidden="true" style={{ width: 12, height: 12, borderRadius: 999, background: gh?.connected ? "#4de09b" : "#ff6978", boxShadow: gh?.connected ? "0 0 14px rgba(77,224,155,.9)" : "0 0 14px rgba(255,105,120,.8)" }} />
               <div style={{ flex: 1, minWidth: 260 }}>
-                <b style={{ color: "var(--fg-strong)", fontSize: 14 }}>GitHub keeps code, Project Cards and memory consistent across PCs</b>
-                <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>Projects without a repository remain tied to their creator computer and appear ghosted elsewhere.</div>
+                <b style={{ color: "var(--fg-strong)", fontSize: 14 }}>{gh?.connected ? `GitHub connected as ${gh.login}` : "GitHub not connected"}</b>
+                <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5, marginTop: 3 }}>{gh?.connected ? "Repository access is ready for imports, managed projects and sandbox pushes." : "Public repositories can still be imported. Connect GitHub for private repositories and pushes."}</div>
               </div>
-              <button onClick={openNewProject} style={{ ...btn, height: 40, padding: "0 16px", border: "none", background: "var(--accent)", color: "var(--accent-fg)", borderRadius: 10 }}>+ New GitHub-first project</button>
+              <button onClick={() => { if (gh?.connected) void disconnectGithub(); else { setGhOpen((v) => !v); setGhMsg(""); } }} disabled={ghBusy} style={{ border: "none", background: "transparent", color: gh?.connected ? "#4de09b" : "#ff8792", fontSize: 11.5, fontWeight: 750, cursor: ghBusy ? "wait" : "pointer", textDecoration: "underline", padding: 4 }}>{gh?.connected ? "Disconnect" : "Connect GitHub"}</button>
             </div>
 
-            <section>
+            <div data-ui="CodingProjectColumns" style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", alignItems: "start", gap: 22, width: "100%", minWidth: 0 }}>
+            <section style={{ gridColumn: 2, gridRow: 1, minWidth: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
                 <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", flex: 1 }}>Managed projects</div>
                 <span style={{ color: "var(--fg-subtle)", fontSize: 11 }}>{deviceIdentity.name}</span>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(260px,1fr))", gap: 13 }}>
+              <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: 13 }}>
                 {catalogProjects.map((project) => {
                   const local = projectAvailability(project) === "local";
                   const selectedGhost = ghostProjectId === project.id && !local;
@@ -2597,25 +2672,57 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
               {catalogError && <div style={{ color: "var(--error)", fontSize: 12, marginTop: 9 }}>{catalogError}</div>}
             </section>
-            <div style={{ display: "flex", flexDirection: "column", gap: 24, width: "100%", minWidth: 0 }}>
+            <div style={{ gridColumn: 1, gridRow: 1, display: "flex", flexDirection: "column", gap: 24, width: "100%", minWidth: 0 }}>
               {/* START — VS Code-style action rows */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
-                <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Local actions</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 4, width: "100%" }}>
+                <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", marginBottom: 10 }}>Local actions</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, width: "100%" }}>
                   {([
-                    { icon: "🆕", label: "New project…", onClick: openNewProject },
-                    { icon: "📁", label: "Open a project folder…", onClick: pickWorkspace },
-                    { icon: "💬", label: "New chat (no project)", onClick: startChat },
-                    { icon: "🐙", label: gh?.connected ? `GitHub — ${gh.login}` : "Connect GitHub…", onClick: () => { setGhOpen((v) => !v); setGhMsg(""); } },
+                    { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: openNewProject },
+                    { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
+                    { icon: "◌", label: "New chat", detail: "Start a conversation without giving the model access to a project folder.", onClick: startChat },
                   ]).map((a) => (
                     <button key={a.label} onClick={a.onClick}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                      style={{ display: "flex", alignItems: "center", gap: 11, minWidth: 0, background: "transparent", border: "none", padding: "7px 8px", borderRadius: 6, cursor: "pointer", textAlign: "left" }}>
-                      <span style={{ fontSize: 15, width: 18, textAlign: "center", flexShrink: 0 }}>{a.icon}</span>
-                      <span style={{ color: "var(--accent-ink)", fontWeight: 500, fontSize: 13.5, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{a.label}</span>
+                      style={{ minHeight: 118, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, minWidth: 0, padding: 14, borderRadius: 14, cursor: "pointer", textAlign: "left", color: "var(--fg)", border: "1px solid rgba(var(--accent-rgb),.28)", background: "radial-gradient(circle at 100% 0%,rgba(var(--accent-rgb),.16),transparent 52%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px rgba(0,0,0,.12)" }}>
+                      <span style={{ fontSize: 20, color: "var(--accent-ink)", textShadow: "0 0 14px rgba(var(--accent-rgb),.8)" }}>{a.icon}</span>
+                      <span style={{ color: "var(--fg-strong)", fontWeight: 800, fontSize: 13.5 }}>{a.label}</span>
+                      <span style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>{a.detail}</span>
                     </button>
                   ))}
+                  <div data-ui="ImportFromGitHubCard" style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 9, minWidth: 0, padding: 15, borderRadius: 14, border: "1px solid rgba(126,231,255,.38)", background: "radial-gradient(circle at 100% 0%,rgba(126,231,255,.16),transparent 48%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 28px rgba(0,0,0,.14)" }}>
+                    <div style={{ display: "flex", gap: 9, alignItems: "center" }}><span style={{ color: "#7ee7ff", fontSize: 20, textShadow: "0 0 14px rgba(126,231,255,.8)" }}>⇣</span><b style={{ color: "var(--fg-strong)", fontSize: 13.5 }}>Import from GitHub</b></div>
+                    <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>
+                      {gh?.connected
+                        ? `Choose one of @${gh.login}'s GitHub repositories, then choose the local folder where this PC should clone it.`
+                        : "Sign in with GitHub to choose from your repositories. Public URL import stays available as a fallback."}
+                    </div>
+                    {gh?.connected ? (
+                      <div data-ui="GitHubRepositoryPicker" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                          <select value={selectedGithubRepo} onChange={(e) => setSelectedGithubRepo(e.target.value)} disabled={githubReposBusy || githubRepos.length === 0} aria-label="GitHub repository" style={{ flex: 1, minWidth: 0, height: 34, padding: "0 10px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12 }}>
+                            {githubRepos.length === 0 && <option value="">{githubReposBusy ? "Loading GitHub repositories..." : "No repositories found"}</option>}
+                            {githubRepos.map((repo) => (
+                              <option key={repo.fullName} value={repo.fullName}>{repo.fullName}{repo.private ? " (private)" : ""}</option>
+                            ))}
+                          </select>
+                          <button onClick={refreshGithubRepositories} disabled={githubReposBusy} style={{ ...btn, height: 34, padding: "0 11px", color: "#7ee7ff" }}>{githubReposBusy ? "Loading..." : "Refresh"}</button>
+                        </div>
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                          <button onClick={() => void importGithubProject()} disabled={importBusy || !selectedGithubRepo} style={{ ...btn, height: 34, padding: "0 13px", borderColor: "rgba(126,231,255,.5)", color: "#7ee7ff", opacity: importBusy || !selectedGithubRepo ? .5 : 1 }}>{importBusy ? "Importing..." : "Choose folder & import selected repo"}</button>
+                          <button onClick={() => openWebUrl(`https://github.com/${gh.login}?tab=repositories`).catch(() => {})} style={{ ...btn, height: 34, padding: "0 11px", color: "var(--fg-muted)" }}>Open GitHub repositories</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div data-ui="SignedOutGithubImport" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                        <button onClick={openSyncOnboarding} style={{ ...btn, height: 34, justifyContent: "center", borderColor: "rgba(126,231,255,.5)", color: "#7ee7ff" }}>Sign in with GitHub to select a repository</button>
+                        <div style={{ display: "flex", gap: 8 }}>
+                          <input value={importRepoUrl} onChange={(e) => setImportRepoUrl(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") void importGithubProject(); }} placeholder="Public fallback: https://github.com/owner/repository" aria-label="Public GitHub repository URL" style={{ flex: 1, minWidth: 0, height: 34, padding: "0 10px", borderRadius: 8, border: "1px solid var(--border-strong)", background: "var(--bg-surface)", color: "var(--fg)", fontSize: 12 }} />
+                          <button onClick={() => void importGithubProject()} disabled={importBusy || !importRepoUrl.trim()} style={{ ...btn, height: 34, padding: "0 13px", color: "var(--fg-muted)", opacity: importBusy || !importRepoUrl.trim() ? .5 : 1 }}>{importBusy ? "Importing..." : "Import public URL"}</button>
+                        </div>
+                      </div>
+                    )}
+                    {importMsg && <div style={{ color: importMsg.startsWith("Import failed") ? "var(--error)" : "var(--fg-muted)", fontSize: 10.5, lineHeight: 1.4 }}>{importMsg}</div>}
+                  </div>
                 </div>
                 {/* GitHub connect form (inline, opens under the row) */}
                 {ghOpen && !gh?.connected && (
@@ -2629,7 +2736,6 @@ function CodeWorkspace({ pageId, onTitle }: {
                     </div>
                   </div>
                 )}
-                {gh?.connected && <button onClick={disconnectGithub} disabled={ghBusy} style={{ ...btn, height: 24, width: "fit-content", marginTop: 6, padding: "0 10px", color: "var(--fg-muted)", fontSize: 11 }}>Disconnect</button>}
                 {ghMsg && <div style={{ marginTop: 6, fontSize: 11, color: ghMsg.startsWith("✓") || ghMsg.startsWith("Disconnected") ? "#7ff0c5" : "var(--fg-muted)" }}>{ghMsg}</div>}
                 {/* Isolation status — compact line */}
                 <div style={{ marginTop: 18, fontSize: 11.5, lineHeight: 1.5, color: sbox?.available ? "#7ff0c5" : "var(--fg-muted)" }}>
@@ -2646,7 +2752,7 @@ function CodeWorkspace({ pageId, onTitle }: {
               {/* RECENT — projects (name + path), VS Code style */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
                 <div style={{ fontSize: 19, fontWeight: 300, color: "var(--fg-strong)", marginBottom: 8 }}>Projects</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, maxHeight: 420, overflowY: "auto", paddingRight: 2 }}>
+                <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: 8, maxHeight: 420, overflowY: "auto", paddingRight: 2 }}>
                   {orderedRecents.length === 0 && (!isolation.enabled || sboxProjects.filter(p => !recents.includes(p.path)).length === 0) && (
                     <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "var(--fg-muted)" }}>No projects yet — use Local actions above to get started.</div>
                   )}
@@ -2701,6 +2807,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                 </div>
 
               </div>
+            </div>
             </div>
           </div>
         </div>
@@ -3258,12 +3365,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         )}
       </div>
 
-      {/* Status line — expands to multiple lines for the per-credential
-          sync report (P1-2); stays a single ellipsized line otherwise. */}
-      <div style={status.includes("\n")
-        ? { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6, flexShrink: 0 }
-        : { fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 0 }}>{status}</div>
-
       {/* Docked terminal — a real PTY shell in the workspace, sitting right
           above the message box (user spec). Same shell as the popup; ⤢ moves
           it out to the floating window. Kept mounted while hidden so the shell
@@ -3288,6 +3389,25 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
         </div>
       )}
+
+      {/* Status + Terminal line — sits directly above the composer (the input
+          chatbox). The "Coding in …" info is on the left; the Terminal toggle
+          is on the top-right of the input area, full text. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        <div style={status.includes("\n")
+          ? { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
+          : { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
+        <button
+          onClick={() => {
+            // Hidden shells re-open; visible shells hide.
+            if (!termOpen) { setTermOpen(true); setTermHidden(false); }
+            else setTermHidden((hidden) => !hidden);
+          }}
+          title="Open the workspace terminal"
+          aria-label="Open terminal"
+          style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
+        >Terminal</button>
+      </div>
 
       {/* Composer row — lives in the SAME column as the chat panes, so it is
           always exactly as wide as the chat window. DIVIDED (fine-tune-chat
@@ -3315,17 +3435,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
           <input ref={codeFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }}
                  onChange={(e) => { if (e.target.files) void addCodeFiles(e.target.files); e.target.value = ""; }} />
-          <button
-            onClick={() => {
-              // Terminal belongs with the workspace composer, not the compact
-              // utility/header strip. Hidden shells re-open; visible shells hide.
-              if (!termOpen) { setTermOpen(true); setTermHidden(false); }
-              else setTermHidden((hidden) => !hidden);
-            }}
-            title="Open the workspace terminal"
-            aria-label="Open terminal"
-            style={{ ...btn, height: 44, width: 44, justifyContent: "center", padding: 0, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
-          >🖥</button>
           <button onClick={() => codeFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 44, padding: "0 12px" }}>📎</button>
           <textarea
             ref={codeDraftRef}

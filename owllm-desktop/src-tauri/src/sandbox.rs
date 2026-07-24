@@ -1020,7 +1020,12 @@ fn status_impl() -> SandboxStatus {
     // then cached, so polling status is cheap.
     let confined = default_target
         .as_deref()
-        .and_then(|distro| sandbox_cache().lock().ok().and_then(|c| c.get(distro).copied()))
+        .and_then(|distro| {
+            sandbox_cache()
+                .lock()
+                .ok()
+                .and_then(|c| c.get(distro).copied())
+        })
         .unwrap_or(false);
     SandboxStatus {
         available: w.available,
@@ -1403,7 +1408,10 @@ pub struct SparseResult {
 }
 
 #[cfg(windows)]
-fn enable_sparse_impl(distro: Option<String>, convert_existing: bool) -> Result<SparseResult, String> {
+fn enable_sparse_impl(
+    distro: Option<String>,
+    convert_existing: bool,
+) -> Result<SparseResult, String> {
     // ADVANCED opt-in only (the UI gates this behind an explicit data-corruption
     // warning) — Microsoft disables sparse by default for safety, so we never
     // auto-apply it. Set the global default first (covers future distros, no restart).
@@ -1437,8 +1445,9 @@ fn enable_sparse_impl(distro: Option<String>, convert_existing: bool) -> Result<
                 }
             },
             Err(e) => {
-                r.detail =
-                    format!("Auto-shrink default is set, but no Linux distro was found to convert: {e}");
+                r.detail = format!(
+                    "Auto-shrink default is set, but no Linux distro was found to convert: {e}"
+                );
             }
         }
     }
@@ -1446,7 +1455,10 @@ fn enable_sparse_impl(distro: Option<String>, convert_existing: bool) -> Result<
 }
 
 #[cfg(not(windows))]
-fn enable_sparse_impl(_distro: Option<String>, _convert_existing: bool) -> Result<SparseResult, String> {
+fn enable_sparse_impl(
+    _distro: Option<String>,
+    _convert_existing: bool,
+) -> Result<SparseResult, String> {
     // No managed, ever-growing vhdx off Windows: bubblewrap (Linux) runs on the
     // host filesystem and Lima (macOS) manages its own disk. Report not-applicable
     // so the UI can hide the control rather than offer a no-op button.
@@ -2509,7 +2521,10 @@ mod tests {
     fn sparse_merge_uses_existing_experimental_section() {
         let existing = "[experimental]\nautoMemoryReclaim=gradual\n";
         let out = merge_sparse_into_wslconfig(existing).unwrap();
-        assert!(out.contains("autoMemoryReclaim=gradual"), "kept sibling key");
+        assert!(
+            out.contains("autoMemoryReclaim=gradual"),
+            "kept sibling key"
+        );
         assert!(out.contains("sparseVhd=true"));
         // Only ONE [experimental] header — we didn't append a duplicate section.
         assert_eq!(out.matches("[experimental]").count(), 1, "{out}");

@@ -91,14 +91,16 @@ function skillSlug(s: string): string {
 /// equipped ones) so an agent can pull any bundled skill it judges relevant —
 /// the user's "the agent picks/switches its own skills" model. Returns null if
 /// nothing matches.
-export async function loadSkillByRef(ref: string): Promise<ResolvedSkill | null> {
+export async function loadSkillByRef(ref: string, allowedIds?: string[]): Promise<ResolvedSkill | null> {
   const want = skillSlug(ref);
   if (!want) return null;
   const raw = await rawPacks();
-  const match = raw.find(p => {
+  const allowed = allowedIds === undefined ? null : new Set(allowedIds);
+  const visible = allowed ? raw.filter(p => allowed.has(p.id)) : raw;
+  const match = visible.find(p => {
     const name = fmString(p.frontmatter, "name");
     return skillSlug(p.id) === want || skillSlug(name) === want;
-  }) ?? raw.find(p => {
+  }) ?? visible.find(p => {
     // looser contains-match as a fallback ("brand" → "brand-guidelines")
     const name = fmString(p.frontmatter, "name");
     return skillSlug(p.id).includes(want) || skillSlug(name).includes(want);
@@ -115,8 +117,9 @@ export async function loadSkillByRef(ref: string): Promise<ResolvedSkill | null>
 /// Brief catalog of EVERY installed skill (name + description), for the
 /// `list_skills` tool so an agent can discover skills beyond the ones equipped
 /// on it. Equipped ids are flagged so the agent knows what's already on it.
-export async function skillCatalogBrief(equippedIds: string[] = []): Promise<string> {
-  const packs = await listSkillPacks();
+export async function skillCatalogBrief(equippedIds: string[] = [], allowedIds?: string[]): Promise<string> {
+  const allowed = allowedIds === undefined ? null : new Set(allowedIds);
+  const packs = (await listSkillPacks()).filter(pack => !allowed || allowed.has(pack.id));
   if (packs.length === 0) return "(no skills installed)";
   const equipped = new Set(equippedIds.filter(Boolean));
   return packs
@@ -173,9 +176,18 @@ export function buildSkillBlock(skills: ResolvedSkill[]): string {
 ///   sees the catalog and picks its own" model).
 /// - No skills installed at all → empty string.
 /// Resolves everything async so call sites stay one-liners.
-export async function buildAgentSkillBlock(ids: string[]): Promise<string> {
+export async function buildAgentSkillBlock(ids: string[], strict = false): Promise<string> {
   const equipped = await resolveAgentSkills(ids);
-  if (equipped.length > 0) return buildSkillBlock(equipped);
+  if (equipped.length > 0) {
+    const block = buildSkillBlock(equipped);
+    if (!strict) return block;
+    return block
+      .replace(
+        /SELF-LOAD ANY SKILL[\s\S]*?\(Local models may also use the load_skill \/ list_skills tools\.\)/,
+        "ONLY the skills listed above are attached to this personal agent. Do not load or read any other skill pack.",
+      );
+  }
+  if (strict) return "";
   if (!(await anySkillInstalled())) return "";
   const brief = await skillCatalogBrief(ids);
   return [

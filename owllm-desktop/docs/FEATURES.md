@@ -88,6 +88,16 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   (Agents) and the Code page's right column.
 - **Skills**: skill packs auto-equipped by role, badges on agent cards,
   cross-provider self-load (any model reads `.owllm/skills/<id>` from disk).
+- **Personal agents + rule cards**: Studio provides an editor for reusable,
+  version-pinned profiles (identity, role, instructions, model, tools, memory,
+  delegation, skills) and user-authored fact/preference/constraint/workflow/
+  conditional cards. Project configs pin profile/rule revisions and add local
+  overrides; the team editor assigns profiles to agents. Documents persist in
+  encrypted global/project scopes with atomic replacement, while safe export
+  excludes private rules, memory, and secrets by default. Effective-config
+  preview shows deterministic precedence + provenance; runtime resolution
+  applies fail-closed tool/delegation intersections, project-isolated memory,
+  and the resolved skills/rules on every supported model path.
 - **Eval harness**: `routing.verify.run.mjs` control-flow judge + live-run
   scorecard + per-run Run Report (who ran · wrote files? · verdict · done?).
 
@@ -391,8 +401,23 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
   never clobbers a peer's.
 - **Publish pipeline**: rule-based host-side release (used to ship OWLLM
   itself and any user project via the Project Card).
+- **Cross-PC sync coordinator** (`sync_core.rs`, `repo_sync` command): the
+  release rail's Sync/Push actions run one transaction — fetch → classify
+  (synced/ahead/behind/diverged) → integrate diverged histories on a temporary
+  worktree with a plain three-way merge → optional verify on the integrated
+  commit → push with moved-remote retry → fast-forward the local checkout.
+  Never force-pushes; never auto-picks a side of a real conflict (a recovery
+  ref + untouched branches preserve both). `↑N ↓M` divergence is a normal
+  input, not an error. Publish runs the same transaction before building.
+  Generic for ANY repo — zero project-specific knowledge in the Rust core.
+  Proven by a standalone two-clone harness (`src-tauri/sync-harness/`, run via
+  `syncCoordinator.verify.run.mjs --live`) driving a real bare remote + two
+  clones through divergence, same-file merges, conflicts, mid-sync races,
+  dirty files, and verify-gated pushes.
 - **Fleet** (`fleet.rs`): git-worktree substrate for parallel agents/pages;
-  diff/merge/finalize; orphan sweep.
+  diff/merge/finalize; orphan sweep. Worktree merges use plain three-way
+  merging — real overlapping edits return a Conflict with both sides
+  preserved; only disposable app runtime files auto-resolve.
 
 ## Support & UX
 

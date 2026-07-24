@@ -318,9 +318,7 @@ pub fn pty_kill(session_id: String) -> Result<(), String> {
         // The reader thread owns the waitable Child, so retain an independent
         // killer. Dropping the master alone does not stop a child while the
         // reader clone still holds the PTY open.
-        slot.killer
-            .kill()
-            .map_err(|e| format!("pty_kill: {e}"))?;
+        slot.killer.kill().map_err(|e| format!("pty_kill: {e}"))?;
     }
     Ok(())
 }

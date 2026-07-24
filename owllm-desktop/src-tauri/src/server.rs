@@ -342,7 +342,11 @@ pub async fn server_status(state: tauri::State<'_, ServerState>) -> Result<Serve
         port: inner.port,
         message: inner.message.clone(),
         context: if alive { inner.ctx_granted } else { None },
-        context_notice: if alive { inner.ctx_notice.clone() } else { None },
+        context_notice: if alive {
+            inner.ctx_notice.clone()
+        } else {
+            None
+        },
     })
 }
 
@@ -602,7 +606,11 @@ pub async fn server_start(
             granted
         } else {
             // GGUF geometry unreadable → conservative ladder; honour a smaller ask.
-            let granted = if explicit { requested.min(coarse_max_fit) } else { coarse_max_fit };
+            let granted = if explicit {
+                requested.min(coarse_max_fit)
+            } else {
+                coarse_max_fit
+            };
             if explicit && granted < requested {
                 ctx_notice = Some(format!(
                     "Context capped to {granted} — you asked for {requested}. OwLLM couldn't read this model's KV geometry, so it sized conservatively to keep the {:.1} GB model + cache inside your {:.1} GB {mem}. Free some {mem} or use a smaller quant for more.",
@@ -620,7 +628,11 @@ pub async fn server_start(
         }
     } else {
         // Couldn't stat the model file — trust the explicit ask, else a safe 8192.
-        if explicit { requested } else { 8192 }
+        if explicit {
+            requested
+        } else {
+            8192
+        }
     };
     inner.ctx_granted = Some(ctx_size);
     inner.ctx_notice = ctx_notice;

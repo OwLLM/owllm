@@ -227,7 +227,10 @@ fn leveldb_dirs(root: &std::path::Path) -> Vec<PathBuf> {
             return;
         }
         if dir.file_name().and_then(|x| x.to_str()) == Some("leveldb")
-            && dir.parent().and_then(|x| x.file_name()).and_then(|x| x.to_str())
+            && dir
+                .parent()
+                .and_then(|x| x.file_name())
+                .and_then(|x| x.to_str())
                 == Some("Local Storage")
             && dir.join("CURRENT").is_file()
         {
@@ -274,7 +277,7 @@ fn read_legacy_leveldb(
     scratch: &std::path::Path,
     recovered: &mut HashMap<String, String>,
 ) -> Result<(), String> {
-    use rusty_leveldb::{DB, LdbIterator, Options};
+    use rusty_leveldb::{LdbIterator, Options, DB};
 
     copy_leveldb(source, scratch).map_err(|e| format!("copy {}: {e}", source.display()))?;
     let mut options = Options::default();
@@ -344,7 +347,11 @@ pub fn import_legacy_webview_state_once() {
     let mut recovered = HashMap::new();
     let mut opened = 0usize;
     for (index, source) in dirs.iter().enumerate() {
-        match read_legacy_leveldb(source, &scratch_root.join(index.to_string()), &mut recovered) {
+        match read_legacy_leveldb(
+            source,
+            &scratch_root.join(index.to_string()),
+            &mut recovered,
+        ) {
             Ok(()) => opened += 1,
             Err(e) => eprintln!("[state-mirror] legacy profile skipped: {e}"),
         }
@@ -451,8 +458,16 @@ mod tests {
             &db,
             MirrorSaveInput {
                 sets: vec![
-                    MirrorEntry { key: "owllm:code:pages".into(), value: "[1]".into(), pending_recovery: false },
-                    MirrorEntry { key: "owllm:agents:notebook:p1".into(), value: "{}".into(), pending_recovery: false },
+                    MirrorEntry {
+                        key: "owllm:code:pages".into(),
+                        value: "[1]".into(),
+                        pending_recovery: false,
+                    },
+                    MirrorEntry {
+                        key: "owllm:agents:notebook:p1".into(),
+                        value: "{}".into(),
+                        pending_recovery: false,
+                    },
                 ],
                 deletes: vec![],
             },
@@ -468,7 +483,11 @@ mod tests {
         save_sync(
             &db,
             MirrorSaveInput {
-                sets: vec![MirrorEntry { key: "owllm:code:pages".into(), value: "[2]".into(), pending_recovery: false }],
+                sets: vec![MirrorEntry {
+                    key: "owllm:code:pages".into(),
+                    value: "[2]".into(),
+                    pending_recovery: false,
+                }],
                 deletes: vec!["owllm:agents:notebook:p1".into()],
             },
         )
@@ -492,7 +511,10 @@ mod tests {
             .unwrap();
         }
         let loaded = load_sync(&db).unwrap();
-        assert!(loaded.is_empty(), "non-ls rows must not leak into the mirror");
+        assert!(
+            loaded.is_empty(),
+            "non-ls rows must not leak into the mirror"
+        );
         let _ = std::fs::remove_dir_all(db.parent().unwrap());
     }
 

@@ -20,6 +20,7 @@ import SkillLibraryDialog from "./SkillLibraryDialog";
 import { skillIcon } from "./AgentsPage";
 import TeamWorkbench from "./TeamWorkbench";
 import { type ModelInfo, type AccountsStatusLite } from "./ModelPicker";
+import PersonalAgentsDialog from "./PersonalAgentsDialog";
 import IconPickerDialog, {
   setStudioAgentIconOverride,
   loadStudioOverrides,
@@ -2061,6 +2062,7 @@ export default function StudioPage() {
   const [agentQuery, setAgentQuery] = useState("");
   const [showExampleTeams, setShowExampleTeams] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [personalAgentsOpen, setPersonalAgentsOpen] = useState(false);
   const [teams, setTeams] = useState<Team[]>(TEAMS_FALLBACK);
   const [agents, setAgents] = useState<AgentDef[]>(AGENTS_FALLBACK);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -2456,15 +2458,28 @@ export default function StudioPage() {
           {/* Action row — Agents (build roles) vs Skills (install packs). */}
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {view === "agents" ? (
-              <button
-                onClick={handleNewAgent}
-                style={{
-                  minHeight: 34,
-                  background: "var(--accent)", color: "var(--accent-fg)",
-                  border: "none", borderRadius: 8, padding: "0 16px",
-                  fontWeight: 600, cursor: "pointer", fontSize: 12,
-                }}
-              >+ New custom agent</button>
+              <>
+                <button
+                  onClick={() => setPersonalAgentsOpen(true)}
+                  title="Versioned personal profiles, reusable rule cards, project overrides, and effective-config preview"
+                  style={{
+                    minHeight: 34,
+                    background: "linear-gradient(135deg, rgba(127,212,255,.22), rgba(192,138,255,.20))",
+                    color: "#9ddfff", border: "1px solid rgba(127,212,255,.52)",
+                    borderRadius: 8, padding: "0 16px",
+                    fontWeight: 800, cursor: "pointer", fontSize: 12,
+                  }}
+                >🧬 Personal agents &amp; rules</button>
+                <button
+                  onClick={handleNewAgent}
+                  style={{
+                    minHeight: 34,
+                    background: "var(--accent)", color: "var(--accent-fg)",
+                    border: "none", borderRadius: 8, padding: "0 16px",
+                    fontWeight: 600, cursor: "pointer", fontSize: 12,
+                  }}
+                >+ New custom agent</button>
+              </>
             ) : (
               <button
                 onClick={handleOpenSkillLibrary}
@@ -2485,6 +2500,13 @@ export default function StudioPage() {
               placeholder={view === "skills" ? "Filter skills…" : "Filter agents…"}
             />
           </div>
+          <PersonalAgentsDialog
+            open={personalAgentsOpen}
+            onClose={() => setPersonalAgentsOpen(false)}
+            models={models}
+            accountsStatus={accountsStatus}
+            skills={availableSkillMeta}
+          />
           <div style={{ flex: 1, display: "flex", gap: 12, minHeight: 0 }}>
             <div style={{
               flex: 6,

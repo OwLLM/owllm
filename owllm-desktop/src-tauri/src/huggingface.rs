@@ -435,8 +435,7 @@ pub async fn hf_download(
             .open(&partial)
             .map_err(|e| format!("append {}: {e}", partial.display()))?
     } else {
-        std::fs::File::create(&partial)
-            .map_err(|e| format!("create {}: {e}", partial.display()))?
+        std::fs::File::create(&partial).map_err(|e| format!("create {}: {e}", partial.display()))?
     };
     let mut stream = resp.bytes_stream();
     let mut received: u64 = if resuming { resume_from } else { 0 };
@@ -1744,7 +1743,10 @@ mod tests {
         // New-style nested layout: <root>/<org>/<model>/file.partial —
         // the org dir holds no files, so it's recursed as a namespace.
         touch(
-            &root.join("unsloth").join("Qwen-GGUF").join("q4.gguf.partial"),
+            &root
+                .join("unsloth")
+                .join("Qwen-GGUF")
+                .join("q4.gguf.partial"),
             11,
         );
         // Legacy flat layout: <root>/author__model/file.partial.

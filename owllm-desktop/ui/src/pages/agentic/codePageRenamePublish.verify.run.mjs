@@ -70,7 +70,7 @@ anchor("PublishCards.tsx", cards, "Commit button carries the live change count",
 anchor("PublishCards.tsx", cards, "Push button keeps its compact label in the narrow publisher card",
   '{loading ? "⏳" : "↑"} Push');
 anchor("PublishCards.tsx", cards, "Push tooltip explains the merged-project destination",
-  "Push the merged project checkout");
+  "Sync the merged project checkout");
 anchor("PublishCards.tsx", cards, "Commit keeps its hover explanation",
   "Commit all changes in this workspace");
 anchor("PublishCards.tsx", cards, "Merge keeps its hover explanation",

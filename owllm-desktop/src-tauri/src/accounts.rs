@@ -2624,6 +2624,83 @@ pub async fn codex_cli_complete(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Ensure the selected subscription CLI exists where a project will execute.
+///
+/// A Windows Accounts card verifies the host binary, while an isolated project
+/// executes the distro's separate `/usr/local/bin` copy. Install just the
+/// missing backend there instead of letting a run die with `exec: <cli>: not
+/// found`. Native Linux/macOS runs already use their verified host toolchain.
+#[tauri::command]
+pub async fn accounts_prepare_cli_for_cwd(
+    backend: String,
+    cwd: Option<String>,
+) -> Result<bool, String> {
+    #[cfg(windows)]
+    {
+        let Some((distro, _)) = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc) else {
+            return Ok(false);
+        };
+        let (binary, install) = match backend.as_str() {
+            "claude_cli" => (
+                "claude",
+                "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
+                 npm install -g --prefix /usr/local @anthropic-ai/claude-code@latest",
+            ),
+            "codex_cli" => (
+                "codex",
+                "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
+                 npm install -g --prefix /usr/local @openai/codex@latest",
+            ),
+            "gemini_cli" => (
+                "gemini",
+                "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
+                 npm install -g --prefix /usr/local @google/gemini-cli@latest",
+            ),
+            "kimi_cli" => (
+                "kimi",
+                "apt-get update -y; apt-get install -y curl ca-certificates python3-pip; \
+                 export UV_INSTALL_DIR=/usr/local/bin; \
+                 if ! command -v uv >/dev/null 2>&1; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi; \
+                 export UV_TOOL_DIR=/usr/local/share/uv-tools \
+                        UV_TOOL_BIN_DIR=/usr/local/bin \
+                        UV_PYTHON_INSTALL_DIR=/usr/local/share/uv-python; \
+                 (uv tool install --force --python 3.13 kimi-cli \
+                   || pip3 install --break-system-packages --upgrade kimi-cli)",
+            ),
+            "grok_cli" => (
+                "grok",
+                "apt-get update -y; apt-get install -y curl ca-certificates; \
+                 curl -fsSL https://x.ai/cli/install.sh | bash; \
+                 test -x /root/.grok/bin/grok && install -m 755 /root/.grok/bin/grok /usr/local/bin/grok",
+            ),
+            other => return Err(format!("unknown subscription backend: {other}")),
+        };
+        let script = format!(
+            "set -e; export DEBIAN_FRONTEND=noninteractive; \
+             export PATH=/usr/local/bin:/usr/bin:/bin; \
+             if command -v {binary} >/dev/null 2>&1; then echo OWLLM_CLI_READY; exit 0; fi; \
+             {install}; \
+             command -v {binary} >/dev/null 2>&1 || {{ echo '{binary} install did not produce an executable' >&2; exit 1; }}; \
+             echo OWLLM_CLI_INSTALLED"
+        );
+        let out = tokio::task::spawn_blocking(move || {
+            crate::wsl::run_in_distro_script_user(&distro, Some("root"), &script)
+        })
+        .await
+        .map_err(|e| format!("join error: {e}"))??;
+        return Ok(out.contains("OWLLM_CLI_INSTALLED"));
+    }
+
+    #[cfg(not(windows))]
+    {
+        let _ = (backend, cwd);
+        // Native Linux/macOS execution uses the host CLI already verified by
+        // Accounts. Their isolation engines bind that host toolchain; there is
+        // no second WSL environment to provision.
+        Ok(false)
+    }
+}
+
 /// Upgrade the Codex CLI that will actually execute a project run.
 ///
 /// On Windows, WSL projects do not use the green Windows Accounts binary;

@@ -139,6 +139,11 @@ import { clearRunActivity, setRunActivity } from "../../runtime/runActivity";
 import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
+import {
+  clearStoredAgentModelOverrides,
+  graphJsonWithoutAgentModels,
+  resolveAgentModel,
+} from "./teamModelSelection";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -7923,6 +7928,10 @@ async function streamMoonshot(
   // Subscription path — shell to `kimi --print`. Fold history into the
   // user prompt because the CLI's --print mode is single-turn.
   if (route.forceSub) {
+    // Agentic has its own provider loop (separate from dispatch.ts). Keep the
+    // same preflight as Code/Chat so an isolated project gets the Kimi binary
+    // and refreshed credentials before the first agent tries to execute it.
+    await ensureCliWarm("kimi_cli", projectCwd);
     const folded = (history ?? [])
       .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
       .join("\n\n");
@@ -7938,7 +7947,7 @@ async function streamMoonshot(
       cwd: projectCwd ?? null,
       model: modelId,
       allowedTools: allowedTools ?? null,
-    }));
+    }), projectCwd);
     if (reply) onDelta(reply);
     // No thought stream for --print mode; CLI emits a single blob.
     return reply;
@@ -9185,6 +9194,7 @@ export function AgentsPage({
       const cli = info.backend === "codex_cli" ? "Codex"
         : info.backend === "gemini_cli" ? "Gemini"
         : info.backend === "kimi_cli" ? "Kimi"
+        : info.backend === "grok_cli" ? "Grok"
         : "Claude";
       if (info.kind === "recovered") {
         setSupChat(prev => [...prev, {
@@ -9198,6 +9208,14 @@ export function AgentsPage({
         setSupChat(prev => [...prev, {
           role: "system", color: "#ffb74d",
           text: `↻ ${cli} is too old for this model — upgrading the CLI in the project's execution environment, then retrying automatically. The GUI remains available.`,
+          ts: Date.now(), seq: nextSeq(),
+        }]);
+        return;
+      }
+      if (info.kind === "prepare") {
+        setSupChat(prev => [...prev, {
+          role: "system", color: "#9ad9ff",
+          text: `↻ Checking ${cli} inside the project's isolated execution environment — if it is missing, OwLLM installs it there before the run. The GUI remains available.`,
           ts: Date.now(), seq: nextSeq(),
         }]);
         return;
@@ -10517,10 +10535,13 @@ export function AgentsPage({
   // we return is the `model` field in /v1/chat/completions; llama-server
   // ignores it today but the multi-server path will use it to route.
   const modelFor = (agentName: string): string => {
-    const per = perAgentModel.get(agentName);
-    if (per && per.trim()) return per;
-    if (effectiveTeamModel.trim()) return effectiveTeamModel;
-    return serverState.model_id ?? "local";
+    return resolveAgentModel(
+      agentName,
+      teamModelOverride,
+      selectedProject?.team_default_model_id ?? "",
+      perAgentModel,
+      serverState.model_id,
+    );
   };
   const onPickAgentModel = (agentName: string, modelId: string) => {
     setPerAgentModel(prev => {
@@ -10620,8 +10641,23 @@ export function AgentsPage({
   const onPickTeamModel = (modelId: string) => {
     setTeamModelOverride(modelId);
     // Picking a team-wide model implies "every agent uses this one" —
-    // wipe per-agent overrides so the UI behaviour matches the intent.
+    // wipe per-agent overrides in memory AND both persistence layers. The old
+    // implementation only cleared React state; graph_json/localStorage restored
+    // the old provider badges after reload even though the run used the team
+    // model, so the cards and dispatch visibly disagreed.
     setPerAgentModel(new Map());
+    const project = selectedProject;
+    if (!project) return;
+    clearStoredAgentModelOverrides(project.id);
+    void invoke("update_project", {
+      input: {
+        id: project.id,
+        team_default_model_id: modelId,
+        graph_json: graphJsonWithoutAgentModels(project.graph_json),
+      },
+    })
+      .then(() => reloadProjects())
+      .catch((e) => console.error("persist team-wide model selection failed", e));
   };
 
   // Look up the provider for a resolved model id. The ModelPicker

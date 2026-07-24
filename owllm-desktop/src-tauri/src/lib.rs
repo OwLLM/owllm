@@ -296,6 +296,7 @@ pub fn run() {
             accounts::accounts_test_probe_wsl,
             accounts::claude_cli_complete,
             accounts::codex_cli_complete,
+            accounts::accounts_prepare_cli_for_cwd,
             accounts::codex_cli_upgrade_for_cwd,
             accounts::codex_cli_stream,
             accounts::claude_cli_stream,

@@ -1,4 +1,21 @@
-const MAX_PRESENCE_NODES = 5_000;
+// OWLLM World Presence — anonymous, persistent map of OWLLM installations.
+//
+// Design: a single hibernating-WebSocket Durable Object holds every live
+// connection AND retains each anonymous node in the object's free-tier SQLite
+// storage. The socket is the *online* signal; the SQLite row is the *recorded*
+// signal. When an installation first opts in it is recorded forever with its
+// first coarse position; when its socket drops (offline or turned invisible)
+// the node is kept and re-broadcast as a ghost (online:false) rather than
+// removed. This yields two counts the map shows: total recorded and online now.
+//
+// Privacy is unchanged from the ephemeral design: the source IP is never read
+// or stored, only Cloudflare's deliberately coarse edge lat/lon is used (then
+// rounded + jittered), and no account or workspace data is accepted at all.
+// The stable node id is an opaque, per-installation random string supplied by
+// the client; it identifies nothing but "the same anonymous dot across visits".
+
+const MAX_NODES = 20_000; // recorded-forever cap; oldest offline node is evicted past this.
+const MAX_ONLINE = 10_000; // concurrent presence sockets on the single global object.
 const MAX_VIEWERS = 1_000;
 const PRESENCE_TAG = "presence";
 const VIEWER_TAG = "viewer";
@@ -38,6 +55,11 @@ function randomId(cryptoApi = crypto) {
   return cryptoApi.randomUUID().replaceAll("-", "").slice(0, 24);
 }
 
+/** Opaque, device-local node id supplied by the client. Identifies nothing. */
+export function sanitizeNodeId(raw) {
+  return String(raw ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 64);
+}
+
 /**
  * Reduce Cloudflare edge metadata to a deliberately coarse map point.
  * Source IP and exact request coordinates are never read, returned, or stored.
@@ -66,31 +88,34 @@ function attachment(socket) {
   catch { return null; }
 }
 
-function nodeFromSocket(socket) {
-  const data = attachment(socket);
-  if (!data || data.role !== PRESENCE_TAG) return null;
+/** Public, anonymous shape for one recorded node. `online` is derived live. */
+export function publicNode(row, online) {
   return {
-    id: String(data.id ?? "").slice(0, 96),
-    region: String(data.region ?? "").slice(0, 80),
-    latitude: finite(data.latitude),
-    longitude: finite(data.longitude),
-    lastSeen: String(data.connectedAt ?? ""),
+    id: String(row.id ?? "").slice(0, 96),
+    region: String(row.region ?? "").slice(0, 80),
+    latitude: finite(row.latitude),
+    longitude: finite(row.longitude),
+    firstSeen: String(row.firstSeen ?? row.first_seen ?? ""),
+    lastSeen: String(row.lastSeen ?? row.last_seen ?? ""),
+    online: Boolean(online),
   };
 }
 
-export function snapshotFromSockets(sockets, now = Date.now()) {
+/** Build a full snapshot from stored rows plus the set of currently-online ids. */
+export function buildSnapshot(rows, onlineIds, now = Date.now()) {
   const seen = new Set();
   const nodes = [];
-  for (const socket of sockets) {
-    const node = nodeFromSocket(socket);
-    if (!node?.id || seen.has(node.id) || node.latitude == null || node.longitude == null) continue;
+  for (const row of rows) {
+    const node = publicNode(row, onlineIds.has(String(row.id ?? "")));
+    if (!node.id || seen.has(node.id) || node.latitude == null || node.longitude == null) continue;
     if (node.latitude < -90 || node.latitude > 90 || node.longitude < -180 || node.longitude > 180) continue;
     seen.add(node.id);
     nodes.push(node);
   }
   return {
     type: "snapshot",
-    nodes: nodes.slice(0, MAX_PRESENCE_NODES),
+    nodes: nodes.slice(0, MAX_NODES),
+    counts: { total: nodes.length, online: onlineIds.size },
     updatedAt: new Date(now).toISOString(),
   };
 }
@@ -117,6 +142,14 @@ export class WorldPresence {
   constructor(state, env) {
     this.state = state;
     this.env = env;
+    this.sql = state.storage.sql;
+    // Recorded-forever anonymous nodes. Survives hibernation so a node that
+    // first appeared weeks ago still shows as a ghost when it is offline.
+    this.sql.exec(
+      "CREATE TABLE IF NOT EXISTS nodes (" +
+      "id TEXT PRIMARY KEY, region TEXT NOT NULL, latitude REAL NOT NULL, " +
+      "longitude REAL NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)",
+    );
   }
 
   presenceSockets() {
@@ -127,8 +160,39 @@ export class WorldPresence {
     return this.state.getWebSockets(VIEWER_TAG);
   }
 
+  /** Ids of installations with at least one live presence socket right now. */
+  onlineIds(excludedSocket) {
+    const ids = new Set();
+    for (const socket of this.presenceSockets()) {
+      if (socket === excludedSocket) continue;
+      const data = attachment(socket);
+      if (data?.role === PRESENCE_TAG && data.id) ids.add(String(data.id));
+    }
+    return ids;
+  }
+
+  storedRows() {
+    return this.sql
+      .exec("SELECT id, region, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes ORDER BY first_seen ASC LIMIT ?", MAX_NODES)
+      .toArray();
+  }
+
+  storedRow(id) {
+    return this.sql
+      .exec("SELECT id, region, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes WHERE id = ?", id)
+      .toArray()[0] ?? null;
+  }
+
+  totalCount() {
+    return Number(this.sql.exec("SELECT COUNT(*) AS c FROM nodes").toArray()[0]?.c ?? 0);
+  }
+
+  counts(excludedSocket) {
+    return { total: this.totalCount(), online: this.onlineIds(excludedSocket).size };
+  }
+
   snapshot(excludedSocket) {
-    return snapshotFromSockets(this.presenceSockets().filter((socket) => socket !== excludedSocket));
+    return buildSnapshot(this.storedRows(), this.onlineIds(excludedSocket));
   }
 
   broadcast(value) {
@@ -136,11 +200,31 @@ export class WorldPresence {
     for (const viewer of this.viewerSockets()) safeSend(viewer, payload);
   }
 
+  /** Record a first sighting or refresh last_seen; the first position is kept. */
+  recordNode(id, location, now) {
+    this.sql.exec(
+      "INSERT INTO nodes (id, region, latitude, longitude, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen",
+      id, location.region, location.latitude, location.longitude, now, now,
+    );
+    // Bounded footprint: past the cap, drop the oldest offline nodes.
+    const overflow = this.totalCount() - MAX_NODES;
+    if (overflow > 0) {
+      const online = this.onlineIds();
+      for (const victim of this.sql.exec("SELECT id FROM nodes ORDER BY last_seen ASC LIMIT ?", overflow + online.size).toArray()) {
+        if (online.has(String(victim.id)) || String(victim.id) === id) continue;
+        this.sql.exec("DELETE FROM nodes WHERE id = ?", victim.id);
+        this.broadcast({ type: "remove", id: String(victim.id), counts: this.counts(), updatedAt: new Date().toISOString() });
+      }
+    }
+    return this.storedRow(id);
+  }
+
   async fetch(request) {
     if (!isWebSocketUpgrade(request)) return json({ error: "websocket_upgrade_required" }, 426);
     const role = socketRole(request);
     if (!role) return json({ error: "invalid_socket_role" }, 400);
-    if (role === PRESENCE_TAG && this.presenceSockets().length >= MAX_PRESENCE_NODES) {
+    if (role === PRESENCE_TAG && this.presenceSockets().length >= MAX_ONLINE) {
       return json({ error: "presence_capacity_reached" }, 503);
     }
     if (role === VIEWER_TAG && this.viewerSockets().length >= MAX_VIEWERS) {
@@ -149,9 +233,9 @@ export class WorldPresence {
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    const connectedAt = new Date().toISOString();
+    const now = new Date().toISOString();
     if (role === PRESENCE_TAG) {
-      const id = randomId();
+      const id = sanitizeNodeId(new URL(request.url).searchParams.get("id")) || randomId();
       const location = coarseLocation({
         country: request.headers.get("X-OWLLM-Country"),
         regionCode: request.headers.get("X-OWLLM-Region"),
@@ -159,16 +243,14 @@ export class WorldPresence {
         longitude: request.headers.get("X-OWLLM-Longitude"),
       }, id);
       if (!location) return json({ error: "coarse_location_unavailable" }, 503);
-      server.serializeAttachment({ role, id, ...location, connectedAt });
+      const row = this.recordNode(id, location, now);
+      server.serializeAttachment({ role, id, connectedAt: now });
+      this.state.acceptWebSocket(server, [role]);
+      this.broadcast({ type: "upsert", node: publicNode(row, true), counts: this.counts(), updatedAt: new Date().toISOString() });
     } else {
-      server.serializeAttachment({ role, connectedAt });
-    }
-    this.state.acceptWebSocket(server, [role]);
-
-    if (role === VIEWER_TAG) {
+      server.serializeAttachment({ role, connectedAt: now });
+      this.state.acceptWebSocket(server, [role]);
       safeSend(server, this.snapshot());
-    } else {
-      this.broadcast({ type: "upsert", node: nodeFromSocket(server), updatedAt: new Date().toISOString() });
     }
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -177,20 +259,26 @@ export class WorldPresence {
     if (message === "snapshot" && attachment(socket)?.role === VIEWER_TAG) safeSend(socket, this.snapshot());
   }
 
-  async webSocketClose(socket) {
+  markOffline(socket) {
     const data = attachment(socket);
+    if (data?.role !== PRESENCE_TAG) return;
+    const id = String(data.id ?? "");
+    // Another window/socket for the same installation may still be online.
+    if (this.onlineIds(socket).has(id)) return;
+    const row = this.storedRow(id);
+    const updatedAt = new Date().toISOString();
+    if (row) this.broadcast({ type: "upsert", node: publicNode(row, false), counts: this.counts(socket), updatedAt });
+    else this.broadcast({ type: "remove", id: id.slice(0, 96), counts: this.counts(socket), updatedAt });
+  }
+
+  async webSocketClose(socket) {
     try { socket.close(1000, "closed"); }
     catch { /* already closed */ }
-    if (data?.role === PRESENCE_TAG) {
-      this.broadcast({ type: "remove", id: String(data.id ?? "").slice(0, 96), updatedAt: new Date().toISOString() });
-    }
+    this.markOffline(socket);
   }
 
   async webSocketError(socket) {
-    const data = attachment(socket);
-    if (data?.role === PRESENCE_TAG) {
-      this.broadcast({ type: "remove", id: String(data.id ?? "").slice(0, 96), updatedAt: new Date().toISOString() });
-    }
+    this.markOffline(socket);
   }
 }
 
@@ -203,7 +291,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === "/health" && request.method === "GET") {
-      return json({ ok: true, service: "owllm-world-presence", transport: "hibernating-websocket" });
+      return json({ ok: true, service: "owllm-world-presence", transport: "hibernating-websocket", retention: "persistent-anonymous" });
     }
     if (url.pathname !== "/v1/presence/connect") return json({ error: "not_found" }, 404);
     if (!isWebSocketUpgrade(request)) return json({ error: "websocket_upgrade_required" }, 426);

@@ -740,26 +740,14 @@ fn call_tool(app: &AppHandle, name: &str, args: &Value) -> Result<String, String
             "navigate".into(),
             json!({ "url": as_str(args, "url"), "tab_id": as_optional_index(args, "tab_id") }),
         ),
-        "browser_snapshot" => crate::browser::browser_cmd(
-            app.clone(),
-            "snapshot".into(),
-            json!({ "tab_id": as_optional_index(args, "tab_id") }),
-        ),
-        "browser_get_text" => crate::browser::browser_cmd(
-            app.clone(),
-            "get_text".into(),
-            json!({ "tab_id": as_optional_index(args, "tab_id") }),
-        ),
-        "browser_back" => crate::browser::browser_cmd(
-            app.clone(),
-            "back".into(),
-            json!({ "tab_id": as_optional_index(args, "tab_id") }),
-        ),
-        "browser_reload" => crate::browser::browser_cmd(
-            app.clone(),
-            "reload".into(),
-            json!({ "tab_id": as_optional_index(args, "tab_id") }),
-        ),
+        "browser_snapshot" => {
+            crate::browser::browser_cmd(app.clone(), "snapshot".into(), json!({ "tab_id": as_optional_index(args, "tab_id") }))
+        }
+        "browser_get_text" => {
+            crate::browser::browser_cmd(app.clone(), "get_text".into(), json!({ "tab_id": as_optional_index(args, "tab_id") }))
+        }
+        "browser_back" => crate::browser::browser_cmd(app.clone(), "back".into(), json!({ "tab_id": as_optional_index(args, "tab_id") })),
+        "browser_reload" => crate::browser::browser_cmd(app.clone(), "reload".into(), json!({ "tab_id": as_optional_index(args, "tab_id") })),
         "browser_click" => crate::browser::browser_cmd(
             app.clone(),
             "click".into(),

@@ -240,7 +240,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     if (!host) return;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    camera.position.set(0, 0.24, 9.4);
+    camera.position.set(0, 0.24, 6.2);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
@@ -254,7 +254,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = 5.8;
+    controls.minDistance = 3.0;
     controls.maxDistance = 15;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.32;
@@ -427,8 +427,8 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       const nextHasFleet = list.some((node) => node.kind === "fleet");
       if (nextHasFleet !== hasFleet) {
         hasFleet = nextHasFleet;
-        controls.minDistance = hasFleet ? 8.4 : 5.8;
-        camera.position.set(0, 0.24, hasFleet ? 11.8 : 9.4);
+        controls.minDistance = hasFleet ? 8.4 : 3.0;
+        camera.position.set(0, 0.24, hasFleet ? 11.8 : 6.2);
       }
     };
 
@@ -649,10 +649,10 @@ export default function WorldMapPage() {
     ? publicNodes.map((node) => ({
         id: node.id,
         label: node.region || t("Anonymous OWLLM node"),
-        detail: t("Approximate server region"),
+        detail: node.online ? t("Approximate server region") : t("Recorded · offline"),
         latitude: node.latitude,
         longitude: node.longitude,
-        online: true,
+        online: node.online,
         kind: "world" as const,
       }))
     : fleet.map((device) => {
@@ -702,6 +702,11 @@ export default function WorldMapPage() {
               <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid rgba(var(--accent-rgb),.28)", color: "var(--fg-strong)", fontSize: 11.5 }}>
                 <b style={{ color: "var(--accent-ink)" }}>{onlineCount}</b> {mode === "world" ? t("nodes online") : t("devices online")}
               </span>
+              {mode === "world" && (
+                <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid var(--border)", color: "var(--fg-muted)", fontSize: 11.5 }}>
+                  <b style={{ color: "var(--fg-strong)" }}>{nodes.length}</b> {t("recorded")}
+                </span>
+              )}
               <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid var(--border)", color: "var(--fg-muted)", fontSize: 11.5 }}>{t("Drag to orbit · scroll to zoom")}</span>
             </div>
             {mode === "world" && !configured && !loading && (
@@ -724,7 +729,11 @@ export default function WorldMapPage() {
                 )}
               </div>
               <div style={{ marginTop: 7, fontSize: 25, fontWeight: 800, color: "var(--fg-strong)" }}>{nodes.length}</div>
-              <div style={{ color: "var(--fg-muted)", fontSize: 12.5 }}>{mode === "world" ? t("anonymous active installations") : t("paired OwLLM devices")}</div>
+              <div style={{ color: "var(--fg-muted)", fontSize: 12.5 }}>{mode === "world" ? t("anonymous installations recorded") : t("paired OwLLM devices")}</div>
+              <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 6, color: "var(--fg-muted)", fontSize: 12 }}>
+                <span style={{ width: 7, height: 7, borderRadius: "50%", background: "var(--accent)", boxShadow: "0 0 8px var(--accent)" }} />
+                <span><b style={{ color: "var(--accent-ink)" }}>{onlineCount}</b> {t("online now")}</span>
+              </div>
             </div>
 
             {mode === "world" && (
@@ -743,14 +752,14 @@ export default function WorldMapPage() {
               </div>
             )}
 
-            <div style={{ ...panelStyle(), padding: 15, flex: 1, minHeight: 180, overflow: "auto" }}>
+            <div style={{ ...panelStyle(), padding: 15, flex: 1, minHeight: 140, maxHeight: "56vh", overflowY: "auto" }}>
               <div style={{ color: "var(--fg-strong)", fontWeight: 750, fontSize: 13, marginBottom: 10 }}>{t("Network signals")}</div>
               {error && <div style={{ color: "var(--error)", fontSize: 11.5, marginBottom: 10 }}>{error}</div>}
               {nodes.length === 0 ? (
                 <div style={{ color: "var(--fg-muted)", fontSize: 12, lineHeight: 1.5 }}>
                   {loading ? t("Scanning the network…") : mode === "world" ? t("No live presence data yet.") : t("No paired devices found.")}
                 </div>
-              ) : nodes.map((node) => (
+              ) : [...nodes].sort((a, b) => Number(b.online) - Number(a.online)).map((node) => (
                 <button key={node.id} onClick={() => setSelected(node)} style={{ width: "100%", display: "grid", gridTemplateColumns: "9px minmax(0,1fr)", gap: 9, textAlign: "left", padding: "9px 7px", border: "none", borderBottom: "1px solid var(--border)", background: selected?.id === node.id ? "rgba(var(--accent-rgb),.10)" : "transparent", color: "var(--fg)", cursor: "pointer" }}>
                   <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: node.online ? "var(--accent)" : "var(--fg-dim)", boxShadow: node.online ? "0 0 9px var(--accent)" : "none" }} />
                   <span style={{ minWidth: 0 }}>

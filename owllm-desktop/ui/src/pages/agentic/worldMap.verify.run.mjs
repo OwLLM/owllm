@@ -89,12 +89,20 @@ try {
   check("Fleet liveness rejects stale records with no dial path", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", endpoint: null, endpoints: [], p2p_node_id: null }, now) === false);
 
   const sanitized = presence.sanitizePresenceNodes([
-    { id: "ok", region: "EU West", latitude: 48, longitude: 9, lastSeen: "now", github_login: "must-not-leak" },
+    { id: "ok", region: "EU West", latitude: 48, longitude: 9, firstSeen: "t0", lastSeen: "now", online: true, github_login: "must-not-leak" },
     { id: "bad-lat", latitude: 200, longitude: 9 },
     { id: "ok", latitude: 1, longitude: 2 },
+    { id: "ghost", region: "AP", latitude: 1, longitude: 2, online: false },
   ]);
-  check("Presence payload validates and deduplicates coordinates", sanitized.length === 1 && sanitized[0].id === "ok");
-  check("Public nodes expose no account/device identity fields", !Object.hasOwn(sanitized[0], "github_login") && Object.keys(sanitized[0]).length === 5);
+  check("Presence payload validates and deduplicates coordinates", sanitized.length === 2 && sanitized[0].id === "ok");
+  check("Public nodes expose no account/device identity fields", !Object.hasOwn(sanitized[0], "github_login") && Object.keys(sanitized[0]).length === 7);
+  check("Offline installations are retained as ghosts", sanitized.find((node) => node.id === "ghost").online === false && sanitized[0].online === true);
+
+  const stableStore = memory();
+  const firstId = presence.readOrCreateNodeId(stableStore);
+  check("Stable anonymous node id is created and reused", firstId.length > 0 && presence.readOrCreateNodeId(stableStore) === firstId);
+  check("Presence socket URL carries the stable node id", presence.worldPresenceSocketUrl("presence", "https://presence.example", firstId).includes(`id=${firstId}`));
+  check("Viewer socket URL never carries the node id", !presence.worldPresenceSocketUrl("viewer", "https://presence.example", firstId).includes("id="));
 
   check("HTTPS endpoint becomes a viewer WebSocket", presence.worldPresenceSocketUrl("viewer", "https://presence.example/") === "wss://presence.example/v1/presence/connect?role=viewer");
   check("HTTP endpoint becomes a presence WebSocket", presence.worldPresenceSocketUrl("presence", "http://localhost:8787") === "ws://localhost:8787/v1/presence/connect?role=presence");
@@ -122,10 +130,13 @@ try {
   viewerSockets[0].emit("open");
   viewerSockets[0].emit("message", { data: JSON.stringify({ type: "snapshot", nodes: [{ id: "n1", region: "AP", latitude: 35, longitude: 127 }] }) });
   check("Viewer accepts sanitized live snapshots", snapshots.length === 1 && snapshots[0].nodes[0].id === "n1");
+  check("Viewer reports recorded-total and online counts", snapshots[0].counts.total === 1 && snapshots[0].counts.online === 1);
   viewerSockets[0].emit("message", { data: JSON.stringify({ type: "upsert", node: { id: "n2", region: "EU", latitude: 42, longitude: 12 } }) });
   check("Viewer applies incremental presence updates", snapshots.at(-1).nodes.map((node) => node.id).join(",") === "n1,n2");
+  viewerSockets[0].emit("message", { data: JSON.stringify({ type: "upsert", node: { id: "n2", region: "EU", latitude: 42, longitude: 12, online: false } }) });
+  check("Viewer keeps offline nodes as ghosts instead of dropping them", snapshots.at(-1).nodes.find((node) => node.id === "n2").online === false && snapshots.at(-1).counts.total === 2 && snapshots.at(-1).counts.online === 1);
   viewerSockets[0].emit("message", { data: JSON.stringify({ type: "remove", id: "n1" }) });
-  check("Viewer removes disconnected nodes immediately", snapshots.at(-1).nodes.map((node) => node.id).join(",") === "n2");
+  check("Viewer removes only hard-evicted nodes", snapshots.at(-1).nodes.map((node) => node.id).join(",") === "n2");
   viewerSockets[0].emit("close");
   check("Viewer reports disconnect and bounded backoff", statuses.at(-1).connected === false && reconnectDelay === presence.WORLD_PRESENCE_RECONNECT_BASE_MS);
   reconnect();
@@ -151,7 +162,9 @@ try {
       return socket;
     },
   });
-  check("Opted-in installation opens one anonymous presence socket", presenceSockets.length === 1 && presenceSockets[0].url.endsWith("role=presence"));
+  check("Opted-in installation opens one anonymous presence socket", presenceSockets.length === 1 && presenceSockets[0].url.includes("role=presence"));
+  check("Presence socket sends the stable per-installation node id", presenceSockets[0].url.includes("id="));
+  check("Node id is persisted device-locally for the next launch", (runnerStore.getItem("owllm:world-map:node-id") ?? "").length > 0);
   check("D1-era bearer token is removed", runnerStore.getItem("owllm:world-map:presence-token") === null);
   stopPresence();
   check("Invisible or app shutdown immediately closes presence", presenceSockets[0].closed);
@@ -220,13 +233,16 @@ try {
   }
   check("Public mode has an explicit anonymous-presence control", page.includes('type="checkbox"') && page.includes("savePresenceEnabled"));
   check("World Map consumes live WebSocket snapshots", page.includes("subscribeWorldPresence") && !page.includes("loadWorldPresence"));
+  check("World Map ghosts recorded-but-offline nodes and shows both counts", page.includes("online: node.online") && page.includes('t("recorded")') && page.includes('t("online now")'));
   check("Opted-in presence runs application-wide", appShell.includes("<WorldPresenceRunner />") && appShell.includes("installWorldPresenceConnection()"));
-  check("Consent remains device-local", vaultSync.includes('"owllm:world-map:presence-enabled"'));
-  check("Worker persists recorded nodes and ghosts them on disconnect", worker.includes("acceptWebSocket") && worker.includes("serializeAttachment") && /CREATE TABLE IF NOT EXISTS nodes/.test(worker) && /INSERT INTO nodes/.test(worker));
-  check("Worker broadcasts incremental membership changes", worker.includes('type: "upsert"') && worker.includes('type: "remove"'));
+  check("Consent and stable node id remain device-local", vaultSync.includes('"owllm:world-map:presence-enabled"') && vaultSync.includes('"owllm:world-map:node-id"'));
+  check("Worker retains anonymous nodes in SQLite and ghosts offline ones", worker.includes("acceptWebSocket") && worker.includes("serializeAttachment") && worker.includes("CREATE TABLE IF NOT EXISTS nodes") && worker.includes("first_seen") && worker.includes("publicNode(row, false)"));
+  check("Worker never reads the source IP or reintroduces a cron", !/CF-Connecting-IP|x-forwarded-for/i.test(worker) && !/scheduled\s*\(/.test(worker));
+  check("Worker broadcasts incremental membership changes with counts", worker.includes('type: "upsert"') && worker.includes('type: "remove"') && worker.includes("counts:"));
   check("Wrangler binds a free SQLite-backed Durable Object without D1", wrangler.includes("new_sqlite_classes") && !wrangler.includes("d1_databases"));
   check("Unavailable service is disclosed", page.includes("World presence service is not connected yet."));
   check("New navigation labels have all eight locales", /\["World Map",(?:[^\]]*,){6}[^\]]*\]/.test(actions) && /\["Live World",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
+  check("New recorded/online-count labels have all eight locales", /\["recorded",(?:[^\]]*,){6}[^\]]*\]/.test(actions) && /\["online now",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
 
   for (const row of checks) console.log(`  PASS ${row.name}`);
   console.log(`world map verification: ${checks.length}/${checks.length} passed`);

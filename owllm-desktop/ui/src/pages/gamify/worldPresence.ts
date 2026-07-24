@@ -1,14 +1,40 @@
 export const WORLD_PRESENCE_ENABLED_KEY = "owllm:world-map:presence-enabled";
 export const WORLD_MAP_MODE_KEY = "owllm:world-map:mode";
+// Stable, opaque, device-local id so the same installation is one recorded node
+// across reconnects instead of inflating the recorded-users total every time it
+// comes online. Never synced (see vaultSync DENY_EXACT) — it identifies nothing.
+export const WORLD_PRESENCE_NODE_ID_KEY = "owllm:world-map:node-id";
 export const WORLD_PRESENCE_CHANGED_EVENT = "owllm:world-presence-changed";
 export const WORLD_PRESENCE_RECONNECT_BASE_MS = 1_000;
 export const WORLD_PRESENCE_RECONNECT_MAX_MS = 30_000;
 
-// Production endpoint for OWLLM's anonymous, ephemeral presence service. The
-// Vite variable remains available for staging and self-hosted deployments.
+// Production endpoint for OWLLM's anonymous presence service. The Vite variable
+// remains available for staging and self-hosted deployments.
 export const DEFAULT_WORLD_PRESENCE_URL = "https://owllm-world-presence.mc-9fa.workers.dev";
 
 const LEGACY_WORLD_PRESENCE_TOKEN_KEY = "owllm:world-map:presence-token";
+
+function randomNodeId(): string {
+  try {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+      return crypto.randomUUID().replace(/-/g, "");
+    }
+  } catch { /* fall through to a non-crypto id */ }
+  return `n${Math.abs(Math.floor(Math.random() * 1e15)).toString(36)}${Date.now().toString(36)}`;
+}
+
+/** Read the stable anonymous node id for this installation, creating it once. */
+export function readOrCreateNodeId(storage: PresenceStorage | undefined = availableStorage()): string {
+  try {
+    const existing = storage?.getItem(WORLD_PRESENCE_NODE_ID_KEY);
+    const sanitized = typeof existing === "string" ? existing.toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 64) : "";
+    if (sanitized) return sanitized;
+  } catch { /* storage unavailable */ }
+  const created = randomNodeId();
+  try { storage?.setItem(WORLD_PRESENCE_NODE_ID_KEY, created); }
+  catch { /* storage unavailable — id stays session-local */ }
+  return created;
+}
 
 export type WorldMapMode = "world" | "fleet";
 export type PresenceSocketRole = "presence" | "viewer";
@@ -22,11 +48,21 @@ export type PublicPresenceNode = {
   region: string;
   latitude: number;
   longitude: number;
+  firstSeen: string;
   lastSeen: string;
+  // Recorded nodes stay on the map forever; `online` is false for ghosts that
+  // were seen before but have no live presence socket right now.
+  online: boolean;
+};
+
+export type PresenceCounts = {
+  total: number;
+  online: number;
 };
 
 export type PresenceSnapshot = {
   nodes: PublicPresenceNode[];
+  counts: PresenceCounts;
   updatedAt: string | null;
 };
 
@@ -48,6 +84,7 @@ type SocketLike = {
 
 type ConnectionOptions = {
   baseUrl?: string;
+  nodeId?: string;
   socketFactory?: (url: string) => SocketLike;
   setTimer?: (callback: () => void, delay: number) => TimerHandle;
   clearTimer?: (handle: TimerHandle) => void;
@@ -66,7 +103,7 @@ export function worldPresenceEndpoint(): string {
   return String(meta.env?.VITE_OWLLM_WORLD_PRESENCE_URL ?? DEFAULT_WORLD_PRESENCE_URL).trim().replace(/\/$/, "");
 }
 
-export function worldPresenceSocketUrl(role: PresenceSocketRole, baseUrl = worldPresenceEndpoint()): string {
+export function worldPresenceSocketUrl(role: PresenceSocketRole, baseUrl = worldPresenceEndpoint(), nodeId = ""): string {
   const normalized = baseUrl.trim().replace(/\/$/, "");
   if (!normalized) return "";
   try {
@@ -75,6 +112,8 @@ export function worldPresenceSocketUrl(role: PresenceSocketRole, baseUrl = world
     else if (url.protocol === "http:") url.protocol = "ws:";
     else if (url.protocol !== "wss:" && url.protocol !== "ws:") return "";
     url.searchParams.set("role", role);
+    // Only presence sockets carry the stable anonymous id; viewers stay generic.
+    if (role === "presence" && nodeId) url.searchParams.set("id", nodeId);
     return url.toString();
   } catch {
     return "";
@@ -103,7 +142,10 @@ export function sanitizePresenceNodes(value: unknown): PublicPresenceNode[] {
       latitude,
       longitude,
       region: typeof row.region === "string" ? row.region.trim().slice(0, 80) : "",
+      firstSeen: typeof row.firstSeen === "string" ? row.firstSeen : "",
       lastSeen: typeof row.lastSeen === "string" ? row.lastSeen : "",
+      // Missing `online` (e.g. an older upsert) is treated as online.
+      online: row.online !== false,
     });
   }
   return nodes.slice(0, 5_000);
@@ -135,7 +177,7 @@ function reconnectDelay(attempt: number): number {
 }
 
 function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionOptions = {}): () => void {
-  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint());
+  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint(), options.nodeId ?? "");
   if (!url) return () => {};
   const socketFactory = options.socketFactory ?? ((target) => new WebSocket(target));
   const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
@@ -214,8 +256,16 @@ export function subscribeWorldPresence(options: PresenceSubscriptionOptions): ()
     return () => {};
   }
   const nodes = new Map<string, PublicPresenceNode>();
+  // Derive counts from the retained node set so total (recorded) and online
+  // stay correct even between the server's authoritative count messages.
+  const derivedCounts = (): PresenceCounts => {
+    let online = 0;
+    for (const node of nodes.values()) if (node.online) online += 1;
+    return { total: nodes.size, online };
+  };
   const emit = (updatedAt: unknown) => options.onSnapshot({
     nodes: [...nodes.values()],
+    counts: derivedCounts(),
     updatedAt: typeof updatedAt === "string" ? updatedAt : null,
   });
   options.onStatus?.({ configured: true, connected: false, error: "" });
@@ -232,6 +282,8 @@ export function subscribeWorldPresence(options: PresenceSubscriptionOptions): ()
         for (const node of sanitizePresenceNodes(message.nodes)) nodes.set(node.id, node);
         emit(message.updatedAt);
       } else if (message.type === "upsert") {
+        // A recorded node going offline arrives here as online:false and is
+        // kept as a ghost; only a hard eviction (remove) deletes it.
         const [node] = sanitizePresenceNodes([message.node]);
         if (!node) return;
         nodes.set(node.id, node);
@@ -257,11 +309,15 @@ export function installWorldPresenceConnection(options: PresenceRunnerOptions = 
   try { storage?.removeItem(LEGACY_WORLD_PRESENCE_TOKEN_KEY); }
   catch { /* storage unavailable */ }
 
+  // Stable, device-local id so this installation is one recorded node forever
+  // instead of a new "user" on every reconnect.
+  const nodeId = options.nodeId ?? readOrCreateNodeId(storage);
+
   const sync = () => {
     stopSocket?.();
     stopSocket = undefined;
-    if (disposed || !readPresenceEnabled(storage) || !worldPresenceSocketUrl("presence", baseUrl)) return;
-    stopSocket = createReconnectingSocket("presence", { ...options, baseUrl });
+    if (disposed || !readPresenceEnabled(storage) || !worldPresenceSocketUrl("presence", baseUrl, nodeId)) return;
+    stopSocket = createReconnectingSocket("presence", { ...options, baseUrl, nodeId });
   };
   const onPreferenceChanged = () => sync();
   const onStorage = (event: StorageEvent) => {

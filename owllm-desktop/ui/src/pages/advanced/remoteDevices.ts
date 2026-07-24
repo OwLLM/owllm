@@ -87,7 +87,14 @@ export type TrustedController = {
   decided_at: string | null;
 };
 
-export type CommandKind = "diagnostics" | "shell" | "wsl" | "file_write" | "admin";
+export type CommandKind =
+  | "diagnostics"
+  | "shell"
+  | "wsl"
+  | "file_write"
+  | "admin"
+  | "screenshot"
+  | "inference";
 
 export type CommandResult = {
   request_id: string;
@@ -101,6 +108,8 @@ export type CommandResult = {
   session?: string | null;
   data?: string | null;
   exited?: boolean;
+  /** base64 PNG returned by a `screenshot` command (no `data:` prefix). */
+  image?: string | null;
 };
 
 export type ControlSession = {

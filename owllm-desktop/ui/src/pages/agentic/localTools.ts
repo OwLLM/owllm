@@ -287,8 +287,9 @@ export async function refreshBrowserState(): Promise<void> {
       const peers = devs.filter((d) => !d.is_self).map((d) => d.name);
       _browserStateLine +=
         " REMOTE DEVICES — you CAN run shell commands on the user's OTHER paired machines with the device_exec tool " +
-        "(or mcp__owllm__device_exec): device_exec({ device: '<name>', command: '<shell>' }). Use it for tech support, " +
-        "installing software, and development on another PC — it works over the encrypted device channel (no SSH). " +
+        "(or mcp__owllm__device_exec): device_exec({ device: '<name>', command: '<shell>' }). You can also SEE another " +
+        "machine's screen with device_screenshot({ device: '<name>' }) (Windows targets), which saves a PNG you then view. " +
+        "It all works over the encrypted device channel (no SSH). " +
         "CALL IT DIRECTLY, same rules as the browser tools." +
         (peers.length ? ` Paired devices: ${peers.join(", ")}.` : " No devices paired yet — the user pairs them on the Devices page.");
     }
@@ -1271,6 +1272,19 @@ export const LOCAL_TOOL_SPECS: ToolSpec[] = [
     ],
   },
   {
+    name: "device_screenshot",
+    aliases: ["remote_screenshot", "device_screen", "screenshot_device", "capture_device"],
+    description:
+      "Capture the SCREEN of a PAIRED OwLLM device (another of your PCs) over the " +
+      "end-to-end-encrypted device channel and save it as a PNG you can then view via " +
+      "the normal vision path. Use it to see what's on another machine's screen for " +
+      "tech support or monitoring. Windows targets only for now. Requires 'Let agents " +
+      "use remote devices' enabled and shell granted on the target.",
+    args: [
+      { name: "device", required: true, description: "Target device NAME or id (from your OwLLM Devices list).", aliases: ["target", "machine", "pc", "device_id", "name", "host"] },
+    ],
+  },
+  {
     name: "signing_get",
     aliases: ["get_signing", "signing_credentials", "code_signing", "signing_creds"],
     description:
@@ -1910,6 +1924,33 @@ async function executeToolCallInner(
         if (res.error) parts.push(`error: ${res.error}`);
         parts.push(`device: ${match.name} · decision: ${res.decision} · exit_code: ${res.exit_code ?? "n/a"}`);
         return { ok: !!res.ok, output: parts.join("\n\n") };
+      }
+      case "device_screenshot":
+      case "remote_screenshot":
+      case "device_screen": {
+        // Capture a paired device's screen over the sealed channel and save the
+        // PNG so the vision path can read it. Same gate as device_exec.
+        const allowed = await invoke<boolean>("device_agents_allowed_get").catch(() => false);
+        if (!allowed) {
+          return { ok: false, output: "remote device access is disabled — turn on 'Let agents use remote devices' on the Devices page." };
+        }
+        const wanted = String(call.args.device ?? "").trim();
+        if (!wanted) return { ok: false, output: "device_screenshot: 'device' (target name or id) is required" };
+        const devices = await invoke<Array<{ device_id: string; name: string; is_self: boolean }>>("devices_list").catch(() => []);
+        const match = devices.find((d) => !d.is_self && (d.device_id === wanted || d.name.toLowerCase() === wanted.toLowerCase()));
+        if (!match) {
+          const names = devices.filter((d) => !d.is_self).map((d) => d.name).join(", ") || "(none paired)";
+          return { ok: false, output: `device_screenshot: no paired device '${wanted}'. Known devices: ${names}. Pair it on the Devices page first.` };
+        }
+        const res = await invoke<{ ok: boolean; image?: string | null; decision: string; error: string | null }>(
+          "device_send", { toDevice: match.device_id, kind: "screenshot", command: "", payload: null, timeoutMs: 60000 },
+        ).catch((e) => ({ ok: false, image: null, decision: "error", error: String(e) }));
+        if (!res.ok || !res.image) {
+          return { ok: false, output: `device_screenshot failed on ${match.name}: ${res.error ?? res.decision}` };
+        }
+        const path = await invoke<string>("device_save_screenshot", { b64: res.image, cwd }).catch(() => "");
+        if (!path) return { ok: false, output: `screenshot of ${match.name} captured but could not be saved to disk` };
+        return { ok: true, output: `screenshot of ${match.name} saved: ${path}` };
       }
       case "signing_get": {
         // Read the shared code-signing vault so an agent in any project can wire

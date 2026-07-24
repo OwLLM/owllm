@@ -122,6 +122,14 @@ pub enum CommandKind {
     SessionResize,
     /// Close an open session. Gated by `allow_shell`.
     SessionClose,
+    /// Capture the target's primary screen and return a PNG. Privacy-sensitive,
+    /// so gated by `allow_shell` (a controller that can run a shell could
+    /// screenshot anyway); returns the image in `CommandResult.image`.
+    Screenshot,
+    /// Proxy one chat-completion request to the target's own local llama-server
+    /// (127.0.0.1) and return its response body. Lets a device use another
+    /// device's local model over the sealed channel. Gated by `allow_shell`.
+    Inference,
 }
 
 /// The decision `authorize()` returns. `RequiresApproval` means the policy
@@ -191,6 +199,9 @@ pub struct CommandResult {
     /// True when a session's shell has exited (from `SessionRead`/`SessionOpen`).
     #[serde(default)]
     pub exited: bool,
+    /// base64 PNG returned by `Screenshot` (a full-frame image, no `data:` prefix).
+    #[serde(default)]
+    pub image: Option<String>,
 }
 
 // ------------------------------------------------------------------

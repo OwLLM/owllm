@@ -43,6 +43,16 @@ pub fn authorize(kind: CommandKind, policy: &PermissionPolicy) -> Authorization 
                 Denied
             }
         }
+        // Screenshot (privacy-sensitive) and Inference (uses the target's GPU)
+        // ride the shell tier: a controller trusted with shell already has this
+        // reach, and same-account controllers get the standard full grant.
+        Screenshot | Inference => {
+            if policy.allow_shell {
+                Allowed
+            } else {
+                Denied
+            }
+        }
         FileWrite => {
             if policy.allow_file_writes {
                 RequiresApproval

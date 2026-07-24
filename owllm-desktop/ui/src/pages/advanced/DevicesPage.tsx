@@ -73,6 +73,7 @@ export default function DevicesPage() {
   const [fileContent, setFileContent] = useState("");
   const [running, setRunning] = useState(false);
   const [consoleLines, setConsoleLines] = useState<string[]>([]);
+  const [shotUrl, setShotUrl] = useState<string | null>(null);
 
   const [nameDraft, setNameDraft] = useState("");
   const [selftestMsg, setSelftestMsg] = useState("");
@@ -177,6 +178,7 @@ export default function DevicesPage() {
           .filter(Boolean)
           .join("\n");
         setConsoleLines((l) => [...l, `${head} (${res.duration_ms}ms)`, body].filter(Boolean));
+        if (res.image) setShotUrl(`data:image/png;base64,${res.image}`);
       } finally {
         setRunning(false);
         await rd.auditTail(200).then((a) => setAudit((a as AuditRow[]) ?? []));
@@ -378,9 +380,10 @@ export default function DevicesPage() {
         onRun={runCommand}
         onStop={stopAll}
         lines={consoleLines}
-        onClear={() => setConsoleLines([])}
+        onClear={() => { setConsoleLines([]); setShotUrl(null); }}
         wslDisabled={wslDisabled}
         onOpenShell={() => setShellDevice(target)}
+        shotUrl={shotUrl}
       />
 
       {/* Live interactive remote shell (SSH-like) */}
@@ -754,7 +757,7 @@ function TrustedControllers({
 }
 
 function RemoteConsole({
-  devices, target, setTarget, kind, setKind, command, setCommand, fileContent, setFileContent, running, onRun, onStop, lines, onClear, wslDisabled, onOpenShell,
+  devices, target, setTarget, kind, setKind, command, setCommand, fileContent, setFileContent, running, onRun, onStop, lines, onClear, wslDisabled, onOpenShell, shotUrl,
 }: {
   devices: DeviceRecord[];
   target: string;
@@ -772,6 +775,7 @@ function RemoteConsole({
   onClear: () => void;
   wslDisabled: boolean;
   onOpenShell: () => void;
+  shotUrl: string | null;
 }) {
   const needsCommand = kind === "shell" || kind === "wsl";
   const isFileWrite = kind === "file_write";
@@ -794,6 +798,7 @@ function RemoteConsole({
           <option value="diagnostics">Diagnostics (read-only)</option>
           <option value="shell">Shell</option>
           <option value="wsl">Run in WSL</option>
+          <option value="screenshot">Screenshot</option>
           <option value="file_write">File write ⚠ (approval)</option>
         </select>
         {(needsCommand || isFileWrite) && (
@@ -827,6 +832,13 @@ function RemoteConsole({
       {isFileWrite && <span style={{ fontSize: 11, color: "var(--warn)" }}>File write is a dangerous action — the target must approve it live (and its policy must allow file writes).</span>}
       {wslDisabled && <span style={{ fontSize: 11, color: "var(--warn)" }}>The selected device does not report WSL — pick another target or a different mode.</span>}
       <LogBox lines={lines.length ? lines : ["(remote output appears here)"]} height={200} title="Remote console" />
+      {shotUrl && (
+        <img
+          src={shotUrl}
+          alt="Remote screenshot"
+          style={{ maxWidth: "100%", borderRadius: 8, border: "1px solid #c04bd6", marginTop: 4 }}
+        />
+      )}
     </section>
   );
 }

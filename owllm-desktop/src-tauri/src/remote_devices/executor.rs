@@ -124,7 +124,9 @@ pub async fn execute(req: &CommandRequest, policy: &PermissionPolicy) -> Command
         CommandKind::Diagnostics => diagnostics(req, started),
         CommandKind::Shell => run_process(req, timeout_ms, started, ProcKind::Shell).await,
         CommandKind::Wsl => run_wsl(req, timeout_ms, started).await,
-        // Unreachable: authorize() only returns Allowed for the three above.
+        CommandKind::Screenshot => take_screenshot(req, started).await,
+        CommandKind::Inference => run_inference(req, started).await,
+        // Unreachable: authorize() never returns Allowed for these.
         CommandKind::FileWrite | CommandKind::Admin => {
             refused(req, Authorization::Denied, "not executable", started)
         }
@@ -158,6 +160,93 @@ pub async fn execute_dangerous(req: &CommandRequest) -> CommandResult {
     // We're only here because the human approved it.
     r.decision = "approved".into();
     r
+}
+
+// ------------------------------------------------------------------
+// Screenshot — capture the target's screen, return a PNG
+// ------------------------------------------------------------------
+
+async fn take_screenshot(req: &CommandRequest, started: Instant) -> CommandResult {
+    match crate::support::capture_screen_png().await {
+        Ok((png, w, h)) => {
+            use base64::Engine as _;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+            CommandResult {
+                request_id: req.request_id.clone(),
+                ok: true,
+                stdout: format!("screenshot {w}x{h}, {} bytes (png)", png.len()),
+                exit_code: Some(0),
+                decision: "allowed".into(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                image: Some(b64),
+                ..Default::default()
+            }
+        }
+        Err(e) => finish_err(req, started, &e),
+    }
+}
+
+// ------------------------------------------------------------------
+// Inference — proxy a chat request to this device's own local llama-server
+// ------------------------------------------------------------------
+
+async fn run_inference(req: &CommandRequest, started: Instant) -> CommandResult {
+    // The controller sends the OpenAI chat-completions request body (JSON) in
+    // `command`; we forward it to THIS device's own 127.0.0.1 model server and
+    // hand the whole response body back. Non-streaming: the sealed channel is
+    // request/response, so the target buffers the full completion.
+    let body = req.command.clone();
+    if body.trim().is_empty() {
+        return finish_err(req, started, "inference: empty request body");
+    }
+    let (port, key) = match crate::remote_devices::local_inference_endpoint().await {
+        Some(v) => v,
+        None => {
+            return finish_err(
+                req,
+                started,
+                "no local model server is running on this device — open a model in OwLLM on it first",
+            );
+        }
+    };
+    // Inference can outlast the 120s command cap; give it its own budget.
+    let timeout_ms = req.timeout_ms.clamp(5_000, 300_000);
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return finish_err(req, started, &format!("inference client: {e}")),
+    };
+    let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    let mut rb = client
+        .post(&url)
+        .header("content-type", "application/json")
+        .body(body);
+    if let Some(k) = key {
+        rb = rb.header("authorization", format!("Bearer {k}"));
+    }
+    match rb.send().await {
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            CommandResult {
+                request_id: req.request_id.clone(),
+                ok: status.is_success(),
+                stdout: text,
+                exit_code: Some(status.as_u16() as i32),
+                error: if status.is_success() {
+                    None
+                } else {
+                    Some(format!("model server returned {status}"))
+                },
+                decision: "allowed".into(),
+                duration_ms: started.elapsed().as_millis() as u64,
+                ..Default::default()
+            }
+        }
+        Err(e) => finish_err(req, started, &format!("inference request failed: {e}")),
+    }
 }
 
 fn run_file_write(req: &CommandRequest, started: Instant) -> CommandResult {

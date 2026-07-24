@@ -707,6 +707,7 @@ fn canonical_tool_names() -> BTreeSet<&'static str> {
         "browser_tabs",
         "create_dir",
         "device_exec",
+        "device_screenshot",
         "edit_file",
         "glob",
         "grep",

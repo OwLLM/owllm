@@ -37,7 +37,7 @@ transpile("askUserBubble.verify.ts", AGENTIC, "verify.js");
 
 // Heavy imports of dispatch.ts that the pure helpers under test never call.
 const STUB = "module.exports = new Proxy({}, { get: () => () => {} });";
-for (const m of ["localTools", "toolNormalizer", "modelProfiles", "inferenceEndpoint", "ModelPicker", "teamConfig", "dispatchParse", "teamMemoryFormat", "skillRuntime"]) {
+for (const m of ["localTools", "toolNormalizer", "modelProfiles", "inferenceEndpoint", "ModelPicker", "teamConfig", "dispatchParse", "teamMemoryFormat", "skillRuntime", "personalAgentRuntime"]) {
   fs.writeFileSync(path.join(AGENTIC, m + ".js"), STUB);
 }
 fs.writeFileSync(path.join(UTILS, "genStats.js"), STUB);                // ../../utils/genStats

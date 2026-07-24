@@ -222,7 +222,7 @@ try {
   check("World Map consumes live WebSocket snapshots", page.includes("subscribeWorldPresence") && !page.includes("loadWorldPresence"));
   check("Opted-in presence runs application-wide", appShell.includes("<WorldPresenceRunner />") && appShell.includes("installWorldPresenceConnection()"));
   check("Consent remains device-local", vaultSync.includes('"owllm:world-map:presence-enabled"'));
-  check("Worker uses hibernating sockets without retained presence", worker.includes("acceptWebSocket") && worker.includes("serializeAttachment") && !/INSERT INTO|CREATE TABLE|scheduled\s*\(/i.test(worker));
+  check("Worker persists recorded nodes and ghosts them on disconnect", worker.includes("acceptWebSocket") && worker.includes("serializeAttachment") && /CREATE TABLE IF NOT EXISTS nodes/.test(worker) && /INSERT INTO nodes/.test(worker));
   check("Worker broadcasts incremental membership changes", worker.includes('type: "upsert"') && worker.includes('type: "remove"'));
   check("Wrangler binds a free SQLite-backed Durable Object without D1", wrangler.includes("new_sqlite_classes") && !wrangler.includes("d1_databases"));
   check("Unavailable service is disclosed", page.includes("World presence service is not connected yet."));

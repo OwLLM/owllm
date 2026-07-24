@@ -564,11 +564,7 @@ export default function HomePage() {
             stretch to the full window width (1fr each) so the row never
             leaves dead space on the sides; each tile stays square via
             aspectRatio and reveals a 2x2 quick-action matrix on hover. */}
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: "repeat(3, 1fr)",
-          gap: 28,
-        }}>
+        <div className="home-launcher-grid">
           <LauncherTile spec={LAUNCHERS[0]} />
           <LauncherTile spec={LAUNCHERS[1]} />
           <LauncherTile spec={LAUNCHERS[2]} />

@@ -11,9 +11,7 @@ import { getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from
 import { isClickGesture, nodeSignature } from "./globeStability";
 import {
   includeSelfDevice,
-  readPresenceEnabled,
   readWorldMapMode,
-  savePresenceEnabled,
   saveWorldMapMode,
   subscribeWorldPresence,
   type PublicPresenceNode,
@@ -574,7 +572,6 @@ export default function WorldMapPage() {
   const [configured, setConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [presenceEnabled, setPresenceEnabled] = useState(readPresenceEnabled);
   const [selected, setSelected] = useState<GlobeNode | null>(null);
   const [fleetError, setFleetError] = useState("");
 
@@ -647,11 +644,6 @@ export default function WorldMapPage() {
   useEffect(() => {
     if (mode === "fleet") void loadFleet(false);
   }, [mode]);
-
-  const togglePresence = (enabled: boolean) => {
-    setPresenceEnabled(enabled);
-    savePresenceEnabled(enabled);
-  };
 
   const nodes = useMemo<GlobeNode[]>(() => mode === "world"
     ? publicNodes.map((node) => ({
@@ -745,13 +737,10 @@ export default function WorldMapPage() {
             </div>
 
             {mode === "world" && (
-              <label style={{ ...panelStyle(), padding: 15, display: "flex", gap: 11, cursor: "pointer", alignItems: "flex-start" }}>
-                <input type="checkbox" checked={presenceEnabled} onChange={(event) => togglePresence(event.target.checked)} style={{ marginTop: 3, width: 17, height: 17, accentColor: "var(--accent)" }} />
-                <span>
-                  <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 750 }}>{t("Appear anonymously")}</span>
-                  <span style={{ display: "block", marginTop: 4, color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45 }}>{t("Shares no name, account, device, project, prompt, or exact coordinates.")}</span>
-                </span>
-              </label>
+              <div style={{ ...panelStyle(), padding: 13, display: "flex", gap: 9, alignItems: "flex-start", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45 }}>
+                <span aria-hidden style={{ marginTop: 1, color: "var(--accent-ink)" }}>🌐</span>
+                <span>{t("You are counted anonymously — no name, account, device, project, prompt, or exact coordinates are shared.")}</span>
+              </div>
             )}
 
             {mode === "fleet" && fleetError && (

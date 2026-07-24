@@ -512,5 +512,35 @@ console.log("case 9c: Start queue claims the window lease even with auto-feed of
   act(() => m2.root.unmount());
 }
 
+// ---- 10. Accepting the digest's proposed steps ("Add all + clear notes")
+//          MUST clear the working notes — even when the digest also set a
+//          proposedPlan. With the Kanban board hidden (SHOW_KANBAN=false) the
+//          plan's own clear button never renders, so a leftover proposedPlan
+//          used to strand the notes forever (the recurring "notes won't clear"
+//          complaint). ----
+console.log("case 10: Add all + clear notes actually clears the working notes");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "raw brainstorm notes the digest already consumed",
+    plan: PLAN,
+    steps: [],
+    autoFeed: false,
+    digest: [],
+    proposed: ["implement step A", "implement step B"],
+    // The exact trigger: a non-empty proposed plan the hidden board can't apply.
+    proposedPlan: "NOW:\n- something the hidden board would show",
+  }));
+  const { root } = mount({});
+  const addAll = buttons().find((b) => textOf(b).includes("Add all"));
+  check("Add all + clear notes button is present with proposed steps", !!addAll);
+  clickEl(addAll);
+  const after = blob();
+  check("all proposed steps are added to the list", after.steps.map((s) => s.text).join("|") === "implement step A|implement step B");
+  check("proposed steps are consumed", (after.proposed ?? []).length === 0);
+  check("working notes are cleared even with a leftover proposedPlan", after.text === "");
+  check("orphaned proposedPlan is cleared while the board is hidden", (after.proposedPlan ?? "") === "");
+  act(() => root.unmount());
+}
+
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

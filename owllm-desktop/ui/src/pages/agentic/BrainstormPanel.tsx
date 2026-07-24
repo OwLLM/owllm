@@ -688,6 +688,7 @@ export default function BrainstormPanel(props: Props) {
       onClick={(e) => { if (e.target === e.currentTarget && !running) closeAndSave(); }}
     >
       <div
+        data-chat-zoom=""
         style={{
           width: "min(960px, 95vw)",
           maxHeight: "90vh",
@@ -752,7 +753,7 @@ export default function BrainstormPanel(props: Props) {
                 color: "#e6ebf7",
                 border: "1px solid rgba(255,255,255,0.12)",
                 borderRadius: 6,
-                fontSize: 13,
+                fontSize: "var(--chat-font-size, 13px)",
                 resize: "vertical",
                 fontFamily: "inherit",
               }}
@@ -1016,7 +1017,7 @@ export default function BrainstormPanel(props: Props) {
                   flex: 1, minWidth: 0, minHeight: 38, maxHeight: 180,
                   padding: "9px 12px", background: "rgba(10,14,22,0.8)",
                   color: "#e6ebf7", border: "1px solid rgba(255,255,255,0.12)",
-                  borderRadius: 6, fontSize: 13, lineHeight: 1.45,
+                  borderRadius: 6, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.45,
                   fontFamily: "inherit", resize: "none", outline: "none",
                   overflowY: "auto",
                 }}

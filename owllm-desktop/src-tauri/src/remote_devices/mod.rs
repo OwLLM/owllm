@@ -76,6 +76,8 @@ fn kind_str(k: CommandKind) -> &'static str {
         CommandKind::SessionRead => "session_read",
         CommandKind::SessionResize => "session_resize",
         CommandKind::SessionClose => "session_close",
+        CommandKind::Screenshot => "screenshot",
+        CommandKind::Inference => "inference",
     }
 }
 
@@ -108,6 +110,23 @@ fn store_app(app: &AppHandle) {
     if g.is_none() {
         *g = Some(app.clone());
     }
+}
+
+/// This device's own live llama-server (port + the api-key it was exposed with,
+/// if any), for the `Inference` command to proxy a controller's request to
+/// 127.0.0.1. `None` when no model server is running here. The key is only
+/// needed when the server was started with `--api-key` (network exposure on);
+/// a loopback POST to an un-exposed server needs no auth.
+pub(crate) async fn local_inference_endpoint() -> Option<(u16, Option<String>)> {
+    let app = { APP.lock().unwrap().clone() }?;
+    let port = crate::server::any_live_server_port(&app).await?;
+    let expose = crate::server::inference_expose_get();
+    let key = if expose.enabled && !expose.api_key.trim().is_empty() {
+        Some(expose.api_key.clone())
+    } else {
+        None
+    };
+    Some((port, key))
 }
 
 // ------------------------------------------------------------------
@@ -255,12 +274,19 @@ fn relay_url() -> Option<String> {
     cfg_string("relay_url")
 }
 
-/// Whether agents may drive remote devices (default OFF).
+/// Whether agents may drive remote devices. Auto-ON for a machine signed into
+/// the account that owns the private vault (same GitHub login) — the same
+/// "your own devices need no ceremony" rule as `feature_enabled()`. This is
+/// safe *because it is same-account-only in effect*: an agent can only reach a
+/// device that auto-trusts this machine, and only vault-verified same-account
+/// controllers auto-trust (see `ensure_vault_autotrust`); anyone else lands in
+/// Pending and is refused. An explicit toggle in the config always wins, so a
+/// shared/multi-user machine can still turn it off.
 fn agents_allowed() -> bool {
     load_config()
         .get("agents_allowed")
         .and_then(Value::as_bool)
-        .unwrap_or(false)
+        .unwrap_or_else(|| github_login().is_some())
 }
 
 fn set_agents_allowed_cfg(v: bool) -> Result<(), String> {
@@ -1406,6 +1432,28 @@ pub fn device_stop_remote_control(app: AppHandle) -> Value {
     CONTROL.lock().unwrap().clear();
     emit_control();
     json!({ "cancelled": cancelled, "sessions_killed": sessions })
+}
+
+/// Decode a base64 PNG returned by a `Screenshot` command and save it under the
+/// agent's `.owllm-inbox` (or the app data dir) so the vision path can read it.
+/// Returns the saved absolute path.
+#[tauri::command]
+pub fn device_save_screenshot(b64: String, cwd: Option<String>) -> Result<String, String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .map_err(|e| format!("decode screenshot: {e}"))?;
+    let base = cwd
+        .filter(|c| !c.trim().is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(crate::paths::user_data_root)
+        .ok_or_else(|| "no directory available to save the screenshot".to_string())?;
+    let dir = base.join(".owllm-inbox");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create inbox dir: {e}"))?;
+    let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+    let path = dir.join(format!("remote-screenshot-{ts}.png"));
+    std::fs::write(&path, &bytes).map_err(|e| format!("write screenshot: {e}"))?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 /// Whether agents may drive paired+shell-granted remote devices (default OFF).

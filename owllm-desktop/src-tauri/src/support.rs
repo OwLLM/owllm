@@ -223,9 +223,113 @@ fn capture_hwnd_rgba(hwnd: isize) -> Result<(Vec<u8>, u32, u32), String> {
     }
 }
 
+/// Capture the whole virtual screen (all monitors) → tightly-packed RGBA
+/// (top-down). BitBlt of the screen DC — works from any thread, needs no
+/// window handle (unlike the PrintWindow app-window capture above).
+#[cfg(windows)]
+fn capture_virtual_screen_rgba() -> Result<(Vec<u8>, u32, u32), String> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
+        SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, SRCCOPY,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
+        SM_YVIRTUALSCREEN,
+    };
+    unsafe {
+        let x = GetSystemMetrics(SM_XVIRTUALSCREEN);
+        let y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        let w = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1) as u32;
+        let h = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1) as u32;
+
+        let screen_dc = GetDC(std::ptr::null_mut());
+        if screen_dc.is_null() {
+            return Err("GetDC failed".into());
+        }
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        if mem_dc.is_null() {
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+            return Err("CreateCompatibleDC failed".into());
+        }
+        // Top-down 32bpp DIB so the pixel buffer is directly indexable.
+        let mut bi: BITMAPINFO = std::mem::zeroed();
+        bi.bmiHeader = BITMAPINFOHEADER {
+            biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w as i32,
+            biHeight: -(h as i32),
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB as u32,
+            biSizeImage: 0,
+            biXPelsPerMeter: 0,
+            biYPelsPerMeter: 0,
+            biClrUsed: 0,
+            biClrImportant: 0,
+        };
+        let mut bits: *mut core::ffi::c_void = std::ptr::null_mut();
+        let dib = CreateDIBSection(
+            mem_dc,
+            &bi,
+            DIB_RGB_COLORS,
+            &mut bits,
+            std::ptr::null_mut(),
+            0,
+        );
+        if dib.is_null() || bits.is_null() {
+            DeleteDC(mem_dc);
+            ReleaseDC(std::ptr::null_mut(), screen_dc);
+            return Err("CreateDIBSection failed".into());
+        }
+        let old = SelectObject(mem_dc, dib as _);
+        let ok = BitBlt(mem_dc, 0, 0, w as i32, h as i32, screen_dc, x, y, SRCCOPY);
+        let result = if ok != 0 {
+            let n = (w as usize) * (h as usize) * 4;
+            let src = std::slice::from_raw_parts(bits as *const u8, n);
+            // BGRA → RGBA, force alpha opaque.
+            let mut rgba = vec![0u8; n];
+            for i in (0..n).step_by(4) {
+                rgba[i] = src[i + 2];
+                rgba[i + 1] = src[i + 1];
+                rgba[i + 2] = src[i];
+                rgba[i + 3] = 0xFF;
+            }
+            Ok((rgba, w, h))
+        } else {
+            Err("BitBlt failed".to_string())
+        };
+        SelectObject(mem_dc, old);
+        DeleteObject(dib as _);
+        DeleteDC(mem_dc);
+        ReleaseDC(std::ptr::null_mut(), screen_dc);
+        result
+    }
+}
+
+/// Capture the whole screen as PNG bytes (+ pixel size), for the remote-devices
+/// Screenshot command. Windows captures the full virtual desktop from any
+/// thread. Other platforms return an honest, actionable error rather than a
+/// black frame — a headless server (the typical non-Windows target here) has
+/// nothing to capture, and cross-platform capture will land as a follow-up.
+#[cfg(windows)]
+pub(crate) async fn capture_screen_png() -> Result<(Vec<u8>, u32, u32), String> {
+    let (raw, w, h) = tokio::task::spawn_blocking(capture_virtual_screen_rgba)
+        .await
+        .map_err(|e| format!("join: {e}"))??;
+    let png = encode_png(&raw, w, h)?;
+    Ok((png, w, h))
+}
+
+#[cfg(not(windows))]
+pub(crate) async fn capture_screen_png() -> Result<(Vec<u8>, u32, u32), String> {
+    Err(format!(
+        "remote screen capture currently supports Windows targets only (this device is {}).",
+        std::env::consts::OS
+    ))
+}
+
 /// RGBA → PNG bytes.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_png(rgba: &[u8], w: u32, h: u32) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     {
         let mut enc = png::Encoder::new(&mut out, w, h);

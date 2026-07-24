@@ -403,6 +403,7 @@ pub fn run() {
             remote_devices::device_session_close,
             remote_devices::device_agents_allowed_get,
             remote_devices::device_set_agents_allowed,
+            remote_devices::device_save_screenshot,
             remote_devices::device_pending_approvals,
             remote_devices::device_approve_action,
             remote_devices::device_deny_action,

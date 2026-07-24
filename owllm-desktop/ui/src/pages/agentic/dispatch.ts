@@ -2457,6 +2457,28 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
     await maybeYield();
     if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
+    // consumeOpenAISse / deviceChatCompletion stream visible deltas to onDelta,
+    // route reasoning to onThought, and harvest native tool_calls into nativeCalls.
+    const nativeCalls: RawNativeCall[] = [];
+    if (infer.device) {
+      // Paired-device model: one non-streamed round-trip over the sealed
+      // channel — no HTTP route to the device required (works via P2P/relay).
+      lastReply = await deviceChatCompletion(
+        infer.device.id,
+        {
+          model: p.modelId || "local",
+          messages: liveMessages,
+          temperature: p.temperature,
+          ...sampling,
+          tools: openaiTools.length > 0 ? openaiTools : undefined,
+          tool_choice: openaiTools.length > 0 ? "auto" : undefined,
+        },
+        countingDelta,
+        countingThought,
+        nativeCalls,
+        p.signal,
+      );
+    } else {
     let resp: Response | undefined;
     const loadDeadline = Date.now() + LOAD_RETRY_MS;
     while (true) {
@@ -2522,11 +2544,8 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       throw new Error(`llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`);
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
-    // consumeOpenAISse streams visible deltas to onDelta, routes
-    // reasoning/thinking to onThought, and harvests native
-    // delta.tool_calls into nativeCalls.
-    const nativeCalls: RawNativeCall[] = [];
     lastReply = await consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls);
+    }
     // No tools available at all → single-shot, done.
     if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
     // Canonicalise native calls to registry tool + arg names.
@@ -2586,22 +2605,34 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         "for the user now: report what each tool returned and the overall outcome.",
     });
     try {
-      const fresp = await fetch(inferUrl, {
-        method: "POST",
-        headers: inferHeaders,
-        body: JSON.stringify({
-          model: p.modelId || "local",
-          messages: liveMessages,
-          stream: true,
-          temperature: p.temperature,
-          ...sampling,
-          // tools deliberately omitted — force a plain text answer.
-        }),
-        signal: p.signal,
-      });
-      if (fresp.ok) {
-        const finalText = await consumeOpenAISse(fresp, countingDelta, countingThought, []);
+      if (infer.device) {
+        const finalText = await deviceChatCompletion(
+          infer.device.id,
+          { model: p.modelId || "local", messages: liveMessages, temperature: p.temperature, ...sampling },
+          countingDelta,
+          countingThought,
+          [],
+          p.signal,
+        );
         if (finalText.trim()) lastReply = finalText;
+      } else {
+        const fresp = await fetch(inferUrl, {
+          method: "POST",
+          headers: inferHeaders,
+          body: JSON.stringify({
+            model: p.modelId || "local",
+            messages: liveMessages,
+            stream: true,
+            temperature: p.temperature,
+            ...sampling,
+            // tools deliberately omitted — force a plain text answer.
+          }),
+          signal: p.signal,
+        });
+        if (fresp.ok) {
+          const finalText = await consumeOpenAISse(fresp, countingDelta, countingThought, []);
+          if (finalText.trim()) lastReply = finalText;
+        }
       }
     } catch (e) {
       // Best-effort — if the synthesis turn fails, keep whatever the
@@ -3314,6 +3345,67 @@ async function streamGemini(
 //   - text inside <think>/<thinking> tags → onThought("thinking", …)
 //   - delta.reasoning_content (DeepSeek-R1 / o-series) → onThought("thinking", …)
 //   - delta.tool_calls[] → onThought("tool:<name>:<i>", "🛠 <name>", …)
+/// Route ONE chat-completion request to a paired device's local llama-server
+/// over the encrypted device channel (device_send → the target's `Inference`
+/// command proxies to its own 127.0.0.1 model). Non-streaming: the sealed
+/// channel is request/response, so the target buffers the whole completion and
+/// we get it in one shot. Drives the SAME onDelta/onThought/toolCallsOut
+/// contract as consumeOpenAISse, so the downstream tool loop is identical —
+/// the only visible difference is the reply arrives at once, not token-by-token.
+async function deviceChatCompletion(
+  deviceId: string,
+  body: Record<string, unknown>,
+  onDelta: StreamHandler,
+  onThought: ThoughtHandler | undefined,
+  toolCallsOut: RawNativeCall[],
+  signal: AbortSignal,
+): Promise<string> {
+  if (signal.aborted) throw new DOMException("aborted", "AbortError");
+  const payload = JSON.stringify({ ...body, stream: false });
+  const res = await invoke<{ ok: boolean; stdout: string; error: string | null; decision: string }>(
+    "device_send",
+    { toDevice: deviceId, kind: "inference", command: payload, payload: null, timeoutMs: 300_000 },
+  ).catch((e) => ({ ok: false, stdout: "", error: String(e), decision: "error" }));
+  if (!res.ok) throw new Error(`remote device model error: ${res.error ?? res.decision}`);
+  let json: any;
+  try {
+    json = JSON.parse(res.stdout);
+  } catch {
+    throw new Error(`remote device returned a non-JSON model response: ${String(res.stdout).slice(0, 300)}`);
+  }
+  const msg = json?.choices?.[0]?.message ?? {};
+  const reasoning: unknown = msg?.reasoning_content ?? msg?.reasoning;
+  if (typeof reasoning === "string" && reasoning) onThought?.("thinking", "🧠 thinking", reasoning);
+  const toolCalls: any[] | undefined = msg?.tool_calls;
+  if (Array.isArray(toolCalls)) {
+    for (const tc of toolCalls) {
+      const fn = tc?.function ?? {};
+      const name = typeof fn?.name === "string" ? fn.name : "";
+      if (!name) continue;
+      const argsJson = typeof fn?.arguments === "string" && fn.arguments ? fn.arguments : "{}";
+      const args: Record<string, string> = {};
+      try {
+        const parsed = JSON.parse(argsJson);
+        if (parsed && typeof parsed === "object") {
+          for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+            args[k] = typeof v === "string" ? v : JSON.stringify(v);
+          }
+        }
+      } catch { args.raw = argsJson; }
+      onThought?.(`tool:${name}:0`, `🛠 ${name}`, argsJson);
+      toolCallsOut.push({ name: unmangleMcpName(name), args });
+    }
+  }
+  let acc = "";
+  const content: unknown = msg?.content;
+  if (typeof content === "string" && content) {
+    const { reply, thought } = splitThinkTags(content, false);
+    if (thought) onThought?.("thinking", "🧠 thinking", thought);
+    if (reply) { acc += reply; onDelta(reply); }
+  }
+  return acc;
+}
+
 async function consumeOpenAISse(
   resp: Response,
   onDelta: StreamHandler,

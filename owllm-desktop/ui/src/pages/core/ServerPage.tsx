@@ -40,11 +40,18 @@ function InferenceSourceCard() {
   const [ep, setEp] = useState<InferenceEndpoint>(() => getInferenceEndpoint());
   const save = (next: InferenceEndpoint) => { setInferenceEndpoint(next); setEp(next); };
   const remote = ep.mode === "remote";
+  const isDevice = ep.mode === "device";
   // One-click discovery: a GPU server another device on this account published
   // into the vault (its LAN IP + port + key). No typing IPs.
   const [discovered, setDiscovered] = useState<GpuServer | null>(null);
+  // Paired OwLLM devices, for routing inference over the encrypted device
+  // channel (no HTTP route needed — works via P2P/relay).
+  const [pairedDevices, setPairedDevices] = useState<Array<{ device_id: string; name: string; is_self: boolean }>>([]);
   useEffect(() => {
     invoke<GpuServer | null>("vault_read_server").then(setDiscovered).catch(() => setDiscovered(null));
+    invoke<Array<{ device_id: string; name: string; is_self: boolean }>>("devices_list")
+      .then((d) => setPairedDevices((d ?? []).filter((x) => !x.is_self)))
+      .catch(() => setPairedDevices([]));
   }, []);
   const usingDiscovered = remote && discovered && ep.host === discovered.host && ep.port === discovered.port;
   const inp: CSSProperties = {
@@ -63,7 +70,7 @@ function InferenceSourceCard() {
           🛰 Inference source
         </div>
         <div style={{ display: "flex", gap: 4, background: "var(--bg-elevated)", borderRadius: 6, padding: 2 }}>
-          {(["local", "remote"] as const).map(m => (
+          {(["local", "remote", "device"] as const).map(m => (
             <button key={m}
               onClick={() => save({ ...ep, mode: m })}
               style={{
@@ -72,13 +79,15 @@ function InferenceSourceCard() {
                 background: ep.mode === m ? "rgba(var(--accent-rgb),0.75)" : "transparent",
                 color: ep.mode === m ? "#fff" : "var(--fg-muted)",
               }}>
-              {m === "local" ? "Local (this PC)" : "Remote server"}
+              {m === "local" ? "Local (this PC)" : m === "remote" ? "Remote server" : "Paired device"}
             </button>
           ))}
         </div>
       </div>
       <div style={{ fontSize: 11, color: "var(--fg-subtle)", lineHeight: 1.45 }}>
-        {remote
+        {isDevice
+          ? "Agents use a PAIRED OwLLM device's local model over the encrypted device channel — no IP/port needed, works from anywhere (P2P/relay). Responses arrive complete (not token-streamed)."
+          : remote
           ? "Agents send inference to a llama-server on another host (e.g. your Windows GPU box). Run agents here, model there."
           : "Agents use this PC's managed llama-server (default)."}
       </div>
@@ -115,6 +124,27 @@ function InferenceSourceCard() {
             placeholder="API key (the remote server's --api-key, optional)"
             value={ep.apiKey} onChange={e => save({ ...ep, apiKey: e.target.value })} />
         </div>
+      )}
+      {isDevice && (
+        pairedDevices.length ? (
+          <select
+            style={{ ...inp, width: "100%" }}
+            value={ep.deviceId ?? ""}
+            onChange={e => {
+              const d = pairedDevices.find((x) => x.device_id === e.target.value);
+              save({ ...ep, deviceId: d?.device_id, deviceName: d?.name });
+            }}
+          >
+            <option value="">— pick a paired device —</option>
+            {pairedDevices.map((d) => (
+              <option key={d.device_id} value={d.device_id}>{d.name}</option>
+            ))}
+          </select>
+        ) : (
+          <div style={{ fontSize: 11.5, color: "var(--warn)" }}>
+            No paired devices yet — pair one on the Devices page, then it appears here. The target must have a model running and grant this machine shell.
+          </div>
+        )
       )}
     </div>
   );

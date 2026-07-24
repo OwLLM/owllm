@@ -150,6 +150,19 @@ export class WorldPresence {
       "id TEXT PRIMARY KEY, region TEXT NOT NULL, latitude REAL NOT NULL, " +
       "longitude REAL NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)",
     );
+    this.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    // v1 recorded a server-random id for every connection that arrived without a
+    // stable client id, so each reconnect of a pre-stable-id client became a new
+    // permanent "user" and the total count grew additively. Those rows are
+    // duplicates of a handful of installations, not real users — purge them once.
+    const version = this.sql.exec("SELECT value FROM meta WHERE key = 'schema_version'").toArray()[0]?.value;
+    if (version !== "3") {
+      this.sql.exec("DELETE FROM nodes");
+      this.sql.exec(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', '3') " +
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      );
+    }
   }
 
   presenceSockets() {
@@ -192,7 +205,20 @@ export class WorldPresence {
   }
 
   snapshot(excludedSocket) {
-    return buildSnapshot(this.storedRows(), this.onlineIds(excludedSocket));
+    // Recorded rows plus live ephemeral (no stable id) connections. Ephemerals
+    // render as online dots but are never persisted, so `total` stays honest:
+    // it counts recorded installations only, while `online` counts live sockets.
+    const rows = this.storedRows();
+    const seen = new Set(rows.map((row) => String(row.id ?? "")));
+    for (const socket of this.presenceSockets()) {
+      if (socket === excludedSocket) continue;
+      const data = attachment(socket);
+      if (data?.role === PRESENCE_TAG && data.ephemeral && data.node && !seen.has(String(data.node.id))) {
+        seen.add(String(data.node.id));
+        rows.push(data.node);
+      }
+    }
+    return { ...buildSnapshot(rows, this.onlineIds(excludedSocket)), counts: this.counts(excludedSocket) };
   }
 
   broadcast(value) {
@@ -235,7 +261,8 @@ export class WorldPresence {
     const [client, server] = Object.values(pair);
     const now = new Date().toISOString();
     if (role === PRESENCE_TAG) {
-      const id = sanitizeNodeId(new URL(request.url).searchParams.get("id")) || randomId();
+      const stableId = sanitizeNodeId(new URL(request.url).searchParams.get("id"));
+      const id = stableId || randomId();
       const location = coarseLocation({
         country: request.headers.get("X-OWLLM-Country"),
         regionCode: request.headers.get("X-OWLLM-Region"),
@@ -243,8 +270,15 @@ export class WorldPresence {
         longitude: request.headers.get("X-OWLLM-Longitude"),
       }, id);
       if (!location) return json({ error: "coarse_location_unavailable" }, 503);
-      const row = this.recordNode(id, location, now);
-      server.serializeAttachment({ role, id, connectedAt: now });
+      // Only installations that supply a stable client id are recorded forever.
+      // A connection without one (pre-stable-id clients) is shown online while
+      // connected but never persisted — otherwise every reconnect would mint a
+      // new permanent node and the total would grow without bound.
+      const ephemeral = !stableId;
+      const row = ephemeral
+        ? { id, region: location.region, latitude: location.latitude, longitude: location.longitude, firstSeen: now, lastSeen: now }
+        : this.recordNode(id, location, now);
+      server.serializeAttachment({ role, id, ephemeral, node: ephemeral ? row : undefined, connectedAt: now });
       this.state.acceptWebSocket(server, [role]);
       this.broadcast({ type: "upsert", node: publicNode(row, true), counts: this.counts(), updatedAt: new Date().toISOString() });
     } else {

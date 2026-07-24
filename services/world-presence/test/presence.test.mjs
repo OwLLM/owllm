@@ -181,6 +181,46 @@ test("counts report total recorded and online now as membership changes", async 
   });
 });
 
+test("a connection without a stable id is online-only and never recorded", async () => {
+  await withService(async (mf) => {
+    const viewer = await connect(mf, "viewer");
+    await nextMessage(viewer);
+    const update = nextMessage(viewer);
+    const presence = await connect(mf, "presence", KR); // no stable id — legacy client
+    const change = await update;
+    assert.equal(change.type, "upsert");
+    assert.equal(change.node.online, true);
+    // Online counts the live socket; total counts recorded installations only.
+    assert.deepEqual(change.counts, { total: 0, online: 1 });
+    // A fresh viewer sees the ephemeral node while it is connected.
+    const during = await connect(mf, "viewer");
+    const snapshotDuring = await nextMessage(during);
+    assert.equal(snapshotDuring.nodes.length, 1);
+    assert.deepEqual(snapshotDuring.counts, { total: 0, online: 1 });
+    const removal = nextMessage(viewer);
+    presence.close(1000, "gone");
+    const removed = await removal;
+    assert.equal(removed.type, "remove");
+    assert.deepEqual(removed.counts, { total: 0, online: 0 });
+    during.close(1000, "done");
+    viewer.close(1000, "done");
+  });
+});
+
+test("repeated no-id reconnects never grow the recorded total", async () => {
+  await withService(async (mf) => {
+    for (let round = 0; round < 3; round += 1) {
+      const presence = await connect(mf, "presence", KR);
+      presence.close(1000, "flap");
+    }
+    const viewer = await connect(mf, "viewer");
+    const snapshot = await nextMessage(viewer);
+    assert.deepEqual(snapshot.counts, { total: 0, online: 0 });
+    assert.deepEqual(snapshot.nodes, []);
+    viewer.close(1000, "done");
+  });
+});
+
 test("HTTP presence calls and invalid roles fail closed", async () => {
   await withService(async (mf) => {
     const plain = await mf.dispatchFetch("https://presence.example/v1/presence/connect?role=viewer");
@@ -202,4 +242,8 @@ test("service keeps privacy invariants while intentionally retaining anonymous n
   assert.match(source, /first_seen/);
   assert.match(source, /acceptWebSocket/);
   assert.match(config, /new_sqlite_classes/);
+  // Regression pins for the additive-count bug: only stable ids are recorded,
+  // and the v2 migration purged the per-connection random-id duplicates.
+  assert.match(source, /const ephemeral = !stableId/);
+  assert.match(source, /schema_version', '3'/);
 });

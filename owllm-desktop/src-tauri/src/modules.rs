@@ -393,7 +393,11 @@ fn check_requirements(req: &Requirements, hw: &HardwareSnapshot) -> Result<(), S
                     "requires a CUDA {min}+ driver, this driver supports CUDA {have}"
                 ))
             }
-            None => return Err(format!("requires a CUDA {min}+ NVIDIA driver, none detected")),
+            None => {
+                return Err(format!(
+                    "requires a CUDA {min}+ NVIDIA driver, none detected"
+                ))
+            }
         }
     }
     Ok(())
@@ -1347,8 +1351,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let zip_path = tmp.path().join("payload.zip");
         let mut w = zip::ZipWriter::new(fs::File::create(&zip_path).unwrap());
-        w.start_file("llama-server", FileOptions::default().unix_permissions(0o644))
-            .unwrap();
+        w.start_file(
+            "llama-server",
+            FileOptions::default().unix_permissions(0o644),
+        )
+        .unwrap();
         w.write_all(b"#!/bin/sh\n").unwrap();
         w.start_file("bin/tool", FileOptions::default().unix_permissions(0o750))
             .unwrap();
@@ -1358,9 +1365,12 @@ mod tests {
         let dest = tmp.path().join("out");
         extract_zip(&zip_path, &dest).unwrap();
 
-        let mode =
-            |p: &str| fs::metadata(dest.join(p)).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode("llama-server"), 0o755, "exec-less mode must be repaired");
+        let mode = |p: &str| fs::metadata(dest.join(p)).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode("llama-server"),
+            0o755,
+            "exec-less mode must be repaired"
+        );
         assert_eq!(mode("bin/tool"), 0o750, "real exec mode must be preserved");
     }
 }

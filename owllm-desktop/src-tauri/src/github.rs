@@ -133,32 +133,59 @@ fn curl_github_repositories(token: &str) -> Result<Vec<GithubRepository>, String
     if let Some(msg) = v.get("message").and_then(|x| x.as_str()) {
         return Err(format!("GitHub couldn't list repositories: {msg}"));
     }
-    let rows = v.as_array().ok_or_else(|| {
-        "GitHub returned an unexpected repository list response.".to_string()
-    })?;
+    let rows = v
+        .as_array()
+        .ok_or_else(|| "GitHub returned an unexpected repository list response.".to_string())?;
     let mut repos = Vec::new();
     for row in rows {
-        let full_name = row.get("full_name").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let name = row.get("name").and_then(|x| x.as_str()).unwrap_or("").to_string();
+        let full_name = row
+            .get("full_name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let name = row
+            .get("name")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
         let owner_login = row
             .pointer("/owner/login")
             .and_then(|x| x.as_str())
             .unwrap_or("")
             .to_string();
-        let html_url = row.get("html_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        let clone_url = row.get("clone_url").and_then(|x| x.as_str()).unwrap_or("").to_string();
-        if full_name.is_empty() || name.is_empty() || owner_login.is_empty() || clone_url.is_empty() {
+        let html_url = row
+            .get("html_url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let clone_url = row
+            .get("clone_url")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        if full_name.is_empty() || name.is_empty() || owner_login.is_empty() || clone_url.is_empty()
+        {
             continue;
         }
         repos.push(GithubRepository {
             full_name,
             name,
             owner_login,
-            private: row.get("private").and_then(|x| x.as_bool()).unwrap_or(false),
+            private: row
+                .get("private")
+                .and_then(|x| x.as_bool())
+                .unwrap_or(false),
             html_url,
             clone_url,
-            updated_at: row.get("updated_at").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-            description: row.get("description").and_then(|x| x.as_str()).map(|s| s.to_string()),
+            updated_at: row
+                .get("updated_at")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string(),
+            description: row
+                .get("description")
+                .and_then(|x| x.as_str())
+                .map(|s| s.to_string()),
         });
     }
     Ok(repos)
@@ -631,7 +658,11 @@ pub async fn github_repo_url(cwd: String) -> Result<String, String> {
             return Ok(String::new());
         }
         let url = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        Ok(if url.contains("github.com") { url } else { String::new() })
+        Ok(if url.contains("github.com") {
+            url
+        } else {
+            String::new()
+        })
     })
     .await
     .map_err(|e| format!("join error: {e}"))?

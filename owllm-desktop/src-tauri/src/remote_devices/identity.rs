@@ -42,7 +42,9 @@ fn b64(bytes: &[u8]) -> String {
 
 fn unb64(s: &str) -> Result<Vec<u8>, String> {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    STANDARD.decode(s).map_err(|e| format!("base64 decode: {e}"))
+    STANDARD
+        .decode(s)
+        .map_err(|e| format!("base64 decode: {e}"))
 }
 
 fn wrap_secret(seed: &[u8; 32]) -> Result<String, String> {
@@ -52,7 +54,8 @@ fn wrap_secret(seed: &[u8; 32]) -> Result<String, String> {
 
 fn unwrap_secret(wrapped: &str, what: &str) -> Result<[u8; 32], String> {
     let raw = crate::crypt::unprotect(&unb64(wrapped)?)?;
-    raw.try_into().map_err(|_| format!("{what}: unwrapped key not 32 bytes"))
+    raw.try_into()
+        .map_err(|_| format!("{what}: unwrapped key not 32 bytes"))
 }
 
 /// Best-effort machine name for the default device name.
@@ -75,14 +78,22 @@ pub fn load_or_create() -> Result<Identity, String> {
             };
             // Guard against a corrupted/edited id that no longer matches the key.
             if secrets.device_id() == f.device_id {
-                return Ok(Identity { secrets, name: f.name, created_at: f.created_at });
+                return Ok(Identity {
+                    secrets,
+                    name: f.name,
+                    created_at: f.created_at,
+                });
             }
         }
     }
     // First run (or unreadable) → generate + persist.
     let secrets = DeviceSecrets::generate();
     let created_at = crate::remote_devices::now_rfc3339();
-    let ident = Identity { secrets, name: machine_name(), created_at };
+    let ident = Identity {
+        secrets,
+        name: machine_name(),
+        created_at,
+    };
     write_identity(&ident)?;
     Ok(ident)
 }

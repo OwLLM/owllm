@@ -88,6 +88,16 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   (Agents) and the Code page's right column.
 - **Skills**: skill packs auto-equipped by role, badges on agent cards,
   cross-provider self-load (any model reads `.owllm/skills/<id>` from disk).
+- **Personal agents + rule cards**: Studio provides an editor for reusable,
+  version-pinned profiles (identity, role, instructions, model, tools, memory,
+  delegation, skills) and user-authored fact/preference/constraint/workflow/
+  conditional cards. Project configs pin profile/rule revisions and add local
+  overrides; the team editor assigns profiles to agents. Documents persist in
+  encrypted global/project scopes with atomic replacement, while safe export
+  excludes private rules, memory, and secrets by default. Effective-config
+  preview shows deterministic precedence + provenance; runtime resolution
+  applies fail-closed tool/delegation intersections, project-isolated memory,
+  and the resolved skills/rules on every supported model path.
 - **Eval harness**: `routing.verify.run.mjs` control-flow judge + live-run
   scorecard + per-run Run Report (who ran · wrote files? · verdict · done?).
 

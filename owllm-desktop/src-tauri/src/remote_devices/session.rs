@@ -91,7 +91,12 @@ fn open(controller: &str, req: &CommandRequest) -> CommandResult {
     };
 
     let pty_system = native_pty_system();
-    let pair = match pty_system.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }) {
+    let pair = match pty_system.openpty(PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    }) {
         Ok(p) => p,
         Err(e) => return err(req, &format!("openpty: {e}")),
     };
@@ -147,7 +152,14 @@ fn open(controller: &str, req: &CommandRequest) -> CommandResult {
 
     SESSIONS.lock().unwrap().insert(
         session_id.clone(),
-        Session { controller_id: controller.to_string(), writer, master: pair.master, buffer, exited, last_active: Instant::now() },
+        Session {
+            controller_id: controller.to_string(),
+            writer,
+            master: pair.master,
+            buffer,
+            exited,
+            last_active: Instant::now(),
+        },
     );
     let mut r = base(req, true);
     r.session = Some(session_id);
@@ -156,7 +168,11 @@ fn open(controller: &str, req: &CommandRequest) -> CommandResult {
 
 /// Fetch a session the caller owns (and mark it active). Fails closed on a
 /// missing session or an ownership mismatch.
-fn owned<'a>(sessions: &'a mut HashMap<String, Session>, controller: &str, id: &str) -> Result<&'a mut Session, String> {
+fn owned<'a>(
+    sessions: &'a mut HashMap<String, Session>,
+    controller: &str,
+    id: &str,
+) -> Result<&'a mut Session, String> {
     match sessions.get_mut(id) {
         Some(s) if s.controller_id == controller => {
             s.last_active = Instant::now();
@@ -224,7 +240,12 @@ fn resize(controller: &str, req: &CommandRequest) -> CommandResult {
     let mut sessions = SESSIONS.lock().unwrap();
     match owned(&mut sessions, controller, &id) {
         Ok(s) => {
-            let _ = s.master.resize(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 });
+            let _ = s.master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            });
             base(req, true)
         }
         Err(e) => err(req, &e),

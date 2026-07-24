@@ -141,17 +141,17 @@ pub async fn git_status(dir: String) -> Result<GitStatus, String> {
                 ".owllm/eval-traces.jsonl",
             ],
         )
-            .ok()
-            .filter(|(ok, _, _)| *ok)
-            .map(|(_, tracked, _)| {
-                tracked
-                    .lines()
-                    .map(str::trim)
-                    .filter(|path| crate::fleet::is_app_scratch(path))
-                    .map(str::to_string)
-                    .collect()
-            })
-            .unwrap_or_default();
+        .ok()
+        .filter(|(ok, _, _)| *ok)
+        .map(|(_, tracked, _)| {
+            tracked
+                .lines()
+                .map(str::trim)
+                .filter(|path| crate::fleet::is_app_scratch(path))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
         Ok(GitStatus {
             is_repo: true,
             branch,
@@ -196,7 +196,9 @@ mod tests {
 
         fs::write(root.join(".owllm-inbox/image_1.png"), b"new runtime").unwrap();
         fs::write(root.join(".owllm/project.json"), b"{\"goal\":\"ship\"}\n").unwrap();
-        let status = git_status(root.to_string_lossy().to_string()).await.unwrap();
+        let status = git_status(root.to_string_lossy().to_string())
+            .await
+            .unwrap();
 
         assert_eq!(status.total, 1);
         assert_eq!(status.files.len(), 1);

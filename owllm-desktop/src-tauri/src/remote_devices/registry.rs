@@ -45,12 +45,20 @@ fn save_file(f: &RegistryFile) -> Result<(), String> {
 /// machine's own record.
 pub fn upsert(public: DevicePublic, is_self: bool) -> Result<(), String> {
     let mut f = load_file();
-    match f.devices.iter_mut().find(|d| d.public.device_id == public.device_id) {
+    match f
+        .devices
+        .iter_mut()
+        .find(|d| d.public.device_id == public.device_id)
+    {
         Some(existing) => {
             existing.public = public;
             existing.is_self = is_self;
         }
-        None => f.devices.push(DeviceRecord { public, last_seen: None, is_self }),
+        None => f.devices.push(DeviceRecord {
+            public,
+            last_seen: None,
+            is_self,
+        }),
     }
     save_file(&f)
 }
@@ -58,7 +66,11 @@ pub fn upsert(public: DevicePublic, is_self: bool) -> Result<(), String> {
 /// Update a device's last-seen to now (called whenever we accept a frame from it).
 pub fn touch_last_seen(device_id: &str) -> Result<(), String> {
     let mut f = load_file();
-    if let Some(d) = f.devices.iter_mut().find(|d| d.public.device_id == device_id) {
+    if let Some(d) = f
+        .devices
+        .iter_mut()
+        .find(|d| d.public.device_id == device_id)
+    {
         d.last_seen = Some(crate::remote_devices::now_rfc3339());
         save_file(&f)?;
     }
@@ -75,7 +87,11 @@ pub fn forget(device_id: &str) -> Result<(), String> {
 /// The full device list with THIS device guaranteed present + marked self.
 pub fn list(self_public: &DevicePublic) -> Vec<DeviceRecord> {
     let mut f = load_file();
-    if let Some(me) = f.devices.iter_mut().find(|d| d.public.device_id == self_public.device_id) {
+    if let Some(me) = f
+        .devices
+        .iter_mut()
+        .find(|d| d.public.device_id == self_public.device_id)
+    {
         me.public = self_public.clone();
         me.is_self = true;
     } else {

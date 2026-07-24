@@ -95,7 +95,11 @@ impl GgufGeom {
                     n_ctx.min(win) as u64,
                 )
             } else {
-                (self.key_length as u64, self.value_length as u64, n_ctx as u64)
+                (
+                    self.key_length as u64,
+                    self.value_length as u64,
+                    n_ctx as u64,
+                )
             };
             total += ctx_eff * hkv * (klen + vlen) * ELT;
         }
@@ -148,7 +152,10 @@ fn read_gguf_string(r: &mut impl Read) -> io::Result<String> {
     let len = read_u64(r)? as usize;
     // Guard against a corrupt/huge length blowing up memory.
     if len > 1 << 20 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "string too long"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "string too long",
+        ));
     }
     let mut buf = vec![0u8; len];
     r.read_exact(&mut buf)?;
@@ -311,10 +318,16 @@ pub fn read_geometry(path: &Path) -> Option<GgufGeom> {
         let suffix = key.split_once('.').map(|(_, s)| s).unwrap_or(key.as_str());
         match suffix {
             "block_count" => {
-                block_count = read_scalar_as_u64(&mut r, vtype).ok().flatten().map(|v| v as u32);
+                block_count = read_scalar_as_u64(&mut r, vtype)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as u32);
             }
             "context_length" => {
-                context_length = read_scalar_as_u64(&mut r, vtype).ok().flatten().map(|v| v as u32);
+                context_length = read_scalar_as_u64(&mut r, vtype)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as u32);
             }
             "attention.head_count_kv" => {
                 if vtype == T_ARRAY {
@@ -326,19 +339,34 @@ pub fn read_geometry(path: &Path) -> Option<GgufGeom> {
                 }
             }
             "attention.key_length" => {
-                key_length = read_scalar_as_u64(&mut r, vtype).ok().flatten().map(|v| v as u32);
+                key_length = read_scalar_as_u64(&mut r, vtype)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as u32);
             }
             "attention.value_length" => {
-                value_length = read_scalar_as_u64(&mut r, vtype).ok().flatten().map(|v| v as u32);
+                value_length = read_scalar_as_u64(&mut r, vtype)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as u32);
             }
             "attention.sliding_window" => {
-                sliding_window = read_scalar_as_u64(&mut r, vtype).ok().flatten().map(|v| v as u32);
+                sliding_window = read_scalar_as_u64(&mut r, vtype)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as u32);
             }
             "attention.key_length_swa" => {
-                key_length_swa = read_scalar_as_u64(&mut r, vtype).ok().flatten().map(|v| v as u32);
+                key_length_swa = read_scalar_as_u64(&mut r, vtype)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as u32);
             }
             "attention.value_length_swa" => {
-                value_length_swa = read_scalar_as_u64(&mut r, vtype).ok().flatten().map(|v| v as u32);
+                value_length_swa = read_scalar_as_u64(&mut r, vtype)
+                    .ok()
+                    .flatten()
+                    .map(|v| v as u32);
             }
             "attention.sliding_window_pattern" => {
                 if vtype == T_ARRAY {

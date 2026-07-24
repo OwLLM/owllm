@@ -45,7 +45,10 @@ pub fn list() -> Vec<TrustedController> {
 }
 
 pub fn find(device_id: &str) -> Option<TrustedController> {
-    load_file().controllers.into_iter().find(|c| c.device_id == device_id)
+    load_file()
+        .controllers
+        .into_iter()
+        .find(|c| c.device_id == device_id)
 }
 
 /// Record an incoming pairing request. If the controller is already known:

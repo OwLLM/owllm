@@ -322,9 +322,7 @@ fn sync_once(main: &WebviewWindow, overlay: &WebviewWindow) -> tauri::Result<()>
 
     if !main.is_visible()? {
         let _ = overlay.hide();
-    } else if !main.is_minimized()?
-        && OVERLAY_READY.load(Ordering::Acquire)
-        && should_map_overlay()
+    } else if !main.is_minimized()? && OVERLAY_READY.load(Ordering::Acquire) && should_map_overlay()
     {
         // Ready-gated for the same reason as prepare_and_show_for_main:
         // an unpainted transparent webview shows as a white sheet.

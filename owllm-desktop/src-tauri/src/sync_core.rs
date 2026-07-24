@@ -53,7 +53,9 @@ pub enum SyncError {
     },
     /// The integrated commit failed the caller-supplied verify command; the
     /// push was NOT performed.
-    VerifyFailed { output: String },
+    VerifyFailed {
+        output: String,
+    },
     Git(String),
 }
 
@@ -70,10 +72,14 @@ fn git_cmd(dir: &Path) -> Command {
 
 /// Run git in `dir`; (ok, stdout, stderr). Spawn failures become Err.
 fn git(dir: &Path, args: &[&str]) -> Result<(bool, String, String), SyncError> {
-    let out = git_cmd(dir)
-        .args(args)
-        .output()
-        .map_err(|e| SyncError::Git(format!("git {} in {}: {}", args.join(" "), dir.display(), e)))?;
+    let out = git_cmd(dir).args(args).output().map_err(|e| {
+        SyncError::Git(format!(
+            "git {} in {}: {}",
+            args.join(" "),
+            dir.display(),
+            e
+        ))
+    })?;
     Ok((
         out.status.success(),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -93,7 +99,11 @@ fn git_detail(stdout: &str, stderr: &str) -> String {
 
 fn rev_parse(dir: &Path, what: &str) -> Result<Option<String>, SyncError> {
     let (ok, out, _) = git(dir, &["rev-parse", "--verify", "--quiet", what])?;
-    Ok(if ok { Some(out.trim().to_string()) } else { None })
+    Ok(if ok {
+        Some(out.trim().to_string())
+    } else {
+        None
+    })
 }
 
 fn is_ancestor(dir: &Path, ancestor: &str, descendant: &str) -> Result<bool, SyncError> {
@@ -271,7 +281,11 @@ pub fn sync_repo(
         .ok_or_else(|| SyncError::Git("repository has no commits yet".into()))?;
     let current_branch = {
         let (ok, out, _) = git(repo, &["symbolic-ref", "--short", "-q", "HEAD"])?;
-        if ok { Some(out.trim().to_string()) } else { None }
+        if ok {
+            Some(out.trim().to_string())
+        } else {
+            None
+        }
     };
     let remote_ref = format!("origin/{target}");
     let push_refspec = format!("HEAD:refs/heads/{target}");
@@ -351,9 +365,7 @@ pub fn sync_repo(
             }
             return Ok(SyncReport {
                 action: "up-to-date",
-                detail: format!(
-                    "All local commits are already contained in origin/{target}."
-                ),
+                detail: format!("All local commits are already contained in origin/{target}."),
             });
         }
 

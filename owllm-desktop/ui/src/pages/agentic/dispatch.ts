@@ -29,8 +29,8 @@ import {
   renderValidationErrorsForModel,
   validateCall,
   firstRequiredArg,
-  retrieveTeamMemoryPack,
-  logTeamWork,
+  retrieveScopedTeamMemoryPack,
+  logScopedTeamWork,
   type ToolCall,
   type ToolExecResult,
 } from "./localTools";
@@ -41,6 +41,17 @@ import { samplingFor } from "./modelProfiles";
 // uses, so bridge runs (Telegram/WhatsApp/…) get equipped-skill bodies and the
 // .owllm/skills self-load guidance too, not just the mirrored files on disk.
 import { buildAgentSkillBlock } from "./skillRuntime";
+import {
+  applyDelegationPolicy,
+  assertProviderHonorsPersonalPolicy,
+  intersectRuntimeTools,
+  resolveRuntimeAgents,
+  runtimeMemoryKey,
+  runtimeModelId,
+  runtimeSkillIds,
+  type RuntimePersonalAgent,
+} from "./personalAgentRuntime";
+import type { RevisionRef } from "./personalAgentConfig";
 import { resolveInferenceBase } from "./inferenceEndpoint";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
@@ -529,7 +540,7 @@ export async function appendAgentMemory(
   // the SHARED team memory — this is the model-agnostic write path that works on
   // every model (cloud CLIs/APIs that can't call the memory_write tool included).
   // Done first + unconditionally so it runs even for the no-projectId bridge case.
-  try { await harvestMemoryWrites(reply); } catch { /* memory is best-effort */ }
+  try { await harvestMemoryWrites(reply, projectId ?? ""); } catch { /* memory is best-effort */ }
   if (!projectId || !agentName) return;
   // Don't persist obvious error replies as if they were real answers.
   if (/^\(error:/.test(reply.trim())) return;
@@ -567,6 +578,8 @@ export type Attachment = {
 export type AgentSpec = {
   name: string;
   base: string;
+  profileRef?: RevisionRef;
+  runtimePersonal?: RuntimePersonalAgent;
   icon?: string | null;
   description?: string;
   extraPrompt?: string;
@@ -963,6 +976,9 @@ export function toTeam(t: TeamTemplateBackend): Team {
         description: typeof a.description === "string" ? a.description : undefined,
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
         extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
+        profileRef: a.profile_ref && typeof a.profile_ref.id === "string" && Number.isFinite(a.profile_ref.revision)
+          ? { id: a.profile_ref.id, revision: a.profile_ref.revision }
+          : undefined,
       }))
     : [];
   const edges: Edge[] = Array.isArray(d.graph?.edges) ? d.graph.edges : [];
@@ -984,6 +1000,7 @@ export function projectToTeam(p: ProjectRow): Team {
   // this copy is what the bridge / runDispatchLoop use. Without it a renamed
   // agent loses its role here too.
   const baseByName = new Map<string, string>();
+  const profileByName = new Map<string, RevisionRef>();
   let edges: Edge[] = [];
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
@@ -997,12 +1014,19 @@ export function projectToTeam(p: ProjectRow): Team {
         for (const r of parsed.roster) {
           if (r && typeof r.name === "string" && typeof r.base === "string" && r.base.trim()) {
             baseByName.set(r.name, r.base);
+            if (r.profileRef && typeof r.profileRef.id === "string" && Number.isFinite(r.profileRef.revision)) {
+              profileByName.set(r.name, { id: r.profileRef.id, revision: r.profileRef.revision });
+            }
           }
         }
       }
     } catch { /* fall back to no edges */ }
   }
-  const agents: AgentSpec[] = (p.team ?? []).map(n => ({ name: n, base: baseByName.get(n) ?? n }));
+  const agents: AgentSpec[] = (p.team ?? []).map(n => ({
+    name: n,
+    base: baseByName.get(n) ?? n,
+    profileRef: profileByName.get(n),
+  }));
   return {
     id: `project:${p.id}`,
     name: p.name,
@@ -1083,10 +1107,12 @@ export function buildOrchestratorPrompt(
   }
   const roster = rosterLines.join("\n");
   const orchRole = roleByName.get(orch.base);
+  const personal = orch.runtimePersonal;
   const orchBase =
-    orchRole?.systemPrompt ??
-    orchRole?.description ??
-    "Plan the work, dispatch one task at a time, integrate the results.";
+    personal?.effective.systemInstructions ||
+    (orchRole?.systemPrompt ??
+      orchRole?.description ??
+      "Plan the work, dispatch one task at a time, integrate the results.");
   const orchSystemPrompt = orch.extraPrompt
     ? `${orchBase}\n\n--- TEAM-SPECIFIC GUIDANCE ---\n${orch.extraPrompt}`
     : orchBase;
@@ -1095,6 +1121,7 @@ export function buildOrchestratorPrompt(
   // no specialists are configured (solo team).
   const exampleAgent = specialists[0]?.name ?? "coder";
   const directivesBlock = formatDirectivesBlock(directives);
+  const personalRulesBlock = personal?.rulesBlock ?? "";
   // Director-mode framing: when the user has appointed a Critic agent
   // to stand in for them, the orchestrator should KNOW that "asking the
   // user" still gets a real answer (from the critic) so it should ask
@@ -1132,9 +1159,13 @@ export function buildOrchestratorPrompt(
   return [
     `You are the orchestrator of the '${team.display}' team.`,
     "",
+    personal
+      ? `You are ${personal.effective.identity.name} (${personal.effective.role}); runtime routing id: ${orch.name}.`
+      : "",
     orchSystemPrompt,
     briefBlock,
     directivesBlock,
+    personalRulesBlock,
     directorBlock,
     (skillBlock && skillBlock.trim()) ? `\n${skillBlock.trim()}` : "",
     "",
@@ -1175,7 +1206,7 @@ export function buildOrchestratorPrompt(
     "",
     TEAM_MEMORY_HINT,
     "  - As orchestrator, recover what the team already established from the snapshot below at the START of a run, and record key decisions (with `[REMEMBER ...]` or memory_write) so later runs and other agents inherit them.",
-    getTeamMemorySnapshot(),
+    personal ? personal.memorySnapshot : getTeamMemorySnapshot(),
     getBrowserStateLine(),
   ].join("\n");
 }
@@ -1195,11 +1226,14 @@ export function buildSpecialistPrompt(
   lean?: boolean,
 ): string {
   const role = roleByName.get(spec.base);
+  const personal = spec.runtimePersonal;
   const layers: string[] = [
-    `You are ${displayLabel(spec.name)} (${spec.base}) on the '${team.display}' team.`,
+    personal
+      ? `You are ${personal.effective.identity.name} (${personal.effective.role}) on the '${team.display}' team. Your stable runtime routing id is ${spec.name}.`
+      : `You are ${displayLabel(spec.name)} (${spec.base}) on the '${team.display}' team.`,
     "",
   ];
-  const roleBase = role?.systemPrompt ?? role?.description;
+  const roleBase = personal?.effective.systemInstructions || role?.systemPrompt || role?.description;
   if (roleBase) {
     layers.push(roleBase);
     layers.push("");
@@ -1220,12 +1254,15 @@ export function buildSpecialistPrompt(
   if (directivesBlock) {
     layers.push(directivesBlock);
   }
+  if (personal?.rulesBlock) layers.push(personal.rulesBlock);
   layers.push(projectWorkspaceBlock(projectCwd));
   const deviceLine = getDeviceGroundTruthLine();
   if (deviceLine) layers.push(deviceLine);
   layers.push(TEAM_OPERATING_CONTRACT);
-  layers.push(lean ? TEAM_MEMORY_HINT_LEAN : TEAM_MEMORY_HINT);
-  const memSnapshot = getTeamMemorySnapshot();
+  if (!personal || personal.memoryScope !== "none") {
+    layers.push(lean ? TEAM_MEMORY_HINT_LEAN : TEAM_MEMORY_HINT);
+  }
+  const memSnapshot = personal ? personal.memorySnapshot : getTeamMemorySnapshot();
   if (memSnapshot) layers.push(memSnapshot);
   const browserLine = getBrowserStateLine();
   if (browserLine) layers.push(browserLine);
@@ -2197,6 +2234,7 @@ export async function streamChatCompletion(
   const bareId = forceSub || forceApi || modelId.startsWith("auto/")
     ? modelId.slice(modelId.indexOf("/") + 1)
     : modelId;
+  assertProviderHonorsPersonalPolicy(provider, modelId, allowedTools);
 
   // Transcribe any audio parts first (Whisper, one-shot). After this,
   // `effectiveText` carries the original prompt + transcript blocks
@@ -2510,7 +2548,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
       p.events?.onToolCall?.(c, turn);
       // eslint-disable-next-line no-await-in-loop
-      const r = await executeToolCall(c, p.projectCwd ?? "");
+      const r = await executeToolCall(c, p.projectCwd ?? "", p.allowedTools);
       results.push(r);
       p.events?.onToolResult?.(c, r, turn);
       await maybeYield();
@@ -2650,7 +2688,7 @@ export async function streamOpenAiApiWithTools(args: {
     for (const c of valid) {
       await maybeYield();
       if (args.signal.aborted) throw new DOMException("aborted", "AbortError");
-      const r = await executeToolCall(c, args.projectCwd ?? "");
+      const r = await executeToolCall(c, args.projectCwd ?? "", args.allowedTools);
       results.push(r);
       await maybeYield();
     }
@@ -3689,13 +3727,15 @@ export async function runCriticDispatch(opts: {
   /// When provided, the critic role's default_temperature is honoured
   /// (critic.yaml ships 0.2) instead of the 0.3 fallback.
   roleByName?: Map<string, RoleData>;
+  allowedTools?: string[];
 }): Promise<string> {
   const sys = buildCriticPrompt(opts.team, opts.directives);
   const criticTemp = opts.roleByName?.get("critic")?.defaultTemperature ?? 0.3;
-  // Use the same model the orchestrator uses so the critic's voice
-  // stays consistent in tone. (Could be made user-configurable later.)
-  const orch = findOrchestratorSpec(opts.team);
-  const modelId = orch ? opts.modelFor(orch.name) : opts.modelFor("critical_thinker");
+  // A real critic may be a pinned personal agent with its own model. Never
+  // inherit the orchestrator's model here: that would bypass the critic's
+  // effective configuration on the direct-question path.
+  const critic = findCriticSpec(opts.team);
+  const modelId = critic ? opts.modelFor(critic.name) : opts.modelFor("critical_thinker");
   const provider = providerFor(modelId, opts.models);
   try {
     const reply = await streamChatCompletion(
@@ -3704,7 +3744,7 @@ export async function runCriticDispatch(opts: {
       opts.onDelta ?? (() => {}),
       opts.projectCwd, opts.history, opts.autoApprove,
       () => {},
-      undefined,
+      opts.allowedTools,
     );
     return reply.trim() || "(no answer)";
   } catch (e: any) {
@@ -3713,7 +3753,23 @@ export async function runCriticDispatch(opts: {
 }
 
 export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks): Promise<string> {
-  const { team, roleByName, goal, modelFor, models, port, projectCwd, projectId, history, autoApprove, signal, directives, directorMode, attachments } = opts;
+  const { team: inputTeam, roleByName, goal, modelFor, models, port, projectCwd, projectId, history, autoApprove, signal, directives, directorMode, attachments } = opts;
+  const resolvedAgents = await resolveRuntimeAgents(projectId ?? "", inputTeam.agents);
+  const team: Team = {
+    ...inputTeam,
+    agents: resolvedAgents,
+    edges: applyDelegationPolicy(resolvedAgents, inputTeam.edges),
+  };
+  const effectiveModelFor = (spec: AgentSpec) => runtimeModelId(spec, modelFor(spec.name));
+  const effectiveToolsFor = (spec: AgentSpec) =>
+    intersectRuntimeTools(spec.runtimePersonal, roleByName.get(spec.base)?.toolAllowlist);
+  const canDelegateTo = (source: AgentSpec, targetName: string): boolean => {
+    const policy = source.runtimePersonal?.effective.delegation;
+    if (!policy) return true;
+    const target = team.agents.find(agent => agent.name === targetName);
+    return !!policy.enabled && !!target?.profileRef?.id &&
+      policy.allowedProfileIds.includes(target.profileRef.id);
+  };
   // Key the shared team memory by stable project ID (cross-PC / vault-syncable),
   // pin the goal so every snapshot refresh this run ranks facts by relevance to
   // it, then warm the snapshot so the orchestrator + specialists get it injected.
@@ -3778,12 +3834,16 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // The orchestrator consumes its OWN equipped skills exactly like specialists
   // do (role allowlist + team extras — the bridge has no per-project graph
   // grant), mirroring the desktop path in AgentsPage.
-  const orchSkillBlock = await buildAgentSkillBlock([
+  const orchLegacySkills = [
     ...(roleByName.get(orch.base)?.skillAllowlist ?? []),
     ...(orch.extraSkills ?? []),
-  ]);
+  ];
+  const orchSkillBlock = await buildAgentSkillBlock(
+    runtimeSkillIds(orch, orchLegacySkills),
+    !!orch.runtimePersonal,
+  );
   const orchPrompt = buildOrchestratorPrompt(team, roleByName, orch, directives, directorMode, briefText, projectCwd, orchSkillBlock);
-  const orchModel = modelFor(orch.name);
+  const orchModel = effectiveModelFor(orch);
   const orchProvider = providerFor(orchModel, models);
   let orchReply: string;
   try {
@@ -3797,7 +3857,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       // allowlist as the desktop path. (Worktree isolation on this
       // path is a follow-up slice; bridge dispatches today are mostly
       // single-agent so the contention risk is lower.)
-      roleByName.get(orch.base)?.toolAllowlist,
+      effectiveToolsFor(orch),
       // Inbound images/audio attached via Telegram. Audio gets
       // transcribed up-front (Whisper), images embed natively; both
       // ride only to the orchestrator turn.
@@ -3816,7 +3876,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     hooks.onAgentEnd(orch.name);
   }
   // Persist any `[REMEMBER ...]` facts the orchestrator wrote while planning.
-  await harvestMemoryWrites(orchReply);
+  await harvestMemoryWrites(orchReply, runtimeMemoryKey(orch, projectId ?? ""));
 
   // Director-mode interception: if the orchestrator emitted a
   // [NEED_USER_INPUT] marker, route the question to the Critic, fold
@@ -3831,7 +3891,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // own initiative when it needs a peer review.
   {
     const { question, cleaned } = extractUserInputRequest(orchReply);
-    if (question) {
+    if (question && canDelegateTo(orch, "critical_thinker")) {
       // Visible on the canvas + Thought tab so the user sees the
       // hand-off when reviewing the run after the fact.
       hooks.onThought(orch.name, {
@@ -3846,9 +3906,14 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       hooks.onLog(CRITIC_NAME, { role: CRITIC_NAME, color: "#ff9ad9", text: "" });
       const criticReply = await runCriticDispatch({
         team, question, history: liveHistory, directives,
-        modelFor, models, port, projectCwd, autoApprove, signal,
+        modelFor: name => {
+          const spec = team.agents.find(agent => agent.name === name);
+          return spec ? effectiveModelFor(spec) : modelFor(name);
+        },
+        models, port, projectCwd, autoApprove, signal,
         onDelta: (d) => hooks.onLogDelta(CRITIC_NAME, d),
         roleByName,
+        allowedTools: effectiveToolsFor(team.agents.find(agent => agent.name === CRITIC_NAME) ?? orch),
       });
       hooks.onAgentEnd(CRITIC_NAME);
       hooks.onAgentReply(CRITIC_NAME, criticReply);
@@ -3868,13 +3933,20 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
           (delta) => hooks.onLogDelta(orch.name, delta),
           projectCwd, liveHistory, autoApprove,
           (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
-          roleByName.get(orch.base)?.toolAllowlist,
+          effectiveToolsFor(orch),
           undefined,
           getClaudeSession(projectId, orch.name),
         );
       } finally {
         hooks.onAgentEnd(orch.name);
       }
+    } else if (question) {
+      orchReply = cleaned;
+      hooks.onThought(orch.name, {
+        role: "system",
+        color: "#ffb74d",
+        text: "Personal-agent delegation policy denied the Critical Thinker handoff; continuing without it.",
+      });
     }
   }
 
@@ -3894,7 +3966,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   // reflects the critic's feedback — running another brainstorm pass
   // on top of that would just be a redundant peer review of itself.
   const skipBrainstorm = extractUserInputRequest(orchReply).question !== null;
-  if (critic && critic.name !== orch.name && !skipBrainstorm) {
+  if (critic && critic.name !== orch.name && !skipBrainstorm && canDelegateTo(orch, critic.name)) {
     if (signal.aborted) throw new DOMException("aborted", "AbortError");
     hooks.onThought(orch.name, {
       role: "dispatch",
@@ -3917,7 +3989,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       "",
       "Review this plan. What is missing, risky, or worth challenging before specialists start work? 3-6 bullets max.",
     ].join("\n");
-    const criticModelId = modelFor(critic.name);
+    const criticModelId = effectiveModelFor(critic);
     const criticProvider = providerFor(criticModelId, models);
     let criticBrainstormReply = "";
     try {
@@ -3928,7 +4000,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         (delta) => hooks.onLogDelta(critic.name, delta),
         projectCwd, liveHistory, autoApprove,
         (channel, role, delta) => hooks.onThoughtDelta(critic.name, channel, role, delta),
-        roleByName.get(critic.base)?.toolAllowlist,
+        effectiveToolsFor(critic),
         undefined,
         getClaudeSession(projectId, critic.name),
       );
@@ -3962,7 +4034,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
           (delta) => hooks.onLogDelta(orch.name, delta),
           projectCwd, liveHistory, autoApprove,
           (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
-          roleByName.get(orch.base)?.toolAllowlist,
+          effectiveToolsFor(orch),
           undefined,
           getClaudeSession(projectId, orch.name),
         );
@@ -4002,7 +4074,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
           (delta) => hooks.onLogDelta(orch.name, delta),
           projectCwd, liveHistory, autoApprove,
           (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
-          roleByName.get(orch.base)?.toolAllowlist,
+          effectiveToolsFor(orch),
           undefined,
           getClaudeSession(projectId, orch.name),
         );
@@ -4050,7 +4122,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
           (delta) => hooks.onLogDelta(orch.name, delta),
           projectCwd, liveHistory, autoApprove,
           (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
-          roleByName.get(orch.base)?.toolAllowlist,
+          effectiveToolsFor(orch),
           undefined,
           getClaudeSession(projectId, orch.name),
         );
@@ -4137,20 +4209,29 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     // Resolve this agent's equipped skills (role allowlist + team template
     // extras) and inject them — parity with the desktop runAgent, which was
     // passing a built skill block here while this path hardcoded undefined.
-    const skillBlock = await buildAgentSkillBlock([
+    const legacySkills = [
       ...(roleByName.get(spec.base)?.skillAllowlist ?? []),
       ...(spec.extraSkills ?? []),
-    ]);
+    ];
+    const skillBlock = await buildAgentSkillBlock(
+      runtimeSkillIds(spec, legacySkills),
+      !!spec.runtimePersonal,
+    );
     const specPrompt = buildSpecialistPrompt(team, spec, roleByName, directives, skillBlock, projectCwd, team.agents.length <= 3);
-    const specModel = modelFor(spec.name);
+    const specModel = effectiveModelFor(spec);
     const specProvider = providerFor(specModel, models);
     // Per-agent memory: fold this agent's own prior turns in so the bridge path
     // (Telegram/WhatsApp/etc.) gets the same continuity as the UI team path.
-    const specMemory = await loadAgentMemory(projectId, spec.name);
+    const specMemKey = runtimeMemoryKey(spec, projectId ?? "");
+    const specMemory = specMemKey
+      ? await loadAgentMemory(specMemKey, spec.profileRef?.id ?? spec.name)
+      : [];
     // Shared work-state (RAG): prepend the work teammates already did that's
     // relevant to THIS task, so the bridge path is synchronized too (parity with
     // the desktop runAgent). Rides the instruction → works on every model path.
-    const pack = await retrieveTeamMemoryPack(instruction);
+    const pack = specMemKey
+      ? await retrieveScopedTeamMemoryPack(specMemKey, instruction, 8, !spec.runtimePersonal)
+      : { scope: "", query: instruction, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (pack.total > 0) {
       hooks.onThought(spec.name, {
         role: "memory",
@@ -4166,7 +4247,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
         (delta) => hooks.onLogDelta(spec.name, delta),
         projectCwd, specMemory.length > 0 ? specMemory : [], autoApprove,
         (channel, role, delta) => hooks.onThoughtDelta(spec.name, channel, role, delta),
-        roleByName.get(spec.base)?.toolAllowlist,
+        effectiveToolsFor(spec),
         undefined,
         getClaudeSession(projectId, spec.name),
       );
@@ -4174,14 +4255,19 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       // PUBLISH BRIDGE — see AgentsPage runAgent: a sandboxed CLI publisher can't
       // reach the publish_release tool, so it emits `[PUBLISH …]` and the HOST
       // runs the real signed release here. Gated to the publisher role.
-      const canPublish = spec.base === "publisher"
-        || (roleByName.get(spec.base)?.toolAllowlist ?? []).includes("publish_release");
+      const effectiveTools = effectiveToolsFor(spec);
+      const canPublish = spec.runtimePersonal
+        ? (effectiveTools ?? []).includes("publish_release")
+        : spec.base === "publisher"
+          || (roleByName.get(spec.base)?.toolAllowlist ?? []).includes("publish_release");
       if (canPublish) {
         const pub = await harvestPublishRequest(cleaned, projectCwd);
         if (pub) cleaned = `${cleaned}\n\n[host publish result]\n${pub.slice(-1600)}`;
       }
-      await appendAgentMemory(projectId, spec.name, instruction, cleaned);
-      await logTeamWork(spec.name, instruction, cleaned); // shared work-state for the next agent
+      if (specMemKey) {
+        await appendAgentMemory(specMemKey, spec.profileRef?.id ?? spec.name, instruction, cleaned);
+        await logScopedTeamWork(specMemKey, spec.name, instruction, cleaned);
+      }
       hooks.onAgentReply(spec.name, cleaned);
       return { name: spec.name, text: cleaned };
     } catch (e: any) {
@@ -4252,7 +4338,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
     "Now write the FINAL answer for the user. Be concise, structured, and quote the relevant specialist when useful. Do not dispatch again.",
   ].join("\n");
   hooks.onLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
-  const finalModel = modelFor(orch.name);
+  const finalModel = effectiveModelFor(orch);
   const finalProvider = providerFor(finalModel, models);
   let finalReply: string;
   try {
@@ -4262,7 +4348,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       (delta) => hooks.onLogDelta(orch.name, delta),
       projectCwd, liveHistory, autoApprove,
       (channel, role, delta) => hooks.onThoughtDelta(orch.name, channel, role, delta),
-      roleByName.get(orch.base)?.toolAllowlist,
+      effectiveToolsFor(orch),
       undefined,
       getClaudeSession(projectId, orch.name),
     );
@@ -4272,7 +4358,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
   const final = finalReply.trim();
   hooks.onAgentReply(orch.name, final);
   // Persist any `[REMEMBER ...]` facts the orchestrator wrote in its final answer.
-  await harvestMemoryWrites(final);
+  await harvestMemoryWrites(final, runtimeMemoryKey(orch, projectId ?? ""));
   hooks.onPhase("done");
   return final;
 }

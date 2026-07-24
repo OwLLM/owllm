@@ -225,10 +225,7 @@ fn ensure_executable(path: &Path) {
     if let Ok(meta) = std::fs::metadata(path) {
         let mode = meta.permissions().mode();
         if mode & 0o111 == 0 {
-            let _ = std::fs::set_permissions(
-                path,
-                std::fs::Permissions::from_mode(mode | 0o755),
-            );
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o755));
         }
     }
 }
@@ -755,7 +752,10 @@ pub fn publish_finish_script() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
             for cand in [
-                parent.join("_up_").join("scripts").join("finish-and-publish.sh"),
+                parent
+                    .join("_up_")
+                    .join("scripts")
+                    .join("finish-and-publish.sh"),
                 parent.join("scripts").join("finish-and-publish.sh"),
             ] {
                 if cand.is_file() {

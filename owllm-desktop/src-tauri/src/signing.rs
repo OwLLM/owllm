@@ -408,15 +408,25 @@ pub fn signing_apple_gen_csr(common_name: String, email: String) -> Result<CsrRe
     let ok = run_openssl_ok(
         &bin,
         &[
-            "req", "-new", "-newkey", "rsa:2048", "-nodes",
-            "-keyout", &key_path.to_string_lossy(),
-            "-out", &csr_path.to_string_lossy(),
-            "-subj", &subj,
+            "req",
+            "-new",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-keyout",
+            &key_path.to_string_lossy(),
+            "-out",
+            &csr_path.to_string_lossy(),
+            "-subj",
+            &subj,
         ],
     );
     if !ok {
         let _ = std::fs::remove_file(&key_path);
-        return Err("openssl couldn't generate the request — check that openssl works (`openssl version`)".into());
+        return Err(
+            "openssl couldn't generate the request — check that openssl works (`openssl version`)"
+                .into(),
+        );
     }
     let key_pem = std::fs::read_to_string(&key_path).map_err(|e| e.to_string())?;
     let csr_pem = std::fs::read_to_string(&csr_path).map_err(|e| e.to_string())?;
@@ -429,7 +439,10 @@ pub fn signing_apple_gen_csr(common_name: String, email: String) -> Result<CsrRe
     apple.updated_ms = now_ms();
     v.apple = Some(apple);
     save(&v)?;
-    Ok(CsrResult { csr_path: csr_path.display().to_string(), csr_pem })
+    Ok(CsrResult {
+        csr_path: csr_path.display().to_string(),
+        csr_pem,
+    })
 }
 
 /// The no-Mac path, step 2: import the bare certificate Apple issues
@@ -446,7 +459,10 @@ pub fn signing_apple_import_cert(path: String) -> Result<SigningStatus, String> 
         "openssl not found — install OpenSSL (on Windows, installing Git also provides it), then retry",
     )?;
     // Normalise DER (what Apple serves) or PEM to PEM.
-    let pem = if bytes.windows(27).any(|w| w == b"-----BEGIN CERTIFICATE-----") {
+    let pem = if bytes
+        .windows(27)
+        .any(|w| w == b"-----BEGIN CERTIFICATE-----")
+    {
         bytes.clone()
     } else {
         run_openssl(&bin, &["x509", "-inform", "der"], Some(&bytes))
@@ -467,7 +483,11 @@ pub fn signing_apple_import_cert(path: String) -> Result<SigningStatus, String> 
     // The cert must match OUR key — a .cer issued for someone else's CSR can
     // never sign. Best-effort (skipped if either extraction fails).
     let cert_pub = run_openssl(&bin, &["x509", "-noout", "-pubkey"], Some(&pem));
-    let key_pub = run_openssl(&bin, &["pkey", "-pubout"], Some(apple.private_key_pem.as_bytes()));
+    let key_pub = run_openssl(
+        &bin,
+        &["pkey", "-pubout"],
+        Some(apple.private_key_pem.as_bytes()),
+    );
     if let (Some(c), Some(k)) = (&cert_pub, &key_pub) {
         if c != k {
             v.apple = Some(apple);
@@ -496,17 +516,26 @@ pub fn signing_apple_import_cert(path: String) -> Result<SigningStatus, String> 
     }
     let password: String = {
         use rand::{distributions::Alphanumeric, Rng};
-        rand::thread_rng().sample_iter(&Alphanumeric).take(24).map(char::from).collect()
+        rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(24)
+            .map(char::from)
+            .collect()
     };
     let passout = format!("pass:{password}");
     let ok = run_openssl_ok(
         &bin,
         &[
-            "pkcs12", "-export",
-            "-inkey", &key_path.to_string_lossy(),
-            "-in", &cert_path.to_string_lossy(),
-            "-passout", &passout,
-            "-out", &p12_path.to_string_lossy(),
+            "pkcs12",
+            "-export",
+            "-inkey",
+            &key_path.to_string_lossy(),
+            "-in",
+            &cert_path.to_string_lossy(),
+            "-passout",
+            &passout,
+            "-out",
+            &p12_path.to_string_lossy(),
         ],
     );
     if !ok {
@@ -523,10 +552,14 @@ pub fn signing_apple_import_cert(path: String) -> Result<SigningStatus, String> 
     // Metadata straight from the cert PEM (same fields the .p12 import fills).
     if let Some(info) = run_openssl(
         &bin,
-        &["x509", "-noout", "-enddate", "-subject", "-nameopt", "RFC2253"],
+        &[
+            "x509", "-noout", "-enddate", "-subject", "-nameopt", "RFC2253",
+        ],
         Some(&pem),
     ) {
-        if let Some((subject, identity, not_after_ms)) = parse_x509_text(&String::from_utf8_lossy(&info)) {
+        if let Some((subject, identity, not_after_ms)) =
+            parse_x509_text(&String::from_utf8_lossy(&info))
+        {
             if nonempty(&subject) {
                 apple.cert_subject = subject;
             }
@@ -598,7 +631,9 @@ pub fn signing_export_env(platform: String) -> Result<BTreeMap<String, String>, 
     let mut out = BTreeMap::new();
     match platform.as_str() {
         "apple" => {
-            let a = v.apple.ok_or_else(|| "no Apple signing set stored".to_string())?;
+            let a = v
+                .apple
+                .ok_or_else(|| "no Apple signing set stored".to_string())?;
             out.insert("APPLE_CERTIFICATE".into(), a.certificate_p12_b64);
             out.insert("APPLE_CERTIFICATE_PASSWORD".into(), a.certificate_password);
             out.insert("APPLE_SIGNING_IDENTITY".into(), a.signing_identity);
@@ -607,7 +642,9 @@ pub fn signing_export_env(platform: String) -> Result<BTreeMap<String, String>, 
             out.insert("APPLE_TEAM_ID".into(), a.team_id);
         }
         "windows" => {
-            let w = v.windows.ok_or_else(|| "no Windows signing set stored".to_string())?;
+            let w = v
+                .windows
+                .ok_or_else(|| "no Windows signing set stored".to_string())?;
             out.insert("OWLLM_SIGN_THUMBPRINT".into(), w.thumbprint);
             out.insert("OWLLM_SIGN_SUBJECT".into(), w.subject);
             out.insert("OWLLM_SIGN_TSA".into(), w.tsa);
@@ -808,7 +845,11 @@ fn cert_store_probe(thumbprint: &str) -> (Option<bool>, String) {
     ) else {
         return (None, String::new());
     };
-    let line = out.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("");
+    let line = out
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
     if line.is_empty() {
         return (Some(false), String::new());
     }
@@ -833,7 +874,10 @@ fn cert_store_probe(_thumbprint: &str) -> (Option<bool>, String) {
     (
         Some(n > 0),
         if n > 0 {
-            format!("{n} Developer ID identit{} in the keychain", if n == 1 { "y" } else { "ies" })
+            format!(
+                "{n} Developer ID identit{} in the keychain",
+                if n == 1 { "y" } else { "ies" }
+            )
         } else {
             String::new()
         },
@@ -912,7 +956,10 @@ const PORTALS: &[(&str, &str)] = &[
     ("apple-id", "https://account.apple.com/account/manage"),
     ("certum", "https://panel.certum.pl/"),
     ("github-tokens", "https://github.com/settings/tokens"),
-    ("microsoft-partner", "https://partner.microsoft.com/dashboard"),
+    (
+        "microsoft-partner",
+        "https://partner.microsoft.com/dashboard",
+    ),
     ("google-play", "https://play.google.com/console"),
 ];
 
@@ -1141,7 +1188,9 @@ fn run_openssl(bin: &str, args: &[&str], stdin: Option<&[u8]>) -> Option<Vec<u8>
 fn run_openssl_ok(bin: &str, args: &[&str]) -> bool {
     let mut cmd = Command::new(bin);
     cmd.args(args);
-    cmd.stdout(Stdio::null()).stderr(Stdio::null()).stdin(Stdio::null());
+    cmd.stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .stdin(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
@@ -1178,7 +1227,9 @@ fn parse_p12_meta(p12_path: &str, password: &str) -> Option<(String, String, i64
     // Read notAfter + subject from the PEM via `openssl x509`.
     let info = run_openssl(
         &bin,
-        &["x509", "-noout", "-enddate", "-subject", "-nameopt", "RFC2253"],
+        &[
+            "x509", "-noout", "-enddate", "-subject", "-nameopt", "RFC2253",
+        ],
         Some(&pem),
     )?;
     let text = String::from_utf8_lossy(&info);

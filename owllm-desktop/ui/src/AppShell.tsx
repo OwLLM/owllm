@@ -1112,6 +1112,7 @@ function ModeBar({
             <span>{t.label}</span>
           </button>
         ))}
+
       </div>
 
       {/* Spacer for the grid column so the layout still flows; the

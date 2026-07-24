@@ -280,6 +280,17 @@ html[dir="rtl"] input[type="number"] { direction: ltr; text-align: left; }
   grid-template-columns: minmax(0, 1fr) minmax(250px, 310px);
 }
 
+/* Keep the image-heavy Home launchers useful on laptop displays. The former
+   1fr tracks expanded each square past 420px on a 14-inch Retina screen,
+   pushing status/setup below the Dock and making the page feel like a zoomed
+   poster. Tracks still shrink with the window, but stop growing at 360px. */
+.home-launcher-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 360px));
+  justify-content: center;
+  gap: 28px;
+}
+
 @media (max-width: 900px) {
   .world-map-layout {
     grid-template-columns: minmax(0, 1fr);

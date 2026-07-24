@@ -19,6 +19,8 @@ type GitStatusInfo = {
 type ReleaseVisibility = "publish" | "draft" | "dry-run";
 type PublishMode = "host" | "ci";
 
+const HOST_IS_WINDOWS = typeof navigator !== "undefined" && navigator.userAgent.includes("Windows");
+
 type SignCfg = {
   thumbprint: string;
   subject: string;
@@ -351,7 +353,7 @@ export default function PublishCards({
     return invoke<string>("repo_sync", { repoDir: gitDir, target: mergeTarget });
   });
 
-  const signPayload = settings.sign.thumbprint.trim() || settings.sign.subject.trim()
+  const signPayload = HOST_IS_WINDOWS && (settings.sign.thumbprint.trim() || settings.sign.subject.trim())
     ? {
         thumbprint: settings.sign.thumbprint.trim() || null,
         subject: settings.sign.subject.trim() || null,
@@ -362,14 +364,16 @@ export default function PublishCards({
   const doPublish = () => run(`${modeLabel} release`, async () => {
     const visibility = settings.visibility;
     if (visibility === "publish") {
-      const signed = !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
+      const signed = HOST_IS_WINDOWS && !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
       const modeLabel = settings.mode === "host" ? "HOST mode" : "CI mode";
       if (!window.confirm(
         `Publish a new release? (${modeLabel})\n\n` +
         (settings.mode === "host"
-          ? `This bumps the version, commits, tags, pushes, and runs the host build → ${signed ? "code-signs" : "does NOT code-sign"} → publishes a public release to GitHub.`
+          ? HOST_IS_WINDOWS
+            ? `This bumps the version, commits, tags, pushes, and runs the host build → ${signed ? "code-signs" : "does NOT code-sign"} → publishes a public release to GitHub.`
+            : "This bumps the version, commits, tags, pushes, builds this platform's packages, and publishes a public release to GitHub."
           : `This bumps the version, commits, tags, and pushes. The repository's GitHub Actions workflow will build and publish a public release.`) +
-        (settings.mode === "host" && !signed ? "\n\nNo signing certificate is configured, so this build will be UNSIGNED." : "")
+        (HOST_IS_WINDOWS && settings.mode === "host" && !signed ? "\n\nNo signing certificate is configured, so this build will be UNSIGNED." : "")
       )) return "Cancelled.";
       // Publish rides on the same sync transaction first: a diverged origin
       // integrates (or stops on a real conflict) BEFORE the long build, instead
@@ -422,7 +426,7 @@ export default function PublishCards({
 
   const modeLabel = settings.visibility === "dry-run" ? "Dry run" : settings.visibility === "draft" ? "Draft" : "Publish";
   const modeColor = settings.visibility === "publish" ? "#7ff0c5" : settings.visibility === "draft" ? "#7aa2ff" : "#ffd97a";
-  const signed = !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
+  const signed = HOST_IS_WINDOWS && !!(settings.sign.thumbprint.trim() || settings.sign.subject.trim());
 
   // One click hands the failure to the coder agent instead of making the user
   // copy-paste PUBLISH_FAILED output into the chat. Carries BOTH the last
@@ -560,7 +564,7 @@ export default function PublishCards({
                 }}
                 disabled={disabled || loading}
                 title={canPublish
-                  ? `${modeLabel} release (${settings.mode})${signed ? "" : ", unsigned"}`
+                  ? `${modeLabel} release (${settings.mode})${HOST_IS_WINDOWS ? (signed ? "" : ", unsigned") : ""}`
                   : (publishFailReason || "Readiness check running… — click to see what's missing")}
                 style={{ ...chipBtn, flex: 1, background: modeColor, color: "#06080d", border: "none", opacity: canPublish ? 1 : 0.5 }}
               >
@@ -633,7 +637,7 @@ export default function PublishCards({
               }}
             >
               {showPublish && <span>{settings.mode === "host" ? "Host build" : "CI / GitHub Actions"}</span>}
-              {showPublish && <span>· {signed ? "Signed" : "Unsigned"}</span>}
+              {showPublish && HOST_IS_WINDOWS && <span>· {signed ? "Signed" : "Unsigned"}</span>}
               <span style={{ flex: 1 }} />
               <span style={{ color: readyFails.length === 0 ? "#7ff0c5" : "#ffd97a", fontWeight: 700 }}>
                 {readyFails.length === 0 ? "READY" : `${readyFails.length} issue${readyFails.length > 1 ? "s" : ""}`}
@@ -745,7 +749,7 @@ export default function PublishCards({
                 disabled={disabled || loading}
                 style={{ ...inputBase, height: 28 }}
               >
-                <option value="host">Host — build + sign + publish on this machine</option>
+                <option value="host">Host — build + publish on this machine</option>
                 <option value="ci">CI / GitHub Actions — push tag, let workflow build</option>
               </select>
               <div style={{ fontSize: 10, color: "var(--fg-subtle)", lineHeight: 1.4 }}>
@@ -753,38 +757,40 @@ export default function PublishCards({
               </div>
             </div>
 
-            <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
-            <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-strong)" }}>Code signing (Windows)</div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Cert thumbprint (SHA-1)</label>
-              <input
-                value={settings.sign.thumbprint}
-                onChange={(e) => updateSettings({ sign: { ...settings.sign, thumbprint: e.target.value } })}
-                placeholder="empty = unsigned"
-                disabled={disabled || loading}
-                style={{ ...inputBase, height: 28 }}
-              />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>…or cert subject (CN)</label>
-              <input
-                value={settings.sign.subject}
-                onChange={(e) => updateSettings({ sign: { ...settings.sign, subject: e.target.value } })}
-                placeholder="e.g. Your Company Ltd"
-                disabled={disabled || loading}
-                style={{ ...inputBase, height: 28 }}
-              />
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Timestamp URL (RFC3161)</label>
-              <input
-                value={settings.sign.tsa}
-                onChange={(e) => updateSettings({ sign: { ...settings.sign, tsa: e.target.value } })}
-                placeholder="http://time.certum.pl"
-                disabled={disabled || loading}
-                style={{ ...inputBase, height: 28 }}
-              />
-            </div>
+            {HOST_IS_WINDOWS && (<>
+              <div style={{ borderTop: "1px solid var(--border)", margin: "4px 0" }} />
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-strong)" }}>Code signing (Windows)</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Cert thumbprint (SHA-1)</label>
+                <input
+                  value={settings.sign.thumbprint}
+                  onChange={(e) => updateSettings({ sign: { ...settings.sign, thumbprint: e.target.value } })}
+                  placeholder="empty = unsigned"
+                  disabled={disabled || loading}
+                  style={{ ...inputBase, height: 28 }}
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>…or cert subject (CN)</label>
+                <input
+                  value={settings.sign.subject}
+                  onChange={(e) => updateSettings({ sign: { ...settings.sign, subject: e.target.value } })}
+                  placeholder="e.g. Your Company Ltd"
+                  disabled={disabled || loading}
+                  style={{ ...inputBase, height: 28 }}
+                />
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Timestamp URL (RFC3161)</label>
+                <input
+                  value={settings.sign.tsa}
+                  onChange={(e) => updateSettings({ sign: { ...settings.sign, tsa: e.target.value } })}
+                  placeholder="http://time.certum.pl"
+                  disabled={disabled || loading}
+                  style={{ ...inputBase, height: 28 }}
+                />
+              </div>
+            </>)}
 
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
               <label style={{ fontSize: 11, fontWeight: 700, color: "var(--fg-muted)" }}>Release notes</label>

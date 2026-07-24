@@ -79,6 +79,10 @@ anchor("PublishCards.tsx", cards, "Publish keeps its hover explanation",
   "Readiness check running");
 anchor("PublishCards.tsx", cards, "readiness summary renders READY / N issues",
   'readyFails.length === 0 ? "READY" : `${readyFails.length} issue');
+anchor("PublishCards.tsx", cards, "Windows signing status is hidden on Linux/macOS",
+  '{showPublish && HOST_IS_WINDOWS && <span>· {signed ? "Signed" : "Unsigned"}</span>}');
+anchor("PublishCards.tsx", cards, "non-Windows publish confirmation describes platform packages",
+  "builds this platform's packages");
 anchor("PublishCards.tsx", cards, "expanded checklist shows the actionable detail per failing check",
   "{!c.ok && <div style={{ color: \"var(--fg-muted)\", wordBreak: \"break-word\" }}>{c.detail}</div>}");
 // Action feedback: every button acknowledges immediately (inline + shared line)

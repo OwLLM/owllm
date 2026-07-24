@@ -220,7 +220,14 @@ try {
     page.includes("subsolarLocalDir(new Date(), sunLocal)") && /sunLight\.position\.copy\(sunLocal\)/.test(page) && !/sunLight\.position\.set\(5\.8/.test(page));
   // The shadowed hemisphere must stay dimly visible (twilight), not pure black.
   check("Night hemisphere is softly lit, not pitch black",
-    page.includes("emissiveMap: earthMap") && /emissiveIntensity:\s*0\.3/.test(page));
+    page.includes("emissiveMap: earthMap")
+      && /emissiveIntensity:\s*0\.72/.test(page)
+      && /new THREE\.AmbientLight\(0xa8c7ef,\s*0\.9\)/.test(page));
+  check("Globe starts zoomed out and cannot wheel-zoom into a cropped sphere",
+    page.includes("const WORLD_CAMERA_DISTANCE = 11.8")
+      && page.includes("const WORLD_MIN_DISTANCE = 9.6")
+      && page.includes("camera.position.set(0, 0.24, WORLD_CAMERA_DISTANCE)")
+      && page.includes("controls.minDistance = WORLD_MIN_DISTANCE"));
   check("Globe follows the readable selected GUI accent", page.includes('getPropertyValue("--accent-ink")') && page.includes("accent={colors.accentInk}"));
   check("My Fleet consumes real paired-device state", page.includes("getIdentity()") && page.includes("listDevices()") && page.includes("device.is_self"));
   check("My Fleet and Devices share one online rule", page.includes('from "../advanced/deviceLiveness"') && page.includes("isDeviceOnline(device)") && read("pages/advanced/DevicesPage.tsx").includes('from "./deviceLiveness"'));

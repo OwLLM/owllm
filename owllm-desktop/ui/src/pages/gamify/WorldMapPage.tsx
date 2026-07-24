@@ -48,6 +48,14 @@ const EARTH_TEXTURES = {
   clouds: "/world-map/earth-clouds.png",
 } as const;
 
+// Keep enough space around the globe that it reads as a world in space instead
+// of filling/cropping against the panel edges. OrbitControls clamps accidental
+// wheel zooms to these bounds, while fleet mode leaves extra room for satellites.
+const WORLD_CAMERA_DISTANCE = 11.8;
+const FLEET_CAMERA_DISTANCE = 13.2;
+const WORLD_MIN_DISTANCE = 9.6;
+const FLEET_MIN_DISTANCE = 10.8;
+
 // Direction of the subsolar point (where the sun is directly overhead right now)
 // in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
 // real UTC clock. The equirectangular Earth map places longitude 0 at +X and the
@@ -240,7 +248,7 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     if (!host) return;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    camera.position.set(0, 0.24, 6.2);
+    camera.position.set(0, 0.24, WORLD_CAMERA_DISTANCE);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
@@ -254,8 +262,8 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = 3.0;
-    controls.maxDistance = 15;
+    controls.minDistance = WORLD_MIN_DISTANCE;
+    controls.maxDistance = 17;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.32;
 
@@ -287,9 +295,9 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
         // Faint self-illumination of the land/ocean so the night hemisphere reads
         // as a dim twilit Earth rather than pure black. The day map modulates it,
         // so continents glow softly; on the sunlit side it is negligible.
-        emissive: new THREE.Color(0x2a3a55),
+        emissive: new THREE.Color(0x58759d),
         emissiveMap: earthMap,
-        emissiveIntensity: 0.32,
+        emissiveIntensity: 0.72,
       }),
     );
     earthGroup.add(globe);
@@ -341,8 +349,8 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
 
     // Ground color lifted from near-black so the shadowed hemisphere keeps a dim
     // blue twilight fill instead of collapsing to black.
-    scene.add(new THREE.HemisphereLight(0x91bdff, 0x1b2a44, 1.3));
-    scene.add(new THREE.AmbientLight(0x8aaee0, 0.5));
+    scene.add(new THREE.HemisphereLight(0xb5d3ff, 0x385476, 1.55));
+    scene.add(new THREE.AmbientLight(0xa8c7ef, 0.9));
     // Sun tracks the real subsolar point each frame (see animate loop); this is
     // just the initial placement so the first rendered frame is already correct.
     const sunLight = new THREE.DirectionalLight(0xffffff, 3.9);
@@ -427,8 +435,8 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       const nextHasFleet = list.some((node) => node.kind === "fleet");
       if (nextHasFleet !== hasFleet) {
         hasFleet = nextHasFleet;
-        controls.minDistance = hasFleet ? 8.4 : 3.0;
-        camera.position.set(0, 0.24, hasFleet ? 11.8 : 6.2);
+        controls.minDistance = hasFleet ? FLEET_MIN_DISTANCE : WORLD_MIN_DISTANCE;
+        camera.position.set(0, 0.24, hasFleet ? FLEET_CAMERA_DISTANCE : WORLD_CAMERA_DISTANCE);
       }
     };
 

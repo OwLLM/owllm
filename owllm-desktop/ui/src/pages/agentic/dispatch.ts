@@ -1545,6 +1545,17 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
   // Re-warm when there's no entry OR the cached warm has aged past the TTL.
   if (!entry || now - entry.at > WARM_TTL_MS) {
     const p = (async () => {
+      // A green host Accounts card does not prove the same CLI exists inside a
+      // WSL-isolated project. Prepare that execution environment first. The
+      // Rust command is a fast no-op for native/already-installed runs and
+      // installs only the missing backend in WSL.
+      if (cwd && /^\\\\(?:wsl(?:\.localhost)?)[\\/]/i.test(cwd)) {
+        _authWaitHandler?.({ kind: "prepare", backend });
+      }
+      await invoke<boolean>("accounts_prepare_cli_for_cwd", {
+        backend,
+        cwd: cwd ?? null,
+      });
       // Run the live probe round-trip for EVERY subscription backend — invoking
       // the CLI refreshes its OAuth access token as a side effect on all of
       // them. This was claude/codex-only, which made both the proactive 25-min
@@ -1626,6 +1637,7 @@ export function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
 /// Module-level to avoid threading a callback through every call site.
 export type AuthWaitInfo =
   | { kind: "wait"; attempt: number; total: number; waitMs: number; backend: string; reason: "auth" | "network" }
+  | { kind: "prepare"; backend: string }
   | { kind: "upgrade"; backend: string }
   | { kind: "recovered"; backend: string };
 let _authWaitHandler: ((info: AuthWaitInfo) => void) | null = null;

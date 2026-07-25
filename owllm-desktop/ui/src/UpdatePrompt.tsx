@@ -8,9 +8,9 @@
 //
 // Self-mounting: drop <UpdateController /> at the AppShell root and
 // it fires its own check() 2.5s after mount, then renders the modal
-// only when there's actually a newer version on the server. Errors
-// (offline, 404, etc.) get swallowed — the user just doesn't see
-// the modal, which is the right failure mode.
+// only when there's actually a newer version on the server. Routine offline
+// failures stay non-blocking; release/configuration failures are surfaced so a
+// platform cannot silently lose auto-update support again.
 
 import React, { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -66,17 +66,28 @@ function toReleaseBullets(body: string): string[] {
   return out;
 }
 
+function actionableCheckError(value: unknown): string | null {
+  const message = String((value as any)?.message ?? value);
+  // Connectivity is transient and must not interrupt startup. A missing target,
+  // invalid manifest, or signature problem means the published release is
+  // broken for this platform and must be visible instead of console-only.
+  if (!/(target|platform).*(not found|missing)|signature|manifest|invalid json|http status (404|410)/i.test(message)) {
+    return null;
+  }
+  return `Automatic update is unavailable for this platform: ${message}`;
+}
+
 export default function UpdateController() {
   const [phase, setPhase] = useState<Phase>("hidden");
   const [update, setUpdate] = useState<Update | null>(null);
   const [downloaded, setDownloaded] = useState(0);
   const [total, setTotal] = useState(0);
   const [error, setError] = useState<string | null>(null);
-  // "auto" = the updater can swap this install in place (Windows NSIS,
-  // macOS .app, Linux AppImage). "manual" = Linux deb/rpm — in-place
-  // install is impossible (plugin errors with "invalid updater binary
-  // format"), so we offer the download page instead.
-  const [installMode, setInstallMode] = useState<"auto" | "manual">("auto");
+  // Linux AppImage uses a separate mode: the downloaded, signature-verified
+  // AppImage waits for this process to exit and then swaps files atomically.
+  // That avoids SIGBUS crashes in WebKitGTK processes which still map the old
+  // AppImage. deb/rpm remain manual because the package manager owns them.
+  const [installMode, setInstallMode] = useState<"auto" | "linux-appimage" | "manual">("auto");
 
   // One-shot check on mount. We don't poll — Tauri's updater is
   // designed for once-per-launch checks. Users who keep the app
@@ -97,14 +108,18 @@ export default function UpdateController() {
           } catch { /* storage blocked — show as normal */ }
           try {
             const mode = await invoke<string>("update_install_mode");
-            if (mode === "manual") setInstallMode("manual");
+            if (mode === "manual" || mode === "linux-appimage") setInstallMode(mode);
           } catch { /* older backend without the command — assume auto */ }
           setUpdate(u as unknown as Update);
           setPhase("prompt");
         }
       } catch (e) {
-        // Offline / 404 / corp proxy — silent fail is correct here.
         console.warn("[updater] check failed:", e);
+        const actionable = actionableCheckError(e);
+        if (actionable) {
+          setError(actionable);
+          setPhase("error");
+        }
       }
     }, 2500);
     return () => window.clearTimeout(t);
@@ -137,6 +152,24 @@ export default function UpdateController() {
         const { invoke } = await import("@tauri-apps/api/core");
         await invoke("server_stop").catch(() => {});
       } catch { /* best effort — proceed with the install regardless */ }
+      if (installMode === "linux-appimage") {
+        const { listen } = await import("@tauri-apps/api/event");
+        const unlisten = await listen<{ downloaded: number; total?: number }>(
+          "owllm:update-progress",
+          ({ payload }) => {
+            setDownloaded(payload.downloaded);
+            if (typeof payload.total === "number") setTotal(payload.total);
+          },
+        );
+        try {
+          await invoke("linux_appimage_update_install", { expectedVersion: update.version });
+          setPhase("installing");
+        } finally {
+          unlisten();
+        }
+        return;
+      }
+
       await update.downloadAndInstall((evt: any) => {
         // Tauri emits {event, data}: "Started" with contentLength,
         // "Progress" with chunkLength, "Finished".
@@ -158,7 +191,7 @@ export default function UpdateController() {
     }
   };
 
-  if (phase === "hidden" || !update) return null;
+  if (phase === "hidden" || (!update && phase !== "error")) return null;
 
   const pct = total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : 0;
   const mbDown = (downloaded / 1024 / 1024).toFixed(1);
@@ -214,16 +247,16 @@ export default function UpdateController() {
           />
           <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
             <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: 1.4, color: "var(--accent-ink)", textTransform: "uppercase" }}>
-              OwLLM Desktop · Update available
+              {update ? "OwLLM Desktop · Update available" : "OwLLM Desktop · Update service error"}
             </div>
             <div style={{ fontSize: 22, fontWeight: 700, color: "var(--fg-strong)" }}>
-              Version {update.version}
+              {update ? `Version ${update.version}` : "Automatic update needs attention"}
             </div>
           </div>
         </div>
 
         {/* Release notes — rendered as a structured "What's new" list. */}
-        {update.body && update.body.trim() ? (
+        {update?.body && update.body.trim() ? (
           <div
             style={{
               background: "rgba(255,255,255,0.04)",
@@ -243,7 +276,7 @@ export default function UpdateController() {
               What's new
             </div>
             {(() => {
-              const bullets = toReleaseBullets(update.body!);
+              const bullets = toReleaseBullets(update.body);
               if (bullets.length === 0) {
                 return (
                   <div style={{ fontSize: 13, lineHeight: 1.55, color: "rgba(255,255,255,0.82)", whiteSpace: "pre-wrap" }}>
@@ -384,7 +417,7 @@ export default function UpdateController() {
                 }}
               >Dismiss</button>
               <button
-                onClick={onInstall}
+                onClick={update ? onInstall : onDownload}
                 style={{
                   background: "linear-gradient(180deg, rgba(var(--accent-rgb),0.85), rgba(var(--accent-rgb),0.65))",
                   border: "1px solid rgba(var(--accent-rgb),0.95)",
@@ -395,7 +428,7 @@ export default function UpdateController() {
                   fontWeight: 700,
                   cursor: "pointer",
                 }}
-              >Try again</button>
+              >{update ? "Try again" : "Open releases ↗"}</button>
             </div>
           </div>
         )}

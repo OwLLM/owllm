@@ -54,6 +54,7 @@ mod github;
 mod hardware;
 mod huggingface;
 mod kvm;
+mod linux_updater;
 mod mcp;
 mod mcp_gateway;
 mod media_assets;
@@ -190,6 +191,9 @@ fn fit_macos_main_window(_window: &tauri::Window) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if linux_updater::handle_startup_mode() {
+        return;
+    }
     install_crash_log_hook();
     configure_linux_webkit_renderer();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
@@ -294,6 +298,7 @@ pub fn run() {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
+                linux_updater::confirm_successful_boot();
                 let window = webview.window();
                 // Don't force-maximize on first paint — tauri.conf.json
                 // sets width/height (1400x960) which is what the user
@@ -575,6 +580,7 @@ pub fn run() {
             recommendations::models_recommended,
             paths::shell_open_url,
             paths::update_install_mode,
+            linux_updater::linux_appimage_update_install,
             paths::paths_debug,
             paths::llama_server_path,
             readiness::app_readiness,

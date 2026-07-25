@@ -22,6 +22,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 import { vaultEnsure, vaultStatus } from "../pages/agentic/github";
+import { REMOTE_DEVICE_HEARTBEAT_MS } from "../pages/advanced/deviceLiveness";
 
 // Device-local marker of the newest blob we've adopted OR pushed. Compared
 // against the remote blob's syncedAt to decide whether to adopt. NOT synced.
@@ -429,6 +430,11 @@ function wireListeners(): void {
   // reconcile projects/facts as a backstop for native memory writes and abrupt
   // exits; event-driven writes normally sync after the 4-second debounce.
   window.setInterval(() => { if (_enabled) void syncProjectsNow(); }, 60_000);
+  // Fleet liveness heartbeat: republish OUR device record (fresh published_at)
+  // and ingest peers' heartbeats. Without this the record was published once at
+  // launch, so isDeviceOnline's 5-minute freshness window was unhittable for
+  // any idle machine and every fleet count went stale.
+  window.setInterval(() => { if (_enabled) void syncDevicesNow(); }, REMOTE_DEVICE_HEARTBEAT_MS);
 }
 
 // githubDisconnect emits this after the native credential scrub completes.

@@ -36,6 +36,7 @@ export type InferenceEndpoint = {
 };
 
 const DEFAULTS: InferenceEndpoint = { mode: "local", host: "127.0.0.1", port: 8080, apiKey: "" };
+let unavailableRouteKey: string | null = null;
 
 // The LOCAL managed server normally needs no auth — but when the user EXPOSES it
 // on the network (Server page), llama-server is launched with `--api-key`, which
@@ -80,6 +81,8 @@ export function getInferenceEndpoint(): InferenceEndpoint {
 }
 
 export function setInferenceEndpoint(ep: InferenceEndpoint): void {
+  // An explicit user edit is a request to try that route again.
+  unavailableRouteKey = null;
   try { localStorage.setItem(KEY, JSON.stringify(ep)); } catch { /* private mode / quota */ }
 }
 
@@ -97,6 +100,26 @@ export type ResolvedInference = {
   device?: { id: string; name: string } | null;
 };
 
+function resolveLocalInference(localPort: number): ResolvedInference {
+  return {
+    baseUrl: `http://127.0.0.1:${localPort}`,
+    apiKey: getLocalServerKey(),
+    remote: false,
+  };
+}
+
+function isValidLocalPort(localPort: number): boolean {
+  return Number.isInteger(localPort) && localPort > 0 && localPort <= 65535;
+}
+
+function inferenceRouteKey(inference: ResolvedInference): string {
+  return inference.device
+    ? `device:${inference.device.id}`
+    : inference.remote
+      ? `http:${inference.baseUrl}`
+      : "";
+}
+
 /// Resolve the base URL for an inference call. In local mode the managed
 /// server port (discovered at runtime) is used; in remote mode the saved
 /// host:port + key are used and `localPort` is ignored; in device mode the
@@ -104,20 +127,41 @@ export type ResolvedInference = {
 export function resolveInferenceBase(localPort: number): ResolvedInference {
   const ep = getInferenceEndpoint();
   if (ep.mode === "device" && ep.deviceId) {
-    return {
+    const device: ResolvedInference = {
       baseUrl: "",
       apiKey: null,
       remote: true,
       device: { id: ep.deviceId, name: ep.deviceName || ep.deviceId },
     };
+    return inferenceRouteKey(device) === unavailableRouteKey && isValidLocalPort(localPort)
+      ? resolveLocalInference(localPort)
+      : device;
   }
   if (ep.mode === "remote" && ep.host) {
-    return {
+    const remote: ResolvedInference = {
       baseUrl: `http://${ep.host}:${ep.port}`,
       apiKey: ep.apiKey.trim() ? ep.apiKey.trim() : null,
       remote: true,
     };
+    return inferenceRouteKey(remote) === unavailableRouteKey && isValidLocalPort(localPort)
+      ? resolveLocalInference(localPort)
+      : remote;
   }
   // Local managed server: send the expose api-key if one is set (else no auth).
-  return { baseUrl: `http://127.0.0.1:${localPort}`, apiKey: getLocalServerKey(), remote: false };
+  return resolveLocalInference(localPort);
+}
+
+/// Recover a configured off-box route with the managed local server that the
+/// caller already resolved/started for this model. A stale remote preference
+/// must never strand an otherwise healthy local model for the full network
+/// retry window. `null` means there is no valid local server to recover to.
+export function localInferenceFallback(
+  failed: ResolvedInference,
+  localPort: number,
+): ResolvedInference | null {
+  if (!failed.remote || !isValidLocalPort(localPort)) {
+    return null;
+  }
+  unavailableRouteKey = inferenceRouteKey(failed);
+  return resolveLocalInference(localPort);
 }

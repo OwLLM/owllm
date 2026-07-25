@@ -39,8 +39,10 @@ pub fn shell_open_url(app: tauri::AppHandle, url: String) -> Result<String, Stri
 }
 
 /// How this install can take updates.
-///   "auto"   — tauri-plugin-updater can swap the binary in place
-///              (Windows NSIS, macOS .app bundle, Linux AppImage).
+///   "auto"   — tauri-plugin-updater can install this platform directly.
+///   "linux-appimage" — use OwLLM's deferred atomic AppImage handoff so the
+///              running WebKitGTK processes never observe rewritten backing
+///              data.
 ///   "manual" — package-managed install (deb/rpm): the updater plugin
 ///              cannot replace it (it fails with "invalid updater binary
 ///              format"), so the UI must send the user to the download
@@ -52,7 +54,7 @@ pub fn update_install_mode() -> &'static str {
         // Tauri's Linux updater only handles AppImage, detected via the
         // APPIMAGE env var the AppImage runtime sets. Absent → deb/rpm.
         if std::env::var_os("APPIMAGE").is_some() {
-            "auto"
+            "linux-appimage"
         } else {
             "manual"
         }

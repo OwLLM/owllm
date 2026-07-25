@@ -52,7 +52,7 @@ import {
   type RuntimePersonalAgent,
 } from "./personalAgentRuntime";
 import type { RevisionRef } from "./personalAgentConfig";
-import { resolveInferenceBase } from "./inferenceEndpoint";
+import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoint";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
 import { makeGenMeter } from "../../utils/genStats";
@@ -2440,11 +2440,56 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // llama-server on another host (the Windows-GPU / Linux-agents split).
   // resolveInferenceBase() reads the persisted endpoint; local mode uses the
   // managed port passed in `p.port`, remote uses the configured host:port:key.
-  const infer = resolveInferenceBase(p.port);
-  const inferUrl = `${infer.baseUrl}/v1/chat/completions`;
-  const inferHeaders: Record<string, string> = {
+  let infer = resolveInferenceBase(p.port);
+  let inferUrl = `${infer.baseUrl}/v1/chat/completions`;
+  let inferHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     ...(infer.apiKey ? { Authorization: `Bearer ${infer.apiKey}` } : {}),
+  };
+  let inferenceRouteChecked = !infer.remote || !!infer.device;
+  const recoverLocalInference = (reason: string): boolean => {
+    const local = localInferenceFallback(infer, p.port);
+    if (!local) return false;
+    infer = local;
+    inferUrl = `${local.baseUrl}/v1/chat/completions`;
+    inferHeaders = {
+      "Content-Type": "application/json",
+      ...(local.apiKey ? { Authorization: `Bearer ${local.apiKey}` } : {}),
+    };
+    inferenceRouteChecked = true;
+    try {
+      console.warn(
+        `[streamLocalChat] configured inference route failed (${reason}); ` +
+        `continuing with the managed local model at ${local.baseUrl}`,
+      );
+      window.dispatchEvent(new CustomEvent("owllm:inference:fallback", {
+        detail: { modelId: p.modelId, localPort: p.port, reason },
+      }));
+    } catch { /* diagnostics must never break recovery */ }
+    return true;
+  };
+  const ensureInferenceRoute = async (): Promise<void> => {
+    if (inferenceRouteChecked || !infer.remote || infer.device) return;
+    const probeCtrl = new AbortController();
+    const timeout = setTimeout(() => probeCtrl.abort(), 3_000);
+    const onAbort = () => probeCtrl.abort();
+    p.signal.addEventListener("abort", onAbort);
+    try {
+      // Any HTTP response proves the host is reachable. A server without a
+      // /health route may answer 404, which is fine; the real POST below will
+      // still surface authentication/model errors without a false failover.
+      await fetch(`${infer.baseUrl}/health`, {
+        headers: infer.apiKey ? { Authorization: `Bearer ${infer.apiKey}` } : {},
+        signal: probeCtrl.signal,
+      });
+      inferenceRouteChecked = true;
+    } catch (e: any) {
+      if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
+      if (!recoverLocalInference(`reachability check: ${String(e?.message ?? e)}`)) throw e;
+    } finally {
+      clearTimeout(timeout);
+      p.signal.removeEventListener("abort", onAbort);
+    }
   };
   // 503/502 slot-warmup retry — cold model load is handled by server.rs's
   // /health poller; this only absorbs the few-second slot init after the
@@ -2491,6 +2536,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         p.signal,
       );
     } else {
+    await ensureInferenceRoute();
     let resp: Response | undefined;
     const loadDeadline = Date.now() + LOAD_RETRY_MS;
     while (true) {
@@ -2518,6 +2564,9 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         });
       } catch (e: any) {
         if (p.signal.aborted) throw e;
+        if (recoverLocalInference(String(e?.message ?? e))) {
+          continue;
+        }
         if (Date.now() >= loadDeadline) {
           // Can't reach the server at all. Ask the supervisor WHY before
           // surfacing a generic network error — a crashed llama-server

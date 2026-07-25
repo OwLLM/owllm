@@ -26,7 +26,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
-import { resolveInferenceBase } from "../agentic/inferenceEndpoint";
+import { localInferenceFallback, resolveInferenceBase } from "../agentic/inferenceEndpoint";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getServerCtx } from "../core/serverContext";
 // Tool-use loop, always-on. sendOne() appends the same XML <tool_call>
@@ -837,6 +837,40 @@ export default function ChatPage() {
     // True once the model answers WITHOUT a tool call (clean exit). Stays
     // false if we burn every turn with tools pending → forced synthesis.
     let answeredWithoutTools = false;
+    let inference = resolveInferenceBase(activePort);
+    let inferenceRouteChecked = !inference.remote || !!inference.device;
+    const recoverLocalInference = (reason: string): boolean => {
+      const local = localInferenceFallback(inference, activePort);
+      if (!local) return false;
+      inference = local;
+      inferenceRouteChecked = true;
+      console.warn(
+        `[ChatPage] configured inference route failed (${reason}); ` +
+        `continuing with the managed local model at ${local.baseUrl}`,
+      );
+      updateCol(col.id, { error: "Remote inference is unavailable — continuing with the managed local model." });
+      return true;
+    };
+    const ensureInferenceRoute = async (): Promise<void> => {
+      if (inferenceRouteChecked || !inference.remote || inference.device) return;
+      const probeCtrl = new AbortController();
+      const timeout = setTimeout(() => probeCtrl.abort(), 3_000);
+      const onAbort = () => probeCtrl.abort();
+      signal.addEventListener("abort", onAbort);
+      try {
+        await fetch(`${inference.baseUrl}/health`, {
+          headers: inference.apiKey ? { Authorization: `Bearer ${inference.apiKey}` } : {},
+          signal: probeCtrl.signal,
+        });
+        inferenceRouteChecked = true;
+      } catch (e: any) {
+        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+        if (!recoverLocalInference(`reachability check: ${String(e?.message ?? e)}`)) throw e;
+      } finally {
+        clearTimeout(timeout);
+        signal.removeEventListener("abort", onAbort);
+      }
+    };
 
     try {
       for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
@@ -872,6 +906,7 @@ export default function ChatPage() {
         const PER_ATTEMPT_TIMEOUT_MS = 20_000;
         while (true) {
           if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+          await ensureInferenceRoute();
           // Per-attempt timeout. If llama-server accepts the TCP
           // connection but never replies (we've seen this when the
           // GGUF is broken / not actually loading), a vanilla fetch
@@ -881,14 +916,14 @@ export default function ChatPage() {
           // that single attempt and re-enter the retry loop so the
           // status text + abort button stay responsive.
           const attemptCtrl = new AbortController();
-          const tid = setTimeout(() => attemptCtrl.abort(), PER_ATTEMPT_TIMEOUT_MS);
+          const attemptTimeoutMs = PER_ATTEMPT_TIMEOUT_MS;
+          const tid = setTimeout(() => attemptCtrl.abort(), attemptTimeoutMs);
           const onOuterAbort = () => attemptCtrl.abort();
           signal.addEventListener("abort", onOuterAbort);
           try {
-            const _infer = resolveInferenceBase(activePort);
-            resp = await fetch(`${_infer.baseUrl}/v1/chat/completions`, {
+            resp = await fetch(`${inference.baseUrl}/v1/chat/completions`, {
               method: "POST",
-              headers: { "Content-Type": "application/json", ...(_infer.apiKey ? { Authorization: `Bearer ${_infer.apiKey}` } : {}) },
+              headers: { "Content-Type": "application/json", ...(inference.apiKey ? { Authorization: `Bearer ${inference.apiKey}` } : {}) },
               body: JSON.stringify(payload),
               signal: attemptCtrl.signal,
             });
@@ -897,9 +932,12 @@ export default function ChatPage() {
             signal.removeEventListener("abort", onOuterAbort);
             // Outer abort (user pressed Stop) — surface as-is.
             if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+            if (recoverLocalInference(String(e?.message ?? e))) {
+              continue;
+            }
             const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
             updateCol(col.id, {
-              error: `⏳ Waiting for llama-server to respond (no reply in ${PER_ATTEMPT_TIMEOUT_MS / 1000}s)… ${elapsedSec}s — check the Server tab logs.`,
+              error: `⏳ Waiting for llama-server to respond (no reply in ${attemptTimeoutMs / 1000}s)… ${elapsedSec}s — check the Server tab logs.`,
             });
             if (Date.now() - startedAt > READY_TIMEOUT_MS) {
               throw new Error(`llama-server unresponsive for ${READY_TIMEOUT_MS / 1000}s — check the Server tab. Common causes: broken GGUF, GPU OOM, missing -ngl support.`);
@@ -1236,10 +1274,9 @@ export default function ChatPage() {
             "briefly and answer from your own knowledge.",
         });
         try {
-          const _infer2 = resolveInferenceBase(activePort);
-          const fresp = await fetch(`${_infer2.baseUrl}/v1/chat/completions`, {
+          const fresp = await fetch(`${inference.baseUrl}/v1/chat/completions`, {
             method: "POST",
-            headers: { "Content-Type": "application/json", ...(_infer2.apiKey ? { Authorization: `Bearer ${_infer2.apiKey}` } : {}) },
+            headers: { "Content-Type": "application/json", ...(inference.apiKey ? { Authorization: `Bearer ${inference.apiKey}` } : {}) },
             body: JSON.stringify({
               model: status.model_id ?? "local",
               messages: liveMessages,

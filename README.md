@@ -102,6 +102,8 @@ Every tool below is good at its one thing. OwLLM's pitch is that **the whole pip
 | Subscription CLIs as agents (Claude Code · Codex · Gemini · Kimi) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Rule-based release pipeline (agents that actually SHIP versions) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | In-app support agent that sees your screen (the Watcher) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Fleet control** — agents that drive your *other* machines (encrypted, LAN/WAN/P2P) | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| **Cross-PC repo sync** — real three-way merge coordinator, never a FF dead-end | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
 | Price | **Free** | Free | Free | Free | Free | $20+/mo |
 
 *Fair notes: LM Studio is a superb model runner; Cursor is a superb code editor. OwLLM doesn't replace your editor — it replaces the **five separate apps** between "I have a GPU" and "my own trained, sandboxed, always-reachable agent workforce".*
@@ -214,6 +216,7 @@ Same teams. Same agent definitions. Same UI. The model layer is just plumbing.
 | **Desktop (Windows)** | ✅ shipped | Daily-driver AI workstation on your laptop |
 | **Desktop (Linux x86_64)** | ✅ shipped | AppImage + Debian/Ubuntu `.deb` |
 | **Desktop (macOS)** | 🔜 next | Apple Silicon + Intel via cross-platform CI |
+| **Fleet — your other machines** | ✅ shipped | Pair your PCs; agents run commands, open a remote shell, and drive them over an encrypted LAN / WAN / P2P channel. |
 | **Headless on VPS (24/7)** | 🔜 Q4 2026 | Run your custom teams on a $5/mo box. Reach them via Telegram, web, API. Always-on agentic services. |
 | **Containerised / VM** | 🔜 Q4 2026 | Drop OwLLM into your existing infra. |
 | **🔑 OwLLM Go (USB)** | 🧪 in design | Your entire AI workforce **on a hardware key** — see below. |
@@ -283,7 +286,41 @@ That's why the data/ tree is open and community-driven even though the app binar
 
 ## ✨ Recent highlights
 
-OwLLM ships fast. Here's what landed across the **0.6.37 → 0.7.78** releases.
+OwLLM ships fast. Here's what landed across the **0.6.37 → 0.9.42** releases.
+
+### 🛰️ Fleet Control — your agents reach your other machines (0.8.35 → 0.8.56)
+Pair your computers and your agent teams can **run commands on them, open an interactive SSH-like shell, and drive them** — no SSH setup, no port-forwarding. Devices talk over an **end-to-end-encrypted channel** (Ed25519 + X25519 sealed envelope), reachable on your **LAN**, across the **WAN** (overlay / public / relay), or through a **zero-setup embedded P2P transport** (iroh) that punches through NAT for you. Same-account machines **auto-enable and self-heal pairing**; the first injection into a new host still asks for your per-host approval. Even **subscription-CLI agents** (Claude Code / Codex) can drive a paired device. *This is the software half of "run your workforce anywhere" — and no other local-LLM app ships it.*
+
+### 🖥️ Agents with hands on real screens — the KVM tool is live (0.8.32)
+The **`kvm_node`** tool (screenshot · type · keys · mouse · boot-key) is now wired into **every agent path**, so a team can control a networked KVM device **below the OS — BIOS included** — with nothing installed on the target. OwLLM Node moves from concept to a callable capability.
+
+### 🔄 Cross-PC sync coordinator — no more merge dead-ends (0.9.26 → 0.9.42)
+The same repo edited on two PCs used to hit a wall: **Merge/Push were fast-forward-only** and simply rejected divergence, even when Git could safely combine the two edits. Now **Merge, Push, and Publish route through one coordinator transaction**: fetch origin → classify (ahead / behind / diverged) → on divergence do a **real three-way merge on a throwaway worktree** → conflicts are **preserved with both sides intact**, never force-pushed → push with rebase-retry. And (0.9.42) **agent runs now require isolated worktrees** instead of silently falling back to the shared project folder — so parallel agents and parallel PCs stop clobbering each other's history.
+
+### 🍎 Cross-platform: macOS signing + ARM64 / Jetson (0.8.43 → 0.9.11)
+Real groundwork for the platforms beyond Windows: a **code-signing certificate vault + management page**, the ability to **accept Apple's bare `.cer` and generate the signing CSR in-app (no Mac needed)**, **Apple-Silicon runtime modules + whisper auto-install**, a **Jetson CUDA engine + ARM64 runtime modules** with honest per-arch gating, and **Linux aarch64 AppImage/deb/rpm built on-device**. Releases are now **signed across all platforms**.
+
+### 🌍 The OwLLM World Map (0.9.14 → 0.9.40)
+A live, ambient view of the OwLLM fleet: a **globe with real-clock lighting**, **satellite fleet orbits**, live device loading, a **private-fleet mode**, and a **Solar-System explorer**. The first slice of the gamification track — presence you can actually watch.
+
+### 🛒 Creator marketplace + guided onboarding (0.9.26 → 0.9.36)
+**Creator self-service**, a **marketplace surface in Settings**, **GitHub repo-picker import**, and a **guided onboarding / account-setup** flow with a dedicated "Finish onboarding" step — the on-ramp for sharing and installing community teams.
+
+### 🧷 History that survives updates — WebView isolation, fixed (0.8.96 → 0.9.5)
+Updates used to migrate the WebView profile and appear to **wipe your history**. Now a **SQLite mirror of durable localStorage** restores **projects, chats, notebooks, settings, model picks, and Code conversations** across profile changes, **orphaned Code tabs are rebuilt** from surviving sessions, and **missing vault clones are recovered** on startup. Side-by-side builds are isolated so they stop freezing each other.
+
+### 🛡️ Security: credential-transplant guard (0.9.40)
+A startup **account-ownership guard** compares your local `.owllm` vault's origin owner to your signed-in GitHub login and **quarantines foreign credentials** on mismatch — closing a cross-account key-leak path. The installer ships **no keys**.
+
+### 🗂️ Notebook → a Kanban plan (0.8.9 → 0.8.23)
+The Run Notebook's plan became a **Now / Next / Later Kanban board**; the **Digest agent** proposes fewer, larger implementation chunks and persists its proposals; **Start batch / Start queue** make the plan runnable without consuming it; plus a **media asset library** and an **issue tracker**.
+
+### ⚙️ More providers, more polish
+- **xAI Grok Build CLI** auto-installs on Windows (another subscription-CLI agent).
+- **Concurrent local agents** — llama.cpp **auto parallel slots + continuous batching**, so a local model serves several agents at once.
+- **Images everywhere** — render + click-to-zoom in every chat; **CSV password import** works around Chrome 127+ App-Bound Encryption.
+- **Auto-resume interrupted model downloads** via HTTP Range (no 0% restart).
+- **Launch OwLLM at login** (per-user, opt-out) · **two-agent Code-page chat** with two-way auto-feed · a **dockable terminal** above the composer.
 
 ### 🌐 The Agent Browser — native, shared, and on every model (0.7.53 → 0.7.78)
 The browser your agents drive is now **built into OwLLM** — no Python, no bundled Chromium, no external window. It runs on the app's own engine (WebView2 / WebKit), opens instantly, and renders inside OwLLM's own dark chrome.
@@ -384,10 +421,53 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - **No more doubled output** — fixed a race that could run a team's orchestrator twice at once, interleaving two streams into one garbled reply.
 
 <details>
-<summary><b>Full changelog (0.6.37 → 0.7.78)</b></summary>
+<summary><b>Full changelog (0.6.37 → 0.9.42)</b></summary>
 
 | Version | Highlight |
 |---|---|
+| **0.9.42** | Agent runs require isolated worktrees (no silent shared-folder fallback) · honor inherited agent model settings |
+| **0.9.40** | Account-ownership guard quarantines transplanted `.owllm` credentials · `/dl` resolves per-OS to the newest build · World Map Solar-System explorer |
+| **0.9.39** | macOS auto-updates fixed — signed app bundle preserved after launch |
+| **0.9.36** | Notebook working-notes auto-clear · dedicated "Finish onboarding" settings row |
+| **0.9.32** | World-Map persistence client · fixed additive presence counts (stable-id clients only) |
+| **0.9.29** | Onboarding account setup · GitHub repo-picker import · notebook window-lease + cross-PC sync |
+| **0.9.27** | Signing popup · real-clock globe lighting · **marketplace in Settings** |
+| **0.9.26** | **Cross-PC sync coordinator** — one transaction replaces FF-only Merge/Push dead-ends · creator self-service · guided onboarding |
+| **0.9.14** | **World Map** + private-fleet modes |
+| **0.9.5** | Recover missing vault clones on startup |
+| **0.9.3** | Recover projects, settings, notebooks, model picks & Code chats across WebView profile changes |
+| **0.9.2** | **SQLite mirror of durable localStorage** — history survives WebView profile changes · Tao keyboard-deadlock patch |
+| **0.8.99** | Reliable Linux device login · recover chats after updater profile migration |
+| **0.8.96** | Fix app-wide WebView freezes · isolate side-by-side builds |
+| **0.8.87** | Linux aarch64 GUI frame fix · AppImage auto-update (Jetson unified VRAM in header) |
+| **0.8.86** | Per-install update path — deb/rpm gets Download, not a failing Install |
+| **0.8.80** | Prevent WSL disk inflation safely — auto-trim + sparse opt-in |
+| **0.8.58** | **Launch OwLLM at login** (per-user, opt-out) · stop the model server before applying an update |
+| **0.8.54** | **xAI Grok Build CLI** auto-installs on Windows |
+| **0.8.53** | Remote Devices — auto-enable inbound listener for same-account machines |
+| **0.8.50** | Images everywhere + click-to-zoom · CSV password import (Chrome 127+ App-Bound Encryption) · size local context from real GGUF KV geometry |
+| **0.8.49** | Embedded **P2P device transport (iroh)** — zero-setup off-LAN control · current-device ground truth in every prompt |
+| **0.8.48** | Event-loop-free Win32 geometry sync — stop the overlay UI-thread deadlock |
+| **0.8.47** | **Credential hub** — live readiness probes, in-app portals, web logins · agent browser gets the OwLLM chrome bar |
+| **0.8.43** | **Signed releases across all platforms** — code-signing cert vault · Apple `.cer`+CSR in-app · Jetson CUDA + ARM64 modules · resume interrupted downloads |
+| **0.8.40** | Remote-devices pairing fix — real endpoints published at launch, self-healing Pair |
+| **0.8.39** | Subscription-CLI agents (Claude Code / Codex) can drive **paired devices** |
+| **0.8.38** | **Interactive remote shell** (SSH-like) + agent access to paired devices |
+| **0.8.36** | Remote-devices **WAN control** — overlay / public / relay, not LAN-only |
+| **0.8.35** | **Remote Devices / Fleet Control** — LAN-direct transport, discovery, approved-dangerous ops · Linux `/dl` links + stable-named assets |
+| **0.8.34** | Rule-based publish works for **any** repo · create the GitHub repo for the user in onboarding |
+| **0.8.33** | Two-agent Code-page chat — selectable last-reply auto-feed both ways |
+| **0.8.32** | Expose **`kvm_node`** to every agent path · settable publish target repo · notebook LogBox + adaptive Kanban |
+| **0.8.23** | Notebook plan becomes a **Now / Next / Later Kanban board** |
+| **0.8.22** | Notebook redesign — one working-notes box, Digest reads notes/plan/steps |
+| **0.8.15** | **Memory Curator context packs** — retrieved memory is reference-only, current-task dominated |
+| **0.8.10** | Code-page publish cards in the file-tree rail (commit / merge / push / publish, rule-based) |
+| **0.8.9** | Notebook redesign · **media asset library** · **issue tracker** |
+| **0.8.6** | llama.cpp **auto parallel slots + continuous batching** for concurrent local agents |
+| **0.8.1** | Kimi balance + meaningful usage notes for all providers |
+| **0.7.92** | Production **smoke matrix** — the ship/no-ship gate |
+| **0.7.88** | Fix Claude on the Code page ("command line too long", `.cmd` shim ~8 KB) · `--prerelease` publish channel |
+| **0.7.79** | Auto-`/login` on Connect for REPL CLIs · Kimi K2.7 in the catalogue |
 | **0.7.78** | Kimi CLI works inside the WSL sandbox — installed in the seal, login detected, real disconnect |
 | **0.7.77** | Browser gateway reaches Gemini & Kimi CLI agents · Kimi subscription detected after login |
 | **0.7.76** | OpenAI API-key agents get the full tool loop — browser + files, model-agnostic |
@@ -484,6 +564,10 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - [x] **Mid-run steering + Run Notebook** — steer working agents; roadmap auto-feeds the team
 - [x] **Team memory (FACTS + RAG)** — durable, deduped, ranked, synced across PCs
 - [x] **Verification Gate + Project Card** — "done" = a real exit code; rules travel with the repo
+- [x] **Cross-PC sync coordinator** — Merge / Push / Publish run as one transaction: real three-way merge on divergence, conflict-preserving, never force-pushed
+- [x] **Remote Devices / Fleet Control** — encrypted device-to-device control (LAN · WAN · zero-setup P2P); interactive remote shell + agents that drive your other machines
+- [x] **Code-signing vault** — Windows EV + Apple `.cer`/CSR in-app; releases signed across all platforms
+- [x] **Launch at login** — per-user, opt-out
 - [x] **WSL tool isolation** — agents run their tools inside Ubuntu, off your Windows drive
 - [x] **Folder-sealed isolation** — agents see **only the project folder** (bubblewrap inside WSL), on your **real Windows folder, no copy**
 - [x] **Sandbox disk management** — usage view, one-click cache clear, disk reclaim; auto-cleanup on project delete
@@ -494,15 +578,16 @@ After a deep, citation-backed review of how agentic systems actually succeed and
 - [~] **Mac/Linux isolation (beta)** — Lima VM (macOS) + bubblewrap (Linux), same model as WSL
 - [ ] **Visual team builder** — Q3 2026
 - [x] **Linux desktop** — AppImage + `.deb` (x86_64)
-- [ ] **macOS desktop** — Apple Silicon + Intel
+- [x] **Linux aarch64 / Jetson** — AppImage + `.deb` + `.rpm`, CUDA engine, built on-device
+- [ ] **macOS desktop** — Apple Silicon + Intel *(signing + runtime-module groundwork shipped)*
 - [ ] **24/7 headless / VPS mode** — Q4 2026
 - [ ] **Container / VM deployment** — Q4 2026
 - [x] **Local vision models** — image-capable GGUFs work out of the box (projectors auto-fetched)
-- [ ] **Gamification** (agent-vs-agent arena, achievements) — Q4 2026 *(in progress)*
+- [~] **Gamification** — the **World Map** (live fleet presence, orbits, Solar-System explorer) shipped; agent-vs-agent arena + achievements next
 - [ ] **🔑 OwLLM Go** — the workforce-on-a-USB-key hardware edition *(in design)*
-- [ ] **🖥️ OwLLM Node** — KVM device: teams with eyes + hands on remote physical machines *(prototyping)*
+- [~] **🖥️ OwLLM Node** — KVM device: teams with eyes + hands on remote physical machines *(prototyping — the `kvm_node` agent tool is live)*
 - [ ] **Voice output (TTS)** — Q1 2027
-- [ ] **Public team marketplace** — Q1 2027
+- [~] **Public team marketplace** — creator self-service + an in-Settings marketplace surface shipped; full public marketplace Q1 2027
 
 Track active work in [Discussions → Roadmap](https://github.com/OwLLM/owllm/discussions).
 

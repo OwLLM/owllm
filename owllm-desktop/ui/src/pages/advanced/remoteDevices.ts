@@ -94,7 +94,24 @@ export type CommandKind =
   | "file_write"
   | "admin"
   | "screenshot"
-  | "inference";
+  | "inference"
+  | "model_catalog"
+  | "model_start";
+
+export type RemoteModel = {
+  model_id: string;
+  port: number | null;
+  base_model: string | null;
+  size_mib: number | null;
+  provider: string;
+};
+
+export type RemoteModelCatalog = {
+  models: RemoteModel[];
+  active_model_id: string | null;
+  running: boolean;
+  status: string;
+};
 
 export type CommandResult = {
   request_id: string;
@@ -172,6 +189,21 @@ export const sendCommand = (
   payload?: string | null,
   timeoutMs?: number,
 ) => invoke<CommandResult>("device_send", { toDevice, kind, command, payload: payload ?? null, timeoutMs: timeoutMs ?? null });
+
+export async function listRemoteModels(toDevice: string): Promise<RemoteModelCatalog> {
+  const result = await sendCommand(toDevice, "model_catalog", "", null, 30_000);
+  if (!result.ok) throw new Error(result.error || `model catalogue ${result.decision}`);
+  try {
+    return JSON.parse(result.stdout) as RemoteModelCatalog;
+  } catch {
+    throw new Error("paired device returned an invalid model catalogue");
+  }
+}
+
+export async function startRemoteModel(toDevice: string, modelId: string): Promise<void> {
+  const result = await sendCommand(toDevice, "model_start", modelId, null, 300_000);
+  if (!result.ok) throw new Error(result.error || `model start ${result.decision}`);
+}
 export const controlState = () => invoke<ControlState>("device_control_state");
 export const stopRemoteControl = () => invoke<{ cancelled: number }>("device_stop_remote_control");
 export const auditTail = (limit?: number) => invoke<unknown[]>("device_audit_tail", { limit: limit ?? 200 });

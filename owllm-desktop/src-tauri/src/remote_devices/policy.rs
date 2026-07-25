@@ -46,7 +46,7 @@ pub fn authorize(kind: CommandKind, policy: &PermissionPolicy) -> Authorization 
         // Screenshot (privacy-sensitive) and Inference (uses the target's GPU)
         // ride the shell tier: a controller trusted with shell already has this
         // reach, and same-account controllers get the standard full grant.
-        Screenshot | Inference => {
+        Screenshot | Inference | ModelCatalog | ModelStart => {
             if policy.allow_shell {
                 Allowed
             } else {
@@ -98,6 +98,8 @@ mod tests {
         assert_eq!(authorize(Wsl, &p), Denied);
         assert_eq!(authorize(FileWrite, &p), Denied);
         assert_eq!(authorize(Admin, &p), Denied);
+        assert_eq!(authorize(ModelCatalog, &p), Denied);
+        assert_eq!(authorize(ModelStart, &p), Denied);
     }
 
     #[test]
@@ -105,6 +107,8 @@ mod tests {
         let mut p = all_off();
         p.allow_shell = true;
         assert_eq!(authorize(Shell, &p), Allowed);
+        assert_eq!(authorize(ModelCatalog, &p), Allowed);
+        assert_eq!(authorize(ModelStart, &p), Allowed);
         // ...and nothing else leaks open.
         assert_eq!(authorize(Wsl, &p), Denied);
         assert_eq!(authorize(FileWrite, &p), Denied);

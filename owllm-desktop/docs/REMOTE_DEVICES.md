@@ -226,6 +226,7 @@ PermissionPolicy { allow_shell, allow_wsl, allow_file_writes, allow_admin }
 |---|---|---|
 | `Diagnostics` | **Allowed** (read-only) | Allowed |
 | `Shell` | Denied | Allowed |
+| `ModelCatalog` / `ModelStart` / `Inference` | Denied | Allowed (shell/remote-model toggle) |
 | `Wsl` | Denied | Allowed |
 | `FileWrite` | Denied | **RequiresApproval** (per-action, target-side) |
 | `Admin` | Denied | **RequiresApproval** (per-action, target-side) |
@@ -242,6 +243,10 @@ single security-decision chokepoint.
   an active-session table so it can be **cancelled** / killed.
 - **WSL** (gated, Windows targets): routed through the existing
   `wsl::run_in_distro_script` with a timeout; picks `best_linux_distro()`.
+- **Remote models** (gated with shell): the controller can list only runnable
+  local/tuned models, start or switch one through the managed server lifecycle,
+  and proxy inference over the sealed P2P channel. The selected model is pinned
+  on every request so a target restart cannot silently route to another model.
 - **FileWrite / Admin** (dangerous): authorize returns `RequiresApproval`. The
   target registers a **pending approval**, emits `remote-devices:approval` (the
   UI shows a prominent prompt), and the command **waits** on a `oneshot` for a
@@ -267,7 +272,8 @@ single security-decision chokepoint.
 - **Trust store + full pairing flow** (request / approve / deny / revoke) — over the wire and by IP.
 - **Permission policy** with the four toggles, read-only default, unit-tested `authorize()`.
 - **Sealed+signed envelope** crypto, unit-tested round-trip + tamper/replay rejection.
-- **Executor**: diagnostics + shell + WSL + FileWrite, with timeout + cancellation.
+- **Executor**: diagnostics + shell + WSL + FileWrite + remote model catalogue,
+  managed model switching, and encrypted inference, with timeout + cancellation.
 - **Approved-dangerous execution** — FileWrite/Admin run only after a live target-side approval.
 - **Persistent replay cache** — survives restart (pruned to the freshness window).
 - **Redacted audit** on both ends; audit viewer in the UI.

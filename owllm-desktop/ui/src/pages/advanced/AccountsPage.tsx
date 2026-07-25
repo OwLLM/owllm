@@ -28,14 +28,6 @@ import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
 import { openWebUrl } from "../../utils/openWebUrl";
 
-const HOST_IS_WINDOWS = navigator.userAgent.includes("Windows");
-const HOST_LABEL = HOST_IS_WINDOWS
-  ? "Windows"
-  : navigator.userAgent.includes("Mac")
-    ? "macOS"
-    : navigator.userAgent.includes("Linux")
-      ? "Linux"
-      : "Host";
 const ACCOUNT_ONBOARDING_KEY = "owllm:accounts:onboarding-provider";
 
 // VoiceRuntimePanel — surfaces the status of the bundled whisper.cpp
@@ -565,11 +557,12 @@ function ApiKeyDialog({
 // One route row inside a provider container.
 // -----------------------------------------------------------------------
 function RouteRow({
-  provider, route, state, onConnect, onInstall, onDisconnect, onTest,
+  provider, route, state, hostLabel, onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
   route: RouteSpec;
   state: CardState;
+  hostLabel: string;
   onConnect: () => void;
   onInstall: () => void;
   onDisconnect: () => void;
@@ -621,7 +614,7 @@ function RouteRow({
           fontSize: 11, marginLeft: 17, wordBreak: "break-word",
           color: state.testing ? "#dcb0ff" : state.testOk ? "#4caf50" : "#ff8c8c",
         }}>
-          {state.testing ? "Running probe…" : <><b>Windows:</b> {state.testText}</>}
+          {state.testing ? "Running probe…" : <><b>{hostLabel}:</b> {state.testText}</>}
         </div>
       )}
       {!state.testing && state.wslText && (
@@ -635,6 +628,7 @@ function RouteRow({
       <div style={{ display: "flex", gap: 8, marginLeft: 17, marginTop: 4 }}>
         {cliBackedSub && !connected && (
           <button
+            data-cli-backend={route.backend}
             onClick={onInstall}
             disabled={state.installing}
             style={{
@@ -658,6 +652,7 @@ function RouteRow({
           }}
         >{primaryLabel}</button>
         <button
+          data-cli-test-backend={route.backend}
           onClick={onTest}
           disabled={!connected || state.testing}
           style={{
@@ -678,11 +673,12 @@ function RouteRow({
 // Provider container — header + N route rows.
 // -----------------------------------------------------------------------
 function ProviderCard({
-  provider, cards, highlighted, onConnect, onInstall, onDisconnect, onTest,
+  provider, cards, highlighted, hostLabel, onConnect, onInstall, onDisconnect, onTest,
 }: {
   provider: ProviderSpec;
   cards: Record<string, CardState>;
   highlighted?: boolean;
+  hostLabel: string;
   onConnect: (route: RouteSpec) => void;
   onInstall: (route: RouteSpec) => void;
   onDisconnect: (route: RouteSpec) => void;
@@ -720,6 +716,7 @@ function ProviderCard({
             provider={provider}
             route={route}
             state={cards[route.key] ?? initialCardState}
+            hostLabel={hostLabel}
             onConnect={() => onConnect(route)}
             onInstall={() => onInstall(route)}
             onDisconnect={() => onDisconnect(route)}
@@ -1328,6 +1325,7 @@ export default function AccountsPage() {
               provider={provider}
               cards={cards}
               highlighted={onboardingProvider === provider.key}
+              hostLabel={hostLabel}
               onConnect={(r) => handleConnect(r, provider)}
               onInstall={(r) => handleInstall(r, provider)}
               onDisconnect={(r) => handleDisconnect(r, provider)}

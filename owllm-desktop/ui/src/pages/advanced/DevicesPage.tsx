@@ -13,6 +13,7 @@ import LogBox from "../../components/LogBox";
 import KvmNodePanel from "./KvmNodePanel";
 import RemoteTerminal from "./RemoteTerminal";
 import { isDeviceOnline } from "./deviceLiveness";
+import { getInferenceEndpoint, setInferenceEndpoint } from "../agentic/inferenceEndpoint";
 import * as rd from "./remoteDevices";
 import type {
   CommandKind,
@@ -37,7 +38,7 @@ type AuditRow = {
 };
 
 const POLICY_LABELS: Array<{ key: keyof PermissionPolicy; label: string; danger?: boolean }> = [
-  { key: "allow_shell", label: "Shell commands" },
+  { key: "allow_shell", label: "Shell commands + remote models" },
   { key: "allow_wsl", label: "WSL commands" },
   { key: "allow_file_writes", label: "File writes", danger: true },
   { key: "allow_admin", label: "Admin / system", danger: true },
@@ -66,6 +67,8 @@ export default function DevicesPage() {
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const [audit, setAudit] = useState<AuditRow[]>([]);
   const [err, setErr] = useState("");
+  const [remoteModels, setRemoteModels] = useState<Record<string, rd.RemoteModelCatalog | null>>({});
+  const [remoteModelErrors, setRemoteModelErrors] = useState<Record<string, string>>({});
 
   // Console state.
   const [target, setTarget] = useState<string>("");
@@ -129,6 +132,31 @@ export default function DevicesPage() {
     const auditTimer = window.setTimeout(() => { void guard(reloadAudit); }, 250);
     return () => { window.clearTimeout(coreTimer); window.clearTimeout(auditTimer); };
   }, [guard, reloadAudit, reloadCore]);
+
+  // Pairing should expose useful compute, not just a transport badge. Query
+  // each reachable peer's protected model catalogue and surface the result on
+  // its device row. Failures stay per-device so one offline/older peer cannot
+  // hide the rest of the fleet.
+  useEffect(() => {
+    if (!isTauri) return;
+    const peers = devices.filter((d) => !d.is_self && isDeviceOnline(d));
+    let cancelled = false;
+    for (const peer of peers) {
+      void rd.listRemoteModels(peer.device_id).then(
+        (catalog) => {
+          if (cancelled) return;
+          setRemoteModels((prev) => ({ ...prev, [peer.device_id]: catalog }));
+          setRemoteModelErrors((prev) => ({ ...prev, [peer.device_id]: "" }));
+        },
+        (e) => {
+          if (cancelled) return;
+          setRemoteModels((prev) => ({ ...prev, [peer.device_id]: null }));
+          setRemoteModelErrors((prev) => ({ ...prev, [peer.device_id]: String(e) }));
+        },
+      );
+    }
+    return () => { cancelled = true; };
+  }, [devices]);
 
   // Live updates: being-controlled, dangerous-action approvals, incoming pairing,
   // and vault-discovery refreshes.
@@ -215,6 +243,16 @@ export default function DevicesPage() {
   const saveRelay = () => guard(async () => { await rd.setRelay(relayUrlDraft.trim() || null); setRelayUrlDraft(""); await reload(); });
   const toggleRelayServer = (on: boolean) => guard(async () => { if (on) await rd.relayServe(); else await rd.relayStop(); await reload(); });
   const toggleAgents = (on: boolean) => guard(async () => { await rd.setAgentsAllowed(on); await reload(); });
+  const useRemoteModels = (device: DeviceRecord) => {
+    setInferenceEndpoint({
+      ...getInferenceEndpoint(),
+      mode: "device",
+      deviceId: device.device_id,
+      deviceName: device.name,
+      remoteModelId: undefined,
+    });
+    window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "server" } }));
+  };
 
   const stopAll = () =>
     guard(async () => {
@@ -327,8 +365,11 @@ export default function DevicesPage() {
           selftestMsg={selftestMsg}
           onToggle={(on) => guard(async () => { await rd.setEnabled(on); await reload(); })}
         />
-        <DeviceList
-          devices={devices}
+      <DeviceList
+        devices={devices}
+        remoteModels={remoteModels}
+        remoteModelErrors={remoteModelErrors}
+        onUseModels={useRemoteModels}
           onPair={(id) => guard(async () => { await rd.requestPairing(id); await reload(); })}
           onForget={(id) => guard(async () => { await rd.forgetDevice(id); await reload(); })}
           trusted={trusted}
@@ -630,9 +671,12 @@ function NetworkPanel({
 }
 
 function DeviceList({
-  devices, onPair, onForget, trusted, manualAddr, setManualAddr, onPairByIp, onDiscover, discoverMsg,
+  devices, remoteModels, remoteModelErrors, onUseModels, onPair, onForget, trusted, manualAddr, setManualAddr, onPairByIp, onDiscover, discoverMsg,
 }: {
   devices: DeviceRecord[];
+  remoteModels: Record<string, rd.RemoteModelCatalog | null>;
+  remoteModelErrors: Record<string, string>;
+  onUseModels: (device: DeviceRecord) => void;
   onPair: (id: string) => void;
   onForget: (id: string) => void;
   trusted: TrustedController[];
@@ -657,6 +701,8 @@ function DeviceList({
         const online = isDeviceOnline(d);
         const ts = trustState(d.device_id);
         const noAddress = !d.is_self && !(d.endpoints?.length || d.endpoint || d.p2p_node_id);
+        const catalog = remoteModels[d.device_id];
+        const modelError = remoteModelErrors[d.device_id];
         return (
           <div key={d.device_id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, padding: "5px 8px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-card)" }}>
             <span className="status-dot" style={{ background: online ? "var(--ok)" : "var(--fg-subtle)", width: 8, height: 8, borderRadius: 4 }} />
@@ -667,6 +713,27 @@ function DeviceList({
             {ts === "revoked" && <span style={badge("var(--error)")}>revoked</span>}
             <span style={{ color: "var(--fg-muted)" }}>{d.os}</span>
             <span style={{ color: "var(--fg-subtle)" }}>v{d.app_version}</span>
+            {!d.is_self && catalog && (
+              <span
+                style={badge(catalog.running ? "var(--ok)" : "var(--accent)")}
+                title={catalog.running && catalog.active_model_id
+                  ? `Running ${catalog.active_model_id}`
+                  : `${catalog.models.length} runnable model(s); server stopped`}
+              >
+                {catalog.models.length} model{catalog.models.length === 1 ? "" : "s"}
+                {catalog.running && catalog.active_model_id ? ` · ${catalog.active_model_id}` : ""}
+              </span>
+            )}
+            {!d.is_self && modelError && (
+              <span
+                style={badge("var(--warn)")}
+                title={modelError.includes("permission denied")
+                  ? "Paired, but this device has not granted remote model access."
+                  : modelError}
+              >
+                models unavailable
+              </span>
+            )}
             {noAddress && (
               <span title="That machine hasn't published a dialable address yet. Open its Devices page and enable remote control — the address syncs here via your vault."
                 style={{ fontSize: 10.5, color: "var(--warn)" }}>
@@ -675,6 +742,16 @@ function DeviceList({
             )}
             <span style={{ flex: 1 }} />
             <span style={{ fontSize: 10.5, color: "var(--fg-subtle)" }}>{online ? "online" : relativeSeen(d.last_seen)}</span>
+            {!d.is_self && catalog && catalog.models.length > 0 && (
+              <button
+                className="ghost-btn"
+                onClick={() => onUseModels(d)}
+                title={`Select and run a model installed on ${d.name}`}
+                style={{ fontSize: 10.5, padding: "1px 8px", color: "var(--ok)" }}
+              >
+                Use models →
+              </button>
+            )}
             {d.is_self ? (
               <button className="ghost-btn" onClick={() => onPair(d.device_id)} title="Simulate a pairing request (v1 loopback) to drive the approve→control flow" style={{ fontSize: 10.5, padding: "1px 6px" }}>
                 Pair (self-test)
@@ -739,7 +816,7 @@ function TrustedControllers({
             ))}
           </div>
           <span style={{ fontSize: 10.5, color: "var(--fg-subtle)" }}>
-            Default is read-only diagnostics. File writes &amp; admin also require a per-action approval on this machine (not executable in v1).
+            Remote model catalogue, model switching, and inference share the Shell commands permission. Default is read-only diagnostics. File writes &amp; admin also require a per-action approval on this machine (not executable in v1).
           </span>
         </div>
       ))}

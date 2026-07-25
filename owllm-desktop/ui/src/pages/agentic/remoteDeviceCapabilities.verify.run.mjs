@@ -49,9 +49,12 @@ check(
 // ── 2. Remote Screenshot ──────────────────────────────────────────────────
 check(protocol.includes("Screenshot,"), "protocol: CommandKind has a Screenshot variant");
 check(protocol.includes("pub image: Option<String>"), "protocol: CommandResult carries an image (base64 PNG) field");
-check(policy.includes("Screenshot | Inference =>"), "policy: Screenshot + Inference gated together");
 check(
-  /Screenshot \| Inference =>\s*\{\s*if policy\.allow_shell/.test(policy),
+  policy.includes("Screenshot | Inference | ModelCatalog | ModelStart =>"),
+  "policy: Screenshot + Inference + remote model control gated together",
+);
+check(
+  /Screenshot \| Inference \| ModelCatalog \| ModelStart =>\s*\{\s*if policy\.allow_shell/.test(policy),
   "policy: Screenshot/Inference gated by allow_shell (frictionless for same-account, blocked otherwise)",
 );
 check(executor.includes("CommandKind::Screenshot => take_screenshot"), "executor: Screenshot routed to take_screenshot");
@@ -84,7 +87,9 @@ check(
   "inferenceEndpoint: a 'device' inference mode exists",
 );
 check(
-  inferenceEndpoint.includes("ep.mode === \"device\"") && inferenceEndpoint.includes("device: { id: ep.deviceId"),
+  inferenceEndpoint.includes("ep.mode === \"device\"") &&
+    inferenceEndpoint.includes("id: ep.deviceId") &&
+    inferenceEndpoint.includes("modelId: ep.remoteModelId"),
   "inferenceEndpoint: resolveInferenceBase returns a device target in device mode",
 );
 check(dispatch.includes("async function deviceChatCompletion"), "dispatch: deviceChatCompletion helper (sealed-channel round-trip)");

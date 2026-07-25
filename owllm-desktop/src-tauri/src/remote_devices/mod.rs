@@ -78,6 +78,8 @@ fn kind_str(k: CommandKind) -> &'static str {
         CommandKind::SessionClose => "session_close",
         CommandKind::Screenshot => "screenshot",
         CommandKind::Inference => "inference",
+        CommandKind::ModelCatalog => "model_catalog",
+        CommandKind::ModelStart => "model_start",
     }
 }
 

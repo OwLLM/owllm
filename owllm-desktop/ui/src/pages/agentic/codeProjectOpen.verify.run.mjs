@@ -81,8 +81,13 @@ const createEnd = fleet.indexOf("// --------------------------------------------
 const createBody = fleet.slice(createStart, createEnd);
 check(createStart >= 0 && !createBody.includes("sync_current_branch_from_origin(&cwd)"),
   "opening a Coding page does not require local/remote history reconciliation");
-check(fleet.slice(createEnd).includes("sync_current_branch_from_origin(&cwd)"),
-  "remote-history safety remains enforced when work is integrated");
+const mergeStart = fleet.indexOf("fn fleet_worktree_merge_blocking(");
+const mergeEnd = fleet.indexOf("// ------------------------------------------------------------------\n// 5.", mergeStart);
+check(mergeStart >= 0 && !fleet.slice(mergeStart, mergeEnd).includes("sync_current_branch_from_origin(&cwd)"),
+  "local worktree integration does not duplicate the cross-PC synchronization policy");
+const release = read(path.join(DESKTOP, "src-tauri", "src", "release.rs"));
+check(release.includes("pub async fn repo_sync") && release.includes("sync_blocking"),
+  "cross-PC remote-history safety remains centralized in repo_sync");
 
 const mirror = read(path.join(DESKTOP, "src-tauri", "src", "state_mirror.rs"));
 check(mirror.includes('const LEGACY_IMPORT_MARKER: &str = "migration:legacy-webview-leveldb-v2"'),

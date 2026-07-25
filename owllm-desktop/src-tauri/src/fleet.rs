@@ -1,13 +1,10 @@
-// Fleet — per-agent git worktree isolation for parallel dispatches.
+// Fleet — per-agent git worktree isolation for filesystem-capable runs.
 //
-// Today's React dispatch loop runs every specialist in the same cwd
-// (the project location the user picked). When two specialists run
-// concurrently — coder + critic, or coder + docs — their edits race on
-// the same working tree; one write wins, the other is lost, and git
-// state ends up undefined. This module gives each specialist its own
-// `git worktree` on a private branch so the parallel runs are
-// technically isolated, then a serial squash-merge step folds each
-// agent's changes back into the user's project tree with attribution.
+// Every Agentic run that can see a project filesystem receives a private
+// `git worktree`, including solo, single-agent, sequential, parallel, and WSL
+// runs. This prevents model/tool behavior from mutating the user's shared
+// checkout while another page, process, or PC is integrating work. A serial
+// squash-merge step folds successful work back with attribution.
 //
 // Flow per dispatch:
 //   1. fleet_worktree_create(project_cwd, agent, run_id)
@@ -23,9 +20,9 @@
 //          with both sides preserved (never silently prefer one side)
 //   5. fleet_worktree_remove(path, branch, keep_on_failure)
 //
-// Non-git projects: every command returns an `Outcome::NotAGitRepo`
-// status so the frontend can fall back to the old "one shared cwd"
-// behaviour without a hard error.
+// Non-git projects return `Outcome::NotAGitRepo`; filesystem-capable Agentic
+// runs fail closed and ask the user to initialize Git. They never silently
+// downgrade to the shared project directory.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,6 +42,46 @@ fn fleet_root() -> Option<PathBuf> {
     } else {
         std::env::var_os("HOME").map(|d| PathBuf::from(d).join(".owllm").join("fleet"))
     }
+}
+
+fn linux_path_to_wsl_unc(distro: &str, linux_path: &str) -> PathBuf {
+    let tail = linux_path.trim_start_matches('/').replace('/', "\\");
+    PathBuf::from(format!(r"\\wsl.localhost\{distro}\{tail}"))
+}
+
+fn fleet_root_for(project_cwd: &str) -> Result<PathBuf, String> {
+    let Some((distro, _)) = crate::wsl::parse_wsl_unc(project_cwd) else {
+        return fleet_root()
+            .ok_or_else(|| "could not resolve a home dir for the fleet scratch root".to_string());
+    };
+    let output = crate::wsl::run_in_distro(
+        &distro,
+        "printf '__OWLLM_FLEET_HOME__=%s\\n' \"$HOME\"",
+    )?;
+    let home = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("__OWLLM_FLEET_HOME__="))
+        .unwrap_or("")
+        .trim();
+    if home.is_empty() || !home.starts_with('/') {
+        return Err(format!(
+            "could not resolve the Linux home directory in WSL distro {distro}"
+        ));
+    }
+    Ok(linux_path_to_wsl_unc(
+        &distro,
+        &format!("{home}/.owllm/fleet"),
+    ))
+}
+
+fn git_reported_path_for_host(repo: &Path, reported_path: &str) -> PathBuf {
+    let repo_text = repo.to_string_lossy();
+    if reported_path.starts_with('/') {
+        if let Some((distro, _)) = crate::wsl::parse_wsl_unc(&repo_text) {
+            return linux_path_to_wsl_unc(&distro, reported_path);
+        }
+    }
+    PathBuf::from(reported_path)
 }
 
 /// Per-source-repo lock so two Code pages (or a page + a team dispatch) that
@@ -144,61 +181,6 @@ fn drop_staged_app_scratch(cwd: &Path) -> Result<(), String> {
         let _ = git(cwd, &["reset", "--", path]);
     }
     Ok(())
-}
-
-/// Bring the checked-out project branch up to its remote tip before cutting or
-/// merging an isolated worktree. The Code page keeps worktrees open for a long
-/// time, so the source checkout can otherwise remain hundreds of commits behind
-/// `origin` while Merge still reports success locally. Only a safe fast-forward
-/// is automatic: local-ahead branches are preserved, and genuine divergence is
-/// surfaced instead of rebasing or overwriting user history.
-fn sync_current_branch_from_origin(cwd: &Path) -> Result<(), String> {
-    let (has_origin, _, _) = git(cwd, &["remote", "get-url", "origin"])?;
-    if !has_origin {
-        return Ok(());
-    }
-
-    let (branch_ok, branch, branch_err) = git(cwd, &["symbolic-ref", "--short", "HEAD"])?;
-    if !branch_ok || branch.trim().is_empty() {
-        return Err(format!(
-            "project checkout is detached; check out its target branch before using an isolated Code page: {}",
-            branch_err.trim()
-        ));
-    }
-    let branch = branch.trim();
-    let remote_ref = format!("origin/{branch}");
-    let (fetch_ok, _, fetch_err) = git(cwd, &["fetch", "origin", "--prune"])?;
-    if !fetch_ok {
-        return Err(format!(
-            "could not refresh {remote_ref} before worktree integration: {}",
-            fetch_err.trim()
-        ));
-    }
-    let (remote_exists, _, _) = git(cwd, &["rev-parse", "--verify", &remote_ref])?;
-    if !remote_exists {
-        return Ok(());
-    }
-
-    let (local_is_behind, _, _) = git(cwd, &["merge-base", "--is-ancestor", "HEAD", &remote_ref])?;
-    if local_is_behind {
-        let (ff_ok, _, ff_err) = git(cwd, &["merge", "--ff-only", &remote_ref])?;
-        if !ff_ok {
-            return Err(format!(
-                "could not fast-forward the project checkout to {remote_ref}: {}",
-                ff_err.trim()
-            ));
-        }
-        return Ok(());
-    }
-
-    let (remote_is_behind, _, _) = git(cwd, &["merge-base", "--is-ancestor", &remote_ref, "HEAD"])?;
-    if remote_is_behind {
-        return Ok(()); // Local commits are waiting to be pushed; preserve them.
-    }
-
-    Err(format!(
-        "the project checkout and {remote_ref} have diverged. Sync that checkout first; OWLLM will not rewrite or silently publish divergent history."
-    ))
 }
 
 /// Identical untracked files can still make `git merge` abort before it starts.
@@ -638,20 +620,42 @@ fn git_cmd(dir: &Path) -> Command {
 
 /// Is `dir` the root of a git repo (or inside one)?
 fn is_git_repo(dir: &Path) -> bool {
-    git_cmd(dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
+    git_once(dir, &["rev-parse", "--is-inside-work-tree"])
+        .map(|(ok, out, _)| ok && out.trim() == "true")
         .unwrap_or(false)
 }
 
 fn git_once(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
-    let out = git_cmd(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("git {} in {}: {}", args.join(" "), dir.display(), e))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let dir_text = dir.to_string_lossy();
+    let out = if let Some((distro, linux_cwd)) = crate::wsl::parse_wsl_unc(&dir_text) {
+        let mapped_args: Vec<String> = args
+            .iter()
+            .map(|arg| {
+                crate::wsl::parse_wsl_unc(arg)
+                    .filter(|(arg_distro, _)| arg_distro.eq_ignore_ascii_case(&distro))
+                    .map(|(_, linux_path)| linux_path)
+                    .unwrap_or_else(|| (*arg).to_string())
+            })
+            .collect();
+        crate::wsl::wsl_program_command(&distro, &linux_cwd, "git", &mapped_args)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "git {} in WSL {}:{}: {}",
+                    args.join(" "),
+                    distro,
+                    linux_cwd,
+                    e
+                )
+            })?
+    } else {
+        git_cmd(dir)
+            .args(args)
+            .output()
+            .map_err(|e| format!("git {} in {}: {}", args.join(" "), dir.display(), e))?
+    };
+    let stdout = crate::wsl::decode_wsl(&out.stdout);
+    let stderr = crate::wsl::decode_wsl(&out.stderr);
     Ok((out.status.success(), stdout, stderr))
 }
 
@@ -697,8 +701,8 @@ pub enum CreateOutcome {
         /// the same point.
         base_sha: String,
     },
-    /// project_cwd isn't a git repo — caller should fall back to the
-    /// shared-cwd path with no isolation.
+    /// project_cwd isn't a git repo. Filesystem-capable callers must stop;
+    /// there is no safe shared-cwd fallback.
     NotAGitRepo,
     /// Working tree has uncommitted changes — would silently end up in
     /// the agent's branch via the base it's cut from. Caller decides
@@ -778,10 +782,11 @@ pub async fn fleet_worktree_create(
     }
     let base_sha = base_sha.trim().to_string();
 
-    let Some(fleet_root) = fleet_root() else {
-        return Ok(CreateOutcome::Error {
-            message: "could not resolve a home dir for the fleet scratch root".to_string(),
-        });
+    let fleet_root = match fleet_root_for(&project_cwd) {
+        Ok(root) => root,
+        Err(message) => {
+            return Ok(CreateOutcome::Error { message });
+        }
     };
     let repo_name = cwd
         .file_name()
@@ -1004,9 +1009,10 @@ fn fleet_worktree_merge_blocking(
     // failures or interleaving one page's staged squash with another's.
     let lock = repo_git_lock(&cwd);
     let _merge_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-    if let Err(message) = sync_current_branch_from_origin(&cwd) {
-        return Ok(MergeOutcome::Error { message });
-    }
+    // Integrate into the user's CURRENT local branch. Cross-PC reconciliation
+    // belongs to the single repo_sync coordinator after local integration.
+    // Fetching here with a fast-forward-only policy made a valid isolated run
+    // impossible to merge whenever another PC had advanced origin/main.
     let mut untracked_backup = match prepare_untracked_collisions(&cwd, &branch) {
         Ok(backup) => backup,
         Err(message) => return Ok(MergeOutcome::Error { message }),
@@ -1161,7 +1167,7 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
                 if !branch.starts_with("owllm-fleet/") {
                     continue;
                 } // team only
-                let wt = PathBuf::from(&p);
+                let wt = git_reported_path_for_host(&cwd, &p);
                 let dirty = git(&wt, &["status", "--porcelain", "--untracked-files=no"])
                     .map(|(_, o, _)| !o.trim().is_empty())
                     .unwrap_or(true); // can't tell → assume dirty → keep
@@ -1173,7 +1179,7 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
                 } // has work → KEEP
                 let _ = git(&cwd, &["worktree", "remove", "--force", &p]);
                 let _ = git(&cwd, &["branch", "-D", &branch]);
-                let _ = std::fs::remove_dir_all(&p);
+                let _ = std::fs::remove_dir_all(&wt);
                 if let Some(parent) = wt.parent() {
                     let _ = std::fs::remove_dir(parent);
                 } // empty run dir
@@ -1212,8 +1218,8 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 mod tests {
     use super::{
         fleet_worktree_finalize, fleet_worktree_merge_blocking, git_failure_message,
-        is_app_scratch, porcelain_path, sync_current_branch_from_origin, unstage_app_scratch,
-        user_conflict_files, FinalizeOutcome, MergeOutcome,
+        git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc, porcelain_path,
+        unstage_app_scratch, user_conflict_files, FinalizeOutcome, MergeOutcome,
     };
     use std::{fs, path::Path, process::Command};
 
@@ -1350,46 +1356,19 @@ mod tests {
     }
 
     #[test]
-    fn project_checkout_fast_forwards_to_remote_source_of_truth() {
-        let source = init_merge_repo();
-        let remote = tempfile::tempdir().unwrap();
-        git_ok(remote.path(), &["init", "--bare"]);
-        git_ok(
-            source.path(),
-            &["remote", "add", "origin", &remote.path().to_string_lossy()],
+    fn wsl_fleet_paths_round_trip_to_the_same_distro() {
+        let unc = linux_path_to_wsl_unc(
+            "Ubuntu",
+            "/home/owllm/.owllm/fleet/repo/run/coder",
         );
-        git_ok(source.path(), &["push", "-u", "origin", "main"]);
-
-        let peer = tempfile::tempdir().unwrap();
-        git_ok(
-            peer.path(),
-            &["clone", &remote.path().to_string_lossy(), "."],
-        );
-        git_ok(peer.path(), &["config", "user.email", "peer@owllm.local"]);
-        git_ok(peer.path(), &["config", "user.name", "OwLLM Peer"]);
-        git_ok(peer.path(), &["checkout", "main"]);
-        fs::write(peer.path().join("remote.txt"), b"published elsewhere").unwrap();
-        git_ok(peer.path(), &["add", "remote.txt"]);
-        git_ok(peer.path(), &["commit", "-m", "remote advance"]);
-        git_ok(peer.path(), &["push", "origin", "main"]);
-
-        sync_current_branch_from_origin(source.path()).unwrap();
-
         assert_eq!(
-            fs::read(source.path().join("remote.txt")).unwrap(),
-            b"published elsewhere"
+            unc.to_string_lossy().replace('/', "\\"),
+            r"\\wsl.localhost\Ubuntu\home\owllm\.owllm\fleet\repo\run\coder"
         );
-        let local = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(source.path())
-            .output()
-            .unwrap();
-        let remote_head = Command::new("git")
-            .args(["rev-parse", "origin/main"])
-            .current_dir(source.path())
-            .output()
-            .unwrap();
-        assert_eq!(local.stdout, remote_head.stdout);
+        let repo = Path::new(r"\\wsl.localhost\Ubuntu\home\owllm\repo");
+        let reported =
+            git_reported_path_for_host(repo, "/home/owllm/.owllm/fleet/repo/run/coder");
+        assert_eq!(reported, unc);
     }
 
     #[test]

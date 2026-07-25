@@ -145,6 +145,11 @@ import {
   graphJsonWithoutAgentModels,
   resolveAgentModel,
 } from "./teamModelSelection";
+import {
+  requiresAgentWorktree,
+  worktreeCreationFailure,
+  type WorktreeCreateState,
+} from "./worktreeIsolation";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -4893,11 +4898,8 @@ function GraphCanvas({
 
 // Mirror of fleet.rs Tauri command return shapes. The discriminator
 // is the `status` field (serde tag).
-type FleetCreateResult =
-  | { status: "ready"; path: string; branch: string; baseSha: string }
-  | { status: "notAGitRepo" }
-  | { status: "dirtyWorkingTree"; details: string }
-  | { status: "error"; message: string };
+type FleetCreateResult = WorktreeCreateState;
+type WorktreeBinding = { path: string; branch: string; baseSha: string };
 type FleetFinalizeResult =
   | { status: "committed"; commitSha: string; filesChanged: number; files: string[] }
   | { status: "noChanges" }
@@ -11209,6 +11211,33 @@ export function AgentsPage({
           ?? writers[0]
           ?? runTeam.agents.find(a => a.name !== orch.name)
           ?? orch;
+        if (!requiresAgentWorktree(projectCwd)) {
+          throw new Error(
+            "Solo mode needs a Git project directory so OWLLM can isolate its filesystem access. Select or initialize a Git project, then retry.",
+          );
+        }
+        const soloRunId = `${Date.now().toString(36).slice(-6)}-solo`;
+        const soloCreate = await invoke<FleetCreateResult>("fleet_worktree_create", {
+          projectCwd,
+          agentName: coder.name,
+          runId: soloRunId,
+        });
+        if (soloCreate.status !== "ready") {
+          throw new Error(worktreeCreationFailure(coder.name, projectCwd, soloCreate));
+        }
+        const soloWt: WorktreeBinding = {
+          path: soloCreate.path,
+          branch: soloCreate.branch,
+          baseSha: soloCreate.baseSha,
+        };
+        const soloCwd = soloWt.path;
+        let keepSoloWorktree = false;
+        appendThought(coder.name, {
+          role: "fleet",
+          color: "#7ff0c5",
+          text: `🗂 ${coder.name} → ${soloWt.branch}\n   ${soloWt.path}`,
+        });
+        try {
         appendLog("you", { role: "you", color: "#9ad9ff", text });
         addActive(coder.name);
         appendThought(coder.name, { role: "system", color: "#7fd4ff", text: "⚡ Solo-loop — one agent, no orchestration" });
@@ -11240,7 +11269,7 @@ export function AgentsPage({
           "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
           "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
         ].join("\n");
-        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, projectCwd, true) + "\n" + SOLO_OVERRIDE;
+        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, soloCwd, true) + "\n" + SOLO_OVERRIDE;
         const sAllowed = effectiveToolsFor(coder);
         const soloMemKey = runtimeMemoryKey(coder, selectedProjectId);
         const sMem = soloMemKey
@@ -11281,7 +11310,7 @@ export function AgentsPage({
             sText = (await streamChatCompletion(
               port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
               sPrompt, turn, tempFor(coder, 0.3), ctrl.signal,
-              (d) => streamLog(coder.name, d), projectCwd,
+              (d) => streamLog(coder.name, d), soloCwd,
               sHist, autoApprove,
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
               attachments.length > 0 ? attachments : undefined,
@@ -11291,7 +11320,7 @@ export function AgentsPage({
             )).trim();
           } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }
           if (isAuthError(sText)) break;  // 401 came back as reply text — don't gate/retry; handled below
-          sGate = await runGate(projectCwd, sScope);
+          sGate = await runGate(soloCwd, sScope);
           lastGateRef.current = sGate;
           if (sGate.status !== "failed") break;
           if (attempt >= 3) { appendThought(coder.name, { role: "system", color: "#ff8c8c", text: "⚠ verify still failing after 3 attempts — stopping." }); break; }
@@ -11303,6 +11332,7 @@ export function AgentsPage({
         // AUTH FAILURE: a 401 means the agent did nothing — never report "done".
         // Tell the user plainly to re-login (with the exact step), and stop.
         if (isAuthError(sText)) {
+          keepSoloWorktree = true;
           removeActive(coder.name);
           const m = authReloginMessage(providerFor(effectiveModelFor(coder)));
           appendLog("system", { role: "system", color: "#ff8c8c", text: m });
@@ -11324,12 +11354,12 @@ export function AgentsPage({
               port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
               sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteer}`,
               tempFor(coder, 0.3), ctrl.signal,
-              (d) => streamLog(coder.name, d), projectCwd,
+              (d) => streamLog(coder.name, d), soloCwd,
               sHist, autoApprove,
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed, undefined,
               getClaudeSession(selectedProjectId, coder.name),
             )).trim();
-            sGate = await runGate(projectCwd, sScope); lastGateRef.current = sGate;
+            sGate = await runGate(soloCwd, sScope); lastGateRef.current = sGate;
           } catch (e: any) { if (ctrl.signal.aborted) throw e; }
           finally { removeActive(coder.name); }
         }
@@ -11359,7 +11389,7 @@ export function AgentsPage({
                 "ONLY if it needs a decision the USER must make, say so on a line prefixed 'NEEDS USER:'.",
               ].join("\n"),
               criticTemp, ctrl.signal,
-              (d) => streamLog(CRITIC_NAME, d), projectCwd,
+              (d) => streamLog(CRITIC_NAME, d), soloCwd,
               undefined, undefined,
               (c, r, d) => streamThought(CRITIC_NAME, c, r, d),
               criticToolsForRun(), undefined,
@@ -11379,6 +11409,63 @@ export function AgentsPage({
             appendThought(coder.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker check skipped (${cleanAgentError(e)}) — shipping as-is.` });
           } finally { removeActive(CRITIC_NAME); }
         }
+        // Integrate only a cleanly completed isolated run. Failed verification,
+        // cancellation, or a pending user decision keeps the private branch and
+        // worktree intact for inspection/re-feed; it never leaks partial edits
+        // into the shared project checkout.
+        let soloIntegrationOk =
+          !ctrl.signal.aborted &&
+          (!sGate || sGate.status !== "failed") &&
+          !needsUserDecision;
+        if (!soloIntegrationOk) {
+          keepSoloWorktree = true;
+          appendThought(coder.name, {
+            role: "fleet",
+            color: "#ffb74d",
+            text: `⏸ isolated work kept at ${soloWt.path}\nBranch: ${soloWt.branch}`,
+          });
+        } else {
+          const soloFinalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {
+            worktreePath: soloWt.path,
+            agentName: coder.name,
+            summary: text,
+          });
+          if (soloFinalize.status === "committed") {
+            const soloMerge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
+              projectCwd,
+              agentName: coder.name,
+              branch: soloWt.branch,
+            });
+            if (soloMerge.status === "merged") {
+              appendThought(coder.name, {
+                role: "fleet",
+                color: "#7ff0c5",
+                text: `🔀 merged ${coder.name} → ${soloMerge.commitSha.slice(0, 7)} · ${soloMerge.filesChanged} file${soloMerge.filesChanged === 1 ? "" : "s"}`,
+              });
+            } else if (soloMerge.status === "noChanges") {
+              appendThought(coder.name, { role: "fleet", color: "var(--fg-muted)", text: "🔀 nothing to merge" });
+            } else {
+              keepSoloWorktree = true;
+              soloIntegrationOk = false;
+              const detail = soloMerge.status === "conflict"
+                ? `conflict in ${soloMerge.files.join(", ")}`
+                : soloMerge.message;
+              appendThought(coder.name, {
+                role: "fleet",
+                color: "#ff8c8c",
+                text: `⚠ isolated work was not merged: ${detail}\nKept at ${soloWt.path}`,
+              });
+            }
+          } else if (soloFinalize.status === "error") {
+            keepSoloWorktree = true;
+            soloIntegrationOk = false;
+            appendThought(coder.name, {
+              role: "fleet",
+              color: "#ff8c8c",
+              text: `⚠ finalize failed: ${soloFinalize.message}\nKept at ${soloWt.path}`,
+            });
+          }
+        }
         // RULE-BASED PUBLISH: host commits+bumps+releases deterministically when asked.
         // The host build/sign/release can run for minutes with no model activity, so
         // KEEP the coder card active (pulsing) and flip the phase to "integrating"
@@ -11386,12 +11473,11 @@ export function AgentsPage({
         // chat stays locked with NO active card, leaving the user with no idea why.
         let sPub = "";
         const wantsPublish = goalRequiresPublish(text);
-        if (wantsPublish && needsUserDecision) {
-          // A user-only decision is pending — hold the release, don't ship blind.
-          appendThought(coder.name, { role: "system", color: "#ffd97a", text: "⏸ Publish held — waiting on your decision above." });
-          setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: "⏸ Publish is on hold until you answer the question above.", ts: Date.now(), seq: nextSeq() }]);
+        if (wantsPublish && !soloIntegrationOk) {
+          appendThought(coder.name, { role: "system", color: "#ffd97a", text: "⏸ Publish held — isolated work was not safely integrated." });
+          setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: "⏸ Publish is on hold because the isolated run was not safely integrated.", ts: Date.now(), seq: nextSeq() }]);
         }
-        if (wantsPublish && !needsUserDecision) {
+        if (wantsPublish && soloIntegrationOk) {
           setPhase("integrating");
           appendThought(coder.name, { role: "system", color: "#7ff0c5", text: "📦 rule-based publish — host building / signing / releasing…" });
           // Surface it in the main chat too (the thought buffer alone is easy to miss),
@@ -11428,7 +11514,7 @@ export function AgentsPage({
         // Minimal solo run report.
         const vtxt = sGate ? (sGate.status === "passed" ? "✓ verify passed" : sGate.status === "failed" ? "✗ verify FAILED" : "verify: unverified") : "ran";
         const ptxt = wantsPublish ? (/PUBLISH_OK/.test(sPub) ? " · ✓ published" : " · ✗ publish failed") : "";
-        const okRun = (!sGate || sGate.status !== "failed") && (!wantsPublish || /PUBLISH_OK/.test(sPub));
+        const okRun = soloIntegrationOk && (!sGate || sGate.status !== "failed") && (!wantsPublish || /PUBLISH_OK/.test(sPub));
         const secs = Math.round((Date.now() - (runTraceRef.current?.t0 ?? Date.now())) / 1000);
         setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now(), seq: nextSeq() }]);
         setPhase("done");
@@ -11436,6 +11522,18 @@ export function AgentsPage({
         notebookRunCompletedCleanly = okRun;
         if (!okRun) notebookPauseReason = "the solo run did not finish cleanly";
         return;
+        } finally {
+          try {
+            await invoke("fleet_worktree_remove", {
+              args: {
+                projectCwd,
+                worktreePath: soloWt.path,
+                branch: soloWt.branch,
+                keep: keepSoloWorktree,
+              },
+            });
+          } catch { /* worktree remains recoverable on disk */ }
+        }
       }
 
       // ----- Phase 1: orchestrator plan + dispatches -----
@@ -11926,42 +12024,26 @@ export function AgentsPage({
       const runId = Date.now().toString(36).slice(-6);
 
       // ----- Phase 2a: pre-create one git worktree per specialist -----
-      // Serial loop on purpose — concurrent `git worktree add` from the
-      // same source repo can race on `.git/worktrees/` index. After
-      // this loop every dispatch.agent has either: a per-agent worktree
-      // path to use as cwd (isolated), or null (fall back to projectCwd
-      // — happens when projectCwd isn't a git repo at all, e.g.
-      // research-only teams against a plain folder).
+      // Every run with a project cwd is isolated, including single-agent,
+      // sequential, and WSL runs. We cannot predict whether a model will decide
+      // to write later in its turn, so isolation is based on filesystem access,
+      // not on parallel mode or the initial prompt. Creation is serial because
+      // concurrent `git worktree add` calls race on `.git/worktrees/`.
       setPhase("dispatching");
       if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
-      type WorktreeBinding = { path: string; branch: string; baseSha: string };
       const worktreeBySpec = new Map<string, WorktreeBinding | null>();
-      // Per-agent git worktrees are a Windows-side operation; they can't be
-      // created on a `\\wsl.localhost\...` path (Windows can't reach it). For a
-      // WSL-isolated project the agents already run sealed inside the distro via
-      // wsl.exe — so skip the worktree step entirely and run them shared in the
-      // WSL folder. Isolation is preserved; we just don't sub-isolate per agent.
-      const wslShared = isWslPath(projectCwd);
-      if (wslShared) {
-        appendThought(orch.name, { role: "fleet", color: "#7ff0c5",
-          text: `🗂 WSL-isolated project — agents run sealed inside the distro (shared worktree).` });
-      }
-      // Per-agent worktrees exist ONLY to stop CONCURRENT agents from colliding on
-      // the same files. A sequential run (the default) has no concurrency, so it
-      // needs none — running in the project dir directly avoids cutting a full
-      // working-tree copy per agent on every run (the leftover-folders the user
-      // hit). Only a parallel run with >1 agent actually needs isolation.
-      const needWorktrees = !wslShared && parallelMode && dispatches.length > 1;
+      const needWorktrees = requiresAgentWorktree(projectCwd);
       // Reclaim any worktrees a PAST/crashed run left behind before making new
       // ones — per-run cleanup misses a run that crashed before its finally{}.
-      if (!wslShared) {
+      if (needWorktrees) {
         try {
           const n = await invoke<number>("fleet_cleanup_orphans", { projectCwd });
           if (n > 0) appendThought(orch.name, { role: "fleet", color: "#7ff0c5", text: `🧹 reclaimed ${n} leftover worktree(s) from a previous run.` });
         } catch { /* best-effort */ }
       }
-      // Surface a "🗂 isolated" or "🗂 shared" line in the orchestrator's
-      // Thought tab per dispatch so the user can see what happened.
+      // With no project cwd, agents have no project filesystem to share. With a
+      // project cwd, anything except Ready is a hard stop: never silently
+      // downgrade a filesystem-capable run to the user's shared checkout.
       for (const d of dispatches) {
         if (!needWorktrees) { worktreeBySpec.set(d.agentName, null); continue; }
         const spec = runTeam.agents.find(a => a.name === d.agentName);
@@ -11980,32 +12062,14 @@ export function AgentsPage({
             role: "fleet", color: "#7ff0c5",
             text: `🗂 ${spec.name} → ${res.branch}\n   ${res.path}`,
           });
-        } else if (res.status === "notAGitRepo") {
-          worktreeBySpec.set(spec.name, null);
-          appendThought(orch.name, {
-            role: "fleet", color: "var(--fg-muted)",
-            text: `🗂 ${spec.name}: project is not a git repo — running shared in ${projectCwd || "(no cwd)"}`,
-          });
-        } else if (res.status === "dirtyWorkingTree") {
-          // Abort the whole run with a clear, fixable error rather than
-          // silently giving the agent a stale base. The user can commit
-          // / stash and re-run.
-          throw new Error(
-            `Project has uncommitted changes — commit or stash before running a multi-agent dispatch so each agent works from a clean base.\n\n${res.details}`
-          );
         } else {
-          worktreeBySpec.set(spec.name, null);
-          appendThought(orch.name, {
-            role: "fleet", color: "#ff8c8c",
-            text: `🗂 ${spec.name}: worktree creation failed — ${res.message}. Falling back to shared cwd.`,
-          });
+          throw new Error(worktreeCreationFailure(spec.name, projectCwd, res));
         }
       }
 
       // ----- Phase 2b: parallel specialist dispatch -----
-      // Each task runs the CLI in its own worktree path (or the shared
-      // projectCwd if none was created), then finalizes (commits) any
-      // edits the agent made before resolving.
+      // Each task runs the CLI in its own worktree path. A null binding exists
+      // only when there is no project cwd at all.
       // Surface a parallel wave in the user thread so concurrency is visible
       // (Stage 1 "surface"). A single dispatch reads as the usual sequential step.
       if (dispatches.length > 1) {
@@ -12422,7 +12486,7 @@ export function AgentsPage({
           projectCwd,
           priorHistory, undefined,   // history: continuity for the final answer
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-          effectiveToolsFor(orch),
+          runtimeReadOnlyTools(orch, roleByName),
           undefined,
           getClaudeSession(selectedProjectId, orch.name),
         );
@@ -12512,7 +12576,7 @@ export function AgentsPage({
               projectCwd,
               priorHistory, undefined,
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-              effectiveToolsFor(orch),
+              runtimeReadOnlyTools(orch, roleByName),
               undefined,
               getClaudeSession(selectedProjectId, orch.name),
             );
@@ -12552,7 +12616,7 @@ export function AgentsPage({
             projectCwd,
             priorHistory, undefined,
             (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-            effectiveToolsFor(orch),
+            runtimeReadOnlyTools(orch, roleByName),
             undefined,
             getClaudeSession(selectedProjectId, orch.name),
           );
@@ -12635,9 +12699,20 @@ export function AgentsPage({
           if (wtRes.status === "ready") {
             docWt = { path: wtRes.path, branch: wtRes.branch, baseSha: wtRes.baseSha };
             appendThought(docSpec.name, { role: "fleet", color: "#7ff0c5", text: `🗂 ${docSpec.name} → ${wtRes.branch}` });
+          } else {
+            throw new Error(worktreeCreationFailure(docSpec.name, projectCwd, wtRes));
           }
-        } catch { /* fall back to shared cwd */ }
-        const docCwd = docWt ? docWt.path : projectCwd;
+        } catch (e: any) {
+          appendThought(docSpec.name, {
+            role: "fleet",
+            color: "#ff8c8c",
+            text: `📚 auto-doc stopped before dispatch: ${String(e?.message ?? e)}`,
+          });
+          removeActive(docSpec.name);
+          throw e;
+        }
+        if (!docWt) throw new Error(`Required worktree for @${docSpec.name} was not created.`);
+        const docCwd = docWt.path;
         const docAllowed = effectiveToolsFor(docSpec);
         const docSkillIds = [...(roleByName.get(docSpec.base)?.skillAllowlist ?? []), ...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
         const docSkillBlock = await buildAgentSkillBlock(

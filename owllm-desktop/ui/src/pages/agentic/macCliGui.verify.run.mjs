@@ -9,19 +9,19 @@ const desktopRoot = path.resolve(uiRoot, "..", "..");
 const accountsPage = fs.readFileSync(
   path.join(uiRoot, "pages", "advanced", "AccountsPage.tsx"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 const accountsRs = fs.readFileSync(
   path.join(desktopRoot, "src-tauri", "src", "accounts.rs"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 const ptyRs = fs.readFileSync(
   path.join(desktopRoot, "src-tauri", "src", "pty.rs"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 const pathsRs = fs.readFileSync(
   path.join(desktopRoot, "src-tauri", "src", "paths.rs"),
   "utf8",
-);
+).replace(/\r\n/g, "\n");
 
 let passed = 0;
 let failed = 0;

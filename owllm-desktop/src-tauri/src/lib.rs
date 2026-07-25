@@ -206,6 +206,13 @@ pub fn run() {
     // local build must not join (and inherit a hang from) the installed app or
     // another checkout. Installed and portable profiles remain unchanged.
     paths::init_isolated_webview_profile();
+    // SECURITY: neutralize a transplanted `.owllm` on launch. If the local
+    // vault clone belongs to a different GitHub account than the one signed in,
+    // this data folder was copied from someone else (portable stick, cloned
+    // disk image, shared build) and carries THEIR API keys + synced vault.
+    // Quarantine the inherited credentials and drop the foreign clone before any
+    // window or sync runs — so an app UPDATE fixes an already-leaked install.
+    vault::enforce_account_ownership_on_startup();
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
@@ -236,24 +243,16 @@ pub fn run() {
             // blocks startup, no admin, no sparse (which modern WSL flags unsafe).
             std::thread::spawn(sandbox::auto_housekeep_startup);
             // Diagnostic: log the resolved paths on startup so missing
-            // models / disappeared user state can be triaged from the
-            // log file without F12 console acrobatics. Tries three
-            // candidate locations so even a stripped-env Tauri context
-            // gets ONE that succeeds.
+            // models / disappeared user state can be triaged without
+            // F12 console acrobatics. Never write beside the executable:
+            // on macOS that mutates the signed .app bundle and invalidates
+            // its code signature after the first launch.
             let dbg = paths::paths_debug();
             if let Ok(s) = serde_json::to_string_pretty(&dbg) {
-                let mut targets: Vec<std::path::PathBuf> = Vec::new();
-                if let Some(t) = std::env::var_os("TEMP") {
-                    targets.push(std::path::PathBuf::from(&t).join("owllm-paths.log"));
-                }
-                if let Some(t) = std::env::var_os("USERPROFILE") {
-                    targets.push(std::path::PathBuf::from(&t).join("owllm-paths.log"));
-                }
-                if let Ok(exe) = std::env::current_exe() {
-                    if let Some(p) = exe.parent() {
-                        targets.push(p.join("owllm-paths.log"));
-                    }
-                }
+                let mut targets = paths::user_data_root()
+                    .map(|root| vec![root.join("owllm-paths.log")])
+                    .unwrap_or_default();
+                targets.push(std::env::temp_dir().join("owllm-paths.log"));
                 for t in &targets {
                     if std::fs::write(t, &s).is_ok() {
                         eprintln!("[owllm] paths_debug written to {}", t.display());

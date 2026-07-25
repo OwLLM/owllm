@@ -175,11 +175,20 @@
 :root[data-theme="dark"] { color-scheme: dark; }
 :root[data-theme="light"] { color-scheme: light; }
 
+/* Flag-only emoji font (unicode-range keeps it away from all other glyphs).
+   Windows/WebView2 renders country flags as bare letter pairs without it. */
+@font-face {
+  font-family: "Twemoji Country Flags";
+  src: url("/fonts/TwemojiCountryFlags.woff2") format("woff2");
+  unicode-range: U+1F1E6-1F1FF;
+  font-display: swap;
+}
+
 html, body, #root {
   margin: 0;
   padding: 0;
   background: transparent;
-  font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+  font-family: "Twemoji Country Flags", "Segoe UI", "Inter", system-ui, sans-serif;
   color: var(--fg);
   overflow: hidden;
   height: 100%;

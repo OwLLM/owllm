@@ -262,6 +262,11 @@ try {
   // The anonymous-counting note contains commas in its text, so verify locale
   // coverage by its English key plus the last-column (pt) translation.
   check("Anonymous-counting note is translated (en + pt endpoints present)", actions.includes("You are counted anonymously") && actions.includes("Você é contado anonimamente"));
+  // Server list shows the nation flag instead of the bare 2-letter code.
+  check("Region labels convert the country code to a flag", page.includes("regionWithFlag(node.region)") && page.includes("0x1f1e6 + ch.charCodeAt(0) - 65"));
+  check("Flag font is bundled for Windows (no native flag emoji)", fs.statSync(path.join(UI, "../public/fonts/TwemojiCountryFlags.woff2")).size > 50_000);
+  const styles = read("styles.css");
+  check("Flag font is registered flag-codepoints-only and first in the stack", styles.includes('font-family: "Twemoji Country Flags"') && styles.includes("unicode-range: U+1F1E6-1F1FF") && styles.includes('font-family: "Twemoji Country Flags", "Segoe UI"'));
 
   for (const row of checks) console.log(`  PASS ${row.name}`);
   console.log(`world map verification: ${checks.length}/${checks.length} passed`);

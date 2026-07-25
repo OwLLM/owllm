@@ -493,6 +493,35 @@ else
   gh release create "$TAG" --repo "$REPO" --title "$TAG" --notes "$NOTES" $LATEST_FLAG "${UPLOADS[@]}"
 fi
 
+# Carry-forward: the release marked "Latest" must offer a working installer for
+# EVERY OS, even on a single-OS publish. The site/READMEs link at
+# `releases/latest/download/<stable-name>`, which 404s the instant Latest lacks
+# that OS's asset (a Mac-only publish once broke the Windows download this way).
+# So after this tag is Latest, copy forward the newest existing stable-named
+# installer for any OS this build didn't produce. Purely additive and
+# failure-tolerant — a hiccup here never fails the publish.
+carry_forward_assets() {
+  local repo="$1" tag="$2"
+  local names="OwLLM.Desktop.Setup.exe OwLLM.Desktop.Setup.dmg OwLLM.Desktop.AppImage OwLLM.Desktop.deb"
+  local have tmp src name
+  have="$(gh release view "$tag" --repo "$repo" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+  tmp="$(mktemp -d)"
+  for name in $names; do
+    printf '%s\n' "$have" | grep -qxF "$name" && continue   # already on this tag
+    src="$(gh api "repos/$repo/releases?per_page=30" \
+      --jq "[.[] | select(.draft|not) | select(.tag_name != \"$tag\") | select(any(.assets[]; .name == \"$name\")) ] | first | .tag_name" 2>/dev/null || true)"
+    [ -n "$src" ] && [ "$src" != "null" ] || continue       # no OS build to carry
+    if gh release download "$src" --repo "$repo" --pattern "$name" --dir "$tmp" 2>/dev/null; then
+      gh release upload "$tag" "$tmp/$name" --repo "$repo" --clobber 2>/dev/null \
+        && echo "  carried forward $name from $src"
+    fi
+  done
+  rm -rf "$tmp"
+}
+if [ "$DRAFT" != 1 ] && [ "$PRERELEASE" != 1 ]; then
+  carry_forward_assets "$REPO" "$TAG" || echo "  warn: asset carry-forward skipped (non-fatal)"
+fi
+
 step "5/5 verify"
 if [ "$DRAFT" = 1 ]; then
   echo "PUBLISH_DRAFT_OK: $TAG drafted — flip it public on GitHub when ready."

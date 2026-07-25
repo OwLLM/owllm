@@ -1,0 +1,206 @@
+---
+import Layout from "../layouts/Layout.astro";
+import Card from "../components/Card.astro";
+import Button from "../components/Button.astro";
+import { loadReleaseMeta } from "../lib/release";
+
+const release = await loadReleaseMeta();
+
+interface Platform {
+  name: string;
+  badge: string;
+  arch: string;
+  description: string;
+  cta: string;
+  href: string;
+}
+
+const platforms: Platform[] = [
+  {
+    name: "Windows",
+    badge: "shipping",
+    arch: "10 / 11 · x86-64",
+    description: "Native CUDA GPU server · WSL2 sandbox · signed auto-updater",
+    cta: "Download installer",
+    href: release.assets?.find((a) => a.name.endsWith(".msi") || a.name.endsWith(".exe"))?.browserDownloadUrl ??
+      "https://github.com/OwLLM/owllm/releases/latest",
+  },
+  {
+    name: "Linux",
+    badge: "shipping",
+    arch: "x86-64",
+    description: "llama.cpp payloads · GPU probes (NVIDIA + AMD/Intel) · bubblewrap sandbox",
+    cta: "AppImage · .deb",
+    href:
+      release.assets?.find((a) => a.name.endsWith(".AppImage"))?.browserDownloadUrl ??
+      "https://github.com/OwLLM/owllm/releases/latest",
+  },
+  {
+    name: "macOS",
+    badge: "beta",
+    arch: "Apple Silicon · Metal",
+    description: "Metal payload · unified-memory model sizing · Lima sandbox",
+    cta: "Download .dmg",
+    href:
+      release.assets?.find((a) => a.name.endsWith(".dmg"))?.browserDownloadUrl ??
+      "https://github.com/OwLLM/owllm/releases/latest",
+  },
+];
+
+const releaseDate = release.publishedAt
+  ? new Date(release.publishedAt).toLocaleDateString("en-US", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    })
+  : null;
+---
+
+<Layout
+  title="Download"
+  description="Download OwLLM for Windows, Linux, and macOS. Run LLMs locally with multi-agent teams and sandboxed tool execution."
+>
+  <section class="page-header" aria-labelledby="download-title">
+    <div class="container">
+      <h1 id="download-title">Download OwLLM</h1>
+      <p class="subtitle">
+        Latest release: <a href={release.url} class="release-link">{release.version}</a>
+        {releaseDate && <span class="release-date"> — {releaseDate}</span>}
+      </p>
+    </div>
+  </section>
+
+  <section class="section" aria-label="Platform downloads">
+    <div class="container">
+      <div class="platform-grid">
+        {platforms.map((platform) => (
+          <Card as="article" class="platform-card">
+            <div class="platform-header">
+              <h2>{platform.name}</h2>
+              <span class={`badge badge-${platform.badge}`}>{platform.badge}</span>
+            </div>
+            <p class="arch">{platform.arch}</p>
+            <p class="description">{platform.description}</p>
+            <Button href={platform.href} variant="primary" size="md">
+              {platform.cta}
+            </Button>
+          </Card>
+        ))}
+      </div>
+
+      <div class="alternate">
+        <p>
+          Looking for an older release or a specific asset? Browse all releases on{" "}
+          <a href="https://github.com/OwLLM/owllm/releases" target="_blank" rel="noopener noreferrer">
+            GitHub
+          </a>.
+        </p>
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 1rem;
+  }
+
+  .page-header {
+    padding: 4rem 0 2rem;
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+    text-align: center;
+  }
+
+  .page-header h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    margin-bottom: 0.75rem;
+  }
+
+  .subtitle {
+    color: var(--fg-muted);
+    font-size: 1.125rem;
+  }
+
+  .release-link {
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+
+  .release-date {
+    color: var(--fg-subtle);
+  }
+
+  .section {
+    padding: 3rem 0 5rem;
+  }
+
+  .platform-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem;
+  }
+
+  .platform-card {
+    display: flex;
+    flex-direction: column;
+    text-align: center;
+  }
+
+  .platform-header {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.75rem;
+    margin-bottom: 0.25rem;
+  }
+
+  .platform-header h2 {
+    font-size: 1.5rem;
+  }
+
+  .badge {
+    display: inline-block;
+    padding: 0.125rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.75rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+  }
+
+  .badge-shipping {
+    background-color: rgba(var(--ok-rgb), 0.2);
+    color: var(--ok);
+  }
+
+  .badge-beta {
+    background-color: rgba(var(--warn-rgb), 0.2);
+    color: var(--warn);
+  }
+
+  .arch {
+    color: var(--fg-subtle);
+    font-size: 0.875rem;
+    margin-bottom: 1rem;
+  }
+
+  .description {
+    color: var(--fg-muted);
+    flex: 1;
+    margin-bottom: 1.5rem;
+  }
+
+  .alternate {
+    margin-top: 3rem;
+    text-align: center;
+    color: var(--fg-muted);
+  }
+
+  @media (max-width: 640px) {
+    .platform-grid {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>

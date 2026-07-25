@@ -1,0 +1,18 @@
+{
+  "name": "OwLLM",
+  "short_name": "OwLLM",
+  "description": "A local-first AI workstation: run LLMs on your own hardware, orchestrate multi-agent teams, and keep the dangerous parts sandboxed.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#06080d",
+  "theme_color": "#667eea",
+  "orientation": "any",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

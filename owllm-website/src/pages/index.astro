@@ -1,0 +1,228 @@
+---
+import { Image } from "astro:assets";
+import Layout from "../layouts/Layout.astro";
+import Button from "../components/Button.astro";
+import Card from "../components/Card.astro";
+import heroOwl from "../assets/hero-owl.png";
+import featureAgents from "../assets/feature-agents.png";
+
+const features = [
+  {
+    title: "Split inference",
+    description:
+      "Run the GPU model server on one machine and the agents on another over a plain OpenAI-compatible HTTP API.",
+  },
+  {
+    title: "Linux sandbox",
+    description:
+      "Real OS-level isolation via WSL2, Lima, or bubblewrap — tools run where they cannot touch your real files.",
+  },
+  {
+    title: "Native GGUF tool-calling",
+    description:
+      "Uses the model's own chat template — no XML hacks. MCP servers with per-tool toggles and schema safety.",
+  },
+  {
+    title: "Cloud peers",
+    description:
+      "Mix local models with Claude, GPT, Gemini, and subscription CLIs as first-class peers with live streaming.",
+  },
+];
+---
+
+<Layout
+  title="OwLLM"
+  description="A local-first AI workstation: run LLMs on your own hardware, orchestrate multi-agent teams, and keep the dangerous parts sandboxed."
+>
+  <section class="hero" aria-labelledby="hero-heading">
+    <div class="hero-content container">
+      <div class="hero-text">
+        <h1 id="hero-heading">
+          A local-first AI workstation that <span class="accent-text">runs on your hardware</span>.
+        </h1>
+        <p class="hero-tagline">
+          Orchestrate multi-agent teams, execute native GGUF tool-calling, and keep the
+          dangerous parts sandboxed — with one feature nobody else has: split the model
+          and the agents across machines.
+        </p>
+        <div class="hero-actions">
+          <Button href="/download" size="lg">Download</Button>
+          <Button href="/features" variant="outline" size="lg">See features</Button>
+        </div>
+      </div>
+      <div class="hero-media">
+        <Image
+          src={heroOwl}
+          alt="OwLLM mascot owl"
+          widths={[320, 640, 960]}
+          sizes="(max-width: 768px) 100vw, 480px"
+          class="hero-image"
+        />
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="features-heading">
+    <div class="container">
+      <h2 id="features-heading" class="section-title">Why OwLLM is different</h2>
+      <div class="feature-grid">
+        {features.map((feature) => (
+          <Card as="article">
+            <h3>{feature.title}</h3>
+            <p>{feature.description}</p>
+          </Card>
+        ))}
+      </div>
+      <div class="feature-teaser">
+        <Image
+          src={featureAgents}
+          alt="OwLLM agentic team interface preview"
+          widths={[320, 640, 800]}
+          sizes="(max-width: 768px) 100vw, 720px"
+          class="feature-image"
+        />
+      </div>
+    </div>
+  </section>
+
+  <section class="section cta-section" aria-labelledby="cta-heading">
+    <div class="container cta-content">
+      <h2 id="cta-heading">Ready to run your own AI workstation?</h2>
+      <p>
+        Download the latest installer, pick a model, and start building agentic teams in
+        minutes.
+      </p>
+      <Button href="/download" size="lg">Get OwLLM</Button>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 1rem;
+  }
+
+  .hero {
+    padding: 4rem 0;
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+  }
+
+  .hero-content {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3rem;
+    align-items: center;
+  }
+
+  .hero-text h1 {
+    font-size: clamp(2rem, 5vw, 3.5rem);
+    margin-bottom: 1rem;
+  }
+
+  .accent-text {
+    color: var(--accent-ink);
+  }
+
+  .hero-tagline {
+    font-size: 1.125rem;
+    color: var(--fg-muted);
+    margin-bottom: 1.75rem;
+    max-width: 55ch;
+  }
+
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 1rem;
+  }
+
+  .hero-media {
+    display: flex;
+    justify-content: center;
+  }
+
+  .hero-image {
+    border-radius: 24px;
+    box-shadow: var(--shadow-lg);
+    max-height: 420px;
+    width: auto;
+    object-fit: contain;
+  }
+
+  .section {
+    padding: 4rem 0;
+  }
+
+  .section-title {
+    text-align: center;
+    font-size: clamp(1.75rem, 4vw, 2.5rem);
+    margin-bottom: 2rem;
+  }
+
+  .feature-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 3rem;
+  }
+
+  .feature-grid h3 {
+    color: var(--accent-ink);
+    margin-bottom: 0.5rem;
+    font-size: 1.125rem;
+  }
+
+  .feature-grid p {
+    color: var(--fg-muted);
+    margin: 0;
+  }
+
+  .feature-teaser {
+    display: flex;
+    justify-content: center;
+  }
+
+  .feature-image {
+    border-radius: 20px;
+    box-shadow: var(--shadow-md);
+    max-height: 420px;
+    width: auto;
+    object-fit: contain;
+  }
+
+  .cta-section {
+    background-color: var(--bg-panel);
+    text-align: center;
+  }
+
+  .cta-content {
+    max-width: 64ch;
+  }
+
+  .cta-content h2 {
+    margin-bottom: 0.75rem;
+  }
+
+  .cta-content p {
+    color: var(--fg-muted);
+    margin-bottom: 1.5rem;
+  }
+
+  @media (max-width: 768px) {
+    .hero-content {
+      grid-template-columns: 1fr;
+      text-align: center;
+    }
+
+    .hero-actions {
+      justify-content: center;
+    }
+
+    .hero-image,
+    .feature-image {
+      max-height: 300px;
+    }
+  }
+</style>

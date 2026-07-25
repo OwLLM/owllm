@@ -1,0 +1,114 @@
+/*
+ * OwLLM website design tokens.
+ *
+ * Values are copied from owllm-desktop/ui/src/styles.css and
+ * owllm-desktop/ui/src/themePreferences.ts so this package remains
+ * standalone and does not import from owllm-desktop/.
+ */
+
+:root {
+  /* Default accent: indigo. Overwritten at runtime by theme.ts. */
+  --accent: #667eea;
+  --accent-rgb: 102, 126, 234;
+  --accent-fg: #06080d;
+  --accent-soft: rgba(102, 126, 234, 0.18);
+  --accent-strong: rgba(102, 126, 234, 0.55);
+  --accent-glow-soft: rgba(102, 126, 234, 0.35);
+  --accent-glow-strong: rgba(102, 126, 234, 0.65);
+
+  /* Adaptive accent ink for text/icons on app surfaces. */
+  --accent-ink: var(--accent-ink-dark, var(--accent));
+
+  /* Header chrome stays dark in both modes. */
+  --bg-header-fg: #ffffff;
+  --header-pill-base: #14172a;
+
+  /* Status colors (universal). */
+  --ok: #22c55e;
+  --ok-rgb: 34, 197, 94;
+  --warn: #f59e0b;
+  --warn-rgb: 245, 158, 11;
+  --error: #ef4444;
+  --error-rgb: 239, 68, 68;
+  --info: #3b82f6;
+  --info-rgb: 59, 130, 246;
+}
+
+/* Dark mode — default. */
+:root[data-theme="dark"] {
+  --bg: color-mix(in srgb, var(--accent) 22%, #06080d);
+  --bg-app: color-mix(in srgb, var(--accent) 22%, #06080d);
+  --bg-panel: color-mix(in srgb, var(--accent) 25%, #0e1117);
+  --bg-elevated: color-mix(in srgb, var(--accent) 30%, #11151e);
+  --bg-card: color-mix(in srgb, var(--accent) 32%, #1a1f2c);
+  --bg-header: color-mix(in srgb, var(--accent) 70%, #1c2244);
+  --bg-input: color-mix(in srgb, var(--accent) 18%, #0f0f19);
+  --bg-surface: rgba(255, 255, 255, 0.04);
+  --bg-surface-hover: rgba(255, 255, 255, 0.10);
+  --bg-overlay: rgba(6, 8, 13, 0.72);
+
+  --fg: #e6e8eb;
+  --fg-strong: #ffffff;
+  --fg-muted: #9aa0a6;
+  --fg-subtle: #6c7280;
+  --fg-dim: #5a6270;
+
+  --border: rgba(255, 255, 255, 0.06);
+  --border-strong: rgba(255, 255, 255, 0.14);
+  --border-accent: rgba(var(--accent-rgb), 0.30);
+
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.40);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.50);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.60);
+
+  --ghost-bg: rgba(255, 255, 255, 0.04);
+  --ghost-fg: #dadcdf;
+  --ghost-hover-bg: rgba(255, 255, 255, 0.10);
+  --ghost-hover-fg: #ffffff;
+}
+
+/* Light mode. */
+:root[data-theme="light"] {
+  --bg: color-mix(in srgb, var(--accent) 15%, #f0f2f5);
+  --bg-app: color-mix(in srgb, var(--accent) 15%, #f0f2f5);
+  --bg-panel: color-mix(in srgb, var(--accent) 12%, #ffffff);
+  --bg-elevated: color-mix(in srgb, var(--accent) 18%, #f7f8fa);
+  --bg-card: color-mix(in srgb, var(--accent) 12%, #ffffff);
+  --bg-header: color-mix(in srgb, var(--accent) 70%, #1c2244);
+  --bg-input: color-mix(in srgb, var(--accent) 10%, #ffffff);
+  --bg-surface: rgba(0, 0, 0, 0.04);
+  --bg-surface-hover: rgba(0, 0, 0, 0.08);
+  --bg-overlay: rgba(20, 22, 28, 0.55);
+
+  --fg: #1a1f2c;
+  --fg-strong: #06080d;
+  --fg-muted: #5a6270;
+  --fg-subtle: #8a8f99;
+  --fg-dim: #a0a4ad;
+
+  --border: rgba(0, 0, 0, 0.10);
+  --border-strong: rgba(0, 0, 0, 0.20);
+  --border-accent: rgba(var(--accent-rgb), 0.45);
+
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.08);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.10);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.18);
+
+  --ghost-bg: rgba(0, 0, 0, 0.04);
+  --ghost-fg: #1a1f2c;
+  --ghost-hover-bg: rgba(0, 0, 0, 0.08);
+  --ghost-hover-fg: #06080d;
+}
+
+/* Default to dark until theme script runs. */
+:root:not([data-theme]) {
+  color-scheme: dark;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}

@@ -1,0 +1,90 @@
+---
+import Layout from "../../layouts/Layout.astro";
+---
+
+<Layout
+  title="Welcome to the OwLLM blog"
+  description="We're building a local-first AI workstation where you own the hardware, the models, and the agent runtime."
+  type="article"
+>
+  <article class="post">
+    <header class="post-header">
+      <div class="container">
+        <time datetime="2025-07-20" class="post-date">July 20, 2025</time>
+        <h1 id="post-title">Welcome to the OwLLM blog</h1>
+      </div>
+    </header>
+
+    <div class="post-content container">
+      <p>
+        We're building a local-first AI workstation where you own the hardware,
+        the models, and the agent runtime. OwLLM is designed for people who want
+        the power of modern large language models without shipping every prompt
+        to someone else's cloud.
+      </p>
+      <p>
+        This blog is where we'll share release notes, deep-dives into the
+        architecture, and behind-the-scenes notes on building a desktop app that
+        can orchestrate multi-agent teams, execute sandboxed tools, and split
+        inference across machines.
+      </p>
+      <p>
+        If you want to follow along, grab the latest build from the{" "}
+        <a href="/download">download page</a> or join the discussion on{" "}
+        <a
+          href="https://github.com/OwLLM/owllm/discussions"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          GitHub
+        </a>.
+      </p>
+    </div>
+  </article>
+</Layout>
+
+<style>
+  .post {
+    padding-bottom: 4rem;
+  }
+
+  .post-header {
+    padding: 4rem 0 2rem;
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+    text-align: center;
+  }
+
+  .container {
+    max-width: 768px;
+    margin: 0 auto;
+    padding: 0 1rem;
+  }
+
+  .post-date {
+    display: block;
+    color: var(--fg-subtle);
+    font-size: 0.875rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .post-header h1 {
+    font-size: clamp(1.75rem, 5vw, 2.75rem);
+    margin-bottom: 0.5rem;
+  }
+
+  .post-content {
+    padding-top: 2rem;
+  }
+
+  .post-content p {
+    color: var(--fg-muted);
+    font-size: 1.125rem;
+    line-height: 1.7;
+    margin-bottom: 1.5rem;
+  }
+
+  .post-content a {
+    color: var(--accent-ink);
+    text-decoration: underline;
+  }
+</style>

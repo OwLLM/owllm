@@ -1,0 +1,126 @@
+---
+const year = new Date().getFullYear();
+const repo = "OwLLM/owllm";
+---
+
+<footer class="site-footer">
+  <div class="container">
+    <div class="footer-grid">
+      <div>
+        <strong class="footer-brand">OwLLM</strong>
+        <p class="footer-tagline">
+          A local-first AI workstation: run LLMs on your own hardware, orchestrate
+          multi-agent teams, and keep the dangerous parts sandboxed.
+        </p>
+      </div>
+      <nav aria-label="Footer links">
+        <ul class="footer-links">
+          <li><a href="/features">Features</a></li>
+          <li><a href="/download">Download</a></li>
+          <li><a href="/docs">Docs</a></li>
+          <li><a href="/blog">Blog</a></li>
+        </ul>
+      </nav>
+      <nav aria-label="Community">
+        <ul class="footer-links">
+          <li>
+            <a href={`https://github.com/${repo}`} target="_blank" rel="noopener noreferrer">
+              GitHub
+            </a>
+          </li>
+          <li>
+            <a href={`https://github.com/${repo}/discussions`} target="_blank" rel="noopener noreferrer">
+              Discussions
+            </a>
+          </li>
+          <li>
+            <a href={`https://github.com/${repo}/releases`} target="_blank" rel="noopener noreferrer">
+              Releases
+            </a>
+          </li>
+        </ul>
+      </nav>
+    </div>
+    <div class="footer-bottom">
+      <p>&copy; {year} Far island Corporation Ltd. All rights reserved.</p>
+      <p class="license-note">
+        OWLLM is proprietary software. Official unmodified executables may be used
+        free of charge, but the source code is not open source and may not be
+        copied, modified, redistributed, sublicensed, or sold.
+      </p>
+    </div>
+  </div>
+</footer>
+
+<style>
+  .site-footer {
+    background-color: var(--bg-panel);
+    border-top: 1px solid var(--border);
+    padding: 3rem 1rem 2rem;
+    margin-top: auto;
+  }
+
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .footer-grid {
+    display: grid;
+    grid-template-columns: 2fr 1fr 1fr;
+    gap: 2rem;
+    margin-bottom: 2rem;
+  }
+
+  .footer-brand {
+    display: block;
+    font-size: 1.25rem;
+    margin-bottom: 0.75rem;
+    color: var(--fg-strong);
+  }
+
+  .footer-tagline {
+    color: var(--fg-muted);
+    max-width: 32ch;
+    margin: 0;
+  }
+
+  .footer-links {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .footer-links a {
+    color: var(--fg);
+    text-decoration: none;
+  }
+
+  .footer-links a:hover {
+    color: var(--accent-ink);
+    text-decoration: underline;
+  }
+
+  .footer-bottom {
+    border-top: 1px solid var(--border);
+    padding-top: 1.5rem;
+    text-align: center;
+    color: var(--fg-subtle);
+    font-size: 0.875rem;
+  }
+
+  .license-note {
+    max-width: 80ch;
+    margin: 0.5rem auto 0;
+  }
+
+  @media (max-width: 768px) {
+    .footer-grid {
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+    }
+  }
+</style>

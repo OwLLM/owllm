@@ -1,0 +1,144 @@
+---
+import Layout from "../layouts/Layout.astro";
+import Card from "../components/Card.astro";
+
+const sections = [
+  {
+    title: "Split inference across machines",
+    description:
+      "Run the GPU model server on your Windows machine and the agents on a Linux box, WSL sandbox, or another PC. Agents talk to the model over a plain OpenAI-compatible HTTP API, so you get native CUDA speed plus real isolation.",
+  },
+  {
+    title: "True OS-level Linux sandbox",
+    description:
+      "Autonomous agents that edit files and run shell commands are powerful and risky. OwLLM runs tool execution inside a real Linux sandbox: WSL2 on Windows, Lima on macOS, and bubblewrap on Linux. Your real drive and home stay untouched.",
+  },
+  {
+    title: "Native GGUF tool-calling",
+    description:
+      "Tool-calling uses the model's own chat template through llama-server with native tools arrays and structured tool_calls. No XML hacks, no dialect parsing. MCP servers auto-start with a master switch, per-tool toggles, and a schema-safety gate.",
+  },
+  {
+    title: "Cloud models as first-class peers",
+    description:
+      "Mix local and cloud models freely in one team. Add an API key for Anthropic, OpenAI, Gemini, DeepSeek, Groq, and more, or use subscription CLIs like Claude Code, Codex, and Gemini. Subscription agents stream their activity live instead of going dark.",
+  },
+  {
+    title: "Memory that stays useful",
+    description:
+      "Agentic teams keep per-agent episodic history and shared project memory for facts, decisions, and worklog. Retrieval is scoped to the current project and framed as a current-task context pack, so old work is reference material instead of stale context.",
+  },
+  {
+    title: "Code page with per-project persistence",
+    description:
+      "Your local model codes directly in a folder with a conversation, plan, and model that come back when you reopen the project. Open it isolated in WSL or as a plain folder — your choice, per project.",
+  },
+  {
+    title: "Signed auto-updater",
+    description:
+      "Updates ship with a branded, plain-language changelog and a signed installer path so you always know what changed and that it came from us.",
+  },
+];
+---
+
+<Layout
+  title="Features"
+  description="Explore OwLLM features: split inference, Linux sandbox, native GGUF tool-calling, cloud peers, memory, Code page, and signed updates."
+>
+  <section class="page-header" aria-labelledby="features-title">
+    <div class="container">
+      <h1 id="features-title">Features</h1>
+      <p class="subtitle">
+        Everything that makes OwLLM a local-first AI workstation.
+      </p>
+    </div>
+  </section>
+
+  <section class="section" aria-label="Feature list">
+    <div class="container">
+      <div class="feature-list">
+        {sections.map((section, index) => (
+          <Card as="article" class="feature-card">
+            <span class="feature-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
+            <h2>{section.title}</h2>
+            <p>{section.description}</p>
+          </Card>
+        ))}
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 1rem;
+  }
+
+  .page-header {
+    padding: 4rem 0 2rem;
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+    text-align: center;
+  }
+
+  .page-header h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    margin-bottom: 0.75rem;
+  }
+
+  .subtitle {
+    color: var(--fg-muted);
+    font-size: 1.125rem;
+    max-width: 60ch;
+    margin: 0 auto;
+  }
+
+  .section {
+    padding: 3rem 0 5rem;
+  }
+
+  .feature-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+  }
+
+  .feature-card {
+    position: relative;
+    padding-left: 4.5rem;
+  }
+
+  .feature-number {
+    position: absolute;
+    left: 1.5rem;
+    top: 1.5rem;
+    font-size: 1.75rem;
+    font-weight: 800;
+    color: var(--accent);
+    opacity: 0.6;
+    line-height: 1;
+  }
+
+  .feature-card h2 {
+    margin-bottom: 0.5rem;
+    font-size: 1.35rem;
+  }
+
+  .feature-card p {
+    color: var(--fg-muted);
+    margin: 0;
+  }
+
+  @media (max-width: 640px) {
+    .feature-card {
+      padding-left: 1.5rem;
+      padding-top: 3.5rem;
+    }
+
+    .feature-number {
+      top: 1rem;
+      left: 1.5rem;
+    }
+  }
+</style>

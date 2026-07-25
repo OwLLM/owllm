@@ -18,7 +18,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFailed, markNotebookStepFinished } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -71,6 +71,7 @@ import {
   streamLocalChat,
   streamOpenAiApiWithTools,
   runCodexCliStream,
+  runKimiCliStream,
   makeResponsiveHandlers,
   makeUiYield,
   ensureCliWarm,
@@ -144,6 +145,11 @@ import {
   graphJsonWithoutAgentModels,
   resolveAgentModel,
 } from "./teamModelSelection";
+import {
+  requiresAgentWorktree,
+  worktreeCreationFailure,
+  type WorktreeCreateState,
+} from "./worktreeIsolation";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -296,6 +302,7 @@ function buildGraphJson(opts: {
       name: a.name,
       base: a.base,
       ...(a.profileRef ? { profileRef: a.profileRef } : {}),
+      ...(a.defaultModelId ? { defaultModelId: a.defaultModelId } : {}),
     })),
     agentModels: Object.fromEntries(opts.agentModels),
     agentVoices: Object.fromEntries(opts.agentVoices),
@@ -339,6 +346,10 @@ type AgentSpec = {
   // specialist prompt builder can layer them.
   description?: string;
   extraPrompt?: string;
+  /// Optional model pinned on the team template's agent row
+  /// (`default_model_id`). It is inherited by projects using that template and
+  /// must affect dispatch, not just the editor form that writes it.
+  defaultModelId?: string;
   // Per-agent SKILL.md packs equipped on this agent (skill ids). Skills are
   // instruction packs loaded on demand at dispatch (progressive disclosure),
   // distinct from `tool_allowlist` function calls. Kept in sync with the
@@ -670,6 +681,7 @@ function toTeam(t: TeamTemplateBackend): Team {
         // Qt source spells this `extra_prompt`; we expose it camel-case
         // on the React side so usage doesn't pierce snake_case.
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
+        defaultModelId: typeof a.default_model_id === "string" && a.default_model_id.trim() ? a.default_model_id.trim() : undefined,
         extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
         profileRef: a.profile_ref && typeof a.profile_ref.id === "string" && Number.isFinite(a.profile_ref.revision)
           ? { id: a.profile_ref.id, revision: a.profile_ref.revision }
@@ -708,6 +720,7 @@ function projectToTeam(p: ProjectRow): Team {
   // the name-contains rule in orchestratorOf still catches a renamed orchestrator.
   const baseByName = new Map<string, string>();
   const profileByName = new Map<string, RevisionRef>();
+  const defaultModelByName = new Map<string, string>();
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
       const parsed = JSON.parse(p.graph_json);
@@ -723,6 +736,9 @@ function projectToTeam(p: ProjectRow): Team {
             if (r.profileRef && typeof r.profileRef.id === "string" && Number.isFinite(r.profileRef.revision)) {
               profileByName.set(r.name, { id: r.profileRef.id, revision: r.profileRef.revision });
             }
+            if (typeof r.defaultModelId === "string" && r.defaultModelId.trim()) {
+              defaultModelByName.set(r.name, r.defaultModelId.trim());
+            }
           }
         }
       }
@@ -735,6 +751,7 @@ function projectToTeam(p: ProjectRow): Team {
       name: n,
       base: baseByName.get(n) ?? n,
       profileRef: profileByName.get(n),
+      defaultModelId: defaultModelByName.get(n),
     })),
   );
   return {
@@ -4881,11 +4898,8 @@ function GraphCanvas({
 
 // Mirror of fleet.rs Tauri command return shapes. The discriminator
 // is the `status` field (serde tag).
-type FleetCreateResult =
-  | { status: "ready"; path: string; branch: string; baseSha: string }
-  | { status: "notAGitRepo" }
-  | { status: "dirtyWorkingTree"; details: string }
-  | { status: "error"; message: string };
+type FleetCreateResult = WorktreeCreateState;
+type WorktreeBinding = { path: string; branch: string; baseSha: string };
 type FleetFinalizeResult =
   | { status: "committed"; commitSha: string; filesChanged: number; files: string[] }
   | { status: "noChanges" }
@@ -6056,6 +6070,7 @@ function RightColumnTabs(props: {
   phase: DispatchPhase;
   models: ModelInfo[];
   modelFor: (agentName: string) => string;
+  agentModelOverrideFor: (agentName: string) => string;
   onPickAgentModel: (agentName: string, modelId: string) => void;
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
@@ -6183,6 +6198,7 @@ function RightColumnTabs(props: {
             activeAgent={props.activeAgent}
             models={props.models}
             modelFor={props.modelFor}
+            agentModelOverrideFor={props.agentModelOverrideFor}
             onPickAgentModel={props.onPickAgentModel}
             accountsStatus={props.accountsStatus}
             effectiveTeamModel={props.effectiveTeamModel}
@@ -6483,7 +6499,7 @@ function OrchestratorSettings({
 // is selected).
 function OrchAgentSettings({
   team, selectedAgent, activeAgent,
-  models, modelFor, onPickAgentModel, accountsStatus,
+  models, modelFor, agentModelOverrideFor, onPickAgentModel, accountsStatus,
   effectiveTeamModel, serverState,
   voiceFor, onPickAgentVoice, voices,
 }: {
@@ -6492,6 +6508,7 @@ function OrchAgentSettings({
   activeAgent: string | null;
   models: ModelInfo[];
   modelFor: (agentName: string) => string;
+  agentModelOverrideFor: (agentName: string) => string;
   onPickAgentModel: (agentName: string, modelId: string) => void;
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
@@ -6502,19 +6519,23 @@ function OrchAgentSettings({
 }) {
   const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
   const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
+  const explicitModel = agentModelOverrideFor(focus);
+  const inheritedModel = modelFor(focus);
   const disabled = focus === "you" || focus === "system";
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Model</span>
         <ModelPicker
-          value={modelFor(focus)}
+          value={explicitModel}
           onChange={(id) => onPickAgentModel(focus, id)}
           models={models}
           status={accountsStatus}
           disabled={disabled}
           fallbackLabel={
-            effectiveTeamModel
+            inheritedModel && inheritedModel !== "local"
+              ? `(use inherited · ${inheritedModel})`
+              : effectiveTeamModel
               ? `(use team model · ${effectiveTeamModel})`
               : serverState.model_id
                 ? `(use team / server model · ${serverState.model_id})`
@@ -7941,15 +7962,15 @@ async function streamMoonshot(
     // real auth/network text, so withCliAuthRetry can recognize and retry it.
     // allowedTools gates the browser gateway to the Browser role only (a normal
     // Kimi agent must not wire it — kimi fatally aborts if it can't connect).
-    const reply = await withCliAuthRetry("kimi_cli", signal, () => invoke<string>("kimi_cli_complete", {
+    const reply = await withCliAuthRetry("kimi_cli", signal, () => runKimiCliStream({
       systemPrompt,
       userMessage: composed,
       cwd: projectCwd ?? null,
       model: modelId,
-      allowedTools: allowedTools ?? null,
+      allowedTools,
+      onDelta,
+      onThought: onThought ?? (() => {}),
     }), projectCwd);
-    if (reply) onDelta(reply);
-    // No thought stream for --print mode; CLI emits a single blob.
     return reply;
   }
   // API path — OpenAI-compatible streaming.
@@ -10177,6 +10198,7 @@ export function AgentsPage({
     });
     const singleRunStartedAt = Date.now();
     let singleRunCompletedCleanly = false;
+    let singleRunFailureReason = "The run ended with an error.";
     supSendBusyRef.current = true;
     setSupSendBusy(true);
     // Fresh abort controller for THIS run. Any owllm:dispatch-abort
@@ -10463,6 +10485,7 @@ export function AgentsPage({
           : "(the model returned an empty response — no answer was produced)";
         setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg, ts: Date.now(), seq: nextSeq() }]);
         appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
+        singleRunFailureReason = emptyMsg;
       }
       singleRunCompletedCleanly = Boolean(cleanReply || cleanReturned);
     } catch (e: any) {
@@ -10471,8 +10494,9 @@ export function AgentsPage({
       // it never reached the chat. Now both supChat (left/main) AND
       // the agent log (right pane) get the error in red.
       console.error("[onSupSend] streamChatCompletion threw", String(e?.message ?? e));
+      singleRunFailureReason = cleanAgentError(e);
       const errMsg: GoalMsg = {
-        role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}`,
+        role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${singleRunFailureReason}`,
         ts: Date.now(), seq: nextSeq(),
         // Attach the one-click WSL-restart recovery when it's a network failure.
         action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
@@ -10509,7 +10533,11 @@ export function AgentsPage({
       }
       const now = Date.now();
       if (notebookStepRef.current) {
-        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        if (singleRunCompletedCleanly) {
+          markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        } else {
+          markNotebookStepFailed(selectedProjectId, notebookStepRef.current, singleRunFailureReason, now);
+        }
         notebookStepRef.current = null;
       }
       setSupChat(prev => [...prev, { role: "system", color: "var(--fg-muted)", text: runTimingFooter(singleRunStartedAt, now), ts: now, seq: nextSeq() }]);
@@ -10517,7 +10545,7 @@ export function AgentsPage({
       // queue could only process its first item. Continue from every clean run
       // path, not only dispatchGoal's team/solo branches.
       if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();
-      else notifyAutoFeedPaused("the run ended with an error");
+      else notifyAutoFeedPaused(singleRunFailureReason);
     }
   };
   onSupSendRef.current = onSupSend; // the notebook helpers (declared earlier) dispatch through this
@@ -10529,8 +10557,14 @@ export function AgentsPage({
   const effectiveTeamModel =
     teamModelOverride ?? selectedProject?.team_default_model_id ?? "";
 
+  const agentModelOverrideFor = (agentName: string): string =>
+    perAgentModel.get(agentName)?.trim() ?? "";
+  const agentTemplateModelFor = (agentName: string): string =>
+    activeTeam?.agents.find(a => a.name === agentName)?.defaultModelId?.trim() ?? "";
+
   // Resolve the model id we should send for a given agent. Priority:
-  //   per-agent override > team default > server's running model > "local"
+  //   per-agent override > agent template default > team default >
+  //   server's running model > "local"
   // Empty-string overrides fall through to the next layer. The string
   // we return is the `model` field in /v1/chat/completions; llama-server
   // ignores it today but the multi-server path will use it to route.
@@ -10541,6 +10575,7 @@ export function AgentsPage({
       selectedProject?.team_default_model_id ?? "",
       perAgentModel,
       serverState.model_id,
+      agentTemplateModelFor(agentName),
     );
   };
   const onPickAgentModel = (agentName: string, modelId: string) => {
@@ -11176,6 +11211,33 @@ export function AgentsPage({
           ?? writers[0]
           ?? runTeam.agents.find(a => a.name !== orch.name)
           ?? orch;
+        if (!requiresAgentWorktree(projectCwd)) {
+          throw new Error(
+            "Solo mode needs a Git project directory so OWLLM can isolate its filesystem access. Select or initialize a Git project, then retry.",
+          );
+        }
+        const soloRunId = `${Date.now().toString(36).slice(-6)}-solo`;
+        const soloCreate = await invoke<FleetCreateResult>("fleet_worktree_create", {
+          projectCwd,
+          agentName: coder.name,
+          runId: soloRunId,
+        });
+        if (soloCreate.status !== "ready") {
+          throw new Error(worktreeCreationFailure(coder.name, projectCwd, soloCreate));
+        }
+        const soloWt: WorktreeBinding = {
+          path: soloCreate.path,
+          branch: soloCreate.branch,
+          baseSha: soloCreate.baseSha,
+        };
+        const soloCwd = soloWt.path;
+        let keepSoloWorktree = false;
+        appendThought(coder.name, {
+          role: "fleet",
+          color: "#7ff0c5",
+          text: `🗂 ${coder.name} → ${soloWt.branch}\n   ${soloWt.path}`,
+        });
+        try {
         appendLog("you", { role: "you", color: "#9ad9ff", text });
         addActive(coder.name);
         appendThought(coder.name, { role: "system", color: "#7fd4ff", text: "⚡ Solo-loop — one agent, no orchestration" });
@@ -11207,7 +11269,7 @@ export function AgentsPage({
           "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
           "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
         ].join("\n");
-        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, projectCwd, true) + "\n" + SOLO_OVERRIDE;
+        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, soloCwd, true) + "\n" + SOLO_OVERRIDE;
         const sAllowed = effectiveToolsFor(coder);
         const soloMemKey = runtimeMemoryKey(coder, selectedProjectId);
         const sMem = soloMemKey
@@ -11248,7 +11310,7 @@ export function AgentsPage({
             sText = (await streamChatCompletion(
               port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
               sPrompt, turn, tempFor(coder, 0.3), ctrl.signal,
-              (d) => streamLog(coder.name, d), projectCwd,
+              (d) => streamLog(coder.name, d), soloCwd,
               sHist, autoApprove,
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
               attachments.length > 0 ? attachments : undefined,
@@ -11258,7 +11320,7 @@ export function AgentsPage({
             )).trim();
           } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }
           if (isAuthError(sText)) break;  // 401 came back as reply text — don't gate/retry; handled below
-          sGate = await runGate(projectCwd, sScope);
+          sGate = await runGate(soloCwd, sScope);
           lastGateRef.current = sGate;
           if (sGate.status !== "failed") break;
           if (attempt >= 3) { appendThought(coder.name, { role: "system", color: "#ff8c8c", text: "⚠ verify still failing after 3 attempts — stopping." }); break; }
@@ -11270,6 +11332,7 @@ export function AgentsPage({
         // AUTH FAILURE: a 401 means the agent did nothing — never report "done".
         // Tell the user plainly to re-login (with the exact step), and stop.
         if (isAuthError(sText)) {
+          keepSoloWorktree = true;
           removeActive(coder.name);
           const m = authReloginMessage(providerFor(effectiveModelFor(coder)));
           appendLog("system", { role: "system", color: "#ff8c8c", text: m });
@@ -11291,12 +11354,12 @@ export function AgentsPage({
               port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
               sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteer}`,
               tempFor(coder, 0.3), ctrl.signal,
-              (d) => streamLog(coder.name, d), projectCwd,
+              (d) => streamLog(coder.name, d), soloCwd,
               sHist, autoApprove,
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed, undefined,
               getClaudeSession(selectedProjectId, coder.name),
             )).trim();
-            sGate = await runGate(projectCwd, sScope); lastGateRef.current = sGate;
+            sGate = await runGate(soloCwd, sScope); lastGateRef.current = sGate;
           } catch (e: any) { if (ctrl.signal.aborted) throw e; }
           finally { removeActive(coder.name); }
         }
@@ -11326,7 +11389,7 @@ export function AgentsPage({
                 "ONLY if it needs a decision the USER must make, say so on a line prefixed 'NEEDS USER:'.",
               ].join("\n"),
               criticTemp, ctrl.signal,
-              (d) => streamLog(CRITIC_NAME, d), projectCwd,
+              (d) => streamLog(CRITIC_NAME, d), soloCwd,
               undefined, undefined,
               (c, r, d) => streamThought(CRITIC_NAME, c, r, d),
               criticToolsForRun(), undefined,
@@ -11346,6 +11409,63 @@ export function AgentsPage({
             appendThought(coder.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker check skipped (${cleanAgentError(e)}) — shipping as-is.` });
           } finally { removeActive(CRITIC_NAME); }
         }
+        // Integrate only a cleanly completed isolated run. Failed verification,
+        // cancellation, or a pending user decision keeps the private branch and
+        // worktree intact for inspection/re-feed; it never leaks partial edits
+        // into the shared project checkout.
+        let soloIntegrationOk =
+          !ctrl.signal.aborted &&
+          (!sGate || sGate.status !== "failed") &&
+          !needsUserDecision;
+        if (!soloIntegrationOk) {
+          keepSoloWorktree = true;
+          appendThought(coder.name, {
+            role: "fleet",
+            color: "#ffb74d",
+            text: `⏸ isolated work kept at ${soloWt.path}\nBranch: ${soloWt.branch}`,
+          });
+        } else {
+          const soloFinalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {
+            worktreePath: soloWt.path,
+            agentName: coder.name,
+            summary: text,
+          });
+          if (soloFinalize.status === "committed") {
+            const soloMerge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
+              projectCwd,
+              agentName: coder.name,
+              branch: soloWt.branch,
+            });
+            if (soloMerge.status === "merged") {
+              appendThought(coder.name, {
+                role: "fleet",
+                color: "#7ff0c5",
+                text: `🔀 merged ${coder.name} → ${soloMerge.commitSha.slice(0, 7)} · ${soloMerge.filesChanged} file${soloMerge.filesChanged === 1 ? "" : "s"}`,
+              });
+            } else if (soloMerge.status === "noChanges") {
+              appendThought(coder.name, { role: "fleet", color: "var(--fg-muted)", text: "🔀 nothing to merge" });
+            } else {
+              keepSoloWorktree = true;
+              soloIntegrationOk = false;
+              const detail = soloMerge.status === "conflict"
+                ? `conflict in ${soloMerge.files.join(", ")}`
+                : soloMerge.message;
+              appendThought(coder.name, {
+                role: "fleet",
+                color: "#ff8c8c",
+                text: `⚠ isolated work was not merged: ${detail}\nKept at ${soloWt.path}`,
+              });
+            }
+          } else if (soloFinalize.status === "error") {
+            keepSoloWorktree = true;
+            soloIntegrationOk = false;
+            appendThought(coder.name, {
+              role: "fleet",
+              color: "#ff8c8c",
+              text: `⚠ finalize failed: ${soloFinalize.message}\nKept at ${soloWt.path}`,
+            });
+          }
+        }
         // RULE-BASED PUBLISH: host commits+bumps+releases deterministically when asked.
         // The host build/sign/release can run for minutes with no model activity, so
         // KEEP the coder card active (pulsing) and flip the phase to "integrating"
@@ -11353,12 +11473,11 @@ export function AgentsPage({
         // chat stays locked with NO active card, leaving the user with no idea why.
         let sPub = "";
         const wantsPublish = goalRequiresPublish(text);
-        if (wantsPublish && needsUserDecision) {
-          // A user-only decision is pending — hold the release, don't ship blind.
-          appendThought(coder.name, { role: "system", color: "#ffd97a", text: "⏸ Publish held — waiting on your decision above." });
-          setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: "⏸ Publish is on hold until you answer the question above.", ts: Date.now(), seq: nextSeq() }]);
+        if (wantsPublish && !soloIntegrationOk) {
+          appendThought(coder.name, { role: "system", color: "#ffd97a", text: "⏸ Publish held — isolated work was not safely integrated." });
+          setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: "⏸ Publish is on hold because the isolated run was not safely integrated.", ts: Date.now(), seq: nextSeq() }]);
         }
-        if (wantsPublish && !needsUserDecision) {
+        if (wantsPublish && soloIntegrationOk) {
           setPhase("integrating");
           appendThought(coder.name, { role: "system", color: "#7ff0c5", text: "📦 rule-based publish — host building / signing / releasing…" });
           // Surface it in the main chat too (the thought buffer alone is easy to miss),
@@ -11395,7 +11514,7 @@ export function AgentsPage({
         // Minimal solo run report.
         const vtxt = sGate ? (sGate.status === "passed" ? "✓ verify passed" : sGate.status === "failed" ? "✗ verify FAILED" : "verify: unverified") : "ran";
         const ptxt = wantsPublish ? (/PUBLISH_OK/.test(sPub) ? " · ✓ published" : " · ✗ publish failed") : "";
-        const okRun = (!sGate || sGate.status !== "failed") && (!wantsPublish || /PUBLISH_OK/.test(sPub));
+        const okRun = soloIntegrationOk && (!sGate || sGate.status !== "failed") && (!wantsPublish || /PUBLISH_OK/.test(sPub));
         const secs = Math.round((Date.now() - (runTraceRef.current?.t0 ?? Date.now())) / 1000);
         setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now(), seq: nextSeq() }]);
         setPhase("done");
@@ -11403,6 +11522,18 @@ export function AgentsPage({
         notebookRunCompletedCleanly = okRun;
         if (!okRun) notebookPauseReason = "the solo run did not finish cleanly";
         return;
+        } finally {
+          try {
+            await invoke("fleet_worktree_remove", {
+              args: {
+                projectCwd,
+                worktreePath: soloWt.path,
+                branch: soloWt.branch,
+                keep: keepSoloWorktree,
+              },
+            });
+          } catch { /* worktree remains recoverable on disk */ }
+        }
       }
 
       // ----- Phase 1: orchestrator plan + dispatches -----
@@ -11893,42 +12024,26 @@ export function AgentsPage({
       const runId = Date.now().toString(36).slice(-6);
 
       // ----- Phase 2a: pre-create one git worktree per specialist -----
-      // Serial loop on purpose — concurrent `git worktree add` from the
-      // same source repo can race on `.git/worktrees/` index. After
-      // this loop every dispatch.agent has either: a per-agent worktree
-      // path to use as cwd (isolated), or null (fall back to projectCwd
-      // — happens when projectCwd isn't a git repo at all, e.g.
-      // research-only teams against a plain folder).
+      // Every run with a project cwd is isolated, including single-agent,
+      // sequential, and WSL runs. We cannot predict whether a model will decide
+      // to write later in its turn, so isolation is based on filesystem access,
+      // not on parallel mode or the initial prompt. Creation is serial because
+      // concurrent `git worktree add` calls race on `.git/worktrees/`.
       setPhase("dispatching");
       if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
-      type WorktreeBinding = { path: string; branch: string; baseSha: string };
       const worktreeBySpec = new Map<string, WorktreeBinding | null>();
-      // Per-agent git worktrees are a Windows-side operation; they can't be
-      // created on a `\\wsl.localhost\...` path (Windows can't reach it). For a
-      // WSL-isolated project the agents already run sealed inside the distro via
-      // wsl.exe — so skip the worktree step entirely and run them shared in the
-      // WSL folder. Isolation is preserved; we just don't sub-isolate per agent.
-      const wslShared = isWslPath(projectCwd);
-      if (wslShared) {
-        appendThought(orch.name, { role: "fleet", color: "#7ff0c5",
-          text: `🗂 WSL-isolated project — agents run sealed inside the distro (shared worktree).` });
-      }
-      // Per-agent worktrees exist ONLY to stop CONCURRENT agents from colliding on
-      // the same files. A sequential run (the default) has no concurrency, so it
-      // needs none — running in the project dir directly avoids cutting a full
-      // working-tree copy per agent on every run (the leftover-folders the user
-      // hit). Only a parallel run with >1 agent actually needs isolation.
-      const needWorktrees = !wslShared && parallelMode && dispatches.length > 1;
+      const needWorktrees = requiresAgentWorktree(projectCwd);
       // Reclaim any worktrees a PAST/crashed run left behind before making new
       // ones — per-run cleanup misses a run that crashed before its finally{}.
-      if (!wslShared) {
+      if (needWorktrees) {
         try {
           const n = await invoke<number>("fleet_cleanup_orphans", { projectCwd });
           if (n > 0) appendThought(orch.name, { role: "fleet", color: "#7ff0c5", text: `🧹 reclaimed ${n} leftover worktree(s) from a previous run.` });
         } catch { /* best-effort */ }
       }
-      // Surface a "🗂 isolated" or "🗂 shared" line in the orchestrator's
-      // Thought tab per dispatch so the user can see what happened.
+      // With no project cwd, agents have no project filesystem to share. With a
+      // project cwd, anything except Ready is a hard stop: never silently
+      // downgrade a filesystem-capable run to the user's shared checkout.
       for (const d of dispatches) {
         if (!needWorktrees) { worktreeBySpec.set(d.agentName, null); continue; }
         const spec = runTeam.agents.find(a => a.name === d.agentName);
@@ -11947,32 +12062,14 @@ export function AgentsPage({
             role: "fleet", color: "#7ff0c5",
             text: `🗂 ${spec.name} → ${res.branch}\n   ${res.path}`,
           });
-        } else if (res.status === "notAGitRepo") {
-          worktreeBySpec.set(spec.name, null);
-          appendThought(orch.name, {
-            role: "fleet", color: "var(--fg-muted)",
-            text: `🗂 ${spec.name}: project is not a git repo — running shared in ${projectCwd || "(no cwd)"}`,
-          });
-        } else if (res.status === "dirtyWorkingTree") {
-          // Abort the whole run with a clear, fixable error rather than
-          // silently giving the agent a stale base. The user can commit
-          // / stash and re-run.
-          throw new Error(
-            `Project has uncommitted changes — commit or stash before running a multi-agent dispatch so each agent works from a clean base.\n\n${res.details}`
-          );
         } else {
-          worktreeBySpec.set(spec.name, null);
-          appendThought(orch.name, {
-            role: "fleet", color: "#ff8c8c",
-            text: `🗂 ${spec.name}: worktree creation failed — ${res.message}. Falling back to shared cwd.`,
-          });
+          throw new Error(worktreeCreationFailure(spec.name, projectCwd, res));
         }
       }
 
       // ----- Phase 2b: parallel specialist dispatch -----
-      // Each task runs the CLI in its own worktree path (or the shared
-      // projectCwd if none was created), then finalizes (commits) any
-      // edits the agent made before resolving.
+      // Each task runs the CLI in its own worktree path. A null binding exists
+      // only when there is no project cwd at all.
       // Surface a parallel wave in the user thread so concurrency is visible
       // (Stage 1 "surface"). A single dispatch reads as the usual sequential step.
       if (dispatches.length > 1) {
@@ -12389,7 +12486,7 @@ export function AgentsPage({
           projectCwd,
           priorHistory, undefined,   // history: continuity for the final answer
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-          effectiveToolsFor(orch),
+          runtimeReadOnlyTools(orch, roleByName),
           undefined,
           getClaudeSession(selectedProjectId, orch.name),
         );
@@ -12479,7 +12576,7 @@ export function AgentsPage({
               projectCwd,
               priorHistory, undefined,
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-              effectiveToolsFor(orch),
+              runtimeReadOnlyTools(orch, roleByName),
               undefined,
               getClaudeSession(selectedProjectId, orch.name),
             );
@@ -12519,7 +12616,7 @@ export function AgentsPage({
             projectCwd,
             priorHistory, undefined,
             (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-            effectiveToolsFor(orch),
+            runtimeReadOnlyTools(orch, roleByName),
             undefined,
             getClaudeSession(selectedProjectId, orch.name),
           );
@@ -12602,9 +12699,20 @@ export function AgentsPage({
           if (wtRes.status === "ready") {
             docWt = { path: wtRes.path, branch: wtRes.branch, baseSha: wtRes.baseSha };
             appendThought(docSpec.name, { role: "fleet", color: "#7ff0c5", text: `🗂 ${docSpec.name} → ${wtRes.branch}` });
+          } else {
+            throw new Error(worktreeCreationFailure(docSpec.name, projectCwd, wtRes));
           }
-        } catch { /* fall back to shared cwd */ }
-        const docCwd = docWt ? docWt.path : projectCwd;
+        } catch (e: any) {
+          appendThought(docSpec.name, {
+            role: "fleet",
+            color: "#ff8c8c",
+            text: `📚 auto-doc stopped before dispatch: ${String(e?.message ?? e)}`,
+          });
+          removeActive(docSpec.name);
+          throw e;
+        }
+        if (!docWt) throw new Error(`Required worktree for @${docSpec.name} was not created.`);
+        const docCwd = docWt.path;
         const docAllowed = effectiveToolsFor(docSpec);
         const docSkillIds = [...(roleByName.get(docSpec.base)?.skillAllowlist ?? []), ...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
         const docSkillBlock = await buildAgentSkillBlock(
@@ -12769,7 +12877,7 @@ export function AgentsPage({
           role: "system", color: "#ff8c8c", text: `⚠ ${clean}`,
           action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
         });
-        notebookPauseReason = "the run ended with an error";
+        notebookPauseReason = clean;
       }
       setPhase("idle");
     } finally {
@@ -12781,11 +12889,19 @@ export function AgentsPage({
       // notebook steps that were drained and processed as mid-run steers.
       const now = Date.now();
       if (notebookStepRef.current) {
-        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        if (notebookRunCompletedCleanly) {
+          markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        } else {
+          markNotebookStepFailed(selectedProjectId, notebookStepRef.current, notebookPauseReason, now);
+        }
         notebookStepRef.current = null;
       }
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
-        markNotebookStepFinished(selectedProjectId, sid, now);
+        if (notebookRunCompletedCleanly) {
+          markNotebookStepFinished(selectedProjectId, sid, now);
+        } else {
+          markNotebookStepFailed(selectedProjectId, sid, notebookPauseReason, now);
+        }
       }
       // Busy/reentrancy flags are clear now, so every exit path makes one
       // deterministic Notebook decision. A clean run advances the next card;
@@ -13495,7 +13611,7 @@ export function AgentsPage({
             agentName={name}
             displayName={displayLabel(name)}
             icon={agentIconRef(spec, roleByName, agentIconOverrides)}
-            initialModel={modelFor(name)}
+            initialModel={agentModelOverrideFor(name) || spec.defaultModelId || ""}
             initialColor={spec.color ?? ""}
             initialPrompt={spec.extraPrompt ?? ""}
             initialProfileRef={spec.profileRef}
@@ -13685,6 +13801,7 @@ export function AgentsPage({
             phase={phase}
             models={models}
             modelFor={modelFor}
+            agentModelOverrideFor={agentModelOverrideFor}
             onPickAgentModel={onPickAgentModel}
             accountsStatus={accountsStatus}
             effectiveTeamModel={effectiveTeamModel}

@@ -6,6 +6,7 @@ export function resolveAgentModel(
   savedTeamModel: string,
   perAgentModels: ReadonlyMap<string, string>,
   serverModel: string | null,
+  agentDefaultModel = "",
 ): string {
   // A live team-picker choice is an explicit "assign to every agent" action.
   // It must win immediately, even while stale per-agent overrides are being
@@ -13,6 +14,7 @@ export function resolveAgentModel(
   if (liveTeamModel !== null) return liveTeamModel.trim() || serverModel || "local";
   const perAgent = perAgentModels.get(agentName)?.trim();
   if (perAgent) return perAgent;
+  if (agentDefaultModel.trim()) return agentDefaultModel.trim();
   return savedTeamModel.trim() || serverModel || "local";
 }
 

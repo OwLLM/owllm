@@ -155,6 +155,22 @@ let _listenersWired = false;
 let _pushTimer: ReturnType<typeof setTimeout> | null = null;
 let _lastSnapshotJson = "";
 
+/// Stop remote sync immediately when the user logs out. Local projects/chats
+/// remain usable offline; only the account-backed transport is disabled.
+export function stopVaultSync(): void {
+  _enabled = false;
+  _started = false;
+  if (_pushTimer) {
+    clearTimeout(_pushTimer);
+    _pushTimer = null;
+  }
+  if (_projectSyncTimer) {
+    clearTimeout(_projectSyncTimer);
+    _projectSyncTimer = null;
+  }
+  _lastSnapshotJson = "";
+}
+
 function getLast(): number {
   try { return Number(localStorage.getItem(LAST_KEY) || "0") || 0; } catch { return 0; }
 }
@@ -413,4 +429,11 @@ function wireListeners(): void {
   // reconcile projects/facts as a backstop for native memory writes and abrupt
   // exits; event-driven writes normally sync after the 4-second debounce.
   window.setInterval(() => { if (_enabled) void syncProjectsNow(); }, 60_000);
+}
+
+// githubDisconnect emits this after the native credential scrub completes.
+// Install the listener at module load so logout also stops a sync engine that
+// was started earlier in this same WebView session.
+if (typeof window !== "undefined") {
+  window.addEventListener("owllm:vault-disconnected", stopVaultSync);
 }

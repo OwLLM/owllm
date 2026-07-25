@@ -182,3 +182,27 @@ owllm-desktop/tooltest/
 .owllm-inbox/
 .owllm/brainstorm.json
 .owllm/eval-traces.jsonl
+
+# Credential / secret material — must NEVER be committed or bundled. A stray
+# `git add -A` has swept a dev's runtime vault into the tree before, and it then
+# shipped inside the installer. Enforced at ship time by
+# credentialEmbedGuard.verify.run.mjs; ignored here so it can't be staged.
+*vault*.json
+*credentials.json
+*credential.json
+auth.json
+owllm_agent_secrets.json
+LLM/data/owllm_agent_secrets.json
+*.pem
+*.pfx
+*.p12
+id_rsa
+id_ed25519
+.env
+!.env.example
+!.env.sample
+!.env.template
+# WebView2 / Chromium browser profile (holds saved website logins + cookies).
+browser_profile/
+EBWebView/
+Login Data

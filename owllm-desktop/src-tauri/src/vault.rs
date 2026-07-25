@@ -50,6 +50,15 @@ fn token_and_login() -> Option<(String, String)> {
     Some((token, login))
 }
 
+/// Remote vault operations must be authorized by OWLLM's CURRENT GitHub
+/// session, not merely by whatever Git Credential Manager/gh credentials happen
+/// to exist on the machine. The local clone remains after logout for offline
+/// access, but no fetch/push command may use it until the app reconnects.
+fn connected_vault_dir() -> Result<PathBuf, String> {
+    token_and_login().ok_or_else(|| "GitHub is disconnected — vault sync is disabled.".to_string())?;
+    vault_dir().ok_or_else(|| "no vault dir".to_string())
+}
+
 /// GET an authenticated GitHub API URL; return the parsed JSON body.
 fn curl_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
     let mut cmd = std::process::Command::new("curl");
@@ -280,6 +289,104 @@ fn build_status(repo_exists: bool, cloned: bool, login: &str) -> VaultStatus {
 }
 
 // --------------------------------------------------------------------------
+// SECURITY: account-ownership guard
+//
+// Credentials are tied to the GitHub account that OWNS the `.owllm` folder. The
+// only durable, per-account marker of that ownership on disk is the local vault
+// clone's `origin` remote: it points at `github.com/<owner>/owllm-vault`, and
+// only the account that created it could have. If that owner differs from the
+// account signed in now, the whole `.owllm` was transplanted from someone else
+// — a copied/portable install, a cloned disk image, a shared build — carrying
+// THAT person's `agent_secrets.json` (API keys) and their synced vault. This is
+// exactly the reported leak: a fresh install on a different GitHub still showed
+// (and could USE) the original owner's keys, because `vault_ensure` reused the
+// existing clone without checking who it belonged to.
+// --------------------------------------------------------------------------
+
+/// Parse the GitHub owner ("login") out of an `owllm-vault` remote URL.
+/// Handles the forms git ever writes for this repo:
+///   https://github.com/OWNER/owllm-vault
+///   https://github.com/OWNER/owllm-vault.git
+///   https://user:token@github.com/OWNER/owllm-vault.git   (token-embedded fallback)
+///   git@github.com:OWNER/owllm-vault.git                   (ssh)
+/// Returns None when no `github.com/<owner>` segment is present.
+pub(crate) fn parse_vault_owner(remote: &str) -> Option<String> {
+    let r = remote.trim();
+    let idx = r.find("github.com")?;
+    // After "github.com" comes either '/' (https) or ':' (ssh), then OWNER/repo.
+    let after = r[idx + "github.com".len()..].trim_start_matches(['/', ':']);
+    let owner = after.split('/').next()?.trim();
+    if owner.is_empty() {
+        None
+    } else {
+        Some(owner.to_string())
+    }
+}
+
+/// Pure decision: is the local vault owned by a DIFFERENT account than the one
+/// signed in? Only a provable mismatch (both sides non-empty, case-insensitively
+/// different) counts — so a user's own machine is never flagged.
+pub(crate) fn is_foreign_owner(vault_owner: &str, signed_in_login: &str) -> bool {
+    let o = vault_owner.trim();
+    let l = signed_in_login.trim();
+    !o.is_empty() && !l.is_empty() && !o.eq_ignore_ascii_case(l)
+}
+
+/// Read the `origin` owner of the local vault clone, if one exists.
+fn local_vault_owner() -> Option<String> {
+    let dir = vault_dir()?;
+    if !is_cloned(&dir) {
+        return None;
+    }
+    let url = run_git(&["remote", "get-url", "origin"], Some(&dir)).ok()?;
+    parse_vault_owner(&url)
+}
+
+/// Enforce that on-disk credentials belong to `current_login`. When the local
+/// vault clone was created by a different account (transplanted `.owllm`):
+///   1. quarantine every inherited API secret (keeping only the current GitHub
+///      sign-in) so nothing of the previous owner's remains usable, and
+///   2. remove the foreign vault clone so `vault_ensure` re-clones THIS
+///      account's own (empty) vault instead of syncing the previous owner's
+///      chats/projects/model list.
+/// Fires only on a provable cross-account mismatch; a no-op otherwise. Returns
+/// true when it acted.
+pub fn enforce_account_ownership(current_login: &str) -> bool {
+    let Some(owner) = local_vault_owner() else {
+        return false;
+    };
+    if !is_foreign_owner(&owner, current_login) {
+        return false;
+    }
+    eprintln!(
+        "SECURITY: local vault belongs to '{owner}' but the signed-in account is \
+         '{}'. This `.owllm` was transplanted from another account — quarantining \
+         inherited credentials and re-cloning the correct vault.",
+        current_login.trim()
+    );
+    match crate::accounts::quarantine_foreign_secrets(&["GITHUB_TOKEN", "GITHUB_LOGIN"]) {
+        Ok(n) => eprintln!("SECURITY: quarantined {n} inherited API secret(s)."),
+        Err(e) => eprintln!("SECURITY: secret quarantine failed: {e}"),
+    }
+    if let Some(dir) = vault_dir() {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            eprintln!("SECURITY: could not remove foreign vault clone: {e}");
+        }
+    }
+    true
+}
+
+/// Startup entry: enforce ownership using the stored GitHub login BEFORE any
+/// sync runs, so an app UPDATE neutralizes a transplanted install on the very
+/// next launch. No-op when GitHub isn't connected or no local vault clone
+/// exists (nothing to prove ownership against yet).
+pub fn enforce_account_ownership_on_startup() {
+    if let Some(login) = crate::accounts::accounts_get_secret("GITHUB_LOGIN".to_string()) {
+        enforce_account_ownership(&login);
+    }
+}
+
+// --------------------------------------------------------------------------
 // Tauri commands
 // --------------------------------------------------------------------------
 
@@ -356,7 +463,7 @@ fn commit_push(dir: &std::path::Path, branch: &str) -> Result<(), String> {
 /// Publish this machine as a usable GPU/inference server in the vault.
 #[tauri::command]
 pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Err("vault not set up on this device yet".to_string());
     }
@@ -384,7 +491,7 @@ pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), Stri
 /// Stop advertising this machine as a server (deletes the record).
 #[tauri::command]
 pub async fn vault_unpublish_server() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }
@@ -404,7 +511,7 @@ pub async fn vault_unpublish_server() -> Result<(), String> {
 /// THIS device's own record). Used to offer a one-click "Use my GPU box".
 #[tauri::command]
 pub async fn vault_read_server() -> Result<Option<GpuServer>, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(None);
     }
@@ -460,7 +567,7 @@ fn copy_dir_files(from: &std::path::Path, to: &std::path::Path, overwrite: bool)
 /// vault: pull teams from other devices (add-missing) and publish ours.
 #[tauri::command]
 pub async fn vault_sync_teams() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }
@@ -1082,7 +1189,7 @@ fn import_project(
 /// ours. Returns true when the local DB changed (so the UI can reload).
 #[tauri::command]
 pub async fn vault_sync_projects() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1176,7 +1283,7 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
 /// when a peer record changed locally.
 #[tauri::command]
 pub async fn vault_sync_devices() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1230,7 +1337,7 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
 /// material never enters the git repo. Returns true when local metadata changed.
 #[tauri::command]
 pub async fn vault_sync_signing() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1280,7 +1387,7 @@ fn current_branch(dir: &std::path::Path) -> String {
 /// decides whether to adopt it (last-write-wins by timestamp).
 #[tauri::command]
 pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(None);
     }
@@ -1303,7 +1410,7 @@ pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
 /// JS layer already resolved which side is newer), and push.
 #[tauri::command]
 pub async fn vault_write_state(json: String) -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Err("vault not set up on this device yet".to_string());
     }
@@ -1341,7 +1448,7 @@ pub async fn vault_write_state(json: String) -> Result<(), String> {
 /// remote blob into localStorage — keeps future commits clean/linear.
 #[tauri::command]
 pub async fn vault_align() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }
@@ -1365,6 +1472,10 @@ pub async fn vault_ensure() -> Result<VaultStatus, String> {
     let (token, login) =
         token_and_login().ok_or_else(|| "Connect GitHub first (Sync sign-in).".to_string())?;
     tokio::task::spawn_blocking(move || -> Result<VaultStatus, String> {
+        // 0) SECURITY: if the local clone belongs to another account (a
+        //    transplanted `.owllm`), quarantine the inherited credentials and
+        //    drop the foreign clone BEFORE trusting or reusing it below.
+        enforce_account_ownership(&login);
         // 1) Repo on GitHub.
         if !repo_exists(&token, &login) {
             create_repo(&token)?;
@@ -1387,6 +1498,83 @@ pub async fn vault_ensure() -> Result<VaultStatus, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- SECURITY: account-ownership guard ----
+
+    #[test]
+    fn parse_owner_handles_every_remote_form() {
+        assert_eq!(
+            parse_vault_owner("https://github.com/ruigro/owllm-vault").as_deref(),
+            Some("ruigro")
+        );
+        assert_eq!(
+            parse_vault_owner("https://github.com/ruigro/owllm-vault.git").as_deref(),
+            Some("ruigro")
+        );
+        assert_eq!(
+            parse_vault_owner("https://ruigro:ghp_tok@github.com/ruigro/owllm-vault.git")
+                .as_deref(),
+            Some("ruigro")
+        );
+        assert_eq!(
+            parse_vault_owner("git@github.com:ruigro/owllm-vault.git").as_deref(),
+            Some("ruigro")
+        );
+        assert_eq!(parse_vault_owner("not a url").as_deref(), None);
+        assert_eq!(parse_vault_owner("https://github.com/").as_deref(), None);
+    }
+
+    #[test]
+    fn foreign_owner_only_fires_on_a_provable_cross_account_mismatch() {
+        // The reported leak: vault cloned by 'ruigro', signed in as someone else.
+        assert!(is_foreign_owner("ruigro", "sg-user"));
+        // Same account (case-insensitive) is NEVER foreign — a user's own machine.
+        assert!(!is_foreign_owner("ruigro", "ruigro"));
+        assert!(!is_foreign_owner("RuiGro", "ruigro"));
+        // Missing either side is not provable → never flag (no false wipes).
+        assert!(!is_foreign_owner("", "ruigro"));
+        assert!(!is_foreign_owner("ruigro", ""));
+        assert!(!is_foreign_owner("  ", "  "));
+    }
+
+    #[test]
+    fn quarantine_keeps_github_signin_and_drops_inherited_keys() {
+        // Prove the purge contract on a temp secrets file via a scoped HOME.
+        let tmp = std::env::temp_dir().join(format!("owllm-quar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join(".owllm")).unwrap();
+        let prev_home = std::env::var_os("USERPROFILE");
+        std::env::set_var("USERPROFILE", &tmp);
+        let secrets = tmp.join(".owllm").join("agent_secrets.json");
+        std::fs::write(
+            &secrets,
+            r#"{"ANTHROPIC_API_KEY":"sk-ant-leaked","OPENAI_API_KEY":"sk-leaked","GITHUB_TOKEN":"his-tok","GITHUB_LOGIN":"sg-user"}"#,
+        )
+        .unwrap();
+
+        let removed =
+            crate::accounts::quarantine_foreign_secrets(&["GITHUB_TOKEN", "GITHUB_LOGIN"]).unwrap();
+        assert_eq!(removed, 2, "both inherited API keys must be counted purged");
+
+        let rewritten: std::collections::BTreeMap<String, String> =
+            serde_json::from_str(&std::fs::read_to_string(&secrets).unwrap()).unwrap();
+        assert_eq!(rewritten.get("GITHUB_LOGIN").map(String::as_str), Some("sg-user"));
+        assert!(rewritten.get("ANTHROPIC_API_KEY").is_none(), "leaked key must be gone");
+        assert!(rewritten.get("OPENAI_API_KEY").is_none(), "leaked key must be gone");
+
+        // The original is preserved (moved aside), never silently destroyed.
+        let quarantined = std::fs::read_dir(tmp.join(".owllm"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .any(|e| e.file_name().to_string_lossy().starts_with("agent_secrets.quarantine-"));
+        assert!(quarantined, "original secrets must be recoverable");
+
+        match prev_home {
+            Some(h) => std::env::set_var("USERPROFILE", h),
+            None => std::env::remove_var("USERPROFILE"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     fn row_location(conn: &rusqlite::Connection, id: &str) -> String {
         conn.query_row(

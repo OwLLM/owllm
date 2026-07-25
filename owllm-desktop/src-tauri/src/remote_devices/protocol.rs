@@ -130,6 +130,14 @@ pub enum CommandKind {
     /// (127.0.0.1) and return its response body. Lets a device use another
     /// device's local model over the sealed channel. Gated by `allow_shell`.
     Inference,
+    /// Return the target's locally installed, runnable models and current
+    /// server status. Read-only, but restricted to the same permission tier as
+    /// inference because model inventory is not part of public discovery.
+    ModelCatalog,
+    /// Start or switch the target's managed local server to a selected model.
+    /// This is the explicit remote-inference control surface; it never runs an
+    /// arbitrary shell command. Gated by the same policy as inference.
+    ModelStart,
 }
 
 /// The decision `authorize()` returns. `RequiresApproval` means the policy

@@ -25,6 +25,7 @@ import { listen } from "@tauri-apps/api/event";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getInferenceEndpoint, setInferenceEndpoint, setLocalServerKey, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
 import { getServerCtx, setServerCtx, SERVER_CTX_PRESETS, fmtCtx, approxKvGb } from "./serverContext";
+import { listRemoteModels, startRemoteModel, type RemoteModelCatalog } from "../advanced/remoteDevices";
 
 // Real Page_icons PNG served by vite.config.ts middleware
 // (same pattern as AgentsPage.tsx / CodePage.tsx).
@@ -47,12 +48,49 @@ function InferenceSourceCard() {
   // Paired OwLLM devices, for routing inference over the encrypted device
   // channel (no HTTP route needed — works via P2P/relay).
   const [pairedDevices, setPairedDevices] = useState<Array<{ device_id: string; name: string; is_self: boolean }>>([]);
+  const [remoteCatalog, setRemoteCatalog] = useState<RemoteModelCatalog | null>(null);
+  const [remoteBusy, setRemoteBusy] = useState(false);
+  const [remoteError, setRemoteError] = useState("");
   useEffect(() => {
     invoke<GpuServer | null>("vault_read_server").then(setDiscovered).catch(() => setDiscovered(null));
     invoke<Array<{ device_id: string; name: string; is_self: boolean }>>("devices_list")
       .then((d) => setPairedDevices((d ?? []).filter((x) => !x.is_self)))
       .catch(() => setPairedDevices([]));
   }, []);
+  const refreshRemoteModels = async (deviceId: string) => {
+    setRemoteBusy(true);
+    setRemoteError("");
+    try {
+      setRemoteCatalog(await listRemoteModels(deviceId));
+    } catch (e) {
+      setRemoteCatalog(null);
+      setRemoteError(String(e));
+    } finally {
+      setRemoteBusy(false);
+    }
+  };
+  useEffect(() => {
+    if (!isDevice || !ep.deviceId) {
+      setRemoteCatalog(null);
+      setRemoteError("");
+      return;
+    }
+    void refreshRemoteModels(ep.deviceId);
+  }, [isDevice, ep.deviceId]);
+
+  const chooseRemoteModel = async (modelId: string) => {
+    if (!ep.deviceId || !modelId) return;
+    setRemoteBusy(true);
+    setRemoteError("");
+    try {
+      await startRemoteModel(ep.deviceId, modelId);
+      save({ ...ep, remoteModelId: modelId });
+      await refreshRemoteModels(ep.deviceId);
+    } catch (e) {
+      setRemoteError(String(e));
+      setRemoteBusy(false);
+    }
+  };
   const usingDiscovered = remote && discovered && ep.host === discovered.host && ep.port === discovered.port;
   const inp: CSSProperties = {
     height: 30, padding: "0 10px", borderRadius: 6,
@@ -132,7 +170,7 @@ function InferenceSourceCard() {
             value={ep.deviceId ?? ""}
             onChange={e => {
               const d = pairedDevices.find((x) => x.device_id === e.target.value);
-              save({ ...ep, deviceId: d?.device_id, deviceName: d?.name });
+              save({ ...ep, deviceId: d?.device_id, deviceName: d?.name, remoteModelId: undefined });
             }}
           >
             <option value="">— pick a paired device —</option>
@@ -145,6 +183,66 @@ function InferenceSourceCard() {
             No paired devices yet — pair one on the Devices page, then it appears here. The target must have a model running and grant this machine shell.
           </div>
         )
+      )}
+      {isDevice && ep.deviceId && (
+        <div data-ui="PairedDeviceModels" style={{
+          display: "flex", flexDirection: "column", gap: 7, padding: 9,
+          border: "1px solid rgba(34,197,94,0.35)", borderRadius: 8,
+          background: "rgba(34,197,94,0.06)",
+        }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <b style={{ fontSize: 12, color: "var(--fg-strong)" }}>
+              Models on {ep.deviceName || "paired device"}
+            </b>
+            <span style={{ flex: 1 }} />
+            {remoteCatalog && (
+              <span style={{ fontSize: 10.5, color: "var(--fg-muted)" }}>
+                {remoteCatalog.models.length} available
+                {remoteCatalog.running && remoteCatalog.active_model_id
+                  ? ` · running ${remoteCatalog.active_model_id}`
+                  : " · server stopped"}
+              </span>
+            )}
+            <button
+              className="ghost-btn"
+              disabled={remoteBusy}
+              onClick={() => void refreshRemoteModels(ep.deviceId!)}
+              style={{ fontSize: 10.5, padding: "2px 8px" }}
+            >
+              {remoteBusy ? "Checking…" : "Refresh"}
+            </button>
+          </div>
+          {remoteCatalog && remoteCatalog.models.length > 0 && (
+            <select
+              aria-label={`Models on ${ep.deviceName || "paired device"}`}
+              style={{ ...inp, width: "100%" }}
+              value={ep.remoteModelId ?? remoteCatalog.active_model_id ?? ""}
+              disabled={remoteBusy}
+              onChange={(e) => void chooseRemoteModel(e.target.value)}
+            >
+              <option value="">— select and start a model —</option>
+              {remoteCatalog.models.map((model) => (
+                <option key={model.model_id} value={model.model_id}>
+                  {model.model_id}
+                  {model.size_mib != null ? ` · ${(model.size_mib / 1024).toFixed(1)} GiB` : ""}
+                  {remoteCatalog.active_model_id === model.model_id && remoteCatalog.running ? " · running" : ""}
+                </option>
+              ))}
+            </select>
+          )}
+          {remoteCatalog && remoteCatalog.models.length === 0 && (
+            <span style={{ fontSize: 11.5, color: "var(--warn)" }}>
+              No runnable GGUF models are installed on this device.
+            </span>
+          )}
+          {remoteError && (
+            <span style={{ fontSize: 11.5, color: "var(--error)" }}>
+              {remoteError.includes("permission denied")
+                ? "Remote model access is not allowed by that device. On the target, grant this PC Shell commands in Devices → Trusted controllers."
+                : remoteError}
+            </span>
+          )}
+        </div>
       )}
     </div>
   );

@@ -275,7 +275,81 @@ pub fn module_node_exe() -> Option<PathBuf> {
 /// resolve via the bundled runtime even when the host doesn't have
 /// Node installed system-wide.
 pub fn module_node_dir() -> Option<PathBuf> {
-    module_node_exe().and_then(|p| p.parent().map(PathBuf::from))
+    let dir = module_node_exe().and_then(|p| p.parent().map(PathBuf::from))?;
+    repair_posix_node_shims(&dir);
+    Some(dir)
+}
+
+/// Node's macOS/Linux archives ship `bin/npm` and `bin/npx` as symlinks into
+/// `lib/node_modules/npm/bin`. Some zip/tar extraction paths materialize the
+/// symlink payload as a regular 54-byte script instead. From `bin/`, that copied
+/// script resolves `../lib/cli.js` to the wrong directory and every GUI install
+/// exits 1. Restore the archive's intended relative links in the app-managed
+/// module directory. This is idempotent and never touches a system Node install.
+#[cfg(unix)]
+fn repair_posix_node_shims(bin_dir: &Path) {
+    use std::os::unix::fs::symlink;
+
+    for (name, relative_target) in [
+        ("npm", "../lib/node_modules/npm/bin/npm-cli.js"),
+        ("npx", "../lib/node_modules/npm/bin/npx-cli.js"),
+    ] {
+        let target = bin_dir.join(relative_target);
+        if !target.is_file() {
+            continue;
+        }
+        let shim = bin_dir.join(name);
+        let already_correct = std::fs::read_link(&shim)
+            .ok()
+            .map(|link| link == PathBuf::from(relative_target))
+            .unwrap_or(false);
+        if already_correct {
+            continue;
+        }
+        let temp = bin_dir.join(format!(".{name}.owllm-link"));
+        let _ = std::fs::remove_file(&temp);
+        if symlink(relative_target, &temp).is_ok() {
+            let _ = std::fs::rename(&temp, &shim);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn repair_posix_node_shims(_bin_dir: &Path) {}
+
+#[cfg(all(test, unix))]
+mod node_shim_tests {
+    use super::repair_posix_node_shims;
+
+    #[test]
+    fn copied_npm_scripts_are_restored_to_relative_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        let npm_bin = temp.path().join("lib/node_modules/npm/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&npm_bin).unwrap();
+        for (name, body) in [
+            ("npm-cli.js", "#!/usr/bin/env node\n"),
+            ("npx-cli.js", "#!/usr/bin/env node\n"),
+        ] {
+            std::fs::write(npm_bin.join(name), body).unwrap();
+        }
+        // Reproduce the broken extractor result seen on the live Mac: the
+        // symlink payload was copied into bin/npm and resolves ../lib wrongly.
+        std::fs::write(bin.join("npm"), "require('../lib/cli.js')(process)\n").unwrap();
+        std::fs::write(bin.join("npx"), "require('../lib/cli.js')(process)\n").unwrap();
+
+        repair_posix_node_shims(&bin);
+
+        assert_eq!(
+            std::fs::read_link(bin.join("npm")).unwrap(),
+            std::path::PathBuf::from("../lib/node_modules/npm/bin/npm-cli.js")
+        );
+        assert_eq!(
+            std::fs::read_link(bin.join("npx")).unwrap(),
+            std::path::PathBuf::from("../lib/node_modules/npm/bin/npx-cli.js")
+        );
+    }
 }
 
 fn appdata_root() -> Option<PathBuf> {

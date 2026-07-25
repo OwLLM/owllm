@@ -752,12 +752,15 @@ pub async fn github_clone_project(repo_url: String, parent: String) -> Result<St
     .map_err(|e| format!("join error: {e}"))?
 }
 
-/// Disconnect: forget the token and scrub credentials from the sandbox and
-/// host. Best effort — always clears the stored token even if scrubbing fails.
+/// Disconnect: require the app-owned token/login to be removed, then
+/// best-effort scrub credentials from the sandbox and host.
 #[tauri::command]
 pub async fn github_disconnect(distro: Option<String>) -> Result<(), String> {
-    let _ = crate::accounts::accounts_delete_secret("GITHUB_TOKEN".to_string());
-    let _ = crate::accounts::accounts_delete_secret("GITHUB_LOGIN".to_string());
+    // This is the authorization boundary for every vault command. Never report
+    // success if the app token could not actually be removed: the old
+    // best-effort deletion let the UI say "logged out" while sync continued.
+    crate::accounts::accounts_delete_secret("GITHUB_TOKEN".to_string())?;
+    crate::accounts::accounts_delete_secret("GITHUB_LOGIN".to_string())?;
 
     tokio::task::spawn_blocking(move || {
         // Scrub from the REAL Linux distro (where configure_sandbox wrote the

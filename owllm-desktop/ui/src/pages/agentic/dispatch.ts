@@ -340,6 +340,65 @@ export async function runCodexCliStream(args: {
   }
 }
 
+/// Run Kimi Code in its native NDJSON mode so long coding turns expose
+/// thinking/tool progress instead of leaving the UI on a frozen "Thinking"
+/// placeholder until `--final-message-only` exits.
+export async function runKimiCliStream(args: {
+  model?: string | null;
+  systemPrompt: string;
+  userMessage: string;
+  cwd?: string | null;
+  allowedTools?: string[];
+  onDelta: (delta: string) => void;
+  onThought: (channel: string, role: string, delta: string) => void;
+}): Promise<string> {
+  const responsive = makeResponsiveHandlers(args.onDelta, args.onThought);
+  const ch = new Channel<ClaudeStreamEvent>();
+  ch.onmessage = (msg) => {
+    switch (msg.kind) {
+      case "text":
+        responsive.onDelta(msg.delta);
+        break;
+      case "thinking":
+        responsive.onThought?.("thinking", "🧠 Kimi thinking", msg.delta);
+        break;
+      case "toolUse":
+        responsive.onThought?.(
+          `tool:${msg.name}:${msg.toolUseId}`,
+          `🛠 ${msg.name}`,
+          msg.input || "",
+        );
+        break;
+      case "toolResult": {
+        const snippet = msg.content.length > 800
+          ? `${msg.content.slice(0, 800)}\n…(truncated)`
+          : msg.content;
+        responsive.onThought?.(
+          `tool-result:${msg.toolUseId}`,
+          msg.isError ? "↩ error" : "↩ result",
+          snippet,
+        );
+        break;
+      }
+      case "error":
+        responsive.onThought?.("cli-error", "⚠ Kimi CLI", msg.message);
+        break;
+    }
+  };
+  try {
+    return await invoke<string>("kimi_cli_stream", {
+      systemPrompt: args.systemPrompt,
+      userMessage: args.userMessage,
+      cwd: args.cwd ?? null,
+      model: args.model ?? null,
+      allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      onEvent: ch,
+    });
+  } finally {
+    await responsive.flush();
+  }
+}
+
 /// Best-effort extraction of the message text from a SendUserMessage
 /// tool call's input. The CLI stringifies the JSON input; the schema
 /// is `{ message: string }` for this tool. Falls back to the raw
@@ -1562,8 +1621,19 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
       // re-warm AND the reactive 401 clear-and-rewarm a NO-OP for Kimi/Gemini:
       // their token expired mid-run and the retry re-ran the same stale creds
       // until the backoff died — the "inconsistent logouts, worst with Kimi".
-      try { await invoke("accounts_test_probe_live", { backend }); }
-      catch { /* ignore — warm-up is best-effort */ }
+      try {
+        const probe = await invoke<{ ok: boolean; detail: string }>("accounts_test_probe_live", { backend });
+        // A revoked Kimi refresh grant is not a cold-token race: repeating the
+        // same CLI call can never repair it. Stop before the real job and give
+        // the user the one action that can recover the account.
+        if (backend === "kimi_cli" && !probe.ok && isCliReauthRequired(probe.detail)) {
+          throw new Error(kimiReconnectMessage(probe.detail));
+        }
+      } catch (error: any) {
+        if (backend === "kimi_cli" && isCliReauthRequired(error?.message ?? String(error))) throw error;
+        // Other warm-up failures are best-effort: the real call below still
+        // carries the provider's most precise error and normal retry policy.
+      }
       // THE AGENTIC-TEAM 401 FIX: a sandboxed project runs the CLI inside WSL
       // against a COPY of the Windows credentials; warming only refreshes the
       // Windows token, so the in-sandbox copy goes stale → persistent 401. After
@@ -1600,6 +1670,15 @@ export const CLI_AUTH_BACKOFFS_MS = [10_000, 30_000, 120_000]; // 10s, 30s, 2min
 
 export function isCliAuthError(msg: string): boolean {
   return /\b401\b|invalid authentication|failed to authenticate|authentication_error|not logged in|unauthorized/i.test(msg);
+}
+
+export function isCliReauthRequired(msg: string): boolean {
+  return /authorization grant is invalid|invalid[_ ]authentication[_ ]error|api key appears to be invalid|refresh token.*(?:invalid|revoked|expired)|login expired|signed out/i.test(msg);
+}
+
+function kimiReconnectMessage(detail: string): string {
+  const clean = detail.trim().replace(/\s+/g, " ");
+  return `Kimi sign-in expired and cannot be refreshed. Open Accounts → Kimi, choose Disconnect, then Login again.${clean ? ` Kimi reported: ${clean}` : ""}`;
 }
 
 // Transient NETWORK failures the subscription CLI surfaces ("Failed to fetch"
@@ -1687,6 +1766,9 @@ export async function withCliAuthRetry<T>(
       // fast (1.5s/4s/8s).
       const isAuth = isCliAuthError(msg);
       const isNet = !isAuth && isTransientNetError(msg);
+      if (backend === "kimi_cli" && isAuth && isCliReauthRequired(msg)) {
+        throw new Error(kimiReconnectMessage(msg));
+      }
       const schedule = isAuth ? CLI_AUTH_BACKOFFS_MS : CLI_NET_BACKOFFS_MS;
       if ((!isAuth && !isNet) || attempt >= schedule.length) throw e;
       const waitMs = schedule[attempt];
@@ -2522,6 +2604,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       // channel — no HTTP route to the device required (works via P2P/relay).
       lastReply = await deviceChatCompletion(
         infer.device.id,
+        infer.device.modelId,
         {
           model: p.modelId || "local",
           messages: liveMessages,
@@ -2669,6 +2752,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       if (infer.device) {
         const finalText = await deviceChatCompletion(
           infer.device.id,
+          infer.device.modelId,
           { model: p.modelId || "local", messages: liveMessages, temperature: p.temperature, ...sampling },
           countingDelta,
           countingThought,
@@ -3200,16 +3284,17 @@ async function streamMoonshot(
     const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], kimiCwd);
     const prompt = buildKimiCliPrompt(cliUserMessage, history);
     const reply = await withCliAuthRetry("kimi_cli", signal, () =>
-      invoke<string>("kimi_cli_complete", {
+      runKimiCliStream({
         systemPrompt,
         userMessage: prompt,
         cwd: kimiCwd ?? null,
         model: modelId,
-        allowedTools: allowedTools ?? null,
+        allowedTools,
+        onDelta,
+        onThought: onThought ?? (() => {}),
       }),
       kimiCwd,
     );
-    if (reply) onDelta(reply);
     return reply;
   }
   return streamOpenAiApiWithTools({
@@ -3415,6 +3500,7 @@ async function streamGemini(
 /// the only visible difference is the reply arrives at once, not token-by-token.
 async function deviceChatCompletion(
   deviceId: string,
+  remoteModelId: string | undefined,
   body: Record<string, unknown>,
   onDelta: StreamHandler,
   onThought: ThoughtHandler | undefined,
@@ -3422,7 +3508,11 @@ async function deviceChatCompletion(
   signal: AbortSignal,
 ): Promise<string> {
   if (signal.aborted) throw new DOMException("aborted", "AbortError");
-  const payload = JSON.stringify({ ...body, stream: false });
+  const payload = JSON.stringify({
+    ...body,
+    stream: false,
+    ...(remoteModelId ? { owllm_remote_model: remoteModelId } : {}),
+  });
   const res = await invoke<{ ok: boolean; stdout: string; error: string | null; decision: string }>(
     "device_send",
     { toDevice: deviceId, kind: "inference", command: payload, payload: null, timeoutMs: 300_000 },

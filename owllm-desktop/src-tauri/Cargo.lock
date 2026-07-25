@@ -4271,7 +4271,7 @@ dependencies = [
 
 [[package]]
 name = "owllm-desktop"
-version = "0.9.39"
+version = "0.9.42"
 dependencies = [
  "aes",
  "aes-gcm",
@@ -4318,6 +4318,9 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "webkit2gtk",
+ "webview2-com",
+ "windows 0.61.3",
  "windows-sys 0.59.0",
  "x25519-dalek",
  "zip 0.6.6",

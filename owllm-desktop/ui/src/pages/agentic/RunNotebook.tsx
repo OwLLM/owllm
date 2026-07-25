@@ -36,13 +36,17 @@ import ActionIcon from "../../components/ActionIcon";
 export type NotebookStep = {
   id: string;
   text: string;
-  /// pending = written, not fed yet · sent = fed to the team · done = user checked it off
-  status: "pending" | "sent" | "done";
+  /// pending = not fed · sent = live/successful run · failed = run ended
+  /// unsuccessfully and stays actionable · done = user explicitly checked it.
+  status: "pending" | "sent" | "failed" | "done";
   ts: number;
   /// When this step was fed to the team (started as a job).
   startedAt?: number;
   /// When the run that processed this step finished.
   finishedAt?: number;
+  /// Concise reason the last run did not complete. Failed steps stay on Active
+  /// with a Re-feed action instead of being silently archived.
+  failureReason?: string;
 };
 
 export type NotebookState = {
@@ -151,6 +155,7 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   next.status = "sent";
   next.startedAt = now;
   next.finishedAt = undefined;
+  next.failureReason = undefined;
   if (nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) {
     nb.autoFeedStartedAt = now;
     nb.autoFeedFinishedAt = undefined;
@@ -273,7 +278,7 @@ export function markNotebookStepStarted(projectId: string | null | undefined, st
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], startedAt, finishedAt: undefined };
+  nb.steps[idx] = { ...nb.steps[idx], status: "sent", startedAt, finishedAt: undefined, failureReason: undefined };
   saveNotebook(projectId, nb);
 }
 
@@ -283,7 +288,28 @@ export function markNotebookStepFinished(projectId: string | null | undefined, s
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], finishedAt };
+  nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, failureReason: undefined };
+  saveNotebook(projectId, nb);
+}
+
+/// A stopped/errored run did not complete its notebook card. Keep the card in
+/// Active and make the failed state durable so every page/PC offers Re-feed.
+export function markNotebookStepFailed(
+  projectId: string | null | undefined,
+  stepId: string,
+  reason: string,
+  finishedAt: number = Date.now(),
+): void {
+  if (!projectId || !stepId) return;
+  const nb = loadNotebook(projectId);
+  const idx = nb.steps.findIndex((s) => s.id === stepId);
+  if (idx < 0) return;
+  nb.steps[idx] = {
+    ...nb.steps[idx],
+    status: "failed",
+    finishedAt,
+    failureReason: reason.trim() || "The run did not complete.",
+  };
   saveNotebook(projectId, nb);
 }
 
@@ -291,7 +317,7 @@ export function markNotebookStepFinished(projectId: string | null | undefined, s
 /// or a run it was fed to has completed ("sent" with a finish stamp). Archived
 /// steps leave the Active queue and appear only on the Archive tab — a fed
 /// step that finished no longer needs a manual check-off to get out of the way.
-function isStepArchived(s: NotebookStep): boolean {
+export function isStepArchived(s: NotebookStep): boolean {
   return s.status === "done" || (s.status === "sent" && s.finishedAt != null);
 }
 
@@ -300,7 +326,8 @@ function formatStepTiming(s: NotebookStep): string | null {
   if (s.startedAt == null) return null;
   const start = formatClock(s.startedAt);
   if (s.finishedAt != null) {
-    return translateUiText(`started ${start} • finished ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`);
+    const outcome = s.status === "failed" ? "incomplete" : "finished";
+    return translateUiText(`started ${start} • ${outcome} ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`);
   }
   return translateUiText(`started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`);
 }
@@ -564,7 +591,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     // race React's queued state updater and erase the just-started sequence.
     updateNotebook((prev) => ({
       ...prev,
-      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined } : step),
+      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined, failureReason: undefined } : step),
       // Claiming the queue makes THIS window its owner even when auto-feed is
       // off: a started queue is driven by one window, and every other open
       // window (another tab here or the app on another PC) ghosts its run
@@ -677,6 +704,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
 
   const pendingCount = useMemo(() => nb.steps.filter((s) => s.status === "pending").length, [nb.steps]);
+  const incompleteCount = useMemo(() => nb.steps.filter((s) => s.status === "failed").length, [nb.steps]);
   // Total queue timing: sum of finished durations plus currently-running time.
   const queueTiming = useMemo(() => {
     const finished = nb.steps.filter((s) => s.startedAt != null && s.finishedAt != null);
@@ -745,7 +773,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   const statusIcon = (s: NotebookStep) => (
     <ActionIcon name={s.status === "done" ? "check" : s.status === "sent" ? "bolt" : "circle"} size={15} />
   );
-  const statusColor = (s: NotebookStep) => (s.status === "done" ? "var(--ok)" : s.status === "sent" ? "var(--warn)" : "var(--fg-muted)");
+  const statusColor = (s: NotebookStep) => (s.status === "done" ? "var(--ok)" : s.status === "failed" ? "var(--error)" : s.status === "sent" ? "var(--warn)" : "var(--fg-muted)");
 
   const card: React.CSSProperties = {
     display: "flex", flexDirection: "column", gap: 8,
@@ -1033,6 +1061,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent-ink)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
               )}
               <span style={{ fontSize: 10, fontWeight: 700, color: pendingCount ? "var(--ok)" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
+              {incompleteCount > 0 && (
+                <span style={{ fontSize: 10, fontWeight: 700, color: "var(--error)", border: "1px solid rgba(var(--error-rgb),0.45)", borderRadius: 999, padding: "1px 8px" }}>{incompleteCount} incomplete</span>
+              )}
               {pendingCount > 0 && (
                 <button
                   onClick={startQueue}
@@ -1151,9 +1182,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         >
                           {s.text}
                           {s.status === "sent" && <span style={{ display: "inline-block", marginLeft: 8, fontSize: 10, color: "var(--warn)", border: "1px solid rgba(var(--warn-rgb),0.45)", borderRadius: 999, padding: "1px 7px" }}>fed to team</span>}
+                          {s.status === "failed" && <span style={{ display: "inline-block", marginLeft: 8, fontSize: 10, color: "var(--error)", border: "1px solid rgba(var(--error-rgb),0.45)", borderRadius: 999, padding: "1px 7px" }}>incomplete</span>}
                         </div>
                       )}
                     </div>
+                    {s.status === "failed" && s.failureReason && (
+                      <div style={{ paddingLeft: 28, fontSize: 10.5, color: "var(--error)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                        {s.failureReason}
+                      </div>
+                    )}
                     {formatStepTiming(s) && (
                       <div style={{ paddingLeft: 28, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>
                         {formatStepTiming(s)}
@@ -1165,12 +1202,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <button
                           onClick={() => feedStep(s)}
                           disabled={lockedElsewhere}
-                          aria-label={s.status === "sent" ? "Re-feed" : "Feed"}
+                          aria-label={s.status === "sent" || s.status === "failed" ? "Re-feed" : "Feed"}
                           title={lockedElsewhere
                             ? "The queue is running in another window on this project — feeding is read-only here. Take over from the header to feed from this window."
                             : running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
                           style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: lockedElsewhere ? "not-allowed" : "pointer", opacity: lockedElsewhere ? 0.5 : 1 }}
-                        ><ActionIcon name="bolt" size={12} />{s.status === "sent" ? "Re-feed" : "Feed"}</button>
+                        ><ActionIcon name="bolt" size={12} />{s.status === "sent" || s.status === "failed" ? "Re-feed" : "Feed"}</button>
                       )}
                       {feedNotice?.id === s.id && (
                         <span style={{

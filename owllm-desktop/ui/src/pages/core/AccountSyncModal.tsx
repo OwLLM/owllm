@@ -20,6 +20,7 @@
 // validated + stored + git creds wired). The actual vault repo + sync
 // engine build on top of this; this modal is the front door.
 import React from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { openWebUrl } from "../../utils/openWebUrl";
 import {
   githubStatus,
@@ -49,6 +50,32 @@ const SUBSCRIPTION_CHOICES = [
 
 function openExternal(url: string) {
   openWebUrl(url).catch((error) => console.error("Could not open the OwLLM browser", error));
+}
+
+async function openAndFillGithubDeviceCode(url: string, code: string): Promise<boolean> {
+  const opened = await invoke<string>("browser_open_tab", { url, activate: true });
+  let tabId: number | undefined;
+  try {
+    const parsed = JSON.parse(opened) as { tab_id?: number };
+    tabId = parsed.tab_id;
+  } catch {
+    // Older browser builds return a readable sentence instead of JSON. The
+    // active-tab fallback still lets browser_cmd target the page.
+  }
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    if (attempt) await new Promise((resolve) => window.setTimeout(resolve, 350));
+    try {
+      const result = await invoke<string>("browser_cmd", {
+        action: "fill_device_code",
+        params: { code, submit: true, tab_id: tabId ?? null },
+      });
+      if (result.includes("filled GitHub device code")) return true;
+    } catch {
+      // The bridge is injected after navigation. Retry while GitHub's device
+      // page and its React form finish loading.
+    }
+  }
+  return false;
 }
 
 /// Imperatively open the modal from anywhere (e.g. a header button).
@@ -192,7 +219,10 @@ export default function AccountSyncModal() {
       // Auto-copy the code so the user can just paste it in the browser —
       // no need to alt-tab back to read it off this popup.
       try { await navigator.clipboard?.writeText(d.userCode); } catch { /* ok */ }
-      openExternal(d.verificationUri);
+      const filled = await openAndFillGithubDeviceCode(d.verificationUri, d.userCode);
+      if (!filled) {
+        setErr("GitHub opened, but OWLLM could not fill the code automatically. The code is copied; paste it into the page.");
+      }
       pollAlive.current = true;
       const poll = async () => {
         if (!pollAlive.current) return;
@@ -203,6 +233,7 @@ export default function AccountSyncModal() {
         if (r.status === "authorized") {
           pollAlive.current = false;
           setDevice(null); setBusy(false);
+          setErr(null);
           setStatus({ connected: true, login: r.login });
           await ensureVault();
           return;
@@ -244,6 +275,8 @@ export default function AccountSyncModal() {
     try {
       await githubDisconnect();
       setStatus({ connected: false, login: null });
+      setVault(null);
+      setVaultMsg("Signed out. Remote sync is stopped; local projects and chats remain available offline.");
     } catch (e) {
       setErr(String(e));
     } finally {
@@ -373,8 +406,8 @@ export default function AccountSyncModal() {
                 borderRadius: 10, padding: "12px",
               }}>
                 <div style={{ fontSize: 12.5, color: "var(--fg)", lineHeight: 1.5 }}>
-                  We opened <b>github.com/login/device</b> in your browser and <b>copied your code</b> —
-                  just <b>paste</b> it there and click <b>Authorize</b>. This window stays open.
+                  We opened <b>github.com/login/device</b> and <b>filled your code automatically</b>.
+                  Review GitHub's authorization screen, then click <b>Authorize</b>. This window stays open.
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8, margin: "10px 0", flexWrap: "wrap" }}>
                   <div style={{

@@ -133,4 +133,7 @@ For the full design — the split, the safety tiers, native tool-calling, MCP ro
 
 ## License
 
-MIT © OWLLM.
+OWLLM is proprietary software owned by **Far island Corporation Ltd.**
+Official unmodified executables may be used free of charge, but the source code
+is not open source and may not be copied, modified, redistributed, sublicensed,
+or sold. See [LICENSE](LICENSE) for the complete terms.

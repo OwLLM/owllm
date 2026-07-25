@@ -8,23 +8,33 @@
 // cookie, no per-user id, no timestamps-per-user — nothing that identifies a
 // person. That is why this needs no consent banner (it processes no personal
 // data). An analytics failure never blocks the download.
+//
+// The redirect target is resolved LIVE per OS (see resolve.mjs): we scan the
+// repo's releases newest-first and pick the newest asset matching the platform
+// by file type. This means the link never 404s just because a per-OS publish
+// became "Latest" without that OS's asset, or because the filename was
+// version-stamped. This IS the link to put on the site / README / socials.
 
 import type { Context } from "@netlify/edge-functions";
 import { getStore } from "@netlify/blobs";
+import { resolveDownloadTarget } from "./resolve.mjs";
 
-// The artifacts you ship — stable asset names uploaded by publish-release.sh.
-// mac/linux 404 until their first release is published from that OS; the
-// endpoints are wired now so links/docs don't need another change then.
-const TARGETS: Record<string, string> = {
+// Best-effort static fallbacks, used only if the live release scan fails
+// (GitHub API down/rate-limited). Windows keeps its stable-name direct link;
+// the others fall back to the releases page so the user can still grab a build
+// rather than hitting a 404.
+const FALLBACK: Record<string, string> = {
   win: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.exe",
-  mac: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.Setup.dmg",
-  // Linux ships two stable-named assets (uploaded per release): the universal
-  // AppImage (no install, webkit bundled — the default) and a Debian/Ubuntu
-  // .deb. Both must exist under these EXACT names or /dl 404s.
-  linux: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.AppImage",
-  deb: "https://github.com/OwLLM/owllm/releases/latest/download/OwLLM.Desktop.deb",
+  mac: "https://github.com/OwLLM/owllm/releases/latest",
+  linux: "https://github.com/OwLLM/owllm/releases/latest",
+  deb: "https://github.com/OwLLM/owllm/releases/latest",
 };
 const DEFAULT_PLATFORM = "win";
+
+// Cache resolved URLs briefly so we don't hit the GitHub API on every click
+// (and to stay well under any edge rate limit). A few minutes of staleness is
+// fine — a new release's asset just becomes reachable a few minutes later.
+const CACHE_TTL_MS = 10 * 60 * 1000;
 
 // /dl with no explicit platform → best guess from the requesting browser.
 function platformFromUA(ua: string): string {
@@ -39,6 +49,32 @@ function platformFromUA(ua: string): string {
 const BOT_RE =
   /bot|crawler|spider|crawl|preview|facebookexternalhit|slackbot|discordbot|telegrambot|twitterbot|whatsapp|bingbot|googlebot|yandex|baiduspider|duckduckbot|embedly|curl|wget|python-requests|headless/i;
 
+async function targetFor(platform: string): Promise<string> {
+  const fallback = FALLBACK[platform] ?? FALLBACK[DEFAULT_PLATFORM];
+  // Try the cache first, then a live scan, then the static fallback.
+  try {
+    const cache = getStore("downloads");
+    const key = `dl_cache:${platform}`;
+    const hit = (await cache.get(key, { type: "json" })) as
+      | { url: string; at: number }
+      | null;
+    if (hit && hit.url && Date.now() - hit.at < CACHE_TTL_MS) return hit.url;
+
+    const resolved = await resolveDownloadTarget(platform, fetch);
+    if (resolved) {
+      try {
+        await cache.setJSON(key, { url: resolved, at: Date.now() });
+      } catch {
+        // Cache write is best-effort; still return the resolved URL.
+      }
+      return resolved;
+    }
+  } catch {
+    // Blobs/API hiccup — fall through to the static fallback below.
+  }
+  return fallback;
+}
+
 export default async (request: Request, context: Context): Promise<Response> => {
   const url = new URL(request.url);
   // /dl            → default platform
@@ -49,7 +85,8 @@ export default async (request: Request, context: Context): Promise<Response> => 
   const platform = (
     segs[1] || url.searchParams.get("p") || platformFromUA(ua)
   ).toLowerCase();
-  const target = TARGETS[platform] ?? TARGETS[DEFAULT_PLATFORM];
+
+  const target = await targetFor(platform);
 
   const isRealDownload = request.method === "GET" && !BOT_RE.test(ua);
 

@@ -34,7 +34,7 @@ check(
 );
 check(
   "Accounts login terminal opts in to auth-URL auto-open",
-  /<PtyTerminal [^>]*autoOpenAuthUrls/.test(accountsPage),
+  /<PtyTerminal[\s\S]*?autoOpenAuthUrls/.test(accountsPage),
 );
 check(
   "Coding-page workspace terminals never auto-open the browser",

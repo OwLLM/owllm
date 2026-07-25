@@ -1,0 +1,191 @@
+name: Publish macOS release asset
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build and repair
+        required: true
+        default: v0.9.40
+
+permissions:
+  contents: read
+
+jobs:
+  macos-arm64:
+    runs-on: [self-hosted, macOS, ARM64, owllm-release]
+    timeout-minutes: 120
+    env:
+      RELEASE_REPO: OwLLM/owllm
+      TAG: ${{ inputs.tag }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+
+      - name: Prepare native toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "/opt/homebrew/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+          export PATH="/opt/homebrew/bin:$HOME/.cargo/bin:$PATH"
+          command -v node
+          command -v npm
+          command -v cargo
+          command -v cmake
+          command -v gh || brew install gh
+
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_CERTIFICATE"
+          test -n "$APPLE_CERTIFICATE_PASSWORD"
+          KEYCHAIN_PATH="$RUNNER_TEMP/owllm-release.keychain-db"
+          KEYCHAIN_PASS="$(openssl rand -base64 32)"
+          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 7200 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$KEYCHAIN_PATH" \
+            $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
+
+      - name: Install dependencies
+        working-directory: owllm-desktop
+        run: npm ci
+
+      - name: Bundle Apple Silicon voice runtime
+        working-directory: owllm-desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="resources/runtime/whisper.cpp"
+          mkdir -p "$DEST"
+          curl -fL --retry 3 \
+            -o "$DEST/ggml-base.bin" \
+            "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin"
+          rm -rf "$RUNNER_TEMP/whisper-src" "$RUNNER_TEMP/whisper-build"
+          git clone --depth 1 -b v1.8.4 \
+            https://github.com/ggml-org/whisper.cpp "$RUNNER_TEMP/whisper-src"
+          cmake -S "$RUNNER_TEMP/whisper-src" -B "$RUNNER_TEMP/whisper-build" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_SHARED_LIBS=OFF \
+            -DWHISPER_BUILD_TESTS=OFF \
+            -DWHISPER_BUILD_SERVER=OFF \
+            -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build "$RUNNER_TEMP/whisper-build" --config Release -j 4
+          find "$RUNNER_TEMP/whisper-build" -type f \
+            \( -name whisper-cli -o -name main \) -exec cp {} "$DEST/" \;
+          chmod +x "$DEST"/whisper-cli "$DEST"/main 2>/dev/null || true
+
+      - name: Run desktop ship gate
+        working-directory: owllm-desktop
+        run: node scripts/smoke-matrix.mjs
+
+      - name: Build signed macOS updater
+        working-directory: owllm-desktop
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          test -n "$TAURI_SIGNING_PRIVATE_KEY"
+          test -n "$APPLE_SIGNING_IDENTITY"
+          npm run tauri -- build --target aarch64-apple-darwin \
+            --config '{"bundle":{"createUpdaterArtifacts":true}}'
+
+      - name: Verify and stage macOS artifacts
+        working-directory: owllm-desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUNDLE="src-tauri/target/aarch64-apple-darwin/release/bundle"
+          APP="$(find "$BUNDLE/macos" -maxdepth 1 -type d -name '*.app' | head -1)"
+          DMG="$(find "$BUNDLE/dmg" -maxdepth 1 -type f -name '*.dmg' | head -1)"
+          ARCHIVE="$(find "$BUNDLE/macos" -maxdepth 1 -type f -name '*.app.tar.gz' | head -1)"
+          test -n "$APP"
+          test -n "$DMG"
+          test -n "$ARCHIVE"
+          test -f "$ARCHIVE.sig"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          mkdir -p dist
+          cp -f "$DMG" dist/OwLLM.Desktop.Setup.dmg
+          cp -f "$ARCHIVE" dist/OwLLM.Desktop_aarch64.app.tar.gz
+          cp -f "$ARCHIVE.sig" dist/OwLLM.Desktop_aarch64.app.tar.gz.sig
+
+      - name: Merge Mac into updater manifest
+        working-directory: owllm-desktop
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${TAG#v}"
+          curl -fsSL \
+            "https://github.com/$RELEASE_REPO/releases/latest/download/latest.json" \
+            -o dist/latest.previous.json
+          VERSION="$VERSION" TAG="$TAG" RELEASE_REPO="$RELEASE_REPO" node <<'NODE'
+          const fs = require("fs");
+          const prev = JSON.parse(fs.readFileSync("dist/latest.previous.json", "utf8"));
+          if (prev.version !== process.env.VERSION) {
+            throw new Error(`Latest manifest is ${prev.version}, expected ${process.env.VERSION}`);
+          }
+          const signature = fs.readFileSync(
+            "dist/OwLLM.Desktop_aarch64.app.tar.gz.sig",
+            "utf8",
+          ).trim();
+          prev.platforms = { ...(prev.platforms || {}) };
+          prev.platforms["darwin-aarch64"] = {
+            signature,
+            url: `https://github.com/${process.env.RELEASE_REPO}/releases/download/${process.env.TAG}/OwLLM.Desktop_aarch64.app.tar.gz`,
+          };
+          prev.pub_date = new Date().toISOString();
+          fs.writeFileSync("dist/latest.json", JSON.stringify(prev, null, 2) + "\n");
+          NODE
+
+      - name: Publish Mac assets and manifest
+        working-directory: owllm-desktop
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_REPO_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$GH_TOKEN"
+          gh release upload "$TAG" \
+            dist/OwLLM.Desktop.Setup.dmg \
+            dist/OwLLM.Desktop_aarch64.app.tar.gz \
+            --repo "$RELEASE_REPO" --clobber
+          # Publish latest.json last so it never points at a missing archive.
+          gh release upload "$TAG" dist/latest.json \
+            --repo "$RELEASE_REPO" --clobber
+
+      - name: Verify public Mac update path
+        shell: bash
+        run: |
+          set -euo pipefail
+          sleep 5
+          curl -fsSL \
+            "https://github.com/$RELEASE_REPO/releases/latest/download/latest.json" \
+            -o "$RUNNER_TEMP/latest.json"
+          node - "$RUNNER_TEMP/latest.json" "${TAG#v}" <<'NODE'
+          const fs = require("fs");
+          const [path, version] = process.argv.slice(2);
+          const manifest = JSON.parse(fs.readFileSync(path, "utf8"));
+          if (manifest.version !== version) throw new Error("wrong public version");
+          if (!manifest.platforms?.["windows-x86_64"]) throw new Error("Windows entry lost");
+          if (!manifest.platforms?.["darwin-aarch64"]) throw new Error("Mac entry missing");
+          console.log("Public updater platforms:", Object.keys(manifest.platforms).join(", "));
+          NODE
+          curl -fsSI \
+            "https://github.com/$RELEASE_REPO/releases/download/$TAG/OwLLM.Desktop_aarch64.app.tar.gz" \
+            >/dev/null

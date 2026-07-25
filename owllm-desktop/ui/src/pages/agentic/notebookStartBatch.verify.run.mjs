@@ -253,7 +253,26 @@ console.log("case 3b: markNotebookStepStarted / markNotebookStepFinished update 
   check("startedAt is stamped", blob().steps.find((s) => s.id === "s1")?.startedAt === 1000);
   markNotebookStepFinished(PID, "s1", 5000);
   check("finishedAt is stamped", blob().steps.find((s) => s.id === "s1")?.finishedAt === 5000);
-  check("status is untouched by timing helpers", blob().steps.find((s) => s.id === "s1")?.status === "pending");
+  check("successful completion is archived", blob().steps.find((s) => s.id === "s1")?.status === "sent"
+    && NB.isStepArchived(blob().steps.find((s) => s.id === "s1")));
+}
+
+console.log("case 3c: failed runs remain active and can be re-fed");
+{
+  seed();
+  NB.markNotebookStepStarted(PID, "s1", 1000);
+  NB.markNotebookStepFailed(PID, "s1", "Kimi login expired", 5000);
+  const failed = blob().steps.find((s) => s.id === "s1");
+  check("failed card stores its incomplete result", failed?.status === "failed"
+    && failed?.finishedAt === 5000
+    && failed?.failureReason === "Kimi login expired");
+  check("failed card is not archived", NB.isStepArchived(failed) === false);
+  NB.markNotebookStepStarted(PID, "s1", 6000);
+  const refeed = blob().steps.find((s) => s.id === "s1");
+  check("re-feed clears failure and starts the card again", refeed?.status === "sent"
+    && refeed?.startedAt === 6000
+    && refeed?.finishedAt == null
+    && refeed?.failureReason == null);
 }
 
 console.log("case 0c: a completed project brainstorm prepares its Notebook queue");

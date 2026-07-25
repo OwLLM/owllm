@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -49,9 +50,38 @@ const APPIMAGE_ENV_KEYS: &[&str] = &[
     "PYTHONPATH",
 ];
 
-/// Strip AppImage-specific environment variables from a Command before spawn.
-/// No-op on non-Linux platforms.
+/// PATH inherited by subscription-CLI installers, probes and real runs.
+///
+/// Finder-launched macOS apps inherit only `/usr/bin:/bin:/usr/sbin:/sbin`.
+/// `which_extended` can still locate `/opt/homebrew/bin/codex`, but its
+/// `#!/usr/bin/env node` shebang performs a second PATH lookup and exits 127
+/// unless Homebrew's directory is also present in the child environment.
+/// Build one shared PATH from the same locations used for CLI discovery so
+/// install, login, Test and actual execution cannot disagree.
+pub(crate) fn cli_child_path() -> Option<OsString> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(node_dir) = crate::paths::module_node_dir() {
+        dirs.push(node_dir);
+    }
+    dirs.extend(extra_search_dirs());
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(app_dir) = std::env::var_os("APPDIR").map(PathBuf::from) {
+        dirs.retain(|dir| !dir.starts_with(&app_dir));
+    }
+    dirs.retain(|dir| dir.is_dir());
+    dirs.dedup();
+    std::env::join_paths(dirs).ok()
+}
+
+/// Prepare an external CLI command before spawn: give it the complete
+/// cross-platform CLI PATH and strip AppImage-only runtime variables on Linux.
 fn sanitize_appimage_env(cmd: &mut Command) {
+    if let Some(path) = cli_child_path() {
+        cmd.env("PATH", path);
+    }
     #[cfg(target_os = "linux")]
     for key in APPIMAGE_ENV_KEYS {
         cmd.env_remove(key);
@@ -248,6 +278,126 @@ fn wait_cli_child(
     }
 }
 
+/// Streaming counterpart of `wait_cli_child`. Stdout is drained line-by-line
+/// so subscription CLIs with NDJSON output can update the UI while they work;
+/// stderr is drained concurrently so neither pipe can deadlock. The returned
+/// Output still contains both complete streams for normal exit/auth diagnosis.
+fn wait_cli_child_lines<F>(
+    mut child: std::process::Child,
+    pid: u32,
+    mut on_stdout_line: F,
+) -> std::io::Result<std::process::Output>
+where
+    F: FnMut(&str),
+{
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+
+    let started = Instant::now();
+    let last_activity = Arc::new(AtomicU64::new(0));
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let mut readers = Vec::new();
+
+    if let Some(stdout) = child.stdout.take() {
+        let buf = Arc::clone(&stdout_buf);
+        let act = Arc::clone(&last_activity);
+        readers.push(std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if let Ok(mut b) = buf.lock() {
+                            b.extend_from_slice(line.as_bytes());
+                        }
+                        act.store(
+                            started.elapsed().as_millis() as u64,
+                            AtomicOrdering::Relaxed,
+                        );
+                        let clean = line.trim_end_matches(['\r', '\n']).to_string();
+                        if line_tx.send(clean).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    if let Some(mut stderr) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_buf);
+        let act = Arc::clone(&last_activity);
+        readers.push(std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut b) = buf.lock() {
+                            b.extend_from_slice(&chunk[..n]);
+                        }
+                        act.store(
+                            started.elapsed().as_millis() as u64,
+                            AtomicOrdering::Relaxed,
+                        );
+                    }
+                }
+            }
+        }));
+    }
+
+    let take = |b: &Arc<Mutex<Vec<u8>>>| {
+        b.lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    };
+    loop {
+        while let Ok(line) = line_rx.try_recv() {
+            on_stdout_line(&line);
+        }
+        if let Some(status) = child.try_wait()? {
+            for t in readers {
+                let _ = t.join();
+            }
+            while let Ok(line) = line_rx.try_recv() {
+                on_stdout_line(&line);
+            }
+            unregister_cli_child(pid);
+            return Ok(std::process::Output {
+                status,
+                stdout: take(&stdout_buf),
+                stderr: take(&stderr_buf),
+            });
+        }
+        let idle = started.elapsed().saturating_sub(Duration::from_millis(
+            last_activity.load(AtomicOrdering::Relaxed),
+        ));
+        if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            for t in readers {
+                let _ = t.join();
+            }
+            unregister_cli_child(pid);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "CLI child timed out ({}) and was killed",
+                    if started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+                        format!("absolute ceiling {}s", CLI_CHILD_ABS_TIMEOUT.as_secs())
+                    } else {
+                        format!("{}s with no output", CLI_CHILD_TIMEOUT.as_secs())
+                    }
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
 /// Kill every live agent-CLI child. Windows needs `taskkill /T /F`: the
 /// process we spawned is often a cmd.exe batch shim whose real work happens
 /// in a node/python grandchild — killing only the shim leaves the agent
@@ -361,6 +511,56 @@ fn write_secrets(map: &BTreeMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
+/// SECURITY: quarantine the on-disk secrets that belong to a DIFFERENT account.
+///
+/// Called when a transplanted `.owllm` is detected (its vault clone belongs to
+/// another GitHub login — see `vault::enforce_account_ownership`). Every API
+/// key in `agent_secrets.json` was entered by the previous owner, so it must
+/// not remain usable on this machine. The original file is MOVED ASIDE (never
+/// silently destroyed) to `agent_secrets.quarantine-<epoch>.json` so a
+/// legitimate same-machine account switch stays recoverable, then a fresh file
+/// is written containing ONLY `keep` (the current user's just-entered GitHub
+/// sign-in) so they stay connected while every inherited provider key is gone.
+///
+/// Returns the number of non-empty inherited secrets removed. Best-effort: a
+/// filesystem hiccup is logged by the caller, never fatal.
+pub(crate) fn quarantine_foreign_secrets(keep: &[&str]) -> Result<usize, String> {
+    let Some(path) = secrets_path() else {
+        return Ok(0);
+    };
+    if !path.exists() {
+        return Ok(0);
+    }
+    let map = load_secrets();
+    if map.is_empty() {
+        return Ok(0);
+    }
+    // Move the original aside for recovery (epoch-stamped, collision-free).
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let quarantine = path.with_file_name(format!("agent_secrets.quarantine-{stamp}.json"));
+    std::fs::rename(&path, &quarantine)
+        .map_err(|e| format!("could not quarantine transplanted secrets: {e}"))?;
+    // Rewrite keeping only the preserved keys (the current GitHub sign-in).
+    let mut kept: BTreeMap<String, String> = BTreeMap::new();
+    let mut removed = 0usize;
+    for (k, v) in map.iter() {
+        if keep.contains(&k.as_str()) {
+            kept.insert(k.clone(), v.clone());
+        } else if !v.trim().is_empty() {
+            removed += 1;
+        }
+    }
+    // When nothing is preserved, leave the file absent (the quarantine copy
+    // still holds the original) so a stale `{}` doesn't linger.
+    if !kept.is_empty() {
+        write_secrets(&kept)?;
+    }
+    Ok(removed)
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AccountsStatus {
     /// Backend-authoritative host OS. WebView user-agent strings can be
@@ -391,16 +591,25 @@ pub struct AccountsStatus {
     pub hf_token: bool,
     /// Claude Code CLI is installed AND has logged-in credentials.
     pub claude_cli: bool,
+    pub claude_cli_installed: bool,
     /// OpenAI Codex CLI is installed AND has logged-in credentials.
     pub codex_cli: bool,
+    pub codex_cli_installed: bool,
     /// Kimi Code CLI (MoonshotAI/kimi-cli) is installed AND logged in.
     pub kimi_cli: bool,
+    pub kimi_cli_installed: bool,
+    /// Kimi credentials exist, but a live CLI call proved the OAuth refresh
+    /// grant is no longer usable. Kept separate from `kimi_cli` so the UI can
+    /// offer Reconnect instead of claiming that a stale file is a valid login.
+    pub kimi_cli_reauth_required: bool,
     /// Google Gemini CLI (google-gemini/gemini-cli) is installed AND
     /// logged in (~/.gemini/ contains OAuth cache).
     pub gemini_cli: bool,
+    pub gemini_cli_installed: bool,
     /// xAI Grok Build CLI (`grok`) is installed AND logged in
     /// (~/.grok/ carries the sign-in state).
     pub grok_cli: bool,
+    pub grok_cli_installed: bool,
 }
 
 /// Probe what's connected right now. Cheap — runs on the AccountsPage
@@ -422,6 +631,7 @@ pub async fn accounts_status() -> AccountsStatus {
 
 fn accounts_status_blocking() -> AccountsStatus {
     let map = load_secrets();
+    let kimi_reauth_required = kimi_reauth_required();
     AccountsStatus {
         host_os: std::env::consts::OS.to_string(),
         anthropic_api_key: map
@@ -441,14 +651,20 @@ fn accounts_status_blocking() -> AccountsStatus {
         together_api_key: nonempty(&map, "TOGETHER_API_KEY"),
         gemini_api_key: nonempty(&map, "GEMINI_API_KEY") || nonempty(&map, "GOOGLE_API_KEY"),
         gemini_cli: gemini_cli_logged_in(),
+        gemini_cli_installed: find_gemini_cli().is_some(),
         hf_token: map
             .get("HF_TOKEN")
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false),
         claude_cli: claude_cli_logged_in(),
+        claude_cli_installed: find_claude_cli().is_some(),
         codex_cli: codex_cli_logged_in(),
+        codex_cli_installed: find_codex_cli().is_some(),
         kimi_cli: kimi_cli_logged_in(),
+        kimi_cli_installed: find_kimi_cli().is_some(),
+        kimi_cli_reauth_required: kimi_reauth_required,
         grok_cli: grok_cli_logged_in(),
+        grok_cli_installed: find_grok_cli().is_some(),
     }
 }
 
@@ -1687,6 +1903,15 @@ async fn probe_cli_subscription(
     let combined = format!("{stdout}\n{stderr}");
     let lower = combined.to_ascii_lowercase();
 
+    if name == "Kimi" && kimi_output_auth_failed(&combined) {
+        mark_kimi_reauth_required();
+        return (
+            false,
+            "Kimi sign-in expired and cannot be refreshed. Reconnect Kimi to continue."
+                .to_string(),
+        );
+    }
+
     // Subscription / quota error patterns. Each CLI phrases these
     // differently; cast a wide net.
     let sub_errors: &[&str] = &[
@@ -2043,14 +2268,30 @@ fn npm_global_bin_dirs() -> Vec<PathBuf> {
             push_arg(&mut cmd, batch, "config");
             push_arg(&mut cmd, batch, "get");
             push_arg(&mut cmd, batch, "prefix");
-            // Bundled Node on PATH so npm can resolve `node` if needed.
+            // npm itself is commonly a `#!/usr/bin/env node` script. Finder-
+            // launched macOS apps omit Homebrew from PATH, so include the
+            // resolved npm directory before asking npm for its global prefix.
+            let mut npm_path: Vec<PathBuf> = Vec::new();
+            if let Some(parent) = npm.parent() {
+                npm_path.push(parent.to_path_buf());
+            }
             if let Some(node_dir) = crate::paths::module_node_dir() {
-                let existing = std::env::var("PATH").unwrap_or_default();
-                #[cfg(windows)]
-                let sep = ";";
-                #[cfg(not(windows))]
-                let sep = ":";
-                cmd.env("PATH", format!("{}{sep}{}", node_dir.display(), existing));
+                npm_path.push(node_dir);
+            }
+            #[cfg(not(windows))]
+            for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
+                let dir = PathBuf::from(dir);
+                if dir.is_dir() {
+                    npm_path.push(dir);
+                }
+            }
+            if let Some(existing) = std::env::var_os("PATH") {
+                npm_path.extend(std::env::split_paths(&existing));
+            }
+            npm_path.retain(|dir| dir.is_dir());
+            npm_path.dedup();
+            if let Ok(path) = std::env::join_paths(npm_path) {
+                cmd.env("PATH", path);
             }
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::piped());
@@ -2379,6 +2620,11 @@ fn looks_like_cli_auth_error(text: &str) -> bool {
         || low.contains("authentication_error")
         || low.contains("401 unauthorized")
         || low.contains("oauth token has expired")
+        || low.contains("invalid_authentication_error")
+        || low.contains("api key appears to be invalid")
+        || low.contains("authorization grant is invalid")
+        || low.contains("refresh token is invalid")
+        || low.contains("refresh token has been revoked")
         || low.contains("please run /login")
         || low.contains("please log in")
         // Kimi/Gemini phrasings — this is the ONE shared vocabulary for every
@@ -2748,6 +2994,7 @@ pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, St
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
         let out = cmd.output().map_err(|e| format!("start npm: {e}"))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -3983,6 +4230,81 @@ fn kimi_home_dir() -> Option<PathBuf> {
     kimi_home_candidates().into_iter().find(|p| p.is_dir())
 }
 
+fn kimi_credential_path() -> Option<PathBuf> {
+    kimi_home_candidates()
+        .into_iter()
+        .map(|kimi| kimi.join("credentials").join("kimi-code.json"))
+        .find(|path| path.is_file())
+}
+
+/// A non-secret identity for the current Kimi credential file. When a fresh
+/// login rewrites the file, its metadata changes and an older revocation marker
+/// stops applying automatically. Tokens are never copied into the marker.
+fn kimi_credential_fingerprint(path: &std::path::Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("{}\n{}\n{}", path.display(), metadata.len(), modified))
+}
+
+fn kimi_reauth_marker_path() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".owllm")
+            .join("kimi_reauth_required"),
+    )
+}
+
+fn kimi_reauth_required() -> bool {
+    let Some(credential) = kimi_credential_path() else {
+        clear_kimi_reauth_required();
+        return false;
+    };
+    let Some(fingerprint) = kimi_credential_fingerprint(&credential) else {
+        return false;
+    };
+    let Some(marker_path) = kimi_reauth_marker_path() else {
+        return false;
+    };
+    match std::fs::read_to_string(&marker_path) {
+        Ok(marker) if marker == fingerprint => true,
+        Ok(_) => {
+            // A successful fresh login replaced the credential file. The old
+            // failure no longer applies.
+            let _ = std::fs::remove_file(marker_path);
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn mark_kimi_reauth_required() {
+    let Some(credential) = kimi_credential_path() else {
+        return;
+    };
+    let Some(fingerprint) = kimi_credential_fingerprint(&credential) else {
+        return;
+    };
+    let Some(marker_path) = kimi_reauth_marker_path() else {
+        return;
+    };
+    if let Some(parent) = marker_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(marker_path, fingerprint);
+}
+
+fn clear_kimi_reauth_required() {
+    if let Some(path) = kimi_reauth_marker_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Best guess at whether the installed `kimi` binary is the new `kimi-code`
 /// (true) or the legacy `kimi-cli` (false). The safest signal is the home
 /// directory the CLI has already created on disk.
@@ -3995,9 +4317,7 @@ fn kimi_is_new_flavor() -> bool {
 /// Kimi Code CLI stores OAuth tokens in `credentials/kimi-code.json`.
 /// config.toml exists before login and must never count as authentication.
 fn kimi_cli_logged_in() -> bool {
-    kimi_home_candidates()
-        .iter()
-        .any(|kimi| kimi.join("credentials").join("kimi-code.json").is_file())
+    kimi_credential_path().is_some() && !kimi_reauth_required()
 }
 
 /// Raw text of the active Kimi config.toml (None when absent/unreadable).
@@ -4350,11 +4670,17 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
                     &mut removed,
                 );
             }
+            clear_kimi_reauth_required();
         }
         "gemini_cli" => {
             for path in gemini_credential_paths(&home) {
                 try_remove(&path, &mut removed);
             }
+        }
+        "grok_cli" => {
+            let grok = home.join(".grok");
+            try_remove(&grok.join("auth.json"), &mut removed);
+            try_remove(&grok.join("credentials.json"), &mut removed);
         }
         other => return Err(format!("unknown subscription backend: {other}")),
     }
@@ -4788,6 +5114,7 @@ pub fn cli_install(backend: String) -> Result<(), String> {
         let args: Vec<&str> = parts.collect();
         let mut cmd = Command::new(head);
         cmd.args(&args);
+        sanitize_appimage_env(&mut cmd);
         cmd.spawn().map_err(|e| format!("spawn {head}: {e}"))?;
     }
 
@@ -5020,14 +5347,150 @@ pub async fn grok_cli_complete(
 ///     flag, so we inject the system prompt via a temporary `KIMI_CODE_HOME`
 ///     containing `AGENTS.md`, copy the user's config/credentials, and wire the
 ///     browser gateway through `mcp.json` + `OWLLM_GW_TOKEN`.
-#[tauri::command]
-pub async fn kimi_cli_complete(
+fn kimi_content_text(value: &serde_json::Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    let Some(parts) = value.as_array() else {
+        return String::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .or_else(|| part.get("content"))
+                .and_then(|v| v.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Parse one Kimi `--output-format stream-json` line. Kimi emits OpenAI-style
+/// Message objects: assistant content contains `text`/`think` parts and
+/// `tool_calls`; tool results are role=tool messages. Keep the parser tolerant
+/// of older field spellings so upgrading kimi-cli cannot make the UI silent.
+fn parse_kimi_stream_line(line: &str, assembled: &mut String) -> Vec<ClaudeStreamEvent> {
+    let mut events = Vec::new();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return events;
+    };
+    let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
+    if role == "assistant" {
+        if let Some(parts) = v.get("content").and_then(|c| c.as_array()) {
+            for part in parts {
+                let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let text = part
+                    .get("text")
+                    .or_else(|| part.get("think"))
+                    .or_else(|| part.get("thinking"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if text.is_empty() {
+                    continue;
+                }
+                if matches!(kind, "think" | "thinking" | "reasoning") {
+                    events.push(ClaudeStreamEvent::Thinking {
+                        delta: text.to_string(),
+                    });
+                } else {
+                    assembled.push_str(text);
+                    events.push(ClaudeStreamEvent::Text {
+                        delta: text.to_string(),
+                    });
+                }
+            }
+        } else if let Some(text) = v.get("content").and_then(|c| c.as_str()) {
+            assembled.push_str(text);
+            events.push(ClaudeStreamEvent::Text {
+                delta: text.to_string(),
+            });
+        }
+        if let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
+            for call in calls {
+                let id = call
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let function = call.get("function").unwrap_or(call);
+                let name = function
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let input = function
+                    .get("arguments")
+                    .map(|x| {
+                        x.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| serde_json::to_string_pretty(x).unwrap_or_default())
+                    })
+                    .unwrap_or_default();
+                events.push(ClaudeStreamEvent::ToolUse {
+                    tool_use_id: id,
+                    name,
+                    input,
+                });
+            }
+        }
+        return events;
+    }
+    if role == "tool" {
+        let content = v
+            .get("content")
+            .map(kimi_content_text)
+            .unwrap_or_default();
+        let id = v
+            .get("tool_call_id")
+            .or_else(|| v.get("toolCallId"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let is_error = v
+            .get("is_error")
+            .or_else(|| v.get("isError"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        events.push(ClaudeStreamEvent::ToolResult {
+            tool_use_id: id,
+            content,
+            is_error,
+        });
+        return events;
+    }
+    if let Some(title) = v.get("title").and_then(|x| x.as_str()) {
+        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("");
+        events.push(ClaudeStreamEvent::Thinking {
+            delta: format!("{title}{}\n", if body.is_empty() { String::new() } else { format!(": {body}") }),
+        });
+    } else if let Some(plan) = v.get("content").and_then(|x| x.as_str()) {
+        if v.get("file_path").is_some() || v.get("filePath").is_some() {
+            events.push(ClaudeStreamEvent::Thinking {
+                delta: format!("Plan updated:\n{plan}\n"),
+            });
+        }
+    }
+    events
+}
+
+fn handle_kimi_stream_line(
+    line: &str,
+    on_event: &Channel<ClaudeStreamEvent>,
+    assembled: &mut String,
+) {
+    for event in parse_kimi_stream_line(line, assembled) {
+        let _ = on_event.send(event);
+    }
+}
+
+async fn kimi_cli_run(
     app: tauri::AppHandle,
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
     _allowed_tools: Option<Vec<String>>,
+    on_event: Option<Channel<ClaudeStreamEvent>>,
 ) -> Result<String, String> {
     // Browser tools are a CROSS-CUTTING capability: every host-run Kimi agent
     // gets the in-app browser gateway, not just the Browser role. kimi-cli
@@ -5124,12 +5587,15 @@ pub async fn kimi_cli_complete(
 
             // Both legacy kimi-cli and current kimi-code support --print
             // non-interactive mode; --output-format only works in that mode.
+            let stream_live = on_event.is_some();
             let mut args: Vec<String> = vec![
                 "--print".into(),
                 "--output-format".into(),
-                "text".into(),
-                "--final-message-only".into(),
+                if stream_live { "stream-json".into() } else { "text".into() },
             ];
+            if !stream_live {
+                args.push("--final-message-only".into());
+            }
             if with_model {
                 args.extend(model_args.iter().cloned());
             }
@@ -5215,8 +5681,15 @@ pub async fn kimi_cli_complete(
                     let _ = stdin.write_all(prompt_value.as_bytes());
                 }
             }
-            let output = wait_cli_child(child, pid)
-                .map_err(|e| format!("wait kimi: {e}"))?;
+            let mut streamed_reply = String::new();
+            let output = if let Some(channel) = on_event.as_ref() {
+                wait_cli_child_lines(child, pid, |line| {
+                    handle_kimi_stream_line(line, channel, &mut streamed_reply);
+                })
+            } else {
+                wait_cli_child(child, pid)
+            }
+            .map_err(|e| format!("wait kimi: {e}"))?;
 
             // Clean up the temporary injection files now that the child is done.
             match injection {
@@ -5242,6 +5715,7 @@ pub async fn kimi_cli_complete(
                     return Err("kimi: LLM not set".to_string());
                 }
                 if kimi_output_auth_failed(&stdout) || kimi_output_auth_failed(&stderr) {
+                    mark_kimi_reauth_required();
                     let detail = if kimi_output_auth_failed(&stdout) {
                         stdout.trim()
                     } else {
@@ -5269,7 +5743,12 @@ pub async fn kimi_cli_complete(
             // kimi exits 0 even on a fatal MCP-load failure; the error is only in
             // the output. Detect it so we can retry without the gateway.
             let mcp_failed = kimi_output_mcp_failed(&stdout) || kimi_output_mcp_failed(&stderr);
-            Ok((stdout.trim().to_string(), mcp_failed))
+            let reply = if stream_live {
+                streamed_reply.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            Ok((reply, mcp_failed))
         };
 
         let wired = old_mcp_config.is_some()
@@ -5305,6 +5784,7 @@ pub async fn kimi_cli_complete(
             return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
         }
         if kimi_output_auth_failed(&reply) {
+            mark_kimi_reauth_required();
             return Err("kimi: authentication failed (401 / login expired / signed out)".to_string());
         }
 
@@ -5320,14 +5800,95 @@ pub async fn kimi_cli_complete(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+#[tauri::command]
+pub async fn kimi_cli_complete(
+    app: tauri::AppHandle,
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+) -> Result<String, String> {
+    kimi_cli_run(
+        app,
+        system_prompt,
+        user_message,
+        cwd,
+        model,
+        allowed_tools,
+        None,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn kimi_cli_stream(
+    app: tauri::AppHandle,
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    on_event: Channel<ClaudeStreamEvent>,
+) -> Result<String, String> {
+    kimi_cli_run(
+        app,
+        system_prompt,
+        user_message,
+        cwd,
+        model,
+        allowed_tools,
+        Some(on_event),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        append_codex_input_args, cli_exit_err, codex_should_grant_browser,
+        append_codex_input_args, cli_child_path, cli_exit_err, codex_should_grant_browser,
         is_browser_role_allowlist, kimi_agent_yaml, kimi_config_has_default,
         kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
-        kimi_output_mcp_failed,
+        kimi_output_mcp_failed, parse_kimi_stream_line, sanitize_appimage_env,
+        ClaudeStreamEvent,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gui_cli_path_includes_homebrew_interpreters() {
+        let homebrew = std::path::PathBuf::from("/opt/homebrew/bin");
+        if !homebrew.join("node").is_file() {
+            return;
+        }
+        let path = cli_child_path().expect("CLI child PATH");
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert!(
+            dirs.contains(&homebrew),
+            "Finder-launched CLI child PATH must include /opt/homebrew/bin"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finder_environment_can_launch_homebrew_node_cli() {
+        let codex = std::path::PathBuf::from("/opt/homebrew/bin/codex");
+        if !codex.is_file() {
+            return;
+        }
+        let mut command = std::process::Command::new(codex);
+        command.arg("--version");
+        command.env_clear();
+        if let Some(home) = std::env::var_os("HOME") {
+            command.env("HOME", home);
+        }
+        sanitize_appimage_env(&mut command);
+        let output = command.output().expect("launch Homebrew Codex");
+        assert!(
+            output.status.success(),
+            "GUI child environment must not fail /usr/bin/env node with exit 127: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn codex_images_are_terminated_by_the_stdin_prompt_marker() {
@@ -5399,8 +5960,45 @@ mod tests {
         assert!(kimi_output_auth_failed(
             "You are not logged in. Run `kimi login`."
         ));
+        assert!(kimi_output_auth_failed(
+            "Error code: 401 - {'error': {'message': 'The API Key appears to be invalid or may have expired.', 'type': 'invalid_authentication_error'}}"
+        ));
+        assert!(kimi_output_auth_failed(
+            "kimi_cli.auth.oauth.OAuthError: The provided authorization grant is invalid"
+        ));
         assert!(!kimi_output_auth_failed(
             "The server responded with a 200 OK."
+        ));
+    }
+
+    #[test]
+    fn kimi_stream_json_emits_thinking_text_tools_and_results() {
+        let mut assembled = String::new();
+        let assistant = r#"{"role":"assistant","content":[{"type":"think","think":"Checking files"},{"type":"text","text":"I found it."}],"tool_calls":[{"id":"call-1","function":{"name":"read_file","arguments":"{\"path\":\"README.md\"}"}}]}"#;
+        let events = parse_kimi_stream_line(assistant, &mut assembled);
+        assert_eq!(assembled, "I found it.");
+        assert!(matches!(
+            &events[0],
+            ClaudeStreamEvent::Thinking { delta } if delta == "Checking files"
+        ));
+        assert!(matches!(
+            &events[1],
+            ClaudeStreamEvent::Text { delta } if delta == "I found it."
+        ));
+        assert!(matches!(
+            &events[2],
+            ClaudeStreamEvent::ToolUse { tool_use_id, name, input }
+                if tool_use_id == "call-1"
+                    && name == "read_file"
+                    && input.contains("README.md")
+        ));
+
+        let tool = r#"{"role":"tool","tool_call_id":"call-1","content":[{"type":"text","text":"file contents"}],"is_error":false}"#;
+        let events = parse_kimi_stream_line(tool, &mut assembled);
+        assert!(matches!(
+            &events[0],
+            ClaudeStreamEvent::ToolResult { tool_use_id, content, is_error }
+                if tool_use_id == "call-1" && content == "file contents" && !is_error
         ));
     }
 

@@ -61,8 +61,15 @@ export async function githubConnect(token: string, distro?: string | null): Prom
 }
 
 export async function githubDisconnect(distro?: string | null): Promise<void> {
-  await invoke("github_disconnect", { distro: distro ?? null });
-  notifyGithubChanged();
+  try {
+    await invoke("github_disconnect", { distro: distro ?? null });
+  } finally {
+    // Logout is an immediate runtime boundary, not just a status repaint. Stop
+    // the vault engine even if credential cleanup reports an error; the user
+    // requested logout, so no background fetch/push may continue afterward.
+    try { window.dispatchEvent(new CustomEvent("owllm:vault-disconnected")); } catch { /* non-browser */ }
+    notifyGithubChanged();
+  }
 }
 
 export async function githubListRepositories(): Promise<GithubRepository[]> {

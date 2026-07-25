@@ -516,6 +516,71 @@ const BRIDGE_JS: &str = r##"
           fire(f, "input"); fire(f, "change");
           return report(reqId, "filled [" + p.index + "] with " + JSON.stringify(p.text));
         }
+        case "fill_device_code": {
+          // GitHub's Device Flow gives OWLLM the short code before the page is
+          // opened. Fill the provider-owned form without storing the code or
+          // bypassing GitHub's explicit final authorization/approval screen.
+          if (location.hostname !== "github.com" || location.pathname.indexOf("/login/device") !== 0) {
+            return report(reqId, "refused device-code fill outside github.com/login/device");
+          }
+          var code = String(p.code || "").trim();
+          var selectors = [
+            'input[autocomplete="one-time-code"]',
+            'input[name="user_code"]',
+            'input[name="user-code"]',
+            'input[id*="user-code"]',
+            'input[id*="device-code"]',
+            'input[inputmode="text"]'
+          ];
+          var dc = null;
+          for (var ds = 0; ds < selectors.length && !dc; ds++) {
+            var candidates = document.querySelectorAll(selectors[ds]);
+            for (var di = 0; di < candidates.length; di++) {
+              if (visible(candidates[di])) { dc = candidates[di]; break; }
+            }
+          }
+          if (!dc) return report(reqId, "device code field not ready");
+          dc.focus();
+          // React-controlled inputs ignore a plain assignment in some GitHub
+          // builds. Use the native setter, then emit the same events as typing.
+          var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+          if (setter && setter.set) setter.set.call(dc, code); else dc.value = code;
+          fire(dc, "input"); fire(dc, "change");
+          if (p.submit !== false && dc.form) {
+            setTimeout(function () {
+              try { dc.form.requestSubmit ? dc.form.requestSubmit() : dc.form.submit(); } catch (e) {}
+            }, 120);
+          }
+          return report(reqId, "filled GitHub device code");
+        }
+        case "auth_complete": {
+          // Some provider device-flow pages intentionally finish on an empty
+          // dark document. Keep the provider page/cookies intact, but put a
+          // readable OWLLM-owned completion card above it so the user is never
+          // stranded wondering whether login worked.
+          var provider = String(p.provider || "Account");
+          var old = document.getElementById("owllm-auth-complete");
+          if (old) old.remove();
+          var wrap = document.createElement("div");
+          wrap.id = "owllm-auth-complete";
+          wrap.setAttribute("role", "status");
+          wrap.setAttribute("aria-live", "polite");
+          wrap.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:28px;background:#0b0f17;color:#f7f9fc;font-family:system-ui,-apple-system,sans-serif";
+          var card = document.createElement("div");
+          card.style.cssText = "max-width:520px;padding:30px 34px;border-radius:18px;border:1px solid #334155;background:#111827;box-shadow:0 24px 80px rgba(0,0,0,.45);text-align:center";
+          var mark = document.createElement("div");
+          mark.textContent = "✓";
+          mark.style.cssText = "font-size:42px;color:#4ade80;margin-bottom:10px";
+          var title = document.createElement("h1");
+          title.textContent = provider + " connected";
+          title.style.cssText = "font-size:24px;margin:0 0 9px";
+          var body = document.createElement("p");
+          body.textContent = "Authentication completed successfully. You can return to OWLLM and close this tab.";
+          body.style.cssText = "font-size:15px;line-height:1.55;color:#cbd5e1;margin:0";
+          card.appendChild(mark); card.appendChild(title); card.appendChild(body);
+          wrap.appendChild(card); document.documentElement.appendChild(wrap);
+          return report(reqId, "showed " + provider + " authentication completion");
+        }
         case "select": {
           var s = elAt(p.index); var matched = false;
           for (var i = 0; i < s.options.length; i++) {
@@ -604,6 +669,48 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
         }
     }
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
+}
+
+/// Enable WebView2 password autosave + general autofill on an agent-browser
+/// webview. WebView2 disables both by default (unlike a normal Chrome/Edge
+/// profile), so a login typed here would never trigger a "Save password?"
+/// prompt and never be re-filled on return, even though the profile dir keeps
+/// cookies. Called on every agent-browser webview right after creation. The
+/// stored credentials live only in the per-user, per-machine WebView2 profile
+/// (`browser_data_dir()`); nothing is written to the repo or a release.
+#[cfg(windows)]
+fn win_enable_web_credentials(pw: tauri::webview::PlatformWebview) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+    use windows::core::Interface;
+    unsafe {
+        let core = match pw.controller().CoreWebView2() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let settings = match core.Settings() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
+            let _ = s4.SetIsGeneralAutofillEnabled(true);
+            let _ = s4.SetIsPasswordAutosaveEnabled(true);
+        }
+    }
+}
+
+/// Linux (WebKitGTK) analog of `win_enable_web_credentials`: the engine's
+/// persistent credential storage — HTTP-auth logins saved into the user's
+/// secret service (libsecret) — is also DISABLED by default. Form-password
+/// autosave has no embedder API in WebKitGTK; staying logged in on ordinary
+/// websites comes from the persisted cookie/session profile set via
+/// `data_directory()`. macOS WKWebView exposes neither switch, but its default
+/// persistent data store already keeps cookies/sessions per app.
+#[cfg(target_os = "linux")]
+fn linux_enable_web_credentials(pw: tauri::webview::PlatformWebview) {
+    use webkit2gtk::{WebViewExt, WebsiteDataManagerExt};
+    if let Some(manager) = pw.inner().website_data_manager() {
+        manager.set_persistent_credential_storage_enabled(true);
+    }
 }
 
 fn get_window(app: &tauri::AppHandle) -> Option<Window> {
@@ -1001,12 +1108,21 @@ fn attach_tab(
         .map(|s| s.to_logical::<f64>(scale))
         .unwrap_or_else(|_| LogicalSize::new(dev.width, dev.height + CHROME_H));
     let x = if active { 0.0 } else { PARK_X };
-    win.add_child(
-        content,
-        LogicalPosition::new(x, CHROME_H),
-        LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
-    )
-    .map_err(|e| format!("page webview: {e}"))?;
+    let _webview = win
+        .add_child(
+            content,
+            LogicalPosition::new(x, CHROME_H),
+            LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
+        )
+        .map_err(|e| format!("page webview: {e}"))?;
+    #[cfg(windows)]
+    {
+        let _ = _webview.with_webview(win_enable_web_credentials);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = _webview.with_webview(linux_enable_web_credentials);
+    }
     Ok(())
 }
 
@@ -1500,9 +1616,17 @@ fn attach_legacy_tab(
         let _ = std::fs::create_dir_all(&dir);
         builder = builder.data_directory(dir);
     }
-    builder
+    let _ww = builder
         .build()
         .map_err(|e| format!("failed to open agent browser window: {e}"))?;
+    #[cfg(windows)]
+    {
+        let _ = _ww.with_webview(win_enable_web_credentials);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = _ww.with_webview(linux_enable_web_credentials);
+    }
     if let Some(win) = app.get_window(&tab_label(id)) {
         apply_chrome(&win);
         let handle = app.clone();

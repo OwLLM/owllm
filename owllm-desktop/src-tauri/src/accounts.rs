@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -49,9 +50,38 @@ const APPIMAGE_ENV_KEYS: &[&str] = &[
     "PYTHONPATH",
 ];
 
-/// Strip AppImage-specific environment variables from a Command before spawn.
-/// No-op on non-Linux platforms.
+/// PATH inherited by subscription-CLI installers, probes and real runs.
+///
+/// Finder-launched macOS apps inherit only `/usr/bin:/bin:/usr/sbin:/sbin`.
+/// `which_extended` can still locate `/opt/homebrew/bin/codex`, but its
+/// `#!/usr/bin/env node` shebang performs a second PATH lookup and exits 127
+/// unless Homebrew's directory is also present in the child environment.
+/// Build one shared PATH from the same locations used for CLI discovery so
+/// install, login, Test and actual execution cannot disagree.
+pub(crate) fn cli_child_path() -> Option<OsString> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(node_dir) = crate::paths::module_node_dir() {
+        dirs.push(node_dir);
+    }
+    dirs.extend(extra_search_dirs());
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(app_dir) = std::env::var_os("APPDIR").map(PathBuf::from) {
+        dirs.retain(|dir| !dir.starts_with(&app_dir));
+    }
+    dirs.retain(|dir| dir.is_dir());
+    dirs.dedup();
+    std::env::join_paths(dirs).ok()
+}
+
+/// Prepare an external CLI command before spawn: give it the complete
+/// cross-platform CLI PATH and strip AppImage-only runtime variables on Linux.
 fn sanitize_appimage_env(cmd: &mut Command) {
+    if let Some(path) = cli_child_path() {
+        cmd.env("PATH", path);
+    }
     #[cfg(target_os = "linux")]
     for key in APPIMAGE_ENV_KEYS {
         cmd.env_remove(key);
@@ -2213,14 +2243,30 @@ fn npm_global_bin_dirs() -> Vec<PathBuf> {
             push_arg(&mut cmd, batch, "config");
             push_arg(&mut cmd, batch, "get");
             push_arg(&mut cmd, batch, "prefix");
-            // Bundled Node on PATH so npm can resolve `node` if needed.
+            // npm itself is commonly a `#!/usr/bin/env node` script. Finder-
+            // launched macOS apps omit Homebrew from PATH, so include the
+            // resolved npm directory before asking npm for its global prefix.
+            let mut npm_path: Vec<PathBuf> = Vec::new();
+            if let Some(parent) = npm.parent() {
+                npm_path.push(parent.to_path_buf());
+            }
             if let Some(node_dir) = crate::paths::module_node_dir() {
-                let existing = std::env::var("PATH").unwrap_or_default();
-                #[cfg(windows)]
-                let sep = ";";
-                #[cfg(not(windows))]
-                let sep = ":";
-                cmd.env("PATH", format!("{}{sep}{}", node_dir.display(), existing));
+                npm_path.push(node_dir);
+            }
+            #[cfg(not(windows))]
+            for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
+                let dir = PathBuf::from(dir);
+                if dir.is_dir() {
+                    npm_path.push(dir);
+                }
+            }
+            if let Some(existing) = std::env::var_os("PATH") {
+                npm_path.extend(std::env::split_paths(&existing));
+            }
+            npm_path.retain(|dir| dir.is_dir());
+            npm_path.dedup();
+            if let Ok(path) = std::env::join_paths(npm_path) {
+                cmd.env("PATH", path);
             }
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::piped());
@@ -2918,6 +2964,7 @@ pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, St
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
         let out = cmd.output().map_err(|e| format!("start npm: {e}"))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -4958,6 +5005,7 @@ pub fn cli_install(backend: String) -> Result<(), String> {
         let args: Vec<&str> = parts.collect();
         let mut cmd = Command::new(head);
         cmd.args(&args);
+        sanitize_appimage_env(&mut cmd);
         cmd.spawn().map_err(|e| format!("spawn {head}: {e}"))?;
     }
 
@@ -5687,11 +5735,49 @@ pub async fn kimi_cli_stream(
 #[cfg(test)]
 mod tests {
     use super::{
-        append_codex_input_args, cli_exit_err, codex_should_grant_browser,
+        append_codex_input_args, cli_child_path, cli_exit_err, codex_should_grant_browser,
         is_browser_role_allowlist, kimi_agent_yaml, kimi_config_has_default,
         kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
-        kimi_output_mcp_failed, parse_kimi_stream_line, ClaudeStreamEvent,
+        kimi_output_mcp_failed, parse_kimi_stream_line, sanitize_appimage_env,
+        ClaudeStreamEvent,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gui_cli_path_includes_homebrew_interpreters() {
+        let homebrew = std::path::PathBuf::from("/opt/homebrew/bin");
+        if !homebrew.join("node").is_file() {
+            return;
+        }
+        let path = cli_child_path().expect("CLI child PATH");
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert!(
+            dirs.contains(&homebrew),
+            "Finder-launched CLI child PATH must include /opt/homebrew/bin"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finder_environment_can_launch_homebrew_node_cli() {
+        let codex = std::path::PathBuf::from("/opt/homebrew/bin/codex");
+        if !codex.is_file() {
+            return;
+        }
+        let mut command = std::process::Command::new(codex);
+        command.arg("--version");
+        command.env_clear();
+        if let Some(home) = std::env::var_os("HOME") {
+            command.env("HOME", home);
+        }
+        sanitize_appimage_env(&mut command);
+        let output = command.output().expect("launch Homebrew Codex");
+        assert!(
+            output.status.success(),
+            "GUI child environment must not fail /usr/bin/env node with exit 127: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn codex_images_are_terminated_by_the_stdin_prompt_marker() {

@@ -2559,6 +2559,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       // channel — no HTTP route to the device required (works via P2P/relay).
       lastReply = await deviceChatCompletion(
         infer.device.id,
+        infer.device.modelId,
         {
           model: p.modelId || "local",
           messages: liveMessages,
@@ -2702,6 +2703,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       if (infer.device) {
         const finalText = await deviceChatCompletion(
           infer.device.id,
+          infer.device.modelId,
           { model: p.modelId || "local", messages: liveMessages, temperature: p.temperature, ...sampling },
           countingDelta,
           countingThought,
@@ -3449,6 +3451,7 @@ async function streamGemini(
 /// the only visible difference is the reply arrives at once, not token-by-token.
 async function deviceChatCompletion(
   deviceId: string,
+  remoteModelId: string | undefined,
   body: Record<string, unknown>,
   onDelta: StreamHandler,
   onThought: ThoughtHandler | undefined,
@@ -3456,7 +3459,11 @@ async function deviceChatCompletion(
   signal: AbortSignal,
 ): Promise<string> {
   if (signal.aborted) throw new DOMException("aborted", "AbortError");
-  const payload = JSON.stringify({ ...body, stream: false });
+  const payload = JSON.stringify({
+    ...body,
+    stream: false,
+    ...(remoteModelId ? { owllm_remote_model: remoteModelId } : {}),
+  });
   const res = await invoke<{ ok: boolean; stdout: string; error: string | null; decision: string }>(
     "device_send",
     { toDevice: deviceId, kind: "inference", command: payload, payload: null, timeoutMs: 300_000 },

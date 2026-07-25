@@ -33,6 +33,9 @@ export type InferenceEndpoint = {
   deviceId?: string;
   /// Cosmetic name of that device, for display (device mode only).
   deviceName?: string;
+  /// The runnable local model selected from the paired device's advertised
+  /// catalogue. Kept separate from the agent's logical model selection.
+  remoteModelId?: string;
 };
 
 const DEFAULTS: InferenceEndpoint = { mode: "local", host: "127.0.0.1", port: 8080, apiKey: "" };
@@ -73,6 +76,7 @@ export function getInferenceEndpoint(): InferenceEndpoint {
       apiKey: typeof p?.apiKey === "string" ? p.apiKey : "",
       deviceId: typeof p?.deviceId === "string" ? p.deviceId : undefined,
       deviceName: typeof p?.deviceName === "string" ? p.deviceName : undefined,
+      remoteModelId: typeof p?.remoteModelId === "string" ? p.remoteModelId : undefined,
     };
   } catch {
     return { ...DEFAULTS };
@@ -94,7 +98,7 @@ export type ResolvedInference = {
   remote: boolean;
   /// When set, route the request through the paired device's local model over
   /// the encrypted device channel instead of fetching a URL.
-  device?: { id: string; name: string } | null;
+  device?: { id: string; name: string; modelId?: string } | null;
 };
 
 /// Resolve the base URL for an inference call. In local mode the managed
@@ -108,7 +112,11 @@ export function resolveInferenceBase(localPort: number): ResolvedInference {
       baseUrl: "",
       apiKey: null,
       remote: true,
-      device: { id: ep.deviceId, name: ep.deviceName || ep.deviceId },
+      device: {
+        id: ep.deviceId,
+        name: ep.deviceName || ep.deviceId,
+        modelId: ep.remoteModelId,
+      },
     };
   }
   if (ep.mode === "remote" && ep.host) {

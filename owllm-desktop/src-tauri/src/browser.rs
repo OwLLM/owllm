@@ -1102,6 +1102,36 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
     }
 }
 
+/// OAuth/SSO popups that post the sign-in result back through
+/// `window.opener` and then close themselves. These must stay engine-owned
+/// popups: re-opening them as detached OwLLM tabs severs the opener (and the
+/// per-tab sessionStorage nonce), so the identity provider's callback page
+/// has nowhere to deliver the token and dies black — seen live with Kimi's
+/// "Continue with Google" (kimi.com/google-callback). The engine popup shares
+/// this webview's profile, so the resulting session lands in the opening tab.
+fn is_opener_dependent_popup(url: &tauri::Url) -> bool {
+    if url.scheme() != "https" {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("");
+    let path = url.path();
+    match host {
+        // Google Identity Services popup mode (GSI / "Sign in with Google").
+        "accounts.google.com" => true,
+        // Sign in with Apple popup flow.
+        "appleid.apple.com" => true,
+        // Microsoft MSAL loginPopup flows.
+        "login.microsoftonline.com" | "login.live.com" => true,
+        // GitHub OAuth popup flows only — plain github.com links stay tabs.
+        "github.com" => path.starts_with("/login"),
+        // Facebook Login dialog.
+        "www.facebook.com" | "m.facebook.com" | "facebook.com" => {
+            path.starts_with("/dialog/") || path.starts_with("/login")
+        }
+        _ => false,
+    }
+}
+
 /// Build + attach one content (page) webview as a new tab. Active tabs sit
 /// under the chrome bar; inactive ones are parked offscreen. All tabs share
 /// the same profile data dir, so logins/cookies span tabs.
@@ -1118,8 +1148,12 @@ fn attach_tab(
     let mut content = WebviewBuilder::new(tab_label(id), WebviewUrl::External(url))
         .initialization_script(BRIDGE_JS)
         .on_new_window(move |url, _features| {
-            // Never let WebView2/WKWebView/WebKitGTK create an unmanaged popup.
-            // Queue it as a normal OwLLM tab after this native callback returns.
+            // Opener-dependent OAuth popups must stay engine-owned so
+            // `window.opener` / `window.close` keep working; everything else
+            // is queued as a managed OwLLM tab after this callback returns.
+            if is_opener_dependent_popup(&url) {
+                return NewWindowResponse::Allow;
+            }
             queue_browser_ui(
                 &new_window_app,
                 BrowserUiEvent::OpenTab {
@@ -1649,6 +1683,10 @@ fn attach_legacy_tab(
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
         .on_new_window(move |url, _features| {
+            // Same opener-preserving OAuth popup rule as the framed shape.
+            if is_opener_dependent_popup(&url) {
+                return NewWindowResponse::Allow;
+            }
             queue_browser_ui(
                 &new_window_app,
                 BrowserUiEvent::OpenTab {
@@ -2307,6 +2345,25 @@ mod tests {
             batch.open_tabs[1],
             ("https://two.example/".to_string(), false)
         );
+    }
+
+    #[test]
+    fn oauth_popups_keep_engine_opener_and_plain_links_stay_tabs() {
+        let popup = |u: &str| is_opener_dependent_popup(&tauri::Url::parse(u).unwrap());
+        // Opener-dependent IdP popups → engine-owned (window.opener intact).
+        assert!(popup(
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=x&nonce=y"
+        ));
+        assert!(popup("https://appleid.apple.com/auth/authorize?x=1"));
+        assert!(popup("https://login.microsoftonline.com/common/oauth2/v2.0/authorize"));
+        assert!(popup("https://github.com/login/oauth/authorize?client_id=x"));
+        assert!(popup("https://www.facebook.com/dialog/oauth?client_id=x"));
+        // Ordinary target=_blank links → managed OwLLM tabs, as before.
+        assert!(!popup("https://github.com/OwLLM/owllm"));
+        assert!(!popup("https://www.kimi.com/code/authorize_device?user_code=x"));
+        assert!(!popup("https://example.com/login"));
+        // Non-https never gets an unmanaged engine popup.
+        assert!(!popup("http://accounts.google.com/o/oauth2/v2/auth"));
     }
 
     #[test]

@@ -297,6 +297,7 @@ function buildGraphJson(opts: {
       name: a.name,
       base: a.base,
       ...(a.profileRef ? { profileRef: a.profileRef } : {}),
+      ...(a.defaultModelId ? { defaultModelId: a.defaultModelId } : {}),
     })),
     agentModels: Object.fromEntries(opts.agentModels),
     agentVoices: Object.fromEntries(opts.agentVoices),
@@ -340,6 +341,10 @@ type AgentSpec = {
   // specialist prompt builder can layer them.
   description?: string;
   extraPrompt?: string;
+  /// Optional model pinned on the team template's agent row
+  /// (`default_model_id`). It is inherited by projects using that template and
+  /// must affect dispatch, not just the editor form that writes it.
+  defaultModelId?: string;
   // Per-agent SKILL.md packs equipped on this agent (skill ids). Skills are
   // instruction packs loaded on demand at dispatch (progressive disclosure),
   // distinct from `tool_allowlist` function calls. Kept in sync with the
@@ -671,6 +676,7 @@ function toTeam(t: TeamTemplateBackend): Team {
         // Qt source spells this `extra_prompt`; we expose it camel-case
         // on the React side so usage doesn't pierce snake_case.
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
+        defaultModelId: typeof a.default_model_id === "string" && a.default_model_id.trim() ? a.default_model_id.trim() : undefined,
         extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
         profileRef: a.profile_ref && typeof a.profile_ref.id === "string" && Number.isFinite(a.profile_ref.revision)
           ? { id: a.profile_ref.id, revision: a.profile_ref.revision }
@@ -709,6 +715,7 @@ function projectToTeam(p: ProjectRow): Team {
   // the name-contains rule in orchestratorOf still catches a renamed orchestrator.
   const baseByName = new Map<string, string>();
   const profileByName = new Map<string, RevisionRef>();
+  const defaultModelByName = new Map<string, string>();
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
       const parsed = JSON.parse(p.graph_json);
@@ -724,6 +731,9 @@ function projectToTeam(p: ProjectRow): Team {
             if (r.profileRef && typeof r.profileRef.id === "string" && Number.isFinite(r.profileRef.revision)) {
               profileByName.set(r.name, { id: r.profileRef.id, revision: r.profileRef.revision });
             }
+            if (typeof r.defaultModelId === "string" && r.defaultModelId.trim()) {
+              defaultModelByName.set(r.name, r.defaultModelId.trim());
+            }
           }
         }
       }
@@ -736,6 +746,7 @@ function projectToTeam(p: ProjectRow): Team {
       name: n,
       base: baseByName.get(n) ?? n,
       profileRef: profileByName.get(n),
+      defaultModelId: defaultModelByName.get(n),
     })),
   );
   return {
@@ -6057,6 +6068,7 @@ function RightColumnTabs(props: {
   phase: DispatchPhase;
   models: ModelInfo[];
   modelFor: (agentName: string) => string;
+  agentModelOverrideFor: (agentName: string) => string;
   onPickAgentModel: (agentName: string, modelId: string) => void;
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
@@ -6184,6 +6196,7 @@ function RightColumnTabs(props: {
             activeAgent={props.activeAgent}
             models={props.models}
             modelFor={props.modelFor}
+            agentModelOverrideFor={props.agentModelOverrideFor}
             onPickAgentModel={props.onPickAgentModel}
             accountsStatus={props.accountsStatus}
             effectiveTeamModel={props.effectiveTeamModel}
@@ -6484,7 +6497,7 @@ function OrchestratorSettings({
 // is selected).
 function OrchAgentSettings({
   team, selectedAgent, activeAgent,
-  models, modelFor, onPickAgentModel, accountsStatus,
+  models, modelFor, agentModelOverrideFor, onPickAgentModel, accountsStatus,
   effectiveTeamModel, serverState,
   voiceFor, onPickAgentVoice, voices,
 }: {
@@ -6493,6 +6506,7 @@ function OrchAgentSettings({
   activeAgent: string | null;
   models: ModelInfo[];
   modelFor: (agentName: string) => string;
+  agentModelOverrideFor: (agentName: string) => string;
   onPickAgentModel: (agentName: string, modelId: string) => void;
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
@@ -6503,19 +6517,23 @@ function OrchAgentSettings({
 }) {
   const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
   const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
+  const explicitModel = agentModelOverrideFor(focus);
+  const inheritedModel = modelFor(focus);
   const disabled = focus === "you" || focus === "system";
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Model</span>
         <ModelPicker
-          value={modelFor(focus)}
+          value={explicitModel}
           onChange={(id) => onPickAgentModel(focus, id)}
           models={models}
           status={accountsStatus}
           disabled={disabled}
           fallbackLabel={
-            effectiveTeamModel
+            inheritedModel && inheritedModel !== "local"
+              ? `(use inherited · ${inheritedModel})`
+              : effectiveTeamModel
               ? `(use team model · ${effectiveTeamModel})`
               : serverState.model_id
                 ? `(use team / server model · ${serverState.model_id})`
@@ -10537,8 +10555,14 @@ export function AgentsPage({
   const effectiveTeamModel =
     teamModelOverride ?? selectedProject?.team_default_model_id ?? "";
 
+  const agentModelOverrideFor = (agentName: string): string =>
+    perAgentModel.get(agentName)?.trim() ?? "";
+  const agentTemplateModelFor = (agentName: string): string =>
+    activeTeam?.agents.find(a => a.name === agentName)?.defaultModelId?.trim() ?? "";
+
   // Resolve the model id we should send for a given agent. Priority:
-  //   per-agent override > team default > server's running model > "local"
+  //   per-agent override > agent template default > team default >
+  //   server's running model > "local"
   // Empty-string overrides fall through to the next layer. The string
   // we return is the `model` field in /v1/chat/completions; llama-server
   // ignores it today but the multi-server path will use it to route.
@@ -10549,6 +10573,7 @@ export function AgentsPage({
       selectedProject?.team_default_model_id ?? "",
       perAgentModel,
       serverState.model_id,
+      agentTemplateModelFor(agentName),
     );
   };
   const onPickAgentModel = (agentName: string, modelId: string) => {
@@ -13511,7 +13536,7 @@ export function AgentsPage({
             agentName={name}
             displayName={displayLabel(name)}
             icon={agentIconRef(spec, roleByName, agentIconOverrides)}
-            initialModel={modelFor(name)}
+            initialModel={agentModelOverrideFor(name) || spec.defaultModelId || ""}
             initialColor={spec.color ?? ""}
             initialPrompt={spec.extraPrompt ?? ""}
             initialProfileRef={spec.profileRef}
@@ -13701,6 +13726,7 @@ export function AgentsPage({
             phase={phase}
             models={models}
             modelFor={modelFor}
+            agentModelOverrideFor={agentModelOverrideFor}
             onPickAgentModel={onPickAgentModel}
             accountsStatus={accountsStatus}
             effectiveTeamModel={effectiveTeamModel}

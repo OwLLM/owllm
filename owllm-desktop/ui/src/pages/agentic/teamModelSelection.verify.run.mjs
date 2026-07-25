@@ -35,6 +35,11 @@ try {
     model.resolveAgentModel("coder", "", "sub/gpt-5.5", stale, "local-model") === "local-model");
   check("Normal per-agent precedence remains when no live team assignment is pending",
     model.resolveAgentModel("coder", null, "sub/kimi-k3", stale, null) === "sub/gpt-5.5");
+  check("Agent template default wins over the team default but not over project overrides",
+    model.resolveAgentModel("publisher", null, "sub/kimi-k3", new Map(), "local-model", "api/deepseek-chat") === "api/deepseek-chat"
+      && model.resolveAgentModel("coder", null, "sub/kimi-k3", stale, "local-model", "api/deepseek-chat") === "sub/gpt-5.5");
+  check("A live team selection still overrides stale project and template agent models",
+    model.resolveAgentModel("coder", "sub/claude-opus-4-7", "sub/kimi-k3", stale, "local-model", "api/deepseek-chat") === "sub/claude-opus-4-7");
 
   const graph = model.graphJsonWithoutAgentModels(JSON.stringify({
     edges: [{ source: "orchestrator", target: "coder" }],
@@ -68,6 +73,16 @@ try {
   const accounts = fs.readFileSync(path.join(ROOT, "owllm-desktop/src-tauri/src/accounts.rs"), "utf8");
   check("Agent cards and dispatch share the team-first resolver",
     page.includes("return resolveAgentModel(") && page.includes("teamModelOverride,"));
+  check("Template default_model_id is loaded and participates in dispatch",
+    page.includes("defaultModelId?: string")
+      && page.includes("a.default_model_id")
+      && page.includes("agentTemplateModelFor(agentName)"));
+  check("Agent settings picker shows only explicit overrides, not resolved inherited models",
+    page.includes("agentModelOverrideFor: (agentName: string) => string")
+      && page.includes("value={explicitModel}")
+      && page.includes("(use inherited · ${inheritedModel})"));
+  check("Agent editor does not materialize inherited team/server models as overrides",
+    page.includes("initialModel={agentModelOverrideFor(name) || spec.defaultModelId || \"\"}"));
   check("Team picker clears local and DB per-agent overrides",
     page.includes("clearStoredAgentModelOverrides(project.id)")
       && page.includes("graphJsonWithoutAgentModels(project.graph_json)"));

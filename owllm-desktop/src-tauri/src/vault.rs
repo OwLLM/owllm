@@ -787,7 +787,7 @@ fn is_worklog(kind: &str, tags: &str) -> bool {
 fn export_team_memory(conn: &rusqlite::Connection, project_id: &str) -> Vec<VaultMemEntry> {
     let mut stmt = match conn.prepare(
         "SELECT mkey, content, tags, author, ts, kind FROM team_memory \
-         WHERE scope = ?1 AND kind != 'worklog' ORDER BY id ASC",
+         WHERE scope = ?1 AND kind = 'fact' ORDER BY id ASC",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),

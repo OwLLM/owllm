@@ -166,12 +166,18 @@ const DEFAULT_CODE_STATE: CodeState = {
 // footer, the auto-feed pause note) as plain assistant answers, which let them
 // own the Forward button and re-enter the model's history. Stamp them as meta.
 function stampLegacyMetaNotices(s: CodeState | null): CodeState | null {
-  if (!s?.messages?.length) return s;
+  if (!s) return s;
   const fix = (list?: Msg[]) => list?.map((m) =>
     m.role === "assistant" && !m.kind && (m.content.startsWith("⏱ ") || m.content.startsWith("📓 Auto-feed paused"))
       ? { ...m, kind: "meta" as const }
       : m);
-  return { ...s, messages: fix(s.messages) ?? [], secondaryMessages: fix(s.secondaryMessages) };
+  // Publisher results used to be persisted in the composer status. Clear the
+  // exact stale sync-success message during hydration now that PublisherCards
+  // owns it in the left Git container.
+  const status = s.status === "✓ Up to date. Local and origin/main are already the same commit."
+    ? (s.workspace ? `Coding in ${s.workspace}` : DEFAULT_CODE_STATE.status)
+    : s.status;
+  return { ...s, status, messages: fix(s.messages) ?? [], secondaryMessages: fix(s.secondaryMessages) };
 }
 
 // Worktree command outcomes — serde-tagged "status", camelCase. Mirror of the
@@ -2225,36 +2231,74 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
   sendSecondaryRef.current = sendSecondary;
 
+  const toggleWorkspaceTerminal = () => {
+    // Hidden shells re-open; visible shells hide. Both agent composers control
+    // the same workspace terminal, so a second shell/process is never created.
+    if (!termOpen) {
+      setTermOpen(true);
+      setTermHidden(false);
+    } else {
+      setTermHidden((hidden) => !hidden);
+    }
+  };
+
+  const renderTerminalButton = (owner: "primary" | "secondary") => (
+    <button
+      data-ui={owner === "primary" ? "CodePrimaryTerminalButton" : "CodeSecondaryTerminalButton"}
+      onClick={toggleWorkspaceTerminal}
+      title="Open the workspace terminal"
+      aria-label={`Open terminal for the ${owner} agent`}
+      style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
+    >Terminal</button>
+  );
+
   // The second agent's composer — ONE definition, rendered in two homes:
   // inside the pane when the panes are STACKED (narrow), or in the divided
   // bottom composer row aligned under its pane when side-by-side (wide) —
   // the fine-tuning-chat layout: columns above, inputs divided below.
   const renderSecondaryComposer = () => (
-    <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
-      <textarea
-        ref={secondaryDraftRef}
-        value={secondaryDraft}
-        onChange={(e) => setSecondaryDraft(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
-        placeholder="Message the second agent… (same workspace, its own conversation & model)"
-        rows={2}
-        disabled={secondaryBusy}
-        style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
-      />
-      {secondaryBusy ? (
-        <button
-          onClick={() => { secondaryAbortRef.current?.abort(); }}
-          title="Stop the second agent"
-          style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
-        >Stop</button>
-      ) : (
-        <button
-          onClick={() => { void sendSecondary(); }}
-          disabled={!secondaryDraft.trim()}
-          title="Send to the second agent"
-          style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
-        >Send</button>
-      )}
+    <div data-ui="CodeSecondaryComposer" style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flexShrink: 0 }}>
+      <div data-ui="CodeSecondaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
+        <div data-ui="CodeSecondaryComposerModelPicker" style={{ flex: 1, minWidth: 0 }}>
+          <ModelPicker
+            value={secondaryModelId}
+            onChange={setSecondaryModelId}
+            models={availableModels}
+            status={accountsStatus}
+            disabled={secondaryBusy}
+            fallbackLabel="Same as 1st agent"
+            placement="top"
+          />
+        </div>
+        {renderTerminalButton("secondary")}
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "flex-end", minWidth: 0 }}>
+        <textarea
+          ref={secondaryDraftRef}
+          value={secondaryDraft}
+          onChange={(e) => setSecondaryDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
+          placeholder="Message the second agent… (same workspace, its own conversation & model)"
+          rows={2}
+          disabled={secondaryBusy}
+          style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
+        />
+        {secondaryBusy ? (
+          <button
+            onClick={() => { secondaryAbortRef.current?.abort(); }}
+            title="Stop the second agent"
+            style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
+          >Stop</button>
+        ) : (
+          <button
+            onClick={() => { void sendSecondary(); }}
+            disabled={!secondaryDraft.trim()}
+            title="Send to the second agent"
+            style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
+          >Send</button>
+        )}
+      </div>
     </div>
   );
 
@@ -2982,19 +3026,6 @@ function CodeWorkspace({ pageId, onTitle }: {
           🖥 {stx.createdDeviceName || deviceIdentity.name}
         </span>
         {stx.repoUrl && <span title={stx.repoUrl} style={{ fontSize: 10.5, fontWeight: 750, color: "var(--accent-ink)", whiteSpace: "nowrap" }}>🐙 GitHub</span>}
-        {/* Project Memory — same shared surface (TeamMemoryModal) and same
-            project scope both code agents read/write, matching the Agents page's
-            🧠 Memory button. Scoped event so only THIS page's modal opens (the
-            keep-alive Agents modal is mounted+hidden alongside). */}
-        {(projectRoot || workspace) && (
-          <button
-            onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-code-memory"))}
-            title="Project Memory — the shared knowledge base both code agents read and write (build commands, decisions, file maps). Same memory as the Agents page for this project; syncs across your PCs via the vault."
-            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
-          >
-            🧠 Memory
-          </button>
-        )}
         {/* Per-page rename — tab shows "folder(rename)" so two pages on the
             same project stay tellable apart. Empty = folder name only. */}
         <input
@@ -3125,6 +3156,14 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 8 }}>
         {workspace && (
           <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
+            <button
+              data-ui="CodeProjectMemory"
+              onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-code-memory"))}
+              title="Project Memory — the same shared facts and worklog used by this project's Agents page and synced through the vault."
+              style={{ ...btn, width: "100%", height: 30, marginBottom: 4, justifyContent: "flex-start", color: "var(--accent-ink)", borderColor: "rgba(var(--accent-rgb),0.42)" }}
+            >
+              🧠 Project Memory
+            </button>
             <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
             <PublishCards
               repoDir={projectRoot || workspace}
@@ -3133,7 +3172,6 @@ function CodeWorkspace({ pageId, onTitle }: {
               projectRoot={projectRoot}
               isolated={isolated}
               disabled={busy}
-              onStatus={setStatus}
               // Failed release actions become a coder task; send() queues it
               // as a ⚡ steer when a run is already in flight. Pre-check the
               // guards send() would trip so the card reports the truth instead
@@ -3172,16 +3210,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         }}>
           <div data-ui="code-primary-agent-header" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
-            <div data-ui="code-agent-model-picker" style={{ flex: "1 1 360px", minWidth: 240, maxWidth: 560 }}>
-              <ModelPicker
-                value={modelId}
-                onChange={setModelId}
-                models={availableModels}
-                status={accountsStatus}
-                disabled={busy}
-                fallbackLabel="Pick a model"
-              />
-            </div>
             {secondaryOpen && (
               <label title="When the 1st agent finishes a reply, automatically feed it to the 2nd agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: feedPrimaryToSecondary ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer", whiteSpace: "nowrap" }}>
                 <input type="checkbox" checked={feedPrimaryToSecondary} onChange={(e) => setFeedPrimaryToSecondary(e.target.checked)} />
@@ -3292,17 +3320,6 @@ function CodeWorkspace({ pageId, onTitle }: {
           }}>
             <div data-ui="code-secondary-agent-header" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>
-              {/* The second agent's OWN model — independent of the primary chat.
-                  Empty falls back to the primary model ("Same as 1st agent"). */}
-              <div data-ui="code-agent-model-picker" style={{ flex: "1 1 360px", minWidth: 240, maxWidth: 560 }}>
-                <ModelPicker
-                  value={secondaryModelId}
-                  onChange={setSecondaryModelId}
-                  models={availableModels}
-                  status={accountsStatus}
-                  fallbackLabel="Same as 1st agent"
-                />
-              </div>
               <label title="When the 2nd agent finishes a reply, automatically feed it to the 1st agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: feedSecondaryToPrimary ? "#c7a8ff" : "var(--fg-muted)", cursor: "pointer", whiteSpace: "nowrap" }}>
                 <input type="checkbox" checked={feedSecondaryToPrimary} onChange={(e) => setFeedSecondaryToPrimary(e.target.checked)} />
                 ⇄ to 1st
@@ -3400,25 +3417,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         </div>
       )}
 
-      {/* Status + Terminal line — sits directly above the composer (the input
-          chatbox). The "Coding in …" info is on the left; the Terminal toggle
-          is on the top-right of the input area, full text. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-        <div style={status.includes("\n")
-          ? { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
-          : { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
-        <button
-          onClick={() => {
-            // Hidden shells re-open; visible shells hide.
-            if (!termOpen) { setTermOpen(true); setTermHidden(false); }
-            else setTermHidden((hidden) => !hidden);
-          }}
-          title="Open the workspace terminal"
-          aria-label="Open terminal"
-          style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
-        >Terminal</button>
-      </div>
-
       {/* Composer row — lives in the SAME column as the chat panes, so it is
           always exactly as wide as the chat window. DIVIDED (fine-tune-chat
           style) when the second agent is open side-by-side: primary composer
@@ -3432,6 +3430,27 @@ function CodeWorkspace({ pageId, onTitle }: {
         onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
         style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
       >
+        {/* Each agent owns a toolbar immediately above — and exactly aligned
+            with — its own textarea. Both Terminal buttons address the same
+            workspace shell; the model selections remain independent. */}
+        <div data-ui="CodePrimaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <div style={status.includes("\n")
+            ? { flex: 1, minWidth: 0, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
+            : { flex: 1, minWidth: 0, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
+          <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
+          <div data-ui="CodePrimaryComposerModelPicker" style={{ width: "min(300px, 48%)", minWidth: 180 }}>
+            <ModelPicker
+              value={modelId}
+              onChange={setModelId}
+              models={availableModels}
+              status={accountsStatus}
+              disabled={busy}
+              fallbackLabel="(pick a model)"
+              placement="top"
+            />
+          </div>
+          {renderTerminalButton("primary")}
+        </div>
         {codeAttachments.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {codeAttachments.map((attachment, i) => (

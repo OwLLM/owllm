@@ -52,15 +52,27 @@ pin("forward control skips trailing meta notices",
   codePageSrc.includes('messages.slice(i + 1).every((n) => n.kind === "meta")'));
 pin("legacy sessions are migrated at hydration",
   codePageSrc.includes("stampLegacyMetaNotices(loadPageSession(pageId)"));
-pin("primary chat header owns a model picker",
-  codePageSrc.includes('data-ui="code-primary-agent-header"')
-  && codePageSrc.indexOf('data-ui="code-primary-agent-header"') < codePageSrc.indexOf('value={modelId}', codePageSrc.indexOf('data-ui="code-primary-agent-header"')));
-pin("second chat header owns a model picker",
-  codePageSrc.includes('data-ui="code-secondary-agent-header"')
-  && codePageSrc.indexOf('data-ui="code-secondary-agent-header"') < codePageSrc.indexOf('value={secondaryModelId}', codePageSrc.indexOf('data-ui="code-secondary-agent-header"')));
-pin("both chat model pickers have the wide flexible layout",
-  (codePageSrc.match(/data-ui="code-agent-model-picker"/g) || []).length === 2
-  && (codePageSrc.match(/flex: "1 1 360px", minWidth: 240, maxWidth: 560/g) || []).length === 2);
+pin("primary composer owns its model picker above its textarea",
+  codePageSrc.includes('data-ui="CodePrimaryComposerToolbar"')
+  && codePageSrc.indexOf('data-ui="CodePrimaryComposerToolbar"') < codePageSrc.indexOf("ref={codeDraftRef}"));
+pin("second composer owns its independent model picker above its textarea",
+  codePageSrc.includes('data-ui="CodeSecondaryComposerToolbar"')
+  && codePageSrc.indexOf('data-ui="CodeSecondaryComposerToolbar"') < codePageSrc.indexOf("ref={secondaryDraftRef}"));
+pin("both composer pickers open upward and share a Terminal control",
+  codePageSrc.includes('data-ui="CodePrimaryComposerModelPicker"')
+  && codePageSrc.includes('data-ui="CodeSecondaryComposerModelPicker"')
+  && (codePageSrc.match(/placement="top"/g) || []).length >= 2
+  && codePageSrc.includes('renderTerminalButton("primary")')
+  && codePageSrc.includes('renderTerminalButton("secondary")'));
+pin("model pickers are absent from both crowded chat headers",
+  !codePageSrc.slice(
+    codePageSrc.indexOf('data-ui="code-primary-agent-header"'),
+    codePageSrc.indexOf("<div", codePageSrc.indexOf('data-ui="code-primary-agent-header"') + 20),
+  ).includes("<ModelPicker")
+  && !codePageSrc.slice(
+    codePageSrc.indexOf('data-ui="code-secondary-agent-header"'),
+    codePageSrc.indexOf("{/* Transcript", codePageSrc.indexOf('data-ui="code-secondary-agent-header"')),
+  ).includes("<ModelPicker"));
 pin("old page-level second-agent row is removed",
   !codePageSrc.includes("Hide 2nd agent")
   && !codePageSrc.includes("Show 2nd agent")

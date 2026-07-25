@@ -100,6 +100,30 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_team_memory_index_memory ON team_memory_index(memory_id);",
     )
     .map_err(|e| format!("ensure memory index schema: {e}"))?;
+    // A short-lived UI experiment promoted every successful run summary into
+    // a durable fact tagged `auto-curated`. That duplicated the bounded worklog,
+    // polluted RAG retrieval, and produced a large disconnected graph cluster.
+    // Preserve those generated rows in an internal archive, but remove them
+    // from graph/search/index/vault facts. Explicit memory_write/[REMEMBER]
+    // facts are untouched.
+    let legacy_auto_ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM team_memory \
+             WHERE kind = 'fact' AND (',' || lower(tags) || ',') LIKE '%,auto-curated,%'",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| r.get::<_, i64>(0))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+        })
+        .unwrap_or_default();
+    for id in legacy_auto_ids {
+        conn.execute(
+            "UPDATE team_memory SET kind = 'archived' WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| format!("archive legacy auto-curated memory: {e}"))?;
+        reindex_team_memory_row(conn, id)?;
+    }
     let indexed: i64 = conn
         .query_row("SELECT count(*) FROM team_memory_index", [], |r| r.get(0))
         .unwrap_or(0);
@@ -514,19 +538,23 @@ pub(crate) fn reindex_team_memory_row(conn: &rusqlite::Connection, id: i64) -> R
     )
     .map_err(|e| format!("clear memory index: {e}"))?;
     let row = conn.query_row(
-        "SELECT mkey, tags, content FROM team_memory WHERE id = ?1",
+        "SELECT mkey, tags, content, kind FROM team_memory WHERE id = ?1",
         rusqlite::params![id],
         |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         },
     );
-    let Ok((key, tags, content)) = row else {
+    let Ok((key, tags, content, kind)) = row else {
         return Ok(());
     };
+    if kind == "archived" {
+        return Ok(());
+    }
     let toks = tokens_for_fields(&key, &tags, &content);
     let mut terms = BTreeSet::new();
     terms.extend(toks.key.iter().cloned());
@@ -662,7 +690,8 @@ pub async fn team_memory_search(
         let mut stmt = conn
             .prepare(
                 "SELECT id, mkey, content, tags, author, ts, kind FROM team_memory \
-                 WHERE scope = ?1 ORDER BY id DESC LIMIT 500",
+                 WHERE scope = ?1 AND kind IN ('fact', 'worklog') \
+                 ORDER BY id DESC LIMIT 500",
             )
             .map_err(|e| format!("prepare: {e}"))?;
         let rows = stmt
@@ -953,6 +982,56 @@ mod tests {
                 count >= 3,
                 "expected persisted RAG index terms, got {count}"
             );
+        });
+    }
+
+    #[test]
+    fn legacy_auto_curated_facts_are_archived_without_touching_explicit_facts() {
+        with_project_db("auto-curated-demotion", |path| {
+            {
+                let conn = rusqlite::Connection::open(path).expect("open test db");
+                ensure_schema(&conn).expect("create schema");
+                conn.execute(
+                    "INSERT INTO team_memory (scope, mkey, content, tags, author, ts, kind) \
+                     VALUES ('project', 'auto_work_old', 'generated summary', \
+                             'auto-curated,implementation', 'code', 1, 'fact')",
+                    [],
+                )
+                .expect("insert generated fact");
+                conn.execute(
+                    "INSERT INTO team_memory (scope, mkey, content, tags, author, ts, kind) \
+                     VALUES ('project', 'build_command', 'npm run build', \
+                             'build', 'you', 2, 'fact')",
+                    [],
+                )
+                .expect("insert explicit fact");
+            }
+
+            let conn = rusqlite::Connection::open(path).expect("reopen test db");
+            ensure_schema(&conn).expect("run memory migration");
+            let generated: (String, String) = conn
+                .query_row(
+                    "SELECT kind, tags FROM team_memory WHERE mkey = 'auto_work_old'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("read generated row");
+            let explicit: String = conn
+                .query_row(
+                    "SELECT kind FROM team_memory WHERE mkey = 'build_command'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("read explicit row");
+
+            assert_eq!(
+                generated,
+                (
+                    "archived".to_string(),
+                    "auto-curated,implementation".to_string()
+                )
+            );
+            assert_eq!(explicit, "fact");
         });
     }
 }

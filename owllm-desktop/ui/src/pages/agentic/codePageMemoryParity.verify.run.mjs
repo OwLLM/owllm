@@ -45,10 +45,16 @@ check(
     && /retrieveScopedTeamMemoryPack[\s\S]*team_memory_search/.test(mem),
 );
 check(
-  "Successful implementation work is conservatively promoted into synced facts",
-  mem.includes("autoCurateScopedTeamFact")
-    && mem.includes('tags: "auto-curated,implementation"')
-    && /logScopedTeamWork[\s\S]*autoCurateScopedTeamFact/.test(mem),
+  "Ordinary run summaries stay in the bounded worklog instead of polluting durable RAG facts",
+  !mem.includes("autoCurateScopedTeamFact")
+    && !mem.includes('tags: "auto-curated,implementation"')
+    && /logScopedTeamWork[\s\S]*team_memory_log/.test(mem),
+);
+check(
+  "Coding keeps Project Memory in the persistent left project rail",
+  src.includes('data-ui="CodeProjectMemory"')
+    && src.includes('CustomEvent("owllm:open-code-memory")')
+    && /<TeamMemoryModal[\s\S]*projectId=\{ruleScope\.id \|\| projectRoot \|\| workspace \|\| null\}/.test(src),
 );
 check(
   "Fact writes trigger project-vault sync with a periodic SQLite backstop",

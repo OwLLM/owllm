@@ -141,7 +141,6 @@ export default function PublishCards({
   projectRoot,
   isolated,
   disabled,
-  onStatus,
   onFixIssues,
 }: {
   repoDir: string;
@@ -150,7 +149,6 @@ export default function PublishCards({
   projectRoot?: string;
   isolated?: boolean;
   disabled?: boolean;
-  onStatus?: (msg: string) => void;
   /** Hands a ready-made "diagnose and fix this" task to the page's coder agent
    *  (queued as a steer if a run is in flight). Renders the Fix-with-agent
    *  button only when provided AND there is a failure to act on. Returns what
@@ -273,8 +271,6 @@ export default function PublishCards({
     return () => { live = false; };
   }, [repoDir]);
 
-  const status = (msg: string) => { if (onStatus) onStatus(msg); };
-
   const run = async (
     label: string,
     fn: () => Promise<unknown>,
@@ -286,30 +282,24 @@ export default function PublishCards({
     }
     runningRef.current = true;
     setLoading(true);
-    // Immediate acknowledgement on three surfaces — a compact rail chip, a
-    // one-line ambient note on the shared status line, and the full output in a
-    // closable modal — so a long host build (commit → tag → build → sign →
-    // publish) doesn't look frozen while it runs, and its multi-line log/error
-    // can be read then dismissed instead of permanently expanding the status
-    // line below the chatbox.
+    // The Publisher card owns its progress/result. Do not copy Git status into
+    // the composer toolbar: that cross-column coupling is what kept moving
+    // "Up to date" beside unrelated chat controls.
     setActivity({ kind: "run", msg: `${label}…` });
     setOutput({ kind: "run", title: label, body: `${label}…` });
     // Host publishing takes minutes. Do not place a full-screen modal over the
     // app for that whole period; its output remains available from the rail.
     setOutputOpen(openOutput);
-    status(`⏳ ${label}…`);
     try {
       const out = await fn();
       const msg = String(out ?? "Done.");
       setActivity({ kind: "ok", msg: firstLine(msg) });
       setOutput({ kind: "ok", title: label, body: msg });
-      status(`✓ ${firstLine(msg)}`);
       refresh();
     } catch (e) {
       const msg = String((e as Error).message ?? e);
       setActivity({ kind: "err", msg: firstLine(msg) });
       setOutput({ kind: "err", title: label, body: msg });
-      status(`✗ ${firstLine(msg)}`);
     } finally {
       runningRef.current = false;
       setLoading(false);
@@ -507,6 +497,7 @@ export default function PublishCards({
     <>
       <div ref={rootRef} style={{ marginTop: "auto", padding: 6 }}>
         <div
+          data-ui="GitPublisherContainer"
           style={{
             background: "var(--bg-surface)",
             border: "1px solid var(--border-strong)",
@@ -517,6 +508,32 @@ export default function PublishCards({
             gap: 6,
           }}
         >
+          {/* Publisher result belongs above the first Git row. */}
+          {activity && (
+            <div
+              data-ui="PublisherActivity"
+              style={{
+                display: "flex", gap: 5, alignItems: "flex-start", padding: "0 2px",
+                fontSize: 10.5, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word",
+                color: activity.kind === "err" ? "#ff8c8c" : activity.kind === "ok" ? "#7ff0c5" : "var(--fg-muted)",
+              }}
+            >
+              <span style={{ flexShrink: 0 }}>{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}</span>
+              <span style={{ minWidth: 0 }}>{activity.msg}</span>
+              {activity.kind === "run" && (
+                <span aria-label={`Elapsed ${elapsedClock(elapsedSeconds)}`} style={{ flexShrink: 0, color: "var(--accent)", fontVariantNumeric: "tabular-nums" }}>
+                  · {elapsedClock(elapsedSeconds)}
+                </span>
+              )}
+              {output && !outputOpen && (
+                <button
+                  onClick={() => setOutputOpen(true)}
+                  title="Show full output"
+                  style={{ marginLeft: "auto", flexShrink: 0, background: "transparent", border: "none", color: "inherit", cursor: "pointer", padding: 0, fontSize: 10.5, textDecoration: "underline", fontFamily: "inherit" }}
+                >⤢</button>
+              )}
+            </div>
+          )}
           {/* Live repo facts — branch, ahead/behind upstream, uncommitted count */}
           {git?.isRepo && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--fg-muted)", padding: "0 2px", minWidth: 0 }}>
@@ -617,35 +634,6 @@ export default function PublishCards({
               </button>
             )}
           </div>
-          {/* Inline activity — immediate ⏳ on click, then ✓/✗ result, right
-              where the buttons are (the shared status line is in another column). */}
-          {activity && (
-            <div
-              style={{
-                display: "flex", gap: 5, alignItems: "flex-start", padding: "0 2px",
-                fontSize: 10.5, lineHeight: 1.4, whiteSpace: "pre-wrap", wordBreak: "break-word",
-                color: activity.kind === "err" ? "#ff8c8c" : activity.kind === "ok" ? "#7ff0c5" : "var(--fg-muted)",
-              }}
-            >
-              <span style={{ flexShrink: 0 }}>{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}</span>
-              <span style={{ minWidth: 0 }}>{activity.msg}</span>
-              {activity.kind === "run" && (
-                <span
-                  aria-label={`Elapsed ${elapsedClock(elapsedSeconds)}`}
-                  style={{ flexShrink: 0, color: "var(--accent)", fontVariantNumeric: "tabular-nums" }}
-                >
-                  · {elapsedClock(elapsedSeconds)}
-                </span>
-              )}
-              {output && !outputOpen && (
-                <button
-                  onClick={() => setOutputOpen(true)}
-                  title="Show full output"
-                  style={{ marginLeft: "auto", flexShrink: 0, background: "transparent", border: "none", color: "inherit", cursor: "pointer", padding: 0, fontSize: 10.5, textDecoration: "underline", fontFamily: "inherit" }}
-                >⤢</button>
-              )}
-            </div>
-          )}
           {/* Fix with agent — hands failed-action output + unmet readiness
               checks to the page's coder as a real task (steer-safe mid-run). */}
           {onFixIssues && hasFixableIssue && (

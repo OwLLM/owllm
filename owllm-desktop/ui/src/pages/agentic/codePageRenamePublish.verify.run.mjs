@@ -85,12 +85,18 @@ anchor("PublishCards.tsx", cards, "non-Windows publish confirmation describes pl
   "builds this platform's packages");
 anchor("PublishCards.tsx", cards, "expanded checklist shows the actionable detail per failing check",
   "{!c.ok && <div style={{ color: \"var(--fg-muted)\", wordBreak: \"break-word\" }}>{c.detail}</div>}");
-// Action feedback: every button acknowledges immediately (inline + shared line)
-// and a not-ready Publish explains itself instead of swallowing the click.
+// Action feedback belongs to the left Publisher card. It must not leak Git
+// results into the composer toolbar beside model/Terminal controls.
 anchor("PublishCards.tsx", cards, "run() gives an immediate inline ⏳ acknowledgement",
   'setActivity({ kind: "run", msg: `${label}…` });');
-anchor("PublishCards.tsx", cards, "run() pushes an immediate ⏳ to the shared status line",
-  "status(`⏳ ${label}…`);");
+anchor("PublishCards.tsx", cards, "Publisher activity has an owned layout marker",
+  'data-ui="PublisherActivity"');
+if (cards.includes("status(`⏳") || cards.includes("status(`✓") || cards.includes("status(`✗")) {
+  failures++;
+  console.error("  ✗ PublishCards.tsx: Publisher results stay out of the composer status line");
+} else {
+  console.log("  ✓ PublishCards.tsx: Publisher results stay out of the composer status line");
+}
 anchor("PublishCards.tsx", cards, "the inline activity row renders in the card",
   '{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}');
 anchor("PublishCards.tsx", cards, "a not-ready Publish stays clickable and surfaces the reason",

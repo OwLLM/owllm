@@ -62,8 +62,15 @@ check(accounts.includes('data-ui="AccountOnboardingHint"')
   "Accounts explains the selected route and highlights the matching provider");
 check(accounts.includes('saved === "api" || PROVIDERS.some((provider) => provider.key === saved)'),
   "Accounts rejects unknown provider focus values before using them in a selector");
-check(shell.includes('data-ui="SettingsAccountRow"') && shell.includes("Finish onboarding")
-  && shell.includes("GitHub sign-in and AI subscription setup"),
-  "Settings links signed-out users back to the same complete journey");
+const onboardingRow = shell.indexOf('data-ui="SettingsOnboardingRow"');
+const accountRow = shell.indexOf('data-ui="SettingsAccountRow"');
+check(onboardingRow >= 0
+  && accountRow > onboardingRow
+  && shell.slice(onboardingRow, accountRow).includes("openSyncOnboarding()")
+  && shell.slice(onboardingRow, accountRow).includes("Finish onboarding")
+  && shell.slice(onboardingRow, accountRow).includes("GitHub and AI account setup"),
+  "Settings always shows a dedicated onboarding row immediately before the GitHub account container");
+check(shell.includes('maxHeight: "calc(100vh - 86px)", overflowY: "auto"'),
+  "the Settings dropdown scrolls within short windows so the onboarding row cannot fall off-screen");
 
 console.log(`OK onboarding journey: ${passed}/${passed} checks passed`);

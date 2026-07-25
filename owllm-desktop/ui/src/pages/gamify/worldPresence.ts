@@ -1,10 +1,8 @@
-export const WORLD_PRESENCE_ENABLED_KEY = "owllm:world-map:presence-enabled";
 export const WORLD_MAP_MODE_KEY = "owllm:world-map:mode";
 // Stable, opaque, device-local id so the same installation is one recorded node
 // across reconnects instead of inflating the recorded-users total every time it
 // comes online. Never synced (see vaultSync DENY_EXACT) — it identifies nothing.
 export const WORLD_PRESENCE_NODE_ID_KEY = "owllm:world-map:node-id";
-export const WORLD_PRESENCE_CHANGED_EVENT = "owllm:world-presence-changed";
 export const WORLD_PRESENCE_RECONNECT_BASE_MS = 1_000;
 export const WORLD_PRESENCE_RECONNECT_MAX_MS = 30_000;
 
@@ -161,17 +159,6 @@ export function saveWorldMapMode(mode: WorldMapMode, storage: Pick<Storage, "set
   catch { /* storage unavailable */ }
 }
 
-export function readPresenceEnabled(storage: Pick<Storage, "getItem"> | undefined = availableStorage()): boolean {
-  try { return storage?.getItem(WORLD_PRESENCE_ENABLED_KEY) === "1"; }
-  catch { return false; }
-}
-
-export function savePresenceEnabled(enabled: boolean, storage: Pick<Storage, "setItem"> = localStorage) {
-  try { storage.setItem(WORLD_PRESENCE_ENABLED_KEY, enabled ? "1" : "0"); }
-  catch { /* storage unavailable */ }
-  if (typeof window !== "undefined") window.dispatchEvent(new CustomEvent(WORLD_PRESENCE_CHANGED_EVENT, { detail: { enabled } }));
-}
-
 function reconnectDelay(attempt: number): number {
   return Math.min(WORLD_PRESENCE_RECONNECT_MAX_MS, WORLD_PRESENCE_RECONNECT_BASE_MS * (2 ** Math.min(attempt, 5)));
 }
@@ -298,7 +285,13 @@ export function subscribeWorldPresence(options: PresenceSubscriptionOptions): ()
 
 type PresenceRunnerOptions = ConnectionOptions & { storage?: PresenceStorage };
 
-/** Maintain one anonymous presence socket while this installation is opted in. */
+/**
+ * Maintain one anonymous presence socket for this installation.
+ *
+ * Presence is ALWAYS on: it shares nothing but an opaque device-local id and a
+ * coarse server-derived region, so there is nothing to consent to — every
+ * install is simply counted on the board. No opt-in flag gates this.
+ */
 export function installWorldPresenceConnection(options: PresenceRunnerOptions = {}): () => void {
   const storage = options.storage ?? availableStorage();
   const baseUrl = options.baseUrl ?? worldPresenceEndpoint();
@@ -316,28 +309,16 @@ export function installWorldPresenceConnection(options: PresenceRunnerOptions = 
   const sync = () => {
     stopSocket?.();
     stopSocket = undefined;
-    if (disposed || !readPresenceEnabled(storage) || !worldPresenceSocketUrl("presence", baseUrl, nodeId)) return;
+    if (disposed || !worldPresenceSocketUrl("presence", baseUrl, nodeId)) return;
     stopSocket = createReconnectingSocket("presence", { ...options, baseUrl, nodeId });
-  };
-  const onPreferenceChanged = () => sync();
-  const onStorage = (event: StorageEvent) => {
-    if (event.key === WORLD_PRESENCE_ENABLED_KEY) sync();
   };
   const onOnline = () => sync();
 
-  if (typeof window !== "undefined") {
-    window.addEventListener(WORLD_PRESENCE_CHANGED_EVENT, onPreferenceChanged);
-    window.addEventListener("storage", onStorage);
-    window.addEventListener("online", onOnline);
-  }
+  if (typeof window !== "undefined") window.addEventListener("online", onOnline);
   sync();
   return () => {
     disposed = true;
     stopSocket?.();
-    if (typeof window !== "undefined") {
-      window.removeEventListener(WORLD_PRESENCE_CHANGED_EVENT, onPreferenceChanged);
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener("online", onOnline);
-    }
+    if (typeof window !== "undefined") window.removeEventListener("online", onOnline);
   };
 }

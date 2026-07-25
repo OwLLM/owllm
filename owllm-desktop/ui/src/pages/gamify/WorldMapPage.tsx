@@ -11,9 +11,7 @@ import { getIdentity, listDevices, type DeviceIdentity, type DeviceRecord } from
 import { isClickGesture, nodeSignature } from "./globeStability";
 import {
   includeSelfDevice,
-  readPresenceEnabled,
   readWorldMapMode,
-  savePresenceEnabled,
   saveWorldMapMode,
   subscribeWorldPresence,
   type PublicPresenceNode,
@@ -47,6 +45,14 @@ const EARTH_TEXTURES = {
   specular: "/world-map/earth-specular.jpg",
   clouds: "/world-map/earth-clouds.png",
 } as const;
+
+// Keep enough space around the globe that it reads as a world in space instead
+// of filling/cropping against the panel edges. OrbitControls clamps accidental
+// wheel zooms to these bounds, while fleet mode leaves extra room for satellites.
+const WORLD_CAMERA_DISTANCE = 11.8;
+const FLEET_CAMERA_DISTANCE = 13.2;
+const WORLD_MIN_DISTANCE = 9.6;
+const FLEET_MIN_DISTANCE = 10.8;
 
 // Direction of the subsolar point (where the sun is directly overhead right now)
 // in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
@@ -240,13 +246,20 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     if (!host) return;
     const scene = new THREE.Scene();
     const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 100);
-    camera.position.set(0, 0.24, 6.2);
+    camera.position.set(0, 0.24, WORLD_CAMERA_DISTANCE);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = 1.18;
+    // Retina displays use a 2x drawing buffer. Keep the canvas' CSS box tied to
+    // the panel instead of letting its intrinsic (2x) pixel dimensions become
+    // its layout dimensions; otherwise macOS renders a double-sized canvas and
+    // the globe appears cropped into the lower-right corner.
+    renderer.domElement.style.width = "100%";
+    renderer.domElement.style.height = "100%";
+    renderer.domElement.style.display = "block";
     renderer.domElement.setAttribute("aria-label", "Interactive 3D OWLLM world map");
     renderer.domElement.setAttribute("role", "img");
     host.appendChild(renderer.domElement);
@@ -254,8 +267,8 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = 3.0;
-    controls.maxDistance = 15;
+    controls.minDistance = WORLD_MIN_DISTANCE;
+    controls.maxDistance = 17;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.32;
 
@@ -287,9 +300,9 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
         // Faint self-illumination of the land/ocean so the night hemisphere reads
         // as a dim twilit Earth rather than pure black. The day map modulates it,
         // so continents glow softly; on the sunlit side it is negligible.
-        emissive: new THREE.Color(0x2a3a55),
+        emissive: new THREE.Color(0x58759d),
         emissiveMap: earthMap,
-        emissiveIntensity: 0.32,
+        emissiveIntensity: 0.72,
       }),
     );
     earthGroup.add(globe);
@@ -341,8 +354,8 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
 
     // Ground color lifted from near-black so the shadowed hemisphere keeps a dim
     // blue twilight fill instead of collapsing to black.
-    scene.add(new THREE.HemisphereLight(0x91bdff, 0x1b2a44, 1.3));
-    scene.add(new THREE.AmbientLight(0x8aaee0, 0.5));
+    scene.add(new THREE.HemisphereLight(0xb5d3ff, 0x385476, 1.55));
+    scene.add(new THREE.AmbientLight(0xa8c7ef, 0.9));
     // Sun tracks the real subsolar point each frame (see animate loop); this is
     // just the initial placement so the first rendered frame is already correct.
     const sunLight = new THREE.DirectionalLight(0xffffff, 3.9);
@@ -427,8 +440,8 @@ function Globe({ nodes, accent, selectedId, onSelect }: {
       const nextHasFleet = list.some((node) => node.kind === "fleet");
       if (nextHasFleet !== hasFleet) {
         hasFleet = nextHasFleet;
-        controls.minDistance = hasFleet ? 8.4 : 3.0;
-        camera.position.set(0, 0.24, hasFleet ? 11.8 : 6.2);
+        controls.minDistance = hasFleet ? FLEET_MIN_DISTANCE : WORLD_MIN_DISTANCE;
+        camera.position.set(0, 0.24, hasFleet ? FLEET_CAMERA_DISTANCE : WORLD_CAMERA_DISTANCE);
       }
     };
 
@@ -566,7 +579,6 @@ export default function WorldMapPage() {
   const [configured, setConfigured] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [presenceEnabled, setPresenceEnabled] = useState(readPresenceEnabled);
   const [selected, setSelected] = useState<GlobeNode | null>(null);
   const [fleetError, setFleetError] = useState("");
 
@@ -639,11 +651,6 @@ export default function WorldMapPage() {
   useEffect(() => {
     if (mode === "fleet") void loadFleet(false);
   }, [mode]);
-
-  const togglePresence = (enabled: boolean) => {
-    setPresenceEnabled(enabled);
-    savePresenceEnabled(enabled);
-  };
 
   const nodes = useMemo<GlobeNode[]>(() => mode === "world"
     ? publicNodes.map((node) => ({
@@ -737,13 +744,10 @@ export default function WorldMapPage() {
             </div>
 
             {mode === "world" && (
-              <label style={{ ...panelStyle(), padding: 15, display: "flex", gap: 11, cursor: "pointer", alignItems: "flex-start" }}>
-                <input type="checkbox" checked={presenceEnabled} onChange={(event) => togglePresence(event.target.checked)} style={{ marginTop: 3, width: 17, height: 17, accentColor: "var(--accent)" }} />
-                <span>
-                  <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 750 }}>{t("Appear anonymously")}</span>
-                  <span style={{ display: "block", marginTop: 4, color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45 }}>{t("Shares no name, account, device, project, prompt, or exact coordinates.")}</span>
-                </span>
-              </label>
+              <div style={{ ...panelStyle(), padding: 13, display: "flex", gap: 9, alignItems: "flex-start", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45 }}>
+                <span aria-hidden style={{ marginTop: 1, color: "var(--accent-ink)" }}>🌐</span>
+                <span>{t("You are counted anonymously — no name, account, device, project, prompt, or exact coordinates are shared.")}</span>
+              </div>
             )}
 
             {mode === "fleet" && fleetError && (

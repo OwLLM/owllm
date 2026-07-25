@@ -468,6 +468,41 @@ export default function PublishCards({
     }
   };
 
+  // The escape hatch for when the buttons themselves keep failing: hand the
+  // WHOLE release job to the coder agent — not "fix the buttons' code", but
+  // "do the commit/merge/push/publish end-to-end yourself and verify the
+  // public release". Same dispatch channel as Fix with agent (steer-safe).
+  const finishWithAgent = () => {
+    if (!onFixIssues) return;
+    const parts: string[] = [];
+    if (activity?.kind === "err") {
+      const failedOutput = output?.kind === "err" ? output.body : activity.msg;
+      parts.push(`Last failed action output:\n\n${failedOutput}`);
+    }
+    if (readyFails.length > 0) {
+      parts.push(`Readiness checks currently failing:\n${readyFails.map((c) => `- ${c.label}: ${c.detail}`).join("\n")}`);
+    }
+    const outcome = onFixIssues(
+      "The rule-based release buttons (Commit / Merge / Push / Publish) are failing in this repository. " +
+      "Do NOT spend this run fixing or debugging the buttons' own code. Instead, COMPLETE the release yourself, end-to-end:\n" +
+      "1. Audit the working tree(s); commit pending project work (never sweep runtime/scratch files or another session's WIP).\n" +
+      "2. Merge the page branch into main, resolving conflicts safely — preserve both sides' work, never drop definitions or imports.\n" +
+      "3. Push, then run the repository's real publish pipeline (finish_and_publish / scripts/finish-and-publish.sh) from the checkout that holds the signing key.\n" +
+      "4. Do not stop at 'command launched' — follow it to a terminal result and VERIFY the new version is actually live as the Latest public release before reporting done.\n" +
+      "If a step genuinely cannot proceed, stop and report the exact blocker with evidence.\n\n" +
+      parts.join("\n\n"),
+    ) ?? "sent";
+    if (outcome === "no-model") {
+      setActivity({ kind: "err", msg: "Can't hand off — no model is selected in the Coder pane. Pick a model above the chat, then press 🚀 Finish release with agent again." });
+    } else if (outcome === "no-workspace") {
+      setActivity({ kind: "err", msg: "Can't hand off — no workspace is connected on this page." });
+    } else if (outcome === "queued") {
+      setActivity({ kind: "run", msg: "Coder is mid-run — the release handoff is queued as a ⚡ steer and will run next." });
+    } else {
+      setActivity({ kind: "run", msg: "Release handed to the coder agent — it will commit, merge, push and publish end-to-end, then verify the live release." });
+    }
+  };
+
   return (
     <>
       <div ref={rootRef} style={{ marginTop: "auto", padding: 6 }}>
@@ -621,6 +656,19 @@ export default function PublishCards({
               style={{ ...chipBtn, width: "100%", color: "#ffd97a", borderColor: "rgba(255,217,122,0.45)" }}
             >
               🛠 Fix with agent
+            </button>
+          )}
+          {/* Finish release with agent — when the rule-based buttons keep
+              failing, hand the WHOLE job (commit→merge→push→publish→verify)
+              to the coder instead of asking it to repair the buttons. */}
+          {onFixIssues && hasFixableIssue && (
+            <button
+              onClick={finishWithAgent}
+              disabled={disabled}
+              title="Hand the whole release to the coder agent: it commits, merges, pushes, publishes and verifies the live release itself"
+              style={{ ...chipBtn, width: "100%", color: "#7ff0c5", borderColor: "rgba(127,240,197,0.45)" }}
+            >
+              🚀 Finish release with agent
             </button>
           )}
           {/* Readiness summary — click to expand the per-check list, so "why

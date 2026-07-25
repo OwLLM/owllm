@@ -70,10 +70,10 @@ try {
   const modeStore = memory();
   presence.saveWorldMapMode("fleet", modeStore);
   check("My Fleet mode persists", presence.readWorldMapMode(modeStore) === "fleet");
-  check("Anonymous presence defaults off", presence.readPresenceEnabled(memory()) === false);
-  const consentStore = memory();
-  presence.savePresenceEnabled(true, consentStore);
-  check("Anonymous presence choice persists", presence.readPresenceEnabled(consentStore) === true);
+  // Anonymous presence is always on now: there is no opt-in flag to read/save.
+  // Counting an install shares only an opaque id + coarse region, so nothing is
+  // gated on consent — the presence module exposes no enabled getter/setter.
+  check("No consent gate exists on the presence module", presence.readPresenceEnabled === undefined && presence.savePresenceEnabled === undefined);
 
   const self = { device_id: "self", name: "This device" };
   const paired = [{ device_id: "peer", name: "Peer" }];
@@ -148,8 +148,8 @@ try {
   presence.subscribeWorldPresence({ baseUrl: "", onStatus: (status) => { missingStatus = status; }, onSnapshot: () => {} });
   check("Missing service stays honest instead of fabricating users", missingStatus.configured === false && missingStatus.connected === false);
 
+  // No enabled flag is seeded: presence must connect for every install.
   const runnerStore = memory({
-    [presence.WORLD_PRESENCE_ENABLED_KEY]: "1",
     "owllm:world-map:presence-token": "obsolete-d1-token",
   });
   const presenceSockets = [];
@@ -162,7 +162,7 @@ try {
       return socket;
     },
   });
-  check("Opted-in installation opens one anonymous presence socket", presenceSockets.length === 1 && presenceSockets[0].url.includes("role=presence"));
+  check("Every installation opens one anonymous presence socket (always on, no consent)", presenceSockets.length === 1 && presenceSockets[0].url.includes("role=presence"));
   check("Presence socket sends the stable per-installation node id", presenceSockets[0].url.includes("id="));
   check("Node id is persisted device-locally for the next launch", (runnerStore.getItem("owllm:world-map:node-id") ?? "").length > 0);
   check("D1-era bearer token is removed", runnerStore.getItem("owllm:world-map:presence-token") === null);
@@ -187,6 +187,11 @@ try {
   check("Globe scene is built once per accent, not per node/selection", /}, \[accent\]\);/.test(page) && !/\[accent, nodes, onSelect, selectedId\]/.test(page));
   check("Selection is read live from a ref (no scene rebuild on select)", page.includes("selectedIdRef.current === node.id"));
   check("Node changes trigger a node-only rebuild, not a renderer teardown", page.includes("rebuildNodesRef.current?.()") && /rebuildNodesRef\.current = buildNodes/.test(page));
+  check("Retina drawing buffer cannot resize the globe canvas CSS box",
+    page.includes('renderer.domElement.style.width = "100%"')
+      && page.includes('renderer.domElement.style.height = "100%"')
+      && page.includes('renderer.domElement.style.display = "block"')
+      && page.includes("renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))"));
 
   // Regression: idle rotation must not flicker. The 30s fleet poll and each
   // presence snapshot return a NEW array with identical content; the node layer
@@ -220,7 +225,14 @@ try {
     page.includes("subsolarLocalDir(new Date(), sunLocal)") && /sunLight\.position\.copy\(sunLocal\)/.test(page) && !/sunLight\.position\.set\(5\.8/.test(page));
   // The shadowed hemisphere must stay dimly visible (twilight), not pure black.
   check("Night hemisphere is softly lit, not pitch black",
-    page.includes("emissiveMap: earthMap") && /emissiveIntensity:\s*0\.3/.test(page));
+    page.includes("emissiveMap: earthMap")
+      && /emissiveIntensity:\s*0\.72/.test(page)
+      && /new THREE\.AmbientLight\(0xa8c7ef,\s*0\.9\)/.test(page));
+  check("Globe starts zoomed out and cannot wheel-zoom into a cropped sphere",
+    page.includes("const WORLD_CAMERA_DISTANCE = 11.8")
+      && page.includes("const WORLD_MIN_DISTANCE = 9.6")
+      && page.includes("camera.position.set(0, 0.24, WORLD_CAMERA_DISTANCE)")
+      && page.includes("controls.minDistance = WORLD_MIN_DISTANCE"));
   check("Globe follows the readable selected GUI accent", page.includes('getPropertyValue("--accent-ink")') && page.includes("accent={colors.accentInk}"));
   check("My Fleet consumes real paired-device state", page.includes("getIdentity()") && page.includes("listDevices()") && page.includes("device.is_self"));
   check("My Fleet and Devices share one online rule", page.includes('from "../advanced/deviceLiveness"') && page.includes("isDeviceOnline(device)") && read("pages/advanced/DevicesPage.tsx").includes('from "./deviceLiveness"'));
@@ -231,11 +243,14 @@ try {
   for (const asset of ["earth-day.jpg", "earth-normal.jpg", "earth-specular.jpg", "earth-clouds.png"]) {
     check(`Bundled Earth asset exists: ${asset}`, fs.statSync(path.join(UI, "../public/world-map", asset)).size > 100_000);
   }
-  check("Public mode has an explicit anonymous-presence control", page.includes('type="checkbox"') && page.includes("savePresenceEnabled"));
+  // Presence is always on — there must be NO opt-in checkbox/toggle. Public mode
+  // instead shows a passive note that counting is anonymous.
+  check("Public mode has no presence opt-in checkbox or consent toggle", !page.includes('type="checkbox"') && !page.includes("savePresenceEnabled") && !page.includes("presenceEnabled"));
+  check("Public mode discloses anonymous counting without a consent control", page.includes("You are counted anonymously"));
   check("World Map consumes live WebSocket snapshots", page.includes("subscribeWorldPresence") && !page.includes("loadWorldPresence"));
   check("World Map ghosts recorded-but-offline nodes and shows both counts", page.includes("online: node.online") && page.includes('t("recorded")') && page.includes('t("online now")'));
-  check("Opted-in presence runs application-wide", appShell.includes("<WorldPresenceRunner />") && appShell.includes("installWorldPresenceConnection()"));
-  check("Consent and stable node id remain device-local", vaultSync.includes('"owllm:world-map:presence-enabled"') && vaultSync.includes('"owllm:world-map:node-id"'));
+  check("Presence runs application-wide, always on", appShell.includes("<WorldPresenceRunner />") && appShell.includes("installWorldPresenceConnection()"));
+  check("Stable node id (and any legacy consent key) stay device-local", vaultSync.includes('"owllm:world-map:node-id"') && vaultSync.includes('"owllm:world-map:presence-enabled"'));
   check("Worker retains anonymous nodes in SQLite and ghosts offline ones", worker.includes("acceptWebSocket") && worker.includes("serializeAttachment") && worker.includes("CREATE TABLE IF NOT EXISTS nodes") && worker.includes("first_seen") && worker.includes("publicNode(row, false)"));
   check("Worker never reads the source IP or reintroduces a cron", !/CF-Connecting-IP|x-forwarded-for/i.test(worker) && !/scheduled\s*\(/.test(worker));
   check("Worker broadcasts incremental membership changes with counts", worker.includes('type: "upsert"') && worker.includes('type: "remove"') && worker.includes("counts:"));
@@ -243,6 +258,9 @@ try {
   check("Unavailable service is disclosed", page.includes("World presence service is not connected yet."));
   check("New navigation labels have all eight locales", /\["World Map",(?:[^\]]*,){6}[^\]]*\]/.test(actions) && /\["Live World",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
   check("New recorded/online-count labels have all eight locales", /\["recorded",(?:[^\]]*,){6}[^\]]*\]/.test(actions) && /\["online now",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
+  // The anonymous-counting note contains commas in its text, so verify locale
+  // coverage by its English key plus the last-column (pt) translation.
+  check("Anonymous-counting note is translated (en + pt endpoints present)", actions.includes("You are counted anonymously") && actions.includes("Você é contado anonimamente"));
 
   for (const row of checks) console.log(`  PASS ${row.name}`);
   console.log(`world map verification: ${checks.length}/${checks.length} passed`);

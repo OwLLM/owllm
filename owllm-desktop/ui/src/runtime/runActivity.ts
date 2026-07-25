@@ -14,8 +14,10 @@
 
 const activeTags = new Set<string>();
 const listeners = new Set<() => void>();
+let version = 0;
 
 function notify(): void {
+  version += 1;
   for (const cb of Array.from(listeners)) {
     try { cb(); } catch { /* a bad listener must never break a run loop */ }
   }
@@ -44,6 +46,24 @@ export function clearRunActivity(prefix: string): void {
 /// useSyncExternalStore snapshot.
 export function isRunActive(): boolean {
   return activeTags.size > 0;
+}
+
+/// True while any in-flight run's tag starts with one of `prefixes`. Powers the
+/// per-page ("code:" / "agents:") second-header button glow off the very same
+/// tags that drive the aggregate signal, so no page reports anything new.
+export function isRunActiveMatching(prefixes: readonly string[]): boolean {
+  for (const tag of activeTags) {
+    for (const p of prefixes) if (tag.startsWith(p)) return true;
+  }
+  return false;
+}
+
+/// Monotonic change counter — bumped on EVERY run-activity change. A stable
+/// useSyncExternalStore snapshot for surfaces that must re-render on every
+/// change, not just the aggregate on/off edge: per-page glow has to clear when
+/// one family stops while another keeps running (aggregate stays true there).
+export function getRunActivityVersion(): number {
+  return version;
 }
 
 export function subscribeRunActivity(cb: () => void): () => void {

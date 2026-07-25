@@ -47,11 +47,15 @@ import { installScopedSelectAll } from "./utils/scopedSelectAll";
 import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
 import { readKeepFrameVisible, saveKeepFrameVisible } from "./framePreferences";
-import { isRunActive, subscribeRunActivity } from "./runtime/runActivity";
+import { isRunActive, isRunActiveMatching, getRunActivityVersion, subscribeRunActivity } from "./runtime/runActivity";
+import {
+  initTabActivity, isWorkflowAwarePage, runPrefixesForPage, showFinishedBadge, stepTabActivity,
+} from "./runtime/headerTabActivity";
 import {
   CHAT_FONT_MIN_STEP, chatFontSizePx, clampChatFontStep,
   readChatFontStep, saveChatFontStep,
 } from "./chatFontPreferences";
+import { isChatZoomTarget, nextChatFontStep } from "./chatFontWheelZoom";
 import ActionIcon from "./components/ActionIcon";
 import { installWorldPresenceConnection } from "./pages/gamify/worldPresence";
 import { openWebUrl } from "./utils/openWebUrl";
@@ -582,6 +586,13 @@ function useRunActive(): boolean {
   return React.useSyncExternalStore(subscribeRunActivity, isRunActive);
 }
 
+// Re-renders on EVERY run-activity change (not just the aggregate on/off edge),
+// so the per-page header glow clears the right button when one family stops
+// while another keeps running. The version is a stable snapshot per change.
+function useRunActivityVersion(): number {
+  return React.useSyncExternalStore(subscribeRunActivity, getRunActivityVersion);
+}
+
 // The header aura reuses the agent tiles' rainbow ring verbatim (same stops,
 // same 4s linear spin) but anchors its start/end stop on the SELECTED GUI
 // accent so the effect visibly carries the user's colour instead of a
@@ -590,6 +601,14 @@ const HEADER_AURA_GRADIENT =
   `conic-gradient(from var(--owllm-aura-angle),`
   + ` var(--accent), #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, var(--accent))`;
 const HEADER_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
+
+// The per-button "working" dot and finished "✓" check reuse the page tab-strip's
+// psychedelic rainbow (CodePage PSYCHEDELIC_AURA_DOT / owllm-tab-working pulse)
+// verbatim, so a workflow-aware second-header button reads as the SAME activity
+// signal as the page's own tab.
+const HEADER_TAB_AURA_STOPS = "#3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b";
+const HEADER_TAB_AURA_DOT = `conic-gradient(from 0deg, ${HEADER_TAB_AURA_STOPS})`;
+const HEADER_TAB_WORKING_ANIMATION = "owllm-tab-working 1.4s ease-in-out infinite";
 
 function ModeBar({
   mode, setMode, installed,
@@ -722,6 +741,20 @@ function ModeBar({
       <style>{`
         @property --owllm-aura-angle { syntax: "<angle>"; initial-value: 0deg; inherits: false; }
         @keyframes owllm-aura-spin { to { --owllm-aura-angle: 360deg; } }
+        @keyframes owllm-tab-working {
+          0%, 100% {
+            box-shadow:
+              0 0 0 1px rgba(255,255,255,0.08),
+              0 0 8px rgba(176,124,255,0.28),
+              0 0 12px rgba(127,212,255,0.18);
+          }
+          50% {
+            box-shadow:
+              0 0 0 1px rgba(255,255,255,0.20),
+              0 0 18px rgba(176,124,255,0.90),
+              0 0 28px rgba(127,212,255,0.55);
+          }
+        }
       `}</style>
       <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
         <div ref={settingsRef} data-no-drag style={{ position: "relative" }}>
@@ -749,6 +782,7 @@ function ModeBar({
               style={{
                 position: "absolute", left: 0, top: 58, width: 344,
                 padding: 12, borderRadius: 10,
+                maxHeight: "calc(100vh - 86px)", overflowY: "auto",
                 background: "var(--bg-panel)", color: "var(--fg)",
                 border: "1px solid rgba(var(--accent-rgb),0.65)",
                 boxShadow: "0 12px 32px rgba(0,0,0,0.48)",
@@ -985,6 +1019,28 @@ function ModeBar({
                 <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
               </button>
 
+              {/* Keep the guided setup independently discoverable after GitHub
+                  is connected. The account row below remains dedicated to
+                  sync/account management. */}
+              <button
+                data-ui="SettingsOnboardingRow"
+                onClick={() => { setSettingsOpen(false); openSyncOnboarding(); }}
+                title="Open the guided GitHub and AI account setup"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🧭</span>
+                <span style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 2 }}>
+                  <span style={{ fontWeight: 700, fontSize: 13.5 }}>Finish onboarding</span>
+                  <span style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.35 }}>GitHub and AI account setup</span>
+                </span>
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
               {/* The same guided first-run journey stays discoverable here when
                   identity is not connected. Once signed in this becomes the
                   compact account-management entry rather than advertising
@@ -1043,13 +1099,20 @@ function ModeBar({
           <button
             key={t.id}
             data-ui={t.dataUi}
-            onClick={() => setMode(mode === t.id ? "home" : t.id)}
+            onClick={() => {
+              if (t.id === "gamify") {
+                window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key: "world-map" } }));
+                return;
+              }
+              setMode(mode === t.id ? "home" : t.id);
+            }}
             style={{ ...(mode === t.id ? active : baseBtn), width: t.width }}
           >
             <span style={{ fontSize: 14 }}>{t.emoji}</span>
             <span>{t.label}</span>
           </button>
         ))}
+
       </div>
 
       {/* Spacer for the grid column so the layout still flows; the
@@ -1221,13 +1284,41 @@ function SubTabs({
   onChange: (key: string) => void;
 }) {
   const runActive = useRunActive();
+  const runVersion = useRunActivityVersion();
+
+  // Per-page "working" from the live run tags — the Coding button lights for
+  // "code:*"/"stream:code:*", the Agents button for "agents:*". Recomputed on
+  // every run-activity change (runVersion) so one family stopping while another
+  // runs still clears the right button; the aggregate `runActive` can't.
+  const workingByKey = useMemo(() => {
+    const m: Record<string, boolean> = {};
+    for (const p of pages) {
+      if (isWorkflowAwarePage(p.key)) m[p.key] = isRunActiveMatching(runPrefixesForPage(p.key));
+    }
+    return m;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pages, runVersion]);
+
+  // Working → finished-badge conversion: a run that ends while you're on
+  // another tab leaves a "✓ finished (unseen)" badge on its button until you
+  // open it. stepTabActivity returns prev unchanged when nothing moved, so this
+  // updater can't loop.
+  const [tabActivity, setTabActivity] = useState(initTabActivity);
+  useEffect(() => {
+    setTabActivity((prev) => stepTabActivity(prev, workingByKey, activeKey));
+  }, [workingByKey, activeKey]);
+
   const renderTab = (p: PageDef) => {
     const active = p.key === activeKey;
+    const working = workingByKey[p.key] ?? false;
+    const done = showFinishedBadge(tabActivity, p.key, working);
     return (
       <div
         key={p.key}
         onClick={() => onChange(p.key)}
+        title={working ? `${p.label} — working…` : done ? `${p.label} — finished (unseen)` : undefined}
         style={{
+          display: "flex", alignItems: "center", gap: 6,
           padding: "5px 14px",
           background: active ? "rgba(var(--accent-rgb),0.28)" : "transparent",
           color: active ? "#fafafa" : "var(--fg-muted)",
@@ -1236,9 +1327,30 @@ function SubTabs({
           borderBottom: active ? "3px solid var(--accent)" : "3px solid transparent",
           cursor: "pointer",
           userSelect: "none",
+          // Same pulse the page's own tab strip uses while a run is live.
+          animation: working ? HEADER_TAB_WORKING_ANIMATION : undefined,
         }}
       >
-        {p.label}
+        {/* Live rainbow dot while this page is working (matches its tab strip). */}
+        {working && (
+          <span title="Working" style={{
+            flexShrink: 0, width: 8, height: 8, borderRadius: "50%",
+            background: HEADER_TAB_AURA_DOT,
+            boxShadow: "0 0 0 1px rgba(255,255,255,0.20), 0 0 8px rgba(176,124,255,0.85), 0 0 12px rgba(127,212,255,0.45)",
+          }} />
+        )}
+        <span>{p.label}</span>
+        {/* Finished-while-away check — cleared when you open the page. Never
+            shown while working, so the glow and badge can't collide. */}
+        {done && (
+          <span title="Finished — click to view" style={{
+            flexShrink: 0, fontSize: 12, fontWeight: 900, lineHeight: 1,
+            color: "transparent",
+            background: HEADER_TAB_AURA_DOT,
+            WebkitBackgroundClip: "text", backgroundClip: "text",
+            filter: "drop-shadow(0 0 5px rgba(176,124,255,0.85)) drop-shadow(0 0 8px rgba(127,212,255,0.45))",
+          }}>✓</span>
+        )}
       </div>
     );
   };
@@ -1495,6 +1607,23 @@ export default function AppShell() {
     saveChatFontStep(chatFontStep);
     document.documentElement.style.setProperty("--chat-font-size", `${chatFontSizePx(chatFontStep)}px`);
   }, [chatFontStep]);
+
+  // Ctrl+mouse-wheel resizes the text in the currently focused/hovered chat,
+  // notebook, brainstorm, or code text box — the same shared step the Settings
+  // +/- buttons drive, so it clamps to the readable range and persists the same
+  // way. Listener is non-passive so preventDefault can suppress the browser's
+  // own Ctrl+wheel page zoom; it only fires when the gesture starts over a
+  // zoomable text surface (or one is focused), never over the rest of the app.
+  useEffect(() => {
+    const onWheel = (e: WheelEvent) => {
+      if (!e.ctrlKey) return;
+      if (!isChatZoomTarget(e.target as Element | null) && !isChatZoomTarget(document.activeElement)) return;
+      e.preventDefault();
+      setChatFontStep((step) => nextChatFontStep(step, e.deltaY));
+    };
+    window.addEventListener("wheel", onWheel, { passive: false });
+    return () => window.removeEventListener("wheel", onWheel);
+  }, []);
 
   // Windows draws the decorative art in a separate click-through webview.
   // Broadcast the same visibility state there; the storage message is a

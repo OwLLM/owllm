@@ -106,6 +106,17 @@ anchor("PublishCards.tsx", cards, "a no-model outcome surfaces as an inline erro
   'if (outcome === "no-model") {');
 anchor("PublishCards.tsx", cards, "a mid-run dispatch tells the user it rides the steer queue",
   '} else if (outcome === "queued") {');
+// Finish-release-with-agent: the escape hatch that hands the WHOLE release
+// job to the coder (commit→merge→push→publish→verify) instead of asking it
+// to repair the buttons' code. Single-line needles (CRLF-safe reads above).
+anchor("PublishCards.tsx", cards, "finishWithAgent exists and dispatches through the same channel",
+  "const finishWithAgent = () => {");
+anchor("PublishCards.tsx", cards, "handoff prompt forbids fixing the buttons and demands the release itself",
+  "Do NOT spend this run fixing or debugging the buttons' own code.");
+anchor("PublishCards.tsx", cards, "handoff prompt requires verifying the live release before done",
+  "VERIFY the new version is actually live as the Latest public release");
+anchor("PublishCards.tsx", cards, "Finish release button renders next to Fix with agent",
+  "🚀 Finish release with agent");
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the busy guard and steers",
   'if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }');
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the model guard",

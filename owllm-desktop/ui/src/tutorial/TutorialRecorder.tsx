@@ -1,5 +1,17 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { isRunActive, subscribeRunActivity } from "../runtime/runActivity";
+import {
+  AUTO_STOP_DELAY_MS,
+  DEFAULT_FPS,
+  FPS_OPTIONS,
+  bitrateForFps,
+  jobJustEnded,
+  readAutoStop,
+  readFps,
+  saveAutoStop,
+  saveFps,
+} from "./tutorialRecorderPrefs";
 
 type Point = { x: number; y: number };
 type ClickMark = Point & { id: number };
@@ -28,13 +40,22 @@ export function toggleTutorialRecorder() {
   window.dispatchEvent(new CustomEvent(TOGGLE_EVENT));
 }
 
+// localStorage guarded for non-browser/blocked contexts (SSR, private mode).
+function safeLocalStorage(): Storage | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
 // Crop a full-screen capture down to the app rectangle. The frame lives in a
 // SEPARATE window OUTSIDE the main content window, so the only surface that
 // holds both is the screen; we draw the app's sub-rect of the screen video to
 // an off-screen canvas every frame and record THAT. Async so we can wait for
 // the first decoded frame before building the recorded stream (otherwise the
 // MediaRecorder can start on a zero-content canvas and produce nothing).
-async function cropScreenToApp(src: MediaStream, geom: CaptureGeometry): Promise<{ stream: MediaStream; stop: () => void }> {
+async function cropScreenToApp(src: MediaStream, geom: CaptureGeometry, fps: number): Promise<{ stream: MediaStream; stop: () => void }> {
   const video = document.createElement("video");
   video.srcObject = src;
   video.muted = true;
@@ -99,7 +120,7 @@ async function cropScreenToApp(src: MediaStream, geom: CaptureGeometry): Promise
   };
   raf = requestAnimationFrame(draw);
 
-  const stream = canvas.captureStream(30);
+  const stream = canvas.captureStream(fps);
   return {
     stream,
     stop: () => {
@@ -177,13 +198,13 @@ function ClickPulseOverlay({
   );
 }
 
-async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
+async function requestDisplayStream(mode: CaptureMode, fps: number): Promise<MediaStream> {
   const media = navigator.mediaDevices as MediaDevices & {
     getDisplayMedia(options?: unknown): Promise<MediaStream>;
   };
   const preferred = {
     video: {
-      frameRate: 30,
+      frameRate: fps,
       cursor: "always",
       displaySurface: mode === "screen" ? "monitor" : "window",
     },
@@ -198,7 +219,7 @@ async function requestDisplayStream(mode: CaptureMode): Promise<MediaStream> {
     if (err instanceof DOMException && err.name === "NotAllowedError") {
       throw err;
     }
-    return media.getDisplayMedia({ video: { frameRate: 30 }, audio: false });
+    return media.getDisplayMedia({ video: { frameRate: fps }, audio: false });
   }
 }
 
@@ -208,6 +229,10 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   // We always capture a whole screen; this toggle decides whether the result is
   // cropped down to just the OWLLM app (frame included) or kept as the full screen.
   const [cropToApp, setCropToApp] = useState<boolean>(true);
+  // Capture frame-rate — lower keeps long recordings from filling the drive.
+  const [fps, setFps] = useState<number>(() => readFps(safeLocalStorage()));
+  // Auto-stop the recording a few seconds after an agent/coding job finishes.
+  const [autoStopAfterJob, setAutoStopAfterJob] = useState<boolean>(() => readAutoStop(safeLocalStorage()));
   const [elapsedMs, setElapsedMs] = useState(0);
   const [mark, setMark] = useState<ClickMark | null>(null);
   const [status, setStatus] = useState("Records your screen and auto-crops to just the OWLLM app (frame included). In the share dialog, choose “Entire Screen”. Use Ctrl+Shift+R to stop.");
@@ -222,6 +247,11 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   const clickTrackRef = useRef<Array<{ t: number; x: number; y: number; target: string }>>([]);
   // Crop pipeline for "window" mode (screen capture cropped to the app rect).
   const cropHandleRef = useRef<{ stream: MediaStream; stop: () => void } | null>(null);
+  // Auto-stop-after-job bookkeeping: pending countdown timer + whether a job was
+  // ever seen running during THIS recording (so a recording started with no job
+  // in flight doesn't stop itself before any work has run).
+  const autoStopTimerRef = useRef<number | null>(null);
+  const sawRunRef = useRef<boolean>(false);
 
   useEffect(() => {
     const onToggle = () => {
@@ -249,6 +279,49 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
     }, 250);
     return () => window.clearInterval(id);
   }, [state]);
+
+  // Auto-stop: once a job (agent/coding run) has been seen running during this
+  // recording, stop AUTO_STOP_DELAY_MS after the LAST run finishes. A new run
+  // starting within that window cancels the countdown, so overlapping jobs keep
+  // the recording alive until everything is idle.
+  useEffect(() => {
+    const clearTimer = () => {
+      if (autoStopTimerRef.current != null) {
+        window.clearTimeout(autoStopTimerRef.current);
+        autoStopTimerRef.current = null;
+      }
+    };
+    if (state !== "recording" || !autoStopAfterJob) {
+      clearTimer();
+      return;
+    }
+    let prevActive = isRunActive();
+    if (prevActive) sawRunRef.current = true;
+    const evaluate = () => {
+      const nowActive = isRunActive();
+      if (nowActive) {
+        sawRunRef.current = true;
+        if (autoStopTimerRef.current != null) {
+          clearTimer();
+          setStatus("Recording. A new job started — auto-stop cancelled.");
+        }
+      } else if (jobJustEnded(prevActive, nowActive) && sawRunRef.current && autoStopTimerRef.current == null) {
+        const secs = Math.round(AUTO_STOP_DELAY_MS / 1000);
+        setStatus(`Job finished — stopping in ${secs}s…`);
+        autoStopTimerRef.current = window.setTimeout(() => {
+          autoStopTimerRef.current = null;
+          stop();
+        }, AUTO_STOP_DELAY_MS);
+      }
+      prevActive = nowActive;
+    };
+    const unsub = subscribeRunActivity(evaluate);
+    return () => {
+      unsub();
+      clearTimer();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state, autoStopAfterJob]);
 
   useEffect(() => {
     if (state !== "recording" && state !== "paused") return;
@@ -316,6 +389,11 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       clickTrackRef.current = [];
       pausedTotalRef.current = 0;
       pausedAtRef.current = null;
+      sawRunRef.current = false;
+      if (autoStopTimerRef.current != null) {
+        window.clearTimeout(autoStopTimerRef.current);
+        autoStopTimerRef.current = null;
+      }
       startedAtRef.current = performance.now();
       setElapsedMs(0);
       setStatus(cropToApp
@@ -329,7 +407,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         ? await invoke<CaptureGeometry | null>("overlay_frame_capture_geometry").catch(() => null)
         : null;
 
-      const screenStream = await requestDisplayStream("screen");
+      const screenStream = await requestDisplayStream("screen", fps);
       streamRef.current = screenStream;
 
       // Crop ONLY if the user actually shared a whole screen — a single window
@@ -339,7 +417,7 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
       let recordStream = screenStream;
       if (cropToApp && geom && surface === "monitor") {
         try {
-          const handle = await cropScreenToApp(screenStream, geom);
+          const handle = await cropScreenToApp(screenStream, geom, fps);
           cropHandleRef.current = handle;
           recordStream = handle.stream;
         } catch {
@@ -354,6 +432,10 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         mimeType: MediaRecorder.isTypeSupported("video/webm;codecs=vp9")
           ? "video/webm;codecs=vp9"
           : "video/webm",
+        // Cap the bitrate to the chosen FPS — MediaRecorder otherwise targets a
+        // fixed bitrate regardless of frame rate, so a low FPS alone would NOT
+        // shrink the file (the drive-filling problem).
+        videoBitsPerSecond: bitrateForFps(fps),
       });
       mediaRecorderRef.current = recorder;
       recorder.ondataavailable = e => {
@@ -372,6 +454,10 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         downloadBlob(track, `owllm-tutorial-${stamp}-clicks.json`);
         cropHandleRef.current?.stop();
         cropHandleRef.current = null;
+        if (autoStopTimerRef.current != null) {
+          window.clearTimeout(autoStopTimerRef.current);
+          autoStopTimerRef.current = null;
+        }
         stopStreams();
         setState("idle");
         setStatus("Saved video and click track.");
@@ -408,6 +494,10 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
   };
 
   const stop = () => {
+    if (autoStopTimerRef.current != null) {
+      window.clearTimeout(autoStopTimerRef.current);
+      autoStopTimerRef.current = null;
+    }
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state !== "inactive") {
       setState("saving");
@@ -494,6 +584,65 @@ export default function TutorialRecorder({ enabled }: { enabled: boolean }) {
         <div style={{ fontSize: 10.5, color: "var(--fg-muted)", marginBottom: 8, lineHeight: 1.35 }}>
           In the share dialog, choose <b>Entire Screen</b> (not Window). Off = record the whole screen.
         </div>
+        <label
+          style={{
+            display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+            padding: "6px 9px", borderRadius: 6,
+            border: "1px solid rgba(var(--accent-rgb),0.35)",
+            background: "rgba(var(--accent-rgb),0.08)",
+            cursor: active ? "not-allowed" : "pointer", opacity: active ? 0.6 : 1,
+          }}
+          title="Lower frame rates make much smaller files — ideal for long recordings so they don't fill the drive."
+        >
+          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg-strong)" }}>🎞 Frame rate</span>
+          <div style={{ flex: 1 }} />
+          <select
+            value={fps}
+            disabled={active}
+            onChange={(e) => {
+              const next = Number(e.target.value) || DEFAULT_FPS;
+              setFps(next);
+              saveFps(next, safeLocalStorage());
+            }}
+            data-ui="TutorialRecorderFps"
+            style={{
+              height: 26, padding: "0 6px", borderRadius: 5,
+              border: "1px solid rgba(var(--accent-rgb),0.4)",
+              background: "rgba(255,255,255,0.06)", color: "var(--fg)",
+              fontSize: 12, fontWeight: 700,
+              cursor: active ? "not-allowed" : "pointer",
+            }}
+          >
+            {FPS_OPTIONS.map((opt) => (
+              <option key={opt} value={opt}>{opt} fps</option>
+            ))}
+          </select>
+        </label>
+        <label
+          style={{
+            display: "flex", alignItems: "center", gap: 8, marginBottom: 8,
+            padding: "7px 9px", borderRadius: 6,
+            border: "1px solid rgba(var(--accent-rgb),0.35)",
+            background: "rgba(var(--accent-rgb),0.08)",
+            cursor: active ? "not-allowed" : "pointer", opacity: active ? 0.6 : 1,
+          }}
+          title="When a running agent/coding job finishes, the recording stops itself 3 seconds later. A new job starting within those 3s cancels the stop."
+        >
+          <input
+            type="checkbox"
+            checked={autoStopAfterJob}
+            disabled={active}
+            onChange={(e) => {
+              setAutoStopAfterJob(e.target.checked);
+              saveAutoStop(e.target.checked, safeLocalStorage());
+            }}
+            data-ui="TutorialRecorderAutoStop"
+            style={{ width: 14, height: 14, accentColor: "var(--accent)" }}
+          />
+          <span style={{ fontSize: 12, fontWeight: 700, color: "var(--fg-strong)" }}>
+            ⏱ Stop 3s after the job finishes
+          </span>
+        </label>
         <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
           <button
             onClick={start}

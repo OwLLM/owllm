@@ -6,6 +6,9 @@
 [package]
 name = "sync-harness"
 version = "0.1.0"
+authors = ["Far island Corporation Ltd."]
+publish = false
+license-file = "../../../LICENSE"
 edition = "2021"
 
 [workspace]

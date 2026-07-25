@@ -5,7 +5,9 @@ name = "owllm-desktop"
 # so this only affects exe/crate metadata.
 version = "0.9.42"
 description = "OwLLM Desktop — Tauri + React. Rust owns the runtime; Python is invited on-demand only for fine-tuning."
-authors = ["OWLLM"]
+authors = ["Far island Corporation Ltd."]
+publish = false
+license-file = "../../LICENSE"
 edition = "2021"
 
 [lib]

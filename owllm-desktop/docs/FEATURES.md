@@ -20,7 +20,7 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 | **Core** (always) | Home, Server, Info | hardware probe, llama-server lifecycle, sandbox-disk care |
 | **Fine-tuning** | Models, Dataset, Train, Chat | Python env is installed on demand, ONLY needed for Train |
 | **Agentic** | Code, Agents, Studio, Bridges | the flagship: teams, solo coder, bridges |
-| **Gamify** (experimental) | Gamify, Characters, Arena | RPG world driven by the same dispatch stream |
+| **Gamify** (experimental) | Gamify, Characters, World Map | RPG world driven by the same dispatch stream; World Map is a Solar System explorer (all 8 planets, bundled NASA-derived textures, focus/zoom flights) around the live presence globe |
 | **Advanced** | MCP, Accounts, Signing, Devices | MCP servers/packs; API keys + subscription CLI logins; code-signing certificate vault; secure remote device control |
 
 ## Models & inference

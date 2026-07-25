@@ -591,16 +591,25 @@ pub struct AccountsStatus {
     pub hf_token: bool,
     /// Claude Code CLI is installed AND has logged-in credentials.
     pub claude_cli: bool,
+    pub claude_cli_installed: bool,
     /// OpenAI Codex CLI is installed AND has logged-in credentials.
     pub codex_cli: bool,
+    pub codex_cli_installed: bool,
     /// Kimi Code CLI (MoonshotAI/kimi-cli) is installed AND logged in.
     pub kimi_cli: bool,
+    pub kimi_cli_installed: bool,
+    /// Kimi credentials exist, but a live CLI call proved the OAuth refresh
+    /// grant is no longer usable. Kept separate from `kimi_cli` so the UI can
+    /// offer Reconnect instead of claiming that a stale file is a valid login.
+    pub kimi_cli_reauth_required: bool,
     /// Google Gemini CLI (google-gemini/gemini-cli) is installed AND
     /// logged in (~/.gemini/ contains OAuth cache).
     pub gemini_cli: bool,
+    pub gemini_cli_installed: bool,
     /// xAI Grok Build CLI (`grok`) is installed AND logged in
     /// (~/.grok/ carries the sign-in state).
     pub grok_cli: bool,
+    pub grok_cli_installed: bool,
 }
 
 /// Probe what's connected right now. Cheap — runs on the AccountsPage
@@ -622,6 +631,7 @@ pub async fn accounts_status() -> AccountsStatus {
 
 fn accounts_status_blocking() -> AccountsStatus {
     let map = load_secrets();
+    let kimi_reauth_required = kimi_reauth_required();
     AccountsStatus {
         host_os: std::env::consts::OS.to_string(),
         anthropic_api_key: map
@@ -641,14 +651,20 @@ fn accounts_status_blocking() -> AccountsStatus {
         together_api_key: nonempty(&map, "TOGETHER_API_KEY"),
         gemini_api_key: nonempty(&map, "GEMINI_API_KEY") || nonempty(&map, "GOOGLE_API_KEY"),
         gemini_cli: gemini_cli_logged_in(),
+        gemini_cli_installed: find_gemini_cli().is_some(),
         hf_token: map
             .get("HF_TOKEN")
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false),
         claude_cli: claude_cli_logged_in(),
+        claude_cli_installed: find_claude_cli().is_some(),
         codex_cli: codex_cli_logged_in(),
+        codex_cli_installed: find_codex_cli().is_some(),
         kimi_cli: kimi_cli_logged_in(),
+        kimi_cli_installed: find_kimi_cli().is_some(),
+        kimi_cli_reauth_required: kimi_reauth_required,
         grok_cli: grok_cli_logged_in(),
+        grok_cli_installed: find_grok_cli().is_some(),
     }
 }
 
@@ -1887,6 +1903,15 @@ async fn probe_cli_subscription(
     let combined = format!("{stdout}\n{stderr}");
     let lower = combined.to_ascii_lowercase();
 
+    if name == "Kimi" && kimi_output_auth_failed(&combined) {
+        mark_kimi_reauth_required();
+        return (
+            false,
+            "Kimi sign-in expired and cannot be refreshed. Reconnect Kimi to continue."
+                .to_string(),
+        );
+    }
+
     // Subscription / quota error patterns. Each CLI phrases these
     // differently; cast a wide net.
     let sub_errors: &[&str] = &[
@@ -2595,6 +2620,11 @@ fn looks_like_cli_auth_error(text: &str) -> bool {
         || low.contains("authentication_error")
         || low.contains("401 unauthorized")
         || low.contains("oauth token has expired")
+        || low.contains("invalid_authentication_error")
+        || low.contains("api key appears to be invalid")
+        || low.contains("authorization grant is invalid")
+        || low.contains("refresh token is invalid")
+        || low.contains("refresh token has been revoked")
         || low.contains("please run /login")
         || low.contains("please log in")
         // Kimi/Gemini phrasings — this is the ONE shared vocabulary for every
@@ -4200,6 +4230,81 @@ fn kimi_home_dir() -> Option<PathBuf> {
     kimi_home_candidates().into_iter().find(|p| p.is_dir())
 }
 
+fn kimi_credential_path() -> Option<PathBuf> {
+    kimi_home_candidates()
+        .into_iter()
+        .map(|kimi| kimi.join("credentials").join("kimi-code.json"))
+        .find(|path| path.is_file())
+}
+
+/// A non-secret identity for the current Kimi credential file. When a fresh
+/// login rewrites the file, its metadata changes and an older revocation marker
+/// stops applying automatically. Tokens are never copied into the marker.
+fn kimi_credential_fingerprint(path: &std::path::Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("{}\n{}\n{}", path.display(), metadata.len(), modified))
+}
+
+fn kimi_reauth_marker_path() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".owllm")
+            .join("kimi_reauth_required"),
+    )
+}
+
+fn kimi_reauth_required() -> bool {
+    let Some(credential) = kimi_credential_path() else {
+        clear_kimi_reauth_required();
+        return false;
+    };
+    let Some(fingerprint) = kimi_credential_fingerprint(&credential) else {
+        return false;
+    };
+    let Some(marker_path) = kimi_reauth_marker_path() else {
+        return false;
+    };
+    match std::fs::read_to_string(&marker_path) {
+        Ok(marker) if marker == fingerprint => true,
+        Ok(_) => {
+            // A successful fresh login replaced the credential file. The old
+            // failure no longer applies.
+            let _ = std::fs::remove_file(marker_path);
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn mark_kimi_reauth_required() {
+    let Some(credential) = kimi_credential_path() else {
+        return;
+    };
+    let Some(fingerprint) = kimi_credential_fingerprint(&credential) else {
+        return;
+    };
+    let Some(marker_path) = kimi_reauth_marker_path() else {
+        return;
+    };
+    if let Some(parent) = marker_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(marker_path, fingerprint);
+}
+
+fn clear_kimi_reauth_required() {
+    if let Some(path) = kimi_reauth_marker_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Best guess at whether the installed `kimi` binary is the new `kimi-code`
 /// (true) or the legacy `kimi-cli` (false). The safest signal is the home
 /// directory the CLI has already created on disk.
@@ -4212,9 +4317,7 @@ fn kimi_is_new_flavor() -> bool {
 /// Kimi Code CLI stores OAuth tokens in `credentials/kimi-code.json`.
 /// config.toml exists before login and must never count as authentication.
 fn kimi_cli_logged_in() -> bool {
-    kimi_home_candidates()
-        .iter()
-        .any(|kimi| kimi.join("credentials").join("kimi-code.json").is_file())
+    kimi_credential_path().is_some() && !kimi_reauth_required()
 }
 
 /// Raw text of the active Kimi config.toml (None when absent/unreadable).
@@ -4567,11 +4670,17 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
                     &mut removed,
                 );
             }
+            clear_kimi_reauth_required();
         }
         "gemini_cli" => {
             for path in gemini_credential_paths(&home) {
                 try_remove(&path, &mut removed);
             }
+        }
+        "grok_cli" => {
+            let grok = home.join(".grok");
+            try_remove(&grok.join("auth.json"), &mut removed);
+            try_remove(&grok.join("credentials.json"), &mut removed);
         }
         other => return Err(format!("unknown subscription backend: {other}")),
     }
@@ -5606,6 +5715,7 @@ async fn kimi_cli_run(
                     return Err("kimi: LLM not set".to_string());
                 }
                 if kimi_output_auth_failed(&stdout) || kimi_output_auth_failed(&stderr) {
+                    mark_kimi_reauth_required();
                     let detail = if kimi_output_auth_failed(&stdout) {
                         stdout.trim()
                     } else {
@@ -5674,6 +5784,7 @@ async fn kimi_cli_run(
             return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
         }
         if kimi_output_auth_failed(&reply) {
+            mark_kimi_reauth_required();
             return Err("kimi: authentication failed (401 / login expired / signed out)".to_string());
         }
 
@@ -5848,6 +5959,12 @@ mod tests {
         assert!(kimi_output_auth_failed("HTTP 401 Unauthorized"));
         assert!(kimi_output_auth_failed(
             "You are not logged in. Run `kimi login`."
+        ));
+        assert!(kimi_output_auth_failed(
+            "Error code: 401 - {'error': {'message': 'The API Key appears to be invalid or may have expired.', 'type': 'invalid_authentication_error'}}"
+        ));
+        assert!(kimi_output_auth_failed(
+            "kimi_cli.auth.oauth.OAuthError: The provided authorization grant is invalid"
         ));
         assert!(!kimi_output_auth_failed(
             "The server responded with a 200 OK."

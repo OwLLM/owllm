@@ -25,7 +25,7 @@ const helperJs = ts.transpileModule(helperSource, {
 const temp = fs.mkdtempSync(path.join(os.tmpdir(), "owllm-code-project-open-"));
 const helperPath = path.join(temp, "codeProjectPages.js");
 fs.writeFileSync(helperPath, helperJs);
-const { savedPageIdsForLocalProject } = require(helperPath);
+const { chooseProjectOpenTarget, savedPageIdsForLocalProject } = require(helperPath);
 
 const values = new Map([
   ["owllm:code:page:linux", JSON.stringify({
@@ -66,14 +66,27 @@ check(!pages.includes("failed"),
   "a blank failed-open record does not replace real saved pages");
 check(pages.includes("windows"),
   "a malformed record cannot hide later valid pages");
+check(
+  JSON.stringify(chooseProjectOpenTarget(pages, true)) === JSON.stringify({ kind: "current" }),
+  "a blank New page opens the selected project in itself even when saved pages exist");
+check(
+  JSON.stringify(chooseProjectOpenTarget(pages, false)) === JSON.stringify({ kind: "saved", pageId: "linux" }),
+  "a non-blank page can still recover the first saved page for the checkout");
+check(
+  JSON.stringify(chooseProjectOpenTarget([], false)) === JSON.stringify({ kind: "current" }),
+  "a project without saved pages opens in the current page");
 
 const code = read(path.join(HERE, "CodePage.tsx"));
 check(code.includes("savedPageMetasForLocalProject(detail.project)") &&
-      code.includes("setActiveId(saved[0].id)"),
+      code.includes("chooseProjectOpenTarget(saved.map((page) => page.id), detail.currentPageIsBlank)") &&
+      code.includes("setActiveId(target.pageId)"),
   "the Coding project card activates recovered page tabs");
-check(code.includes("if (detail.handled) return;") &&
+check(code.includes("currentPageIsBlank: !hasRecoverablePageState(stx)") &&
+      code.includes("if (target.kind === \"current\") return;") &&
       code.includes("await openWorkspace(project.location)"),
-  "a project creates a new page only when no saved page exists");
+  "a blank New page bypasses saved-page activation and opens the project itself");
+check(code.includes("openingBlankPage ? null : loadCodeSession(dir)"),
+  "a blank New page does not clone another page's recovered conversation");
 
 const fleet = read(path.join(DESKTOP, "src-tauri", "src", "fleet.rs"));
 const createStart = fleet.indexOf("pub async fn fleet_worktree_create(");

@@ -52,6 +52,22 @@ pin("forward control skips trailing meta notices",
   codePageSrc.includes('messages.slice(i + 1).every((n) => n.kind === "meta")'));
 pin("legacy sessions are migrated at hydration",
   codePageSrc.includes("stampLegacyMetaNotices(loadPageSession(pageId)"));
+pin("primary chat header owns a model picker",
+  codePageSrc.includes('data-ui="code-primary-agent-header"')
+  && codePageSrc.indexOf('data-ui="code-primary-agent-header"') < codePageSrc.indexOf('value={modelId}', codePageSrc.indexOf('data-ui="code-primary-agent-header"')));
+pin("second chat header owns a model picker",
+  codePageSrc.includes('data-ui="code-secondary-agent-header"')
+  && codePageSrc.indexOf('data-ui="code-secondary-agent-header"') < codePageSrc.indexOf('value={secondaryModelId}', codePageSrc.indexOf('data-ui="code-secondary-agent-header"')));
+pin("both chat model pickers have the wide flexible layout",
+  (codePageSrc.match(/data-ui="code-agent-model-picker"/g) || []).length === 2
+  && (codePageSrc.match(/flex: "1 1 360px", minWidth: 240, maxWidth: 560/g) || []).length === 2);
+pin("old page-level second-agent row is removed",
+  !codePageSrc.includes("Hide 2nd agent")
+  && !codePageSrc.includes("Show 2nd agent")
+  && !codePageSrc.includes("Second-agent pane toggle"));
+pin("second agent remains openable from inside the primary chat header",
+  codePageSrc.includes("+ 2nd agent")
+  && codePageSrc.includes('onClick={() => setSecondaryOpen(true)}'));
 if (pinFailures > 0) {
   throw new Error(`FAILED: ${pinFailures} source pin(s) failed.`);
 }

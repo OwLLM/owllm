@@ -27,6 +27,11 @@ import PtyTerminal from "./PtyTerminal";
 import { sandboxSyncLogins } from "../agentic/isolation";
 import { translateUiText } from "../../localization";
 import { openWebUrl } from "../../utils/openWebUrl";
+import {
+  classifySubscriptionFailure,
+  isKimiLoginSuccess,
+  type AccountRemediation,
+} from "./accountHealth";
 
 const ACCOUNT_ONBOARDING_KEY = "owllm:accounts:onboarding-provider";
 
@@ -244,10 +249,16 @@ type AccountsStatus = {
   together_api_key: boolean;
   gemini_api_key: boolean;
   claude_cli: boolean;
+  claude_cli_installed: boolean;
   codex_cli: boolean;
+  codex_cli_installed: boolean;
   kimi_cli: boolean;
+  kimi_cli_installed: boolean;
+  kimi_cli_reauth_required: boolean;
   gemini_cli: boolean;
+  gemini_cli_installed: boolean;
   grok_cli: boolean;
+  grok_cli_installed: boolean;
 };
 type ProbeResult = { ok: boolean; detail: string; elapsed_ms: number };
 
@@ -411,6 +422,9 @@ const PROVIDERS: ProviderSpec[] = [
 // -----------------------------------------------------------------------
 type CardState = {
   connected: boolean;
+  installed: boolean;
+  reauthRequired: boolean;
+  remediation: AccountRemediation;
   testing: boolean;
   testText: string;       // Windows / host probe result
   testOk: boolean | null;
@@ -420,6 +434,9 @@ type CardState = {
 };
 const initialCardState: CardState = {
   connected: false,
+  installed: false,
+  reauthRequired: false,
+  remediation: null,
   testing: false,
   testText: "",
   testOk: null,
@@ -570,9 +587,19 @@ function RouteRow({
 }) {
   const isSub = route.kind === "subscription";
   const connected = state.connected;
-  const statusText = connected
+  const statusText = state.remediation === "update"
+    ? "CLI outdated or incompatible · update required"
+    : state.remediation === "subscription"
+      ? "Subscription unavailable · renew the plan or wait for quota reset"
+      : state.remediation === "retry"
+        ? "CLI failed its live check · update it, then test again"
+        : state.reauthRequired || state.remediation === "reauth"
+    ? "Session expired · reconnect required"
+    : connected
     ? (isSub ? "CLI logged in" : "API key saved")
-    : (isSub ? (route.webOnly ? "Web-only · sign up to subscribe" : "CLI not installed / logged in")
+    : (isSub ? (route.webOnly
+        ? "Web-only · sign up to subscribe"
+        : state.installed ? "CLI installed · sign in required" : "CLI not installed · install it first")
              : "No API key saved");
 
   // Subscription routes with a CLI get TWO buttons when disconnected:
@@ -581,12 +608,15 @@ function RouteRow({
   const cliBackedSub = isSub && !route.webOnly;
 
   const primaryLabel =
-    connected ? "Disconnect"
+    state.reauthRequired || state.remediation === "reauth" ? "Reconnect"
+    : connected ? "Disconnect"
     : isSub ? (route.webOnly ? "Open subscription" : "Connect")
     : "Set key";
 
   function handlePrimary() {
-    if (connected) {
+    if (state.reauthRequired || state.remediation === "reauth") {
+      onConnect();
+    } else if (connected) {
       if (window.confirm(`Remove the local ${provider.name} credentials?`)) onDisconnect();
     } else {
       onConnect();
@@ -601,7 +631,7 @@ function RouteRow({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <StatusDot connected={connected} />
+        <StatusDot connected={connected && !state.remediation && !state.reauthRequired} />
         <div style={{ flex: 1, color: "var(--fg)", fontSize: 12 }}>
           {route.routeLabel}
         </div>
@@ -626,7 +656,20 @@ function RouteRow({
         </div>
       )}
       <div style={{ display: "flex", gap: 8, marginLeft: 17, marginTop: 4 }}>
-        {cliBackedSub && !connected && (
+        {cliBackedSub && (state.remediation === "update" || state.remediation === "retry") && (
+          <button
+            data-cli-repair={route.backend}
+            onClick={onInstall}
+            disabled={state.installing}
+            style={{
+              minHeight: 30, padding: "0 14px",
+              background: "rgba(255,190,92,0.15)", color: "#ffd27a",
+              border: "1px solid rgba(255,190,92,0.35)", borderRadius: 6,
+              fontSize: 11, fontWeight: 700, cursor: state.installing ? "default" : "pointer",
+            }}
+          >{state.installing ? "Updating…" : "Update CLI"}</button>
+        )}
+        {cliBackedSub && !connected && state.remediation !== "update" && state.remediation !== "retry" && (
           <button
             data-cli-backend={route.backend}
             onClick={onInstall}
@@ -639,7 +682,7 @@ function RouteRow({
               borderRadius: 6, fontSize: 11, fontWeight: 600,
               cursor: state.installing ? "default" : "pointer",
             }}
-          >{state.installing ? "Installing…" : "⬇ Install CLI"}</button>
+          >{state.installing ? "Installing…" : state.installed ? "⬆ Update CLI" : "⬇ Install CLI"}</button>
         )}
         <button
           onClick={handlePrimary}
@@ -746,13 +789,15 @@ type ActiveTerminal = {
 };
 
 function RightRail({
-  stacked, activeTerm, tab, setTab, onCloseTerm,
+  stacked, activeTerm, tab, setTab, onCloseTerm, onTerminalOutput, onAuthTabOpened,
 }: {
   stacked: boolean;
   activeTerm: ActiveTerminal | null;
   tab: RailTab;
   setTab: (t: RailTab) => void;
   onCloseTerm: () => void;
+  onTerminalOutput: (backend: string, text: string) => void;
+  onAuthTabOpened: (backend: string, tabId: number) => void;
 }) {
   // Auto-switch to the terminal tab whenever a new session opens, so
   // the user doesn't have to hunt for it. Switching back to log is up
@@ -808,7 +853,14 @@ function RightRail({
       </div>
       <div style={{ flex: 1, minHeight: 0, display: tab === "terminal" ? "block" : "none" }}>
         {activeTerm
-          ? <PtyTerminal cli={activeTerm.cli} args={activeTerm.args} autoSend={activeTerm.send} autoOpenAuthUrls />
+          ? <PtyTerminal
+              cli={activeTerm.cli}
+              args={activeTerm.args}
+              autoSend={activeTerm.send}
+              autoOpenAuthUrls
+              onOutputText={(text) => onTerminalOutput(activeTerm.backend, text)}
+              onAuthTabOpened={(tabId) => onAuthTabOpened(activeTerm.backend, tabId)}
+            />
           : <div style={{ padding: 14, color: "var(--fg-dim)", fontSize: 11, fontStyle: "italic" }}>
               Click Connect on any CLI-backed subscription to open a live terminal here.
             </div>}
@@ -968,6 +1020,10 @@ export default function AccountsPage() {
   const [activeTerm, setActiveTerm] = useState<ActiveTerminal | null>(null);
   const [railTab, setRailTab] = useState<RailTab>("log");
   const [hostOs, setHostOs] = useState("");
+  const autoHealthProbedBackends = useRef(new Set<string>());
+  const authTabs = useRef<Record<string, number>>({});
+  const terminalOutput = useRef<Record<string, string>>({});
+  const completedLogins = useRef(new Set<string>());
   const hostIsWindows = hostOs === "windows";
   const hostLabel = hostOs === "windows"
     ? "Windows"
@@ -980,13 +1036,24 @@ export default function AccountsPage() {
   function reconcile(status: AccountsStatus) {
     setCards((prev) => {
       const next = { ...prev };
-      const flag = (key: string, connected: boolean) => {
+      const flag = (key: string, connected: boolean, reauthRequired = false, installed = true) => {
         const cur = next[key];
         if (!cur) return;
-        if (cur.connected !== connected) {
+        if (cur.connected !== connected || cur.reauthRequired !== reauthRequired || cur.installed !== installed) {
           next[key] = {
-            ...cur, connected,
-            ...(connected ? {} : { testText: "", testOk: null }),
+            ...cur,
+            connected,
+            installed,
+            reauthRequired,
+            remediation: reauthRequired ? "reauth" : cur.remediation,
+            ...(reauthRequired
+              ? {
+                  testText: "✗  Kimi sign-in expired. Click Reconnect and complete login again.",
+                  testOk: false,
+                }
+              : connected
+                ? {}
+                : { testText: "", testOk: null }),
           };
         }
       };
@@ -1000,11 +1067,11 @@ export default function AccountsPage() {
       flag("mistral_api",           status.mistral_api_key);
       flag("together_api",          status.together_api_key);
       flag("gemini_api",            status.gemini_api_key);
-      flag("claude_subscription",   status.claude_cli);
-      flag("codex_subscription",    status.codex_cli);
-      flag("kimi_subscription",     status.kimi_cli);
-      flag("gemini_subscription",   status.gemini_cli);
-      flag("xai_subscription",      status.grok_cli);
+      flag("claude_subscription",   status.claude_cli, false, status.claude_cli_installed);
+      flag("codex_subscription",    status.codex_cli, false, status.codex_cli_installed);
+      flag("kimi_subscription",     status.kimi_cli, status.kimi_cli_reauth_required, status.kimi_cli_installed);
+      flag("gemini_subscription",   status.gemini_cli, false, status.gemini_cli_installed);
+      flag("xai_subscription",      status.grok_cli, false, status.grok_cli_installed);
       return next;
     });
   }
@@ -1017,6 +1084,25 @@ export default function AccountsPage() {
         if (!dead) {
           setHostOs(s.host_os);
           reconcile(s);
+          const connectedBackends = new Set([
+            ...(s.claude_cli ? ["claude_cli"] : []),
+            ...(s.codex_cli ? ["codex_cli"] : []),
+            ...(s.kimi_cli ? ["kimi_cli"] : []),
+            ...(s.gemini_cli ? ["gemini_cli"] : []),
+            ...(s.grok_cli ? ["grok_cli"] : []),
+          ]);
+          const routes = allRoutes.filter((route) =>
+            route.kind === "subscription"
+            && connectedBackends.has(route.backend)
+            && !autoHealthProbedBackends.current.has(route.backend));
+          if (routes.length) {
+            routes.forEach((route) => autoHealthProbedBackends.current.add(route.backend));
+            // Probe sequentially so opening Accounts cannot launch five CLIs at
+            // once. The work stays asynchronous and never blocks the WebView.
+            void (async () => {
+              for (const route of routes) await probeSubscriptionHealth(route, false);
+            })();
+          }
         }
       } catch (e) {
         console.error("accounts_status failed", e);
@@ -1029,6 +1115,41 @@ export default function AccountsPage() {
 
   function setCardState(key: string, patch: Partial<CardState>) {
     setCards((prev) => ({ ...prev, [key]: { ...prev[key], ...patch } }));
+  }
+
+  async function probeSubscriptionHealth(route: RouteSpec, announce = true): Promise<ProbeResult> {
+    if (announce) {
+      setCardState(route.key, { testing: true, testText: "", testOk: null });
+      logInfo(route.backend, "Running a live subscription/CLI health check…");
+    }
+    try {
+      const result = await invoke<ProbeResult>("accounts_test_probe_live", { backend: route.backend });
+      const remediation = result.ok ? null : classifySubscriptionFailure(result.detail);
+      const line = `${result.ok ? "✓" : "✗"}  ${result.detail}  ·  ${result.elapsed_ms} ms`;
+      setCardState(route.key, {
+        ...(result.ok ? { connected: true } : {}),
+        reauthRequired: remediation === "reauth",
+        remediation,
+        testing: false,
+        testText: line,
+        testOk: result.ok,
+      });
+      if (announce || !result.ok) logInfo(route.backend, `${hostLabel}: ${line}`);
+      return result;
+    } catch (error: any) {
+      const detail = String(error?.message ?? error);
+      const remediation = classifySubscriptionFailure(detail);
+      const result = { ok: false, detail, elapsed_ms: 0 };
+      setCardState(route.key, {
+        reauthRequired: remediation === "reauth",
+        remediation,
+        testing: false,
+        testText: `✗  ${detail}`,
+        testOk: false,
+      });
+      logInfo(route.backend, `${hostLabel}: ✗  ${detail}`);
+      return result;
+    }
   }
 
   function logInfo(backend: string, text: string) {
@@ -1047,7 +1168,11 @@ export default function AccountsPage() {
     } catch { /* no WSL on this machine — nothing to mirror into */ }
   }
 
-  function handleConnect(route: RouteSpec, provider: ProviderSpec) {
+  async function handleConnect(
+    route: RouteSpec,
+    provider: ProviderSpec,
+    resetStaleLogin = false,
+  ) {
     if (route.kind === "subscription") {
       if (route.webOnly) {
         logInfo(route.backend, `Opening ${route.webOnly.url} in your browser…`);
@@ -1063,6 +1188,22 @@ export default function AccountsPage() {
         logInfo(route.backend, `[error] no spawn recipe for ${route.backend}`);
         return;
       }
+      if (resetStaleLogin) {
+        try {
+          await invoke<string>("subscription_cli_logout", { backend: route.backend });
+          setCardState(route.key, {
+            connected: false,
+            reauthRequired: false,
+            remediation: null,
+            testText: "",
+            testOk: null,
+          });
+          logInfo(route.backend, `Removed the expired ${provider.name} session. Starting a fresh login.`);
+        } catch (e: any) {
+          logInfo(route.backend, `[error] couldn't reset the expired ${provider.name} session: ${e?.message ?? e}`);
+          return;
+        }
+      }
       const hint: Record<string, string> = {
         claude_cli: "auto-running /login — complete the browser sign-in.",
         codex_cli:  "the device page opens in OwLLM's browser; enter the code shown here.",
@@ -1071,6 +1212,9 @@ export default function AccountsPage() {
         grok_cli:   "the xAI device page opens in OwLLM's browser; confirm the code shown here.",
       };
       logInfo(route.backend, `Opening ${provider.name} CLI in the embedded terminal — ${hint[route.backend] ?? ""}`);
+      completedLogins.current.delete(route.backend);
+      terminalOutput.current[route.backend] = "";
+      delete authTabs.current[route.backend];
       setActiveTerm({
         cli: recipe.cli,
         args: recipe.args,
@@ -1081,6 +1225,59 @@ export default function AccountsPage() {
       setRailTab("terminal");
     } else {
       setDialogFor({ route, provider });
+    }
+  }
+
+  function handleAuthTabOpened(backend: string, tabId: number) {
+    authTabs.current[backend] = tabId;
+  }
+
+  function handleTerminalOutput(backend: string, text: string) {
+    const buffered = `${terminalOutput.current[backend] ?? ""}${text}`.slice(-16_384);
+    terminalOutput.current[backend] = buffered;
+    if (backend !== "kimi_cli" || completedLogins.current.has(backend)) return;
+
+    const success = isKimiLoginSuccess(buffered);
+    if (!success) {
+      if (/"type"\s*:\s*"error"/i.test(buffered)) {
+        completedLogins.current.add(backend);
+        const remediation = classifySubscriptionFailure(buffered);
+        setCardState("kimi_subscription", {
+          connected: false,
+          reauthRequired: remediation === "reauth",
+          remediation,
+          testText: `✗  Kimi login failed. ${remediation === "update" ? "Update the CLI and try again." : "Reconnect and follow the browser authorization again."}`,
+          testOk: false,
+        });
+        logInfo(backend, "✗ Kimi login failed. The card now shows the required recovery action.");
+        setRailTab("log");
+      }
+      return;
+    }
+
+    completedLogins.current.add(backend);
+    const route = allRoutes.find((item) => item.backend === backend);
+    if (route) {
+      setCardState(route.key, {
+        connected: true,
+        reauthRequired: false,
+        remediation: null,
+        testText: "✓  Kimi login completed. Validating the subscription…",
+        testOk: true,
+      });
+    }
+    logInfo(backend, "✓ Kimi authentication completed. Validating the subscription now.");
+    const tabId = authTabs.current[backend];
+    if (typeof tabId === "number") {
+      invoke<string>("browser_cmd", {
+        action: "auth_complete",
+        params: { provider: "Kimi", tab_id: tabId },
+      }).catch((error) => logInfo(backend, `[browser] couldn't show completion page: ${String(error)}`));
+    }
+    setRailTab("log");
+    void mirrorToSandbox(backend);
+    if (route) {
+      window.setTimeout(() => { void probeSubscriptionHealth(route, false); }, 700);
     }
   }
 
@@ -1113,7 +1310,13 @@ export default function AccountsPage() {
         logInfo(route.backend, ok
           ? `✓ install finished — click Connect on the same row to log in.`
           : `✗ install failed (exit ${evt.code ?? "?"}); see lines above.`);
-        setCardState(route.key, { installing: false });
+        setCardState(route.key, {
+          installing: false,
+          ...(ok ? { remediation: null } : { remediation: "retry" as const }),
+        });
+        if (ok) {
+          window.setTimeout(() => { void probeSubscriptionHealth(route, false); }, 500);
+        }
       }
     };
     invoke("cli_install_stream", { backend: route.backend, onEvent: channel }).catch(async (e) => {
@@ -1156,7 +1359,7 @@ export default function AccountsPage() {
     try {
       if (route.kind === "api" && route.envName) {
         await invoke("accounts_delete_secret", { name: route.envName });
-        setCardState(route.key, { connected: false, testText: "", testOk: null });
+        setCardState(route.key, { connected: false, reauthRequired: false, remediation: null, testText: "", testOk: null });
         logInfo(route.backend, `Removed ${provider.name} API key from local store.`);
       } else {
         // Web-only sub (Grok/DeepSeek) has nothing to wipe locally —
@@ -1171,7 +1374,7 @@ export default function AccountsPage() {
         // that just printed a "run kimi /logout yourself" hint and
         // left the broken green card in place.
         const summary = await invoke<string>("subscription_cli_logout", { backend: route.backend });
-        setCardState(route.key, { connected: false, testText: "", testOk: null });
+        setCardState(route.key, { connected: false, reauthRequired: false, remediation: null, testText: "", testOk: null });
         logInfo(route.backend, `${provider.name} disconnected. ${summary} Click Connect to log in again.`);
         // If the broken session's terminal is still open in the right
         // rail, close it so the user doesn't accidentally type into a
@@ -1191,7 +1394,7 @@ export default function AccountsPage() {
     if (!route.envName) { setDialogFor(null); return; }
     try {
       await invoke("accounts_save_api_key", { name: route.envName, value });
-      setCardState(route.key, { connected: true, testText: "", testOk: null });
+      setCardState(route.key, { connected: true, reauthRequired: false, remediation: null, testText: "", testOk: null });
       logInfo(route.backend, `Saved ${provider.name} API key locally.`);
       // Push the key into the sandbox too, so isolated agents can use it — at
       // registration, automatically.
@@ -1203,24 +1406,8 @@ export default function AccountsPage() {
   }
 
   async function handleTest(route: RouteSpec) {
-    setCardState(route.key, { testing: true, testText: "", testOk: null, wslText: "", wslOk: null });
-    logInfo(route.backend, `Running live round-trip probe (this calls the actual API / CLI)…`);
-    try {
-      // accounts_test_probe_live actually round-trips: API keys hit
-      // /v1/models with the key; CLI subscriptions run a `--print
-      // --prompt ok` and read the response. Catches "logged in but
-      // free tier can't use the subscription" cases the old presence-
-      // only probe missed.
-      const r = await invoke<ProbeResult>("accounts_test_probe_live", { backend: route.backend });
-      const prefix = r.ok ? "✓" : "✗";
-      const line = `${prefix}  ${r.detail}  ·  ${r.elapsed_ms} ms`;
-      setCardState(route.key, { testing: false, testText: line, testOk: r.ok });
-      logInfo(route.backend, `${hostLabel}: ${line}`);
-    } catch (e: any) {
-      const line = `✗  ${String(e?.message ?? e)}`;
-      setCardState(route.key, { testing: false, testText: line, testOk: false });
-      logInfo(route.backend, `${hostLabel}: ${line}`);
-    }
+    setCardState(route.key, { wslText: "", wslOk: null });
+    await probeSubscriptionHealth(route, true);
     // Also probe the WSL sandbox — tells the user whether ISOLATED agents can
     // use this provider (creds mirrored into the distro). Non-fatal. Native
     // Linux/macOS have their own host/sandbox routing and must not show a fake
@@ -1326,7 +1513,13 @@ export default function AccountsPage() {
               cards={cards}
               highlighted={onboardingProvider === provider.key}
               hostLabel={hostLabel}
-              onConnect={(r) => handleConnect(r, provider)}
+              onConnect={(r) => {
+                void handleConnect(
+                  r,
+                  provider,
+                  !!cards[r.key]?.reauthRequired || cards[r.key]?.remediation === "reauth",
+                );
+              }}
               onInstall={(r) => handleInstall(r, provider)}
               onDisconnect={(r) => handleDisconnect(r, provider)}
               onTest={(r) => handleTest(r)}
@@ -1342,6 +1535,8 @@ export default function AccountsPage() {
           tab={railTab}
           setTab={setRailTab}
           onCloseTerm={handleCloseTerm}
+          onTerminalOutput={handleTerminalOutput}
+          onAuthTabOpened={handleAuthTabOpened}
         />
       </div>
 

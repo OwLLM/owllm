@@ -47,8 +47,8 @@ anchor("CodePage.tsx", codePage, "blank/default page records do not pollute the 
   "if (!hasRecoverablePageState(state)) continue");
 anchor("CodePage.tsx", codePage, "every page persist also writes a project-root recovery copy",
   "saveCodeSession(state)");
-anchor("CodePage.tsx", codePage, "folder reopen loads its project-root recovery copy before preparing",
-  "const recovered = reopeningCurrent ? stx : loadCodeSession(dir)");
+anchor("CodePage.tsx", codePage, "folder reopen recovers history without cloning it into a blank New page",
+  "const recovered = reopeningCurrent ? stx : openingBlankPage ? null : loadCodeSession(dir)");
 anchor("CodePage.tsx", codePage, "worktree errors preserve the recovered conversation",
   "...((p as CodeState) ?? base)");
 
@@ -116,7 +116,7 @@ anchor("PublishCards.tsx", cards, "Finish release button renders next to Fix wit
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the busy guard and steers",
   'if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }');
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the model guard",
-  'if (!modelId) { setStatus("No model selected — pick one above."); return "no-model"; }');
+  'if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }');
 anchor("CodePage.tsx", codePage, "programmatic sends surface guard failures in the transcript",
   "if (!fromComposer) setMessages((msgs) => [...msgs, { role: \"assistant\", content: `⚠ ${why}");
 

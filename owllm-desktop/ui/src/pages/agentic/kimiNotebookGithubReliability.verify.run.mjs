@@ -12,6 +12,7 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const APP = path.resolve(HERE, "../../../..");
 const read = (relative) => fs.readFileSync(path.join(APP, relative), "utf8");
 const accounts = read("src-tauri/src/accounts.rs");
+const accountsPage = read("ui/src/pages/advanced/AccountsPage.tsx");
 const githubRs = read("src-tauri/src/github.rs");
 const vaultRs = read("src-tauri/src/vault.rs");
 const libRs = read("src-tauri/src/lib.rs");
@@ -52,6 +53,18 @@ check(
     && dispatch.includes("kimiReconnectMessage")
     && dispatch.includes("choose Disconnect, then Login again")
     && dispatch.includes('backend === "kimi_cli" && isCliReauthRequired'),
+);
+check(
+  "revoked Kimi credentials persist as disconnected until a fresh login replaces them",
+  accounts.includes("fn mark_kimi_reauth_required()")
+    && accounts.includes("fn kimi_reauth_required()")
+    && accounts.includes("kimi_cli_reauth_required")
+    && accounts.includes("api key appears to be invalid")
+    && accounts.includes("authorization grant is invalid")
+    && accountsPage.includes("Session expired · reconnect required")
+    && accountsPage.includes('state.reauthRequired || state.remediation === "reauth" ? "Reconnect"')
+    && accountsPage.includes("if (resetStaleLogin)")
+    && accountsPage.includes("Removed the expired ${provider.name} session. Starting a fresh login."),
 );
 check(
   "failed notebook cards remain active and expose Re-feed",

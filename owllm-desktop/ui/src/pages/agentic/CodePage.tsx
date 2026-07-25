@@ -28,7 +28,7 @@ import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookSt
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
-import { savedPageIdsForLocalProject } from "./codeProjectPages";
+import { chooseProjectOpenTarget, savedPageIdsForLocalProject } from "./codeProjectPages";
 import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
@@ -193,6 +193,7 @@ type ProjectCatalogRow = {
 };
 type OpenProjectPagesDetail = {
   project: Pick<ProjectCatalogRow, "id" | "name" | "location">;
+  currentPageIsBlank: boolean;
   handled: boolean;
 };
 const OPEN_PROJECT_PAGES_EVENT = "owllm:code:open-project-pages";
@@ -1121,10 +1122,13 @@ function CodeWorkspace({ pageId, onTitle }: {
     const normPath = (p: string | undefined) =>
       (p || "").replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
     const reopeningCurrent = normPath(stx.projectRoot || stx.workspace) === normPath(dir);
+    const openingBlankPage = !hasRecoverablePageState(stx);
     // Prefer the live page when it already owns this project. Otherwise recover
     // the latest project-root copy written by the persister. This is evaluated
     // BEFORE the preparing state so opening a folder can never blank the chat.
-    const recovered = reopeningCurrent ? stx : loadCodeSession(dir);
+    // A deliberately-created blank page must start a fresh conversation and
+    // worktree, even when another page already uses this same project.
+    const recovered = reopeningCurrent ? stx : openingBlankPage ? null : loadCodeSession(dir);
     const base = recovered ?? DEFAULT_CODE_STATE;
     // Switching THIS page to a different project: drop the old worktree in the
     // BACKGROUND so it doesn't block (or leak). Unmerged work is the user's to
@@ -1223,7 +1227,11 @@ function CodeWorkspace({ pageId, onTitle }: {
     setCatalogError("");
     setGhostProjectId(project.id);
     if (project.location.trim()) {
-      const detail: OpenProjectPagesDetail = { project, handled: false };
+      const detail: OpenProjectPagesDetail = {
+        project,
+        currentPageIsBlank: !hasRecoverablePageState(stx),
+        handled: false,
+      };
       window.dispatchEvent(new CustomEvent<OpenProjectPagesDetail>(OPEN_PROJECT_PAGES_EVENT, { detail }));
       if (detail.handled) return;
       await openWorkspace(project.location);
@@ -2027,7 +2035,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (!fromComposer) setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${why}\n\nDropped task:\n${text.length > 400 ? text.slice(0, 400) + "…" : text}`, ts: Date.now() }]);
     };
     if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { blockSend("No model selected — pick one above."); return; }
+    if (!modelId) { blockSend("No model selected — pick one in the Coder header."); return; }
     if (fromComposer) { setDraft(""); setCodeAttachments([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
@@ -2291,7 +2299,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     const attachments = chatAttachments;
     const images = imageAttachments(attachments);
     if ((!text && attachments.length === 0) || chatBusy) return;
-    if (!modelId) { setStatus("Pick a model above first."); return; }
+    if (!modelId) { setStatus("Pick a model in the Coder header first."); return; }
     setChatDraft("");
     setChatAttachments([]);
     setChatBusy(true);
@@ -3060,23 +3068,6 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
         )}
         <div style={{ flex: 1 }} />
-        {/* Model picker + Clear buttons live HERE in the page header, above the
-            chat window (user spec 2026-07-11 — reverts the 07-10 in-pane move). */}
-        <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
-        <div style={{ minWidth: 260, maxWidth: 360 }}>
-          {/* THE shared model picker — same component, same list_models source,
-              and the SAME full set (local + cloud + subscriptions) as AgentsPage.
-              No localOnly: the agentic Code page offers every model the other
-              agentic surfaces do; execution routes by provider below. */}
-          <ModelPicker
-            value={modelId}
-            onChange={setModelId}
-            models={availableModels}
-            status={accountsStatus}
-            disabled={busy}
-            fallbackLabel="(pick a model)"
-          />
-        </div>
         <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
         {/* Clear history is now PER AGENT — each pane's own button lives in that
             pane's header (below), with an independent ↩ Undo. */}
@@ -3104,38 +3095,6 @@ function CodeWorkspace({ pageId, onTitle }: {
               </div>
             );
           })}
-        </div>
-      )}
-
-      {/* Second-agent pane toggle — a parallel/hand-off agent chat beside the
-          primary one, with its own transcript and its own input area. Shown
-          once a workspace is open. */}
-      {workspace && (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
-          <button
-            onClick={() => setSecondaryOpen(!secondaryOpen)}
-            title="Show a second, independent agent chat pane beside this one — its own transcript and input, same workspace and model."
-            style={{ ...btn, height: 26 }}
-          >{secondaryOpen ? "◧ Hide 2nd agent" : "◨ Show 2nd agent"}</button>
-          {/* ⇄ selectable last-reply auto-feed, PER DIRECTION. On = the finished
-              reply is handed to the other agent as its next turn (labelled ⇄).
-              Both on = agent-to-agent conversation, capped at 6 automatic
-              exchanges (any manual send resets the cap). */}
-          {secondaryOpen && (
-            <>
-              <label title="When the 1st agent finishes a reply, automatically feed it to the 2nd agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: feedPrimaryToSecondary ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}>
-                <input type="checkbox" checked={feedPrimaryToSecondary} onChange={(e) => setFeedPrimaryToSecondary(e.target.checked)} />
-                ⇄ 1st → 2nd
-              </label>
-              <label title="When the 2nd agent finishes a reply, automatically feed it to the 1st agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: feedSecondaryToPrimary ? "#c7a8ff" : "var(--fg-muted)", cursor: "pointer" }}>
-                <input type="checkbox" checked={feedSecondaryToPrimary} onChange={(e) => setFeedSecondaryToPrimary(e.target.checked)} />
-                ⇄ 2nd → 1st
-              </label>
-              {feedPrimaryToSecondary && feedSecondaryToPrimary && (
-                <span style={{ fontSize: 10.5, color: "#ffd97a" }}>agent↔agent conversation — pauses after {6} automatic exchanges</span>
-              )}
-            </>
-          )}
         </div>
       )}
 
@@ -3182,7 +3141,7 @@ function CodeWorkspace({ pageId, onTitle }: {
               onFixIssues={(task) => {
                 if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
                 if (!workspace) return "no-workspace";
-                if (!modelId) { setStatus("No model selected — pick one above."); return "no-model"; }
+                if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }
                 void sendRef.current?.(task);
                 return "sent";
               }}
@@ -3198,9 +3157,9 @@ function CodeWorkspace({ pageId, onTitle }: {
           pane owns its own scroll. With the second pane closed this wrapper has
           a single child, so the primary fills the width exactly as before. */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: wideView ? "row" : "column", gap: 8 }}>
-        {/* Primary pane — same box anatomy as the second-agent pane: a slim
-            label header over its own scrolling transcript. (Model picker +
-            Clear buttons live in the page header above.) */}
+        {/* Primary pane — same box anatomy as the second-agent pane: each header
+            owns its agent name, wide model picker, feed control and history
+            actions. No separate page-level agent-control row. */}
         <div style={{
           flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12,
           // Solid fill on padding-box keeps the message/input area's background;
@@ -3211,13 +3170,38 @@ function CodeWorkspace({ pageId, onTitle }: {
           boxShadow: primaryAuraActive ? PSYCHEDELIC_AURA_HALO : undefined,
           animation: primaryAuraActive ? PSYCHEDELIC_AURA_ANIMATION : undefined,
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          <div data-ui="code-primary-agent-header" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
+            <div data-ui="code-agent-model-picker" style={{ flex: "1 1 360px", minWidth: 240, maxWidth: 560 }}>
+              <ModelPicker
+                value={modelId}
+                onChange={setModelId}
+                models={availableModels}
+                status={accountsStatus}
+                disabled={busy}
+                fallbackLabel="Pick a model"
+              />
+            </div>
+            {secondaryOpen && (
+              <label title="When the 1st agent finishes a reply, automatically feed it to the 2nd agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: feedPrimaryToSecondary ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer", whiteSpace: "nowrap" }}>
+                <input type="checkbox" checked={feedPrimaryToSecondary} onChange={(e) => setFeedPrimaryToSecondary(e.target.checked)} />
+                ⇄ to 2nd
+              </label>
+            )}
             <span style={{ flex: 1 }} />
             {primaryUndo && (
               <button onClick={undoPrimaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
             )}
             <button onClick={clearPrimaryHistory} disabled={busy || messages.length === 0} title="Clear this agent's conversation (undoable)" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>Clear history</button>
+            {!secondaryOpen && (
+              <button
+                onClick={() => setSecondaryOpen(true)}
+                title="Open a second independent agent chat for this workspace"
+                style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap" }}
+              >
+                + 2nd agent
+              </button>
+            )}
           </div>
       <div
         ref={transcriptSticky.ref}
@@ -3306,17 +3290,23 @@ function CodeWorkspace({ pageId, onTitle }: {
             boxShadow: secondaryBusy ? PSYCHEDELIC_AURA_HALO : undefined,
             animation: secondaryBusy ? PSYCHEDELIC_AURA_ANIMATION : undefined,
           }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            <div data-ui="code-secondary-agent-header" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>
               {/* The second agent's OWN model — independent of the primary chat.
                   Empty falls back to the primary model ("Same as 1st agent"). */}
-              <ModelPicker
-                value={secondaryModelId}
-                onChange={setSecondaryModelId}
-                models={availableModels}
-                status={accountsStatus}
-                fallbackLabel="Same as 1st agent"
-              />
+              <div data-ui="code-agent-model-picker" style={{ flex: "1 1 360px", minWidth: 240, maxWidth: 560 }}>
+                <ModelPicker
+                  value={secondaryModelId}
+                  onChange={setSecondaryModelId}
+                  models={availableModels}
+                  status={accountsStatus}
+                  fallbackLabel="Same as 1st agent"
+                />
+              </div>
+              <label title="When the 2nd agent finishes a reply, automatically feed it to the 1st agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: feedSecondaryToPrimary ? "#c7a8ff" : "var(--fg-muted)", cursor: "pointer", whiteSpace: "nowrap" }}>
+                <input type="checkbox" checked={feedSecondaryToPrimary} onChange={(e) => setFeedSecondaryToPrimary(e.target.checked)} />
+                ⇄ to 1st
+              </label>
               <span style={{ flex: 1 }} />
               {secondaryUndo && (
                 <button onClick={undoSecondaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
@@ -3663,13 +3653,14 @@ export default function CodePage() {
       const detail = (event as CustomEvent<OpenProjectPagesDetail>).detail;
       if (!detail?.project?.location) return;
       const saved = savedPageMetasForLocalProject(detail.project);
-      if (saved.length === 0) return;
+      const target = chooseProjectOpenTarget(saved.map((page) => page.id), detail.currentPageIsBlank);
+      if (target.kind === "current") return;
       detail.handled = true;
       setPages((current) => {
         const known = new Set(current.map((page) => page.id));
         return [...current, ...saved.filter((page) => !known.has(page.id))];
       });
-      setActiveId(saved[0].id);
+      setActiveId(target.pageId);
     };
     window.addEventListener(OPEN_PROJECT_PAGES_EVENT, openSavedProjectPages);
     return () => window.removeEventListener(OPEN_PROJECT_PAGES_EVENT, openSavedProjectPages);

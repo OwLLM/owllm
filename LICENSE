@@ -1,31 +1,45 @@
-MIT License
+OWLLM PROPRIETARY SOFTWARE LICENSE
 
-Copyright (c) 2026 OwLLM contributors
+Copyright (c) 2025-2026 Far island Corporation Ltd.
+All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+OWLLM and its first-party source code, binaries, documentation, templates,
+role definitions, registries, schemas, artwork, and other materials in this
+repository are proprietary software owned by Far island Corporation Ltd.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+OFFICIAL EXECUTABLE
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+Far island Corporation Ltd. grants each user a limited, non-exclusive,
+non-transferable, revocable, royalty-free right to install and use an
+unmodified official OWLLM executable for personal or internal business use.
+The executable may be made available free of charge. Free availability does
+not make OWLLM open-source software and does not grant access to, or rights in,
+the source code.
 
----
+RESTRICTIONS
 
-NOTE: This MIT license covers the contents of THIS REPOSITORY ONLY — agent
-team templates (data/teams/), role definitions (data/roles/), the module
-registry (data/modules/), documentation, schemas, and configuration files.
+Except where applicable law expressly provides otherwise, no permission is
+granted to copy, modify, adapt, merge, publish, distribute, sublicense, sell,
+rent, lease, reverse engineer, decompile, disassemble, create derivative works
+from, or commercially exploit OWLLM or any part of its first-party source code,
+binaries, documentation, templates, role definitions, registries, or schemas.
+No rights are granted to use OWLLM trademarks, names, logos, or branding.
 
-The compiled OwLLM Desktop application distributed via the Releases page is
-governed by a separate end-user license agreement (EULA.md). Source code for
-the application is not currently public.
+THIRD-PARTY MATERIALS
+
+Third-party software, models, data, imagery, and other materials included with
+or used by OWLLM remain subject to their respective licenses and notices.
+Nothing in this notice changes or restricts those third-party terms.
+
+DISCLAIMER
+
+OWLLM IS PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTIES OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, TITLE, AND NON-INFRINGEMENT. TO THE MAXIMUM EXTENT PERMITTED BY LAW,
+FAR ISLAND CORPORATION LTD. WILL NOT BE LIABLE FOR ANY INDIRECT, INCIDENTAL,
+SPECIAL, CONSEQUENTIAL, EXEMPLARY, OR PUNITIVE DAMAGES, OR FOR LOSS OF DATA,
+PROFITS, REVENUE, OR BUSINESS, ARISING FROM OR RELATED TO OWLLM.
+
+No rights are granted except those expressly stated above. Separate written
+commercial or enterprise terms signed by Far island Corporation Ltd. control
+if they conflict with this notice.

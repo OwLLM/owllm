@@ -524,9 +524,13 @@ Track active work in [Discussions → Roadmap](https://github.com/OwLLM/owllm/di
 
 ## License
 
-Repository contents (agent teams, role definitions, registry, schemas, docs): [MIT](LICENSE) — fork freely, share team packs, build on it.
+OWLLM, this repository's first-party contents, and the application binaries are
+proprietary software owned by **Far island Corporation Ltd.** Official
+unmodified executables may be used free of charge; no right is granted to copy,
+modify, redistribute, sublicense, or sell repository contents or binaries.
 
-Application binaries via [Releases](https://github.com/OwLLM/owllm/releases): see [EULA.md](EULA.md). Source for the application itself is not currently public.
+See [LICENSE](LICENSE) and the application [EULA](EULA.md) for the complete
+terms. Source for the application itself is not public.
 
 ## Acknowledgements
 

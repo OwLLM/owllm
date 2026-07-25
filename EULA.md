@@ -1,12 +1,12 @@
 # OwLLM Desktop — End-User License Agreement
 
-**Effective: 2026-06-03**
+**Effective: 2026-07-25**
 
-This EULA governs your use of the **OwLLM Desktop application binaries** distributed via the GitHub Releases page of this repository. It does NOT apply to the contents of this repository (templates, registry, docs), which are MIT-licensed — see [LICENSE](LICENSE).
+This EULA governs your use of the **OwLLM Desktop application binaries** distributed via the GitHub Releases page of this repository. Repository contents such as templates, role definitions, registries, schemas, and documentation are also proprietary and are governed by [LICENSE](LICENSE).
 
 ## 1. Grant of License
 
-OwLLM grants you a personal, non-exclusive, non-transferable, royalty-free licence to install and use the OwLLM Desktop application on machines you own or control, for personal, educational, research, internal-business, or commercial purposes.
+Far island Corporation Ltd. grants you a personal, non-exclusive, non-transferable, royalty-free licence to install and use the OwLLM Desktop application on machines you own or control, for personal, educational, research, internal-business, or commercial purposes.
 
 ## 2. Restrictions
 
@@ -31,11 +31,11 @@ OwLLM Desktop bundles third-party open-source software including [llama.cpp](htt
 
 ## 5. Warranty Disclaimer
 
-THE APPLICATION IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. OwLLM disclaims all warranties of merchantability, fitness for a particular purpose, and non-infringement to the maximum extent permitted by applicable law.
+THE APPLICATION IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. Far island Corporation Ltd. disclaims all warranties of merchantability, fitness for a particular purpose, and non-infringement to the maximum extent permitted by applicable law.
 
 ## 6. Limitation of Liability
 
-To the maximum extent permitted by applicable law, in no event shall OwLLM or its contributors be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use the application.
+To the maximum extent permitted by applicable law, in no event shall Far island Corporation Ltd. be liable for any indirect, incidental, special, consequential, or punitive damages arising from your use of or inability to use the application.
 
 ## 7. Termination
 
@@ -47,7 +47,7 @@ The application may automatically download and install updates to itself, its mo
 
 ## 9. Governing Law
 
-This EULA is governed by the laws of the jurisdiction in which OwLLM is established, without regard to its conflict-of-law rules.
+This EULA is governed by the laws of the jurisdiction in which Far island Corporation Ltd. is established, without regard to its conflict-of-law rules.
 
 ## 10. Contact
 

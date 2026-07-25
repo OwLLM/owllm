@@ -205,6 +205,13 @@ iroh = "1"
 # this adds a direct path to it, not a new library in the tree.
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
+# WebKitGTK settings access for the agent browser: persistent credential
+# storage (HTTP-auth logins -> the user's libsecret store) is disabled by
+# default, same as WebView2's password autosave. Flipped per-webview in
+# browser.rs::linux_enable_web_credentials. Version matches what tauri/wry
+# already resolve (webkit2gtk 2.0.2 in Cargo.lock), so this only adds a direct
+# path to types already in the tree, not a new library.
+webkit2gtk = { version = "2.0", features = ["v2_30"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.59", features = [
@@ -229,6 +236,16 @@ windows-sys = { version = "0.59", features = [
     # even when quoted and drops the browser gateway. See mcp_gateway::cli_safe_path.
     "Win32_Storage_FileSystem",
 ] }
+# WebView2 settings access for the agent browser. WebView2 ships with password
+# autosave AND general autofill DISABLED by default, so a website login typed in
+# the agent browser is never offered for saving and never re-filled on return —
+# the profile dir persists cookies/sessions but not saved credentials. We flip
+# IsPasswordAutosaveEnabled / IsGeneralAutofillEnabled on each agent-browser
+# webview via with_webview() (browser.rs::win_enable_web_credentials). Versions
+# match what tauri 2.11 already resolves (webview2-com 0.38 / windows 0.57), so
+# this adds a direct path to types already in the tree, not a new library.
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation"] }
 
 [dev-dependencies]
 tempfile = "3"

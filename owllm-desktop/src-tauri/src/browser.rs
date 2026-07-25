@@ -671,6 +671,48 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
 }
 
+/// Enable WebView2 password autosave + general autofill on an agent-browser
+/// webview. WebView2 disables both by default (unlike a normal Chrome/Edge
+/// profile), so a login typed here would never trigger a "Save password?"
+/// prompt and never be re-filled on return, even though the profile dir keeps
+/// cookies. Called on every agent-browser webview right after creation. The
+/// stored credentials live only in the per-user, per-machine WebView2 profile
+/// (`browser_data_dir()`); nothing is written to the repo or a release.
+#[cfg(windows)]
+fn win_enable_web_credentials(pw: tauri::webview::PlatformWebview) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+    use windows::core::Interface;
+    unsafe {
+        let core = match pw.controller().CoreWebView2() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let settings = match core.Settings() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
+            let _ = s4.SetIsGeneralAutofillEnabled(true);
+            let _ = s4.SetIsPasswordAutosaveEnabled(true);
+        }
+    }
+}
+
+/// Linux (WebKitGTK) analog of `win_enable_web_credentials`: the engine's
+/// persistent credential storage — HTTP-auth logins saved into the user's
+/// secret service (libsecret) — is also DISABLED by default. Form-password
+/// autosave has no embedder API in WebKitGTK; staying logged in on ordinary
+/// websites comes from the persisted cookie/session profile set via
+/// `data_directory()`. macOS WKWebView exposes neither switch, but its default
+/// persistent data store already keeps cookies/sessions per app.
+#[cfg(target_os = "linux")]
+fn linux_enable_web_credentials(pw: tauri::webview::PlatformWebview) {
+    use webkit2gtk::{WebViewExt, WebsiteDataManagerExt};
+    if let Some(manager) = pw.inner().website_data_manager() {
+        manager.set_persistent_credential_storage_enabled(true);
+    }
+}
+
 fn get_window(app: &tauri::AppHandle) -> Option<Window> {
     app.get_window(BROWSER_LABEL)
         .or_else(|| active_tab_id().and_then(|id| app.get_window(&tab_label(id))))
@@ -1066,12 +1108,21 @@ fn attach_tab(
         .map(|s| s.to_logical::<f64>(scale))
         .unwrap_or_else(|_| LogicalSize::new(dev.width, dev.height + CHROME_H));
     let x = if active { 0.0 } else { PARK_X };
-    win.add_child(
-        content,
-        LogicalPosition::new(x, CHROME_H),
-        LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
-    )
-    .map_err(|e| format!("page webview: {e}"))?;
+    let _webview = win
+        .add_child(
+            content,
+            LogicalPosition::new(x, CHROME_H),
+            LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
+        )
+        .map_err(|e| format!("page webview: {e}"))?;
+    #[cfg(windows)]
+    {
+        let _ = _webview.with_webview(win_enable_web_credentials);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = _webview.with_webview(linux_enable_web_credentials);
+    }
     Ok(())
 }
 
@@ -1565,9 +1616,17 @@ fn attach_legacy_tab(
         let _ = std::fs::create_dir_all(&dir);
         builder = builder.data_directory(dir);
     }
-    builder
+    let _ww = builder
         .build()
         .map_err(|e| format!("failed to open agent browser window: {e}"))?;
+    #[cfg(windows)]
+    {
+        let _ = _ww.with_webview(win_enable_web_credentials);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = _ww.with_webview(linux_enable_web_credentials);
+    }
     if let Some(win) = app.get_window(&tab_label(id)) {
         apply_chrome(&win);
         let handle = app.clone();

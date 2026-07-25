@@ -640,7 +640,7 @@ const BRIDGE_JS: &str = r##"
     return { origin: location.origin, username: user, password: pw.value };
   }
   function reportCred() {
-    var c = grabCred();
+    var c = grabCred() || window.__owllmProv || null;
     if (!c) return;
     var key = c.origin + "" + c.username + "" + c.password;
     if (key === credSent) return; // same login already reported on this page
@@ -651,6 +651,60 @@ const BRIDGE_JS: &str = r##"
   }
   document.addEventListener("submit", reportCred, true);
   window.addEventListener("pagehide", reportCred);
+  // SPA logins often clear the form without navigating, so submit/pagehide
+  // alone lose the values. Keep a provisional copy of the last complete login
+  // while the user types, and also report on submit-ish clicks, Enter, and
+  // tab-hide — the report itself dedupes via credSent.
+  document.addEventListener("input", function (e) {
+    var t = e.target;
+    if (t && t.tagName === "INPUT") { var c = grabCred(); if (c) window.__owllmProv = c; }
+  }, true);
+  document.addEventListener("click", function (e) {
+    var el = e.target && e.target.closest ? e.target.closest("button, input[type=submit], [role=button]") : null;
+    if (el) setTimeout(reportCred, 0);
+  }, true);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && e.target && e.target.tagName === "INPUT") setTimeout(reportCred, 0);
+  }, true);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") reportCred();
+  });
+  // --- vault autofill (Rust → page) --------------------------------------
+  // Rust evals __owllmAutofill(user, pass) after a page finishes loading when
+  // the vault holds a login for this origin (browser_vault::autofill_eval_for).
+  // Fills ONLY empty fields — never clobbers what the user or the engine's own
+  // password manager already put there — and waits for late-rendered SPA login
+  // forms with a capped MutationObserver. Works identically on WebView2,
+  // WebKitGTK and WKWebView because it is plain injected JS.
+  window.__owllmAutofill = function (user, pass) {
+    if (window.__owllmAutofilled) return;
+    function visible(el) { return !!(el && el.offsetParent !== null && !el.disabled && !el.readOnly); }
+    function tryFill() {
+      var pws = document.querySelectorAll("input[type=password]");
+      var pw = null;
+      for (var i = 0; i < pws.length; i++) if (visible(pws[i])) { pw = pws[i]; break; }
+      if (!pw) return false;
+      window.__owllmAutofilled = true;
+      if (pw.value) return true; // something else filled it first — leave it
+      var userEl = null;
+      var ins = document.querySelectorAll("input");
+      for (var j = 0; j < ins.length; j++) {
+        if (ins[j] === pw) break;
+        var ty = (ins[j].type || "text").toLowerCase();
+        if ((ty === "text" || ty === "email" || ty === "tel") && visible(ins[j])) userEl = ins[j];
+      }
+      if (userEl && !userEl.value && user) { userEl.value = user; fire(userEl, "input"); fire(userEl, "change"); }
+      if (pass) { pw.value = pass; fire(pw, "input"); fire(pw, "change"); }
+      return true;
+    }
+    if (tryFill()) return;
+    var tries = 0;
+    var obs = new MutationObserver(function () {
+      if (window.__owllmAutofilled || ++tries > 400 || tryFill()) { try { obs.disconnect(); } catch (e) {} }
+    });
+    obs.observe(document.documentElement || document, { childList: true, subtree: true });
+    setTimeout(function () { try { obs.disconnect(); } catch (e) {} }, 20000);
+  };
 })();
 "##;
 
@@ -836,6 +890,13 @@ enum BrowserUiEvent {
     TypedLogin {
         data: String,
     },
+    /// A content tab finished loading an http(s) page: look the origin up in
+    /// the credential vault and, on a hit, inject the autofill script. Vault
+    /// I/O and the eval stay off the native callback thread.
+    AutofillPage {
+        id: u64,
+        url: String,
+    },
     /// A page requested a separate browsing context (`target=_blank` or
     /// `window.open`). The native callback denies the engine-owned popup and
     /// queues this event so the URL becomes a managed OwLLM tab instead.
@@ -857,6 +918,7 @@ struct BrowserUiBatch {
     tab_titles: HashMap<u64, String>,
     push_tabs: bool,
     creds: Vec<String>,
+    autofills: HashMap<u64, String>,
     open_tabs: Vec<(String, bool)>,
     legacy_closed: Vec<u64>,
 }
@@ -879,6 +941,9 @@ impl BrowserUiBatch {
             }
             BrowserUiEvent::PushTabs => self.push_tabs = true,
             BrowserUiEvent::TypedLogin { data } => self.creds.push(data),
+            BrowserUiEvent::AutofillPage { id, url } => {
+                self.autofills.insert(id, url);
+            }
             BrowserUiEvent::OpenTab { url, activate } => self.open_tabs.push((url, activate)),
             BrowserUiEvent::LegacyTabClosed { id } => self.legacy_closed.push(id),
         }
@@ -928,6 +993,13 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
         for data in batch.creds {
             if let Err(e) = crate::browser_vault::store_typed_login(&data) {
                 eprintln!("[browser] could not save typed login: {e}");
+            }
+        }
+        for (id, url) in batch.autofills {
+            if let Some(script) = crate::browser_vault::autofill_eval_for(&url) {
+                if let Some(wv) = content_webview_for_tab(&app, Some(id)) {
+                    let _ = wv.eval(&script);
+                }
             }
         }
         for (url, activate) in batch.open_tabs {
@@ -1089,6 +1161,15 @@ fn attach_tab(
                         title: None,
                     },
                 );
+            }
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let url = payload.url().to_string();
+                if url.starts_with("http") {
+                    queue_browser_ui(
+                        &wv.app_handle().clone(),
+                        BrowserUiEvent::AutofillPage { id, url },
+                    );
+                }
             }
         });
     if let Some(ua) = dev.ua {
@@ -1595,6 +1676,18 @@ fn attach_legacy_tab(
                     &win.app_handle().clone(),
                     BrowserUiEvent::TabTitle { id, title },
                 );
+            }
+        })
+        .on_page_load(move |win, payload| {
+            // Vault autofill works in this top-level-window shape too.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let url = payload.url().to_string();
+                if url.starts_with("http") {
+                    queue_browser_ui(
+                        &win.app_handle().clone(),
+                        BrowserUiEvent::AutofillPage { id, url },
+                    );
+                }
             }
         })
         .background_color(OWLLM_BG)

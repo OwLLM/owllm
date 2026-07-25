@@ -2,12 +2,12 @@
 //
 // Stores site logins the user chooses to save (or imports from a real browser)
 // so the agent browser can autofill them. At rest the whole store is encrypted
-// with `crypt::protect` — DPAPI (per Windows user account) on Windows. On
-// macOS/Linux `crypt` is currently a passthrough, so the file is NOT yet
-// encrypted there; that is a known limitation tracked for OS-keychain backing
-// and is called out in the UI. Passwords are never returned to the frontend in
-// `list` — only origin/username — and only ever leave Rust by being injected
-// straight into the matching page via the browser bridge (`fill_login`).
+// with `crypt::protect` on every OS — DPAPI (per Windows user account) on
+// Windows, AES-256-GCM with a per-user 0600 key file on macOS/Linux (legacy
+// plaintext vaults from before that scheme still load and are re-encrypted on
+// the next save). Passwords are never returned to the frontend in `list` —
+// only origin/username — and only ever leave Rust by being injected straight
+// into the matching page (`fill_login`, or `autofill_eval_for` on page load).
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -229,6 +229,24 @@ pub fn browser_vault_autofill(app: tauri::AppHandle) -> Result<String, String> {
         "fill_login".to_string(),
         serde_json::json!({ "username": cred.username, "password": cred.password }),
     )
+}
+
+/// Build the JS eval that autofills a just-loaded agent-browser page, or None
+/// when the vault has no login for this URL's origin. Called by the browser UI
+/// worker on every page-load-finished event; the password stays inside Rust
+/// until the moment it is injected into the page that matched. The injected
+/// `__owllmAutofill` (BRIDGE_JS) fills only empty fields.
+pub fn autofill_eval_for(page_url: &str) -> Option<String> {
+    if !page_url.starts_with("http") {
+        return None;
+    }
+    let creds = load();
+    let c = find_for_origin(&creds, page_url)?;
+    Some(format!(
+        "try{{window.__owllmAutofill&&window.__owllmAutofill({},{})}}catch(e){{}}",
+        serde_json::to_string(&c.username).ok()?,
+        serde_json::to_string(&c.password).ok()?
+    ))
 }
 
 /// Save a batch of imported creds. Used by browser_import.

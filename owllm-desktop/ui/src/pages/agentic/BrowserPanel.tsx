@@ -293,7 +293,7 @@ export default function BrowserPanel({ open = false, onClose, inline = false }: 
         {tab === "pass" && (
           <>
             <div style={{ fontSize: 11, color: "var(--fg-muted)", marginBottom: 8 }}>
-              Saved logins the agents can autofill. Stored encrypted on this device (DPAPI on Windows). Passwords are never shown here.
+              Saved logins, autofilled automatically when a page from that site loads. Stored encrypted on this device (DPAPI on Windows, per-user key on macOS/Linux). Passwords are never shown here.
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 5, marginBottom: 10 }}>
               {creds.length === 0 && <div style={{ fontSize: 11.5, color: "var(--fg-muted)" }}>No saved passwords yet. Add one below or Import from a browser.</div>}

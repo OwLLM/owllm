@@ -1033,6 +1033,7 @@ export default function ChatPage() {
           genTail = (genTail + s).slice(-3600);
           return checkRunawayLine(genTail);
         };
+        try {
         while (true) {
           // Honor the abort flag inline — the user pressed Stop and
           // we should bail out of the read loop even if reader.read()
@@ -1165,6 +1166,9 @@ export default function ChatPage() {
           }
           if (loopAborted) break;
         }
+        } finally {
+          genTick.stop();
+        }
         controls.onReader(null);
         if (serverError) {
           throw new Error(`llama-server stream error: ${serverError}`);
@@ -1292,9 +1296,11 @@ export default function ChatPage() {
           if (fresp.ok && fresp.body) {
             const freader = fresp.body.getReader();
             controls.onReader(freader);
+            const finalGenTick = makeGenMeter();
             const fdec = new TextDecoder();
             let fbuf = "";
             let fInThink = false;
+            try {
             while (true) {
               if (signal.aborted) { try { await freader.cancel(); } catch {} break; }
               const { done, value } = await freader.read();
@@ -1311,9 +1317,13 @@ export default function ChatPage() {
                   const fj = JSON.parse(fbody);
                   const fd = fj?.choices?.[0]?.delta;
                   const frc: string | undefined = fd?.reasoning_content ?? fd?.reasoning;
-                  if (typeof frc === "string" && frc) appendThinking(col.id, frc);
+                  if (typeof frc === "string" && frc) {
+                    finalGenTick();
+                    appendThinking(col.id, frc);
+                  }
                   const fct: string | undefined = fd?.content;
                   if (typeof fct === "string" && fct) {
+                    finalGenTick();
                     // Route <think>…</think> exactly like the main loop.
                     let fb = fct;
                     while (fb.length > 0) {
@@ -1334,6 +1344,9 @@ export default function ChatPage() {
                   }
                 } catch { /* skip malformed chunk */ }
               }
+            }
+            } finally {
+              finalGenTick.stop();
             }
             controls.onReader(null);
           }

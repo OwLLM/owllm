@@ -2578,19 +2578,23 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // model is resident.
   const LOAD_RETRY_MS = 120_000;
   const LOAD_RETRY_DELAY = 1500;
-  // Live generation-speed meter: count EVERY generated SSE delta (visible
-  // reply, thinking, AND tool-call args — all are tokens the GPU produced)
-  // over wall-clock and broadcast tok/s so the header badge can show
-  // "⚡ N tok/s". A plan/tool-heavy orchestrator turn emits little visible
-  // text, so counting only the reply made the badge look dead — count the
-  // thinking + tool channels too. Throttled to ~5/s; the badge auto-hides
-  // when the stream stops. Local generation only (where tok/s reflects the
-  // user's own hardware and is the meaningful number).
-  const genTick = makeGenMeter();
-  const countingDelta: StreamHandler = (d) => { genTick(); emitDelta(d); };
-  const countingThought: ThoughtHandler = (channel, role, delta) => {
-    if (delta) genTick();
-    emitThought?.(channel, role, delta);
+  // Meter each actual model response independently. In particular, end the
+  // meter before executing tools so tool latency and next-turn prompt prefill
+  // never dilute the displayed generation rate.
+  const meterStream = async (
+    run: (onDelta: StreamHandler, onThought: ThoughtHandler) => Promise<string>,
+  ): Promise<string> => {
+    const genTick = makeGenMeter();
+    const countingDelta: StreamHandler = (d) => { genTick(); emitDelta(d); };
+    const countingThought: ThoughtHandler = (channel, role, delta) => {
+      if (delta) genTick();
+      emitThought?.(channel, role, delta);
+    };
+    try {
+      return await run(countingDelta, countingThought);
+    } finally {
+      genTick.stop();
+    }
   };
   const maybeYield = makeUiYield();
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
@@ -2600,11 +2604,12 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     // route reasoning to onThought, and harvest native tool_calls into nativeCalls.
     const nativeCalls: RawNativeCall[] = [];
     if (infer.device) {
+      const device = infer.device;
       // Paired-device model: one non-streamed round-trip over the sealed
       // channel — no HTTP route to the device required (works via P2P/relay).
-      lastReply = await deviceChatCompletion(
-        infer.device.id,
-        infer.device.modelId,
+      lastReply = await meterStream((countingDelta, countingThought) => deviceChatCompletion(
+        device.id,
+        device.modelId,
         {
           model: p.modelId || "local",
           messages: liveMessages,
@@ -2617,7 +2622,7 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         countingThought,
         nativeCalls,
         p.signal,
-      );
+      ));
     } else {
     await ensureInferenceRoute();
     let resp: Response | undefined;
@@ -2688,7 +2693,10 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       throw new Error(`llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`);
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
-    lastReply = await consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls);
+    lastReply = await meterStream(
+      (countingDelta, countingThought) =>
+        consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls),
+    );
     }
     // No tools available at all → single-shot, done.
     if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
@@ -2750,15 +2758,16 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     });
     try {
       if (infer.device) {
-        const finalText = await deviceChatCompletion(
-          infer.device.id,
-          infer.device.modelId,
+        const device = infer.device;
+        const finalText = await meterStream((countingDelta, countingThought) => deviceChatCompletion(
+          device.id,
+          device.modelId,
           { model: p.modelId || "local", messages: liveMessages, temperature: p.temperature, ...sampling },
           countingDelta,
           countingThought,
           [],
           p.signal,
-        );
+        ));
         if (finalText.trim()) lastReply = finalText;
       } else {
         const fresp = await fetch(inferUrl, {
@@ -2775,7 +2784,10 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
           signal: p.signal,
         });
         if (fresp.ok) {
-          const finalText = await consumeOpenAISse(fresp, countingDelta, countingThought, []);
+          const finalText = await meterStream(
+            (countingDelta, countingThought) =>
+              consumeOpenAISse(fresp, countingDelta, countingThought, []),
+          );
           if (finalText.trim()) lastReply = finalText;
         }
       }

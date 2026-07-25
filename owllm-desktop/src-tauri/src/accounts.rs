@@ -361,6 +361,56 @@ fn write_secrets(map: &BTreeMap<String, String>) -> Result<(), String> {
     Ok(())
 }
 
+/// SECURITY: quarantine the on-disk secrets that belong to a DIFFERENT account.
+///
+/// Called when a transplanted `.owllm` is detected (its vault clone belongs to
+/// another GitHub login — see `vault::enforce_account_ownership`). Every API
+/// key in `agent_secrets.json` was entered by the previous owner, so it must
+/// not remain usable on this machine. The original file is MOVED ASIDE (never
+/// silently destroyed) to `agent_secrets.quarantine-<epoch>.json` so a
+/// legitimate same-machine account switch stays recoverable, then a fresh file
+/// is written containing ONLY `keep` (the current user's just-entered GitHub
+/// sign-in) so they stay connected while every inherited provider key is gone.
+///
+/// Returns the number of non-empty inherited secrets removed. Best-effort: a
+/// filesystem hiccup is logged by the caller, never fatal.
+pub(crate) fn quarantine_foreign_secrets(keep: &[&str]) -> Result<usize, String> {
+    let Some(path) = secrets_path() else {
+        return Ok(0);
+    };
+    if !path.exists() {
+        return Ok(0);
+    }
+    let map = load_secrets();
+    if map.is_empty() {
+        return Ok(0);
+    }
+    // Move the original aside for recovery (epoch-stamped, collision-free).
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let quarantine = path.with_file_name(format!("agent_secrets.quarantine-{stamp}.json"));
+    std::fs::rename(&path, &quarantine)
+        .map_err(|e| format!("could not quarantine transplanted secrets: {e}"))?;
+    // Rewrite keeping only the preserved keys (the current GitHub sign-in).
+    let mut kept: BTreeMap<String, String> = BTreeMap::new();
+    let mut removed = 0usize;
+    for (k, v) in map.iter() {
+        if keep.contains(&k.as_str()) {
+            kept.insert(k.clone(), v.clone());
+        } else if !v.trim().is_empty() {
+            removed += 1;
+        }
+    }
+    // When nothing is preserved, leave the file absent (the quarantine copy
+    // still holds the original) so a stale `{}` doesn't linger.
+    if !kept.is_empty() {
+        write_secrets(&kept)?;
+    }
+    Ok(removed)
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct AccountsStatus {
     /// Backend-authoritative host OS. WebView user-agent strings can be

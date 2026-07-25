@@ -206,6 +206,13 @@ pub fn run() {
     // local build must not join (and inherit a hang from) the installed app or
     // another checkout. Installed and portable profiles remain unchanged.
     paths::init_isolated_webview_profile();
+    // SECURITY: neutralize a transplanted `.owllm` on launch. If the local
+    // vault clone belongs to a different GitHub account than the one signed in,
+    // this data folder was copied from someone else (portable stick, cloned
+    // disk image, shared build) and carries THEIR API keys + synced vault.
+    // Quarantine the inherited credentials and drop the foreign clone before any
+    // window or sync runs — so an app UPDATE fixes an already-leaked install.
+    vault::enforce_account_ownership_on_startup();
     tauri::Builder::default()
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())

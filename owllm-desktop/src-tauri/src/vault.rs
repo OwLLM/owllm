@@ -50,6 +50,15 @@ fn token_and_login() -> Option<(String, String)> {
     Some((token, login))
 }
 
+/// Remote vault operations must be authorized by OWLLM's CURRENT GitHub
+/// session, not merely by whatever Git Credential Manager/gh credentials happen
+/// to exist on the machine. The local clone remains after logout for offline
+/// access, but no fetch/push command may use it until the app reconnects.
+fn connected_vault_dir() -> Result<PathBuf, String> {
+    token_and_login().ok_or_else(|| "GitHub is disconnected — vault sync is disabled.".to_string())?;
+    vault_dir().ok_or_else(|| "no vault dir".to_string())
+}
+
 /// GET an authenticated GitHub API URL; return the parsed JSON body.
 fn curl_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
     let mut cmd = std::process::Command::new("curl");
@@ -454,7 +463,7 @@ fn commit_push(dir: &std::path::Path, branch: &str) -> Result<(), String> {
 /// Publish this machine as a usable GPU/inference server in the vault.
 #[tauri::command]
 pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Err("vault not set up on this device yet".to_string());
     }
@@ -482,7 +491,7 @@ pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), Stri
 /// Stop advertising this machine as a server (deletes the record).
 #[tauri::command]
 pub async fn vault_unpublish_server() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }
@@ -502,7 +511,7 @@ pub async fn vault_unpublish_server() -> Result<(), String> {
 /// THIS device's own record). Used to offer a one-click "Use my GPU box".
 #[tauri::command]
 pub async fn vault_read_server() -> Result<Option<GpuServer>, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(None);
     }
@@ -558,7 +567,7 @@ fn copy_dir_files(from: &std::path::Path, to: &std::path::Path, overwrite: bool)
 /// vault: pull teams from other devices (add-missing) and publish ours.
 #[tauri::command]
 pub async fn vault_sync_teams() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }
@@ -1180,7 +1189,7 @@ fn import_project(
 /// ours. Returns true when the local DB changed (so the UI can reload).
 #[tauri::command]
 pub async fn vault_sync_projects() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1274,7 +1283,7 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
 /// when a peer record changed locally.
 #[tauri::command]
 pub async fn vault_sync_devices() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1328,7 +1337,7 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
 /// material never enters the git repo. Returns true when local metadata changed.
 #[tauri::command]
 pub async fn vault_sync_signing() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1378,7 +1387,7 @@ fn current_branch(dir: &std::path::Path) -> String {
 /// decides whether to adopt it (last-write-wins by timestamp).
 #[tauri::command]
 pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(None);
     }
@@ -1401,7 +1410,7 @@ pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
 /// JS layer already resolved which side is newer), and push.
 #[tauri::command]
 pub async fn vault_write_state(json: String) -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Err("vault not set up on this device yet".to_string());
     }
@@ -1439,7 +1448,7 @@ pub async fn vault_write_state(json: String) -> Result<(), String> {
 /// remote blob into localStorage — keeps future commits clean/linear.
 #[tauri::command]
 pub async fn vault_align() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }

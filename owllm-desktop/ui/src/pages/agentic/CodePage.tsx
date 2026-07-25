@@ -24,7 +24,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFailed, markNotebookStepFinished } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
@@ -1515,7 +1515,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     try {
       await githubDisconnect(wslStat?.defaultDistro ?? null);
       setGh({ connected: false, login: null });
-      setGhMsg("Disconnected — token removed and credentials scrubbed.");
+      setGhMsg("Disconnected — remote sync stopped and OWLLM credentials scrubbed. Local projects and chats remain available offline.");
     } catch (e) {
       setGhMsg(`Couldn't disconnect: ${e}`);
     } finally {
@@ -2046,6 +2046,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     setRunPhase("starting");
     let ok = false;
     let aborted = false;
+    let failureReason = "The run ended with an error.";
     let replyText = "";
     try {
       setStatus(`Coding in ${workspace}`);
@@ -2056,6 +2057,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     } catch (e) {
       const err = e as { name?: string; message?: string };
       aborted = err.name === "AbortError";
+      failureReason = aborted ? "The run was stopped." : (err.message ?? String(e));
       if (!aborted) {
         setMessages((msgs) => {
           const out = msgs.slice();
@@ -2080,11 +2082,29 @@ function CodeWorkspace({ pageId, onTitle }: {
       const now = Date.now();
       const payload = chatRuntime.getSnapshot(SID).payload as CodeState | undefined;
       if (notebookStepRef.current) {
-        markNotebookStepFinished(ruleScopeRef.current.id, notebookStepRef.current, now);
+        if (ok) {
+          markNotebookStepFinished(ruleScopeRef.current.id, notebookStepRef.current, now);
+        } else {
+          markNotebookStepFailed(
+            ruleScopeRef.current.id,
+            notebookStepRef.current,
+            failureReason,
+            now,
+          );
+        }
         notebookStepRef.current = null;
       }
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
-        markNotebookStepFinished(ruleScopeRef.current.id, sid, now);
+        if (ok) {
+          markNotebookStepFinished(ruleScopeRef.current.id, sid, now);
+        } else {
+          markNotebookStepFailed(
+            ruleScopeRef.current.id,
+            sid,
+            failureReason,
+            now,
+          );
+        }
       }
       if (payload?.runStartedAt) {
         setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: runTimingFooter(payload.runStartedAt!, now), ts: now }]);

@@ -342,6 +342,7 @@ pub fn run() {
             accounts::codex_cli_stream,
             accounts::claude_cli_stream,
             accounts::kimi_cli_complete,
+            accounts::kimi_cli_stream,
             accounts::gemini_cli_complete,
             accounts::grok_cli_complete,
             accounts::cli_cancel_all,

@@ -248,6 +248,126 @@ fn wait_cli_child(
     }
 }
 
+/// Streaming counterpart of `wait_cli_child`. Stdout is drained line-by-line
+/// so subscription CLIs with NDJSON output can update the UI while they work;
+/// stderr is drained concurrently so neither pipe can deadlock. The returned
+/// Output still contains both complete streams for normal exit/auth diagnosis.
+fn wait_cli_child_lines<F>(
+    mut child: std::process::Child,
+    pid: u32,
+    mut on_stdout_line: F,
+) -> std::io::Result<std::process::Output>
+where
+    F: FnMut(&str),
+{
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+
+    let started = Instant::now();
+    let last_activity = Arc::new(AtomicU64::new(0));
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let mut readers = Vec::new();
+
+    if let Some(stdout) = child.stdout.take() {
+        let buf = Arc::clone(&stdout_buf);
+        let act = Arc::clone(&last_activity);
+        readers.push(std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if let Ok(mut b) = buf.lock() {
+                            b.extend_from_slice(line.as_bytes());
+                        }
+                        act.store(
+                            started.elapsed().as_millis() as u64,
+                            AtomicOrdering::Relaxed,
+                        );
+                        let clean = line.trim_end_matches(['\r', '\n']).to_string();
+                        if line_tx.send(clean).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    if let Some(mut stderr) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_buf);
+        let act = Arc::clone(&last_activity);
+        readers.push(std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut b) = buf.lock() {
+                            b.extend_from_slice(&chunk[..n]);
+                        }
+                        act.store(
+                            started.elapsed().as_millis() as u64,
+                            AtomicOrdering::Relaxed,
+                        );
+                    }
+                }
+            }
+        }));
+    }
+
+    let take = |b: &Arc<Mutex<Vec<u8>>>| {
+        b.lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    };
+    loop {
+        while let Ok(line) = line_rx.try_recv() {
+            on_stdout_line(&line);
+        }
+        if let Some(status) = child.try_wait()? {
+            for t in readers {
+                let _ = t.join();
+            }
+            while let Ok(line) = line_rx.try_recv() {
+                on_stdout_line(&line);
+            }
+            unregister_cli_child(pid);
+            return Ok(std::process::Output {
+                status,
+                stdout: take(&stdout_buf),
+                stderr: take(&stderr_buf),
+            });
+        }
+        let idle = started.elapsed().saturating_sub(Duration::from_millis(
+            last_activity.load(AtomicOrdering::Relaxed),
+        ));
+        if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            for t in readers {
+                let _ = t.join();
+            }
+            unregister_cli_child(pid);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "CLI child timed out ({}) and was killed",
+                    if started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+                        format!("absolute ceiling {}s", CLI_CHILD_ABS_TIMEOUT.as_secs())
+                    } else {
+                        format!("{}s with no output", CLI_CHILD_TIMEOUT.as_secs())
+                    }
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
 /// Kill every live agent-CLI child. Windows needs `taskkill /T /F`: the
 /// process we spawned is often a cmd.exe batch shim whose real work happens
 /// in a node/python grandchild — killing only the shim leaves the agent
@@ -5070,14 +5190,150 @@ pub async fn grok_cli_complete(
 ///     flag, so we inject the system prompt via a temporary `KIMI_CODE_HOME`
 ///     containing `AGENTS.md`, copy the user's config/credentials, and wire the
 ///     browser gateway through `mcp.json` + `OWLLM_GW_TOKEN`.
-#[tauri::command]
-pub async fn kimi_cli_complete(
+fn kimi_content_text(value: &serde_json::Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    let Some(parts) = value.as_array() else {
+        return String::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .or_else(|| part.get("content"))
+                .and_then(|v| v.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Parse one Kimi `--output-format stream-json` line. Kimi emits OpenAI-style
+/// Message objects: assistant content contains `text`/`think` parts and
+/// `tool_calls`; tool results are role=tool messages. Keep the parser tolerant
+/// of older field spellings so upgrading kimi-cli cannot make the UI silent.
+fn parse_kimi_stream_line(line: &str, assembled: &mut String) -> Vec<ClaudeStreamEvent> {
+    let mut events = Vec::new();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return events;
+    };
+    let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
+    if role == "assistant" {
+        if let Some(parts) = v.get("content").and_then(|c| c.as_array()) {
+            for part in parts {
+                let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let text = part
+                    .get("text")
+                    .or_else(|| part.get("think"))
+                    .or_else(|| part.get("thinking"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if text.is_empty() {
+                    continue;
+                }
+                if matches!(kind, "think" | "thinking" | "reasoning") {
+                    events.push(ClaudeStreamEvent::Thinking {
+                        delta: text.to_string(),
+                    });
+                } else {
+                    assembled.push_str(text);
+                    events.push(ClaudeStreamEvent::Text {
+                        delta: text.to_string(),
+                    });
+                }
+            }
+        } else if let Some(text) = v.get("content").and_then(|c| c.as_str()) {
+            assembled.push_str(text);
+            events.push(ClaudeStreamEvent::Text {
+                delta: text.to_string(),
+            });
+        }
+        if let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
+            for call in calls {
+                let id = call
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let function = call.get("function").unwrap_or(call);
+                let name = function
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let input = function
+                    .get("arguments")
+                    .map(|x| {
+                        x.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| serde_json::to_string_pretty(x).unwrap_or_default())
+                    })
+                    .unwrap_or_default();
+                events.push(ClaudeStreamEvent::ToolUse {
+                    tool_use_id: id,
+                    name,
+                    input,
+                });
+            }
+        }
+        return events;
+    }
+    if role == "tool" {
+        let content = v
+            .get("content")
+            .map(kimi_content_text)
+            .unwrap_or_default();
+        let id = v
+            .get("tool_call_id")
+            .or_else(|| v.get("toolCallId"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let is_error = v
+            .get("is_error")
+            .or_else(|| v.get("isError"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        events.push(ClaudeStreamEvent::ToolResult {
+            tool_use_id: id,
+            content,
+            is_error,
+        });
+        return events;
+    }
+    if let Some(title) = v.get("title").and_then(|x| x.as_str()) {
+        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("");
+        events.push(ClaudeStreamEvent::Thinking {
+            delta: format!("{title}{}\n", if body.is_empty() { String::new() } else { format!(": {body}") }),
+        });
+    } else if let Some(plan) = v.get("content").and_then(|x| x.as_str()) {
+        if v.get("file_path").is_some() || v.get("filePath").is_some() {
+            events.push(ClaudeStreamEvent::Thinking {
+                delta: format!("Plan updated:\n{plan}\n"),
+            });
+        }
+    }
+    events
+}
+
+fn handle_kimi_stream_line(
+    line: &str,
+    on_event: &Channel<ClaudeStreamEvent>,
+    assembled: &mut String,
+) {
+    for event in parse_kimi_stream_line(line, assembled) {
+        let _ = on_event.send(event);
+    }
+}
+
+async fn kimi_cli_run(
     app: tauri::AppHandle,
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
     _allowed_tools: Option<Vec<String>>,
+    on_event: Option<Channel<ClaudeStreamEvent>>,
 ) -> Result<String, String> {
     // Browser tools are a CROSS-CUTTING capability: every host-run Kimi agent
     // gets the in-app browser gateway, not just the Browser role. kimi-cli
@@ -5174,12 +5430,15 @@ pub async fn kimi_cli_complete(
 
             // Both legacy kimi-cli and current kimi-code support --print
             // non-interactive mode; --output-format only works in that mode.
+            let stream_live = on_event.is_some();
             let mut args: Vec<String> = vec![
                 "--print".into(),
                 "--output-format".into(),
-                "text".into(),
-                "--final-message-only".into(),
+                if stream_live { "stream-json".into() } else { "text".into() },
             ];
+            if !stream_live {
+                args.push("--final-message-only".into());
+            }
             if with_model {
                 args.extend(model_args.iter().cloned());
             }
@@ -5265,8 +5524,15 @@ pub async fn kimi_cli_complete(
                     let _ = stdin.write_all(prompt_value.as_bytes());
                 }
             }
-            let output = wait_cli_child(child, pid)
-                .map_err(|e| format!("wait kimi: {e}"))?;
+            let mut streamed_reply = String::new();
+            let output = if let Some(channel) = on_event.as_ref() {
+                wait_cli_child_lines(child, pid, |line| {
+                    handle_kimi_stream_line(line, channel, &mut streamed_reply);
+                })
+            } else {
+                wait_cli_child(child, pid)
+            }
+            .map_err(|e| format!("wait kimi: {e}"))?;
 
             // Clean up the temporary injection files now that the child is done.
             match injection {
@@ -5319,7 +5585,12 @@ pub async fn kimi_cli_complete(
             // kimi exits 0 even on a fatal MCP-load failure; the error is only in
             // the output. Detect it so we can retry without the gateway.
             let mcp_failed = kimi_output_mcp_failed(&stdout) || kimi_output_mcp_failed(&stderr);
-            Ok((stdout.trim().to_string(), mcp_failed))
+            let reply = if stream_live {
+                streamed_reply.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            Ok((reply, mcp_failed))
         };
 
         let wired = old_mcp_config.is_some()
@@ -5370,13 +5641,56 @@ pub async fn kimi_cli_complete(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+#[tauri::command]
+pub async fn kimi_cli_complete(
+    app: tauri::AppHandle,
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+) -> Result<String, String> {
+    kimi_cli_run(
+        app,
+        system_prompt,
+        user_message,
+        cwd,
+        model,
+        allowed_tools,
+        None,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn kimi_cli_stream(
+    app: tauri::AppHandle,
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    on_event: Channel<ClaudeStreamEvent>,
+) -> Result<String, String> {
+    kimi_cli_run(
+        app,
+        system_prompt,
+        user_message,
+        cwd,
+        model,
+        allowed_tools,
+        Some(on_event),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         append_codex_input_args, cli_exit_err, codex_should_grant_browser,
         is_browser_role_allowlist, kimi_agent_yaml, kimi_config_has_default,
         kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
-        kimi_output_mcp_failed,
+        kimi_output_mcp_failed, parse_kimi_stream_line, ClaudeStreamEvent,
     };
 
     #[test]
@@ -5451,6 +5765,37 @@ mod tests {
         ));
         assert!(!kimi_output_auth_failed(
             "The server responded with a 200 OK."
+        ));
+    }
+
+    #[test]
+    fn kimi_stream_json_emits_thinking_text_tools_and_results() {
+        let mut assembled = String::new();
+        let assistant = r#"{"role":"assistant","content":[{"type":"think","think":"Checking files"},{"type":"text","text":"I found it."}],"tool_calls":[{"id":"call-1","function":{"name":"read_file","arguments":"{\"path\":\"README.md\"}"}}]}"#;
+        let events = parse_kimi_stream_line(assistant, &mut assembled);
+        assert_eq!(assembled, "I found it.");
+        assert!(matches!(
+            &events[0],
+            ClaudeStreamEvent::Thinking { delta } if delta == "Checking files"
+        ));
+        assert!(matches!(
+            &events[1],
+            ClaudeStreamEvent::Text { delta } if delta == "I found it."
+        ));
+        assert!(matches!(
+            &events[2],
+            ClaudeStreamEvent::ToolUse { tool_use_id, name, input }
+                if tool_use_id == "call-1"
+                    && name == "read_file"
+                    && input.contains("README.md")
+        ));
+
+        let tool = r#"{"role":"tool","tool_call_id":"call-1","content":[{"type":"text","text":"file contents"}],"is_error":false}"#;
+        let events = parse_kimi_stream_line(tool, &mut assembled);
+        assert!(matches!(
+            &events[0],
+            ClaudeStreamEvent::ToolResult { tool_use_id, content, is_error }
+                if tool_use_id == "call-1" && content == "file contents" && !is_error
         ));
     }
 

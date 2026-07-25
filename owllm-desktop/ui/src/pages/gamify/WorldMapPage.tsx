@@ -19,8 +19,18 @@ import {
   createFocusTween,
   sampleFocusTween,
   nextPlanetIndex,
+  createOrbitClock,
+  advanceOrbitClock,
+  planetOrbitDistance,
+  planetOrbitHeight,
+  planetRadiusAtScale,
+  sunRadiusAtScale,
+  stepSolarScaleProgress,
+  readSolarScaleMode,
+  saveSolarScaleMode,
   type FocusTween,
   type PlanetSpec,
+  type SolarScaleMode,
 } from "./solarSystem";
 import {
   includeSelfDevice,
@@ -64,6 +74,7 @@ const EARTH_TEXTURES = {
 // wheel zooms to these bounds, while fleet mode leaves extra room for satellites.
 const WORLD_CAMERA_DISTANCE = 11.8;
 const FLEET_CAMERA_DISTANCE = 13.2;
+const SYSTEM_OVERVIEW_DISTANCE = 245;
 const WORLD_MIN_DISTANCE = 9.6;
 const FLEET_MIN_DISTANCE = 10.8;
 
@@ -328,7 +339,7 @@ function useThemeColors() {
   return colors;
 }
 
-function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus, onTextureStatus }: {
+function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus, onTextureStatus, orbitRunning, onOrbitPause, scaleMode, reducedMotion }: {
   nodes: GlobeNode[];
   accent: string;
   selectedId: string | null;
@@ -336,9 +347,13 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
   // Imperative bridge for the planet selector overlay: the scene effect installs
   // a focus function here (same ref pattern as rebuildNodesRef) so selecting a
   // planet never re-runs the scene-building effect.
-  focusApiRef: MutableRefObject<{ focus: (id: string) => void } | null>;
+  focusApiRef: MutableRefObject<{ focus: (id: string) => void; overview: () => void; setScaleMode: (mode: SolarScaleMode) => void } | null>;
   onPlanetFocus: (id: string) => void;
   onTextureStatus: (id: string, status: "loading" | "ready" | "fallback") => void;
+  orbitRunning: boolean;
+  onOrbitPause: () => void;
+  scaleMode: SolarScaleMode;
+  reducedMotion: boolean;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   // Live inputs flow into the animation loop / rebuild through refs so that
@@ -356,11 +371,19 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
   const lastNodeSigRef = useRef<string>("");
   const onPlanetFocusRef = useRef(onPlanetFocus);
   const onTextureStatusRef = useRef(onTextureStatus);
+  const orbitRunningRef = useRef(orbitRunning);
+  const onOrbitPauseRef = useRef(onOrbitPause);
+  const scaleModeRef = useRef(scaleMode);
+  const reducedMotionRef = useRef(reducedMotion);
   nodesRef.current = nodes;
   selectedIdRef.current = selectedId;
   onSelectRef.current = onSelect;
   onPlanetFocusRef.current = onPlanetFocus;
   onTextureStatusRef.current = onTextureStatus;
+  orbitRunningRef.current = orbitRunning;
+  onOrbitPauseRef.current = onOrbitPause;
+  scaleModeRef.current = scaleMode;
+  reducedMotionRef.current = reducedMotion;
 
   // Scene is built ONCE per theme accent. Node data / selection / pointer
   // callbacks are read from refs, never from this effect's dependency array.
@@ -368,10 +391,9 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     const host = hostRef.current;
     if (!host) return;
     const scene = new THREE.Scene();
-    // Far plane covers the outer planets (Neptune sits ~86 units out) plus the
-    // enclosing star shell, so every focused view keeps a starry backdrop.
-    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 520);
-    camera.position.set(0, 0.24, WORLD_CAMERA_DISTANCE);
+    // Far plane covers the outer planets and the expanded star shell.
+    const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 900);
+    camera.position.set(0, 82, SYSTEM_OVERVIEW_DISTANCE);
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: "high-performance" });
     renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
     renderer.setClearColor(0x000000, 0);
@@ -392,8 +414,8 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
     controls.enablePan = false;
-    controls.minDistance = WORLD_MIN_DISTANCE;
-    controls.maxDistance = 17;
+    controls.minDistance = 105;
+    controls.maxDistance = 360;
     controls.autoRotate = true;
     controls.autoRotateSpeed = 0.32;
 
@@ -410,9 +432,13 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     earthSpecular.anisotropy = maxAnisotropy;
     cloudMap.anisotropy = maxAnisotropy;
 
+    // Earth and every world/fleet marker share one anchor so the complete Earth
+    // system travels together when orbital mode advances its solar orbit.
+    const earthAnchor = new THREE.Group();
+    scene.add(earthAnchor);
     const earthGroup = new THREE.Group();
     earthGroup.rotation.z = -0.14;
-    scene.add(earthGroup);
+    earthAnchor.add(earthGroup);
     const globe = new THREE.Mesh(
       new THREE.SphereGeometry(2.35, 128, 64),
       new THREE.MeshPhongMaterial({
@@ -445,12 +471,12 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     earthGroup.add(clouds);
 
     const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(2.47, 96, 64), atmosphereMaterial(accent));
-    scene.add(atmosphere);
+    earthAnchor.add(atmosphere);
     const outerGlow = new THREE.Mesh(
       new THREE.SphereGeometry(2.56, 80, 48),
       new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.035, side: THREE.BackSide, depthWrite: false }),
     );
-    scene.add(outerGlow);
+    earthAnchor.add(outerGlow);
 
     // Starfield.
     const starsGeometry = new THREE.BufferGeometry();
@@ -460,7 +486,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     for (let i = 0; i < starCount; i++) {
       // Star shell encloses the whole solar-system arc, not just the Earth view,
       // so Neptune and Saturn keep a deep-space backdrop when focused.
-      const radius = 120 + (i % 23) * 2.9;
+      const radius = 180 + (i % 23) * 3.9;
       const theta = (i * 2.399963) % (Math.PI * 2);
       const z = 1 - 2 * ((i * 37 % 997) / 997);
       const planar = Math.sqrt(1 - z * z);
@@ -495,11 +521,55 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     scene.add(rimLight);
 
     // ---- Solar System bodies ----------------------------------------------
+    // The Sun is the visual and orbital center. Its emissive surface and two
+    // cheap glow shells avoid post-processing while remaining smooth on
+    // integrated GPUs.
+    const sun = new THREE.Mesh(
+      new THREE.SphereGeometry(5.2, 64, 40),
+      new THREE.MeshBasicMaterial({ color: 0xffc85c }),
+    );
+    sun.userData.solarBody = "sun";
+    scene.add(sun);
+    const sunGlow = new THREE.Mesh(
+      new THREE.SphereGeometry(6.2, 48, 32),
+      new THREE.MeshBasicMaterial({
+        color: 0xffa42c,
+        transparent: true,
+        opacity: 0.18,
+        side: THREE.BackSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+      }),
+    );
+    scene.add(sunGlow);
+    const solarLight = new THREE.PointLight(0xfff2d0, 520, 0, 0.55);
+    scene.add(solarLight);
+
+    // Unit orbit paths are scaled every frame with the same layout math as the
+    // planets. This lets the graphic and true astronomical representations
+    // morph smoothly without rebuilding any WebGL geometry.
+    const solarOrbitLines: { spec: PlanetSpec; line: THREE.LineLoop }[] = [];
+    for (const spec of PLANETS) {
+      const points = Array.from({ length: 192 }, (_, index) => {
+        const bearing = index / 192 * Math.PI * 2;
+        return new THREE.Vector3(Math.cos(bearing), Math.sin(bearing), Math.sin(bearing));
+      });
+      const line = new THREE.LineLoop(
+        new THREE.BufferGeometry().setFromPoints(points),
+        new THREE.LineBasicMaterial({ color: 0x7894bd, transparent: true, opacity: 0.19 }),
+      );
+      scene.add(line);
+      solarOrbitLines.push({ spec, line });
+    }
+
     // Earth keeps its photographic layers above; the other seven planets are
     // built here with a procedural fallback texture (instant loading view) that
     // is upgraded in place when the bundled high-resolution map arrives, and
     // kept permanently if that load errors.
-    const planetMeshes: { spec: PlanetSpec; mesh: THREE.Mesh }[] = [];
+    const planetMeshes: { spec: PlanetSpec; anchor: THREE.Group; mesh: THREE.Mesh }[] = [
+      { spec: findPlanet("earth")!, anchor: earthAnchor, mesh: globe },
+    ];
+    const planetAnchors = new Map<string, THREE.Group>([["earth", earthAnchor]]);
     const planetClickable: THREE.Mesh[] = [];
     const planetTextures: THREE.Texture[] = [];
     for (const spec of PLANETS) {
@@ -522,7 +592,8 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       mesh.userData.planetId = spec.id;
       group.add(mesh);
       planetClickable.push(mesh);
-      planetMeshes.push({ spec, mesh });
+      planetMeshes.push({ spec, anchor: group, mesh });
+      planetAnchors.set(spec.id, group);
 
       if (spec.ring) {
         const ring = spec.ring;
@@ -576,27 +647,81 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     // per-planet wheel-zoom bounds.
     let focusTween: FocusTween | null = null;
     let focusTweenStart = 0;
-    const focusPlanet = (id: string) => {
+    let orbitClock = createOrbitClock(performance.now());
+    let scaleProgress = scaleModeRef.current === "real" ? 1 : 0;
+    let scaleTarget = scaleProgress;
+    let lastScaleFrame = performance.now();
+    let activeFocusId: string | null = null;
+    const focusPlanet = (id: string, requestedScale = scaleTarget) => {
       const spec = findPlanet(id);
       if (!spec) return;
+      // Focusing freezes the orbital clock at the body's current position. The
+      // user can resume from the selector, which returns to the system view.
+      orbitRunningRef.current = false;
+      onOrbitPauseRef.current?.();
       const earthDistance = hasFleet ? FLEET_CAMERA_DISTANCE : WORLD_CAMERA_DISTANCE;
       const earthMin = hasFleet ? FLEET_MIN_DISTANCE : WORLD_MIN_DISTANCE;
-      const planetPos = spec.id === "earth" ? { x: 0, y: 0, z: 0 } : planetWorldPosition(spec);
+      const planetPos = planetWorldPosition(spec, orbitClock.elapsedSeconds, requestedScale);
       const current = {
         target: { x: controls.target.x, y: controls.target.y, z: controls.target.z },
         position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
       };
-      const end = focusEndState(current, planetPos, focusDistanceFor(spec, earthDistance));
-      focusTween = createFocusTween(current, end);
-      focusTweenStart = performance.now();
-      const bounds = focusBoundsFor(spec, { min: earthMin, max: 17 }, earthDistance);
+      const end = focusEndState(current, planetPos, focusDistanceFor(spec, earthDistance, requestedScale));
+      const bounds = focusBoundsFor(spec, { min: earthMin, max: 17 }, earthDistance, requestedScale);
       controls.minDistance = bounds.min;
       controls.maxDistance = bounds.max;
-      // The tween owns the camera; user orbit/zoom resumes on arrival.
-      controls.enabled = false;
+      camera.near = requestedScale > 0.5
+        ? Math.max(0.000_001, planetRadiusAtScale(spec, requestedScale) * 0.04)
+        : 0.1;
+      camera.updateProjectionMatrix();
+      if (reducedMotionRef.current) {
+        focusTween = null;
+        controls.target.set(end.target.x, end.target.y, end.target.z);
+        camera.position.set(end.position.x, end.position.y, end.position.z);
+        camera.lookAt(controls.target);
+        controls.enabled = true;
+      } else {
+        focusTween = createFocusTween(current, end);
+        focusTweenStart = performance.now();
+        // The tween owns the camera; user orbit/zoom resumes on arrival.
+        controls.enabled = false;
+      }
+      activeFocusId = id;
       onPlanetFocusRef.current?.(id);
     };
-    focusApiRef.current = { focus: focusPlanet };
+    const focusOverview = () => {
+      const current = {
+        target: { x: controls.target.x, y: controls.target.y, z: controls.target.z },
+        position: { x: camera.position.x, y: camera.position.y, z: camera.position.z },
+      };
+      const end = {
+        target: { x: 0, y: 0, z: 0 },
+        position: { x: 0, y: 82, z: SYSTEM_OVERVIEW_DISTANCE },
+      };
+      controls.minDistance = 105;
+      controls.maxDistance = 360;
+      camera.near = 0.1;
+      camera.updateProjectionMatrix();
+      if (reducedMotionRef.current) {
+        focusTween = null;
+        controls.target.set(0, 0, 0);
+        camera.position.set(0, 82, SYSTEM_OVERVIEW_DISTANCE);
+        camera.lookAt(controls.target);
+        controls.enabled = true;
+      } else {
+        focusTween = createFocusTween(current, end);
+        focusTweenStart = performance.now();
+        controls.enabled = false;
+      }
+      activeFocusId = null;
+    };
+    const setScaleMode = (mode: SolarScaleMode) => {
+      scaleTarget = mode === "real" ? 1 : 0;
+      // Keep a selected planet centered while its physical size and orbit
+      // smoothly change by flying to its final position at the same time.
+      if (activeFocusId) focusPlanet(activeFocusId, scaleTarget);
+    };
+    focusApiRef.current = { focus: focusPlanet, overview: focusOverview, setScaleMode };
 
     // Node layer — rebuilt in place (arrays are cleared + repopulated, never
     // reassigned) so the animation loop and click handler keep working across
@@ -608,7 +733,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     let hasFleet = false;
 
     const disposeNodeObject = (object: any) => {
-      scene.remove(object);
+      object.parent?.remove(object);
       object.geometry?.dispose?.();
       const material = object.material;
       if (Array.isArray(material)) material.forEach((m: any) => { m.map?.dispose?.(); m.dispose?.(); });
@@ -634,7 +759,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
             orbitPosition({ ...orbit, phase: i / 192 * Math.PI * 2, speed: 0 }, 0),
           ));
           const ring = new THREE.LineLoop(ringGeometry, new THREE.LineBasicMaterial({ color, transparent: true, opacity: node.online ? 0.34 : 0.14 }));
-          scene.add(ring);
+          earthAnchor.add(ring);
           orbitRings.push({ line: ring, node });
         }
 
@@ -649,7 +774,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
         });
         const mesh = new THREE.Mesh(geometry, material);
         mesh.userData.node = node;
-        scene.add(mesh);
+        earthAnchor.add(mesh);
         clickable.push(mesh);
 
         const halo = new THREE.Mesh(
@@ -657,11 +782,11 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
           new THREE.MeshBasicMaterial({ color, transparent: true, opacity: node.online ? 0.30 : 0.09, depthWrite: false, blending: THREE.AdditiveBlending }),
         );
         halo.userData.offset = index * 0.63;
-        scene.add(halo);
+        earthAnchor.add(halo);
         pulseMeshes.push(halo);
 
         const label = node.kind === "fleet" ? satelliteLabel(node.label, new THREE.Color(color).getStyle()) : undefined;
-        if (label) scene.add(label);
+        if (label) earthAnchor.add(label);
         nodeMeshes.push({ mesh, halo, label, node, baseScale });
       });
 
@@ -671,14 +796,23 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       const nextHasFleet = list.some((node) => node.kind === "fleet");
       if (nextHasFleet !== hasFleet) {
         hasFleet = nextHasFleet;
-        controls.minDistance = hasFleet ? FLEET_MIN_DISTANCE : WORLD_MIN_DISTANCE;
-        camera.position.set(0, 0.24, hasFleet ? FLEET_CAMERA_DISTANCE : WORLD_CAMERA_DISTANCE);
+        const earthSpec = findPlanet("earth")!;
+        const earthDistance = hasFleet ? FLEET_CAMERA_DISTANCE : WORLD_CAMERA_DISTANCE;
+        const earthMin = hasFleet ? FLEET_MIN_DISTANCE : WORLD_MIN_DISTANCE;
+        const earthPosition = planetWorldPosition(earthSpec, orbitClock.elapsedSeconds, scaleProgress);
+        const focusDistance = focusDistanceFor(earthSpec, earthDistance, scaleProgress);
+        const bounds = focusBoundsFor(earthSpec, { min: earthMin, max: 17 }, earthDistance, scaleProgress);
+        controls.minDistance = bounds.min;
+        camera.position.set(earthPosition.x, earthPosition.y + focusDistance * 0.02, earthPosition.z + focusDistance);
         // Mode reframing is an Earth view: cancel any planet focus in flight and
         // bring the selector back to Earth.
         focusTween = null;
+        orbitRunningRef.current = false;
+        onOrbitPauseRef.current?.();
         controls.enabled = true;
-        controls.target.set(0, 0, 0);
-        controls.maxDistance = 17;
+        controls.target.set(earthPosition.x, earthPosition.y, earthPosition.z);
+        controls.maxDistance = bounds.max;
+        activeFocusId = "earth";
         onPlanetFocusRef.current?.("earth");
       }
     };
@@ -724,6 +858,30 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     const started = performance.now();
     const animate = (now: number) => {
       const elapsed = (now - started) / 1000;
+      const scaleDelta = Math.min(0.1, Math.max(0, (now - lastScaleFrame) / 1000));
+      lastScaleFrame = now;
+      scaleProgress = stepSolarScaleProgress(
+        scaleProgress,
+        scaleTarget,
+        scaleDelta,
+        reducedMotionRef.current,
+      );
+      orbitClock = advanceOrbitClock(orbitClock, now, orbitRunningRef.current);
+      controls.autoRotate = orbitRunningRef.current;
+      planetMeshes.forEach(({ spec, anchor }) => {
+        const position = planetWorldPosition(spec, orbitClock.elapsedSeconds, scaleProgress);
+        anchor.position.set(position.x, position.y, position.z);
+        anchor.scale.setScalar(planetRadiusAtScale(spec, scaleProgress) / spec.radius);
+      });
+      solarOrbitLines.forEach(({ spec, line }) => {
+        const distance = planetOrbitDistance(spec, scaleProgress);
+        line.scale.set(distance, planetOrbitHeight(spec, scaleProgress), distance);
+      });
+      sun.rotation.y = elapsed * 0.035;
+      const sunScale = sunRadiusAtScale(scaleProgress) / 5.2;
+      sun.scale.setScalar(sunScale);
+      const glowPulse = 1 + Math.sin(elapsed * 1.4) * 0.025;
+      sunGlow.scale.setScalar(sunScale * glowPulse);
       globe.rotation.y = elapsed * 0.018 - 0.34;
       clouds.rotation.y = elapsed * 0.024 - 0.34;
       atmosphere.rotation.y = elapsed * 0.018;
@@ -736,7 +894,9 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       sunLight.position.copy(sunLocal).multiplyScalar(10);
 
       // Planets spin on their own axes (Venus/Uranus retrograde via sign).
-      planetMeshes.forEach(({ spec, mesh }) => { mesh.rotation.y = elapsed * spec.spin; });
+      planetMeshes.forEach(({ spec, mesh }) => {
+        if (spec.id !== "earth") mesh.rotation.y = elapsed * spec.spin;
+      });
 
       // Smooth focus flight: while a tween is active it owns the camera and
       // target; OrbitControls resumes (with the new per-planet zoom clamps)
@@ -805,6 +965,13 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     };
   }, [accent]);
 
+  // Scale changes stay inside the live scene. They update only the animation
+  // target and, when focused, schedule a new camera flight to that same planet;
+  // the renderer and high-resolution textures are never recreated.
+  useEffect(() => {
+    focusApiRef.current?.setScaleMode(scaleMode);
+  }, [scaleMode]);
+
   // Node-only rebuild when the node set actually changes (device online/offline,
   // added/removed, mode switch). Cheap: touches just the marker/orbit meshes,
   // leaving the renderer, Earth textures, starfield, and camera view intact.
@@ -845,14 +1012,32 @@ export default function WorldMapPage() {
   // Solar System explorer: which planet the camera is focused on, the imperative
   // focus bridge into the Globe scene, and per-planet texture health for the
   // selector's loading/fallback affordances.
-  const [focusedPlanet, setFocusedPlanet] = useState("earth");
+  const [focusedPlanet, setFocusedPlanet] = useState<string | null>(null);
+  const [reducedMotion, setReducedMotion] = useState(() =>
+    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+  const [orbitRunning, setOrbitRunning] = useState(() =>
+    !(typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches)
+  );
+  const [scaleMode, setScaleMode] = useState<SolarScaleMode>(() =>
+    readSolarScaleMode(typeof window === "undefined" ? undefined : window.localStorage)
+  );
   const [textureStatus, setTextureStatus] = useState<Record<string, "loading" | "ready" | "fallback">>({});
-  const focusApiRef = useRef<{ focus: (id: string) => void } | null>(null);
+  const focusApiRef = useRef<{ focus: (id: string) => void; overview: () => void; setScaleMode: (mode: SolarScaleMode) => void } | null>(null);
   const planetButtonRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
   const focusPlanet = (id: string) => {
+    setOrbitRunning(false);
     setFocusedPlanet(id);
     focusApiRef.current?.focus(id);
+  };
+
+  const toggleOrbits = () => {
+    setOrbitRunning((running) => !running);
+  };
+
+  const toggleScaleMode = () => {
+    setScaleMode((current) => current === "real" ? "graphic" : "real");
   };
 
   // Keyboard-accessible selector: arrows move through solar order (wrapping),
@@ -873,6 +1058,27 @@ export default function WorldMapPage() {
   const onTextureStatus = (id: string, status: "loading" | "ready" | "fallback") => {
     setTextureStatus((current) => (current[id] === status ? current : { ...current, [id]: status }));
   };
+
+  useEffect(() => {
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const onChange = () => {
+      setReducedMotion(media.matches);
+      if (media.matches) setOrbitRunning(false);
+    };
+    onChange();
+    media.addEventListener?.("change", onChange);
+    return () => media.removeEventListener?.("change", onChange);
+  }, []);
+
+  useEffect(() => {
+    if (!orbitRunning) return;
+    setFocusedPlanet(null);
+    focusApiRef.current?.overview();
+  }, [orbitRunning]);
+
+  useEffect(() => {
+    saveSolarScaleMode(scaleMode, window.localStorage);
+  }, [scaleMode]);
 
   // Presence markers and fleet satellites all live around Earth: selecting one
   // while parked at another planet flies the camera home first.
@@ -1011,46 +1217,104 @@ export default function WorldMapPage() {
               focusApiRef={focusApiRef}
               onPlanetFocus={setFocusedPlanet}
               onTextureStatus={onTextureStatus}
+              orbitRunning={orbitRunning}
+              onOrbitPause={() => setOrbitRunning(false)}
+              scaleMode={scaleMode}
+              reducedMotion={reducedMotion}
             />
             <div
-              data-ui="WorldMap:planets"
-              role="listbox"
-              aria-label={t("Solar System")}
-              aria-activedescendant={`world-map-planet-${focusedPlanet}`}
-              tabIndex={0}
-              onKeyDown={onSelectorKeyDown}
+              data-ui="WorldMap:solar-controls"
               style={{
-                position: "absolute", top: 13, left: 13, display: "flex", flexDirection: "column", gap: 3,
-                padding: 7, borderRadius: 13, background: "rgba(2,6,16,.80)", border: "1px solid rgba(var(--accent-rgb),.30)",
-                backdropFilter: "blur(10px)", maxHeight: "calc(100% - 26px)", overflowY: "auto",
+                position: "absolute", zIndex: 2, top: 13, bottom: 13, left: 13, display: "flex", alignItems: "flex-start", gap: 8,
+                maxWidth: "calc(100% - 26px)",
               }}
             >
-              <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.7, textTransform: "uppercase", color: "var(--accent-ink)", padding: "2px 7px 4px" }}>{t("Solar System")}</div>
-              {PLANETS.map((planet, index) => (
+              <div
+                data-ui="WorldMap:planets"
+                role="listbox"
+                aria-label={t("Solar System")}
+                aria-activedescendant={focusedPlanet ? `world-map-planet-${focusedPlanet}` : undefined}
+                tabIndex={0}
+                onKeyDown={onSelectorKeyDown}
+                style={{
+                  display: "flex", flexDirection: "column", gap: 3, flexShrink: 0,
+                  padding: 7, borderRadius: 13, background: "rgba(2,6,16,.80)", border: "1px solid rgba(var(--accent-rgb),.30)",
+                  backdropFilter: "blur(10px)", maxHeight: "100%", overflowY: "auto",
+                }}
+              >
+                <div style={{ fontSize: 10, fontWeight: 800, letterSpacing: 1.7, textTransform: "uppercase", color: "var(--accent-ink)", padding: "2px 7px 4px" }}>{t("Solar System")}</div>
                 <button
-                  key={planet.id}
-                  id={`world-map-planet-${planet.id}`}
-                  role="option"
-                  aria-selected={focusedPlanet === planet.id}
-                  ref={(element) => { planetButtonRefs.current[index] = element; }}
-                  onClick={() => focusPlanet(planet.id)}
-                  title={textureStatus[planet.id] === "fallback" ? t("Simplified view (texture failed to load)") : undefined}
+                  type="button"
+                  aria-pressed={orbitRunning}
+                  onClick={toggleOrbits}
+                  title={reducedMotion ? t("Motion is stopped by your reduced-motion setting") : undefined}
                   style={{
-                    display: "flex", alignItems: "center", gap: 8, minWidth: 122, padding: "5px 9px", borderRadius: 9,
-                    cursor: "pointer", textAlign: "left", fontSize: 12.5, fontWeight: 700,
-                    border: focusedPlanet === planet.id ? "1px solid var(--accent-strong)" : "1px solid transparent",
-                    background: focusedPlanet === planet.id ? "rgba(var(--accent-rgb),.18)" : "transparent",
-                    color: focusedPlanet === planet.id ? "var(--accent-ink)" : "#dce6f6",
+                    minHeight: 32, margin: "0 2px 3px", padding: "5px 9px", borderRadius: 9,
+                    cursor: "pointer", fontSize: 11.5, fontWeight: 800,
+                    border: "1px solid rgba(var(--accent-rgb),.38)",
+                    background: orbitRunning ? "rgba(var(--accent-rgb),.22)" : "rgba(255,255,255,.05)",
+                    color: "var(--accent-ink)",
                   }}
                 >
-                  <span aria-hidden style={{ width: 9, height: 9, borderRadius: "50%", flexShrink: 0, background: planet.fallback.base, boxShadow: `0 0 6px ${planet.fallback.base}` }} />
-                  {t(planet.name)}
-                  {textureStatus[planet.id] === "loading" && <span aria-hidden style={{ marginLeft: "auto", fontSize: 10, color: "#93a5c4" }}>…</span>}
-                  {textureStatus[planet.id] === "fallback" && <span aria-hidden style={{ marginLeft: "auto", fontSize: 10, color: "#e0b45c" }}>◌</span>}
+                  {orbitRunning ? `Ⅱ ${t("Pause orbits")}` : `▶ ${t("Resume orbits")}`}
                 </button>
-              ))}
+                {PLANETS.map((planet, index) => (
+                  <button
+                    key={planet.id}
+                    id={`world-map-planet-${planet.id}`}
+                    role="option"
+                    aria-selected={focusedPlanet === planet.id}
+                    ref={(element) => { planetButtonRefs.current[index] = element; }}
+                    onClick={() => focusPlanet(planet.id)}
+                    title={textureStatus[planet.id] === "fallback" ? t("Simplified view (texture failed to load)") : undefined}
+                    style={{
+                      display: "flex", alignItems: "center", gap: 8, minWidth: 122, padding: "5px 9px", borderRadius: 9,
+                      cursor: "pointer", textAlign: "left", fontSize: 12.5, fontWeight: 700,
+                      border: focusedPlanet === planet.id ? "1px solid var(--accent-strong)" : "1px solid transparent",
+                      background: focusedPlanet === planet.id ? "rgba(var(--accent-rgb),.18)" : "transparent",
+                      color: focusedPlanet === planet.id ? "var(--accent-ink)" : "#dce6f6",
+                    }}
+                  >
+                    <span aria-hidden style={{ width: 9, height: 9, borderRadius: "50%", flexShrink: 0, background: planet.fallback.base, boxShadow: `0 0 6px ${planet.fallback.base}` }} />
+                    {t(planet.name)}
+                    {textureStatus[planet.id] === "loading" && <span aria-hidden style={{ marginLeft: "auto", fontSize: 10, color: "#93a5c4" }}>…</span>}
+                    {textureStatus[planet.id] === "fallback" && <span aria-hidden style={{ marginLeft: "auto", fontSize: 10, color: "#e0b45c" }}>◌</span>}
+                  </button>
+                ))}
+              </div>
+              <div style={{ width: 168, display: "flex", flexDirection: "column", gap: 6 }}>
+                <button
+                  type="button"
+                  data-ui="WorldMap:real-scale"
+                  aria-label={t("Real size")}
+                  aria-pressed={scaleMode === "real"}
+                  onClick={toggleScaleMode}
+                  title={scaleMode === "real" ? t("Return to the graphic representation") : t("Use true relative sizes and orbital distances")}
+                  style={{
+                    minHeight: 38, padding: "7px 11px", borderRadius: 11, cursor: "pointer",
+                    border: scaleMode === "real" ? "1px solid var(--accent-strong)" : "1px solid rgba(var(--accent-rgb),.38)",
+                    background: scaleMode === "real" ? "rgba(var(--accent-rgb),.24)" : "rgba(2,6,16,.80)",
+                    color: scaleMode === "real" ? "var(--accent-ink)" : "#dce6f6",
+                    backdropFilter: "blur(10px)", fontSize: 12, fontWeight: 850,
+                  }}
+                >
+                  ⚖ {t("Real size")}
+                </button>
+                <div
+                  role="status"
+                  aria-live="polite"
+                  style={{
+                    padding: "7px 9px", borderRadius: 10, background: "rgba(2,6,16,.76)",
+                    border: "1px solid rgba(var(--accent-rgb),.24)", color: "#b9c8df", fontSize: 10.5, lineHeight: 1.35,
+                  }}
+                >
+                  {scaleMode === "real"
+                    ? t("True scale: planets are tiny and far apart. Use the selector to focus.")
+                    : t("Graphic scale keeps every planet readable.")}
+                </div>
+              </div>
             </div>
-            <div style={{ position: "absolute", top: 13, right: 13, display: "flex", gap: 8, pointerEvents: "none", flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "58%" }}>
+            <div style={{ position: "absolute", zIndex: 2, top: 13, right: 13, display: "flex", gap: 8, pointerEvents: "none", flexWrap: "wrap", justifyContent: "flex-end", maxWidth: "58%" }}>
               <span style={{ padding: "5px 9px", borderRadius: 999, background: "rgba(2,6,16,.72)", border: "1px solid rgba(var(--accent-rgb),.28)", color: "var(--fg-strong)", fontSize: 11.5 }}>
                 <b style={{ color: "var(--accent-ink)" }}>{onlineCount}</b> {mode === "world" ? t("nodes online") : t("devices online")}
               </span>

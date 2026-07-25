@@ -18,7 +18,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFailed, markNotebookStepFinished } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -71,6 +71,7 @@ import {
   streamLocalChat,
   streamOpenAiApiWithTools,
   runCodexCliStream,
+  runKimiCliStream,
   makeResponsiveHandlers,
   makeUiYield,
   ensureCliWarm,
@@ -7941,15 +7942,15 @@ async function streamMoonshot(
     // real auth/network text, so withCliAuthRetry can recognize and retry it.
     // allowedTools gates the browser gateway to the Browser role only (a normal
     // Kimi agent must not wire it — kimi fatally aborts if it can't connect).
-    const reply = await withCliAuthRetry("kimi_cli", signal, () => invoke<string>("kimi_cli_complete", {
+    const reply = await withCliAuthRetry("kimi_cli", signal, () => runKimiCliStream({
       systemPrompt,
       userMessage: composed,
       cwd: projectCwd ?? null,
       model: modelId,
-      allowedTools: allowedTools ?? null,
+      allowedTools,
+      onDelta,
+      onThought: onThought ?? (() => {}),
     }), projectCwd);
-    if (reply) onDelta(reply);
-    // No thought stream for --print mode; CLI emits a single blob.
     return reply;
   }
   // API path — OpenAI-compatible streaming.
@@ -10177,6 +10178,7 @@ export function AgentsPage({
     });
     const singleRunStartedAt = Date.now();
     let singleRunCompletedCleanly = false;
+    let singleRunFailureReason = "The run ended with an error.";
     supSendBusyRef.current = true;
     setSupSendBusy(true);
     // Fresh abort controller for THIS run. Any owllm:dispatch-abort
@@ -10463,6 +10465,7 @@ export function AgentsPage({
           : "(the model returned an empty response — no answer was produced)";
         setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg, ts: Date.now(), seq: nextSeq() }]);
         appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
+        singleRunFailureReason = emptyMsg;
       }
       singleRunCompletedCleanly = Boolean(cleanReply || cleanReturned);
     } catch (e: any) {
@@ -10471,8 +10474,9 @@ export function AgentsPage({
       // it never reached the chat. Now both supChat (left/main) AND
       // the agent log (right pane) get the error in red.
       console.error("[onSupSend] streamChatCompletion threw", String(e?.message ?? e));
+      singleRunFailureReason = cleanAgentError(e);
       const errMsg: GoalMsg = {
-        role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}`,
+        role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${singleRunFailureReason}`,
         ts: Date.now(), seq: nextSeq(),
         // Attach the one-click WSL-restart recovery when it's a network failure.
         action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
@@ -10509,7 +10513,11 @@ export function AgentsPage({
       }
       const now = Date.now();
       if (notebookStepRef.current) {
-        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        if (singleRunCompletedCleanly) {
+          markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        } else {
+          markNotebookStepFailed(selectedProjectId, notebookStepRef.current, singleRunFailureReason, now);
+        }
         notebookStepRef.current = null;
       }
       setSupChat(prev => [...prev, { role: "system", color: "var(--fg-muted)", text: runTimingFooter(singleRunStartedAt, now), ts: now, seq: nextSeq() }]);
@@ -10517,7 +10525,7 @@ export function AgentsPage({
       // queue could only process its first item. Continue from every clean run
       // path, not only dispatchGoal's team/solo branches.
       if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();
-      else notifyAutoFeedPaused("the run ended with an error");
+      else notifyAutoFeedPaused(singleRunFailureReason);
     }
   };
   onSupSendRef.current = onSupSend; // the notebook helpers (declared earlier) dispatch through this
@@ -12769,7 +12777,7 @@ export function AgentsPage({
           role: "system", color: "#ff8c8c", text: `⚠ ${clean}`,
           action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
         });
-        notebookPauseReason = "the run ended with an error";
+        notebookPauseReason = clean;
       }
       setPhase("idle");
     } finally {
@@ -12781,11 +12789,19 @@ export function AgentsPage({
       // notebook steps that were drained and processed as mid-run steers.
       const now = Date.now();
       if (notebookStepRef.current) {
-        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        if (notebookRunCompletedCleanly) {
+          markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        } else {
+          markNotebookStepFailed(selectedProjectId, notebookStepRef.current, notebookPauseReason, now);
+        }
         notebookStepRef.current = null;
       }
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
-        markNotebookStepFinished(selectedProjectId, sid, now);
+        if (notebookRunCompletedCleanly) {
+          markNotebookStepFinished(selectedProjectId, sid, now);
+        } else {
+          markNotebookStepFailed(selectedProjectId, sid, notebookPauseReason, now);
+        }
       }
       // Busy/reentrancy flags are clear now, so every exit path makes one
       // deterministic Notebook decision. A clean run advances the next card;

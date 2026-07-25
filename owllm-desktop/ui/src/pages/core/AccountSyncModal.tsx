@@ -244,6 +244,8 @@ export default function AccountSyncModal() {
     try {
       await githubDisconnect();
       setStatus({ connected: false, login: null });
+      setVault(null);
+      setVaultMsg("Signed out. Remote sync is stopped; local projects and chats remain available offline.");
     } catch (e) {
       setErr(String(e));
     } finally {

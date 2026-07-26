@@ -84,8 +84,9 @@ try {
   check("Fleet liveness accepts fresh direct frames", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-23T11:58:00.000Z", endpoint: null }, now) === true);
   check("Fleet liveness accepts fresh synced dialable metadata", liveness.isDeviceOnline({ is_self: false, last_seen: null, published_at: "2026-07-23T11:59:00.000Z", endpoint: "192.168.219.102:42445" }, now) === true);
   check("Fleet liveness accepts fresh synced P2P metadata", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", published_at: "2026-07-23T11:59:00.000Z", endpoint: null, p2p_node_id: "node" }, now) === true);
-  check("Fleet liveness keeps legacy dialable records compatible", liveness.isDeviceOnline({ is_self: false, last_seen: null, endpoint: "192.168.219.102:42445" }, now) === true);
+  check("Fleet liveness rejects heartbeat-less records (no immortal-online legacy grace)", liveness.isDeviceOnline({ is_self: false, last_seen: null, endpoint: "192.168.219.102:42445" }, now) === false);
   check("Fleet liveness rejects stale synced heartbeat records", liveness.isDeviceOnline({ is_self: false, last_seen: null, published_at: "2026-07-22T11:00:00.000Z", endpoint: "192.168.219.102:42445" }, now) === false);
+  check("Heartbeat cadence beats twice per liveness window", liveness.REMOTE_DEVICE_HEARTBEAT_MS * 2 <= liveness.REMOTE_DEVICE_RECENT_MS);
   check("Fleet liveness rejects stale records with no dial path", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", endpoint: null, endpoints: [], p2p_node_id: null }, now) === false);
 
   const sanitized = presence.sanitizePresenceNodes([
@@ -239,6 +240,7 @@ try {
   check("My Fleet and Devices share one online rule", page.includes('from "../advanced/deviceLiveness"') && page.includes("isDeviceOnline(device)") && read("pages/advanced/DevicesPage.tsx").includes('from "./deviceLiveness"'));
   check("My Fleet refreshes immediately after device vault sync", page.includes('window.addEventListener("owllm:devices:refresh"') && page.includes('window.removeEventListener("owllm:devices:refresh"'));
   check("Device vault records carry a publication heartbeat", read("../../src-tauri/src/remote_devices/protocol.rs").includes("published_at") && read("../../src-tauri/src/remote_devices/mod.rs").includes("rec.published_at = Some(now_rfc3339())"));
+  check("Running apps republish the heartbeat on an interval", vaultSync.includes("REMOTE_DEVICE_HEARTBEAT_MS") && vaultSync.includes("void syncDevicesNow(); }, REMOTE_DEVICE_HEARTBEAT_MS"));
   check("My Fleet always includes the current installation", page.includes("fleetWithSelf(identity, devices)") && page.includes("is_self: true"));
   check("Fleet satellites have aligned orbit paths and labels", page.includes("orbitPosition({ ...orbit") && page.includes("satelliteLabel(node.label"));
   for (const asset of ["earth-day.jpg", "earth-normal.jpg", "earth-specular.jpg", "earth-clouds.png"]) {
@@ -262,6 +264,11 @@ try {
   // The anonymous-counting note contains commas in its text, so verify locale
   // coverage by its English key plus the last-column (pt) translation.
   check("Anonymous-counting note is translated (en + pt endpoints present)", actions.includes("You are counted anonymously") && actions.includes("Você é contado anonimamente"));
+  // Server list shows the nation flag instead of the bare 2-letter code.
+  check("Region labels convert the country code to a flag", page.includes("regionWithFlag(node.region)") && page.includes("0x1f1e6 + ch.charCodeAt(0) - 65"));
+  check("Flag font is bundled for Windows (no native flag emoji)", fs.statSync(path.join(UI, "../public/fonts/TwemojiCountryFlags.woff2")).size > 50_000);
+  const styles = read("styles.css");
+  check("Flag font is registered flag-codepoints-only and first in the stack", styles.includes('font-family: "Twemoji Country Flags"') && styles.includes("unicode-range: U+1F1E6-1F1FF") && styles.includes('font-family: "Twemoji Country Flags", "Segoe UI"'));
 
   for (const row of checks) console.log(`  PASS ${row.name}`);
   console.log(`world map verification: ${checks.length}/${checks.length} passed`);

@@ -107,6 +107,20 @@ function hashNumber(value: string): number {
   return hash >>> 0;
 }
 
+// Presence regions arrive as "US · CA" (ISO country code + coarse region).
+// Render the country as its flag; the flag glyphs come from the bundled
+// Twemoji Country Flags font because Windows has no native flag emoji.
+function countryCodeToFlag(code: string): string {
+  return String.fromCodePoint(...[...code.toUpperCase()].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
+}
+
+function regionWithFlag(region: string): string {
+  const match = /^([A-Za-z]{2})(?:\s*·\s*(.+))?$/.exec(region.trim());
+  if (!match) return region;
+  const flag = countryCodeToFlag(match[1]);
+  return match[2] ? `${flag} · ${match[2]}` : flag;
+}
+
 function fleetOrbit(id: string): OrbitParams {
   const h = hashNumber(id);
   const h2 = hashNumber(`${id}:orbit`);
@@ -1160,7 +1174,7 @@ export default function WorldMapPage() {
   const nodes = useMemo<GlobeNode[]>(() => mode === "world"
     ? publicNodes.map((node) => ({
         id: node.id,
-        label: node.region || t("Anonymous OWLLM node"),
+        label: node.region ? regionWithFlag(node.region) : t("Anonymous OWLLM node"),
         detail: node.online ? t("Approximate server region") : t("Recorded · offline"),
         latitude: node.latitude,
         longitude: node.longitude,

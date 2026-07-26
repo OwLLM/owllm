@@ -42,12 +42,14 @@ const js = ts.transpileModule(rawSrc, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
 }).outputText
   .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./_tauri.js")')
-  .replace(/require\("\.\.\/pages\/agentic\/github"\)/g, 'require("./_github.js")');
+  .replace(/require\("\.\.\/pages\/agentic\/github"\)/g, 'require("./_github.js")')
+  .replace(/require\("\.\.\/pages\/advanced\/deviceLiveness"\)/g, 'require("./_deviceLiveness.js")');
 
 const TMP = fs.mkdtempSync(path.join(process.env.TEMP || process.env.TMPDIR || "/tmp", "nbsync-"));
 fs.writeFileSync(path.join(TMP, "vaultSync.js"), js);
 fs.writeFileSync(path.join(TMP, "_tauri.js"), "module.exports = { invoke: async () => null };");
 fs.writeFileSync(path.join(TMP, "_github.js"), "module.exports = { vaultEnsure: async () => ({}), vaultStatus: async () => ({ connected: false }) };");
+fs.writeFileSync(path.join(TMP, "_deviceLiveness.js"), "module.exports = { REMOTE_DEVICE_HEARTBEAT_MS: 150000 };");
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 
 const reqTmp = createRequire(path.join(TMP, "vaultSync.js"));

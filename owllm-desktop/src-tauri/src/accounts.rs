@@ -2870,6 +2870,28 @@ pub async fn codex_cli_complete(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Shell snippet that clears npm's interrupted-install debris BEFORE a global
+/// install, so a half-finished upgrade can't wedge every later one.
+///
+/// npm stages a global package by renaming the old directory to a hidden sibling
+/// (`@openai/.codex-vdnmINeK`). If the install dies midway — app closed, run
+/// cancelled, WSL stopped, network drop — that temp directory survives, and every
+/// subsequent `npm install -g` fails **permanently** with:
+///   `ENOTEMPTY: directory not empty, rename '.../@openai/codex' -> '.../@openai/.codex-XXXXXX'`
+/// (reported live: `wsl exited 217`, which paused the agentic Notebook queue). npm
+/// never self-heals this; the user had to know to delete the folder by hand.
+///
+/// We remove only npm's own staging leftovers: hidden `.<name>-<random>` dirs
+/// directly inside the global node_modules root or a scope dir. Real packages are
+/// never dot-prefixed, so published CLIs cannot match. `_cacache` and `.package-lock.json`
+/// are explicitly preserved. Best-effort — failures never abort the install.
+pub(crate) const NPM_CLEAN_STALE_SNIPPET: &str = "\
+for _r in /usr/local/lib/node_modules /usr/lib/node_modules; do \
+  [ -d \"$_r\" ] || continue; \
+  find \"$_r\" -mindepth 1 -maxdepth 2 -type d -name '.*-*' \
+    ! -name '_cacache' ! -name '.package-lock.json' -exec rm -rf {} + 2>/dev/null; \
+done; true; ";
+
 /// Ensure the selected subscription CLI exists where a project will execute.
 ///
 /// A Windows Accounts card verifies the host binary, while an isolated project
@@ -2887,6 +2909,8 @@ pub async fn accounts_prepare_cli_for_cwd(
             return Ok(false);
         };
         let (binary, install) = match backend.as_str() {
+            // NPM_CLEAN_STALE_SNIPPET runs first so a previously interrupted
+            // install can't wedge this one with ENOTEMPTY (see the const's docs).
             "claude_cli" => (
                 "claude",
                 "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
@@ -2925,9 +2949,11 @@ pub async fn accounts_prepare_cli_for_cwd(
             "set -e; export DEBIAN_FRONTEND=noninteractive; \
              export PATH=/usr/local/bin:/usr/bin:/bin; \
              if command -v {binary} >/dev/null 2>&1; then echo OWLLM_CLI_READY; exit 0; fi; \
+             {clean} \
              {install}; \
              command -v {binary} >/dev/null 2>&1 || {{ echo '{binary} install did not produce an executable' >&2; exit 1; }}; \
-             echo OWLLM_CLI_INSTALLED"
+             echo OWLLM_CLI_INSTALLED",
+            clean = NPM_CLEAN_STALE_SNIPPET,
         );
         let out = tokio::task::spawn_blocking(move || {
             crate::wsl::run_in_distro_script_user(&distro, Some("root"), &script)
@@ -2958,14 +2984,19 @@ pub async fn accounts_prepare_cli_for_cwd(
 pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, String> {
     #[cfg(windows)]
     if let Some((distro, _)) = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc) {
+        // Clear npm's interrupted-install debris first: this exact command was the
+        // one reported failing with `wsl exited 217 … ENOTEMPTY: rename
+        // '@openai/codex' -> '@openai/.codex-XXXXXX'`, which paused the agentic
+        // Notebook queue and stayed broken until the folder was deleted by hand.
+        let script = format!(
+            "set -e; command -v npm >/dev/null 2>&1 || {{ echo 'npm is missing in WSL'; exit 1; }}; \
+             {clean} \
+             npm install -g --prefix /usr/local @openai/codex@latest; \
+             PATH=/usr/local/bin:/usr/bin:/bin codex --version",
+            clean = NPM_CLEAN_STALE_SNIPPET,
+        );
         return tokio::task::spawn_blocking(move || {
-            crate::wsl::run_in_distro_script_user(
-                &distro,
-                Some("root"),
-                "set -e; command -v npm >/dev/null 2>&1 || { echo 'npm is missing in WSL'; exit 1; }; \
-                 npm install -g --prefix /usr/local @openai/codex@latest; \
-                 PATH=/usr/local/bin:/usr/bin:/bin codex --version",
-            )
+            crate::wsl::run_in_distro_script_user(&distro, Some("root"), &script)
         })
         .await
         .map_err(|e| format!("join error: {e}"))?;

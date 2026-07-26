@@ -608,6 +608,7 @@ pub async fn wsl_provision(distro: Option<String>) -> Result<String, String> {
                   apt-get install -y nodejs npm git curl ca-certificates bubblewrap; \
                   export UV_INSTALL_DIR=/usr/local/bin; \
                   (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
+                  for _r in /usr/local/lib/node_modules /usr/lib/node_modules; do [ -d \"$_r\" ] || continue; find \"$_r\" -mindepth 1 -maxdepth 2 -type d -name '.*-*' ! -name '_cacache' ! -name '.package-lock.json' -exec rm -rf {} + 2>/dev/null; done; true; \
                   npm install -g --prefix /usr/local @anthropic-ai/claude-code@latest @openai/codex@latest @google/gemini-cli@latest || true; \
                   export UV_TOOL_DIR=/usr/local/share/uv-tools UV_TOOL_BIN_DIR=/usr/local/bin UV_PYTHON_INSTALL_DIR=/usr/local/share/uv-python; \
                   ( /usr/local/bin/uv tool install --force kimi-cli \

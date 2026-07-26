@@ -51,6 +51,7 @@ import {
   runtimeSkillIds,
   type RuntimePersonalAgent,
 } from "./personalAgentRuntime";
+import { isReadOnlyToolAllowlist } from "./agentSandbox";
 import type { RevisionRef } from "./personalAgentConfig";
 import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoint";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
@@ -293,6 +294,12 @@ export async function runCodexCliStream(args: {
   // Per-role allowlist — forwarded so the Rust side can detect the Browser role
   // (its allowlist names browser_*) and wire the MCP browser gateway for it.
   allowedTools?: string[];
+  /// TRUE for a read-only agent (orchestrator / sub-leader). Codex is spawned
+  /// with `--sandbox read-only` so it CANNOT write the shared checkout. The
+  /// prompt saying "you are READ-ONLY" never bound codex's own shell/apply_patch
+  /// tools, so the orchestrator edited the project, left it dirty, and every
+  /// specialist worktree afterwards failed to cut.
+  readOnly?: boolean;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -333,6 +340,7 @@ export async function runCodexCliStream(args: {
       model: args.model ?? null,
       effort: args.effort ?? null,
       allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      readOnly: args.readOnly === true,
       onEvent: ch,
     });
   } finally {
@@ -1474,10 +1482,26 @@ export function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
   return out;
 }
 
+/// Budget for prior turns folded into a CLI prompt. Every CLI path (Claude,
+/// Codex) used to inline the ENTIRE project transcript: one measured
+/// orchestrator dispatch was 778,606 characters = 210,669 input tokens against
+/// a 258,400-token window, so the run began 81% full and degraded from there.
+/// Newest turns are kept; older ones are dropped and the drop is stated so the
+/// model never mistakes a truncated transcript for the whole story.
+export const MAX_FOLDED_HISTORY_TURNS = 24;
+export const MAX_FOLDED_HISTORY_CHARS = 60_000;
+
 export function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem[]): string {
   if (!history || history.length === 0) return userMessage;
+  const kept = recentTextHistory(history, MAX_FOLDED_HISTORY_TURNS, MAX_FOLDED_HISTORY_CHARS);
+  if (kept.length === 0) return userMessage;
+  const dropped = history.length - kept.length;
   const lines: string[] = ["--- Previous conversation ---"];
-  for (const h of history) {
+  if (dropped > 0) {
+    lines.push(`(${dropped} older turn(s) omitted to stay inside the model's context window.)`);
+    lines.push("");
+  }
+  for (const h of kept) {
     lines.push(`${h.role === "user" ? "User" : "Assistant"}: ${h.content}`);
     lines.push("");
   }
@@ -3212,11 +3236,9 @@ async function streamOpenAI(
     // Refresh the Codex CLI token once per session (same cold-start 401
     // fix as Claude — see ensureCliWarm).
     await ensureCliWarm("codex_cli", projectCwd);
-    // Fold prior turns into the prompt so the CLI has conversation context.
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Fold prior turns into the prompt so the CLI has conversation context —
+    // budgeted, so a long-lived chat cannot fill the model's window by itself.
+    const prompt = foldHistoryIntoPrompt(userMessage, history);
     // Pasted images → saved to the working-dir inbox + attached via codex's
     // native -i flag. resolveImageCwd falls back to a scratch dir when there's
     // no project folder, and we run codex in that SAME dir so -i resolves.
@@ -3242,6 +3264,7 @@ async function streamOpenAI(
         model: codexModel,
         effort: codexEffort,
         allowedTools,
+        readOnly: isReadOnlyToolAllowlist(allowedTools),
         onDelta,
         onThought,
       }), codexCwd);

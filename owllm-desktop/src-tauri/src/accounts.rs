@@ -3794,6 +3794,13 @@ pub async fn codex_cli_stream(
     // that owns the shared browser; ordinary coders should dispatch browser
     // work to @browser instead of receiving host-browser privileges.
     allowed_tools: Option<Vec<String>>,
+    // TRUE for a read-only agent (orchestrator / sub-leader). `codex exec` owns
+    // its own shell + apply_patch tools, which `allowed_tools` does NOT gate, so
+    // "You are READ-ONLY" in the prompt was advice, not a boundary: the
+    // orchestrator edited the shared checkout, left it dirty, and every
+    // specialist worktree afterwards failed to cut — deadlocking the whole run.
+    // The sandbox is the boundary.
+    read_only: Option<bool>,
     on_event: Channel<CodexStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -3867,7 +3874,13 @@ pub async fn codex_cli_stream(
         // Escalate the sandbox only when we actually wired the gateway (see the
         // codex-quirk note above). `never` stops the non-interactive auto-cancel
         // of MCP tool calls; `danger-full-access` is what lets them execute.
-        let sandbox_mode = if gateway_wired {
+        // A read-only agent NEVER gets a writable workspace, gateway or not: an
+        // orchestrator that can write the shared checkout breaks its own
+        // specialists' isolation. It keeps read tools and MCP browser tools.
+        let agent_read_only = read_only.unwrap_or(false);
+        let sandbox_mode = if agent_read_only {
+            "read-only"
+        } else if gateway_wired {
             "danger-full-access"
         } else {
             "workspace-write"

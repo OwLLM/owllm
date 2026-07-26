@@ -70,6 +70,7 @@ import {
   appendAgentMemory,
   streamLocalChat,
   streamOpenAiApiWithTools,
+  foldHistoryIntoPrompt,
   runCodexCliStream,
   runKimiCliStream,
   makeResponsiveHandlers,
@@ -149,10 +150,12 @@ import {
 } from "./teamModelSelection";
 import {
   requiresAgentWorktree,
+  worktreeCheckpointNotice,
   WorktreePreflightError,
   worktreePreflightError,
   type WorktreeCreateState,
 } from "./worktreeIsolation";
+import { READONLY_LOCAL_TOOLS, isReadOnlyToolAllowlist } from "./agentSandbox";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -6830,10 +6833,8 @@ const CRITIC_SYNTHETIC_SPEC: AgentSpec = {
 // specialist's job; listing those tools made the orchestrator try to
 // "@web_search:" dispatch them as if they were teammates. Specialists keep
 // the full tool set.
-const READONLY_LOCAL_TOOLS: string[] = [
-  "read_file", "list_dir", "grep", "glob",
-];
-
+// Shared with the CLI layer (agentSandbox.ts) so the process sandbox can be
+// derived from the SAME list the dispatcher narrows the orchestrator to.
 function runtimeReadOnlyTools(
   spec: AgentSpec | undefined,
   roleByName: Map<string, RoleData>,
@@ -7593,21 +7594,10 @@ async function streamChatCompletion(
 /// mode emits the full reply at the end (no token streaming).
 type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
 
-// Embed prior conversation turns into a single user prompt — used by
-// the Claude CLI subscription path because `claude --print` is one-shot
-// and has no native session/history input. Each turn is labelled so
-// the model knows who said what.
-function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem[]): string {
-  if (!history || history.length === 0) return userMessage;
-  const lines: string[] = ["--- Previous conversation ---"];
-  for (const h of history) {
-    lines.push(`${h.role === "user" ? "User" : "Assistant"}: ${h.content}`);
-    lines.push("");
-  }
-  lines.push("--- Current user message ---");
-  lines.push(userMessage);
-  return lines.join("\n");
-}
+// The Claude CLI subscription path folds prior turns into one prompt because
+// `claude --print` is one-shot with no native history input. It used the same
+// unbounded copy dispatch.ts had, so the shared budgeted version is imported
+// instead — one fold, one budget, every CLI path.
 
 // ── Claude CLI auth-retry (mid-run 401 resilience) ─────────────────────────
 // The Claude Code CLI's OAuth access token has a TTL. A long agentic run can
@@ -7891,10 +7881,9 @@ async function streamOpenAI(
     // Refresh the Codex CLI token once per session (cold-start 401 fix). Pass cwd
     // so an isolated project also re-mirrors creds into its WSL sandbox.
     await ensureCliWarm("codex_cli", projectCwd);
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Budgeted fold — an unbounded transcript here is what put 778k characters
+    // (81% of the model's context) into a single orchestrator dispatch.
+    const prompt = foldHistoryIntoPrompt(userMessage, history);
     // Pasted images → saved to the cwd inbox + attached via codex's native -i
     // flag (verified). Same path the Code page uses — consistent everywhere.
     // A no-folder team chat has no projectCwd; fall back to the shared
@@ -7910,7 +7899,8 @@ async function streamOpenAI(
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools, onDelta, onThought,
+        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools,
+        readOnly: isReadOnlyToolAllowlist(allowedTools), onDelta, onThought,
       }), codexCwd);
     }
     const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
@@ -11294,10 +11284,13 @@ export function AgentsPage({
           projectCwd,
           agentName: coder.name,
           runId: soloRunId,
+          checkpointDirty: true,
         });
         if (soloCreate.status !== "ready") {
           throw worktreePreflightError(coder.name, projectCwd, soloCreate);
         }
+        const soloCheckpoint = worktreeCheckpointNotice(soloCreate);
+        if (soloCheckpoint) appendLog("system", { role: "system", color: "#ffd479", text: soloCheckpoint });
         const soloWt: WorktreeBinding = {
           path: soloCreate.path,
           branch: soloCreate.branch,
@@ -12124,13 +12117,17 @@ export function AgentsPage({
         let res: FleetCreateResult;
         try {
           res = await invoke<FleetCreateResult>("fleet_worktree_create", {
-            projectCwd, agentName: spec.name, runId,
+            projectCwd, agentName: spec.name, runId, checkpointDirty: true,
           });
         } catch (e: any) {
           res = { status: "error", message: String(e?.message ?? e) };
         }
         if (res.status === "ready") {
           worktreeBySpec.set(spec.name, { path: res.path, branch: res.branch, baseSha: res.baseSha });
+          // Only the first create of a run can carry a checkpoint — the rest
+          // find the checkout already clean.
+          const checkpoint = worktreeCheckpointNotice(res);
+          if (checkpoint) appendLog("system", { role: "system", color: "#ffd479", text: checkpoint });
           appendThought(orch.name, {
             role: "fleet", color: "#7ff0c5",
             text: `🗂 ${spec.name} → ${res.branch}\n   ${res.path}`,
@@ -12767,7 +12764,7 @@ export function AgentsPage({
         let docWt: WorktreeBinding | null = null;
         try {
           const wtRes = await invoke<FleetCreateResult>("fleet_worktree_create", {
-            projectCwd, agentName: docSpec.name, runId: `${runId}-docs`,
+            projectCwd, agentName: docSpec.name, runId: `${runId}-docs`, checkpointDirty: true,
           });
           if (wtRes.status === "ready") {
             docWt = { path: wtRes.path, branch: wtRes.branch, baseSha: wtRes.baseSha };

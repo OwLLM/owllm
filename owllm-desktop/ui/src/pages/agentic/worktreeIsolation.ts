@@ -1,5 +1,11 @@
 export type WorktreeCreateState =
-  | { status: "ready"; path: string; branch: string; baseSha: string }
+  | {
+      status: "ready"; path: string; branch: string; baseSha: string;
+      /// Present when the shared checkout had uncommitted tracked work that
+      /// OWLLM saved as a checkpoint commit so this worktree could be cut.
+      checkpointSha?: string;
+      checkpointFiles?: string[];
+    }
   | { status: "notAGitRepo" }
   | { status: "dirtyWorkingTree"; details: string }
   | { status: "error"; message: string };
@@ -17,6 +23,23 @@ export class WorktreePreflightError extends Error {
 
 export function requiresAgentWorktree(projectCwd: string): boolean {
   return projectCwd.trim().length > 0;
+}
+
+/// Human-readable note for a create that had to check in the user's open work
+/// first. Silently committing on someone's behalf would be worse than the
+/// deadlock it replaces, so every checkpoint says what it took and how to undo.
+export function worktreeCheckpointNotice(
+  result: Extract<WorktreeCreateState, { status: "ready" }>,
+): string | null {
+  if (!result.checkpointSha) return null;
+  const files = result.checkpointFiles ?? [];
+  const shown = files.slice(0, 10);
+  const more = files.length > shown.length ? `\n   …and ${files.length - shown.length} more` : "";
+  return [
+    `📌 Checked in ${files.length} uncommitted file(s) as ${result.checkpointSha.slice(0, 8)} so agents could run in isolation.`,
+    shown.length ? `   ${shown.join("\n   ")}${more}` : "",
+    "   Undo with: git reset --soft HEAD~1",
+  ].filter(Boolean).join("\n");
 }
 
 export function worktreePreflightError(
@@ -41,8 +64,9 @@ export function worktreeCreationFailure(
   }
   if (result.status === "dirtyWorkingTree") {
     return [
-      "Project has uncommitted tracked changes, so OWLLM cannot cut a complete isolated worktree.",
-      "Commit or stash them, then retry. The run was stopped before the agent started.",
+      "Project has uncommitted tracked changes and OWLLM could not check them in automatically,",
+      "so it cannot cut a complete isolated worktree. Commit or stash them, then retry.",
+      "The run was stopped before the agent started.",
       result.details,
     ].filter(Boolean).join("\n\n");
   }

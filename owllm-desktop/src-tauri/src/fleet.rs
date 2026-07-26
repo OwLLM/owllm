@@ -822,7 +822,7 @@ fn git_failure_message(action: &str, stdout: &str, stderr: &str) -> String {
 // 1. CREATE — per-agent worktree on a fresh branch
 // ------------------------------------------------------------------
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum CreateOutcome {
     /// Worktree created and ready.
@@ -835,6 +835,14 @@ pub enum CreateOutcome {
         /// project_cwd at create time). Saved so merge can target
         /// the same point.
         base_sha: String,
+        /// Set when the shared checkout had uncommitted tracked work that was
+        /// saved as a checkpoint commit so this worktree could be cut. Callers
+        /// surface it so the user can see (and undo) what OWLLM committed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        checkpoint_sha: Option<String>,
+        /// Files captured by that checkpoint commit.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        checkpoint_files: Vec<String>,
     },
     /// project_cwd isn't a git repo. Filesystem-capable callers must stop;
     /// there is no safe shared-cwd fallback.
@@ -867,6 +875,11 @@ pub async fn fleet_worktree_create(
     // per-page worktrees — which hold the user's UNMERGED edits — live in their
     // own namespace and are NEVER touched by the team sweep.
     branch_prefix: Option<String>,
+    // TRUE only for an agent RUN the user just started. Uncommitted tracked work
+    // is then checkpointed so the run is not blocked. The Code page cuts its
+    // worktree merely by OPENING a project, which must never commit on the
+    // user's behalf, so it leaves this unset and keeps the dirty-tree stop.
+    checkpoint_dirty: Option<bool>,
 ) -> Result<CreateOutcome, String> {
     let cwd = PathBuf::from(&project_cwd);
     let cwd_exists = match path_is_dir_native(&cwd) {
@@ -903,10 +916,27 @@ pub async fn fleet_worktree_create(
         .lines()
         .filter(|l| !l.trim().is_empty() && !is_app_scratch(porcelain_path(l)))
         .collect();
+    // A dirty checkout used to be a HARD STOP, and that is what deadlocked team
+    // runs: the shared folder picks up uncommitted work (the user's, or an
+    // orchestrator's), every specialist worktree then refuses to cut, the whole
+    // dispatch aborts, and the Notebook queue idles forever with nothing to fix
+    // it. Checkpoint the tracked work instead — nothing is lost, the checkout is
+    // clean, and merge-back (which also refuses to overwrite dirty tracked
+    // files) works. The hard stop remains only if the checkpoint itself fails.
+    let mut checkpoint: Option<Checkpoint> = None;
     if !dirty.is_empty() {
-        return Ok(CreateOutcome::DirtyWorkingTree {
-            details: dirty.into_iter().take(20).collect::<Vec<_>>().join("\n"),
-        });
+        let listing = dirty.iter().take(20).copied().collect::<Vec<_>>().join("\n");
+        if !checkpoint_dirty.unwrap_or(false) {
+            return Ok(CreateOutcome::DirtyWorkingTree { details: listing });
+        }
+        match checkpoint_uncommitted(&cwd) {
+            Ok(saved) => checkpoint = Some(saved),
+            Err(message) => {
+                return Ok(CreateOutcome::DirtyWorkingTree {
+                    details: format!("{}\n\n{}", message, listing),
+                });
+            }
+        }
     }
     // Opening a Coding page is a local operation: its private worktree is cut
     // from the checkout the user actually has on this device. A local branch
@@ -966,10 +996,69 @@ pub async fn fleet_worktree_create(
             message: format!("git worktree add failed: {}", err.trim()),
         });
     }
+    let (checkpoint_sha, checkpoint_files) = match checkpoint {
+        Some(saved) => (Some(saved.sha), saved.files),
+        None => (None, Vec::new()),
+    };
     Ok(CreateOutcome::Ready {
         path: dest_str,
         branch,
         base_sha,
+        checkpoint_sha,
+        checkpoint_files,
+    })
+}
+
+/// Uncommitted tracked work saved so an isolated worktree could be cut.
+struct Checkpoint {
+    sha: String,
+    files: Vec<String>,
+}
+
+/// Commit the shared checkout's uncommitted TRACKED work.
+///
+/// `git add -u` stages modifications, deletions and both halves of a rename
+/// while leaving untracked files alone; OWLLM's own runtime scratch is then
+/// unstaged so it never lands in the user's history. The commit is reversible
+/// with `git reset --soft <sha>^`, and hooks are skipped because a repo-side
+/// pre-commit hook must not be able to wedge an agent run.
+fn checkpoint_uncommitted(cwd: &Path) -> Result<Checkpoint, String> {
+    let (ok, _, err) = git(cwd, &["add", "-u"])?;
+    if !ok {
+        return Err(format!(
+            "could not stage the uncommitted tracked changes: {}",
+            err.trim()
+        ));
+    }
+    unstage_app_scratch(cwd)?;
+    let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
+    let files: Vec<String> = staged
+        .lines()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    if files.is_empty() {
+        return Err("the uncommitted tracked changes could not be staged".to_string());
+    }
+    let message = "checkpoint: save uncommitted work before an isolated agent run\n\n\
+        OWLLM cuts every agent a private git worktree from HEAD, so the shared\n\
+        checkout has to be clean. This commit preserves the work that was open\n\
+        at that moment. Undo it with `git reset --soft HEAD~1`.";
+    let (ok, out, err) = git(cwd, &["commit", "--no-verify", "-m", message])?;
+    if !ok {
+        return Err(git_failure_message("checkpoint commit failed", &out, &err));
+    }
+    let (ok, sha, err) = git(cwd, &["rev-parse", "HEAD"])?;
+    if !ok {
+        return Err(format!(
+            "checkpoint commit could not be resolved: {}",
+            err.trim()
+        ));
+    }
+    Ok(Checkpoint {
+        sha: sha.trim().to_string(),
+        files,
     })
 }
 
@@ -1355,9 +1444,10 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 #[cfg(test)]
 mod tests {
     use super::{
-        fleet_worktree_finalize, fleet_worktree_merge_blocking, git_failure_message,
-        git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc, path_is_dir_native,
-        porcelain_path, unstage_app_scratch, user_conflict_files, FinalizeOutcome, MergeOutcome,
+        fleet_worktree_create, fleet_worktree_finalize, fleet_worktree_merge_blocking,
+        git_failure_message, git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc,
+        path_is_dir_native, porcelain_path, unstage_app_scratch, user_conflict_files, CreateOutcome,
+        FinalizeOutcome, MergeOutcome,
     };
     use std::{fs, path::Path, process::Command};
 
@@ -1482,6 +1572,119 @@ mod tests {
         );
     }
 
+    /// The deadlock this fixes: an agent RUN met a dirty checkout, every
+    /// worktree refused to cut, the dispatch aborted, and the Notebook queue
+    /// idled with no way to recover. A run now checkpoints the open work and
+    /// proceeds; nothing is lost and the checkout is clean for merge-back.
+    #[tokio::test]
+    async fn agent_run_checkpoints_uncommitted_work_instead_of_deadlocking() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let before = head_sha(root);
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "user work in progress\n",
+        )
+        .unwrap();
+        // App-managed scratch must stay OUT of the user's checkpoint commit.
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"runtime refresh").unwrap();
+
+        let outcome = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "coder".to_string(),
+            "checkpoint-run".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        let (path, branch, checkpoint_sha, checkpoint_files) = match outcome {
+            CreateOutcome::Ready {
+                path,
+                branch,
+                checkpoint_sha,
+                checkpoint_files,
+                ..
+            } => (path, branch, checkpoint_sha, checkpoint_files),
+            other => panic!("a dirty checkout must not block an agent run: {other:?}"),
+        };
+        assert!(
+            checkpoint_sha.is_some(),
+            "the open work should have been checkpointed"
+        );
+        assert_eq!(
+            checkpoint_files,
+            vec!["owllm-desktop/src-tauri/src/release.rs".to_string()],
+            "only the user's tracked work belongs in the checkpoint"
+        );
+        assert_ne!(before, head_sha(root), "the checkpoint should advance HEAD");
+        // The work is preserved in history, not discarded.
+        let show = Command::new("git")
+            .args(["show", "HEAD:owllm-desktop/src-tauri/src/release.rs"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&show.stdout),
+            "user work in progress\n"
+        );
+        // Tracked files are clean now, so merge-back cannot be blocked either.
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "M .owllm-inbox/image_1.png",
+            "only app scratch may remain dirty"
+        );
+        git_ok(root, &["worktree", "remove", "--force", &path]);
+        git_ok(root, &["branch", "-D", &branch]);
+    }
+
+    /// Opening a Code page also cuts a worktree. That is not a user-started run,
+    /// so it must keep the dirty-tree stop rather than commit on their behalf.
+    #[tokio::test]
+    async fn opening_a_page_never_commits_on_the_users_behalf() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let before = head_sha(root);
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "user work in progress\n",
+        )
+        .unwrap();
+
+        let outcome = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "code".to_string(),
+            "page-open".to_string(),
+            Some("owllm-page".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            CreateOutcome::DirtyWorkingTree { details } => {
+                assert!(details.contains("release.rs"), "details name the file");
+            }
+            other => panic!("page open must not auto-commit: {other:?}"),
+        }
+        assert_eq!(before, head_sha(root), "HEAD must not move");
+    }
+
+    fn head_sha(root: &Path) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     #[test]
     fn git_failure_message_uses_stdout_when_stderr_is_empty() {
         let message = git_failure_message(
@@ -1537,6 +1740,7 @@ mod tests {
             project_unc.clone(),
             "coder".into(),
             "wsl-lifecycle-test".into(),
+            None,
             None,
         )
         .await

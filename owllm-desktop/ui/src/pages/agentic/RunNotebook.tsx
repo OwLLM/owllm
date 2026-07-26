@@ -107,20 +107,25 @@ export function isLegacyWslRedirectorFalseFailure(step: NotebookStep): boolean {
     && /project_cwd does not exist:.*(?:\\\\wsl\.localhost\\|\\\\wsl\$\\)/i.test(step.failureReason ?? "");
 }
 
+export function isLegacyCliPreflightFailure(step: NotebookStep): boolean {
+  return step.status === "failed"
+    && /npm ERR!\s+code ENOTEMPTY|write codex prompt to stdin:.*(?:pipe has been ended|os error 109)|Missing optional dependency @openai\/codex-|Could not prepare \w+ in the project environment/i.test(step.failureReason ?? "");
+}
+
 export function loadNotebook(projectId: string | null | undefined): NotebookState {
   if (!projectId) return { ...EMPTY };
   try {
     const raw = localStorage.getItem(keyFor(projectId));
     if (!raw) return { ...EMPTY };
     const p = JSON.parse(raw);
-    let repairedLegacyWslFailure = false;
+    let repairedLegacyPreflightFailure = false;
     const notebook: NotebookState = {
       text: typeof p.text === "string" ? p.text : "",
       plan: typeof p.plan === "string" ? p.plan : "",
       steps: Array.isArray(p.steps)
         ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string").map((s: NotebookStep) => {
-            if (isLegacyWslRedirectorFalseFailure(s)) {
-              repairedLegacyWslFailure = true;
+            if (isLegacyWslRedirectorFalseFailure(s) || isLegacyCliPreflightFailure(s)) {
+              repairedLegacyPreflightFailure = true;
               return {
                 ...s,
                 status: "pending" as const,
@@ -147,7 +152,7 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
       proposedPlan: typeof p.proposedPlan === "string" ? p.proposedPlan : "",
     };
-    if (repairedLegacyWslFailure) {
+    if (repairedLegacyPreflightFailure) {
       localStorage.setItem(keyFor(projectId), JSON.stringify(notebook));
     }
     return notebook;

@@ -23,6 +23,19 @@ use tauri::ipc::Channel;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// Global installation/upgrade gate for CLIs inside WSL.
+///
+/// A team can warm several agents in parallel, and separate Agents windows can
+/// do the same. npm's global installer is not concurrency-safe: two overlapping
+/// Codex installs race the same rename into `.codex-*` and one fails with
+/// ENOTEMPTY. Serialize the Rust-side operation; the WSL script also takes a
+/// process-wide flock so a second OwLLM process cannot race this one.
+#[cfg(windows)]
+fn wsl_cli_provision_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
 /// One-shot subscription CLI calls must eventually return a final blob. If they
 /// loop internally (Kimi can repeatedly call Shell in --print mode without ever
 /// producing a final answer), the UI otherwise stays "working" forever.
@@ -2908,26 +2921,30 @@ pub async fn accounts_prepare_cli_for_cwd(
         let Some((distro, _)) = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc) else {
             return Ok(false);
         };
-        let (binary, install) = match backend.as_str() {
+        let (binary, probe, install) = match backend.as_str() {
             // NPM_CLEAN_STALE_SNIPPET runs first so a previously interrupted
             // install can't wedge this one with ENOTEMPTY (see the const's docs).
             "claude_cli" => (
                 "claude",
+                "claude --version",
                 "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
                  npm install -g --prefix /usr/local @anthropic-ai/claude-code@latest",
             ),
             "codex_cli" => (
                 "codex",
+                "codex --version",
                 "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
                  npm install -g --prefix /usr/local @openai/codex@latest",
             ),
             "gemini_cli" => (
                 "gemini",
+                "gemini --version",
                 "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
                  npm install -g --prefix /usr/local @google/gemini-cli@latest",
             ),
             "kimi_cli" => (
                 "kimi",
+                "kimi --version",
                 "apt-get update -y; apt-get install -y curl ca-certificates python3-pip; \
                  export UV_INSTALL_DIR=/usr/local/bin; \
                  if ! command -v uv >/dev/null 2>&1; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi; \
@@ -2939,6 +2956,7 @@ pub async fn accounts_prepare_cli_for_cwd(
             ),
             "grok_cli" => (
                 "grok",
+                "grok --version",
                 "apt-get update -y; apt-get install -y curl ca-certificates; \
                  curl -fsSL https://x.ai/cli/install.sh | bash; \
                  test -x /root/.grok/bin/grok && install -m 755 /root/.grok/bin/grok /usr/local/bin/grok",
@@ -2948,14 +2966,24 @@ pub async fn accounts_prepare_cli_for_cwd(
         let script = format!(
             "set -e; export DEBIAN_FRONTEND=noninteractive; \
              export PATH=/usr/local/bin:/usr/bin:/bin; \
-             if command -v {binary} >/dev/null 2>&1; then echo OWLLM_CLI_READY; exit 0; fi; \
+             exec 9>/tmp/owllm-cli-provision.lock; \
+             if command -v flock >/dev/null 2>&1; then \
+               flock -w 600 9 || {{ echo 'Timed out waiting for another CLI installation' >&2; exit 1; }}; \
+             fi; \
+             if command -v {binary} >/dev/null 2>&1 && {probe} >/dev/null 2>&1; then \
+               echo OWLLM_CLI_READY; exit 0; \
+             fi; \
              {clean} \
              {install}; \
              command -v {binary} >/dev/null 2>&1 || {{ echo '{binary} install did not produce an executable' >&2; exit 1; }}; \
+             {probe} >/dev/null 2>&1 || {{ echo '{binary} was installed but cannot start' >&2; exit 1; }}; \
              echo OWLLM_CLI_INSTALLED",
             clean = NPM_CLEAN_STALE_SNIPPET,
         );
         let out = tokio::task::spawn_blocking(move || {
+            let _guard = wsl_cli_provision_lock()
+                .lock()
+                .map_err(|_| "WSL CLI provision lock is poisoned".to_string())?;
             crate::wsl::run_in_distro_script_user(&distro, Some("root"), &script)
         })
         .await
@@ -2989,13 +3017,21 @@ pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, St
         // '@openai/codex' -> '@openai/.codex-XXXXXX'`, which paused the agentic
         // Notebook queue and stayed broken until the folder was deleted by hand.
         let script = format!(
-            "set -e; command -v npm >/dev/null 2>&1 || {{ echo 'npm is missing in WSL'; exit 1; }}; \
+            "set -e; export PATH=/usr/local/bin:/usr/bin:/bin; \
+             exec 9>/tmp/owllm-cli-provision.lock; \
+             if command -v flock >/dev/null 2>&1; then \
+               flock -w 600 9 || {{ echo 'Timed out waiting for another CLI installation' >&2; exit 1; }}; \
+             fi; \
+             command -v npm >/dev/null 2>&1 || {{ echo 'npm is missing in WSL'; exit 1; }}; \
              {clean} \
              npm install -g --prefix /usr/local @openai/codex@latest; \
              PATH=/usr/local/bin:/usr/bin:/bin codex --version",
             clean = NPM_CLEAN_STALE_SNIPPET,
         );
         return tokio::task::spawn_blocking(move || {
+            let _guard = wsl_cli_provision_lock()
+                .lock()
+                .map_err(|_| "WSL CLI provision lock is poisoned".to_string())?;
             crate::wsl::run_in_distro_script_user(&distro, Some("root"), &script)
         })
         .await
@@ -3985,15 +4021,14 @@ pub async fn codex_cli_stream(
                 std::thread::sleep(Duration::from_millis(250));
             }
         });
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "codex stdin pipe missing".to_string())?;
-        stdin
-            .write_all(prompt.as_bytes())
-            .map_err(|e| format!("write codex prompt to stdin: {e}"))?;
+        let stdin_write_error = match child.stdin.take() {
+            Some(mut stdin) => stdin
+                .write_all(prompt.as_bytes())
+                .err()
+                .map(|e| format!("write codex prompt to stdin: {e}")),
+            None => Some("codex stdin pipe missing".to_string()),
+        };
         // Drop closes the pipe (EOF) so the stdin-style Codex proceeds.
-        drop(stdin);
         let stdout = child
             .stdout
             .take()
@@ -4188,12 +4223,25 @@ pub async fn codex_cli_stream(
                 .lock()
                 .map(|buf| String::from_utf8_lossy(&buf).into_owned())
                 .unwrap_or_default();
-            return Err(cli_exit_err(
+            let child_error = cli_exit_err(
                 "codex",
                 status.code().unwrap_or(-1),
                 &stream_errors.join("\n"),
                 &stderr_buf,
-            ));
+            );
+            // A CLI that fails during startup can close stdin before OwLLM
+            // writes the prompt. The old early `?` returned only Windows error
+            // 109 and abandoned the child/watchdog, hiding the actionable
+            // startup diagnostic (for example a missing Codex dependency).
+            return Err(match stdin_write_error {
+                Some(write_error) => format!("{child_error}\n{write_error}"),
+                None => child_error,
+            });
+        }
+        if asm.is_empty() {
+            if let Some(write_error) = stdin_write_error {
+                return Err(write_error);
+            }
         }
         // Belt-and-suspenders (same 401-as-reply hazard as Claude): codex can print
         // "API Error: 401 …" / "Failed to authenticate" as its ONLY message and exit

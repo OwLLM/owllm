@@ -75,6 +75,7 @@ import {
   makeResponsiveHandlers,
   makeUiYield,
   ensureCliWarm,
+  CliPreflightError,
   clearCliWarm,
   withCliAuthRetry,
   setCliAuthWaitHandler,
@@ -141,8 +142,9 @@ import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, Thin
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import {
+  assignTeamModelToAgents,
   clearStoredAgentModelOverrides,
-  graphJsonWithoutAgentModels,
+  graphJsonWithAgentModels,
   resolveAgentModel,
 } from "./teamModelSelection";
 import {
@@ -1188,9 +1190,9 @@ function FlowHeader({
 }
 
 // TeamInfoCard — agent_info_card.py:394-521. Driven by the active team.
-// Now with a "TEAM MODEL" row at the bottom: a single select that
-// assigns the model to EVERY agent on the team at once (clears per-
-// agent overrides so the team genuinely runs on one model again).
+// Now with a "TEAM MODEL" row at the bottom: a bulk setter that
+// assigns the selected model to every current agent. Each agent remains
+// independently editable afterward.
 function TeamInfoCard({
   team, models, teamModel, onChangeTeamModel, serverModelId, accountsStatus,
 }: {
@@ -1261,9 +1263,9 @@ function TeamInfoCard({
         <span style={{ fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4, width:86 }}>CONNECTIONS</span>
         <span style={{ flex:1, fontWeight:700 }}>{team.edges.length}</span>
       </div>
-      {/* MODEL row — applies to every agent on the team. */}
+      {/* MODEL row — bulk-assigns now; individual agent choices can override later. */}
       <div style={{ position:"absolute", left:14, top:model_y, width:CARD_W - 28, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
-        <span style={{ flex:1 }}>TEAM MODEL · assigns to every agent</span>
+        <span style={{ flex:1 }}>TEAM MODEL · set all now · agents remain editable</span>
       </div>
       <div style={{ position:"absolute", left:14, top:model_y + 16, width:CARD_W - 28, display:"flex" }}>
         <ModelPicker
@@ -6582,7 +6584,7 @@ function TeamSettings({
       </div>
     );
   }
-  // Per user spec 2026-05-29: this panel keeps ONLY the team model
+  // Per user spec 2026-05-29: this panel keeps the team model bulk
   // selection + a team voice selection. Identity header, description,
   // and category/agent/connection counts are dropped (the project strip
   // up top already shows the project name; users objected to the
@@ -6593,7 +6595,10 @@ function TeamSettings({
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
+        <span
+          title="Set every current agent to this model; you can then override any agent individually"
+          style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}
+        >Team model</span>
         <ModelPicker
           value={effectiveTeamModel}
           onChange={onPickTeamModel}
@@ -6657,7 +6662,10 @@ function TeamPanel({
         borderRadius:10,
       }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
+          <span
+            title="Set every current agent to this model; you can then override any agent individually"
+            style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}
+          >Team model</span>
           <ModelPicker
             value={effectiveTeamModel}
             onChange={onPickTeamModel}
@@ -8452,6 +8460,7 @@ export function AgentsPage({
   /// null we render the saved value; when non-null we render this and
   /// persist it on a debounce.
   const [teamModelOverride, setTeamModelOverride] = useState<string | null>(null);
+  const hydratedProjectIdRef = useRef<string>("");
   /// Per-agent model picks. Keys are agent names (matching team.agents);
   /// values are the model_id chosen on the OrchestratorPane Model
   /// dropdown. Empty string means "no override" (fall back to the team
@@ -9482,20 +9491,21 @@ export function AgentsPage({
   // Sync editable fields when project selection changes.
   useEffect(() => {
     if (selectedProject) {
-      setProjectLocationDraft(selectedProject.location || "", selectedProject.id);
-      setTrustWritesOverride(null);
-      setTeamModelOverride(null);
-      // Restore THIS project's saved per-agent model picks. Primary source is
-      // now the project's DB graph_json (survives app reinstall/update);
-      // localStorage is a legacy fallback. Was wiped to empty on every reboot,
-      // forcing the user to re-pick every agent's model.
-      setPerAgentModel(loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json));
-      // Per-agent voice picks live alongside model picks — same scope, same
-      // DB-first restore.
-      setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id, selectedProject.graph_json));
-      // Per-agent equipped skills + extra tool grants — same DB-first restore.
-      setPerAgentSkills(loadAgentSkillsForProject(selectedProject.graph_json));
-      setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject.graph_json));
+      const projectChanged = hydratedProjectIdRef.current !== selectedProject.id;
+      if (projectChanged) {
+        hydratedProjectIdRef.current = selectedProject.id;
+        setProjectLocationDraft(selectedProject.location || "", selectedProject.id);
+        setTrustWritesOverride(null);
+        setTeamModelOverride(null);
+        // Restore THIS project's saved per-agent model picks. Do this only on a
+        // genuine project switch. chat_json changes after every streamed save;
+        // treating those as project switches used to clear a freshly selected
+        // team model in the middle of its own run.
+        setPerAgentModel(loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json));
+        setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id, selectedProject.graph_json));
+        setPerAgentSkills(loadAgentSkillsForProject(selectedProject.graph_json));
+        setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject.graph_json));
+      }
       // Restore saved chat + per-agent transcripts INTO the shared store —
       // but ONLY if this project's session is empty (fresh load / app
       // restart). If a dispatch is still running in the background, or
@@ -9538,7 +9548,7 @@ export function AgentsPage({
       // from the active dispatch) — reset whenever the user switches
       // project so stale @dispatch lines from a previous team don't
       // bleed into the new project's pane.
-      setAgentThoughts(new Map());
+      if (projectChanged) setAgentThoughts(new Map());
     }
   // Re-run when a project reload supplies its preserved DB transcript too.
   // Folder rebinding keeps the same project id, so depending on id alone left
@@ -10199,6 +10209,7 @@ export function AgentsPage({
     });
     const singleRunStartedAt = Date.now();
     let singleRunCompletedCleanly = false;
+    let singleRunStoppedAtPreflight = false;
     let singleRunFailureReason = "The run ended with an error.";
     supSendBusyRef.current = true;
     setSupSendBusy(true);
@@ -10496,6 +10507,7 @@ export function AgentsPage({
       // the agent log (right pane) get the error in red.
       console.error("[onSupSend] streamChatCompletion threw", String(e?.message ?? e));
       singleRunFailureReason = cleanAgentError(e);
+      singleRunStoppedAtPreflight = e instanceof CliPreflightError;
       const errMsg: GoalMsg = {
         role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${singleRunFailureReason}`,
         ts: Date.now(), seq: nextSeq(),
@@ -10536,6 +10548,8 @@ export function AgentsPage({
       if (notebookStepRef.current) {
         if (singleRunCompletedCleanly) {
           markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        } else if (singleRunStoppedAtPreflight) {
+          markNotebookStepPending(selectedProjectId, notebookStepRef.current);
         } else {
           markNotebookStepFailed(selectedProjectId, notebookStepRef.current, singleRunFailureReason, now);
         }
@@ -10587,7 +10601,15 @@ export function AgentsPage({
       return next;
     });
     // Persist so the pick survives tab switches AND restarts (#17.2).
-    setAgentModelOverride(selectedProject?.id ?? "", agentName, modelId);
+    const projectId = selectedProject?.id ?? "";
+    setAgentModelOverride(projectId, agentName, modelId);
+    // Keep another mounted Agents window on the same project honest. This is
+    // an individual change: update only this agent, never reset the roster.
+    if (projectId) {
+      window.dispatchEvent(new CustomEvent("owllm:agent-model-changed", {
+        detail: { projectId, agentName, modelId },
+      }));
+    }
   };
 
   /// Resolve voice config for an agent. Falls back to DEFAULT_VOICE
@@ -10675,26 +10697,75 @@ export function AgentsPage({
   }, []);
 
   const onPickTeamModel = (modelId: string) => {
-    setTeamModelOverride(modelId);
-    // Picking a team-wide model implies "every agent uses this one" —
-    // wipe per-agent overrides in memory AND both persistence layers. The old
-    // implementation only cleared React state; graph_json/localStorage restored
-    // the old provider badges after reload even though the run used the team
-    // model, so the cards and dispatch visibly disagreed.
-    setPerAgentModel(new Map());
     const project = selectedProject;
     if (!project) return;
+    // "Team model" is a bulk setter, not a permanent precedence layer.
+    // Materialize the choice for every agent that exists now. A later pick on
+    // one agent replaces only that entry and therefore wins for that agent.
+    const assignedModels = assignTeamModelToAgents(
+      (renderTeam?.agents ?? activeTeam?.agents ?? []).map(agent => agent.name),
+      modelId,
+    );
+    setTeamModelOverride(modelId);
+    setPerAgentModel(assignedModels);
+    // Replace this project's synchronous local overlay as one bulk operation.
+    // The DB graph is updated below for cross-device/reinstall persistence.
     clearStoredAgentModelOverrides(project.id);
+    for (const [agentName, selectedModel] of assignedModels) {
+      setAgentModelOverride(project.id, agentName, selectedModel);
+    }
+    // Every mounted Agents window for this project must use the same selection
+    // and the same materialized per-agent assignments immediately.
+    window.dispatchEvent(new CustomEvent("owllm:team-model-changed", {
+      detail: {
+        projectId: project.id,
+        modelId,
+        agentModels: Array.from(assignedModels.entries()),
+      },
+    }));
     void invoke("update_project", {
       input: {
         id: project.id,
         team_default_model_id: modelId,
-        graph_json: graphJsonWithoutAgentModels(project.graph_json),
+        graph_json: graphJsonWithAgentModels(project.graph_json, assignedModels),
       },
     })
       .then(() => reloadProjects())
       .catch((e) => console.error("persist team-wide model selection failed", e));
   };
+
+  useEffect(() => {
+    const onTeamModelChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        projectId?: string;
+        modelId?: string;
+        agentModels?: [string, string][];
+      }>).detail;
+      if (!selectedProject?.id || detail?.projectId !== selectedProject.id) return;
+      setTeamModelOverride(typeof detail.modelId === "string" ? detail.modelId : "");
+      setPerAgentModel(new Map(Array.isArray(detail.agentModels) ? detail.agentModels : []));
+    };
+    const onAgentModelChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        projectId?: string;
+        agentName?: string;
+        modelId?: string;
+      }>).detail;
+      if (!selectedProject?.id || detail?.projectId !== selectedProject.id || !detail.agentName) return;
+      setPerAgentModel(prev => {
+        const next = new Map(prev);
+        if (detail.modelId?.trim()) next.set(detail.agentName!, detail.modelId);
+        else next.delete(detail.agentName!);
+        return next;
+      });
+    };
+    window.addEventListener("owllm:team-model-changed", onTeamModelChanged);
+    window.addEventListener("owllm:agent-model-changed", onAgentModelChanged);
+    return () => {
+      window.removeEventListener("owllm:team-model-changed", onTeamModelChanged);
+      window.removeEventListener("owllm:agent-model-changed", onAgentModelChanged);
+    };
+  }, [selectedProject?.id]);
 
   // Look up the provider for a resolved model id. The ModelPicker
   // encodes routing as prefixes:
@@ -12872,7 +12943,8 @@ export function AgentsPage({
         appendLog("system", { role: "system", color: "#ff8c8c", text: "⏹ Stopped by user." });
         notebookPauseReason = "the run was stopped";
       } else {
-        notebookRunStoppedAtPreflight = e instanceof WorktreePreflightError;
+        notebookRunStoppedAtPreflight =
+          e instanceof WorktreePreflightError || e instanceof CliPreflightError;
         const clean = cleanAgentError(e);
         setRunError(clean);
         // Network failures get the one-click WSL-restart recovery button.

@@ -1598,6 +1598,17 @@ const _warmCli = new Map<string, WarmEntry>();
 // ~1h expiry. The reactive 401 retry (clearCliWarm + retry) is the backstop.
 const WARM_TTL_MS = 25 * 60 * 1000; // 25 min — comfortably under the ~1h token TTL
 export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli" | "grok_cli";
+
+/// The selected CLI could not be made runnable before the model received the
+/// task. Notebook callers keep that card pending (rather than recording a
+/// failed implementation) because no agent work actually began.
+export class CliPreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CliPreflightError";
+  }
+}
+
 export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): Promise<void> {
   const now = Date.now();
   let entry = _warmCli.get(backend);
@@ -1611,10 +1622,15 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
       if (cwd && /^\\\\(?:wsl(?:\.localhost)?)[\\/]/i.test(cwd)) {
         _authWaitHandler?.({ kind: "prepare", backend });
       }
-      await invoke<boolean>("accounts_prepare_cli_for_cwd", {
-        backend,
-        cwd: cwd ?? null,
-      });
+      try {
+        await invoke<boolean>("accounts_prepare_cli_for_cwd", {
+          backend,
+          cwd: cwd ?? null,
+        });
+      } catch (error: any) {
+        const detail = error?.message ?? String(error);
+        throw new CliPreflightError(`Could not prepare ${backend.replace(/_cli$/, "")} in the project environment: ${detail}`);
+      }
       // Run the live probe round-trip for EVERY subscription backend — invoking
       // the CLI refreshes its OAuth access token as a side effect on all of
       // them. This was claude/codex-only, which made both the proactive 25-min

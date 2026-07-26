@@ -152,8 +152,12 @@ check("Code send gates on the synchronous lock", codePageSrc.includes("if (busyS
 check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();"));
 check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();") && agentsPageSrc.includes("else notifyAutoFeedPaused(notebookPauseReason);"));
 check("Recoverable worktree preflight leaves the notebook card pending",
-  agentsPageSrc.includes("notebookRunStoppedAtPreflight = e instanceof WorktreePreflightError")
+  agentsPageSrc.includes("e instanceof WorktreePreflightError || e instanceof CliPreflightError")
     && agentsPageSrc.includes("markNotebookStepPending(selectedProjectId"));
+check("Recoverable CLI preflight leaves team and single-agent notebook cards pending",
+  agentsPageSrc.includes("e instanceof WorktreePreflightError || e instanceof CliPreflightError")
+    && agentsPageSrc.includes("singleRunStoppedAtPreflight = e instanceof CliPreflightError")
+    && agentsPageSrc.includes("else if (singleRunStoppedAtPreflight)"));
 check("Code uses the shared auto-feed continuation", codePageSrc.includes("continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId"));
 check("Agents uses the shared auto-feed continuation", agentsPageSrc.includes("continueNotebookAutoFeed(pid, notebookSurfaceId"));
 check("Watcher help and bug actions have accessible names", watcherSrc.includes('aria-label="Help using the app"') && watcherSrc.includes('aria-label="Report a bug"'));
@@ -185,6 +189,48 @@ console.log("case 0a: false WSL redirector failures are repaired to pending");
       && repaired.steps[0]?.finishedAt == null
       && repaired.steps[0]?.failureReason == null);
   check("repair is durable in the notebook blob", blob().steps[0]?.status === "pending");
+}
+
+console.log("case 0aa: known CLI provisioning failures are repaired without hiding real agent failures");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN, autoFeed: true, digest: [],
+    steps: [
+      {
+        id: "npm-staging-collision",
+        text: "retry Codex after provisioning",
+        status: "failed",
+        ts: 1,
+        startedAt: 10,
+        finishedAt: 20,
+        failureReason: "wsl exited 217: npm ERR! code ENOTEMPTY rename '/usr/local/lib/node_modules/@openai/codex'",
+      },
+      {
+        id: "closed-stdin",
+        text: "retry Codex after startup repair",
+        status: "failed",
+        ts: 2,
+        startedAt: 30,
+        finishedAt: 40,
+        failureReason: "write codex prompt to stdin: The pipe has been ended. (os error 109)",
+      },
+      {
+        id: "real-agent-failure",
+        text: "preserve genuine task failures",
+        status: "failed",
+        ts: 3,
+        startedAt: 50,
+        finishedAt: 60,
+        failureReason: "The implementation tests failed.",
+      },
+    ],
+  }));
+  const repaired = NB.loadNotebook(PID);
+  check("npm ENOTEMPTY preflight returns to pending", repaired.steps[0]?.status === "pending");
+  check("closed stdin preflight returns to pending", repaired.steps[1]?.status === "pending");
+  check("genuine agent failure remains failed", repaired.steps[2]?.status === "failed");
+  check("CLI repair is durable in the notebook blob",
+    blob().steps[0]?.status === "pending" && blob().steps[1]?.status === "pending");
 }
 
 function mount(props) {

@@ -1885,6 +1885,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       return current.id || fallbackProjectScope(folder);
     }
   };
+  const openProjectMemory = async (): Promise<void> => {
+    const scope = await resolveMemoryScope();
+    if (!scope) {
+      setStatus("Open a project before viewing Project Memory.");
+      return;
+    }
+    window.dispatchEvent(new CustomEvent("owllm:open-code-memory", {
+      detail: { projectId: scope },
+    }));
+  };
 
   const memoryLabel = (pack: TeamMemoryPack): string =>
     pack.total > 0 ? `${pack.factCount} fact${pack.factCount === 1 ? "" : "s"} · ${pack.worklogCount} worklog` : "no hits";
@@ -3158,7 +3168,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
             <button
               data-ui="CodeProjectMemory"
-              onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-code-memory"))}
+              onClick={() => { void openProjectMemory(); }}
               title="Project Memory — the same shared facts and worklog used by this project's Agents page and synced through the vault."
               style={{ ...btn, width: "100%", height: 30, marginBottom: 4, justifyContent: "flex-start", color: "var(--accent-ink)", borderColor: "rgba(var(--accent-rgb),0.42)" }}
             >
@@ -3577,7 +3587,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           Opens on the page-scoped event from the header 🧠 Memory button. */}
       <TeamMemoryModal
         openEvent="owllm:open-code-memory"
-        projectId={ruleScope.id || projectRoot || workspace || null}
+        projectId={ruleScope.id || null}
         projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "") || undefined}
       />
 

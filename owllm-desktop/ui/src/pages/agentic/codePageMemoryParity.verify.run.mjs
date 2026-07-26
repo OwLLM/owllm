@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const src = fs.readFileSync(path.join(HERE, "CodePage.tsx"), "utf8");
 const mem = fs.readFileSync(path.join(HERE, "localTools.ts"), "utf8");
+const modal = fs.readFileSync(path.join(HERE, "TeamMemoryModal.tsx"), "utf8");
 const vaultSync = fs.readFileSync(path.resolve(HERE, "../../runtime/vaultSync.ts"), "utf8");
 
 let failed = 0;
@@ -51,10 +52,18 @@ check(
     && /logScopedTeamWork[\s\S]*team_memory_log/.test(mem),
 );
 check(
-  "Coding keeps Project Memory in the persistent left project rail",
+  "Coding resolves the durable project id before opening Project Memory",
   src.includes('data-ui="CodeProjectMemory"')
-    && src.includes('CustomEvent("owllm:open-code-memory")')
-    && /<TeamMemoryModal[\s\S]*projectId=\{ruleScope\.id \|\| projectRoot \|\| workspace \|\| null\}/.test(src),
+    && /openProjectMemory[\s\S]*await resolveMemoryScope\(\)[\s\S]*CustomEvent\("owllm:open-code-memory",[\s\S]*detail: \{ projectId: scope \}/.test(src)
+    && /<TeamMemoryModal[\s\S]*projectId=\{ruleScope\.id \|\| null\}/.test(src)
+    && !src.includes("projectId={ruleScope.id || projectRoot || workspace || null}"),
+);
+check(
+  "Shared memory modal pins the opener's project id and clears stale filters",
+  /const requested = typeof detail\?\.projectId === "string"/.test(modal)
+    && modal.includes("setOpenedScope(requested || propScopeRef.current)")
+    && modal.includes('setQuery("")')
+    && modal.includes("setTagFilter(null)"),
 );
 check(
   "Fact writes trigger project-vault sync with a periodic SQLite backstop",

@@ -66,8 +66,16 @@ export default function TeamMemoryModal({
   const [newContent, setNewContent] = useState("");
   const [newKey, setNewKey] = useState("");
   const [newTags, setNewTags] = useState("");
+  // Pin the exact durable project id supplied by the opener. Coding resolves
+  // its folder asynchronously, so reading only its render-time prop could
+  // briefly query the raw folder/fallback scope while Agents queried the real
+  // project id. The event detail makes both pages open the same database scope.
+  const [openedScope, setOpenedScope] = useState("");
 
-  const scope = (projectId ?? "").trim();
+  const propScope = (projectId ?? "").trim();
+  const propScopeRef = useRef(propScope);
+  propScopeRef.current = propScope;
+  const scope = open ? openedScope : propScope;
 
   const reload = useCallback(async () => {
     if (!scope) { setEntries([]); return; }
@@ -89,7 +97,17 @@ export default function TeamMemoryModal({
   const activeRef = useRef(active);
   activeRef.current = active;
   useEffect(() => {
-    const onOpen = () => { if (activeRef.current) setOpen(true); };
+    const onOpen = (event: Event) => {
+      if (!activeRef.current) return;
+      const detail = event instanceof CustomEvent ? event.detail : null;
+      const requested = typeof detail?.projectId === "string" ? detail.projectId.trim() : "";
+      setOpenedScope(requested || propScopeRef.current);
+      setQuery("");
+      setTagFilter(null);
+      setEntries([]);
+      setErr(null);
+      setOpen(true);
+    };
     window.addEventListener(openEvent, onOpen as EventListener);
     return () => window.removeEventListener(openEvent, onOpen as EventListener);
   }, [openEvent]);

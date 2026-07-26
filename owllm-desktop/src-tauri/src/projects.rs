@@ -374,6 +374,7 @@ pub async fn resolve_project_for_location(
         ensure_schema(&conn)?;
         let path_key = normalize_path_key(&location);
         let mut found: Option<(String, String)> = None;
+        let mut repo_found: Option<(String, String)> = None;
         {
             let mut stmt = conn
                 .prepare("SELECT id, location, COALESCE(repo_url, '') FROM agent_projects")
@@ -394,11 +395,16 @@ pub async fn resolve_project_for_location(
                     found = Some((id, repo));
                     break;
                 }
-                if !repo_url.is_empty() && repo == repo_url {
-                    found = Some((id, repo));
-                    break;
+                if repo_found.is_none() && !repo_url.is_empty() && repo == repo_url {
+                    repo_found = Some((id, repo));
                 }
             }
+        }
+        // A repository may have duplicate portable rows after older vault
+        // migrations. Never let an earlier repo-only match hide the project
+        // row explicitly bound to this computer's exact folder.
+        if found.is_none() {
+            found = repo_found;
         }
         if let Some((id, existing_repo_url)) = found {
             conn.execute(
@@ -946,6 +952,64 @@ mod tests {
             normalize_path_key(&repo_b.to_string_lossy())
         );
         assert_eq!(row.repo_url, "https://github.com/owllm/shared");
+        std::env::remove_var("OWLLM_PROJECT_DB");
+    }
+
+    #[test]
+    fn resolve_project_for_location_prefers_exact_folder_over_earlier_repo_duplicate() {
+        let _guard = crate::memory::PROJECT_DB_TEST_ENV_LOCK
+            .lock()
+            .expect("project test lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("state.db");
+        std::env::set_var("OWLLM_PROJECT_DB", &db);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q"]);
+        git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/OwLLM/Shared.git",
+            ],
+        );
+
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            ensure_schema(&conn).unwrap();
+            // The stale portable duplicate is deliberately inserted first:
+            // the old one-pass resolver returned it before seeing the exact
+            // local-folder binding and Coding opened an empty memory scope.
+            conn.execute(
+                "INSERT INTO agent_projects (id, name, location, repo_url, created_at, updated_at) \
+                 VALUES ('repo-duplicate', 'Duplicate', '', ?1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![normalize_repo_url(
+                    "https://github.com/OwLLM/Shared.git"
+                )],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO agent_projects (id, name, location, repo_url, created_at, updated_at) \
+                 VALUES ('project-exact', 'Exact', ?1, ?2, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')",
+                rusqlite::params![
+                    repo.to_string_lossy().to_string(),
+                    normalize_repo_url("https://github.com/OwLLM/Shared.git"),
+                ],
+            )
+            .unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let row = rt
+            .block_on(resolve_project_for_location(ResolveProjectInput {
+                location: repo.to_string_lossy().to_string(),
+                name: Some("Shared clone".to_string()),
+            }))
+            .expect("resolve project");
+
+        assert_eq!(row.id, "project-exact");
         std::env::remove_var("OWLLM_PROJECT_DB");
     }
 }

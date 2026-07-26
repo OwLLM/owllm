@@ -151,6 +151,9 @@ check("Code busy state synchronizes the imperative lock", codePageSrc.includes("
 check("Code send gates on the synchronous lock", codePageSrc.includes("if (busySendRef.current) {"));
 check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();"));
 check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();") && agentsPageSrc.includes("else notifyAutoFeedPaused(notebookPauseReason);"));
+check("Recoverable worktree preflight leaves the notebook card pending",
+  agentsPageSrc.includes("notebookRunStoppedAtPreflight = e instanceof WorktreePreflightError")
+    && agentsPageSrc.includes("markNotebookStepPending(selectedProjectId"));
 check("Code uses the shared auto-feed continuation", codePageSrc.includes("continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId"));
 check("Agents uses the shared auto-feed continuation", agentsPageSrc.includes("continueNotebookAutoFeed(pid, notebookSurfaceId"));
 check("Watcher help and bug actions have accessible names", watcherSrc.includes('aria-label="Help using the app"') && watcherSrc.includes('aria-label="Report a bug"'));
@@ -160,6 +163,29 @@ check("Existing-project brainstorm does not offer another team", brainstormSrc.i
 check("Agents wires brainstorm completion to the Notebook", agentsPageSrc.includes('hasTeam={!!activeTeam?.agents.length}') && agentsPageSrc.includes('new CustomEvent("owllm:open-run-notebook")'));
 check("Graph fills its parent instead of retaining a stale pixel width", agentsPageSrc.includes('data-ui="GraphFitViewport"') && agentsPageSrc.includes('position:"relative", width:"100%", height:"100%"'));
 check("Graph reframes saved positions when its viewport changes", agentsPageSrc.includes("const fitGraphToViewport = () =>") && agentsPageSrc.includes("positionMembershipKey"));
+
+console.log("case 0a: false WSL redirector failures are repaired to pending");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN, autoFeed: true, digest: [],
+    steps: [{
+      id: "wsl-false-failure",
+      text: "implement the queued website step",
+      status: "failed",
+      ts: 1,
+      startedAt: 10,
+      finishedAt: 20,
+      failureReason: "Could not create the required isolated worktree: project_cwd does not exist: \\\\wsl.localhost\\Ubuntu\\mnt\\c\\repo",
+    }],
+  }));
+  const repaired = NB.loadNotebook(PID);
+  check("known false WSL failure returns to pending", repaired.steps[0]?.status === "pending");
+  check("false-failure timing and reason are cleared",
+    repaired.steps[0]?.startedAt == null
+      && repaired.steps[0]?.finishedAt == null
+      && repaired.steps[0]?.failureReason == null);
+  check("repair is durable in the notebook blob", blob().steps[0]?.status === "pending");
+}
 
 function mount(props) {
   const container = document.getElementById("root");

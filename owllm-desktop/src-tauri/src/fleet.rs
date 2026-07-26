@@ -49,15 +49,145 @@ fn linux_path_to_wsl_unc(distro: &str, linux_path: &str) -> PathBuf {
     PathBuf::from(format!(r"\\wsl.localhost\{distro}\{tail}"))
 }
 
+/// Run filesystem operations in the path's owning OS.
+///
+/// A WSL UNC is an address understood by Windows Explorer, not a reliable
+/// Windows filesystem boundary. The redirector may reject `metadata`,
+/// `create_dir_all`, or `rename` while the same path is healthy inside the
+/// distro. Fleet Git commands already run in WSL; all accompanying filesystem
+/// work must do the same or a run can create successfully and then fail during
+/// finalize/merge/cleanup.
+fn wsl_fs(path: &Path, operation: &str) -> Result<Option<String>, String> {
+    let text = path.to_string_lossy();
+    let Some((distro, linux_path)) = crate::wsl::parse_wsl_unc(&text) else {
+        return Ok(None);
+    };
+    crate::wsl::run_in_distro(
+        &distro,
+        &operation.replace("__PATH__", &crate::wsl::sh_quote(&linux_path)),
+    )
+    .map(Some)
+}
+
+fn path_is_dir_native(path: &Path) -> Result<bool, String> {
+    if let Some(out) = wsl_fs(
+        path,
+        "if [ -d __PATH__ ]; then printf '__OWLLM_DIR__=1'; else printf '__OWLLM_DIR__=0'; fi",
+    )? {
+        return Ok(out.contains("__OWLLM_DIR__=1"));
+    }
+    Ok(path.is_dir())
+}
+
+fn path_is_file_native(path: &Path) -> Result<bool, String> {
+    if let Some(out) = wsl_fs(
+        path,
+        "if [ -f __PATH__ ]; then printf '__OWLLM_FILE__=1'; else printf '__OWLLM_FILE__=0'; fi",
+    )? {
+        return Ok(out.contains("__OWLLM_FILE__=1"));
+    }
+    Ok(path.is_file())
+}
+
+fn path_exists_native(path: &Path) -> Result<bool, String> {
+    if let Some(out) = wsl_fs(
+        path,
+        "if [ -e __PATH__ ]; then printf '__OWLLM_EXISTS__=1'; else printf '__OWLLM_EXISTS__=0'; fi",
+    )? {
+        return Ok(out.contains("__OWLLM_EXISTS__=1"));
+    }
+    Ok(path.exists())
+}
+
+fn create_dir_all_native(path: &Path) -> Result<(), String> {
+    if wsl_fs(path, "mkdir -p -- __PATH__")?.is_some() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path).map_err(|e| format!("mkdir {}: {e}", path.display()))
+}
+
+fn remove_file_native(path: &Path) -> Result<(), String> {
+    if wsl_fs(path, "rm -f -- __PATH__")?.is_some() {
+        return Ok(());
+    }
+    std::fs::remove_file(path).map_err(|e| format!("remove {}: {e}", path.display()))
+}
+
+fn remove_dir_all_native(path: &Path) -> Result<(), String> {
+    if wsl_fs(path, "rm -rf -- __PATH__")?.is_some() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(path).map_err(|e| format!("remove {}: {e}", path.display()))
+}
+
+fn remove_empty_dir_native(path: &Path) -> Result<(), String> {
+    if wsl_fs(path, "rmdir -- __PATH__ 2>/dev/null || true")?.is_some() {
+        return Ok(());
+    }
+    std::fs::remove_dir(path).map_err(|e| format!("remove empty directory {}: {e}", path.display()))
+}
+
+fn two_wsl_paths(from: &Path, to: &Path) -> Option<(String, String, String)> {
+    let (from_distro, from_linux) = crate::wsl::parse_wsl_unc(&from.to_string_lossy())?;
+    let (to_distro, to_linux) = crate::wsl::parse_wsl_unc(&to.to_string_lossy())?;
+    from_distro
+        .eq_ignore_ascii_case(&to_distro)
+        .then_some((from_distro, from_linux, to_linux))
+}
+
+fn rename_native(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some((distro, from_linux, to_linux)) = two_wsl_paths(from, to) {
+        let script = format!(
+            "mv -- {} {}",
+            crate::wsl::sh_quote(&from_linux),
+            crate::wsl::sh_quote(&to_linux)
+        );
+        crate::wsl::run_in_distro(&distro, &script)?;
+        return Ok(());
+    }
+    std::fs::rename(from, to)
+        .map_err(|e| format!("rename {} to {}: {e}", from.display(), to.display()))
+}
+
+fn copy_native(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some((distro, from_linux, to_linux)) = two_wsl_paths(from, to) {
+        let script = format!(
+            "cp -- {} {}",
+            crate::wsl::sh_quote(&from_linux),
+            crate::wsl::sh_quote(&to_linux)
+        );
+        crate::wsl::run_in_distro(&distro, &script)?;
+        return Ok(());
+    }
+    std::fs::copy(from, to)
+        .map(|_| ())
+        .map_err(|e| format!("copy {} to {}: {e}", from.display(), to.display()))
+}
+
+fn repo_name_for_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some((_, linux_path)) = crate::wsl::parse_wsl_unc(&text) {
+        return linux_path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
 fn fleet_root_for(project_cwd: &str) -> Result<PathBuf, String> {
     let Some((distro, _)) = crate::wsl::parse_wsl_unc(project_cwd) else {
         return fleet_root()
             .ok_or_else(|| "could not resolve a home dir for the fleet scratch root".to_string());
     };
-    let output = crate::wsl::run_in_distro(
-        &distro,
-        "printf '__OWLLM_FLEET_HOME__=%s\\n' \"$HOME\"",
-    )?;
+    let output =
+        crate::wsl::run_in_distro(&distro, "printf '__OWLLM_FLEET_HOME__=%s\\n' \"$HOME\"")?;
     let home = output
         .lines()
         .find_map(|line| line.trim().strip_prefix("__OWLLM_FLEET_HOME__="))
@@ -203,19 +333,19 @@ impl UntrackedCollisionBackup {
         for path in &self.preserve_after_merge {
             let from = self.root.join(path);
             let to = self.cwd.join(path);
-            if !from.exists() {
+            if !path_exists_native(&from)? {
                 continue;
             }
-            if to.exists() {
-                std::fs::remove_file(&to)
+            if path_exists_native(&to)? {
+                remove_file_native(&to)
                     .map_err(|e| format!("could not remove merged app state {path}: {e}"))?;
             }
             if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
+                create_dir_all_native(parent).map_err(|e| {
                     format!("could not restore app state directory for {path}: {e}")
                 })?;
             }
-            std::fs::rename(&from, &to)
+            rename_native(&from, &to)
                 .map_err(|e| format!("could not restore app-owned file {path} after merge: {e}"))?;
         }
         self.preserve_after_merge.clear();
@@ -224,7 +354,7 @@ impl UntrackedCollisionBackup {
 
     fn discard(mut self) {
         self.restore_on_drop = false;
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = remove_dir_all_native(&self.root);
     }
 }
 
@@ -236,15 +366,17 @@ impl Drop for UntrackedCollisionBackup {
         for path in &self.paths {
             let from = self.root.join(path);
             let to = self.cwd.join(path);
-            if !from.exists() || to.exists() {
+            if !path_exists_native(&from).unwrap_or(false)
+                || path_exists_native(&to).unwrap_or(true)
+            {
                 continue;
             }
             if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = create_dir_all_native(parent);
             }
-            let _ = std::fs::rename(from, to);
+            let _ = rename_native(&from, &to);
         }
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = remove_dir_all_native(&self.root);
     }
 }
 
@@ -262,7 +394,7 @@ struct IdenticalTrackedBackup {
 impl IdenticalTrackedBackup {
     fn discard(mut self) {
         self.restore_on_drop = false;
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = remove_dir_all_native(&self.root);
     }
 }
 
@@ -274,15 +406,15 @@ impl Drop for IdenticalTrackedBackup {
         for path in &self.paths {
             let from = self.root.join(path);
             let to = self.cwd.join(path);
-            if !from.exists() {
+            if !path_exists_native(&from).unwrap_or(false) {
                 continue;
             }
             if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = create_dir_all_native(parent);
             }
-            let _ = std::fs::copy(from, to);
+            let _ = copy_native(&from, &to);
         }
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = remove_dir_all_native(&self.root);
     }
 }
 
@@ -317,7 +449,7 @@ fn prepare_untracked_collisions(
     let mut differing = Vec::new();
     for path in added.split('\0').filter(|p| !p.is_empty()) {
         let disk_path = cwd.join(path);
-        if !disk_path.is_file() {
+        if !path_is_file_native(&disk_path)? {
             continue;
         }
         let (tracked, _, _) = git(cwd, &["ls-files", "--error-unmatch", "--", path])?;
@@ -362,7 +494,7 @@ fn prepare_untracked_collisions(
     // Keep the backup under Git metadata: it stays on the repository's own
     // filesystem (so rename remains atomic), is invisible to status/merge, and
     // works for ordinary clones and linked worktrees on every platform.
-    let root = PathBuf::from(git_dir.trim()).join(format!(
+    let root = git_reported_path_for_host(cwd, git_dir.trim()).join(format!(
         "owllm-merge-untracked-{}-{nonce}",
         std::process::id()
     ));
@@ -371,10 +503,10 @@ fn prepare_untracked_collisions(
         let from = cwd.join(path);
         let to = root.join(path);
         if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)
+            create_dir_all_native(parent)
                 .map_err(|e| format!("could not prepare untracked-file backup for {path}: {e}"))?;
         }
-        if let Err(e) = std::fs::rename(&from, &to) {
+        if let Err(e) = rename_native(&from, &to) {
             let guard = UntrackedCollisionBackup {
                 cwd: cwd.to_path_buf(),
                 root,
@@ -435,7 +567,11 @@ fn prepare_identical_tracked_collisions(
         let branch_path = format!("{branch}:{path}");
         let (branch_ok, branch_blob, _) = git(cwd, &["rev-parse", &branch_path])?;
         let (disk_ok, disk_blob, _) = git(cwd, &["hash-object", "--", path])?;
-        if disk_path.is_file() && branch_ok && disk_ok && branch_blob.trim() == disk_blob.trim() {
+        if path_is_file_native(&disk_path)?
+            && branch_ok
+            && disk_ok
+            && branch_blob.trim() == disk_blob.trim()
+        {
             identical.push(path.to_string());
         } else {
             differing.push(path.to_string());
@@ -463,7 +599,7 @@ fn prepare_identical_tracked_collisions(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let root = PathBuf::from(git_dir.trim()).join(format!(
+    let root = git_reported_path_for_host(cwd, git_dir.trim()).join(format!(
         "owllm-merge-tracked-{}-{nonce}",
         std::process::id()
     ));
@@ -472,7 +608,7 @@ fn prepare_identical_tracked_collisions(
         let from = cwd.join(path);
         let to = root.join(path);
         if let Some(parent) = to.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+            if let Err(e) = create_dir_all_native(parent) {
                 let guard = IdenticalTrackedBackup {
                     cwd: cwd.to_path_buf(),
                     root,
@@ -485,7 +621,7 @@ fn prepare_identical_tracked_collisions(
                 ));
             }
         }
-        if let Err(e) = std::fs::copy(&from, &to) {
+        if let Err(e) = copy_native(&from, &to) {
             let guard = IdenticalTrackedBackup {
                 cwd: cwd.to_path_buf(),
                 root,
@@ -619,10 +755,9 @@ fn git_cmd(dir: &Path) -> Command {
 }
 
 /// Is `dir` the root of a git repo (or inside one)?
-fn is_git_repo(dir: &Path) -> bool {
-    git_once(dir, &["rev-parse", "--is-inside-work-tree"])
-        .map(|(ok, out, _)| ok && out.trim() == "true")
-        .unwrap_or(false)
+fn is_git_repo(dir: &Path) -> Result<bool, String> {
+    let (ok, out, _) = git_once(dir, &["rev-parse", "--is-inside-work-tree"])?;
+    Ok(ok && out.trim() == "true")
 }
 
 fn git_once(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
@@ -718,7 +853,7 @@ pub enum CreateOutcome {
 /// can fall back to the host folder instead of failing every worktree.
 #[tauri::command]
 pub fn path_is_dir(path: String) -> bool {
-    !path.trim().is_empty() && PathBuf::from(&path).is_dir()
+    !path.trim().is_empty() && path_is_dir_native(&PathBuf::from(path)).unwrap_or(false)
 }
 
 /// Create a per-agent worktree from `project_cwd`'s HEAD.
@@ -734,12 +869,20 @@ pub async fn fleet_worktree_create(
     branch_prefix: Option<String>,
 ) -> Result<CreateOutcome, String> {
     let cwd = PathBuf::from(&project_cwd);
-    if !cwd.is_dir() {
+    let cwd_exists = match path_is_dir_native(&cwd) {
+        Ok(exists) => exists,
+        Err(message) => return Ok(CreateOutcome::Error { message }),
+    };
+    if !cwd_exists {
         return Ok(CreateOutcome::Error {
             message: format!("project_cwd does not exist: {}", project_cwd),
         });
     }
-    if !is_git_repo(&cwd) {
+    let is_repo = match is_git_repo(&cwd) {
+        Ok(is_repo) => is_repo,
+        Err(message) => return Ok(CreateOutcome::Error { message }),
+    };
+    if !is_repo {
         return Ok(CreateOutcome::NotAGitRepo);
     }
     // Serialize creates against THIS repo so two pages opening the same project
@@ -788,19 +931,14 @@ pub async fn fleet_worktree_create(
             return Ok(CreateOutcome::Error { message });
         }
     };
-    let repo_name = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
+    let repo_name = repo_name_for_path(&cwd);
     let dest = fleet_root
-        .join(safe_seg(repo_name))
+        .join(safe_seg(&repo_name))
         .join(safe_seg(&run_id))
         .join(safe_seg(&agent_name));
     if let Some(parent) = dest.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return Ok(CreateOutcome::Error {
-                message: format!("mkdir {}: {}", parent.display(), e),
-            });
+        if let Err(e) = create_dir_all_native(parent) {
+            return Ok(CreateOutcome::Error { message: e });
         }
     }
     // Belt-and-braces: if a previous run crashed mid-flight and left a
@@ -810,7 +948,7 @@ pub async fn fleet_worktree_create(
         &cwd,
         &["worktree", "remove", "--force", &dest.to_string_lossy()],
     );
-    let _ = std::fs::remove_dir_all(&dest);
+    let _ = remove_dir_all_native(&dest);
 
     let prefix = branch_prefix
         .as_deref()
@@ -865,7 +1003,7 @@ pub async fn fleet_worktree_finalize(
     summary: String,
 ) -> Result<FinalizeOutcome, String> {
     let wt = PathBuf::from(&worktree_path);
-    if !wt.is_dir() {
+    if !path_is_dir_native(&wt)? {
         return Ok(FinalizeOutcome::Error {
             message: format!("worktree path does not exist: {}", worktree_path),
         });
@@ -937,7 +1075,7 @@ pub async fn fleet_worktree_diff(
     base_sha: String,
 ) -> Result<String, String> {
     let wt = PathBuf::from(&worktree_path);
-    if !wt.is_dir() {
+    if !path_is_dir_native(&wt)? {
         return Err(format!("worktree path does not exist: {}", worktree_path));
     }
     // Use the three-dot form so the diff is "what THIS branch added on
@@ -993,12 +1131,12 @@ fn fleet_worktree_merge_blocking(
     branch: String,
 ) -> Result<MergeOutcome, String> {
     let cwd = PathBuf::from(&project_cwd);
-    if !cwd.is_dir() {
+    if !path_is_dir_native(&cwd)? {
         return Ok(MergeOutcome::Error {
             message: format!("project_cwd does not exist: {}", project_cwd),
         });
     }
-    if !is_git_repo(&cwd) {
+    if !is_git_repo(&cwd)? {
         return Ok(MergeOutcome::Error {
             message: "project_cwd is not a git repo".to_string(),
         });
@@ -1125,12 +1263,12 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
         &["worktree", "remove", "--force", &args.worktree_path],
     );
     let _ = git(&cwd, &["branch", "-D", &args.branch]);
-    let _ = std::fs::remove_dir_all(&args.worktree_path);
+    let _ = remove_dir_all_native(&PathBuf::from(&args.worktree_path));
     // Remove the now-empty parent RUN dir (…/<repo>/<run_id>/) so finished runs
     // don't leave a litter of empty folders (remove_dir only succeeds if empty,
     // so a kept sibling worktree is never clobbered).
     if let Some(run_dir) = PathBuf::from(&args.worktree_path).parent() {
-        let _ = std::fs::remove_dir(run_dir);
+        let _ = remove_empty_dir_native(run_dir);
     }
     Ok(())
 }
@@ -1145,7 +1283,7 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
 #[tauri::command]
 pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
     let cwd = PathBuf::from(&project_cwd);
-    if !is_git_repo(&cwd) {
+    if !is_git_repo(&cwd)? {
         return Ok(0);
     }
     let _ = git(&cwd, &["worktree", "prune"]); // drop registry entries for already-deleted dirs
@@ -1179,9 +1317,9 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
                 } // has work → KEEP
                 let _ = git(&cwd, &["worktree", "remove", "--force", &p]);
                 let _ = git(&cwd, &["branch", "-D", &branch]);
-                let _ = std::fs::remove_dir_all(&wt);
+                let _ = remove_dir_all_native(&wt);
                 if let Some(parent) = wt.parent() {
-                    let _ = std::fs::remove_dir(parent);
+                    let _ = remove_empty_dir_native(parent);
                 } // empty run dir
                 removed += 1;
             }
@@ -1203,7 +1341,7 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
 #[tauri::command]
 pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String> {
     let cwd = PathBuf::from(&project_cwd);
-    if !is_git_repo(&cwd) {
+    if !is_git_repo(&cwd)? {
         return Ok(Vec::new());
     }
     let (_, out, _) = git(&cwd, &["show", "--name-only", "--format=", "HEAD"])?;
@@ -1218,8 +1356,8 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 mod tests {
     use super::{
         fleet_worktree_finalize, fleet_worktree_merge_blocking, git_failure_message,
-        git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc, porcelain_path,
-        unstage_app_scratch, user_conflict_files, FinalizeOutcome, MergeOutcome,
+        git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc, path_is_dir_native,
+        porcelain_path, unstage_app_scratch, user_conflict_files, FinalizeOutcome, MergeOutcome,
     };
     use std::{fs, path::Path, process::Command};
 
@@ -1357,18 +1495,103 @@ mod tests {
 
     #[test]
     fn wsl_fleet_paths_round_trip_to_the_same_distro() {
-        let unc = linux_path_to_wsl_unc(
-            "Ubuntu",
-            "/home/owllm/.owllm/fleet/repo/run/coder",
-        );
+        let unc = linux_path_to_wsl_unc("Ubuntu", "/home/owllm/.owllm/fleet/repo/run/coder");
         assert_eq!(
             unc.to_string_lossy().replace('/', "\\"),
             r"\\wsl.localhost\Ubuntu\home\owllm\.owllm\fleet\repo\run\coder"
         );
         let repo = Path::new(r"\\wsl.localhost\Ubuntu\home\owllm\repo");
-        let reported =
-            git_reported_path_for_host(repo, "/home/owllm/.owllm/fleet/repo/run/coder");
+        let reported = git_reported_path_for_host(repo, "/home/owllm/.owllm/fleet/repo/run/coder");
         assert_eq!(reported, unc);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn wsl_unc_worktree_lifecycle_uses_the_distro_boundary() {
+        use super::{fleet_worktree_create, fleet_worktree_remove, CreateOutcome, RemoveArgs};
+
+        let distros = Command::new("wsl.exe")
+            .args(["-l", "-q"])
+            .output()
+            .ok()
+            .map(|out| crate::wsl::decode_wsl(&out.stdout))
+            .unwrap_or_default();
+        let Some(distro) = distros.lines().map(str::trim).find(|line| !line.is_empty()) else {
+            eprintln!("WSL is unavailable; skipping the Windows-to-WSL lifecycle assertion");
+            return;
+        };
+
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let windows = root.to_string_lossy().replace('\\', "/");
+        let bytes = windows.as_bytes();
+        if bytes.len() < 3 || bytes[1] != b':' {
+            eprintln!("temporary repository is not on a drive mounted by WSL");
+            return;
+        }
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let tail = windows[3..].replace('/', "\\");
+        let project_unc = format!(r"\\wsl.localhost\{distro}\mnt\{drive}\{tail}");
+
+        let created = fleet_worktree_create(
+            project_unc.clone(),
+            "coder".into(),
+            "wsl-lifecycle-test".into(),
+            None,
+        )
+        .await
+        .unwrap();
+        let (worktree_path, branch) = match created {
+            CreateOutcome::Ready { path, branch, .. } => (path, branch),
+            CreateOutcome::NotAGitRepo => panic!("WSL saw the initialized repository as non-Git"),
+            CreateOutcome::DirtyWorkingTree { details } => {
+                panic!("new test repository was unexpectedly dirty: {details}")
+            }
+            CreateOutcome::Error { message } => {
+                panic!("WSL worktree creation failed: {message}")
+            }
+        };
+
+        assert!(path_is_dir_native(Path::new(&worktree_path)).unwrap());
+        let (worktree_distro, linux_worktree) =
+            crate::wsl::parse_wsl_unc(&worktree_path).expect("worktree must stay in WSL");
+        assert_eq!(worktree_distro, distro);
+        crate::wsl::run_in_distro(
+            &distro,
+            &format!(
+                "printf 'isolated WSL edit\\n' > {}",
+                crate::wsl::sh_quote(&format!("{linux_worktree}/feature.txt"))
+            ),
+        )
+        .unwrap();
+
+        let finalized = fleet_worktree_finalize(
+            worktree_path.clone(),
+            "coder".into(),
+            "WSL lifecycle".into(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(finalized, FinalizeOutcome::Committed { .. }));
+
+        let merged =
+            fleet_worktree_merge_blocking(project_unc.clone(), "coder".into(), branch.clone())
+                .unwrap();
+        assert!(matches!(merged, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("feature.txt")).unwrap(),
+            "isolated WSL edit\n"
+        );
+
+        fleet_worktree_remove(RemoveArgs {
+            project_cwd: project_unc,
+            worktree_path: worktree_path.clone(),
+            branch,
+            keep: false,
+        })
+        .await
+        .unwrap();
+        assert!(!path_is_dir_native(Path::new(&worktree_path)).unwrap());
     }
 
     #[test]

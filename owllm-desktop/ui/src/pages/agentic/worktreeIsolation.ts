@@ -4,8 +4,27 @@ export type WorktreeCreateState =
   | { status: "dirtyWorkingTree"; details: string }
   | { status: "error"; message: string };
 
+/// A worktree preflight stopped before a specialist received filesystem tools.
+/// Notebook callers keep that card pending (rather than recording a completed
+/// failed attempt) so the same isolated job can be retried after the underlying
+/// project/WSL/Git condition is corrected.
+export class WorktreePreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorktreePreflightError";
+  }
+}
+
 export function requiresAgentWorktree(projectCwd: string): boolean {
   return projectCwd.trim().length > 0;
+}
+
+export function worktreePreflightError(
+  agentName: string,
+  projectCwd: string,
+  result: Exclude<WorktreeCreateState, { status: "ready" }>,
+): WorktreePreflightError {
+  return new WorktreePreflightError(worktreeCreationFailure(agentName, projectCwd, result));
 }
 
 export function worktreeCreationFailure(

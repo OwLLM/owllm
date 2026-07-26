@@ -102,21 +102,39 @@ const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36)
 const NOTEBOOK_HEARTBEAT_MS = 8_000;
 const NOTEBOOK_LEASE_TTL_MS = 20_000;
 
+export function isLegacyWslRedirectorFalseFailure(step: NotebookStep): boolean {
+  return step.status === "failed"
+    && /project_cwd does not exist:.*(?:\\\\wsl\.localhost\\|\\\\wsl\$\\)/i.test(step.failureReason ?? "");
+}
+
 export function loadNotebook(projectId: string | null | undefined): NotebookState {
   if (!projectId) return { ...EMPTY };
   try {
     const raw = localStorage.getItem(keyFor(projectId));
     if (!raw) return { ...EMPTY };
     const p = JSON.parse(raw);
-    return {
+    let repairedLegacyWslFailure = false;
+    const notebook: NotebookState = {
       text: typeof p.text === "string" ? p.text : "",
       plan: typeof p.plan === "string" ? p.plan : "",
       steps: Array.isArray(p.steps)
-        ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string").map((s: NotebookStep) => ({
-            ...s,
-            startedAt: typeof s.startedAt === "number" ? s.startedAt : undefined,
-            finishedAt: typeof s.finishedAt === "number" ? s.finishedAt : undefined,
-          }))
+        ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string").map((s: NotebookStep) => {
+            if (isLegacyWslRedirectorFalseFailure(s)) {
+              repairedLegacyWslFailure = true;
+              return {
+                ...s,
+                status: "pending" as const,
+                startedAt: undefined,
+                finishedAt: undefined,
+                failureReason: undefined,
+              };
+            }
+            return {
+              ...s,
+              startedAt: typeof s.startedAt === "number" ? s.startedAt : undefined,
+              finishedAt: typeof s.finishedAt === "number" ? s.finishedAt : undefined,
+            };
+          })
         : [],
       autoFeed: p.autoFeed === true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
@@ -129,6 +147,10 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
       proposedPlan: typeof p.proposedPlan === "string" ? p.proposedPlan : "",
     };
+    if (repairedLegacyWslFailure) {
+      localStorage.setItem(keyFor(projectId), JSON.stringify(notebook));
+    }
+    return notebook;
   } catch { return { ...EMPTY }; }
 }
 
@@ -309,6 +331,26 @@ export function markNotebookStepFailed(
     status: "failed",
     finishedAt,
     failureReason: reason.trim() || "The run did not complete.",
+  };
+  saveNotebook(projectId, nb);
+}
+
+/// A filesystem preflight failed before an agent started. The card remains
+/// pending and actionable instead of becoming a misleading failed delivery.
+export function markNotebookStepPending(
+  projectId: string | null | undefined,
+  stepId: string,
+): void {
+  if (!projectId || !stepId) return;
+  const nb = loadNotebook(projectId);
+  const idx = nb.steps.findIndex((s) => s.id === stepId);
+  if (idx < 0) return;
+  nb.steps[idx] = {
+    ...nb.steps[idx],
+    status: "pending",
+    startedAt: undefined,
+    finishedAt: undefined,
+    failureReason: undefined,
   };
   saveNotebook(projectId, nb);
 }

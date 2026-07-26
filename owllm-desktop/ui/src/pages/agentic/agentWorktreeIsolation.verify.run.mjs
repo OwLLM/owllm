@@ -41,6 +41,12 @@ try {
   });
   check("Creation failures explicitly stop instead of falling back",
     creation.includes("stopped instead of falling back") && creation.includes("simulated lock"));
+  const retryable = policy.worktreePreflightError("coder", "C:\\repo", {
+    status: "error",
+    message: "simulated WSL outage",
+  });
+  check("Worktree setup failures retain a typed preflight boundary",
+    retryable.name === "WorktreePreflightError" && retryable.message.includes("simulated WSL outage"));
   const nonGit = policy.worktreeCreationFailure("coder", "C:\\plain", {
     status: "notAGitRepo",
   });
@@ -58,7 +64,7 @@ try {
     page.includes("const needWorktrees = requiresAgentWorktree(projectCwd)")
       && !page.includes("parallelMode && dispatches.length > 1"));
   check("Agent worktree failure is fail-closed",
-    page.includes("throw new Error(worktreeCreationFailure(spec.name, projectCwd, res))")
+    page.includes("throw worktreePreflightError(spec.name, projectCwd, res)")
       && !page.includes("Falling back to shared cwd"));
   check("Solo filesystem work runs and verifies inside a private worktree",
     page.includes("const soloCwd = soloWt.path")
@@ -81,6 +87,20 @@ try {
   check("WSL worktrees live under the distro user's fleet root",
     fleet.includes('format!("{home}/.owllm/fleet")')
       && fleet.includes("linux_path_to_wsl_unc"));
+  check("Fleet filesystem operations route WSL paths through the distro",
+    fleet.includes("fn path_is_dir_native(")
+      && fleet.includes("fn create_dir_all_native(")
+      && fleet.includes("fn rename_native(")
+      && fleet.includes("crate::wsl::run_in_distro(&distro"));
+  check("Create, finalize, diff, and merge avoid host is_dir on WSL paths",
+    !fleet.includes("if !cwd.is_dir()")
+      && !fleet.includes("if !wt.is_dir()"));
+  check("The native suite covers the full WSL worktree lifecycle",
+    fleet.includes("wsl_unc_worktree_lifecycle_uses_the_distro_boundary")
+      && fleet.includes("fleet_worktree_merge_blocking(project_unc.clone()"));
+  check("Notebook worktree preflight failures remain pending and retryable",
+    page.includes("e instanceof WorktreePreflightError")
+      && page.includes("markNotebookStepPending(selectedProjectId"));
 
   const repo = path.join(temp, "repo");
   const worktree = path.join(temp, "single-agent");

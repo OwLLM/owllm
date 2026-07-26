@@ -18,7 +18,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFailed, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFailed, markNotebookStepFinished, markNotebookStepPending } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -147,7 +147,8 @@ import {
 } from "./teamModelSelection";
 import {
   requiresAgentWorktree,
-  worktreeCreationFailure,
+  WorktreePreflightError,
+  worktreePreflightError,
   type WorktreeCreateState,
 } from "./worktreeIsolation";
 
@@ -11125,6 +11126,7 @@ export function AgentsPage({
     // the bottom of the happy path those returns silently stranded auto-feed
     // after its first card.
     let notebookRunCompletedCleanly = false;
+    let notebookRunStoppedAtPreflight = false;
     let notebookPauseReason = "the run ended before completing";
     try {
       // ===== Preflight: a referenced file the sandbox can't read → AUTO-INGEST it =====
@@ -11223,7 +11225,7 @@ export function AgentsPage({
           runId: soloRunId,
         });
         if (soloCreate.status !== "ready") {
-          throw new Error(worktreeCreationFailure(coder.name, projectCwd, soloCreate));
+          throw worktreePreflightError(coder.name, projectCwd, soloCreate);
         }
         const soloWt: WorktreeBinding = {
           path: soloCreate.path,
@@ -12063,7 +12065,7 @@ export function AgentsPage({
             text: `🗂 ${spec.name} → ${res.branch}\n   ${res.path}`,
           });
         } else {
-          throw new Error(worktreeCreationFailure(spec.name, projectCwd, res));
+          throw worktreePreflightError(spec.name, projectCwd, res);
         }
       }
 
@@ -12700,7 +12702,7 @@ export function AgentsPage({
             docWt = { path: wtRes.path, branch: wtRes.branch, baseSha: wtRes.baseSha };
             appendThought(docSpec.name, { role: "fleet", color: "#7ff0c5", text: `🗂 ${docSpec.name} → ${wtRes.branch}` });
           } else {
-            throw new Error(worktreeCreationFailure(docSpec.name, projectCwd, wtRes));
+            throw worktreePreflightError(docSpec.name, projectCwd, wtRes);
           }
         } catch (e: any) {
           appendThought(docSpec.name, {
@@ -12870,6 +12872,7 @@ export function AgentsPage({
         appendLog("system", { role: "system", color: "#ff8c8c", text: "⏹ Stopped by user." });
         notebookPauseReason = "the run was stopped";
       } else {
+        notebookRunStoppedAtPreflight = e instanceof WorktreePreflightError;
         const clean = cleanAgentError(e);
         setRunError(clean);
         // Network failures get the one-click WSL-restart recovery button.
@@ -12891,6 +12894,8 @@ export function AgentsPage({
       if (notebookStepRef.current) {
         if (notebookRunCompletedCleanly) {
           markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        } else if (notebookRunStoppedAtPreflight) {
+          markNotebookStepPending(selectedProjectId, notebookStepRef.current);
         } else {
           markNotebookStepFailed(selectedProjectId, notebookStepRef.current, notebookPauseReason, now);
         }
@@ -12899,6 +12904,8 @@ export function AgentsPage({
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
         if (notebookRunCompletedCleanly) {
           markNotebookStepFinished(selectedProjectId, sid, now);
+        } else if (notebookRunStoppedAtPreflight) {
+          markNotebookStepPending(selectedProjectId, sid);
         } else {
           markNotebookStepFailed(selectedProjectId, sid, notebookPauseReason, now);
         }

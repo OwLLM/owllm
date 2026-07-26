@@ -42,8 +42,10 @@ export const BUNDLED_CLOUD_CATALOGUE: CloudCatalogue = {
   anthropic: [
     // Fable 5 — newest Claude generation (alongside the 4.X family).
     { id: "claude-fable-5",    display: "Claude Fable 5",    effort: ["low", "medium", "high", "extra_high"] },
-    // Opus 4.8 — latest flagship (GA). Default-on so fresh installs get
-    // it without an override.
+    // Opus 5 — current Opus flagship (GA). A step-change over 4.8 on
+    // agentic coding + long-horizon work, at 4.8's pricing. Default-on so
+    // fresh installs get it without an override.
+    { id: "claude-opus-5",     display: "Claude Opus 5",     effort: ["low", "medium", "high", "extra_high"] },
     { id: "claude-opus-4-8",   display: "Claude Opus 4.8",   effort: ["low", "medium", "high", "extra_high"] },
     { id: "claude-opus-4-7",   display: "Claude Opus 4.7",   effort: ["low", "medium", "high", "extra_high"] },
     { id: "claude-sonnet-4-6", display: "Claude Sonnet 4.6", effort: ["low", "medium", "high", "extra_high"] },

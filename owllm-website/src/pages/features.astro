@@ -48,22 +48,24 @@ const sections = [
   <section class="page-header" aria-labelledby="features-title">
     <div class="container">
       <h1 id="features-title">Features</h1>
-      <p class="subtitle">
-        Everything that makes OwLLM a local-first AI workstation.
-      </p>
+      <p class="subtitle">Everything that makes OwLLM a local-first AI workstation.</p>
     </div>
   </section>
 
   <section class="section" aria-label="Feature list">
     <div class="container">
       <div class="feature-list">
-        {sections.map((section, index) => (
-          <Card as="article" class="feature-card">
-            <span class="feature-number" aria-hidden="true">{String(index + 1).padStart(2, "0")}</span>
-            <h2>{section.title}</h2>
-            <p>{section.description}</p>
-          </Card>
-        ))}
+        {
+          sections.map((section, index) => (
+            <Card as="article" class="feature-card">
+              <span class="feature-number" aria-hidden="true">
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <h2>{section.title}</h2>
+              <p>{section.description}</p>
+            </Card>
+          ))
+        }
       </div>
     </div>
   </section>

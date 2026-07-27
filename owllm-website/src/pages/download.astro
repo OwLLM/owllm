@@ -22,8 +22,9 @@ const platforms: Platform[] = [
     arch: "10 / 11 · x86-64",
     description: "Native CUDA GPU server · WSL2 sandbox · signed auto-updater",
     cta: "Download installer",
-    href: release.assets?.find((a) => a.name.endsWith(".msi") || a.name.endsWith(".exe"))?.browserDownloadUrl ??
-      "https://github.com/OwLLM/owllm/releases/latest",
+    href:
+      release.assets?.find((a) => a.name.endsWith(".msi") || a.name.endsWith(".exe"))
+        ?.browserDownloadUrl ?? "https://github.com/OwLLM/owllm/releases/latest",
   },
   {
     name: "Linux",
@@ -73,25 +74,31 @@ const releaseDate = release.publishedAt
   <section class="section" aria-label="Platform downloads">
     <div class="container">
       <div class="platform-grid">
-        {platforms.map((platform) => (
-          <Card as="article" class="platform-card">
-            <div class="platform-header">
-              <h2>{platform.name}</h2>
-              <span class={`badge badge-${platform.badge}`}>{platform.badge}</span>
-            </div>
-            <p class="arch">{platform.arch}</p>
-            <p class="description">{platform.description}</p>
-            <Button href={platform.href} variant="primary" size="md">
-              {platform.cta}
-            </Button>
-          </Card>
-        ))}
+        {
+          platforms.map((platform) => (
+            <Card as="article" class="platform-card">
+              <div class="platform-header">
+                <h2>{platform.name}</h2>
+                <span class={`badge badge-${platform.badge}`}>{platform.badge}</span>
+              </div>
+              <p class="arch">{platform.arch}</p>
+              <p class="description">{platform.description}</p>
+              <Button href={platform.href} variant="primary" size="md">
+                {platform.cta}
+              </Button>
+            </Card>
+          ))
+        }
       </div>
 
       <div class="alternate">
         <p>
           Looking for an older release or a specific asset? Browse all releases on{" "}
-          <a href="https://github.com/OwLLM/owllm/releases" target="_blank" rel="noopener noreferrer">
+          <a
+            href="https://github.com/OwLLM/owllm/releases"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
             GitHub
           </a>.
         </p>

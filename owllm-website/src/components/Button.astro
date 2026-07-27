@@ -20,9 +20,7 @@ const {
 const baseClasses = "button";
 const variantClass = `variant-${variant}`;
 const sizeClass = `size-${size}`;
-const combined = [baseClasses, variantClass, sizeClass, className]
-  .filter(Boolean)
-  .join(" ");
+const combined = [baseClasses, variantClass, sizeClass, className].filter(Boolean).join(" ");
 ---
 
 {
@@ -47,7 +45,10 @@ const combined = [baseClasses, variantClass, sizeClass, className]
     border-radius: 10px;
     font-weight: 600;
     text-decoration: none;
-    transition: transform 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+    transition:
+      transform 0.15s ease,
+      box-shadow 0.15s ease,
+      background-color 0.15s ease;
   }
 
   .button:hover {

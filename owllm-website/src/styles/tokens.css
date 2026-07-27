@@ -44,7 +44,7 @@
   --bg-header: color-mix(in srgb, var(--accent) 70%, #1c2244);
   --bg-input: color-mix(in srgb, var(--accent) 18%, #0f0f19);
   --bg-surface: rgba(255, 255, 255, 0.04);
-  --bg-surface-hover: rgba(255, 255, 255, 0.10);
+  --bg-surface-hover: rgba(255, 255, 255, 0.1);
   --bg-overlay: rgba(6, 8, 13, 0.72);
 
   --fg: #e6e8eb;
@@ -55,15 +55,15 @@
 
   --border: rgba(255, 255, 255, 0.06);
   --border-strong: rgba(255, 255, 255, 0.14);
-  --border-accent: rgba(var(--accent-rgb), 0.30);
+  --border-accent: rgba(var(--accent-rgb), 0.3);
 
-  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.40);
-  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.50);
-  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.60);
+  --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.6);
 
   --ghost-bg: rgba(255, 255, 255, 0.04);
   --ghost-fg: #dadcdf;
-  --ghost-hover-bg: rgba(255, 255, 255, 0.10);
+  --ghost-hover-bg: rgba(255, 255, 255, 0.1);
   --ghost-hover-fg: #ffffff;
 }
 
@@ -86,12 +86,12 @@
   --fg-subtle: #8a8f99;
   --fg-dim: #a0a4ad;
 
-  --border: rgba(0, 0, 0, 0.10);
-  --border-strong: rgba(0, 0, 0, 0.20);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-strong: rgba(0, 0, 0, 0.2);
   --border-accent: rgba(var(--accent-rgb), 0.45);
 
   --shadow-sm: 0 2px 6px rgba(0, 0, 0, 0.08);
-  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.10);
+  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.1);
   --shadow-lg: 0 8px 30px rgba(0, 0, 0, 0.18);
 
   --ghost-bg: rgba(0, 0, 0, 0.04);

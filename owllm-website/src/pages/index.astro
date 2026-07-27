@@ -4,29 +4,128 @@ import Layout from "../layouts/Layout.astro";
 import Button from "../components/Button.astro";
 import Card from "../components/Card.astro";
 import heroOwl from "../assets/hero-owl.png";
+import heroWorkstation from "../assets/hero-workstation.jpg";
 import featureAgents from "../assets/feature-agents.png";
+import teamCollaboration from "../assets/team-collaboration.jpg";
+import privacyLock from "../assets/privacy-lock.jpg";
+import dataDashboard from "../assets/data-dashboard.jpg";
+import developerWorkspace from "../assets/developer-workspace.jpg";
 
 const features = [
   {
-    title: "Split inference",
+    title: "Local & private models",
     description:
-      "Run the GPU model server on one machine and the agents on another over a plain OpenAI-compatible HTTP API.",
+      "Run GGUF models on your own GPU or CPU. Your prompts, files, and agent history stay on hardware you control.",
   },
   {
-    title: "Linux sandbox",
+    title: "Shared memory & RAG",
     description:
-      "Real OS-level isolation via WSL2, Lima, or bubblewrap — tools run where they cannot touch your real files.",
+      "Per-agent episodic memory plus shared project memory in SQLite, retrieved with BM25-lite and injected as task-focused context.",
   },
   {
-    title: "Native GGUF tool-calling",
+    title: "Personal agent teams",
     description:
-      "Uses the model's own chat template — no XML hacks. MCP servers with per-tool toggles and schema safety.",
+      "Build teams of specialist agents. Each specialist works in its own git worktree for safe, concurrent execution.",
   },
   {
-    title: "Cloud peers",
+    title: "Browser & tool workflows",
     description:
-      "Mix local models with Claude, GPT, Gemini, and subscription CLIs as first-class peers with live streaming.",
+      "Native GGUF tool-calling through the model's own chat template, plus MCP servers with a master switch and per-tool toggles.",
   },
+  {
+    title: "Coding assistance",
+    description:
+      "A dedicated Code page where the model edits files in a folder, with per-project conversation, plan, and model persistence.",
+  },
+  {
+    title: "Configurable skills",
+    description:
+      "Add skills and MCP tools per agent. Toggle exactly what each specialist can use so capability matches responsibility.",
+  },
+  {
+    title: "Background execution",
+    description:
+      "Split inference across machines: keep the GPU server on your workstation and run agents on a Linux box or sandbox.",
+  },
+  {
+    title: "Cross-platform sandbox",
+    description:
+      "Execute tools inside a real Linux sandbox via WSL2, Lima, or bubblewrap — keeping your host files untouched.",
+  },
+];
+
+const demos = [
+  {
+    title: "Split inference across machines",
+    description:
+      "The model server and agent runtime don't have to live on the same machine. Run llama-server where your GPU is, and let agents call it over a plain OpenAI-compatible HTTP API — so a lightweight Linux sandbox can host the agents while CUDA stays native on Windows.",
+    image: heroWorkstation,
+    alt: "Developer workstation showing code and terminal windows",
+  },
+  {
+    title: "Agent teams with isolated workspaces",
+    description:
+      "Each specialist in a team gets its own git worktree on a dedicated branch. They run in parallel, then merge back with conflict detection — safe rollback, no deadlocks.",
+    image: teamCollaboration,
+    alt: "Team of people collaborating around a laptop",
+  },
+  {
+    title: "Memory that stays useful",
+    description:
+      "Project-scoped facts and worklog live in durable SQLite storage. Retrieval is framed as a current-task context pack, so old work is reference material instead of stale context.",
+    image: dataDashboard,
+    alt: "Dashboard with charts and data visualizations",
+  },
+  {
+    title: "Code page with project persistence",
+    description:
+      "Open any folder as a project and the model keeps coding across sessions — conversation, plan, and chosen model come back when you reopen it.",
+    image: developerWorkspace,
+    alt: "MacBook with code on screen on a busy desk",
+  },
+];
+
+const comparisons = [
+  {
+    aspect: "Model execution",
+    owllm:
+      "Local GGUF inference on your own GPU/CPU; optional network-served inference with API-key auth.",
+    typical: "Typically routes every request to a vendor API.",
+  },
+  {
+    aspect: "Data privacy",
+    owllm:
+      "Prompts, files, and memory stay local by default. Cloud peers are opt-in first-class models.",
+    typical: "Conversations and files are processed on remote infrastructure by default.",
+  },
+  {
+    aspect: "Tool execution",
+    owllm:
+      "Native GGUF tool-calling via the model's own chat template; tools run inside an OS-level Linux sandbox.",
+    typical: "Tool-calling is often cloud-mediated or runs on the host without isolation.",
+  },
+  {
+    aspect: "Agent memory",
+    owllm: "Per-agent episodic memory plus shared project memory with scoped BM25-lite retrieval.",
+    typical: "Usually session-scoped; long-term memory depends on external integrations.",
+  },
+  {
+    aspect: "Agent concurrency",
+    owllm: "Each specialist runs in an isolated git worktree with safe merge/conflict handling.",
+    typical: "Single-threaded or shared-context execution is common.",
+  },
+  {
+    aspect: "Skills & MCP",
+    owllm: "Per-agent skill toggles and MCP servers with schema-safety gate and per-tool controls.",
+    typical: "Tool access is often global or hard-coded per conversation.",
+  },
+];
+
+const socialProof = [
+  { label: "Local-first", value: "GGUF" },
+  { label: "Tool-calling", value: "Native" },
+  { label: "Sandbox", value: "WSL2 / Lima / bubblewrap" },
+  { label: "Cloud peers", value: "Claude, GPT, Gemini, DeepSeek, Groq" },
 ];
 ---
 
@@ -35,19 +134,43 @@ const features = [
   description="A local-first AI workstation: run LLMs on your own hardware, orchestrate multi-agent teams, and keep the dangerous parts sandboxed."
 >
   <section class="hero" aria-labelledby="hero-heading">
+    <div class="hero-background" aria-hidden="true">
+      <Image
+        src={heroWorkstation}
+        alt=""
+        widths={[640, 1280, 1920]}
+        sizes="100vw"
+        loading="eager"
+        decoding="async"
+        priority
+        class="hero-bg-image"
+      />
+      <div class="hero-overlay"></div>
+    </div>
     <div class="hero-content container">
       <div class="hero-text">
+        <div class="hero-badge">Local-first AI workstation</div>
         <h1 id="hero-heading">
-          A local-first AI workstation that <span class="accent-text">runs on your hardware</span>.
+          Run AI on <span class="accent-text">your hardware</span>, under your control.
         </h1>
         <p class="hero-tagline">
-          Orchestrate multi-agent teams, execute native GGUF tool-calling, and keep the
-          dangerous parts sandboxed — with one feature nobody else has: split the model
-          and the agents across machines.
+          Orchestrate multi-agent teams, execute native GGUF tool-calling, and keep the dangerous
+          parts sandboxed — with an architectural advantage: split the model server and the agents
+          across machines.
         </p>
         <div class="hero-actions">
-          <Button href="/download" size="lg">Download</Button>
-          <Button href="/features" variant="outline" size="lg">See features</Button>
+          <Button href="/download" size="lg">Download OwLLM</Button>
+          <Button href="/features" variant="outline" size="lg">Explore features</Button>
+        </div>
+        <div class="hero-social-proof" aria-label="Key highlights">
+          {
+            socialProof.map((item) => (
+              <div class="proof-pill">
+                <span class="proof-value">{item.value}</span>
+                <span class="proof-label">{item.label}</span>
+              </div>
+            ))
+          }
         </div>
       </div>
       <div class="hero-media">
@@ -56,22 +179,31 @@ const features = [
           alt="OwLLM mascot owl"
           widths={[320, 640, 960]}
           sizes="(max-width: 768px) 100vw, 480px"
+          loading="eager"
+          decoding="async"
+          priority
           class="hero-image"
         />
       </div>
     </div>
   </section>
 
-  <section class="section" aria-labelledby="features-heading">
+  <section class="section features-section" aria-labelledby="features-heading">
     <div class="container">
       <h2 id="features-heading" class="section-title">Why OwLLM is different</h2>
+      <p class="section-subtitle">
+        Built for users who want the power of modern AI without giving up control of their data,
+        models, or tools.
+      </p>
       <div class="feature-grid">
-        {features.map((feature) => (
-          <Card as="article">
-            <h3>{feature.title}</h3>
-            <p>{feature.description}</p>
-          </Card>
-        ))}
+        {
+          features.map((feature) => (
+            <Card as="article" class="feature-card">
+              <h3>{feature.title}</h3>
+              <p>{feature.description}</p>
+            </Card>
+          ))
+        }
       </div>
       <div class="feature-teaser">
         <Image
@@ -79,7 +211,111 @@ const features = [
           alt="OwLLM agentic team interface preview"
           widths={[320, 640, 800]}
           sizes="(max-width: 768px) 100vw, 720px"
+          loading="lazy"
+          decoding="async"
           class="feature-image"
+        />
+      </div>
+    </div>
+  </section>
+
+  <section class="section demos-section" aria-labelledby="demos-heading">
+    <div class="container">
+      <h2 id="demos-heading" class="section-title">See it in action</h2>
+      <p class="section-subtitle">
+        Concrete architecture choices that make OwLLM a workstation, not just a chat window.
+      </p>
+      <div class="demo-list">
+        {
+          demos.map((demo, index) => (
+            <article class={`demo-row ${index % 2 === 1 ? "reversed" : ""}`}>
+              <div class="demo-media">
+                <Image
+                  src={demo.image}
+                  alt={demo.alt}
+                  widths={[400, 800, 1200]}
+                  sizes="(max-width: 768px) 100vw, 50vw"
+                  loading="lazy"
+                  decoding="async"
+                  class="demo-image"
+                />
+              </div>
+              <div class="demo-text">
+                <h3>{demo.title}</h3>
+                <p>{demo.description}</p>
+              </div>
+            </article>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section comparison-section" aria-labelledby="comparison-heading">
+    <div class="container">
+      <h2 id="comparison-heading" class="section-title">Built for control, not lock-in</h2>
+      <p class="section-subtitle">
+        A fact-based look at how OwLLM's design differs from a typical cloud-only assistant. We
+        don't name competitors — we state what OwLLM actually does.
+      </p>
+      <div
+        class="comparison-table-wrapper"
+        role="region"
+        aria-label="Capability comparison"
+        tabindex="0"
+      >
+        <table class="comparison-table">
+          <caption class="sr-only">
+            Comparison of OwLLM capabilities versus a typical cloud-only assistant
+          </caption>
+          <thead>
+            <tr>
+              <th scope="col">Capability</th>
+              <th scope="col">OwLLM</th>
+              <th scope="col">Typical cloud-only assistant</th>
+            </tr>
+          </thead>
+          <tbody>
+            {
+              comparisons.map((row) => (
+                <tr>
+                  <th scope="row">{row.aspect}</th>
+                  <td>{row.owllm}</td>
+                  <td>{row.typical}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </div>
+      <p class="comparison-note">
+        Cloud models are first-class peers in OwLLM — you can mix Claude, GPT, Gemini, DeepSeek,
+        Groq, and subscription CLIs alongside local models. The comparison above is about where your
+        data and tools live by default, not about rejecting the cloud.
+      </p>
+    </div>
+  </section>
+
+  <section class="section privacy-section" aria-labelledby="privacy-heading">
+    <div class="container privacy-content">
+      <div class="privacy-text">
+        <h2 id="privacy-heading">Your data stays yours</h2>
+        <p>
+          OwLLM defaults to local execution. Models run on your hardware, memory lives in your
+          SQLite database, and tool execution happens inside a Linux sandbox on your machine. Cloud
+          peers are available when you choose them — never as a hidden default.
+        </p>
+        <Button href="/download" size="lg">Get OwLLM</Button>
+      </div>
+      <div class="privacy-media">
+        <Image
+          src={privacyLock}
+          alt="Smartphone and laptop on a desk representing device-local privacy"
+          widths={[400, 800, 1200]}
+          sizes="(max-width: 768px) 100vw, 50vw"
+          loading="lazy"
+          decoding="async"
+          class="privacy-image"
         />
       </div>
     </div>
@@ -89,10 +325,12 @@ const features = [
     <div class="container cta-content">
       <h2 id="cta-heading">Ready to run your own AI workstation?</h2>
       <p>
-        Download the latest installer, pick a model, and start building agentic teams in
-        minutes.
+        Download the latest installer, pick a model, and start building agentic teams in minutes.
       </p>
-      <Button href="/download" size="lg">Get OwLLM</Button>
+      <div class="cta-actions">
+        <Button href="/download" size="lg">Download OwLLM</Button>
+        <Button href="/docs" variant="outline" size="lg">Read the docs</Button>
+      </div>
     </div>
   </section>
 </Layout>
@@ -104,21 +342,66 @@ const features = [
     padding: 0 1rem;
   }
 
+  /* Hero */
   .hero {
-    padding: 4rem 0;
-    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+    position: relative;
+    padding: 5rem 0;
+    min-height: min(90vh, 700px);
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+  }
+
+  .hero-background {
+    position: absolute;
+    inset: 0;
+    z-index: 0;
+  }
+
+  .hero-bg-image {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .hero-overlay {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--bg) 92%, transparent) 0%,
+      color-mix(in srgb, var(--bg) 75%, transparent) 50%,
+      color-mix(in srgb, var(--bg) 60%, transparent) 100%
+    );
   }
 
   .hero-content {
+    position: relative;
+    z-index: 1;
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1.2fr 0.8fr;
     gap: 3rem;
     align-items: center;
   }
 
-  .hero-text h1 {
-    font-size: clamp(2rem, 5vw, 3.5rem);
+  .hero-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.375rem 0.875rem;
+    border-radius: 999px;
+    background-color: var(--accent-soft);
+    color: var(--accent-ink);
+    font-size: 0.875rem;
+    font-weight: 600;
     margin-bottom: 1rem;
+    width: fit-content;
+  }
+
+  .hero-text h1 {
+    font-size: clamp(2.25rem, 5.5vw, 4rem);
+    line-height: 1.1;
+    margin-bottom: 1.25rem;
   }
 
   .accent-text {
@@ -136,6 +419,34 @@ const features = [
     display: flex;
     flex-wrap: wrap;
     gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .hero-social-proof {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+  }
+
+  .proof-pill {
+    display: flex;
+    flex-direction: column;
+    padding: 0.625rem 1rem;
+    border-radius: 12px;
+    background-color: var(--bg-surface);
+    border: 1px solid var(--border);
+    min-width: 120px;
+  }
+
+  .proof-value {
+    font-weight: 700;
+    color: var(--accent-ink);
+    font-size: 0.95rem;
+  }
+
+  .proof-label {
+    font-size: 0.8rem;
+    color: var(--fg-muted);
   }
 
   .hero-media {
@@ -151,14 +462,27 @@ const features = [
     object-fit: contain;
   }
 
+  /* Sections */
   .section {
-    padding: 4rem 0;
+    padding: 5rem 0;
   }
 
   .section-title {
     text-align: center;
-    font-size: clamp(1.75rem, 4vw, 2.5rem);
-    margin-bottom: 2rem;
+    font-size: clamp(1.75rem, 4vw, 2.75rem);
+    margin-bottom: 0.75rem;
+  }
+
+  .section-subtitle {
+    text-align: center;
+    color: var(--fg-muted);
+    font-size: 1.125rem;
+    max-width: 65ch;
+    margin: 0 auto 2.5rem;
+  }
+
+  .features-section {
+    background-color: var(--bg-panel);
   }
 
   .feature-grid {
@@ -168,15 +492,16 @@ const features = [
     margin-bottom: 3rem;
   }
 
-  .feature-grid h3 {
+  .feature-card h3 {
     color: var(--accent-ink);
     margin-bottom: 0.5rem;
     font-size: 1.125rem;
   }
 
-  .feature-grid p {
+  .feature-card p {
     color: var(--fg-muted);
     margin: 0;
+    font-size: 0.975rem;
   }
 
   .feature-teaser {
@@ -192,6 +517,151 @@ const features = [
     object-fit: contain;
   }
 
+  /* Demos */
+  .demos-section {
+    background-color: var(--bg);
+  }
+
+  .demo-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4rem;
+  }
+
+  .demo-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3rem;
+    align-items: center;
+  }
+
+  .demo-row.reversed .demo-media {
+    order: 2;
+  }
+
+  .demo-row.reversed .demo-text {
+    order: 1;
+  }
+
+  .demo-media {
+    display: flex;
+    justify-content: center;
+  }
+
+  .demo-image {
+    border-radius: 20px;
+    box-shadow: var(--shadow-md);
+    width: 100%;
+    max-width: 560px;
+    height: auto;
+    object-fit: cover;
+  }
+
+  .demo-text h3 {
+    font-size: 1.5rem;
+    margin-bottom: 0.75rem;
+    color: var(--fg-strong);
+  }
+
+  .demo-text p {
+    color: var(--fg-muted);
+    margin: 0;
+  }
+
+  /* Comparison */
+  .comparison-section {
+    background-color: var(--bg-panel);
+  }
+
+  .comparison-table-wrapper {
+    overflow-x: auto;
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+  }
+
+  .comparison-table {
+    width: 100%;
+    border-collapse: collapse;
+    text-align: left;
+    font-size: 0.95rem;
+  }
+
+  .comparison-table thead {
+    background-color: var(--bg-elevated);
+  }
+
+  .comparison-table th,
+  .comparison-table td {
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+
+  .comparison-table th {
+    color: var(--fg-strong);
+    font-weight: 600;
+  }
+
+  .comparison-table thead th {
+    font-weight: 700;
+  }
+
+  .comparison-table tbody tr:last-child th,
+  .comparison-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .comparison-table tbody tr:hover {
+    background-color: var(--bg-surface);
+  }
+
+  .comparison-note {
+    text-align: center;
+    color: var(--fg-muted);
+    max-width: 75ch;
+    margin: 0 auto;
+    font-size: 0.95rem;
+  }
+
+  /* Privacy */
+  .privacy-section {
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+  }
+
+  .privacy-content {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 3rem;
+    align-items: center;
+  }
+
+  .privacy-text h2 {
+    font-size: clamp(1.75rem, 4vw, 2.5rem);
+    margin-bottom: 1rem;
+  }
+
+  .privacy-text p {
+    color: var(--fg-muted);
+    margin-bottom: 1.5rem;
+    max-width: 55ch;
+  }
+
+  .privacy-media {
+    display: flex;
+    justify-content: center;
+  }
+
+  .privacy-image {
+    border-radius: 20px;
+    box-shadow: var(--shadow-md);
+    width: 100%;
+    max-width: 560px;
+    height: auto;
+    object-fit: cover;
+  }
+
+  /* CTA */
   .cta-section {
     background-color: var(--bg-panel);
     text-align: center;
@@ -210,18 +680,73 @@ const features = [
     margin-bottom: 1.5rem;
   }
 
-  @media (max-width: 768px) {
-    .hero-content {
+  .cta-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 1rem;
+  }
+
+  @media (max-width: 900px) {
+    .hero-content,
+    .privacy-content {
       grid-template-columns: 1fr;
       text-align: center;
     }
 
-    .hero-actions {
+    .hero-text {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .hero-actions,
+    .hero-social-proof {
       justify-content: center;
     }
 
+    .hero-image {
+      max-height: 300px;
+    }
+
+    .demo-row,
+    .demo-row.reversed {
+      grid-template-columns: 1fr;
+      gap: 1.5rem;
+    }
+
+    .demo-row.reversed .demo-media,
+    .demo-row.reversed .demo-text {
+      order: unset;
+    }
+
+    .demo-text {
+      text-align: center;
+    }
+
+    .privacy-text {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      text-align: center;
+    }
+  }
+
+  @media (max-width: 768px) {
+    .hero {
+      padding: 4rem 0;
+    }
+
+    .comparison-table th,
+    .comparison-table td {
+      padding: 0.875rem;
+      font-size: 0.9rem;
+    }
+
+    .feature-image,
     .hero-image,
-    .feature-image {
+    .demo-image,
+    .privacy-image {
       max-height: 300px;
     }
   }

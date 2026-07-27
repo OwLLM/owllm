@@ -11,7 +11,8 @@ const docs = [
   {
     title: "Architecture",
     href: "https://github.com/OwLLM/owllm/blob/main/docs/ARCHITECTURE.md",
-    description: "Deep-dive into the split, safety tiers, native tool-calling, and runtime modules.",
+    description:
+      "Deep-dive into the split, safety tiers, native tool-calling, and runtime modules.",
   },
   {
     title: "Cross-Platform",
@@ -52,16 +53,18 @@ const docs = [
   <section class="section" aria-label="Documentation links">
     <div class="container">
       <div class="docs-grid">
-        {docs.map((doc) => (
-          <Card as="article" class="doc-card">
-            <h2>
-              <a href={doc.href} target="_blank" rel="noopener noreferrer">
-                {doc.title}
-              </a>
-            </h2>
-            <p>{doc.description}</p>
-          </Card>
-        ))}
+        {
+          docs.map((doc) => (
+            <Card as="article" class="doc-card">
+              <h2>
+                <a href={doc.href} target="_blank" rel="noopener noreferrer">
+                  {doc.title}
+                </a>
+              </h2>
+              <p>{doc.description}</p>
+            </Card>
+          ))
+        }
       </div>
     </div>
   </section>

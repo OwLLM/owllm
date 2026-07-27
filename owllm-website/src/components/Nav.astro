@@ -21,8 +21,7 @@ const currentPath = Astro.url.pathname;
         {
           NAV_LINKS.map((link) => {
             const isActive =
-              currentPath === link.href ||
-              (link.href !== "/" && currentPath.startsWith(link.href));
+              currentPath === link.href || (link.href !== "/" && currentPath.startsWith(link.href));
             return (
               <li>
                 <a
@@ -48,10 +47,18 @@ const currentPath = Astro.url.pathname;
         aria-controls="mobile-menu"
         aria-label="Open menu"
       >
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <line x1="3" y1="6" x2="21" y2="6" />
-          <line x1="3" y1="12" x2="21" y2="12" />
-          <line x1="3" y1="18" x2="21" y2="18" />
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
         </svg>
       </button>
     </div>
@@ -60,14 +67,18 @@ const currentPath = Astro.url.pathname;
   <div id="mobile-menu" class="mobile-menu" role="dialog" aria-modal="true" aria-label="Site menu">
     <div class="mobile-menu-header">
       <span class="brand-name">OwLLM</span>
-      <button
-        type="button"
-        class="menu-close"
-        aria-label="Close menu"
-      >
-        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true">
-          <line x1="18" y1="6" x2="6" y2="18" />
-          <line x1="6" y1="6" x2="18" y2="18" />
+      <button type="button" class="menu-close" aria-label="Close menu">
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
         </svg>
       </button>
     </div>
@@ -76,8 +87,7 @@ const currentPath = Astro.url.pathname;
         {
           NAV_LINKS.map((link) => {
             const isActive =
-              currentPath === link.href ||
-              (link.href !== "/" && currentPath.startsWith(link.href));
+              currentPath === link.href || (link.href !== "/" && currentPath.startsWith(link.href));
             return (
               <li>
                 <a
@@ -196,7 +206,9 @@ const currentPath = Astro.url.pathname;
     font-weight: 500;
     text-decoration: none;
     opacity: 0.85;
-    transition: background-color 0.15s ease, opacity 0.15s ease;
+    transition:
+      background-color 0.15s ease,
+      opacity 0.15s ease;
   }
 
   .nav-list a:hover,
@@ -357,7 +369,9 @@ const currentPath = Astro.url.pathname;
     border-radius: 50%;
     border: 2px solid transparent;
     padding: 0;
-    transition: transform 0.15s ease, border-color 0.15s ease;
+    transition:
+      transform 0.15s ease,
+      border-color 0.15s ease;
   }
 
   .accent-swatch:hover {

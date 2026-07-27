@@ -94,7 +94,12 @@ a:hover {
 }
 
 /* Typography helpers. */
-h1, h2, h3, h4, h5, h6 {
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
   line-height: 1.2;
   color: var(--fg-strong);
 }
@@ -103,7 +108,8 @@ p {
   margin-bottom: 1rem;
 }
 
-ul, ol {
+ul,
+ol {
   padding-left: 1.25rem;
 }
 

@@ -552,12 +552,45 @@ async fn run_process(
     }
 }
 
+/// Largest stdout/stderr, per stream, a remote command may return.
+///
+/// An uncapped `read_to_end` is not merely wasteful here. It grows this Vec
+/// until the allocator fails, and a failed allocation in Rust is an `abort()` —
+/// the whole app dies with no error anyone can see. It is also unsendable: the
+/// reply has to fit in ONE sealed frame, which the p2p reader refuses past
+/// MAX_FRAME, so an uncapped capture builds a result the caller could never
+/// receive. Consumers truncate to a few KB before a model sees it anyway
+/// (`truncate` in localTools.ts).
+const MAX_CAPTURE_BYTES: usize = 1 << 20; // 1 MiB per stream, as in session.rs
+
+/// Read `pipe` to EOF, keeping at most `MAX_CAPTURE_BYTES`.
+///
+/// Reading deliberately CONTINUES past the cap — the excess is counted and
+/// dropped rather than left in the pipe — so the child never blocks writing
+/// into a full buffer. The cap must change how much chatter we keep, never
+/// whether the command finishes.
 async fn drain(pipe: Option<&mut (impl AsyncReadExt + Unpin)>) -> String {
-    let mut buf = Vec::new();
-    if let Some(p) = pipe {
-        let _ = p.read_to_end(&mut buf).await;
+    let Some(p) = pipe else {
+        return String::new();
+    };
+    let mut kept: Vec<u8> = Vec::new();
+    let mut dropped: u64 = 0;
+    let mut chunk = [0u8; 8192];
+    loop {
+        match p.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = MAX_CAPTURE_BYTES.saturating_sub(kept.len()).min(n);
+                kept.extend_from_slice(&chunk[..room]);
+                dropped += (n - room) as u64;
+            }
+        }
     }
-    String::from_utf8_lossy(&buf).to_string()
+    let mut s = String::from_utf8_lossy(&kept).into_owned();
+    if dropped > 0 {
+        s.push_str(&format!("\n…[truncated, {dropped} more bytes]"));
+    }
+    s
 }
 
 fn finish_err(req: &CommandRequest, started: Instant, msg: &str) -> CommandResult {

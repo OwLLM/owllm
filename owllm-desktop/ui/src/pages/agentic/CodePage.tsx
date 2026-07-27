@@ -25,7 +25,7 @@ import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
@@ -429,6 +429,40 @@ function loadChats(): ChatThread[] {
 function saveChats(chats: ChatThread[]): void {
   try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX), dropImages)); } catch { /* private mode / quota */ }
 }
+/// Bucket threads by recency for the conversation sidebar, newest first. A pure
+/// read of the existing thread list — the sidebar is a second VIEW of
+/// `owllm:code:chats`, never a second copy of it.
+function groupChatsByDate(list: ChatThread[]): Array<{ label: string; items: ChatThread[] }> {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const DAY = 86_400_000;
+  const buckets = [
+    { label: "Today", min: startOfToday },
+    { label: "Yesterday", min: startOfToday - DAY },
+    { label: "Previous 7 days", min: startOfToday - 7 * DAY },
+    { label: "Previous 30 days", min: startOfToday - 30 * DAY },
+    { label: "Older", min: -Infinity },
+  ];
+  const out = buckets.map((b) => ({ label: b.label, items: [] as ChatThread[] }));
+  for (const c of [...list].sort((a, b) => (b.ts || 0) - (a.ts || 0))) {
+    const i = buckets.findIndex((b) => (c.ts || 0) >= b.min);
+    out[i < 0 ? out.length - 1 : i].items.push(c);
+  }
+  return out.filter((g) => g.items.length > 0);
+}
+const CHAT_SIDEBAR_KEY = "owllm:code:chat-sidebar";
+/// Reading-column width for the chat transcript and composer. Full-bleed text
+/// on a wide window is hard to read and left the empty state adrift in a void.
+const CHAT_COLUMN_MAX = 760;
+/// Opening prompts for an empty conversation. Deliberately about what THIS
+/// surface can actually do (no folder, no tools beyond the model's own), so a
+/// starter never promises something the no-project chat can't deliver.
+const CHAT_STARTERS = [
+  "Explain this error message",
+  "Summarise the text I paste next",
+  "Help me draft a message",
+  "Talk me through an idea",
+];
 function newThreadId(): string { return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function threadTitle(text: string): string {
   const t = text.trim().replace(/\s+/g, " ");
@@ -650,7 +684,17 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setChatId = (v: string) => setChatField("chatId", v);
   const setChatDraft = (v: string) => setChatField("draft", v);
   const setChatBusy = (v: boolean) => setChatField("busy", v);
-  const [showHistory, setShowHistory] = useState(false);
+  // Conversation sidebar visibility. The thread list used to hide behind a
+  // popover, so the list you need to switch conversations vanished the moment
+  // you were in one. It is ambient now; this only remembers a deliberate
+  // collapse. Device-local UI (the "owllm:code:" prefix is denied from sync).
+  const [chatSidebarOpen, setChatSidebarOpenState] = useState(() => {
+    try { return localStorage.getItem(CHAT_SIDEBAR_KEY) !== "0"; } catch { return true; }
+  });
+  const setChatSidebarOpen = (v: boolean) => {
+    setChatSidebarOpenState(v);
+    try { localStorage.setItem(CHAT_SIDEBAR_KEY, v ? "1" : "0"); } catch { /* private mode */ }
+  };
   // How many memory entries the last chat turn actually recalled — shown on the
   // 🧠 button so "it remembered" is visible rather than something you infer.
   const [chatMemHits, setChatMemHits] = useState(0);
@@ -728,11 +772,11 @@ function CodeWorkspace({ pageId, onTitle }: {
       createdDeviceId: deviceIdentity.device_id,
       createdDeviceName: deviceIdentity.name,
     }, ...cs]);
-    setChatId(id); setShowHistory(false); setChatAttachments([]); setChatDraft(""); setChatMemHits(0);
+    setChatId(id); setChatAttachments([]); setChatDraft(""); setChatMemHits(0);
   };
   // Switch to an existing conversation. The memory badge counts the LAST turn,
   // so it belongs to the thread you were in — clear it when you leave.
-  const openThread = (id: string) => { setChatId(id); setShowHistory(false); setChatAttachments([]); setChatMemHits(0); setChatMode(true); };
+  const openThread = (id: string) => { setChatId(id); setChatAttachments([]); setChatMemHits(0); setChatMode(true); };
   const deleteThread = (id: string) => {
     setChats((cs) => cs.filter((c) => c.id !== id));
     if (chatId === id) { setChatId(""); setChatMemHits(0); }
@@ -2160,6 +2204,12 @@ function CodeWorkspace({ pageId, onTitle }: {
       const outcome: NotebookRunOutcome = ok
         ? { kind: "clean" }
         : stoppedAtPreflight ? { kind: "preflight" } : { kind: "failed", reason: failureReason };
+      // Did the QUEUE dispatch this run? Captured before the refs are cleared
+      // below, because it decides whether the chain may advance. A plain typed
+      // message must never pop a card: `autoFeed` is sticky across restarts, so
+      // an unrelated clean turn used to resume a queue switched on days ago and
+      // the step arrived looking exactly like something the user had asked for.
+      const ranFromNotebook = notebookStepRef.current != null || notebookSteerInFlightIdsRef.current.length > 0;
       if (notebookStepRef.current) {
         settleNotebookStep(ruleScopeRef.current.id, notebookStepRef.current, outcome, now);
         notebookStepRef.current = null;
@@ -2190,10 +2240,14 @@ function CodeWorkspace({ pageId, onTitle }: {
             settleNotebookStep(ruleScopeRef.current.id, sid, { kind: "preflight" });
           }
         }
-        if (ok) {
+        // Advance the chain only from a run the queue itself dispatched, or
+        // from the one run the user explicitly armed with ▶ Start queue while
+        // the agent was busy. Checking the arm second keeps it unconsumed while
+        // the chain is already self-sustaining.
+        if (ok && (ranFromNotebook || consumeAutoFeedArm(ruleScopeRef.current.id, notebookSurfaceId))) {
           const result = continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId, (st) => {
             notebookStepRef.current = st.id;
-            void sendRef.current?.(st.text);
+            void sendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${st.text}`);
           });
           // Discarding this result is how a stalled queue stayed silent, and
           // autoFeedWouldRun can't report it (it is false for exactly this
@@ -2201,8 +2255,12 @@ function CodeWorkspace({ pageId, onTitle }: {
           if (result === "inactive" && notebookPendingStepCount(ruleScopeRef.current.id) > 0) {
             setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: "📓 Auto-feed idle here — another open window on this project is driving the queue. Use “Take over here” in the Notebook to drive it from this page.", ts: Date.now() }]);
           }
-        } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
-          setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
+        } else if (!ok && ranFromNotebook && autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
+          // Only a broken QUEUE run is worth reporting. A failed message the
+          // user typed themselves has nothing to do with the notebook, and the
+          // wording no longer offers "send a message" as a way to resume —
+          // that is exactly the accident this gate removes.
+          setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; press ▶ Start queue in the Notebook to continue.`, ts: Date.now() }]);
         }
       }, 80);
     }
@@ -2665,63 +2723,95 @@ function CodeWorkspace({ pageId, onTitle }: {
   // ---- Just-chat mode (no folder): the everyday-chat surface --------------
   if (!workspace && chatMode) {
     return (
-      <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
-          <button onClick={() => setChatMode(false)} title="Back to Start" style={{ ...btn, height: 30, padding: "0 10px" }}>← Start</button>
-          <button onClick={newChat} title="New conversation" style={{ ...btn, height: 30, padding: "0 10px", fontWeight: 700 }}>＋ New</button>
-          <span title="This no-project chat is stored on its creator computer." style={{ fontSize: 10.5, color: "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px" }}>
-            🖥 {chats.find((c) => c.id === chatId)?.createdDeviceName || deviceIdentity.name}
-          </span>
-          {/* History dropdown — past conversations (persisted) */}
-          <div style={{ position: "relative" }}>
-            <button onClick={() => setShowHistory((v) => !v)} title="Past conversations" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg)" }}>🕘 History{chats.length ? ` (${chats.length})` : ""}</button>
-            {showHistory && (
-              <>
-                <div onClick={() => setShowHistory(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
-                <div style={{ position: "absolute", top: 34, left: 0, zIndex: 41, width: 320, maxHeight: 380, overflowY: "auto", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 10, boxShadow: "var(--shadow-lg)", padding: 6 }}>
-                  {chats.length === 0 && <div style={{ fontSize: 12.5, color: "var(--fg-muted)", padding: "8px 10px" }}>No past chats yet.</div>}
-                  {chats.map((c) => (
-                    <div key={c.id} onClick={() => openThread(c.id)}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = c.id === chatId ? "var(--bg-input)" : "transparent")}
-                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 7, cursor: "pointer", background: c.id === chatId ? "var(--bg-input)" : "transparent" }}>
-                      <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</span>
-                      <span title="Creator PC" style={{ fontSize: 10, color: "var(--fg-subtle)", whiteSpace: "nowrap" }}>🖥 {c.createdDeviceName || "legacy"}</span>
-                      <span style={{ fontSize: 10.5, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>{c.messages.length}</span>
-                      <button onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete" style={{ ...btn, height: 22, padding: "0 6px", color: "var(--fg-muted)", fontSize: 11 }}>✕</button>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-          <div style={{ flex: 1 }} />
-          <div style={{ width: 260, maxWidth: "45%" }}>
-            <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
-          </div>
-          {/* 🧠 This conversation's own memory — the SAME viewer and the same
-              team_memory store the projects use, scoped to this thread. */}
-          <button data-ui="ChatThreadMemory" onClick={openChatMemory} title="What this conversation remembers (searchable, editable)" style={{ ...btn, height: 30, padding: "0 10px", color: chatMemHits > 0 ? "var(--accent-ink)" : "var(--fg-muted)" }}>🧠 Memory{chatMemHits > 0 ? ` (${chatMemHits})` : ""}</button>
-          {chatMsgs.length > 0 && <button onClick={() => chatId && updateThread(chatId, () => [])} title="Clear this conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
-        </div>
-        <div ref={chatSticky.ref} onScroll={chatSticky.onScroll} data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
-          {chatMsgs.length === 0 && (
-            <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", maxWidth: 440 }}>
-              <div style={{ fontSize: 34, marginBottom: 8 }}>💬</div>
-              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--fg-strong)" }}>Just chat</div>
-              <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.6 }}>
-                Ask anything — no project, no setup. Uses the model picked above (local or cloud). To have the model work inside a folder, go back and pick “New project” or “Open a project folder”.
-              </div>
+      <div style={{ height: "100%", display: "flex", background: "var(--bg-panel)", color: "var(--fg)" }}>
+        {/* ── Conversation sidebar (left, ambient) ─────────────────────────
+            The list lives here rather than behind a popover: switching
+            conversations is the primary action of a chat surface, so it must
+            be permanently visible and one click away. */}
+        {chatSidebarOpen && (
+          <aside style={{ width: 262, flex: "0 0 262px", minWidth: 0, display: "flex", flexDirection: "column", background: "var(--bg-card)", borderRight: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 8px 6px 10px" }}>
+              <button onClick={() => setChatMode(false)} title="Back to Start" style={{ ...btn, height: 28, padding: "0 9px", fontSize: 12 }}>← Start</button>
+              <div style={{ flex: 1 }} />
+              <button onClick={() => setChatSidebarOpen(false)} title="Hide conversation list" aria-label="Hide conversation list" style={{ ...btn, height: 28, width: 28, padding: 0, justifyContent: "center", color: "var(--fg-muted)" }}>⟨</button>
             </div>
-          )}
-          {chatMsgs.map((m, i) => {
-            const isUser = m.role === "user";
-            return (
-              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} />
-            );
-          })}
-        </div>
-        <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ padding: "0 10px 8px" }}>
+              <button onClick={newChat} title="Start a new conversation" style={{ ...btn, width: "100%", height: 36, justifyContent: "center", gap: 7, fontWeight: 700, fontSize: 13, background: "var(--bg-input)", borderColor: "var(--border-strong)", color: "var(--fg-strong)" }}>＋ New conversation</button>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 6px 10px" }}>
+              {chats.length === 0 && (
+                <div style={{ fontSize: 12, color: "var(--fg-subtle)", padding: "10px 8px", lineHeight: 1.6 }}>No conversations yet. Your chats appear here.</div>
+              )}
+              {groupChatsByDate(chats).map((group) => (
+                <div key={group.label} style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--fg-subtle)", padding: "4px 8px" }}>{group.label}</div>
+                  {group.items.map((c) => {
+                    const active = c.id === chatId;
+                    return (
+                      <div key={c.id} onClick={() => openThread(c.id)} title={c.title || "Chat"}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-input)"; const x = e.currentTarget.querySelector("[data-del]") as HTMLElement | null; if (x) x.style.opacity = "1"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = active ? "var(--bg-input)" : "transparent"; const x = e.currentTarget.querySelector("[data-del]") as HTMLElement | null; if (x) x.style.opacity = "0"; }}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 8, cursor: "pointer", background: active ? "var(--bg-input)" : "transparent", borderLeft: `2px solid ${active ? "var(--accent)" : "transparent"}` }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, color: active ? "var(--fg-strong)" : "var(--fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</div>
+                          <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginTop: 1 }}>{fmtAgo(c.ts)} · {c.messages.length} msg</div>
+                        </div>
+                        {/* Delete reveals on hover — a permanent ✕ next to every
+                            row invites the misclick it can't undo. */}
+                        <button data-del onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete conversation and its memory" style={{ ...btn, height: 22, width: 22, padding: 0, justifyContent: "center", color: "var(--fg-muted)", fontSize: 11, opacity: 0, transition: "opacity .12s" }}>✕</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </aside>
+        )}
+        {/* ── Conversation ─────────────────────────────────────────────── */}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
+            {!chatSidebarOpen && (
+              <button onClick={() => setChatSidebarOpen(true)} title="Show conversation list" aria-label="Show conversation list" style={{ ...btn, height: 30, padding: "0 9px" }}>☰{chats.length ? ` ${chats.length}` : ""}</button>
+            )}
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 320 }}>{chats.find((c) => c.id === chatId)?.title || "New chat"}</span>
+            <span title="This no-project chat is stored on its creator computer." style={{ fontSize: 10.5, color: "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px", whiteSpace: "nowrap" }}>
+              🖥 {chats.find((c) => c.id === chatId)?.createdDeviceName || deviceIdentity.name}
+            </span>
+            <div style={{ flex: 1 }} />
+            <div style={{ width: 240, maxWidth: "40%" }}>
+              <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
+            </div>
+            {/* 🧠 This conversation's own memory — the SAME viewer and the same
+                team_memory store the projects use, scoped to this thread. */}
+            <button data-ui="ChatThreadMemory" onClick={openChatMemory} title="What this conversation remembers (searchable, editable)" style={{ ...btn, height: 30, padding: "0 10px", color: chatMemHits > 0 ? "var(--accent-ink)" : "var(--fg-muted)" }}>🧠 Memory{chatMemHits > 0 ? ` (${chatMemHits})` : ""}</button>
+            {chatMsgs.length > 0 && <button onClick={() => chatId && updateThread(chatId, () => [])} title="Clear this conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
+          </div>
+          <div ref={chatSticky.ref} onScroll={chatSticky.onScroll} data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 18px" }}>
+            {/* Reading column: full-bleed text on a wide window is unreadable,
+                and left the empty state floating in a void. */}
+            <div style={{ maxWidth: CHAT_COLUMN_MAX, margin: "0 auto", display: "flex", flexDirection: "column", gap: 12, minHeight: "100%" }}>
+              {chatMsgs.length === 0 && (
+                <div style={{ margin: "auto 0", paddingBottom: 24 }}>
+                  <div style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-strong)", letterSpacing: -0.3 }}>What can I help with?</div>
+                  <div style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.6 }}>
+                    Ask anything — no project, no setup. Answers come from the model picked above. To have it work inside a folder, use ← Start and open a project.
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 18 }}>
+                    {CHAT_STARTERS.map((s) => (
+                      <button key={s} onClick={() => setChatDraft(s)} style={{ ...btn, height: "auto", minHeight: 34, padding: "8px 12px", fontSize: 12.5, borderRadius: 10, color: "var(--fg)", textAlign: "left", whiteSpace: "normal" }}>{s}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {chatMsgs.map((m, i) => {
+                const isUser = m.role === "user";
+                return (
+                  <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} />
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ borderTop: "1px solid var(--border)", padding: "10px 18px 12px", display: "flex", flexDirection: "column", gap: 8, maxWidth: CHAT_COLUMN_MAX, width: "100%", margin: "0 auto", boxSizing: "border-box" }}>
           {chatAttachments.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {chatAttachments.map((a, i) => (
@@ -2732,9 +2822,11 @@ function CodeWorkspace({ pageId, onTitle }: {
               ))}
             </div>
           )}
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+          {/* One composer card rather than a bare edge-to-edge row, aligned to
+              the same reading column as the transcript. */}
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 14, padding: 6 }}>
             <input ref={chatFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
-            <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 38, width: 38, justifyContent: "center", padding: 0, fontSize: 16 }}>📎</button>
+            <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 34, width: 34, justifyContent: "center", padding: 0, fontSize: 15, borderRadius: 10, background: "transparent", border: "none", color: "var(--fg-muted)" }}>📎</button>
             <textarea
               value={chatDraft}
               onChange={(e) => setChatDraft(e.target.value)}
@@ -2742,13 +2834,14 @@ function CodeWorkspace({ pageId, onTitle }: {
               onPaste={onChatPaste}
               placeholder="Message…  (paste or attach images/documents, Enter to send)"
               rows={1}
-              style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "9px 12px", lineHeight: 1.5 }}
+              style={{ flex: 1, resize: "none", minHeight: 34, maxHeight: 200, background: "transparent", border: "none", outline: "none", color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "8px 4px", lineHeight: 1.5 }}
             />
             {chatBusy ? (
-              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "var(--error)" }}>Stop</button>
+              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 34, padding: "0 14px", borderRadius: 10, color: "var(--error)" }}>Stop</button>
             ) : (
-              <button onClick={sendChat} disabled={!chatDraft.trim() && chatAttachments.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatAttachments.length) ? 1 : 0.5 }}>Send</button>
+              <button onClick={sendChat} disabled={!chatDraft.trim() && chatAttachments.length === 0} style={{ ...btn, height: 34, padding: "0 16px", borderRadius: 10, fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatAttachments.length) ? 1 : 0.5 }}>Send</button>
             )}
+          </div>
           </div>
         </div>
         {/* This branch returns EARLY, so the project-scoped modal further down

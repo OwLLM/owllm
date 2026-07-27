@@ -2,21 +2,22 @@
 
 Cloudflare Worker backing Gamify → World Map → Live World.
 
-The service uses one hibernating WebSocket Durable Object. An opted-in OWLLM
+The service uses one hibernating WebSocket Durable Object. Every OWLLM
 installation holds one `presence` socket; an open World Map holds one `viewer`
-socket. The socket itself is the presence signal, so there are no heartbeats,
-database writes, cleanup jobs, retained presence records, or automatic costs
-outside the Cloudflare Free-plan limits.
+socket. The socket itself is the online signal. Each stable anonymous
+installation is retained in Durable Object SQLite so the map can show recorded
+and online totals by country, including a coarse OS-family breakdown.
 
 Cloudflare request metadata is reduced to a coarse, jittered region before the
 socket reaches the Durable Object. The service never reads or stores account
 details, device names, projects, prompts, files, source IP headers, or precise
-coordinates. Closing the socket removes the node immediately.
+coordinates. Closing the socket marks the retained anonymous node offline.
 
 ## WebSocket API
 
-- `GET /v1/presence/connect?role=presence` with `Upgrade: websocket` — appear
-  as one anonymous node until the socket closes.
+- `GET /v1/presence/connect?role=presence&id=<opaque-id>&os=<family>` with
+  `Upgrade: websocket` — record one anonymous installation and mark it online
+  until the socket closes.
 - `GET /v1/presence/connect?role=viewer` with `Upgrade: websocket` — receive an
   initial `{ type: "snapshot", nodes, updatedAt }` message, then small
   `{ type: "upsert", node }` / `{ type: "remove", id }` membership changes.

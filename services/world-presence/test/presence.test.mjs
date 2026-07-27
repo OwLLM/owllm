@@ -28,8 +28,11 @@ async function withService(run) {
   finally { await mf.dispose(); }
 }
 
-async function connect(mf, role, cf = {}, id = "") {
-  const query = id ? `?role=${role}&id=${id}` : `?role=${role}`;
+async function connect(mf, role, cf = {}, id = "", os = "") {
+  const params = new URLSearchParams({ role });
+  if (id) params.set("id", id);
+  if (os) params.set("os", os);
+  const query = `?${params.toString()}`;
   const response = await mf.dispatchFetch(`https://presence.example/v1/presence/connect${query}`, {
     headers: { Upgrade: "websocket" },
     cf,
@@ -157,6 +160,27 @@ test("going offline keeps the node forever and broadcasts a ghost, not a removal
   });
 });
 
+test("coarse OS family persists when a recorded installation goes offline", async () => {
+  await withService(async (mf) => {
+    const presence = await connect(mf, "presence", KR, "windows-node", "Windows");
+    const viewer = await connect(mf, "viewer");
+    const online = await nextMessage(viewer);
+    assert.equal(online.nodes[0].os, "Windows");
+    const update = nextMessage(viewer);
+    presence.close(1000, "offline");
+    const change = await update;
+    assert.equal(change.node.online, false);
+    assert.equal(change.node.os, "Windows");
+
+    const later = await connect(mf, "viewer");
+    const snapshot = await nextMessage(later);
+    assert.equal(snapshot.nodes[0].online, false);
+    assert.equal(snapshot.nodes[0].os, "Windows");
+    later.close(1000, "done");
+    viewer.close(1000, "done");
+  });
+});
+
 test("the same installation reconnecting stays one recorded node", async () => {
   await withService(async (mf) => {
     const first = await connect(mf, "presence", KR, "stable");
@@ -249,6 +273,8 @@ test("service keeps privacy invariants while intentionally retaining anonymous n
   // Retention is now intentional: anonymous nodes live in free-tier DO SQLite.
   assert.match(source, /CREATE TABLE IF NOT EXISTS nodes/);
   assert.match(source, /first_seen/);
+  assert.match(source, /ALTER TABLE nodes ADD COLUMN os TEXT NOT NULL DEFAULT 'Other'/);
+  assert.match(source, /os = excluded\.os/);
   assert.match(source, /acceptWebSocket/);
   assert.match(config, /new_sqlite_classes/);
   // Regression pins for the additive-count bug: only stable ids are recorded,

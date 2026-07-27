@@ -33,7 +33,7 @@ import {
   type SolarScaleMode,
 } from "./solarSystem";
 import {
-  groupOnlinePresenceByCountry,
+  groupPresenceByCountry,
   includeSelfDevice,
   readWorldMapMode,
   saveWorldMapMode,
@@ -1205,7 +1205,7 @@ export default function WorldMapPage() {
       }), [fleet, mode, publicNodes, selfId, t]);
 
   const onlineCount = nodes.filter((node) => node.online).length;
-  const countries = useMemo(() => groupOnlinePresenceByCountry(publicNodes), [publicNodes]);
+  const countries = useMemo(() => groupPresenceByCountry(publicNodes), [publicNodes]);
   const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
 
   return (
@@ -1394,7 +1394,7 @@ export default function WorldMapPage() {
 
             <div style={{ ...panelStyle(), padding: 15, flex: 1, minHeight: 140, maxHeight: "68vh", overflowY: "auto" }}>
               <div style={{ color: "var(--fg-strong)", fontWeight: 750, fontSize: 13, marginBottom: 10 }}>
-                {mode === "world" ? t("Connected users by country") : t("Network signals")}
+                {mode === "world" ? t("Users by country") : t("Network signals")}
               </div>
               {error && <div style={{ color: "var(--error)", fontSize: 11.5, marginBottom: 10 }}>{error}</div>}
               {(mode === "world" ? countries.length === 0 : nodes.length === 0) ? (
@@ -1427,13 +1427,20 @@ export default function WorldMapPage() {
                       </button>
                       <div style={{ minWidth: 0 }}>
                         <div style={{ color: "var(--fg-strong)", fontSize: 13, fontWeight: 800 }}>
-                          {country.nodes.length} {t("users online")}
+                          {t("Total users")}: {country.nodes.length}
+                        </div>
+                        <div style={{ marginTop: 2, color: "var(--accent-ink)", fontSize: 11.5, fontWeight: 750 }}>
+                          {t("Online users")}: {country.onlineCount}
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 6 }}>
-                          {OS_DISPLAY_ORDER.filter((os) => country.osCounts[os] > 0).map((os) => (
-                            <div key={os} style={{ display: "flex", justifyContent: "space-between", gap: 10, color: "var(--fg-muted)", fontSize: 11.5 }}>
+                          {OS_DISPLAY_ORDER.filter((os) => country.osCounts[os].total > 0).map((os) => (
+                            <div key={os} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", gap: 10, color: "var(--fg-muted)", fontSize: 11.5 }}>
                               <span>{os === "Other" ? t("Other") : os}</span>
-                              <b style={{ color: "var(--fg-strong)" }}>{country.osCounts[os]}</b>
+                              <span style={{ whiteSpace: "nowrap" }}>
+                                <b style={{ color: "var(--fg-strong)" }}>{country.osCounts[os].total}</b>
+                                {" · "}
+                                <b style={{ color: country.osCounts[os].online > 0 ? "var(--accent-ink)" : "var(--fg-muted)" }}>{country.osCounts[os].online}</b> {t("online now")}
+                              </span>
                             </div>
                           ))}
                         </div>
@@ -1448,7 +1455,7 @@ export default function WorldMapPage() {
                           border: "1px solid var(--border)", borderRadius: 10, background: "rgba(var(--accent-rgb),.05)",
                         }}
                       >
-                        {[...country.nodes].sort((a, b) => a.region.localeCompare(b.region)).map((publicNode) => {
+                        {[...country.nodes].sort((a, b) => Number(b.online) - Number(a.online) || a.region.localeCompare(b.region)).map((publicNode) => {
                           const globeNode = nodesById.get(publicNode.id);
                           return (
                             <button
@@ -1462,10 +1469,12 @@ export default function WorldMapPage() {
                                 color: "var(--fg)", cursor: "pointer",
                               }}
                             >
-                              <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: "var(--accent)", boxShadow: "0 0 9px var(--accent)" }} />
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: publicNode.online ? "var(--accent)" : "var(--fg-dim)", boxShadow: publicNode.online ? "0 0 9px var(--accent)" : "none" }} />
                               <span style={{ minWidth: 0 }}>
                                 <span style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--fg-strong)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{regionWithFlag(publicNode.region)}</span>
-                                <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("Approximate server region")} · {publicNode.os === "Other" ? t("Other") : publicNode.os}</span>
+                                <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {t("Approximate server region")} · {publicNode.os === "Other" ? t("Other") : publicNode.os} · {publicNode.online ? t("Online") : t("Offline")}
+                                </span>
                               </span>
                             </button>
                           );

@@ -162,6 +162,7 @@ import { historyBudgetFor } from "./contextBudget";
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
 type NativeToolCall = { name: string; args: Record<string, string> };
+type QueuedSteer = { text: string; attachments: Attachment[] };
 
 const ICONS = "/Page_icons";
 
@@ -8688,9 +8689,10 @@ export function AgentsPage({
   const supSendBusyRef = useRef(false);
   // Mid-run steering (like Claude Code): a message the user sends WHILE a run is
   // active is queued here instead of dropped, and dispatchGoal drains it at the next
-  // orchestrator boundary and feeds it in as a ⚡ USER (mid-run) turn. steerQueueRef
-  // is the source of truth; pendingSteers just mirrors the count for the UI.
-  const steerQueueRef = useRef<string[]>([]);
+  // orchestrator boundary and feeds it in as a ⚡ USER (mid-run) turn. Keep
+  // attachments beside their text: the old string[] queue silently discarded
+  // every image sent while a run was active.
+  const steerQueueRef = useRef<QueuedSteer[]>([]);
   // 📓 Notebook step timing: which step started the current run, and which steps
   // were queued as mid-run steers. Dispatched steps are marked finished at run end;
   // queued steers are only marked finished once they have been drained (processed).
@@ -8700,14 +8702,25 @@ export function AgentsPage({
   // Drain the queued steers into a single block (empty string when none). Called at
   // safe boundaries in the run loop. The user's feedback that a message was captured
   // is the "⚡ queued to steer the run →" echo pushed into the chat on enqueue.
-  const drainSteers = (): string => {
+  const drainSteers = (): QueuedSteer | null => {
     const q = steerQueueRef.current;
     // Guard BEFORE taking the ids: draining an empty text queue must not empty
     // the id list, or those cards would be silently detached from their text.
-    if (!q.length) return "";
+    if (!q.length) return null;
     const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
     if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
-    return q.splice(0, q.length).join("\n");
+    const drained = q.splice(0, q.length);
+    return {
+      text: drained.map((item) => item.text).filter(Boolean).join("\n"),
+      attachments: drained.flatMap((item) => item.attachments),
+    };
+  };
+  // Local models can accept text between tool calls, but that callback has no
+  // multimodal channel. If any queued item carries bytes, leave the whole
+  // ordered queue intact for the next real streamChatCompletion boundary.
+  const drainTextOnlySteers = (): string => {
+    if (steerQueueRef.current.some((item) => item.attachments.length > 0)) return "";
+    return drainSteers()?.text ?? "";
   };
   // 📓 Notebook feed: a step goes to the team NOW — as a live steer while a
   // run is active (picked up at the next agent boundary, or between tool
@@ -8716,7 +8729,7 @@ export function AgentsPage({
     const t = text.trim();
     if (!t) return "no-team";
     if (supSendBusyRef.current || dispatchInFlightRef.current) {
-      steerQueueRef.current.push(t);
+      steerQueueRef.current.push({ text: t, attachments: [] });
       if (stepId) notebookSteerStepIdsRef.current.push(stepId);
       setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `📓⚡ notebook step queued to steer the run → ${t}`, ts: Date.now(), seq: nextSeq() }]);
       return "queued";
@@ -10126,12 +10139,20 @@ export function AgentsPage({
     if (supSendBusyRef.current) {
       // A run is active → DON'T drop the message. Queue it as a mid-run steer;
       // dispatchGoal drains it at the next orchestrator boundary and feeds it in.
-      // (Images aren't carried mid-run — text only.) Echo it so the user sees it
-      // was captured, not ignored.
+      // Keep the complete attachment payload for the next model-turn boundary.
+      // Echo thumbnails too so the chat accurately shows what was captured.
       const t = appendDocumentAttachmentText(text.trim(), images).trim();
-      if (t) {
-        steerQueueRef.current.push(t);
-        setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `⚡ queued to steer the run → ${visibleText}`, context: t, ts: Date.now(), seq: nextSeq() }]);
+      if (t || images.length > 0) {
+        steerQueueRef.current.push({ text: t, attachments: images });
+        setSupChat(prev => [...prev, {
+          role: "you",
+          color: "#7fd4ff",
+          text: `⚡ queued to steer the run → ${visibleText || "attached media"}`,
+          context: t,
+          images: visualImages.length > 0 ? attachmentThumbs(visualImages) : undefined,
+          ts: Date.now(),
+          seq: nextSeq(),
+        }]);
       }
       return;
     }
@@ -11391,10 +11412,12 @@ export function AgentsPage({
           // Mid-run steering: fold any message the user queued while the coder
           // worked into this attempt's turn (like Claude Code reading it mid-flight).
           const sSteer = drainSteers();
-          if (sSteer) appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteer}` });
+          const sSteerText = sSteer?.text || (sSteer ? "Review the attached media." : "");
+          if (sSteer) appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteerText}` });
           const sBase = attempt === 1 ? soloTask
             : `Your previous change did NOT pass the project's verification:\n${renderGateLine(sGate!)}\n\nFix it so the check passes. Original task:\n${text}`;
-          const turn = sSteer ? `${sBase}\n\n⚡ The user sent this WHILE you were working — address it too:\n${sSteer}` : sBase;
+          const turn = sSteer ? `${sBase}\n\n⚡ The user sent this WHILE you were working — address it too:\n${sSteerText}` : sBase;
+          const sTurnAttachments = [...attachments, ...(sSteer?.attachments ?? [])];
           try {
             sText = (await streamChatCompletion(
               port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
@@ -11402,10 +11425,10 @@ export function AgentsPage({
               (d) => streamLog(coder.name, d), soloCwd,
               sHist, autoApprove,
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
-              attachments.length > 0 ? attachments : undefined,
+              sTurnAttachments.length > 0 ? sTurnAttachments : undefined,
               getClaudeSession(selectedProjectId, coder.name),
               undefined, undefined,
-              drainSteers, // local models drain steers between tool calls (mid-turn)
+              drainTextOnlySteers, // attachment steers wait for a multimodal turn boundary
             )).trim();
           } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }
           if (isAuthError(sText)) break;  // 401 came back as reply text — don't gate/retry; handled below
@@ -11436,16 +11459,18 @@ export function AgentsPage({
         for (let sg = 0; sg < 3 && !ctrl.signal.aborted; sg++) {
           const sSteer = drainSteers();
           if (!sSteer) break;
-          appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteer}` });
+          const sSteerText = sSteer.text || "Review the attached media.";
+          appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteerText}` });
           addActive(coder.name);
           try {
             sText = (await streamChatCompletion(
               port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
-              sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteer}`,
+              sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteerText}`,
               tempFor(coder, 0.3), ctrl.signal,
               (d) => streamLog(coder.name, d), soloCwd,
               sHist, autoApprove,
-              (c, r, d) => streamThought(coder.name, c, r, d), sAllowed, undefined,
+              (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
+              sSteer.attachments.length > 0 ? sSteer.attachments : undefined,
               getClaudeSession(selectedProjectId, coder.name),
             )).trim();
             sGate = await runGate(soloCwd, sScope); lastGateRef.current = sGate;
@@ -12263,12 +12288,13 @@ export function AgentsPage({
             // messages are ignored" bug). Deeper still, getSteer below lets a
             // LOCAL model pick it up between tool calls, mid-turn.
             const specSteer = drainSteers();
-            if (specSteer) appendThought(spec.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${specSteer}` });
+            const specSteerText = specSteer?.text || (specSteer ? "Review the attached media." : "");
+            if (specSteer) appendThought(spec.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${specSteerText}` });
             const turnBase = attempt === 1
               ? enrichedInstruction
               : `Your previous change did NOT pass the project's verification:\n${renderGateLine(finalGate!)}\n\nFix it so the check passes — change the approach if needed. Original task:\n${instruction}`;
             const turn = specSteer
-              ? `${turnBase}\n\n⚡ The user sent this WHILE the team was working — it applies to the whole team's goal; address it too:\n${specSteer}`
+              ? `${turnBase}\n\n⚡ The user sent this WHILE the team was working — it applies to the whole team's goal; address it too:\n${specSteerText}`
               : turnBase;
             try {
               specText = (await streamChatCompletion(
@@ -12285,10 +12311,10 @@ export function AgentsPage({
                 autoApprove,
                 (channel, role, delta) => streamThought(spec.name, channel, role, delta),
                 allowed,
-                undefined,
+                specSteer && specSteer.attachments.length > 0 ? specSteer.attachments : undefined,
                 getClaudeSession(selectedProjectId, spec.name),
                 undefined, undefined,
-                drainSteers, // local models drain steers between tool calls (mid-turn)
+                drainTextOnlySteers, // attachment steers wait for a multimodal turn boundary
               )).trim();
             } catch (e: any) {
               specText = `(error: ${cleanAgentError(e)})`;
@@ -12692,7 +12718,8 @@ export function AgentsPage({
       for (let sg = 0; sg < 5 && !ctrl.signal.aborted; sg++) {
         const steer = drainSteers();
         if (!steer) break;
-        appendThought(orch.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${steer}` });
+        const steerText = steer.text || "Review the attached media.";
+        appendThought(orch.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${steerText}` });
         addActive(orch.name);
         appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
         try {
@@ -12704,7 +12731,7 @@ export function AgentsPage({
               finalReply,
               "",
               "The user sent this WHILE you were working — address it now, then output the updated final answer only. Dispatch specialists again ONLY if the message genuinely needs it:",
-              steer,
+              steerText,
             ].join("\n"),
             tempFor(orch, 0.4), ctrl.signal,
             (delta) => streamLog(orch.name, delta),
@@ -12712,7 +12739,7 @@ export function AgentsPage({
             priorHistory, undefined,
             (channel, role, delta) => streamThought(orch.name, channel, role, delta),
             runtimeReadOnlyTools(orch, roleByName),
-            undefined,
+            steer.attachments.length > 0 ? steer.attachments : undefined,
             getClaudeSession(selectedProjectId, orch.name),
           );
           if (steered.trim()) { finalReply = steered; speakAgentReply(orch.name, finalReply); }
@@ -13004,19 +13031,21 @@ export function AgentsPage({
       // surfaced inside an unrelated later run. Settle them explicitly — the
       // Coding page has always done this; the two pages now agree.
       const strandedSteerIds = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
-      const leftoverSteerText = steerQueueRef.current.splice(0, steerQueueRef.current.length).join("\n");
+      const leftoverSteers = steerQueueRef.current.splice(0, steerQueueRef.current.length);
+      const leftoverSteerText = leftoverSteers.map((item) => item.text).filter(Boolean).join("\n");
+      const leftoverSteerAttachments = leftoverSteers.flatMap((item) => item.attachments);
       // Busy/reentrancy flags are clear now, so every exit path makes one
       // deterministic Notebook decision. A clean run advances the next card;
       // any other outcome leaves pending cards untouched and explains the pause.
-      if (leftoverSteerText && notebookRunCompletedCleanly) {
+      if ((leftoverSteerText || leftoverSteerAttachments.length > 0) && notebookRunCompletedCleanly) {
         // The work is still wanted: re-dispatch it as a follow-up turn and put
         // the cards back in flight so the next run end stamps them properly.
         // This takes priority over auto-feed — the user asked for these first.
         notebookSteerInFlightIdsRef.current.push(...strandedSteerIds);
-        void onSupSendRef.current?.(leftoverSteerText);
+        void onSupSendRef.current?.(leftoverSteerText, leftoverSteerAttachments);
       } else {
         for (const sid of strandedSteerIds) markNotebookStepPending(selectedProjectId, sid);
-        if (leftoverSteerText) {
+        if (leftoverSteerText || leftoverSteerAttachments.length > 0) {
           setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 ${strandedSteerIds.length || 1} queued step(s) never reached the team because the run ended early — returned to the Notebook queue as pending.`, ts: Date.now(), seq: nextSeq() }]);
         }
         if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();

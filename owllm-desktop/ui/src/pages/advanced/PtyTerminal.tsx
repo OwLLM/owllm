@@ -23,6 +23,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
+import { firstCompleteAuthUrl } from "./authUrlCapture";
 
 type PtyEvent =
   | { kind: "data"; data: number[] }
@@ -126,30 +127,21 @@ export default function PtyTerminal({
     const openAuthUrlFrom = (decoded: string) => {
       if (!autoOpenAuthUrls || authUrlOpened) return;
       outputText = (outputText + decoded).slice(-16_384);
-      // Device-login URLs are sometimes wrapped in OSC-8 hyperlinks. Strip
-      // terminal control sequences before matching, while preserving chunks so
-      // a URL split across two PTY reads is still found.
-      const plain = outputText
-        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-      const matches = plain.match(/https?:\/\/[^\s"'<>\\]+/g) ?? [];
-      for (const raw of matches) {
-        const url = raw.replace(/[),.;\]}]+$/, "");
-        authUrlOpened = true;
-        invoke<string>("browser_open_tab", { url, activate: true })
-          .then((opened) => {
-            try {
-              const parsed = JSON.parse(opened) as { tab_id?: number };
-              if (typeof parsed.tab_id === "number") onAuthTabOpenedRef.current?.(parsed.tab_id);
-            } catch { /* older browser response; completion falls back to active tab */ }
-          })
-          .catch((error) => {
-            term.write(`\r\n\x1b[31m[OwLLM browser error] ${String(error)}\x1b[0m\r\n`);
-          });
-        // A login command can later print help/fallback links. Keep the browser
-        // on the first authorization page instead of navigating it away.
-        return;
-      }
+      const url = firstCompleteAuthUrl(outputText);
+      if (!url) return;
+      authUrlOpened = true;
+      invoke<string>("browser_open_tab", { url, activate: true })
+        .then((opened) => {
+          try {
+            const parsed = JSON.parse(opened) as { tab_id?: number };
+            if (typeof parsed.tab_id === "number") onAuthTabOpenedRef.current?.(parsed.tab_id);
+          } catch { /* older browser response; completion falls back to active tab */ }
+        })
+        .catch((error) => {
+          term.write(`\r\n\x1b[31m[OwLLM browser error] ${String(error)}\x1b[0m\r\n`);
+        });
+      // A login command can later print help/fallback links. Keep the browser
+      // on the first authorization page instead of navigating it away.
     };
     const armAutoSend = () => {
       const payload = autoSendRef.current;

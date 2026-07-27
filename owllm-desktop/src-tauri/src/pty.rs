@@ -174,12 +174,13 @@ pub fn pty_spawn(
     }
     // The UI captures login URLs from PTY output and opens them in OwLLM's
     // persistent browser. Give Python's webbrowser module (Kimi) a real
-    // successful no-op: an invalid command makes it fall through to xdg-open,
-    // which can hand an HTTPS URL to LibreOffice on Linux.
+    // successful no-op. `%s` is essential on Windows: without it Python treats
+    // the whole spaced value as an executable name, fails to spawn it, then
+    // falls through to the user's external default browser.
     #[cfg(windows)]
-    cmd.env("BROWSER", "cmd.exe /c exit 0");
+    cmd.env("BROWSER", "cmd.exe /c exit 0 %s");
     #[cfg(not(windows))]
-    cmd.env("BROWSER", "/usr/bin/true");
+    cmd.env("BROWSER", "/usr/bin/true %s");
 
     let mut child = pair
         .slave

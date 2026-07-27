@@ -9,6 +9,7 @@
     "preview": "astro preview",
     "lint": "astro check",
     "format": "prettier --write .",
+    "test": "node --test test/**/*.spec.mjs",
     "sync:release": "node scripts/sync-release-meta.mjs"
   },
   "dependencies": {

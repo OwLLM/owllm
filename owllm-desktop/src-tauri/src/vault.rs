@@ -906,7 +906,7 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
     if !db.is_file() {
         return Ok(Vec::new());
     }
-    let conn = rusqlite::Connection::open(db).map_err(|e| format!("open db: {e}"))?;
+    let conn = crate::projects::open_state_db(db)?;
     let exists: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_projects'",
@@ -1160,8 +1160,16 @@ fn import_project(
     if !p.team_memory_json.trim().is_empty() {
         if let Ok(entries) = serde_json::from_str::<Vec<VaultMemEntry>>(&p.team_memory_json) {
             let _ = crate::memory::ensure_schema(conn);
+            // Re-indexing rewrites every term row for every memory in the
+            // scope, so only pay for it when the merge actually wrote
+            // something. On a converged fleet the 60-second sync merges
+            // nothing, and re-indexing unconditionally meant the app never
+            // stopped writing to the shared state DB.
+            let before = conn.total_changes();
             merge_team_memory(conn, &p.id, &entries);
-            let _ = crate::memory::reindex_team_memory_scope(conn, &p.id);
+            if conn.total_changes() != before {
+                let _ = crate::memory::reindex_team_memory_scope(conn, &p.id);
+            }
         }
     }
     // 3) Merge the rule set — unit last-writer-wins by directives_updated_at
@@ -1218,7 +1226,7 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
             if let Some(parent) = db.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let conn = rusqlite::Connection::open(&db).map_err(|e| format!("open db: {e}"))?;
+            let conn = crate::projects::open_state_db(&db)?;
             crate::projects::ensure_schema(&conn)?;
             if let Ok(rd) = std::fs::read_dir(&proj_dir) {
                 for e in rd.flatten() {

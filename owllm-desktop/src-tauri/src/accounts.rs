@@ -739,7 +739,7 @@ fn usage_db() -> Option<rusqlite::Connection> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let conn = rusqlite::Connection::open(&path).ok()?;
+    let conn = crate::projects::open_state_db(&path).ok()?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS usage_tally (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\

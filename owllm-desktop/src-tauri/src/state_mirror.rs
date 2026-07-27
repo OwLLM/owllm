@@ -116,8 +116,7 @@ fn is_leap(y: i64) -> bool {
 }
 
 fn load_sync(path: &std::path::Path) -> Result<Vec<MirrorEntry>, String> {
-    let conn =
-        rusqlite::Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn = crate::projects::open_state_db(path)?;
     ensure_kv(&conn)?;
     let mut stmt = conn
         .prepare(
@@ -150,8 +149,7 @@ fn load_sync(path: &std::path::Path) -> Result<Vec<MirrorEntry>, String> {
 }
 
 fn save_sync(path: &std::path::Path, input: MirrorSaveInput) -> Result<(), String> {
-    let mut conn =
-        rusqlite::Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut conn = crate::projects::open_state_db(path)?;
     ensure_kv(&conn)?;
     let tx = conn.transaction().map_err(|e| format!("tx: {e}"))?;
     let now = now_iso();
@@ -179,8 +177,7 @@ fn acknowledge_recovery_sync(path: &std::path::Path, keys: &[String]) -> Result<
     if keys.is_empty() {
         return Ok(());
     }
-    let mut conn =
-        rusqlite::Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let mut conn = crate::projects::open_state_db(path)?;
     ensure_kv(&conn)?;
     let tx = conn.transaction().map_err(|e| format!("tx: {e}"))?;
     for key in keys {
@@ -315,7 +312,7 @@ pub fn import_legacy_webview_state_once() {
     if let Some(parent) = db.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let Ok(mut conn) = rusqlite::Connection::open(&db) else {
+    let Ok(mut conn) = crate::projects::open_state_db(&db) else {
         return;
     };
     if ensure_kv(&conn).is_err() {

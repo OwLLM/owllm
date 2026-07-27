@@ -329,8 +329,18 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
         }
       }
       if (repoUrl) {
-        await invoke("update_project", { input: { id: row.id, repo_url: repoUrl } });
-        row.repo_url = repoUrl;
+        try {
+          await invoke("update_project", { input: { id: row.id, repo_url: repoUrl } });
+          row.repo_url = repoUrl;
+        } catch (e: any) {
+          // Same rule as the branch above: the project row already exists, so
+          // throwing here would leave the dialog open on an error while the
+          // project IS created, and Retry would add a duplicate row. Recording
+          // the URL is only a shortcut — list_projects re-derives repo_url from
+          // the folder's git origin whenever the column is empty — so report it
+          // and finish onboarding exactly once.
+          repoSetupError = String(e?.message ?? e);
+        }
       }
       onCreated(row, { kind: kind?.key ?? "custom", action: kind?.kickoff ?? "goal" }); onClose();
       if (repoSetupError) window.setTimeout(() => {

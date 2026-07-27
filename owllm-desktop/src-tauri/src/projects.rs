@@ -79,6 +79,37 @@ pub(crate) fn project_db_path() -> Option<PathBuf> {
     paths::state_db_path()
 }
 
+/// How long a contended statement waits before giving up. The state DB is a
+/// single file shared by projects, directives, memory, media, accounts, the
+/// state mirror and vault sync, so brief overlap is normal and should queue.
+const STATE_DB_BUSY_TIMEOUT_SECS: u64 = 15;
+
+/// Open the shared state database with the pragmas every caller needs.
+///
+/// SQLite's defaults are wrong for a file this many subsystems share:
+///   * `busy_timeout = 0` — an overlapping write returns SQLITE_BUSY
+///     ("database is locked") *immediately* instead of waiting. Background
+///     sync timers touch this file continuously, so a user-initiated write
+///     had to win a race it usually lost.
+///   * `journal_mode = DELETE` — a rollback journal makes readers and writers
+///     mutually exclusive. WAL lets them proceed concurrently.
+///
+/// WAL is a persistent property of the file, so the pragma is a no-op after
+/// the first successful call. Both pragmas are best-effort: on a filesystem
+/// without shared memory (a network share) WAL is refused, and the connection
+/// must stay usable on the old journal mode rather than failing the caller.
+pub(crate) fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    // Set the timeout FIRST: the journal-mode switch below needs a lock of its
+    // own, and on a busy file it would otherwise fail instantly too.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(STATE_DB_BUSY_TIMEOUT_SECS));
+    // `PRAGMA journal_mode` returns the resulting mode, so it must be queried
+    // rather than executed.
+    let _: Result<String, _> = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0));
+    Ok(conn)
+}
+
 pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     // Idempotent CREATE TABLE so opening a fresh database doesn't fail
     // when the user creates their first project before the legacy
@@ -222,8 +253,7 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
     // adds chat_json / agent_logs_json to pre-existing databases.
     // Without that, this read would fail on older DBs the moment we
     // SELECT the new columns.
-    let conn =
-        rusqlite::Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn = open_state_db(path)?;
 
     let exists: i64 = conn
         .query_row(
@@ -369,8 +399,7 @@ pub async fn resolve_project_for_location(
         if let Some(parent) = path2.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        let conn = open_state_db(&path2)?;
         ensure_schema(&conn)?;
         let path_key = normalize_path_key(&location);
         let mut found: Option<(String, String)> = None;
@@ -619,8 +648,7 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
         if let Some(parent) = path2.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        let conn = open_state_db(&path2)?;
         ensure_schema(&conn)?;
 
         let id = new_id();
@@ -705,8 +733,7 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
     };
     let path2 = path.clone();
     tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        let conn = open_state_db(&path2)?;
         ensure_schema(&conn)?;
 
         let now = now_iso();
@@ -788,8 +815,7 @@ pub async fn delete_project(id: String) -> Result<(), String> {
     let path2 = path.clone();
     // Read the location BEFORE deleting so we can auto-clean a sandbox copy.
     let location = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        let conn = open_state_db(&path2)?;
         ensure_schema(&conn)?;
         let loc: Option<String> = match conn.query_row(
             "SELECT location FROM agent_projects WHERE id = ?",

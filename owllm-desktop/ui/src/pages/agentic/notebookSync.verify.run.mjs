@@ -132,7 +132,7 @@ console.log("case 6: a step finished HERE is never dragged back to pending by a 
 {
   store.set(KEY3, nb({
     updatedAt: 100,
-    steps: [{ id: "s1", text: "ship it", status: "sent", ts: 1, startedAt: 5, finishedAt: 9 }],
+    steps: [{ id: "s1", text: "ship it", status: "sent", ts: 1, startedAt: 5, finishedAt: 9, stepUpdatedAt: 9 }],
   }));
   // Peer pushed LATER but still holds the old pending copy of the same step.
   const merged = JSON.parse(mergeNotebookLease(KEY3, nb({
@@ -140,6 +140,34 @@ console.log("case 6: a step finished HERE is never dragged back to pending by a 
     steps: [{ id: "s1", text: "ship it", status: "pending", ts: 1 }],
   })));
   check("archived step stays archived", merged.steps.length === 1 && merged.steps[0].status === "sent" && merged.steps[0].finishedAt === 9);
+}
+
+console.log("case 6b: a newer explicit reopen is not undone by an older archived peer");
+{
+  store.set(KEY3, nb({
+    updatedAt: 300,
+    steps: [{ id: "s1", text: "ship it", status: "pending", ts: 1, stepUpdatedAt: 300 }],
+  }));
+  const merged = JSON.parse(mergeNotebookLease(KEY3, nb({
+    updatedAt: 400,
+    steps: [{ id: "s1", text: "ship it", status: "done", ts: 1, archivedAt: 200, stepUpdatedAt: 200 }],
+  })));
+  check("newer reopened lifecycle wins despite the peer's advanced status",
+    merged.steps[0].status === "pending" && merged.steps[0].archivedAt == null);
+}
+
+console.log("case 6c: a repaired legacy preflight failure beats its stale failed copy");
+{
+  store.set(KEY3, nb({
+    updatedAt: 500,
+    steps: [{ id: "s1", text: "retry setup", status: "pending", ts: 1, stepUpdatedAt: 500 }],
+  }));
+  const merged = JSON.parse(mergeNotebookLease(KEY3, nb({
+    updatedAt: 600,
+    steps: [{ id: "s1", text: "retry setup", status: "failed", ts: 1, finishedAt: 200, archivedAt: 200 }],
+  })));
+  check("repair remains pending and does not regain stale archive metadata",
+    merged.steps[0].status === "pending" && merged.steps[0].archivedAt == null);
 }
 
 console.log("case 7: adopting does not delete steps this PC created since the peer's push");

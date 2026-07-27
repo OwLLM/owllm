@@ -21,25 +21,28 @@ function check(condition, message) {
 // Isolate the Settings dropdown so ordering assertions are scoped to it.
 const popupStart = src.indexOf('data-ui="HeaderSettingsPopup"');
 check(popupStart !== -1, "the Settings dropdown (HeaderSettingsPopup) exists");
-// The dropdown closes at the `)}` that ends its `settingsOpen && ( ... )` block,
-// just before the header mode toggles (visibleToggles.map). Scope to that region.
-const popupEnd = src.indexOf('visibleToggles.map', popupStart);
-check(popupEnd > popupStart, "the Settings dropdown region is bounded before the header mode toggles");
+// The dropdown is the JSX inside `{settingsOpen && ( ... )}`. It closes when the
+// HeaderSettingsPopup </div> is followed by the conditional `)}`. Mode toggles
+// (visibleToggles.map) live later in the same left cluster and must NOT be
+// included, because the global Marketplace button sits between the dropdown and
+// the toggles.
+const popupCloseMatch = src.slice(popupStart).match(/<\/div>\s*\n\s*\)\}/);
+check(popupCloseMatch, "the Settings dropdown has a detectable conditional close");
+const popupEnd = popupStart + (popupCloseMatch.index ?? 0) + popupCloseMatch[0].length;
 const popup = src.slice(popupStart, popupEnd);
 
-// --- Marketplace entry: moved into the dropdown, before the Certificates row ---
+// --- Marketplace entry: now a global header button, NOT inside the dropdown ---
+// It is intentionally moved to the top-level header cluster (next to Settings / mode
+// toggles) and is validated by openWebUrl.verify.run.mjs. This dropdown must NOT
+// contain a duplicate Marketplace entry.
 const marketIdx = popup.indexOf('data-ui="MarketplaceButton"');
-check(marketIdx !== -1, "the dropdown contains the Marketplace entry (MarketplaceButton)");
-check(/MarketplaceButton[\s\S]*?onOpenMarketplace\(\)/.test(popup),
-  "the Marketplace entry opens the marketplace (onOpenMarketplace)");
+check(marketIdx === -1, "MarketplaceButton is no longer inside the Settings dropdown");
 
 // --- Label text ---
 const signingIdx = popup.indexOf('data-ui="SettingsSigningRow"');
 check(signingIdx !== -1, "the dropdown contains the Signing/credential entry (SettingsSigningRow)");
 check(popup.includes(">Certificates and Logs in<"),
   'the Signing entry label reads exactly "Certificates and Logs in"');
-check(marketIdx < signingIdx,
-  "the Marketplace entry is positioned before the Certificates and Logs in entry");
 
 // The entry opens the Signing hub as a centered popup (PageModal) — it is no
 // longer a header tab, so this dropdown row is its only entry point.
@@ -64,15 +67,15 @@ const signingBlock = popup.slice(signingIdx, popup.indexOf("</button>", signingI
 check(signingBlock.includes('width: "100%"') && signingBlock.includes("display: \"flex\""),
   "the Signing entry renders on its own separate full-width line");
 
-// --- Ordering: immediately before the GitHub container, which stays last ---
+// --- Ordering: Signing and Onboarding lead, GitHub container stays last ---
+const onboardingIdx = popup.indexOf('data-ui="SettingsOnboardingRow"');
 const accountIdx = popup.indexOf('data-ui="SettingsAccountRow"');
+check(onboardingIdx !== -1, "the dropdown contains the onboarding entry (SettingsOnboardingRow)");
 check(accountIdx !== -1, "the GitHub container (SettingsAccountRow) exists in the dropdown");
-check(signingIdx < accountIdx,
-  "the Signing entry is positioned before the GitHub container");
-// Nothing else sits between them (immediately-before): no other data-ui row.
-const between = popup.slice(popup.indexOf("</button>", signingIdx) + "</button>".length, accountIdx);
-check(!/data-ui="/.test(between),
-  "the Signing entry is immediately before the GitHub container (no row in between)");
+check(signingIdx < onboardingIdx,
+  "the Signing entry is positioned before the Onboarding entry");
+check(onboardingIdx < accountIdx,
+  "the Onboarding entry is positioned before the GitHub container");
 // The GitHub container is the last interactive row of the dropdown in EVERY
 // state: no further data-ui row appears after it within the dropdown region.
 const afterAccount = popup.slice(accountIdx + 'data-ui="SettingsAccountRow"'.length);

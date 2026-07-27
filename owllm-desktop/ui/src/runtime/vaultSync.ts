@@ -86,11 +86,9 @@ export function stripNotebookLease(key: string, value: string): string {
   }
 }
 
-/// How far a step has progressed. Merging two PCs' copies of the SAME step
-/// takes the more advanced side rather than the more recently written one:
-/// a peer that finished a step must never be dragged back to "pending" just
-/// because this PC's blob was pushed a moment later. That one-way ratchet is
-/// what stops archived steps reappearing in the to-do list.
+/// How far a step has progressed. This is only the tie-breaker when two copies
+/// have the same lifecycle timestamp; a newer explicit Reopen must be allowed
+/// to move a step from archived back to pending.
 function stepProgress(s: any): number {
   if (!s || typeof s !== "object") return 0;
   if (s.status === "done") return 4;
@@ -100,7 +98,15 @@ function stepProgress(s: any): number {
   return 0; // pending
 }
 
-/// Union two step lists by id, most-advanced-wins, with deleted ids buried.
+function stepLifecycleAt(s: any): number {
+  if (!s || typeof s !== "object") return 0;
+  for (const value of [s.stepUpdatedAt, s.archivedAt, s.finishedAt, s.startedAt, s.ts]) {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+  }
+  return 0;
+}
+
+/// Union two step lists by id, newest-lifecycle-wins, with deleted ids buried.
 /// Order follows the newer side, then any ids only the older side still has,
 /// so a reordering on the newer device survives without dropping the other's
 /// additions.
@@ -110,10 +116,13 @@ function mergeSteps(newer: any[], older: any[], buried: Set<string>): any[] {
   for (const s of newer) {
     if (!s?.id || buried.has(s.id)) continue;
     const prev = byId.get(s.id);
-    const winner = !prev || stepProgress(s) >= stepProgress(prev) ? s : prev;
-    const other = winner === s ? prev : s;
-    const maxArchived = Math.max(winner?.archivedAt ?? 0, other?.archivedAt ?? 0);
-    if (maxArchived > 0) winner.archivedAt = maxArchived;
+    const currentAt = stepLifecycleAt(s);
+    const previousAt = stepLifecycleAt(prev);
+    const winner = !prev
+      || currentAt > previousAt
+      || (currentAt === previousAt && stepProgress(s) >= stepProgress(prev))
+      ? s
+      : prev;
     byId.set(s.id, winner);
   }
   const out: any[] = [];

@@ -20,8 +20,8 @@ let JSDOM;
 try {
   ({ JSDOM } = req("jsdom"));
 } catch {
-  console.log("SKIP notebookStartBatch: jsdom not installed (run `npm i --no-save jsdom` to exercise this harness).");
-  process.exit(0);
+  console.error("FAIL notebookStartBatch: jsdom is required (run `npm i --no-save jsdom` to exercise this harness).");
+  process.exit(1);
 }
 
 // ---- DOM environment (react-dom needs window/document globals; the notebook
@@ -196,6 +196,7 @@ console.log("case 0a: false WSL redirector failures are repaired to pending");
       ts: 1,
       startedAt: 10,
       finishedAt: 20,
+      archivedAt: 20,
       failureReason: "Could not create the required isolated worktree: project_cwd does not exist: \\\\wsl.localhost\\Ubuntu\\mnt\\c\\repo",
     }],
   }));
@@ -204,6 +205,7 @@ console.log("case 0a: false WSL redirector failures are repaired to pending");
   check("false-failure timing and reason are cleared",
     repaired.steps[0]?.startedAt == null
       && repaired.steps[0]?.finishedAt == null
+      && repaired.steps[0]?.archivedAt == null
       && repaired.steps[0]?.failureReason == null);
   check("repair is durable in the notebook blob", blob().steps[0]?.status === "pending");
 }
@@ -546,6 +548,25 @@ console.log("case 5dd: Archive button moves an active step to the Archive tab");
   check("Archive tab shows count 1", !!archiveTab && textOf(archiveTab).includes("(1)"));
   clickEl(archiveTab);
   check("archived step appears in the Archive tab", textOf(document.body).includes("step to archive"));
+  check("archive lifecycle timestamp is persisted", typeof blob().steps.find((s) => s.id === "to-archive")?.stepUpdatedAt === "number");
+  act(() => root.unmount());
+}
+
+// ---- 5de. Archiving an in-flight card closes its visible timing instead of
+//            leaving a completed card labelled "running" forever. ----
+console.log("case 5de: manually archiving an in-flight card stamps completion");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [{ id: "in-flight", text: "manual completion", status: "sent", ts: 1, startedAt: 1000 }],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  clickEl(buttons().find((b) => b.getAttribute("aria-label") === "Archive step"));
+  const archived = blob().steps.find((s) => s.id === "in-flight");
+  check("manual archive stamps a finish time", typeof archived?.finishedAt === "number");
+  clickEl(buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive")));
+  check("archived timing no longer says running", !textOf(document.body).includes("running"));
   act(() => root.unmount());
 }
 

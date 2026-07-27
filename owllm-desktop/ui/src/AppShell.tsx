@@ -979,25 +979,6 @@ function ModeBar({
                 })()}
               </div>
 
-              {/* Marketplace entry — opens the OWLLM Marketplace (external web)
-                  on its own separate line, positioned before the Certificates
-                  and GitHub container rows. Moved here from the header cluster. */}
-              <button
-                data-ui="MarketplaceButton"
-                onClick={() => { setSettingsOpen(false); onOpenMarketplace(); }}
-                title="Open OWLLM Marketplace"
-                style={{
-                  display: "flex", alignItems: "center", gap: 10, width: "100%",
-                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
-                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
-                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
-                }}
-              >
-                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🛍️</span>
-                <span style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 13.5 }}>Marketplace</span>
-                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
-              </button>
-
               {/* Signing / credential hub entry — its own separate line,
                   positioned immediately before the GitHub container so that
                   container stays the last item of the dropdown in every state.
@@ -1088,6 +1069,24 @@ function ModeBar({
             </div>
           )}
         </div>
+
+        <button
+          data-ui="MarketplaceButton"
+          data-no-drag
+          onClick={onOpenMarketplace}
+          title="Open OWLLM Marketplace"
+          style={{
+            ...baseBtn,
+            width: 128,
+            display: "inline-flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 7,
+          }}
+        >
+          <ActionIcon name="external-link" size={15} />
+          <span>Marketplace</span>
+        </button>
 
         {/* Advanced toggle removed — MCP/Accounts are always visible in the
             SubTabs right cluster, and Record moved there too. */}

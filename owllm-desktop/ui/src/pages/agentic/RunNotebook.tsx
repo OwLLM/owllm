@@ -60,6 +60,10 @@ export type NotebookStep = {
   /// When the step entered the archive (done, or sent + finished). Persisted so
   /// restart and sync keep archive ordering independent of creation order.
   archivedAt?: number;
+  /// Last lifecycle transition for this step. Cross-device merge uses this
+  /// instead of a one-way status ratchet so an intentional Reopen (pending)
+  /// cannot be undone by an older archived copy from another PC.
+  stepUpdatedAt?: number;
   /// Concise reason the last run did not complete. Failed steps stay on Active
   /// with a Re-feed action instead of being silently archived.
   failureReason?: string;
@@ -209,6 +213,7 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
     if (!raw) return { ...EMPTY };
     const p = JSON.parse(raw);
     let repairedLegacyPreflightFailure = false;
+    const repairAt = Date.now();
     const notebook: NotebookState = {
       text: typeof p.text === "string" ? p.text : "",
       plan: typeof p.plan === "string" ? p.plan : "",
@@ -221,6 +226,8 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
                 status: "pending" as const,
                 startedAt: undefined,
                 finishedAt: undefined,
+                archivedAt: undefined,
+                stepUpdatedAt: repairAt,
                 failureReason: undefined,
               };
             }
@@ -229,6 +236,15 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
               startedAt: typeof s.startedAt === "number" ? s.startedAt : undefined,
               finishedAt: typeof s.finishedAt === "number" ? s.finishedAt : undefined,
               archivedAt: typeof s.archivedAt === "number" ? s.archivedAt : undefined,
+              stepUpdatedAt: typeof s.stepUpdatedAt === "number"
+                ? s.stepUpdatedAt
+                : (typeof s.archivedAt === "number"
+                  ? s.archivedAt
+                  : typeof s.finishedAt === "number"
+                    ? s.finishedAt
+                    : typeof s.startedAt === "number"
+                      ? s.startedAt
+                      : typeof s.ts === "number" ? s.ts : 0),
             };
           })
         : [],
@@ -302,6 +318,8 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
   next.status = "sent";
   next.startedAt = now;
   next.finishedAt = undefined;
+  next.archivedAt = undefined;
+  next.stepUpdatedAt = now;
   next.failureReason = undefined;
   if (nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) {
     nb.autoFeedStartedAt = now;
@@ -370,6 +388,7 @@ export function seedNotebookFromBrief(projectId: string | null | undefined, brie
     text,
     status: "pending" as const,
     ts: now + index,
+    stepUpdatedAt: now + index,
   })));
   saveNotebook(projectId, nb);
   return additions.length;
@@ -456,7 +475,7 @@ export function markNotebookStepStarted(projectId: string | null | undefined, st
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], status: "sent", startedAt, finishedAt: undefined, archivedAt: undefined, failureReason: undefined };
+  nb.steps[idx] = { ...nb.steps[idx], status: "sent", startedAt, finishedAt: undefined, archivedAt: undefined, stepUpdatedAt: startedAt, failureReason: undefined };
   saveNotebook(projectId, nb);
 }
 
@@ -466,7 +485,7 @@ export function markNotebookStepFinished(projectId: string | null | undefined, s
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, archivedAt: finishedAt, failureReason: undefined };
+  nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, archivedAt: finishedAt, stepUpdatedAt: finishedAt, failureReason: undefined };
   saveNotebook(projectId, nb);
 }
 
@@ -486,6 +505,8 @@ export function markNotebookStepFailed(
     ...nb.steps[idx],
     status: "failed",
     finishedAt,
+    archivedAt: undefined,
+    stepUpdatedAt: finishedAt,
     failureReason: reason.trim() || "The run did not complete.",
   };
   saveNotebook(projectId, nb);
@@ -507,6 +528,7 @@ export function markNotebookStepPending(
     startedAt: undefined,
     finishedAt: undefined,
     archivedAt: undefined,
+    stepUpdatedAt: Date.now(),
     failureReason: undefined,
   };
   saveNotebook(projectId, nb);
@@ -786,7 +808,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     if (!t) return;
     updateNotebook((prev) => ({
       ...prev,
-      steps: [...prev.steps, { id: newStepId(), text: t, status: "pending", ts: Date.now() }],
+      steps: [...prev.steps, { id: newStepId(), text: t, status: "pending", ts: Date.now(), stepUpdatedAt: Date.now() }],
     }));
   };
   const addSteps = (texts: string[]) => {
@@ -797,12 +819,21 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       ...prev,
       steps: [
         ...prev.steps,
-        ...clean.map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i })),
+        ...clean.map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i, stepUpdatedAt: now + i })),
       ],
     }));
   };
-  const setStep = (id: string, patch: Partial<NotebookStep>) =>
-    updateNotebook((prev) => ({ ...prev, steps: prev.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
+  const setStep = (id: string, patch: Partial<NotebookStep>) => {
+    const changesLifecycle = ["status", "startedAt", "finishedAt", "archivedAt", "failureReason"]
+      .some((key) => Object.prototype.hasOwnProperty.call(patch, key));
+    const stepUpdatedAt = changesLifecycle ? Date.now() : undefined;
+    updateNotebook((prev) => ({
+      ...prev,
+      steps: prev.steps.map((s) => (s.id === id
+        ? { ...s, ...patch, ...(stepUpdatedAt != null ? { stepUpdatedAt } : {}) }
+        : s)),
+    }));
+  };
   /// Deleting records a TOMBSTONE as well as dropping the step. Steps merge
   /// across PCs as a union by id (so a peer's completion can't be clobbered by
   /// our stale copy); without the tombstone that union would hand the deleted
@@ -837,7 +868,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     // race React's queued state updater and erase the just-started sequence.
     updateNotebook((prev) => ({
       ...prev,
-      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined, archivedAt: undefined, failureReason: undefined } : step),
+      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined, archivedAt: undefined, stepUpdatedAt: now, failureReason: undefined } : step),
       // Claiming the queue makes THIS window its owner even when auto-feed is
       // off: a started queue is driven by one window, and every other open
       // window (another tab here or the app on another PC) ghosts its run
@@ -1217,7 +1248,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <button
                           onClick={() => updateNotebook((prev) => ({
                             ...prev,
-                            steps: [...prev.steps, { id: newStepId(), text: t, status: "pending" as const, ts: Date.now() }],
+                            steps: [...prev.steps, { id: newStepId(), text: t, status: "pending" as const, ts: Date.now(), stepUpdatedAt: Date.now() }],
                             proposed: (prev.proposed ?? []).filter((_, j) => j !== i),
                           }))}
                           title="Add this step to the list"
@@ -1235,7 +1266,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           steps: [
                             ...prev.steps,
                             ...(prev.proposed ?? []).map((t) => t.trim()).filter(Boolean)
-                              .map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i })),
+                              .map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i, stepUpdatedAt: now + i })),
                           ],
                           proposed: [],
                           // Accepting the steps CONSUMES the working notes — the
@@ -1477,7 +1508,14 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       <div style={{ flex: 1 }} />
                       <button
                         className="ghost-btn"
-                        onClick={() => setStep(s.id, { status: "done", archivedAt: Date.now() })}
+                        onClick={() => {
+                          const archivedAt = Date.now();
+                          setStep(s.id, {
+                            status: "done",
+                            archivedAt,
+                            finishedAt: s.startedAt != null && s.finishedAt == null ? archivedAt : s.finishedAt,
+                          });
+                        }}
                         title="Archive this step (moves it to the Archive tab)"
                         aria-label="Archive step"
                         style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, flexShrink: 0 }}

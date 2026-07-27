@@ -632,7 +632,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
         ringMesh.rotation.x = -Math.PI / 2;
         group.add(ringMesh);
         if (ring.texture) {
-          textureLoader.load(ring.texture, (texture) => {
+          textureLoader.load(ring.texture, (texture: THREE.Texture) => {
             texture.colorSpace = THREE.SRGBColorSpace;
             texture.anisotropy = maxAnisotropy;
             ringMaterial.map = texture;
@@ -646,7 +646,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       scene.add(group);
 
       onTextureStatusRef.current?.(spec.id, "loading");
-      textureLoader.load(spec.texture!, (texture) => {
+      textureLoader.load(spec.texture!, (texture: THREE.Texture) => {
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.anisotropy = maxAnisotropy;
         material.map = texture;

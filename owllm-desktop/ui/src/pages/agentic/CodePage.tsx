@@ -33,7 +33,7 @@ import { chooseProjectOpenTarget, savedPageIdsForLocalProject } from "./codeProj
 import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
-import TeamMemoryModal from "./TeamMemoryModal";
+import TeamMemoryModal, { fmtAgo } from "./TeamMemoryModal";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -434,6 +434,16 @@ function threadTitle(text: string): string {
   const t = text.trim().replace(/\s+/g, " ");
   return t ? (t.length > 44 ? t.slice(0, 44) + "…" : t) : "New chat";
 }
+// 🧠 Each folderless conversation gets its OWN durable memory scope, so the
+// everyday chat remembers across restarts exactly like a project does. It is
+// the SAME store the project/team RAG uses (team_memory + team_memory_search) —
+// only the scope string differs, so nothing about memory is reimplemented here.
+// Without this a no-folder chat resolved to scope "" and every enrich/log call
+// was a silent no-op: the chat could never remember anything.
+function chatMemoryScope(threadId: string | null | undefined): string {
+  const id = (threadId ?? "").trim();
+  return id ? `chat:${id}` : "";
+}
 
 // Per-recent metadata: a friendly name and a pin flag. Stored separately from
 // the recents array so the array stays a plain path list.
@@ -641,6 +651,9 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setChatDraft = (v: string) => setChatField("draft", v);
   const setChatBusy = (v: boolean) => setChatField("busy", v);
   const [showHistory, setShowHistory] = useState(false);
+  // How many memory entries the last chat turn actually recalled — shown on the
+  // 🧠 button so "it remembered" is visible rather than something you infer.
+  const [chatMemHits, setChatMemHits] = useState(0);
   const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
   // Project-coding composer image attachments (paste / drag-drop / picker) — the
@@ -715,9 +728,34 @@ function CodeWorkspace({ pageId, onTitle }: {
       createdDeviceId: deviceIdentity.device_id,
       createdDeviceName: deviceIdentity.name,
     }, ...cs]);
-    setChatId(id); setShowHistory(false); setChatAttachments([]); setChatDraft("");
+    setChatId(id); setShowHistory(false); setChatAttachments([]); setChatDraft(""); setChatMemHits(0);
   };
-  const deleteThread = (id: string) => { setChats((cs) => cs.filter((c) => c.id !== id)); if (chatId === id) setChatId(""); };
+  // Switch to an existing conversation. The memory badge counts the LAST turn,
+  // so it belongs to the thread you were in — clear it when you leave.
+  const openThread = (id: string) => { setChatId(id); setShowHistory(false); setChatAttachments([]); setChatMemHits(0); setChatMode(true); };
+  const deleteThread = (id: string) => {
+    setChats((cs) => cs.filter((c) => c.id !== id));
+    if (chatId === id) { setChatId(""); setChatMemHits(0); }
+    // Drop the thread's memory with it. Same store and same commands the memory
+    // viewer uses — a deleted chat must not leave unreachable rows behind in
+    // team_memory (nothing else can ever address a dead chat: scope again).
+    void purgeChatMemory(id);
+  };
+  const purgeChatMemory = async (threadId: string): Promise<void> => {
+    const scope = chatMemoryScope(threadId);
+    if (!scope) return;
+    try {
+      const rows = await invoke<{ id: number }[]>("team_memory_search", { scope, query: "", limit: 500 });
+      for (const r of rows) await invoke<number>("team_memory_delete", { scope, id: r.id });
+    } catch { /* best effort — the thread is gone either way */ }
+  };
+  // 🧠 Open the SHARED memory viewer on this conversation's own scope. Same
+  // modal, same store the project/team memory uses — only the scope differs.
+  const openChatMemory = (): void => {
+    const scope = chatMemoryScope(chatId);
+    if (!scope) { setStatus("Send a message first — the conversation's memory starts with it."); return; }
+    window.dispatchEvent(new CustomEvent("owllm:open-code-memory", { detail: { projectId: scope } }));
+  };
 
   // Paste/drop/pick images and documents. Documents are parsed locally before
   // they enter state, so corrupt/unsupported files surface immediately.
@@ -1921,8 +1959,12 @@ function CodeWorkspace({ pageId, onTitle }: {
     });
   };
 
-  const enrichCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
-    const scope = await resolveMemoryScope();
+  // `scopeOverride` lets a caller PIN the scope it captured when the turn
+  // started (the just-chat surface pins its thread's chat: scope). The chat
+  // stream outlives the page — resolving the scope again at reply time would
+  // read whatever project the user has since navigated to.
+  const enrichCodePromptWithMemory = async (user: string, scopeOverride?: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
+    const scope = scopeOverride ?? await resolveMemoryScope();
     const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (!scope || !user.trim()) return { text: user, pack: empty };
     setTeamMemoryScope(scope);
@@ -1932,8 +1974,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
-  const logCodeWork = async (agent: string, instruction: string, result: string) => {
-    const scope = await resolveMemoryScope();
+  const logCodeWork = async (agent: string, instruction: string, result: string, scopeOverride?: string) => {
+    const scope = scopeOverride ?? await resolveMemoryScope();
     if (!scope || !result.trim()) return;
     setTeamMemoryScope(scope);
     setTeamMemoryGoal(instruction);
@@ -2358,6 +2400,10 @@ function CodeWorkspace({ pageId, onTitle }: {
       else newChat();
     }
   };
+  // The hub card's primary button. Unlike startChat (which RESUMES the latest
+  // thread) this always opens an empty one — the card lists the recent threads
+  // right below it, so resuming is a click away and "New" can mean new.
+  const startNewChat = () => { newChat(); setChatMode(true); };
   const sendChat = async () => {
     const text = chatDraft.trim();
     const attachments = chatAttachments;
@@ -2405,13 +2451,18 @@ function CodeWorkspace({ pageId, onTitle }: {
     });
     try {
       const provider = providerFor(modelId, availableModels);
-      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments));
-      showMemoryPack(pack);
+      // 🧠 Pin THIS thread's memory scope for the whole turn. Captured from the
+      // resolved thread id, never re-resolved after the await, so a reply that
+      // lands after the user navigated away still reads and writes the chat it
+      // belongs to instead of whatever project is on screen by then.
+      const chatScope = chatMemoryScope(tid);
+      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments), chatScope);
+      setChatMemHits(pack.total);
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
-        await logCodeWork("code_chat", text || "(see attached image)", reply);
+        await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);
       } else {
         // Pass a working dir so pasted images can be saved into it for the model
         // to read (codex -i / claude file-ref). Use the workspace if one is
@@ -2419,7 +2470,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         // ("I can't inspect the image"), which is the bug on a no-folder chat.
         const chatCwd = workspace || chatScratchRef.current || undefined;
         const reply = await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
-        await logCodeWork("code_chat", text || "(see attached image)", reply);
+        await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -2630,7 +2681,7 @@ function CodeWorkspace({ pageId, onTitle }: {
                 <div style={{ position: "absolute", top: 34, left: 0, zIndex: 41, width: 320, maxHeight: 380, overflowY: "auto", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 10, boxShadow: "var(--shadow-lg)", padding: 6 }}>
                   {chats.length === 0 && <div style={{ fontSize: 12.5, color: "var(--fg-muted)", padding: "8px 10px" }}>No past chats yet.</div>}
                   {chats.map((c) => (
-                    <div key={c.id} onClick={() => { setChatId(c.id); setShowHistory(false); }}
+                    <div key={c.id} onClick={() => openThread(c.id)}
                       onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
                       onMouseLeave={(e) => (e.currentTarget.style.background = c.id === chatId ? "var(--bg-input)" : "transparent")}
                       style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 7, cursor: "pointer", background: c.id === chatId ? "var(--bg-input)" : "transparent" }}>
@@ -2648,6 +2699,9 @@ function CodeWorkspace({ pageId, onTitle }: {
           <div style={{ width: 260, maxWidth: "45%" }}>
             <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
           </div>
+          {/* 🧠 This conversation's own memory — the SAME viewer and the same
+              team_memory store the projects use, scoped to this thread. */}
+          <button data-ui="ChatThreadMemory" onClick={openChatMemory} title="What this conversation remembers (searchable, editable)" style={{ ...btn, height: 30, padding: "0 10px", color: chatMemHits > 0 ? "var(--accent-ink)" : "var(--fg-muted)" }}>🧠 Memory{chatMemHits > 0 ? ` (${chatMemHits})` : ""}</button>
           {chatMsgs.length > 0 && <button onClick={() => chatId && updateThread(chatId, () => [])} title="Clear this conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
         </div>
         <div ref={chatSticky.ref} onScroll={chatSticky.onScroll} data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
@@ -2697,6 +2751,14 @@ function CodeWorkspace({ pageId, onTitle }: {
             )}
           </div>
         </div>
+        {/* This branch returns EARLY, so the project-scoped modal further down
+            never mounts here — the chat needs its own instance to answer the
+            same event with this thread's scope. */}
+        <TeamMemoryModal
+          openEvent="owllm:open-code-memory"
+          projectId={chatMemoryScope(chatId) || null}
+          projectName={chats.find((c) => c.id === chatId)?.title || "Chat"}
+        />
       </div>
     );
   }
@@ -2768,19 +2830,70 @@ function CodeWorkspace({ pageId, onTitle }: {
               {/* START — VS Code-style action rows */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
                 <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", marginBottom: 10 }}>Local actions</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, width: "100%" }}>
-                  {([
-                    { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: openNewProject },
-                    { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
-                    { icon: "◌", label: "New chat", detail: "Start a conversation without giving the model access to a project folder.", onClick: startChat },
-                  ]).map((a) => (
-                    <button key={a.label} onClick={a.onClick}
-                      style={{ minHeight: 118, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, minWidth: 0, padding: 14, borderRadius: 14, cursor: "pointer", textAlign: "left", color: "var(--fg)", border: "1px solid rgba(var(--accent-rgb),.28)", background: "radial-gradient(circle at 100% 0%,rgba(var(--accent-rgb),.16),transparent 52%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px rgba(0,0,0,.12)" }}>
-                      <span style={{ fontSize: 20, color: "var(--accent-ink)", textShadow: "0 0 14px rgba(var(--accent-rgb),.8)" }}>{a.icon}</span>
-                      <span style={{ color: "var(--fg-strong)", fontWeight: 800, fontSize: 13.5 }}>{a.label}</span>
-                      <span style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>{a.detail}</span>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, width: "100%", alignItems: "stretch" }}>
+                  {/* LEFT — the two project actions, stacked. Deliberately the
+                      quieter violet card: opening a folder is the occasional
+                      task, chatting is the daily one. */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
+                    {([
+                      { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: openNewProject },
+                      { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
+                    ]).map((a) => (
+                      <button key={a.label} onClick={a.onClick}
+                        style={{ flex: 1, minHeight: 118, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, minWidth: 0, padding: 14, borderRadius: 14, cursor: "pointer", textAlign: "left", color: "var(--fg)", border: "1px solid rgba(154,140,255,.34)", background: "radial-gradient(circle at 100% 0%,rgba(154,140,255,.15),transparent 52%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px rgba(0,0,0,.12)" }}>
+                        <span style={{ fontSize: 20, color: "#b9aeff", textShadow: "0 0 14px rgba(154,140,255,.75)" }}>{a.icon}</span>
+                        <span style={{ color: "var(--fg-strong)", fontWeight: 800, fontSize: 13.5 }}>{a.label}</span>
+                        <span style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>{a.detail}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* RIGHT — the everyday chat. Full height of the left column,
+                      mint (the assistant colour used in every chat bubble) so
+                      the daily-use surface reads as the primary one, with its
+                      recent conversations listed inline the way ChatGPT/Claude
+                      do it — no extra click through a History dropdown. */}
+                  <div data-ui="NormalChatCard" style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0, padding: 16, borderRadius: 14, border: "1px solid rgba(127,240,197,.42)", background: "radial-gradient(circle at 100% 0%,rgba(127,240,197,.16),transparent 55%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.05),0 12px 30px rgba(0,0,0,.16)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                      <span style={{ fontSize: 21, color: "#7ff0c5", textShadow: "0 0 15px rgba(127,240,197,.8)" }}>💬</span>
+                      <b style={{ color: "var(--fg-strong)", fontSize: 15 }}>Normal chat</b>
+                      <span style={{ fontSize: 9.5, fontWeight: 900, letterSpacing: 1, textTransform: "uppercase", color: "#7ff0c5", border: "1px solid rgba(127,240,197,.45)", borderRadius: 999, padding: "2px 7px" }}>Everyday</span>
+                    </div>
+                    <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5 }}>
+                      Ask anything — no folder, no setup. Each conversation keeps its own memory, so it remembers what you told it.
+                    </div>
+                    <button onClick={startNewChat}
+                      style={{ height: 40, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 10, cursor: "pointer", fontWeight: 800, fontSize: 13, border: "none", background: "linear-gradient(135deg,#7ff0c5,#4de09b)", color: "#04241a", boxShadow: "0 8px 20px rgba(77,224,155,.25)" }}>
+                      ＋ New conversation
                     </button>
-                  ))}
+                    {/* Recent conversations — the SAME persisted thread list the
+                        chat surface uses (owllm:code:chats), so this is a second
+                        view of it, not a second store. */}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 2 }}>
+                      <span style={{ fontSize: 10, fontWeight: 900, letterSpacing: 1.2, textTransform: "uppercase", color: "var(--fg-subtle)" }}>Recent conversations</span>
+                      {chats.length > 0 && <span style={{ fontSize: 10.5, color: "var(--fg-subtle)" }}>{chats.length}</span>}
+                    </div>
+                    <div data-ui="RecentChatList" style={{ display: "flex", flexDirection: "column", gap: 5, minHeight: 0, maxHeight: 268, overflowY: "auto", paddingRight: 2 }}>
+                      {chats.length === 0 && (
+                        <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5, padding: "8px 2px" }}>
+                          No conversations yet — start one above and it will be listed here.
+                        </div>
+                      )}
+                      {chats.map((c) => (
+                        <div key={c.id} onClick={() => openThread(c.id)} title={c.title || "Chat"}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(127,240,197,.09)")}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
+                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 9, cursor: "pointer", background: "var(--bg-input)", border: "1px solid var(--border)" }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 12.5, fontWeight: 650, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</div>
+                            <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginTop: 2 }}>{fmtAgo(c.ts)} · {c.messages.length} message{c.messages.length === 1 ? "" : "s"}</div>
+                          </div>
+                          <button onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete conversation and its memory"
+                            style={{ ...btn, height: 22, padding: "0 6px", color: "var(--fg-muted)", fontSize: 11 }}>✕</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                   <div data-ui="ImportFromGitHubCard" style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 9, minWidth: 0, padding: 15, borderRadius: 14, border: "1px solid rgba(126,231,255,.38)", background: "radial-gradient(circle at 100% 0%,rgba(126,231,255,.16),transparent 48%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 28px rgba(0,0,0,.14)" }}>
                     <div style={{ display: "flex", gap: 9, alignItems: "center" }}><span style={{ color: "#7ee7ff", fontSize: 20, textShadow: "0 0 14px rgba(126,231,255,.8)" }}>⇣</span><b style={{ color: "var(--fg-strong)", fontSize: 13.5 }}>Import from GitHub</b></div>
                     <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>

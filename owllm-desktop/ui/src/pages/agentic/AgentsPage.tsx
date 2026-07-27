@@ -71,6 +71,7 @@ import {
   streamLocalChat,
   streamOpenAiApiWithTools,
   foldHistoryIntoPrompt,
+  recentTextHistory,
   runCodexCliStream,
   runKimiCliStream,
   makeResponsiveHandlers,
@@ -155,7 +156,8 @@ import {
   worktreePreflightError,
   type WorktreeCreateState,
 } from "./worktreeIsolation";
-import { READONLY_LOCAL_TOOLS, isReadOnlyToolAllowlist } from "./agentSandbox";
+import { READONLY_LOCAL_TOOLS, isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
+import { historyBudgetFor } from "./contextBudget";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
@@ -7371,6 +7373,7 @@ async function runClaudeCliStream(args: {
     // Per-run, user-consented home-profile access (--add-dir). False unless the
     // user approved the consent prompt this run. See grantHomeThisRun.
     grantHome: grantHomeThisRun,
+    readOnly: isAgentReadOnly(args),
     onEvent: ch,
   });
 }
@@ -7640,7 +7643,7 @@ async function streamAnthropic(
   // Claude CLI's --print mode is one-shot — no inherent memory across
   // calls — so fold the prior conversation into the user prompt the
   // CLI sees. The CLI then has everything it needs to continue.
-  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
+  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history, cliModel);
   // forceSub: skip the API path entirely and go straight to the CLI.
   if (wantSub) {
     const status = await invoke<{ claude_cli: boolean }>("accounts_status");
@@ -7690,6 +7693,7 @@ async function streamAnthropic(
       runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false,
+        readOnly: isReadOnlyToolAllowlist(allowedTools),
         model: cliModel, effort: claudeEffort, sessionId: sid,
         grantHome: grantHomeThisRun,
       })), claudeCwd);
@@ -7717,6 +7721,7 @@ async function streamAnthropic(
           userMessage: cliPrompt,
           cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
+          readOnly: isReadOnlyToolAllowlist(allowedTools),
           model: cliModel, effort: claudeEffort, sessionId,
           grantHome: grantHomeThisRun,
         }), claudeCwd);
@@ -7777,13 +7782,17 @@ function buildAnthropicBody(
   const thinkingOn = budget > 0;
   const maxTokens = thinkingOn ? budget + 4096 : 4096;
   const reqTemp = thinkingOn ? 1 : temperature;
+  const anthropicBudget = historyBudgetFor(wireModel);
   return {
     model: wireModel,
     max_tokens: maxTokens,
     ...(thinkingOn ? { thinking: { type: "enabled", budget_tokens: budget } } : {}),
     system: systemPrompt,
     messages: [
-      ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
+      // Bounded to the model's window — the API path used to spread the whole
+      // history in raw while only the CLI paths were capped.
+      ...recentTextHistory(history, anthropicBudget.turns, anthropicBudget.chars)
+        .map(h => ({ role: h.role, content: h.content })),
       { role: "user", content: anthropicUserContent(userMessage, imgList) },
     ],
     stream: true,
@@ -7883,7 +7892,7 @@ async function streamOpenAI(
     await ensureCliWarm("codex_cli", projectCwd);
     // Budgeted fold — an unbounded transcript here is what put 778k characters
     // (81% of the model's context) into a single orchestrator dispatch.
-    const prompt = foldHistoryIntoPrompt(userMessage, history);
+    const prompt = foldHistoryIntoPrompt(userMessage, history, modelId);
     // Pasted images → saved to the cwd inbox + attached via codex's native -i
     // flag (verified). Same path the Code page uses — consistent everywhere.
     // A no-folder team chat has no projectCwd; fall back to the shared
@@ -7952,10 +7961,9 @@ async function streamMoonshot(
     // same preflight as Code/Chat so an isolated project gets the Kimi binary
     // and refreshed credentials before the first agent tries to execute it.
     await ensureCliWarm("kimi_cli", projectCwd);
-    const folded = (history ?? [])
-      .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
-      .join("\n\n");
-    const composed = folded ? `${folded}\n\nuser: ${userMessage}` : userMessage;
+    // Bounded fold, same helper as every other CLI path. This joined the WHOLE
+    // transcript before, so a long team run re-sent every prior turn each time.
+    const composed = foldHistoryIntoPrompt(userMessage, history, modelId);
     // Retry transient network blips (and surface a clear auth error) like the
     // Claude/Codex subscription paths — a Rust-side non-zero exit now carries the
     // real auth/network text, so withCliAuthRetry can recognize and retry it.
@@ -8052,10 +8060,8 @@ async function streamGemini(
   // similar to claude/kimi). Folds history into the prompt since
   // --print is single-turn.
   if (route.forceSub) {
-    const folded = (history ?? [])
-      .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
-      .join("\n\n");
-    const composed = folded ? `${folded}\n\nuser: ${userMessage}` : userMessage;
+    // Bounded fold — see the Kimi path above.
+    const composed = foldHistoryIntoPrompt(userMessage, history, modelId);
     // Retry transient network blips / surface real auth errors, as for the other
     // subscription CLIs (the Rust non-zero-exit path now carries the auth text).
     const reply = await withCliAuthRetry("gemini_cli", signal, () => invoke<string>("gemini_cli_complete", {
@@ -8073,7 +8079,8 @@ async function streamGemini(
   if (!fallbackKey) throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) saved — set it on the Accounts page.");
   // Translate alternating user/assistant history to Gemini's contents
   // shape. Gemini uses "model" instead of "assistant".
-  const contents = (history ?? []).map((h) => ({
+  const geminiBudget = historyBudgetFor(modelId);
+  const contents = recentTextHistory(history, geminiBudget.turns, geminiBudget.chars).map((h) => ({
     role: h.role === "assistant" ? "model" : (h.role === "user" ? "user" : "model"),
     parts: [{ text: typeof h.content === "string" ? h.content : "" }],
   }));
@@ -8726,12 +8733,23 @@ export function AgentsPage({
   // right after the run's finally — but when they haven't yet (a queued steer
   // follow-up), retry for a while instead of silently dropping the chain
   // (the old single-shot check is how a running queue "just stopped").
+  const AUTO_FEED_SETTLE_TRIES = 30; // 30 × 800ms = 24s
   const scheduleNotebookAutoFeed = () => {
     const pid = selectedProjectId;
     let tries = 0;
     const attempt = () => {
       if (supSendBusyRef.current || dispatchInFlightRef.current) {
-        if (++tries <= 8) setTimeout(attempt, 800);
+        if (++tries <= AUTO_FEED_SETTLE_TRIES) {
+          setTimeout(attempt, 800);
+          return;
+        }
+        // Giving up used to be a bare `return`: auto-feed stayed ON, the steps
+        // stayed pending, and nothing ever dispatched again. That is the OTHER
+        // way "the queue just stopped" happens, independent of any run failure.
+        // Say so, using the same notice the non-clean endings use.
+        notifyAutoFeedPaused(
+          `the previous run was still busy ${Math.round((AUTO_FEED_SETTLE_TRIES * 800) / 1000)}s after it finished`,
+        );
         return;
       }
       continueNotebookAutoFeed(pid, notebookSurfaceId, (step) => {
@@ -11898,12 +11916,14 @@ export function AgentsPage({
         for (const u of parse.unresolved) {
           appendThought(orch.name, {
             role: "system", color: "#ff8c8c",
-            text: `⚠ "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""} (line NOT dispatched)`,
+            text: u.reason === "empty-instruction"
+              ? `⚠ "@${u.name}:" was given no instruction (line NOT dispatched)`
+              : `⚠ "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""} (line NOT dispatched)`,
           });
         }
         if (parse.dispatches.length === 0) {
           const correction = unresolvedCorrectionMessage(parse.unresolved, runTeam, orch.name);
-          appendLog("system", { role: "system", color: "#ff8c8c", text: `⚠ Dispatch lines named unknown agents — asking the orchestrator to re-emit with real names.` });
+          appendLog("system", { role: "system", color: "#ff8c8c", text: `⚠ No dispatch line produced a run — asking the orchestrator to re-emit them.` });
           addActive(orch.name);
           appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
           try {
@@ -12036,7 +12056,7 @@ export function AgentsPage({
           // Genuinely no specialist to route to → keep the loud solo notice.
           const clean = stripDispatchDirectives(orchReply).trim();
           const noteText = parse.unresolved.length > 0
-            ? `🚫 0 dispatches ran — the orchestrator named agents that don't exist (${parse.unresolved.map(u => "@" + u.name).join(", ")}) and there's no specialist to fall back to.`
+            ? `🚫 0 dispatches ran — these lines produced no run (${parse.unresolved.map(u => "@" + u.name).join(", ")}) and there's no specialist to fall back to.`
             : "🚫 0 dispatches parsed — orchestrator answered solo, and this team has no specialist to route to. Add a specialist or rephrase the goal.";
           appendThought(orch.name, { role: "system", color: "#ff8c8c", text: noteText });
           appendLog("system", { role: "system", color: "#ff8c8c", text: noteText });

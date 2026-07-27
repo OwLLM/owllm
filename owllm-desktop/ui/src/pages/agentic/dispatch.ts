@@ -51,7 +51,8 @@ import {
   runtimeSkillIds,
   type RuntimePersonalAgent,
 } from "./personalAgentRuntime";
-import { isReadOnlyToolAllowlist } from "./agentSandbox";
+import { isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
+import { historyBudgetFor } from "./contextBudget";
 import type { RevisionRef } from "./personalAgentConfig";
 import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoint";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
@@ -197,6 +198,10 @@ async function runClaudeCliStream(args: {
   /// or falls back to a "❓ to user" entry in the Thought channel.
   /// Defaults to TRUE — same default as VS Code's Claude Code session.
   briefMode?: boolean;
+  /// Force the read-only sandbox. Normally left unset: `isAgentReadOnly`
+  /// derives it from `allowedTools`, so an orchestrator is confined whether or
+  /// not the caller remembered to ask.
+  readOnly?: boolean;
   /// Called when the agent emits a SendUserMessage tool call. The
   /// caller can show a modal/inline prompt and (later) feed the
   /// answer back through stdin. For now (Phase C v1) we just route
@@ -269,6 +274,7 @@ async function runClaudeCliStream(args: {
       // always ask the user a question mid-turn. Callers can pass false
       // explicitly to disable when truly autonomous behaviour is wanted.
       briefMode: args.briefMode ?? true,
+      readOnly: isAgentReadOnly(args),
       onEvent: ch,
     });
   } finally {
@@ -340,7 +346,7 @@ export async function runCodexCliStream(args: {
       model: args.model ?? null,
       effort: args.effort ?? null,
       allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
-      readOnly: args.readOnly === true,
+      readOnly: isAgentReadOnly(args),
       onEvent: ch,
     });
   } finally {
@@ -357,6 +363,8 @@ export async function runKimiCliStream(args: {
   userMessage: string;
   cwd?: string | null;
   allowedTools?: string[];
+  /// See runClaudeCliStream — normally derived from `allowedTools`.
+  readOnly?: boolean;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -400,6 +408,7 @@ export async function runKimiCliStream(args: {
       cwd: args.cwd ?? null,
       model: args.model ?? null,
       allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      readOnly: isAgentReadOnly(args),
       onEvent: ch,
     });
   } finally {
@@ -1488,12 +1497,25 @@ export function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
 /// a 258,400-token window, so the run began 81% full and degraded from there.
 /// Newest turns are kept; older ones are dropped and the drop is stated so the
 /// model never mistakes a truncated transcript for the whole story.
+///
+/// These two constants are now only the FALLBACK, used when the caller cannot
+/// name the model. Pass `modelId` and the budget is sized to that model's real
+/// window instead — see contextBudget.ts for why one fixed number was wrong for
+/// an 8K local GGUF and a 1M-window cloud model simultaneously.
 export const MAX_FOLDED_HISTORY_TURNS = 24;
 export const MAX_FOLDED_HISTORY_CHARS = 60_000;
 
-export function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem[]): string {
+export function foldHistoryIntoPrompt(
+  userMessage: string,
+  history?: HistoryItem[],
+  modelId?: string | null,
+  liveContextWindow?: number | null,
+): string {
   if (!history || history.length === 0) return userMessage;
-  const kept = recentTextHistory(history, MAX_FOLDED_HISTORY_TURNS, MAX_FOLDED_HISTORY_CHARS);
+  const budget = modelId
+    ? historyBudgetFor(modelId, liveContextWindow)
+    : { turns: MAX_FOLDED_HISTORY_TURNS, chars: MAX_FOLDED_HISTORY_CHARS };
+  const kept = recentTextHistory(history, budget.turns, budget.chars);
   if (kept.length === 0) return userMessage;
   const dropped = history.length - kept.length;
   const lines: string[] = ["--- Previous conversation ---"];
@@ -1510,7 +1532,7 @@ export function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem
   return lines.join("\n");
 }
 
-function recentTextHistory(history: HistoryItem[] | undefined, maxTurns = 8, maxChars = 12_000): HistoryItem[] {
+export function recentTextHistory(history: HistoryItem[] | undefined, maxTurns = 8, maxChars = 12_000): HistoryItem[] {
   if (!history || history.length === 0) return [];
   const out: HistoryItem[] = [];
   let used = 0;
@@ -2464,6 +2486,10 @@ export type LocalToolEvents = {
 export type StreamLocalChatParams = {
   port: number;
   modelId: string;
+  /// Context window llama-server was granted for this model, in tokens
+  /// (`server_status().context`). Sizes the history budget; falls back to a
+  /// conservative guess from the model id when the caller does not know it.
+  contextWindow?: number | null;
   systemPrompt: string;
   /// Pre-built OpenAI user content (string, or multimodal parts array).
   userContent: unknown;
@@ -2519,6 +2545,29 @@ export async function fetchNetRetry(doFetch: () => Promise<Response>, signal: Ab
   throw new Error("unreachable"); // loop always returns or throws
 }
 
+/// The `-c` context size llama-server was actually granted for `modelId`, or
+/// null when it cannot be determined (caller then falls back to a conservative
+/// guess from the model id).
+///
+/// This is the only honest source for a local model's window: the same GGUF is
+/// started at 8K on a 6 GB card and 128K on a 24 GB one, because the KV cache
+/// scales with context — so nothing about the file name predicts it. Cached per
+/// model id; a miss costs one cheap Tauri call, never a stall.
+let _grantedCtx: { modelId: string; window: number } | null = null;
+async function grantedLocalContextWindow(modelId: string): Promise<number | null> {
+  if (_grantedCtx && _grantedCtx.modelId === modelId) return _grantedCtx.window;
+  try {
+    const s = await invoke<{ model_id: string | null; context?: number | null }>("server_status");
+    if (s && s.model_id === modelId && typeof s.context === "number" && s.context > 0) {
+      _grantedCtx = { modelId, window: s.context };
+      return s.context;
+    }
+  } catch {
+    // Status unavailable — the id-based fallback is deliberately conservative.
+  }
+  return null;
+}
+
 export async function streamLocalChat(p: StreamLocalChatParams): Promise<string> {
   const responsive = makeResponsiveHandlers(p.onDelta, p.onThought);
   const emitDelta = responsive.onDelta;
@@ -2535,9 +2584,18 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       openaiTools.map((t: any) => t?.function?.name).filter(Boolean),
     );
   } catch { /* logging must never break the turn */ }
+  // Bounded to the LOCAL model's real window. `p.contextWindow` is the `-c`
+  // llama-server was actually granted (server_status().context) — authoritative,
+  // because the same GGUF runs at 8K on one machine and 128K on another. Without
+  // this the whole transcript went in and llama-server silently truncated the
+  // prompt, cutting the orchestrator's dispatch list with no error anywhere.
+  const localBudget = historyBudgetFor(
+    p.modelId,
+    p.contextWindow ?? await grantedLocalContextWindow(p.modelId),
+  );
   const liveMessages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: p.systemPrompt },
-    ...(p.history ?? []),
+    ...recentTextHistory(p.history, localBudget.turns, localBudget.chars),
     { role: "user", content: p.userContent },
   ];
   // One tool round = one model turn. Models like Qwen call tools ONE
@@ -2874,9 +2932,13 @@ export async function streamOpenAiApiWithTools(args: {
     "Content-Type": "application/json",
     "Authorization": `Bearer ${key}`,
   };
+  // Bounded — this one function serves every OpenAI-compatible provider
+  // (DeepSeek, Groq, Mistral, Together, Perplexity, Grok API), all of which
+  // reject the request outright once the accumulated transcript overruns.
+  const apiBudget = historyBudgetFor(wireModel);
   const liveMessages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: args.systemPrompt },
-    ...(args.history ?? []),
+    ...recentTextHistory(args.history, apiBudget.turns, apiBudget.chars),
     { role: "user", content: openaiUserContent(args.userMessage, args.images ?? []) },
   ];
   const MAX_TOOL_TURNS = 16;
@@ -2994,7 +3056,7 @@ async function streamAnthropic(
   // images work in EVERY surface, folder or not (#22/#24).
   const claudeCwd = await resolveImageCwd(projectCwd, imgList.length > 0);
   const cliUserMessage = await appendCliImageFiles(userMessage, imgList, claudeCwd);
-  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
+  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history, cliModel);
   // Wrap CLI invocations so a "Session ID already in use" failure
   // (a stale lock from a prior crashed claude process, or the same
   // session being in flight in the desktop UI) gets one automatic
@@ -3040,6 +3102,7 @@ async function streamAnthropic(
     const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
       systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
       autoApprove: autoApprove ?? false,
+      readOnly: isReadOnlyToolAllowlist(allowedTools),
       model: cliModel, effort: claudeEffort, sessionId: sid,
     }));
     if (reply) onDelta(reply);
@@ -3063,6 +3126,7 @@ async function streamAnthropic(
         const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
           systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
+          readOnly: isReadOnlyToolAllowlist(allowedTools),
           model: cliModel, effort: claudeEffort, sessionId: sid,
         }));
         if (reply) onDelta(reply);
@@ -3122,13 +3186,18 @@ function buildAnthropicBody(
   const thinkingOn = budget > 0;
   const maxTokens = thinkingOn ? budget + 4096 : 4096;
   const reqTemp = thinkingOn ? 1 : temperature;
+  const budgetForModel = historyBudgetFor(wireModel);
   return {
     model: wireModel,
     max_tokens: maxTokens,
     ...(thinkingOn ? { thinking: { type: "enabled", budget_tokens: budget } } : {}),
     system: systemPrompt,
     messages: [
-      ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
+      // Bounded to the model's window. The API path used to spread the ENTIRE
+      // history in raw — only the CLI subscription paths were capped — so a long
+      // agentic run grew its own request until Anthropic rejected it.
+      ...recentTextHistory(history, budgetForModel.turns, budgetForModel.chars)
+        .map(h => ({ role: h.role, content: h.content })),
       { role: "user", content: anthropicUserContent(userMessage, imgList) },
     ],
     stream: true,
@@ -3238,7 +3307,7 @@ async function streamOpenAI(
     await ensureCliWarm("codex_cli", projectCwd);
     // Fold prior turns into the prompt so the CLI has conversation context —
     // budgeted, so a long-lived chat cannot fill the model's window by itself.
-    const prompt = foldHistoryIntoPrompt(userMessage, history);
+    const prompt = foldHistoryIntoPrompt(userMessage, history, modelId);
     // Pasted images → saved to the working-dir inbox + attached via codex's
     // native -i flag. resolveImageCwd falls back to a scratch dir when there's
     // no project folder, and we run codex in that SAME dir so -i resolves.
@@ -3391,10 +3460,10 @@ async function streamXai(
     // same way the Claude/Codex/Kimi subscription paths do.
     const grokCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
     const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], grokCwd);
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${cliUserMessage}` : cliUserMessage;
+    // Same bounded fold as the Claude/Codex/Kimi subscription paths. This used
+    // to join the WHOLE transcript with no cap at all, so a long run shipped
+    // every prior turn to the CLI on every dispatch.
+    const prompt = foldHistoryIntoPrompt(cliUserMessage, history, modelId);
     const reply = await withCliAuthRetry("grok_cli", signal, () =>
       invoke<string>("grok_cli_complete", {
         systemPrompt,
@@ -3468,10 +3537,9 @@ async function streamGemini(
 ): Promise<string> {
   if (route.forceSub === true) {
     await ensureCliWarm("gemini_cli", projectCwd);
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Bounded fold — see streamXai. Unbounded before, on a path that also folds
+    // the system prompt into the same argv/stdin budget.
+    const prompt = foldHistoryIntoPrompt(userMessage, history, modelId);
     const reply = await withCliAuthRetry("gemini_cli", signal, () =>
       invoke<string>("gemini_cli_complete", {
         systemPrompt,
@@ -3487,7 +3555,8 @@ async function streamGemini(
   const key = await invoke<string | null>("accounts_get_secret", { name: "GEMINI_API_KEY" });
   const apiKey = key || await invoke<string | null>("accounts_get_secret", { name: "GOOGLE_API_KEY" });
   if (!apiKey) throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) saved — set it on the Accounts page.");
-  const contents = (history ?? []).map((h) => ({
+  const geminiBudget = historyBudgetFor(modelId);
+  const contents = recentTextHistory(history, geminiBudget.turns, geminiBudget.chars).map((h) => ({
     role: h.role === "assistant" ? "model" : "user",
     parts: [{ text: typeof h.content === "string" ? h.content : "" }],
   }));
@@ -4480,7 +4549,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       hooks.onLog(orch.name, {
         role: "system",
         color: "#ff8c8c",
-        text: `⚠ ${parse.unresolved.length} dispatch line(s) named unknown agents (${names}) and did NOT run — the answer below was produced without specialists.`,
+        text: `⚠ ${parse.unresolved.length} dispatch line(s) did NOT run (${names}) — the answer below was produced without specialists.`,
       });
     }
     hooks.onAgentReply(orch.name, clean);

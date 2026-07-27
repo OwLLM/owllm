@@ -38,7 +38,18 @@ check("ordinary completed runs are not promoted to durable facts",
 check("legacy generated facts are archived outside graph/search instead of deleted",
   nativeMemory.includes("archive legacy auto-curated memory")
     && nativeMemory.includes("SET kind = 'archived'")
-    && nativeMemory.includes("kind IN ('fact', 'worklog')"));
+    // Search may only ever consider 'fact' and 'worklog'. The kind restriction
+    // moved from a literal in the SQL into a validated `wanted` list bound as
+    // parameters — because applying it AFTER the query's 500-row window meant a
+    // busy project's facts fell out of reach. The invariant is unchanged: an
+    // unknown or 'archived' kind is dropped, never queried.
+    && /kind IN \(\{placeholders\}\)/.test(nativeMemory)
+    && /k\.as_str\(\) == "fact" \|\| k\.as_str\(\) == "worklog"/.test(nativeMemory)
+    // No kinds asked for → both queryable kinds, never 'archived'.
+    && /_ => vec!\["fact"\.to_string\(\), "worklog"\.to_string\(\)\]/.test(nativeMemory)
+    // A kinds list that survives the whitelist EMPTY returns no rows, rather than
+    // falling through to the default and silently widening the caller's search.
+    && /known\.is_empty\(\)[\s\S]{0,400}?return Ok\(Vec::new\(\)\)/.test(nativeMemory));
 
 if (failures) process.exit(1);
 console.log("all checks passed");

@@ -2427,6 +2427,9 @@ pub async fn claude_cli_complete(
     // the "grant home for this run" prompt — never silently. See
     // sandbox::extra_allowed_dirs.
     grant_home: Option<bool>,
+    // TRUE for a read-only agent — see claude_cli_stream. This one-shot path is
+    // what a bridge run (no Thought pane) takes, so it needs the same boundary.
+    read_only: Option<bool>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         // Collect args once → run as the Windows CLI or inside WSL (isolated).
@@ -2448,7 +2451,12 @@ pub async fn claude_cli_complete(
             args.push("--session-id".into());
             args.push(sid.to_string());
         }
-        if auto_approve.unwrap_or(false) {
+        // Read-only agent: strip the write tools from the session outright and
+        // never hand it bypassPermissions. Mirrors claude_cli_stream.
+        if read_only.unwrap_or(false) {
+            args.push("--disallowedTools".into());
+            args.push("Edit Write NotebookEdit Bash".into());
+        } else if auto_approve.unwrap_or(false) {
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
@@ -3226,6 +3234,13 @@ pub async fn claude_cli_stream(
     // true ONLY after the user approves the consent prompt. See
     // sandbox::extra_allowed_dirs.
     grant_home: Option<bool>,
+    // TRUE for a read-only agent (orchestrator / sub-leader), mirroring
+    // codex_cli_stream. Claude Code owns its own Edit/Write/Bash tools, which
+    // `allowed_tools` does NOT gate — so "You are READ-ONLY" in the prompt was
+    // advice, not a boundary: the orchestrator could edit the shared checkout,
+    // whose open work then gets swept into a checkpoint commit instead of into
+    // the specialist worktree that was supposed to make the change.
+    read_only: Option<bool>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -3334,7 +3349,16 @@ pub async fn claude_cli_stream(
         args.push("--output-format".into());
         args.push("stream-json".into());
         args.push("--verbose".into());
-        if auto_approve.unwrap_or(false) {
+        // A read-only agent never gets bypassPermissions, and its write tools are
+        // removed from the session outright. `--disallowedTools` outranks
+        // `--allowedTools`, so this holds even though the MCP browser tools are
+        // appended to the allowlist below (they stay available — browser is a
+        // read-side capability the orchestrator legitimately needs).
+        let agent_read_only = read_only.unwrap_or(false);
+        if agent_read_only {
+            args.push("--disallowedTools".into());
+            args.push("Edit Write NotebookEdit Bash".into());
+        } else if auto_approve.unwrap_or(false) {
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
@@ -3365,9 +3389,18 @@ pub async fn claude_cli_stream(
         // dirs guard blocks the Read/`cat` even when every TOOL permission is
         // granted — the allowlist and the filesystem jail are separate axes. This
         // is empty (a no-op) for a bwrap-jailed run, preserving confinement there.
-        for dir in crate::sandbox::extra_allowed_dirs(cwd.as_deref()) {
-            args.push("--add-dir".into());
-            args.push(dir);
+        //
+        // ONLY when the user has consented for this run. This loop used to run
+        // unconditionally while `grant_home` was accepted and never read, so the
+        // STREAMING path — the one the desktop UI actually takes — handed the CLI
+        // the entire %USERPROFILE% on every dispatch and the consent modal
+        // (FileAccessConsentModal → consentGrantHome) decided nothing. Mirrors the
+        // gate claude_cli_complete already had.
+        if grant_home.unwrap_or(false) {
+            for dir in crate::sandbox::extra_allowed_dirs(cwd.as_deref()) {
+                args.push("--add-dir".into());
+                args.push(dir);
+            }
         }
         // See claude_cli_complete: a large agentic system prompt passed via
         // `--append-system-prompt <arg>` overflows the Windows ~32 KB command line
@@ -5582,6 +5615,10 @@ async fn kimi_cli_run(
     cwd: Option<String>,
     model: Option<String>,
     _allowed_tools: Option<Vec<String>>,
+    // TRUE for a read-only agent — see codex_cli_stream. `--print` mode
+    // auto-approves every tool call, so without this a Kimi orchestrator had no
+    // write boundary at all; `--plan` is kimi's read-only mode.
+    read_only: Option<bool>,
     on_event: Option<Channel<ClaudeStreamEvent>>,
 ) -> Result<String, String> {
     // Browser tools are a CROSS-CUTTING capability: every host-run Kimi agent
@@ -5687,6 +5724,12 @@ async fn kimi_cli_run(
             ];
             if !stream_live {
                 args.push("--final-message-only".into());
+            }
+            // Read-only agent: kimi's plan mode. `--print` auto-approves tool
+            // calls, so this is the only boundary stopping an orchestrator from
+            // editing the shared checkout out from under its own specialists.
+            if read_only.unwrap_or(false) {
+                args.push("--plan".into());
             }
             if with_model {
                 args.extend(model_args.iter().cloned());
@@ -5900,6 +5943,7 @@ pub async fn kimi_cli_complete(
     cwd: Option<String>,
     model: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    read_only: Option<bool>,
 ) -> Result<String, String> {
     kimi_cli_run(
         app,
@@ -5908,6 +5952,7 @@ pub async fn kimi_cli_complete(
         cwd,
         model,
         allowed_tools,
+        read_only,
         None,
     )
     .await
@@ -5921,6 +5966,7 @@ pub async fn kimi_cli_stream(
     cwd: Option<String>,
     model: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    read_only: Option<bool>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     kimi_cli_run(
@@ -5930,6 +5976,7 @@ pub async fn kimi_cli_stream(
         cwd,
         model,
         allowed_tools,
+        read_only,
         Some(on_event),
     )
     .await

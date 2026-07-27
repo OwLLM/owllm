@@ -65,14 +65,29 @@ try {
 
   // ---- 2. the flag actually reaches the process sandbox ----
   const dispatch = read("pages/agentic/dispatch.ts");
-  check("runCodexCliStream forwards readOnly to the Rust command",
-    dispatch.includes("readOnly?: boolean")
-      && dispatch.includes("readOnly: args.readOnly === true"));
+  // readOnly used to be an ordinary caller-supplied argument, and exactly ONE of
+  // the CLI invoke sites ever passed it — so the Codex path looked fixed while
+  // every Claude and Kimi orchestrator still ran with no write boundary. Each
+  // stream runner now DERIVES it from the allowlist it was handed, which is the
+  // real invariant: a runner that forgets to ask cannot exist.
+  check("Read-only intent is derived from the allowlist, not left to the caller",
+    sandbox.isAgentReadOnly({ allowedTools: ["read_file", "grep"] }) === true
+      && sandbox.isAgentReadOnly({ allowedTools: ["shell"] }) === false
+      && sandbox.isAgentReadOnly({}) === false);
+  check("An explicit readOnly from a caller is never downgraded",
+    sandbox.isAgentReadOnly({ readOnly: true, allowedTools: ["shell"] }) === true);
+  check("Every CLI stream runner derives readOnly rather than trusting its caller",
+    (dispatch.match(/readOnly: isAgentReadOnly\(args\)/g) || []).length === 3);
   check("The chat/bridge codex path derives readOnly from the allowlist",
     dispatch.includes("readOnly: isReadOnlyToolAllowlist(allowedTools)"));
   const page = read("pages/agentic/AgentsPage.tsx");
   check("The agentic codex path derives readOnly from the allowlist",
     page.includes("readOnly: isReadOnlyToolAllowlist(allowedTools)"));
+  check("The AgentsPage claude_cli_stream copy derives it too",
+    page.includes("readOnly: isAgentReadOnly(args)"));
+  check("The one-shot claude_cli_complete paths carry it as well",
+    (dispatch.match(/readOnly: isReadOnlyToolAllowlist\(allowedTools\)/g) || []).length >= 3
+      && (page.match(/readOnly: isReadOnlyToolAllowlist\(allowedTools\)/g) || []).length >= 3);
   check("AgentsPage no longer keeps a private copy of the read-only tool set",
     !page.includes("const READONLY_LOCAL_TOOLS: string[] = [")
       && page.includes('from "./agentSandbox"'));
@@ -81,6 +96,23 @@ try {
     accounts.includes("read_only: Option<bool>"));
   check("A read-only agent gets --sandbox read-only, ahead of any escalation",
     /let sandbox_mode = if agent_read_only \{\s*"read-only"\s*\} else if gateway_wired \{\s*"danger-full-access"/.test(accounts));
+  // Codex is not the only CLI that ships its own write tools. Claude Code owns
+  // Edit/Write/Bash and Kimi's --print mode auto-approves every call, so each
+  // needs its own boundary or a read-only role is read-only in name only.
+  check("Both Claude CLI entry points strip the write tools for a read-only agent",
+    (accounts.match(/args\.push\("--disallowedTools"\.into\(\)\);\s*\n\s*args\.push\("Edit Write NotebookEdit Bash"\.into\(\)\);/g) || []).length === 2);
+  check("A read-only Claude agent is never also handed bypassPermissions",
+    /if agent_read_only \{[\s\S]{0,200}?--disallowedTools[\s\S]{0,120}?\} else if auto_approve/.test(accounts));
+  check("Kimi's read-only agent runs in plan mode",
+    /if read_only\.unwrap_or\(false\) \{\s*args\.push\("--plan"\.into\(\)\);/.test(accounts));
+  // The filesystem SCOPE is a separate axis from the tool allowlist: --add-dir
+  // hands the CLI the whole %USERPROFILE%. claude_cli_stream accepted grant_home
+  // and never read it, widening on EVERY dispatch — so the consent modal decided
+  // nothing on the path the desktop UI actually takes.
+  check("Both Claude entry points widen the filesystem scope only on consent",
+    (accounts.match(/if grant_home\.unwrap_or\(false\) \{\s*\n\s*for dir in crate::sandbox::extra_allowed_dirs/g) || []).length === 2);
+  check("No Claude path widens to the home profile unconditionally",
+    !/\n {8}for dir in crate::sandbox::extra_allowed_dirs/.test(accounts));
 
   // ---- 3. a dirty checkout no longer aborts a run ----
   const fleet = fs.readFileSync(path.join(APP, "src-tauri/src/fleet.rs"), "utf8").replace(/\r\n/g, "\n");
@@ -142,8 +174,13 @@ try {
     hugeFold.trimEnd().endsWith("the current step"));
   check("Both codex paths use the budgeted fold instead of an ad-hoc join",
     !page.includes('.join("\\n\\n");\n    const prompt = convo')
-      && page.includes("foldHistoryIntoPrompt(userMessage, history)")
-      && dispatch.includes("const prompt = foldHistoryIntoPrompt(userMessage, history)"));
+      && page.includes("foldHistoryIntoPrompt(userMessage, history, modelId)")
+      && dispatch.includes("const prompt = foldHistoryIntoPrompt(userMessage, history, modelId)"));
+  // The two constants above are now only the FALLBACK. Naming the model sizes the
+  // budget to its real window — see contextBudget.verify.run.mjs for that half.
+  check("The fold accepts the model it is budgeting for",
+    /export function foldHistoryIntoPrompt\(\s*userMessage: string,\s*history\?: HistoryItem\[\],\s*modelId\?: string \| null,/
+      .test(dispatch));
 
   console.log(`PASS team run continuity (${checks.length}/${checks.length})`);
 } finally {

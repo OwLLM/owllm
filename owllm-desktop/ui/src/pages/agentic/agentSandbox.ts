@@ -26,6 +26,21 @@ export function isReadOnlyToolAllowlist(allowed?: string[] | null): boolean {
   return tools.every(t => READONLY_LOCAL_TOOLS.includes(t));
 }
 
+/// Read-only intent for ONE CLI spawn, derived from the allowlist the dispatcher
+/// already built.
+///
+/// Deriving it here rather than at each call site is the point: `readOnly` used to
+/// be a plain caller-supplied argument, and only 1 of the 14 CLI invoke sites ever
+/// passed it — so every Claude/Kimi orchestrator ran with no write boundary while
+/// the Codex one looked fixed. A runner that forgets to ask can no longer exist.
+/// An explicit `readOnly: true` from a caller still wins (never downgraded).
+export function isAgentReadOnly(args: {
+  readOnly?: boolean;
+  allowedTools?: string[] | null;
+}): boolean {
+  return args.readOnly === true || isReadOnlyToolAllowlist(args.allowedTools);
+}
+
 /// `intersectRuntimeTools` prefixes a personal agent's allowlist with policy /
 /// skill / memory markers, all of which use the reserved `__owllm_…__` form.
 /// Matched by that shape rather than imported, so this module — the one that

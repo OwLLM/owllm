@@ -685,17 +685,49 @@ pub async fn team_memory_search(
     // Up to 500 so the graph view can show the whole brain; the agent-facing
     // memory_search tool still passes small limits (8).
     let lim = limit.unwrap_or(8).clamp(1, 500) as usize;
+    // Restrict to the requested kinds IN SQL, not after the fact. The 500-row
+    // candidate window is applied by the query, so filtering afterwards meant a
+    // `kinds: ["fact"]` search on a busy project scanned the newest 500 rows of
+    // ANY kind and then kept the facts among them — once a project logged 500
+    // worklog rows, every fact became permanently unreachable to search while
+    // still sitting in the database. Now the window is 500 rows OF THAT KIND.
+    // Unknown kind names are dropped rather than passed through, so the query
+    // can never be widened by a caller.
+    let wanted: Vec<String> = match kinds.as_ref() {
+        Some(ks) if !ks.is_empty() => {
+            let known: Vec<String> = ks
+                .iter()
+                .filter(|k| k.as_str() == "fact" || k.as_str() == "worklog")
+                .cloned()
+                .collect();
+            if known.is_empty() {
+                // The caller asked ONLY for kinds this query never serves (e.g.
+                // 'archived'). Answer with nothing rather than silently widening
+                // back to every kind, which would hand back rows nobody asked for.
+                return Ok(Vec::new());
+            }
+            known
+        }
+        _ => vec!["fact".to_string(), "worklog".to_string()],
+    };
     tokio::task::spawn_blocking(move || {
         let conn = open_db()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, mkey, content, tags, author, ts, kind FROM team_memory \
-                 WHERE scope = ?1 AND kind IN ('fact', 'worklog') \
-                 ORDER BY id DESC LIMIT 500",
-            )
-            .map_err(|e| format!("prepare: {e}"))?;
+        let placeholders = (0..wanted.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, mkey, content, tags, author, ts, kind FROM team_memory \
+             WHERE scope = ?1 AND kind IN ({placeholders}) \
+             ORDER BY id DESC LIMIT 500"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {e}"))?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&sc];
+        for k in &wanted {
+            params.push(k);
+        }
         let rows = stmt
-            .query_map(rusqlite::params![sc], |r| {
+            .query_map(params.as_slice(), |r| {
                 Ok(TeamMemoryEntry {
                     id: r.get(0)?,
                     key: r.get(1)?,
@@ -710,9 +742,6 @@ pub async fn team_memory_search(
         let mut all: Vec<TeamMemoryEntry> = Vec::new();
         for r in rows {
             all.push(r.map_err(|e| format!("row: {e}"))?);
-        }
-        if let Some(ks) = kinds.as_ref().filter(|ks| !ks.is_empty()) {
-            all.retain(|e| ks.iter().any(|k| k == &e.kind));
         }
         let mut terms = tokenize(&query);
         terms.dedup();

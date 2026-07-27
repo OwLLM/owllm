@@ -2451,12 +2451,17 @@ pub async fn claude_cli_complete(
             args.push("--session-id".into());
             args.push(sid.to_string());
         }
-        // Read-only agent: strip the write tools from the session outright and
-        // never hand it bypassPermissions. Mirrors claude_cli_stream.
-        if read_only.unwrap_or(false) {
+        // Read-only agent: strip the write tools from the session outright. That
+        // disallow list — not the permission mode — is the boundary, so the agent
+        // still needs an explicit mode or `-p` hard-denies every tool outside
+        // `--allowedTools` with nobody able to answer the prompt. Mirrors
+        // claude_cli_stream; see the full rationale there.
+        let agent_read_only = read_only.unwrap_or(false);
+        if agent_read_only {
             args.push("--disallowedTools".into());
             args.push("Edit Write NotebookEdit Bash".into());
-        } else if auto_approve.unwrap_or(false) {
+        }
+        if agent_read_only || auto_approve.unwrap_or(false) {
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
@@ -3349,16 +3354,30 @@ pub async fn claude_cli_stream(
         args.push("--output-format".into());
         args.push("stream-json".into());
         args.push("--verbose".into());
-        // A read-only agent never gets bypassPermissions, and its write tools are
-        // removed from the session outright. `--disallowedTools` outranks
-        // `--allowedTools`, so this holds even though the MCP browser tools are
-        // appended to the allowlist below (they stay available — browser is a
-        // read-side capability the orchestrator legitimately needs).
+        // A read-only agent's write tools are removed from the session outright.
+        // `--disallowedTools` outranks BOTH `--allowedTools` and the permission
+        // mode, so this holds even though the MCP browser tools are appended to
+        // the allowlist below (they stay available — browser is a read-side
+        // capability the orchestrator legitimately needs).
         let agent_read_only = read_only.unwrap_or(false);
         if agent_read_only {
             args.push("--disallowedTools".into());
             args.push("Edit Write NotebookEdit Bash".into());
-        } else if auto_approve.unwrap_or(false) {
+        }
+        // Every mode except bypass HARD-DENIES any tool outside `--allowedTools`:
+        // `-p` is non-interactive, so the permission prompt it wants to show can
+        // never be answered and the call fails with "Claude requested permissions
+        // to use X, but you haven't granted it yet". Read-only agents used to fall
+        // into that hole — they took the branch above and were left in `default`
+        // mode — which is why an orchestrator could not WebSearch even though
+        // orchestrator.yaml grants it.
+        //
+        // Bypass is safe for a read-only agent because the disallow list above is
+        // the real boundary, not the mode: verified against Claude Code 2.1.197
+        // that `--permission-mode bypassPermissions --disallowedTools "… Write …"`
+        // removes Write from the session entirely ("No such tool available:
+        // Write"), and no file is created.
+        if agent_read_only || auto_approve.unwrap_or(false) {
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }

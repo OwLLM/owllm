@@ -2,8 +2,16 @@
 /// plan and route; specialists do every write. Kept here rather than in
 /// AgentsPage so the CLI layer can prove read-only intent from the same list the
 /// dispatcher builds it from.
+///
+/// `web_search`/`web_fetch` belong here because they READ the outside world and
+/// write nothing. Leaving them out silently deleted a capability the role files
+/// deliberately grant: `runtimeReadOnlyTools` narrows a role by
+/// `READONLY_LOCAL_TOOLS.filter(t => roleTools.includes(t))`, so
+/// orchestrator.yaml's explicit "Read-only web access — research/verify while
+/// planning" entries could never survive the intersection, and the orchestrator
+/// then hit a hard "you haven't granted it yet" on every WebSearch.
 export const READONLY_LOCAL_TOOLS: string[] = [
-  "read_file", "list_dir", "grep", "glob",
+  "read_file", "list_dir", "grep", "glob", "web_search", "web_fetch",
 ];
 
 /// True when this allowlist can only read.

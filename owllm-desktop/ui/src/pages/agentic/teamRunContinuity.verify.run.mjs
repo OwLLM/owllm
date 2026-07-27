@@ -101,8 +101,27 @@ try {
   // needs its own boundary or a read-only role is read-only in name only.
   check("Both Claude CLI entry points strip the write tools for a read-only agent",
     (accounts.match(/args\.push\("--disallowedTools"\.into\(\)\);\s*\n\s*args\.push\("Edit Write NotebookEdit Bash"\.into\(\)\);/g) || []).length === 2);
-  check("A read-only Claude agent is never also handed bypassPermissions",
-    /if agent_read_only \{[\s\S]{0,200}?--disallowedTools[\s\S]{0,120}?\} else if auto_approve/.test(accounts));
+  // This check used to assert the OPPOSITE — that a read-only agent must never
+  // get bypassPermissions — and so certified the bug. `claude -p` is
+  // non-interactive: in any mode but bypass it hard-denies every tool outside
+  // --allowedTools ("Claude requested permissions to use WebSearch, but you
+  // haven't granted it yet"), and no prompt can ever be answered. The write
+  // boundary is the disallow list, which outranks the mode — verified against
+  // Claude Code 2.1.197: bypassPermissions + --disallowedTools removes Write from
+  // the session ("No such tool available: Write") and writes no file.
+  check("Neither Claude entry point can leave an agent in a promptless default mode",
+    (accounts.match(/if agent_read_only \|\| auto_approve\.unwrap_or\(false\) \{\s*\n\s*args\.push\("--permission-mode"\.into\(\)\);/g) || []).length === 2);
+  check("No Claude path makes the permission mode an else-branch of read-only",
+    !/--disallowedTools[\s\S]{0,160}?\} else if auto_approve/.test(accounts));
+  // web_search/web_fetch read the outside world and write nothing. Omitting them
+  // silently deleted orchestrator.yaml's explicit read-only web grant, because
+  // runtimeReadOnlyTools narrows a role by intersecting with this exact list.
+  check("The read-only tool set keeps the read-only web tools",
+    sandbox.READONLY_LOCAL_TOOLS.includes("web_search")
+      && sandbox.READONLY_LOCAL_TOOLS.includes("web_fetch")
+      && sandbox.isReadOnlyToolAllowlist(["read_file", "web_search", "web_fetch"]) === true);
+  check("Granting web access does not make a writing allowlist look read-only",
+    sandbox.isReadOnlyToolAllowlist(["read_file", "web_search", "write_file_with_diff"]) === false);
   check("Kimi's read-only agent runs in plan mode",
     /if read_only\.unwrap_or\(false\) \{\s*args\.push\("--plan"\.into\(\)\);/.test(accounts));
   // The filesystem SCOPE is a separate axis from the tool allowlist: --add-dir

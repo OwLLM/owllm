@@ -493,6 +493,10 @@ async fn run_process(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    #[cfg(target_os = "linux")]
+    for key in crate::paths::APPIMAGE_RUNTIME_ENV_KEYS {
+        cmd.env_remove(key);
+    }
     #[cfg(windows)]
     {
         // tokio::process::Command provides creation_flags inherently on Windows.

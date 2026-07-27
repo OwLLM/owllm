@@ -271,7 +271,7 @@ console.log("case 0b: Digest Notes is visibly enabled whenever clickable");
   const btn = buttons().find((b) => textOf(b).includes("Digest notes"));
   check("Digest Notes is clickable", !!btn && !btn.disabled);
   check("Digest Notes uses the bundled wand icon", !!btn?.querySelector('svg[data-icon="wand"]'));
-  check("Digest Notes has a strong enabled fill", (btn?.getAttribute("style") ?? "").includes("linear-gradient"));
+  check("Digest Notes has a strong enabled fill", /backgroundImage:\s*digestBusy \? "none" : "linear-gradient/.test(src));
   act(() => root.unmount());
 }
 

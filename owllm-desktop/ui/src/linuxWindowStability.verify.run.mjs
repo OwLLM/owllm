@@ -6,6 +6,9 @@ import { fileURLToPath } from "node:url";
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const app = fs.readFileSync(path.join(HERE, "AppShell.tsx"), "utf8");
 const rust = fs.readFileSync(path.resolve(HERE, "../../src-tauri/src/lib.rs"), "utf8");
+const autostart = fs.readFileSync(path.resolve(HERE, "../../src-tauri/src/autostart.rs"), "utf8");
+const paths = fs.readFileSync(path.resolve(HERE, "../../src-tauri/src/paths.rs"), "utf8");
+const remoteExecutor = fs.readFileSync(path.resolve(HERE, "../../src-tauri/src/remote_devices/executor.rs"), "utf8");
 
 let failed = 0;
 const check = (name, ok) => {
@@ -30,7 +33,30 @@ check(
 );
 check(
   "An explicit WebKit renderer environment choice is preserved",
-  /var_os\("WEBKIT_DISABLE_DMABUF_RENDERER"\)\.is_some\(\)[\s\S]*return;/.test(rust),
+  /var_os\("WEBKIT_DISABLE_DMABUF_RENDERER"\)\.is_none\(\)[\s\S]*set_var\("WEBKIT_DISABLE_DMABUF_RENDERER"/.test(rust),
+);
+check(
+  "NVIDIA arm64 also disables unstable accelerated compositing",
+  /cfg!\(target_arch = "aarch64"\)[\s\S]*var_os\("WEBKIT_DISABLE_COMPOSITING_MODE"\)\.is_none\(\)[\s\S]*set_var\("WEBKIT_DISABLE_COMPOSITING_MODE"/.test(rust),
+);
+check(
+  "Linux AppImage autostart uses the persistent image path instead of its temporary mount",
+  autostart.includes('var_os("APPIMAGE")')
+    && autostart.includes(".filter(|path| path.is_absolute() && path.is_file())")
+    && autostart.includes("let exe = linux_exe_path()"),
+);
+check(
+  "Autostart registration is refreshed on launch so stale entries self-heal",
+  /pub fn ensure_default_enabled\(\)[\s\S]*set\(true\)/.test(autostart)
+    && !/pub fn ensure_default_enabled\(\)[\s\S]*if is_enabled\(\)[\s\S]*return/.test(autostart),
+);
+check(
+  "Remote Linux commands cannot inherit temporary AppImage runtimes",
+  paths.includes('pub(crate) const APPIMAGE_RUNTIME_ENV_KEYS')
+    && paths.includes('"PYTHONHOME"')
+    && paths.includes('"PYTHONPATH"')
+    && remoteExecutor.includes("for key in crate::paths::APPIMAGE_RUNTIME_ENV_KEYS")
+    && remoteExecutor.includes("cmd.env_remove(key)"),
 );
 
 if (failed) process.exit(1);

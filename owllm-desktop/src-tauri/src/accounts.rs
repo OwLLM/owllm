@@ -48,21 +48,6 @@ fn wsl_cli_provision_lock() -> &'static std::sync::Mutex<()> {
 const CLI_CHILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const CLI_CHILD_ABS_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
-/// AppImage environment variables that must never leak into a child CLI.
-/// AppRun exports them for OwLLM's bundled runtime; passing them to a user's
-/// Python/native CLI makes it load modules and libraries from OwLLM's
-/// temporary AppImage mount instead of its own installation, causing launch
-/// failures or hard crashes.
-#[cfg(target_os = "linux")]
-const APPIMAGE_ENV_KEYS: &[&str] = &[
-    "APPDIR",
-    "APPIMAGE",
-    "ARGV0",
-    "LD_LIBRARY_PATH",
-    "PYTHONHOME",
-    "PYTHONPATH",
-];
-
 /// PATH inherited by subscription-CLI installers, probes and real runs.
 ///
 /// Finder-launched macOS apps inherit only `/usr/bin:/bin:/usr/sbin:/sbin`.
@@ -96,7 +81,7 @@ fn sanitize_appimage_env(cmd: &mut Command) {
         cmd.env("PATH", path);
     }
     #[cfg(target_os = "linux")]
-    for key in APPIMAGE_ENV_KEYS {
+    for key in crate::paths::APPIMAGE_RUNTIME_ENV_KEYS {
         cmd.env_remove(key);
     }
 }

@@ -155,10 +155,21 @@ fn linux_desktop() -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
+fn linux_exe_path() -> Option<PathBuf> {
+    // `current_exe()` points inside /tmp/.mount_* when running as an AppImage.
+    // That mount disappears as soon as the app exits, leaving login autostart
+    // permanently broken. AppImage's runtime provides the stable source path.
+    std::env::var_os("APPIMAGE")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute() && path.is_file())
+        .or_else(exe_path)
+}
+
+#[cfg(target_os = "linux")]
 fn set_linux(enabled: bool) -> Result<(), String> {
     let desktop = linux_desktop().ok_or("HOME/XDG_CONFIG_HOME unavailable")?;
     if enabled {
-        let exe = exe_path().ok_or("current exe path unavailable")?;
+        let exe = linux_exe_path().ok_or("current exe path unavailable")?;
         if let Some(dir) = desktop.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("mkdir autostart: {e}"))?;
         }
@@ -210,9 +221,8 @@ pub fn ensure_default_enabled() {
     if optout_marker().map(|m| m.exists()).unwrap_or(false) {
         return; // user turned it off — respect that
     }
-    if is_enabled() {
-        return; // already registered
-    }
+    // Re-register on every launch. This is idempotent and repairs stale paths
+    // after an app move/update (especially vanished AppImage /tmp mounts).
     if let Err(e) = set(true) {
         eprintln!("[owllm] autostart default-enable failed: {e}");
     }

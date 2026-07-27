@@ -28,6 +28,21 @@
 
 use std::path::{Path, PathBuf};
 
+/// AppImage runtime variables that must not leak into external commands.
+///
+/// They point into the image's temporary `/tmp/.mount_*` tree. A system Python,
+/// Node, or native utility launched with them can load OwLLM's bundled runtime
+/// instead of its own installation and fail or crash after the mount changes.
+#[cfg(target_os = "linux")]
+pub(crate) const APPIMAGE_RUNTIME_ENV_KEYS: &[&str] = &[
+    "APPDIR",
+    "APPIMAGE",
+    "ARGV0",
+    "LD_LIBRARY_PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+];
+
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 

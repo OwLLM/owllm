@@ -25,7 +25,8 @@ type Entry = {
 };
 
 /// Compact "how long ago" for row footers ("just now", "5m", "3h", "2d").
-function fmtAgo(ts: number): string {
+/// Exported so the Coding hub's conversation list stamps times identically.
+export function fmtAgo(ts: number): string {
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
   if (s < 60) return "just now";
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;

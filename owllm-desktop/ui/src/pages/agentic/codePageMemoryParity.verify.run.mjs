@@ -37,8 +37,40 @@ check(
   "Primary, secondary, chat, and planned Code turns write shared work-state",
   /logCodeWork\("code", text \|\| "\([^"]*attached (?:image|file)[^"]*\)", reply\)/.test(src)
     && /logCodeWork\("code_second", text, replyText\)/.test(src)
-    && /logCodeWork\("code_chat", text \|\| "\([^"]*attached image[^"]*\)", reply\)/.test(src)
+    && /logCodeWork\("code_chat", text \|\| "\([^"]*attached image[^"]*\)", reply, chatScope\)/.test(src)
     && /logCodeWork\("code", plan\[i\]\.title, stepReply\)/.test(src),
+);
+check(
+  "Folderless chats get their own durable memory scope instead of the silent no-op",
+  // resolveMemoryScope() returns "" with no folder, which made every enrich/log
+  // call on the just-chat surface do nothing. Each thread now owns a chat: scope
+  // in the SAME team_memory store — reused, not reimplemented.
+  /function chatMemoryScope\([\s\S]*return id \? `chat:\$\{id\}` : "";/.test(src)
+    && /const chatScope = chatMemoryScope\(tid\);/.test(src)
+    && /enrichCodePromptWithMemory\(appendDocumentAttachmentText\(text, attachments\), chatScope\)/.test(src)
+    // The scope is PINNED before the await, never re-resolved after it, so a
+    // reply landing after the user navigated away still writes to its own chat.
+    && /enrichCodePromptWithMemory = async \(user: string, scopeOverride\?: string\)[\s\S]*const scope = scopeOverride \?\? await resolveMemoryScope\(\)/.test(src)
+    && /logCodeWork = async \(agent: string, instruction: string, result: string, scopeOverride\?: string\)[\s\S]*const scope = scopeOverride \?\? await resolveMemoryScope\(\)/.test(src),
+);
+check(
+  "A chat's memory is reachable and is removed with the chat",
+  src.includes('data-ui="ChatThreadMemory"')
+    // Same shared viewer the project memory uses, opened on the thread's scope.
+    && /openChatMemory[\s\S]*chatMemoryScope\(chatId\)[\s\S]*CustomEvent\("owllm:open-code-memory", \{ detail: \{ projectId: scope \} \}\)/.test(src)
+    // Deleting a thread must not strand rows nothing can ever address again.
+    && /const deleteThread[\s\S]*void purgeChatMemory\(id\)/.test(src)
+    && /purgeChatMemory[\s\S]*"team_memory_search"[\s\S]*"team_memory_delete"/.test(src),
+);
+check(
+  "The Coding hub surfaces the everyday chat and its threads as one reused store",
+  src.includes('data-ui="NormalChatCard"')
+    && src.includes('data-ui="RecentChatList"')
+    // The hub list is a second VIEW of the persisted thread list, not a copy.
+    && /data-ui="RecentChatList"[\s\S]*chats\.map\(\(c\) => \([\s\S]*openThread\(c\.id\)/.test(src)
+    // "New conversation" must open an empty thread, not resume the last one.
+    && /const startNewChat = \(\) => \{ newChat\(\); setChatMode\(true\); \};/.test(src)
+    && /onClick=\{startNewChat\}/.test(src),
 );
 check(
   "Memory tools and Code page both hit team_memory_search, not a page-local store",

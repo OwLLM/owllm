@@ -92,6 +92,10 @@ fs.writeFileSync(path.join(TMP, "ActionIcon.js"), `
   const React = require("react");
   module.exports = { __esModule: true, default: ({ name }) => React.createElement("svg", { "data-icon": name }) };
 `);
+// device_get_identity backs the cross-PC "queue started on <name>" advisory.
+fs.writeFileSync(path.join(TMP, "tauri.js"), `
+  module.exports = { invoke: async (cmd) => (cmd === "device_get_identity" ? { device_id: "dev-local", name: "This PC" } : null) };
+`);
 // Rewrite relative imports in the transpiled output to the stubs.
 let out = fs.readFileSync(path.join(TMP, "RunNotebook.js"), "utf8");
 out = out
@@ -101,7 +105,8 @@ out = out
   .replace(/require\("\.\/ModelPicker"\)/g, 'require("./ModelPicker.js")')
   .replace(/require\("\.\/RunTimer"\)/g, 'require("./RunTimer.js")')
   .replace(/require\("\.\.\/\.\.\/localization"\)/g, 'require("./localization.js")')
-  .replace(/require\("\.\.\/\.\.\/components\/ActionIcon"\)/g, 'require("./ActionIcon.js")');
+  .replace(/require\("\.\.\/\.\.\/components\/ActionIcon"\)/g, 'require("./ActionIcon.js")')
+  .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./tauri.js")');
 fs.writeFileSync(path.join(TMP, "RunNotebook.js"), out);
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 fs.mkdirSync(path.join(TMP, "node_modules"), { recursive: true });
@@ -151,13 +156,21 @@ check("Code busy state synchronizes the imperative lock", codePageSrc.includes("
 check("Code send gates on the synchronous lock", codePageSrc.includes("if (busySendRef.current) {"));
 check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();"));
 check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();") && agentsPageSrc.includes("else notifyAutoFeedPaused(notebookPauseReason);"));
+// Both surfaces settle their cards through ONE helper now. Asserting the shared
+// helper (rather than each page's own three-way branch, as this gate used to)
+// is what stops the Coding page silently losing the "preflight → pending" case
+// again: it never imported markNotebookStepPending at all.
 check("Recoverable worktree preflight leaves the notebook card pending",
   agentsPageSrc.includes("e instanceof WorktreePreflightError || e instanceof CliPreflightError")
-    && agentsPageSrc.includes("markNotebookStepPending(selectedProjectId"));
+    && agentsPageSrc.includes('notebookRunStoppedAtPreflight ? { kind: "preflight" }'));
 check("Recoverable CLI preflight leaves team and single-agent notebook cards pending",
-  agentsPageSrc.includes("e instanceof WorktreePreflightError || e instanceof CliPreflightError")
-    && agentsPageSrc.includes("singleRunStoppedAtPreflight = e instanceof CliPreflightError")
-    && agentsPageSrc.includes("else if (singleRunStoppedAtPreflight)"));
+  agentsPageSrc.includes("singleRunStoppedAtPreflight = e instanceof CliPreflightError")
+    && agentsPageSrc.includes('singleRunStoppedAtPreflight ? { kind: "preflight" }'));
+check("Coding page recognises a preflight stop too (it used to record it as a real failure)",
+  codePageSrc.includes("stoppedAtPreflight = e instanceof CliPreflightError || e instanceof WorktreePreflightError")
+    && codePageSrc.includes('stoppedAtPreflight ? { kind: "preflight" }'));
+check("both surfaces settle cards through the one shared helper",
+  agentsPageSrc.includes("settleNotebookStep(selectedProjectId") && codePageSrc.includes("settleNotebookStep(ruleScopeRef.current.id"));
 check("Code uses the shared auto-feed continuation", codePageSrc.includes("continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId"));
 check("Agents uses the shared auto-feed continuation", agentsPageSrc.includes("continueNotebookAutoFeed(pid, notebookSurfaceId"));
 check("Watcher help and bug actions have accessible names", watcherSrc.includes('aria-label="Help using the app"') && watcherSrc.includes('aria-label="Report a bug"'));
@@ -514,7 +527,13 @@ console.log("case 7: autoFeedWouldRun respects owner + pending");
   localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "agents:main" }));
   const { autoFeedWouldRun } = NB;
   check("true for the owning surface", autoFeedWouldRun(PID, "agents:main") === true);
-  check("false for another surface", autoFeedWouldRun(PID, "code:p2") === false);
+  // A named owner with NO live heartbeat is a window that closed mid-queue.
+  // This gate used to require `false` here — certifying the exact stall the
+  // user hit: no dispatch, and no "auto-feed paused" notice either, because
+  // this very function suppressed it. A dead owner must release.
+  check("a dead owner releases to another surface", autoFeedWouldRun(PID, "code:p2") === true);
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "agents:main", autoFeedHeartbeat: Date.now() }));
+  check("a LIVE owner still locks another surface out", autoFeedWouldRun(PID, "code:p2") === false);
   localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: false }));
   check("false when the toggle is off", autoFeedWouldRun(PID, "agents:main") === false);
 }

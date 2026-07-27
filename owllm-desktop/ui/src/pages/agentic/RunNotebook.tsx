@@ -23,8 +23,21 @@
 // AgentsPage reads the same blob at run-end for auto-feed via the exported
 // helpers, and both sides broadcast NOTEBOOK_EVENT so the open surface and
 // the page never go stale against each other.
+//
+// Cross-device: vaultSync mirrors the blob to the user's other PCs. Two rules
+// make that safe, and both live in this file's data model:
+//   • `updatedAt` — stamped on every save. Ordering used to come from the vault
+//     blob's single syncedAt, which covered EVERY localStorage key, so an
+//     unrelated setting change on a stale PC republished its stale notebook as
+//     "newer" and completed steps came back as pending.
+//   • `deletedSteps` — tombstones. Steps merge as a UNION by id (peer progress
+//     is never clobbered), and a union without tombstones resurrects everything
+//     the user deleted.
+// The run-lease (autoFeed* fields) is deliberately device-local and stripped
+// before sync; `runningOn` is the advisory that replaces it across PCs.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAutoResize } from "../../hooks/useAutoResize";
 import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
@@ -76,7 +89,24 @@ export type NotebookState = {
   /// A user may turn auto-feed off before the queue is empty. Keep that
   /// distinct from a naturally completed sequence in the timing display.
   autoFeedStopped?: boolean;
+  /// ADVISORY (unlike the run-lease above, this one DOES sync): the device that
+  /// most recently started driving this queue. A peer PC reads it only to SAY
+  /// "the queue is running on <name>" — it is never a lock. Device clocks are
+  /// not synchronized, so a stale/skewed stamp must never be able to block a
+  /// user from starting their own queue.
+  runningOn?: { deviceId: string; deviceName: string; at: number };
   digest: Array<{ role: "you" | "digest"; text: string }>;
+  /// Content stamp, rewritten by every saveNotebook. This is what lets two PCs
+  /// order their copies of THIS notebook. The vault blob's single `syncedAt`
+  /// covers every localStorage key at once, so without a per-notebook stamp an
+  /// unrelated setting change on a stale PC republished its stale notebook as
+  /// "newer" and archived steps came back. See vaultSync → mergeNotebook.
+  updatedAt?: number;
+  /// Tombstones for steps deleted on ANY device. Steps merge as a union by id
+  /// across PCs (so a peer's completion is never overwritten by our stale
+  /// copy), and a union without tombstones resurrects everything the user
+  /// deliberately removed. Capped and pruned in saveNotebook.
+  deletedSteps?: Array<{ id: string; ts: number }>;
   /// User-picked digest model (per project). Empty/undefined = inherit the
   /// surface's default (team model → server model), same rule as before.
   digestModel?: string;
@@ -87,7 +117,7 @@ export type NotebookState = {
 };
 
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
-const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [] };
+const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [], deletedSteps: [] };
 const keyFor = (projectId: string) => `owllm:agents:notebook:${projectId}`;
 // The auto-feed/owner/sequence-clock fields below are the notebook's RUN-LEASE:
 // they live IN this blob so tabs on THIS PC coordinate the queue through it, but
@@ -101,6 +131,53 @@ const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36)
 // couple of missed beats are tolerated before a lock releases to a takeover).
 const NOTEBOOK_HEARTBEAT_MS = 8_000;
 const NOTEBOOK_LEASE_TTL_MS = 20_000;
+
+/// True only when ANOTHER surface owns the queue AND is still beating. The
+/// run-end helpers below used to compare owners alone, so a window that owned
+/// the queue and was then closed (or a Coding page that toggled auto-feed on
+/// and was navigated away from) left an owner string nothing could clear:
+/// takeNextAutoStep returned null forever, autoFeedWouldRun suppressed the very
+/// "auto-feed paused" notice meant to explain it, and the queue silently
+/// stopped with the toggle still reading ON. A dead owner now releases, exactly
+/// as the UI's own takeover button already assumed.
+export function leaseHeldByOtherSurface(nb: NotebookState, surfaceId: string): boolean {
+  if (!nb.autoFeedOwner || nb.autoFeedOwner === surfaceId) return false;
+  return nb.autoFeedHeartbeat != null && (Date.now() - nb.autoFeedHeartbeat) < NOTEBOOK_LEASE_TTL_MS;
+}
+
+/// Identity behind the cross-PC "queue is running on <name>" advisory. The
+/// notebook helpers below are SYNCHRONOUS (they run inside run-end finally
+/// blocks), so identity is fetched once in the background and read from this
+/// cache. Until it warms we simply omit the advisory rather than guess.
+let _selfDevice: { deviceId: string; deviceName: string } | null = null;
+let _selfDeviceFetching = false;
+export function warmNotebookDeviceIdentity(): void {
+  if (_selfDevice || _selfDeviceFetching) return;
+  _selfDeviceFetching = true;
+  void invoke<{ device_id: string; name: string }>("device_get_identity")
+    .then((d) => {
+      if (d?.device_id) _selfDevice = { deviceId: d.device_id, deviceName: (d.name || d.device_id.slice(0, 8)).trim() };
+    })
+    .catch(() => { /* advisory only — never block the queue on identity */ })
+    .finally(() => { _selfDeviceFetching = false; });
+}
+function describeThisDeviceRun(at: number): NotebookState["runningOn"] {
+  return _selfDevice ? { ..._selfDevice, at } : undefined;
+}
+
+/// The advisory is informational ONLY — it never disables anything. Device
+/// clocks are not synchronized (this vault's own history shows peers writing
+/// out-of-order timestamps), so treating a peer stamp as a lock could lock the
+/// user out of their own queue. A generous window keeps it from claiming a
+/// long-finished run is still going.
+const RUNNING_ON_STALE_MS = 30 * 60_000;
+export function peerRunningQueue(nb: NotebookState): { deviceName: string; at: number } | null {
+  const r = nb.runningOn;
+  if (!r || !_selfDevice || r.deviceId === _selfDevice.deviceId) return null;
+  if (Date.now() - r.at > RUNNING_ON_STALE_MS) return null;
+  if (!nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null))) return null;
+  return { deviceName: r.deviceName, at: r.at };
+}
 
 export function isLegacyWslRedirectorFalseFailure(step: NotebookStep): boolean {
   return step.status === "failed"
@@ -147,11 +224,26 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       autoFeedStartedAt: typeof p.autoFeedStartedAt === "number" ? p.autoFeedStartedAt : undefined,
       autoFeedFinishedAt: typeof p.autoFeedFinishedAt === "number" ? p.autoFeedFinishedAt : undefined,
       autoFeedStopped: p.autoFeedStopped === true,
+      runningOn: p.runningOn && typeof p.runningOn === "object" && typeof p.runningOn.deviceId === "string" && typeof p.runningOn.at === "number"
+        ? { deviceId: p.runningOn.deviceId, deviceName: typeof p.runningOn.deviceName === "string" ? p.runningOn.deviceName : p.runningOn.deviceId.slice(0, 8), at: p.runningOn.at }
+        : undefined,
+      updatedAt: typeof p.updatedAt === "number" ? p.updatedAt : undefined,
+      deletedSteps: Array.isArray(p.deletedSteps)
+        ? p.deletedSteps.filter((d: unknown): d is { id: string; ts: number } =>
+            !!d && typeof (d as any).id === "string" && typeof (d as any).ts === "number")
+        : [],
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
       digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
       proposedPlan: typeof p.proposedPlan === "string" ? p.proposedPlan : "",
     };
+    // Belt-and-braces against resurrection: a step the user deleted must not
+    // come back just because some path (an older build, a hand-edited blob)
+    // re-introduced it alongside its tombstone.
+    if (notebook.deletedSteps?.length) {
+      const buried = new Set(notebook.deletedSteps.map((d) => d.id));
+      notebook.steps = notebook.steps.filter((s) => !buried.has(s.id));
+    }
     if (repairedLegacyPreflightFailure) {
       localStorage.setItem(keyFor(projectId), JSON.stringify(notebook));
     }
@@ -159,10 +251,23 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
   } catch { return { ...EMPTY }; }
 }
 
+/// Newest-first tombstone cap. A tombstone only has to outlive the moment a
+/// peer still holds the deleted step; once every device has converged it is
+/// dead weight, so an unbounded list would grow forever in the synced blob.
+const MAX_STEP_TOMBSTONES = 200;
+
 export function saveNotebook(projectId: string | null | undefined, nb: NotebookState): void {
   if (!projectId) return;
   try {
-    localStorage.setItem(keyFor(projectId), JSON.stringify({ ...nb, digest: nb.digest.slice(-12) }));
+    const deletedSteps = (nb.deletedSteps ?? []).slice().sort((a, b) => b.ts - a.ts).slice(0, MAX_STEP_TOMBSTONES);
+    localStorage.setItem(keyFor(projectId), JSON.stringify({
+      ...nb,
+      digest: nb.digest.slice(-12),
+      deletedSteps,
+      // Stamp EVERY write: this is the only per-notebook ordering signal two
+      // PCs have when deciding whose copy of a field is newer.
+      updatedAt: Date.now(),
+    }));
     window.dispatchEvent(new CustomEvent(NOTEBOOK_EVENT, { detail: { projectId } }));
   } catch { /* best effort */ }
 }
@@ -175,7 +280,7 @@ export function saveNotebook(projectId: string | null | undefined, nb: NotebookS
 export function takeNextAutoStep(projectId: string | null | undefined, surfaceId: string): NotebookStep | null {
   const nb = loadNotebook(projectId);
   if (!nb.autoFeed) return null;
-  if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return null;
+  if (leaseHeldByOtherSurface(nb, surfaceId)) return null;
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
   const now = Date.now();
@@ -188,7 +293,15 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
     nb.autoFeedFinishedAt = undefined;
     nb.autoFeedStopped = false;
   }
-  if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
+  // We got here, so the lease is ours, unset, or belonged to a dead surface.
+  // Adopt it outright (with a fresh beat) rather than only filling a blank —
+  // otherwise the released-but-still-named owner keeps winning every later
+  // comparison and the queue re-stalls on the very next card.
+  if (nb.autoFeedOwner !== surfaceId) {
+    nb.autoFeedOwner = surfaceId;
+    nb.autoFeedHeartbeat = now;
+  }
+  nb.runningOn = describeThisDeviceRun(now) ?? nb.runningOn;
   saveNotebook(projectId, nb);
   return next;
 }
@@ -262,7 +375,7 @@ export function markNotebookAutoFeedStarted(projectId: string | null | undefined
 export function markNotebookAutoFeedFinished(projectId: string | null | undefined, surfaceId: string, finishedAt: number = Date.now()): boolean {
   if (!projectId) return false;
   const nb = loadNotebook(projectId);
-  if (!nb.autoFeed || (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) || nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) return false;
+  if (!nb.autoFeed || leaseHeldByOtherSurface(nb, surfaceId) || nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) return false;
   const stillActive = nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null));
   if (stillActive) return false;
   nb.autoFeedFinishedAt = finishedAt;
@@ -271,13 +384,20 @@ export function markNotebookAutoFeedFinished(projectId: string | null | undefine
   return true;
 }
 
+/// How many cards are still waiting. Lets a caller tell "nothing left to do"
+/// apart from "something is blocking me", which the tri-state return of
+/// continueNotebookAutoFeed alone cannot express.
+export function notebookPendingStepCount(projectId: string | null | undefined): number {
+  return loadNotebook(projectId).steps.filter((s) => s.status === "pending").length;
+}
+
 /// True when auto-feed is on with pending steps and THIS surface may drive it
 /// — the run-end paths use it to say "auto-feed paused" instead of stalling
 /// silently when a run doesn't finish cleanly.
 export function autoFeedWouldRun(projectId: string | null | undefined, surfaceId: string): boolean {
   const nb = loadNotebook(projectId);
   if (!nb.autoFeed) return false;
-  if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return false;
+  if (leaseHeldByOtherSurface(nb, surfaceId)) return false;
   return nb.steps.some((s) => s.status === "pending");
 }
 
@@ -358,6 +478,29 @@ export function markNotebookStepPending(
     failureReason: undefined,
   };
   saveNotebook(projectId, nb);
+}
+
+/// How a run that was carrying notebook cards ended.
+export type NotebookRunOutcome =
+  | { kind: "clean" }
+  /// A preflight refused BEFORE any agent started, so no work was attempted.
+  | { kind: "preflight" }
+  | { kind: "failed"; reason: string };
+
+/// The single place both surfaces settle a notebook card at run end. The two
+/// pages each hand-rolled this three-way branch and drifted: the Coding page
+/// never imported markNotebookStepPending, so a preflight stop — where nothing
+/// ran at all — was recorded as a real failure and the card was buried behind a
+/// Re-feed instead of staying straightforwardly pending.
+export function settleNotebookStep(
+  projectId: string | null | undefined,
+  stepId: string,
+  outcome: NotebookRunOutcome,
+  at: number = Date.now(),
+): void {
+  if (outcome.kind === "clean") markNotebookStepFinished(projectId, stepId, at);
+  else if (outcome.kind === "preflight") markNotebookStepPending(projectId, stepId);
+  else markNotebookStepFailed(projectId, stepId, outcome.reason, at);
 }
 
 /// A step is ARCHIVED once it is finished: the user checked it off ("done"),
@@ -452,28 +595,38 @@ function parseDigestReply(reply: string): { plan: string; steps: string[] } {
   return { plan: (planLines ?? []).join("\n").trim(), steps };
 }
 
+// The PLAN half of this prompt is only asked for when the board is actually
+// visible. With SHOW_KANBAN off the reply's PLAN block is parsed and then
+// discarded (proposedPlan is never applied), so every digest was paying to
+// generate and refine a board the user can't see. Kept intact behind the flag
+// so restoring the board restores the prompt with it.
 const DIGEST_SYSTEM = [
   "You are the Notebook Digest agent inside OWLLM. An agent team is working on the user's project;",
-  "the user brainstorms alongside it. Your job: turn their raw notes/requests into (1) an updated",
-  "Kanban PLAN and (2) clear, self-contained, implementable NEXT STEPS for that team.",
+  SHOW_KANBAN
+    ? "the user brainstorms alongside it. Your job: turn their raw notes/requests into (1) an updated Kanban PLAN and (2) clear, self-contained, implementable NEXT STEPS for that team."
+    : "the user brainstorms alongside it. Your job: turn their raw notes/requests into clear, self-contained, implementable NEXT STEPS for that team.",
   "Rules:",
-  "- PLAN is a Kanban board, not prose. Use exactly these lanes inside PLAN: NOW, NEXT, LATER.",
-  "- NOW = the coherent implementation batch that should happen first. NEXT = follow-up batch.",
-  "  LATER = optional/parked work. Keep only useful cards; remove duplication and stale wording.",
-  "- You are shown the CURRENT PLAN; refine it (keep what still holds, never silently drop the user's decisions).",
-  "  If the notes add nothing plan-worthy, omit the PLAN section entirely.",
+  ...(SHOW_KANBAN ? [
+    "- PLAN is a Kanban board, not prose. Use exactly these lanes inside PLAN: NOW, NEXT, LATER.",
+    "- NOW = the coherent implementation batch that should happen first. NEXT = follow-up batch.",
+    "  LATER = optional/parked work. Keep only useful cards; remove duplication and stale wording.",
+    "- You are shown the CURRENT PLAN; refine it (keep what still holds, never silently drop the user's decisions).",
+    "  If the notes add nothing plan-worthy, omit the PLAN section entirely.",
+  ] : []),
   "- STEPS are ADDITIVE: never rewrite, merge or remove the existing steps you are shown — only propose NEW ones.",
   "- Each step must stand alone: an agent receives it with no other context, so name the feature/file/behavior explicitly.",
   "- Do NOT create tiny painful micro-steps. Prefer 1-4 larger implementation chunks that a good agent can complete in one run.",
   "- Merge related UI/code/test work into one step when it belongs together. Split only when the work truly needs separate runs.",
   "- Output format, nothing else:",
-  "  PLAN:",
-  "  NOW:",
-  "  - <card>",
-  "  NEXT:",
-  "  - <card>",
-  "  LATER:",
-  "  - <card>",
+  ...(SHOW_KANBAN ? [
+    "  PLAN:",
+    "  NOW:",
+    "  - <card>",
+    "  NEXT:",
+    "  - <card>",
+    "  LATER:",
+    "  - <card>",
+  ] : []),
   "  STEPS:",
   "  - <each proposed larger implementation chunk on its own line starting with '- '>",
 ].join("\n");
@@ -493,9 +646,9 @@ type Props = {
   modelId: string;
   port: number;
   models: ModelInfo[];
-  /// Window event that opens this instance. The Agents pages listen on the
-  /// default; the Code page mounts its own instance on a separate event so
-  /// the two surfaces never open each other's modal.
+  /// Window event that opens this instance as a MODAL. Only the Agents page
+  /// uses it (on the default name); the Code page mounts `inline` in its right
+  /// column and never opens a modal, so it leaves this at the default.
   openEvent?: string;
   /// Needed by the digest-model ModelPicker (which providers are signed in).
   accountsStatus?: AccountsStatusLite | null;
@@ -612,7 +765,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
   const setStep = (id: string, patch: Partial<NotebookStep>) =>
     updateNotebook((prev) => ({ ...prev, steps: prev.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
-  const removeStep = (id: string) => updateNotebook((prev) => ({ ...prev, steps: prev.steps.filter((s) => s.id !== id) }));
+  /// Deleting records a TOMBSTONE as well as dropping the step. Steps merge
+  /// across PCs as a union by id (so a peer's completion can't be clobbered by
+  /// our stale copy); without the tombstone that union would hand the deleted
+  /// step straight back on the next sync.
+  const removeStep = (id: string) => updateNotebook((prev) => ({
+    ...prev,
+    steps: prev.steps.filter((s) => s.id !== id),
+    deletedSteps: [...(prev.deletedSteps ?? []).filter((d) => d.id !== id), { id, ts: Date.now() }],
+  }));
   // Reorder within the VISIBLE (unfinished) cards only — archived steps are
   // hidden from the feed, so swap the two adjacent visible steps rather than raw
   // array neighbours (a raw swap could silently trade places with a hidden one).
@@ -643,7 +804,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       // off: a started queue is driven by one window, and every other open
       // window (another tab here or the app on another PC) ghosts its run
       // controls until this one finishes or hands the lease over.
-      ...(claimQueue ? { autoFeedOwner: surfaceId, autoFeedHeartbeat: now } : {}),
+      ...(claimQueue ? { autoFeedOwner: surfaceId, autoFeedHeartbeat: now, runningOn: describeThisDeviceRun(now) ?? prev.runningOn } : {}),
       ...(prev.autoFeed && (prev.autoFeedStartedAt == null || prev.autoFeedFinishedAt != null)
         ? { autoFeedStartedAt: now, autoFeedFinishedAt: undefined, autoFeedStopped: false }
         : {}),
@@ -695,7 +856,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     const notes = nb.text.trim();
     const currentPlan = nb.plan.trim();
     if (digestBusy) return;
-    if (!notes && !currentPlan && nb.steps.length === 0) {
+    if (!notes && !(SHOW_KANBAN && currentPlan) && nb.steps.length === 0) {
       setDigestError("Write working notes first, or add an existing plan/step for the digest to refine.");
       return;
     }
@@ -713,7 +874,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     const pid = projRef.current;
     try {
       const user = [
-        currentPlan ? `CURRENT PLAN (extend/refine additively):\n${currentPlan}` : "",
+        SHOW_KANBAN && currentPlan ? `CURRENT PLAN (extend/refine additively):\n${currentPlan}` : "",
         nb.steps.length ? `EXISTING STEPS (do not repeat or rewrite):\n${nb.steps.map((s) => `- ${s.text}`).join("\n")}` : "",
         notes ? `NOTEBOOK NOTES:\n${notes}` : "",
       ].filter(Boolean).join("\n\n");
@@ -799,6 +960,14 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   useTick(queueActive && nb.autoFeedOwner !== surfaceId && nb.autoFeedHeartbeat != null);
   const lockedElsewhere = queueActive && nb.autoFeedOwner !== surfaceId && leaseLive;
   const takeOverQueue = () => updateNotebook((prev) => ({ ...prev, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
+  // Cross-PC ADVISORY. The run-lease deliberately never syncs, so until now a
+  // second machine had no way to know a queue was already running and could
+  // start the same steps again. This only informs — it must not disable, since
+  // peer clocks are unsynchronized and a skewed stamp would lock the user out
+  // of their own queue.
+  useEffect(() => { warmNotebookDeviceIdentity(); }, []);
+  useTick(nb.runningOn != null);
+  const peerRun = peerRunningQueue(nb);
   // While THIS window owns an active queue, beat the heartbeat so peers keep
   // seeing the lease held. Stops when the queue ends or ownership moves away.
   useEffect(() => {
@@ -856,6 +1025,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             {running ? (inline ? "run live — steps steer it" : "team is running — fed steps steer it live") : (inline ? "idle — steps start a run" : "team idle — fed steps start a run")}
           </span>
           <div style={{ flex: 1 }} />
+          {peerRun && !lockedElsewhere && (
+            <span
+              data-ui="NotebookPeerRunning"
+              title={`Another of your PCs started this queue at ${formatClock(peerRun.at)}. This is informational only — you can still run it here, but both machines would work the same steps.`}
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 700, color: "var(--warn)" }}
+            >
+              <ActionIcon name="monitor" size={12} />queue started on {peerRun.deviceName}
+            </span>
+          )}
           {lockedElsewhere ? (
             // This window is a spectator: another window owns the running queue.
             // Ghost the toggle and offer an explicit takeover (for when the

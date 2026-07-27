@@ -18,7 +18,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFailed, markNotebookStepFinished, markNotebookStepPending } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepPending, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -8702,8 +8702,10 @@ export function AgentsPage({
   // is the "⚡ queued to steer the run →" echo pushed into the chat on enqueue.
   const drainSteers = (): string => {
     const q = steerQueueRef.current;
-    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
+    // Guard BEFORE taking the ids: draining an empty text queue must not empty
+    // the id list, or those cards would be silently detached from their text.
     if (!q.length) return "";
+    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
     if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
     return q.splice(0, q.length).join("\n");
   };
@@ -8752,10 +8754,17 @@ export function AgentsPage({
         );
         return;
       }
-      continueNotebookAutoFeed(pid, notebookSurfaceId, (step) => {
+      const result = continueNotebookAutoFeed(pid, notebookSurfaceId, (step) => {
         notebookStepRef.current = step.id;
         void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
       });
+      // "inactive" with cards still pending means another LIVE window on this
+      // project holds the queue lease. Discarding that result is how a stalled
+      // queue stayed silent — and notifyAutoFeedPaused can't say it, because
+      // autoFeedWouldRun is false for exactly this reason. Say it directly.
+      if (result === "inactive" && notebookPendingStepCount(pid) > 0) {
+        setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: "📓 Auto-feed idle here — another open window on this project is driving the queue. Use “Take over here” in the Notebook to drive it from this page.", ts: Date.now(), seq: nextSeq() }]);
+      }
     };
     setTimeout(attempt, 800);
   };
@@ -10554,13 +10563,9 @@ export function AgentsPage({
       }
       const now = Date.now();
       if (notebookStepRef.current) {
-        if (singleRunCompletedCleanly) {
-          markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
-        } else if (singleRunStoppedAtPreflight) {
-          markNotebookStepPending(selectedProjectId, notebookStepRef.current);
-        } else {
-          markNotebookStepFailed(selectedProjectId, notebookStepRef.current, singleRunFailureReason, now);
-        }
+        settleNotebookStep(selectedProjectId, notebookStepRef.current, singleRunCompletedCleanly
+          ? { kind: "clean" }
+          : singleRunStoppedAtPreflight ? { kind: "preflight" } : { kind: "failed", reason: singleRunFailureReason }, now);
         notebookStepRef.current = null;
       }
       setSupChat(prev => [...prev, { role: "system", color: "var(--fg-muted)", text: runTimingFooter(singleRunStartedAt, now), ts: now, seq: nextSeq() }]);
@@ -12980,30 +12985,43 @@ export function AgentsPage({
       // 📓 Stamp notebook step timing for the step that started this run and any
       // notebook steps that were drained and processed as mid-run steers.
       const now = Date.now();
+      // One outcome for every card this run carried, decided in the shared
+      // helper so this page and the Coding page cannot diverge again.
+      const outcome: NotebookRunOutcome = notebookRunCompletedCleanly
+        ? { kind: "clean" }
+        : notebookRunStoppedAtPreflight ? { kind: "preflight" } : { kind: "failed", reason: notebookPauseReason };
       if (notebookStepRef.current) {
-        if (notebookRunCompletedCleanly) {
-          markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
-        } else if (notebookRunStoppedAtPreflight) {
-          markNotebookStepPending(selectedProjectId, notebookStepRef.current);
-        } else {
-          markNotebookStepFailed(selectedProjectId, notebookStepRef.current, notebookPauseReason, now);
-        }
+        settleNotebookStep(selectedProjectId, notebookStepRef.current, outcome, now);
         notebookStepRef.current = null;
       }
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
-        if (notebookRunCompletedCleanly) {
-          markNotebookStepFinished(selectedProjectId, sid, now);
-        } else if (notebookRunStoppedAtPreflight) {
-          markNotebookStepPending(selectedProjectId, sid);
-        } else {
-          markNotebookStepFailed(selectedProjectId, sid, notebookPauseReason, now);
-        }
+        settleNotebookStep(selectedProjectId, sid, outcome, now);
       }
+      // 📓 Steers queued after the run's LAST drain boundary were never handed
+      // to any agent, yet feedStep already stamped their cards "sent · running".
+      // Nothing here used to reclaim them, so those cards ran forever, the
+      // sequence timer never closed, and their text sat in the queue until it
+      // surfaced inside an unrelated later run. Settle them explicitly — the
+      // Coding page has always done this; the two pages now agree.
+      const strandedSteerIds = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
+      const leftoverSteerText = steerQueueRef.current.splice(0, steerQueueRef.current.length).join("\n");
       // Busy/reentrancy flags are clear now, so every exit path makes one
       // deterministic Notebook decision. A clean run advances the next card;
       // any other outcome leaves pending cards untouched and explains the pause.
-      if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();
-      else notifyAutoFeedPaused(notebookPauseReason);
+      if (leftoverSteerText && notebookRunCompletedCleanly) {
+        // The work is still wanted: re-dispatch it as a follow-up turn and put
+        // the cards back in flight so the next run end stamps them properly.
+        // This takes priority over auto-feed — the user asked for these first.
+        notebookSteerInFlightIdsRef.current.push(...strandedSteerIds);
+        void onSupSendRef.current?.(leftoverSteerText);
+      } else {
+        for (const sid of strandedSteerIds) markNotebookStepPending(selectedProjectId, sid);
+        if (leftoverSteerText) {
+          setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 ${strandedSteerIds.length || 1} queued step(s) never reached the team because the run ended early — returned to the Notebook queue as pending.`, ts: Date.now(), seq: nextSeq() }]);
+        }
+        if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();
+        else notifyAutoFeedPaused(notebookPauseReason);
+      }
       clearActive();
       abortRef.current = null;
       agentRunAborts.delete(agentSessId);

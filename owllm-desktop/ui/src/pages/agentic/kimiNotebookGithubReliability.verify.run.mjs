@@ -68,14 +68,18 @@ check(
 );
 check(
   "failed notebook cards remain active and expose Re-feed",
+  // Both pages route their run-end outcome through settleNotebookStep now, so
+  // assert the "failed" arm of that shared helper plus each page's reason,
+  // rather than the direct markNotebookStepFailed calls they used to make.
   notebook.includes('status: "failed"')
     && notebook.includes("export function markNotebookStepFailed")
+    && notebook.includes("else markNotebookStepFailed(projectId, stepId, outcome.reason, at);")
     && notebook.includes('s.status === "sent" && s.finishedAt != null')
     && notebook.includes('s.status === "failed" ? "Re-feed"')
-    && agents.includes("markNotebookStepFailed")
+    && agents.includes('{ kind: "failed", reason: notebookPauseReason }')
     && agents.includes("singleRunFailureReason = cleanAgentError(e)")
     && codePage.includes("failureReason = aborted ?")
-    && codePage.includes("markNotebookStepFailed"),
+    && codePage.includes('{ kind: "failed", reason: failureReason }'),
 );
 check(
   "native vault operations require the current OWLLM GitHub session",

@@ -19,12 +19,13 @@ import { chatRuntime } from "../../runtime/chatRuntime";
 import { setRunActivity } from "../../runtime/runActivity";
 import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFailed, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
@@ -597,8 +598,10 @@ function CodeWorkspace({ pageId, onTitle }: {
   const notebookSteerInFlightIdsRef = useRef<string[]>([]);
   const drainSteer = () => {
     const q = steerRef.current;
-    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
+    // Guard BEFORE taking the ids: draining an empty text queue must not empty
+    // the id list, or those cards would be silently detached from their text.
     if (!q.length) return "";
+    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
     if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
     return q.splice(0, q.length).join("\n\n");
   };
@@ -2070,6 +2073,10 @@ function CodeWorkspace({ pageId, onTitle }: {
     setRunPhase("starting");
     let ok = false;
     let aborted = false;
+    /// A preflight refused before the agent started (no CLI installed, no
+    /// isolated worktree). Nothing ran, so the card must stay pending and
+    /// retryable rather than being recorded as a failed delivery.
+    let stoppedAtPreflight = false;
     let failureReason = "The run ended with an error.";
     let replyText = "";
     try {
@@ -2081,6 +2088,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     } catch (e) {
       const err = e as { name?: string; message?: string };
       aborted = err.name === "AbortError";
+      stoppedAtPreflight = e instanceof CliPreflightError || e instanceof WorktreePreflightError;
       failureReason = aborted ? "The run was stopped." : (err.message ?? String(e));
       if (!aborted) {
         setMessages((msgs) => {
@@ -2105,30 +2113,17 @@ function CodeWorkspace({ pageId, onTitle }: {
       // after the agent's answer so the user sees start/finish for every run.
       const now = Date.now();
       const payload = chatRuntime.getSnapshot(SID).payload as CodeState | undefined;
+      // One outcome for every card this run carried, decided in the shared
+      // helper so this page and the Agents page cannot diverge again.
+      const outcome: NotebookRunOutcome = ok
+        ? { kind: "clean" }
+        : stoppedAtPreflight ? { kind: "preflight" } : { kind: "failed", reason: failureReason };
       if (notebookStepRef.current) {
-        if (ok) {
-          markNotebookStepFinished(ruleScopeRef.current.id, notebookStepRef.current, now);
-        } else {
-          markNotebookStepFailed(
-            ruleScopeRef.current.id,
-            notebookStepRef.current,
-            failureReason,
-            now,
-          );
-        }
+        settleNotebookStep(ruleScopeRef.current.id, notebookStepRef.current, outcome, now);
         notebookStepRef.current = null;
       }
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
-        if (ok) {
-          markNotebookStepFinished(ruleScopeRef.current.id, sid, now);
-        } else {
-          markNotebookStepFailed(
-            ruleScopeRef.current.id,
-            sid,
-            failureReason,
-            now,
-          );
-        }
+        settleNotebookStep(ruleScopeRef.current.id, sid, outcome, now);
       }
       if (payload?.runStartedAt) {
         setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: runTimingFooter(payload.runStartedAt!, now), ts: now }]);
@@ -2144,11 +2139,26 @@ function CodeWorkspace({ pageId, onTitle }: {
         if (busySendRef.current) return;
         const leftover = drainSteer();
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
+        if (leftover) {
+          // Stopped with steers still queued. drainSteer just moved their cards
+          // into the in-flight list, but the run they belonged to is over — left
+          // there they would be stamped with an UNRELATED later run's outcome.
+          // Hand them back to the queue as pending instead.
+          for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
+            settleNotebookStep(ruleScopeRef.current.id, sid, { kind: "preflight" });
+          }
+        }
         if (ok) {
-          continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId, (st) => {
+          const result = continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId, (st) => {
             notebookStepRef.current = st.id;
             void sendRef.current?.(st.text);
           });
+          // Discarding this result is how a stalled queue stayed silent, and
+          // autoFeedWouldRun can't report it (it is false for exactly this
+          // reason). Say it directly.
+          if (result === "inactive" && notebookPendingStepCount(ruleScopeRef.current.id) > 0) {
+            setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: "📓 Auto-feed idle here — another open window on this project is driving the queue. Use “Take over here” in the Notebook to drive it from this page.", ts: Date.now() }]);
+          }
         } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
           setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
         }

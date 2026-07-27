@@ -90,19 +90,32 @@ try {
   check("Fleet liveness rejects stale records with no dial path", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", endpoint: null, endpoints: [], p2p_node_id: null }, now) === false);
 
   const sanitized = presence.sanitizePresenceNodes([
-    { id: "ok", region: "EU West", latitude: 48, longitude: 9, firstSeen: "t0", lastSeen: "now", online: true, github_login: "must-not-leak" },
+    { id: "ok", region: "KR · 11", os: "Windows", latitude: 48, longitude: 9, firstSeen: "t0", lastSeen: "now", online: true, github_login: "must-not-leak" },
     { id: "bad-lat", latitude: 200, longitude: 9 },
     { id: "ok", latitude: 1, longitude: 2 },
-    { id: "ghost", region: "AP", latitude: 1, longitude: 2, online: false },
+    { id: "linux", region: "KR · 41", os: "Linux", latitude: 2, longitude: 3, online: true },
+    { id: "ghost", region: "IT · 62", os: "macOS", latitude: 1, longitude: 2, online: false },
   ]);
-  check("Presence payload validates and deduplicates coordinates", sanitized.length === 2 && sanitized[0].id === "ok");
-  check("Public nodes expose no account/device identity fields", !Object.hasOwn(sanitized[0], "github_login") && Object.keys(sanitized[0]).length === 7);
+  check("Presence payload validates and deduplicates coordinates", sanitized.length === 3 && sanitized[0].id === "ok");
+  check("Public nodes expose no account/device identity fields", !Object.hasOwn(sanitized[0], "github_login") && Object.keys(sanitized[0]).length === 8);
   check("Offline installations are retained as ghosts", sanitized.find((node) => node.id === "ghost").online === false && sanitized[0].online === true);
+  check("OS data is normalized to four anonymous families",
+    presence.normalizePresenceOs("Win32") === "Windows"
+      && presence.normalizePresenceOs("Macintosh") === "macOS"
+      && presence.normalizePresenceOs("X11; Linux") === "Linux"
+      && presence.normalizePresenceOs("unknown") === "Other");
+  const countries = presence.groupOnlinePresenceByCountry(sanitized);
+  check("Connected users group by country and exclude offline ghosts",
+    countries.length === 1 && countries[0].countryCode === "KR" && countries[0].nodes.length === 2);
+  check("Country summaries split connected users by operating system",
+    countries[0].osCounts.Windows === 1 && countries[0].osCounts.Linux === 1 && countries[0].osCounts.macOS === 0);
 
   const stableStore = memory();
   const firstId = presence.readOrCreateNodeId(stableStore);
   check("Stable anonymous node id is created and reused", firstId.length > 0 && presence.readOrCreateNodeId(stableStore) === firstId);
   check("Presence socket URL carries the stable node id", presence.worldPresenceSocketUrl("presence", "https://presence.example", firstId).includes(`id=${firstId}`));
+  check("Presence socket may carry only a normalized OS family",
+    presence.worldPresenceSocketUrl("presence", "https://presence.example", firstId, "Windows").includes("os=Windows"));
   check("Viewer socket URL never carries the node id", !presence.worldPresenceSocketUrl("viewer", "https://presence.example", firstId).includes("id="));
 
   check("HTTPS endpoint becomes a viewer WebSocket", presence.worldPresenceSocketUrl("viewer", "https://presence.example/") === "wss://presence.example/v1/presence/connect?role=viewer");
@@ -224,6 +237,10 @@ try {
   // the computed subsolar point every frame, not pinned to a fixed position.
   check("Sun tracks the real subsolar point from the UTC clock",
     page.includes("subsolarLocalDir(new Date(), sunLocal)") && /sunLight\.position\.copy\(sunLocal\)/.test(page) && !/sunLight\.position\.set\(5\.8/.test(page));
+  check("Sun-facing planet exposure is reduced without lowering night fill",
+    /new THREE\.DirectionalLight\(0xffffff,\s*1\.15\)/.test(page)
+      && /new THREE\.PointLight\(0xfff2d0,\s*150,/.test(page)
+      && /new THREE\.AmbientLight\(0xa8c7ef,\s*0\.9\)/.test(page));
   // The shadowed hemisphere must stay dimly visible (twilight), not pure black.
   check("Night hemisphere is softly lit, not pitch black",
     page.includes("emissiveMap: earthMap")
@@ -249,12 +266,18 @@ try {
   // Presence is always on — there must be NO opt-in checkbox/toggle. Public mode
   // instead shows a passive note that counting is anonymous.
   check("Public mode has no presence opt-in checkbox or consent toggle", !page.includes('type="checkbox"') && !page.includes("savePresenceEnabled") && !page.includes("presenceEnabled"));
-  check("Public mode discloses anonymous counting without a consent control", page.includes("You are counted anonymously"));
+  check("Public mode discloses anonymous coarse-region and OS counting without a consent control",
+    page.includes("Only your OS family and coarse region are shown"));
   check("World Map consumes live WebSocket snapshots", page.includes("subscribeWorldPresence") && !page.includes("loadWorldPresence"));
   check("World Map ghosts recorded-but-offline nodes and shows both counts", page.includes("online: node.online") && page.includes('t("recorded")') && page.includes('t("online now")'));
   check("Presence runs application-wide, always on", appShell.includes("<WorldPresenceRunner />") && appShell.includes("installWorldPresenceConnection()"));
   check("Stable node id (and any legacy consent key) stay device-local", vaultSync.includes('"owllm:world-map:node-id"') && vaultSync.includes('"owllm:world-map:presence-enabled"'));
-  check("Worker retains anonymous nodes in SQLite and ghosts offline ones", worker.includes("acceptWebSocket") && worker.includes("serializeAttachment") && worker.includes("CREATE TABLE IF NOT EXISTS nodes") && worker.includes("first_seen") && worker.includes("publicNode(row, false)"));
+  check("Worker retains anonymous nodes in SQLite and ghosts offline ones",
+    worker.includes("acceptWebSocket")
+      && worker.includes("serializeAttachment")
+      && worker.includes("CREATE TABLE IF NOT EXISTS nodes")
+      && worker.includes("first_seen")
+      && worker.includes("publicNode({ ...row, os: data.os }, false)"));
   check("Worker never reads the source IP or reintroduces a cron", !/CF-Connecting-IP|x-forwarded-for/i.test(worker) && !/scheduled\s*\(/.test(worker));
   check("Worker broadcasts incremental membership changes with counts", worker.includes('type: "upsert"') && worker.includes('type: "remove"') && worker.includes("counts:"));
   check("Wrangler binds a free SQLite-backed Durable Object without D1", wrangler.includes("new_sqlite_classes") && !wrangler.includes("d1_databases"));
@@ -263,9 +286,30 @@ try {
   check("New recorded/online-count labels have all eight locales", /\["recorded",(?:[^\]]*,){6}[^\]]*\]/.test(actions) && /\["online now",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
   // The anonymous-counting note contains commas in its text, so verify locale
   // coverage by its English key plus the last-column (pt) translation.
-  check("Anonymous-counting note is translated (en + pt endpoints present)", actions.includes("You are counted anonymously") && actions.includes("Você é contado anonimamente"));
+  check("Anonymous OS/coarse-region disclosure is translated (en + pt endpoints present)",
+    actions.includes("Only your OS family and coarse region are shown")
+      && actions.includes("Somente a família do sistema operacional e a região aproximada são mostradas"));
   // Server list shows the nation flag instead of the bare 2-letter code.
   check("Region labels convert the country code to a flag", page.includes("regionWithFlag(node.region)") && page.includes("0x1f1e6 + ch.charCodeAt(0) - 65"));
+  check("World list groups connected users into country summaries with large flag controls",
+    page.includes("groupOnlinePresenceByCountry(publicNodes)")
+      && page.includes('gridTemplateColumns: "62px minmax(0,1fr)"')
+      && page.includes("country.nodes.length")
+      && page.includes("country.osCounts[os]"));
+  check("Country flag opens a scrollable detail list capped at twenty rows",
+    page.includes('data-ui="WorldMap:country-details"')
+      && page.includes("maxHeight: 20 * 44")
+      && page.includes('overflowY: "auto"')
+      && page.includes("setExpandedCountry"));
+  check("Worker publishes only normalized live OS families without persisting fingerprint data",
+    worker.includes("normalizeOsFamily")
+      && worker.includes("request.headers.get(\"User-Agent\")")
+      && worker.includes("server.serializeAttachment({ role, id, os")
+      && !/ALTER TABLE nodes|os TEXT/.test(worker));
+  check("Country summary labels have all eight locales",
+    /\["Connected users by country",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
+      && /\["users online",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
+      && /\["Click the flag for connection details",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
   check("Flag font is bundled for Windows (no native flag emoji)", fs.statSync(path.join(UI, "../public/fonts/TwemojiCountryFlags.woff2")).size > 50_000);
   const styles = read("styles.css");
   check("Flag font is registered flag-codepoints-only and first in the stack", styles.includes('font-family: "Twemoji Country Flags"') && styles.includes("unicode-range: U+1F1E6-1F1FF") && styles.includes('font-family: "Twemoji Country Flags", "Segoe UI"'));

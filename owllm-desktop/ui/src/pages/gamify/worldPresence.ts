@@ -36,6 +36,7 @@ export function readOrCreateNodeId(storage: PresenceStorage | undefined = availa
 
 export type WorldMapMode = "world" | "fleet";
 export type PresenceSocketRole = "presence" | "viewer";
+export type PresenceOs = "Windows" | "macOS" | "Linux" | "Other";
 
 export function includeSelfDevice<T extends { device_id: string }>(self: T, devices: T[]): T[] {
   return devices.some((device) => device.device_id === self.device_id) ? devices : [self, ...devices];
@@ -44,6 +45,7 @@ export function includeSelfDevice<T extends { device_id: string }>(self: T, devi
 export type PublicPresenceNode = {
   id: string;
   region: string;
+  os: PresenceOs;
   latitude: number;
   longitude: number;
   firstSeen: string;
@@ -83,6 +85,7 @@ type SocketLike = {
 type ConnectionOptions = {
   baseUrl?: string;
   nodeId?: string;
+  os?: PresenceOs;
   socketFactory?: (url: string) => SocketLike;
   setTimer?: (callback: () => void, delay: number) => TimerHandle;
   clearTimer?: (handle: TimerHandle) => void;
@@ -101,7 +104,62 @@ export function worldPresenceEndpoint(): string {
   return String(meta.env?.VITE_OWLLM_WORLD_PRESENCE_URL ?? DEFAULT_WORLD_PRESENCE_URL).trim().replace(/\/$/, "");
 }
 
-export function worldPresenceSocketUrl(role: PresenceSocketRole, baseUrl = worldPresenceEndpoint(), nodeId = ""): string {
+export function normalizePresenceOs(value: unknown): PresenceOs {
+  const text = typeof value === "string" ? value.toLowerCase() : "";
+  if (text.includes("windows") || /\bwin(?:32|64)?\b/.test(text)) return "Windows";
+  if (text.includes("macintosh") || text.includes("mac os") || text.includes("darwin") || text === "macos") return "macOS";
+  if (text.includes("linux") || text.includes("x11")) return "Linux";
+  return "Other";
+}
+
+export function currentPresenceOs(): PresenceOs {
+  try {
+    return normalizePresenceOs(typeof navigator === "undefined" ? "" : `${navigator.platform ?? ""} ${navigator.userAgent ?? ""}`);
+  } catch {
+    return "Other";
+  }
+}
+
+export function presenceCountryCode(region: string): string {
+  const match = /^([A-Za-z]{2})(?:\s*\u00b7|$)/.exec(region.trim());
+  return match?.[1]?.toUpperCase() ?? "";
+}
+
+export type CountryPresenceGroup = {
+  countryCode: string;
+  nodes: PublicPresenceNode[];
+  osCounts: Record<PresenceOs, number>;
+};
+
+export function groupOnlinePresenceByCountry(nodes: PublicPresenceNode[]): CountryPresenceGroup[] {
+  const groups = new Map<string, CountryPresenceGroup>();
+  for (const node of nodes) {
+    if (!node.online) continue;
+    const countryCode = presenceCountryCode(node.region);
+    const key = countryCode || "unknown";
+    let group = groups.get(key);
+    if (!group) {
+      group = {
+        countryCode,
+        nodes: [],
+        osCounts: { Windows: 0, macOS: 0, Linux: 0, Other: 0 },
+      };
+      groups.set(key, group);
+    }
+    group.nodes.push(node);
+    group.osCounts[node.os] += 1;
+  }
+  return [...groups.values()].sort((a, b) =>
+    b.nodes.length - a.nodes.length || a.countryCode.localeCompare(b.countryCode)
+  );
+}
+
+export function worldPresenceSocketUrl(
+  role: PresenceSocketRole,
+  baseUrl = worldPresenceEndpoint(),
+  nodeId = "",
+  os: PresenceOs | "" = "",
+): string {
   const normalized = baseUrl.trim().replace(/\/$/, "");
   if (!normalized) return "";
   try {
@@ -112,6 +170,7 @@ export function worldPresenceSocketUrl(role: PresenceSocketRole, baseUrl = world
     url.searchParams.set("role", role);
     // Only presence sockets carry the stable anonymous id; viewers stay generic.
     if (role === "presence" && nodeId) url.searchParams.set("id", nodeId);
+    if (role === "presence" && os) url.searchParams.set("os", os);
     return url.toString();
   } catch {
     return "";
@@ -140,6 +199,7 @@ export function sanitizePresenceNodes(value: unknown): PublicPresenceNode[] {
       latitude,
       longitude,
       region: typeof row.region === "string" ? row.region.trim().slice(0, 80) : "",
+      os: normalizePresenceOs(row.os),
       firstSeen: typeof row.firstSeen === "string" ? row.firstSeen : "",
       lastSeen: typeof row.lastSeen === "string" ? row.lastSeen : "",
       // Missing `online` (e.g. an older upsert) is treated as online.
@@ -164,7 +224,7 @@ function reconnectDelay(attempt: number): number {
 }
 
 function createReconnectingSocket(role: PresenceSocketRole, options: ConnectionOptions = {}): () => void {
-  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint(), options.nodeId ?? "");
+  const url = worldPresenceSocketUrl(role, options.baseUrl ?? worldPresenceEndpoint(), options.nodeId ?? "", options.os ?? "");
   if (!url) return () => {};
   const socketFactory = options.socketFactory ?? ((target) => new WebSocket(target));
   const setTimer = options.setTimer ?? ((callback, delay) => setTimeout(callback, delay));
@@ -288,9 +348,9 @@ type PresenceRunnerOptions = ConnectionOptions & { storage?: PresenceStorage };
 /**
  * Maintain one anonymous presence socket for this installation.
  *
- * Presence is ALWAYS on: it shares nothing but an opaque device-local id and a
- * coarse server-derived region, so there is nothing to consent to — every
- * install is simply counted on the board. No opt-in flag gates this.
+ * Presence is ALWAYS on: it shares only an opaque device-local id, a normalized
+ * OS family, and a coarse server-derived region. Every install is counted on
+ * the board; no opt-in flag gates this.
  */
 export function installWorldPresenceConnection(options: PresenceRunnerOptions = {}): () => void {
   const storage = options.storage ?? availableStorage();
@@ -305,12 +365,13 @@ export function installWorldPresenceConnection(options: PresenceRunnerOptions = 
   // Stable, device-local id so this installation is one recorded node forever
   // instead of a new "user" on every reconnect.
   const nodeId = options.nodeId ?? readOrCreateNodeId(storage);
+  const os = options.os ?? currentPresenceOs();
 
   const sync = () => {
     stopSocket?.();
     stopSocket = undefined;
-    if (disposed || !worldPresenceSocketUrl("presence", baseUrl, nodeId)) return;
-    stopSocket = createReconnectingSocket("presence", { ...options, baseUrl, nodeId });
+    if (disposed || !worldPresenceSocketUrl("presence", baseUrl, nodeId, os)) return;
+    stopSocket = createReconnectingSocket("presence", { ...options, baseUrl, nodeId, os });
   };
   const onOnline = () => sync();
 

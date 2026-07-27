@@ -10,7 +10,8 @@
 //
 // Privacy is unchanged from the ephemeral design: the source IP is never read
 // or stored, only Cloudflare's deliberately coarse edge lat/lon is used (then
-// rounded + jittered), and no account or workspace data is accepted at all.
+// rounded + jittered). The only client attribute exposed is a normalized OS
+// family (Windows/macOS/Linux/Other); no account or workspace data is accepted.
 // The stable node id is an opaque, per-installation random string supplied by
 // the client; it identifies nothing but "the same anonymous dot across visits".
 
@@ -60,6 +61,15 @@ export function sanitizeNodeId(raw) {
   return String(raw ?? "").toLowerCase().replace(/[^a-z0-9-]/g, "").slice(0, 64);
 }
 
+/** Reduce platform data to the four anonymous families shown on the map. */
+export function normalizeOsFamily(raw) {
+  const text = String(raw ?? "").toLowerCase();
+  if (text.includes("windows") || /\bwin(?:32|64)?\b/.test(text)) return "Windows";
+  if (text.includes("macintosh") || text.includes("mac os") || text.includes("darwin") || text === "macos") return "macOS";
+  if (text.includes("linux") || text.includes("x11")) return "Linux";
+  return "Other";
+}
+
 /**
  * Reduce Cloudflare edge metadata to a deliberately coarse map point.
  * Source IP and exact request coordinates are never read, returned, or stored.
@@ -93,6 +103,7 @@ export function publicNode(row, online) {
   return {
     id: String(row.id ?? "").slice(0, 96),
     region: String(row.region ?? "").slice(0, 80),
+    os: normalizeOsFamily(row.os),
     latitude: finite(row.latitude),
     longitude: finite(row.longitude),
     firstSeen: String(row.firstSeen ?? row.first_seen ?? ""),
@@ -184,6 +195,17 @@ export class WorldPresence {
     return ids;
   }
 
+  /** Normalized OS family for each live installation; never persisted. */
+  onlineOs(excludedSocket) {
+    const operatingSystems = new Map();
+    for (const socket of this.presenceSockets()) {
+      if (socket === excludedSocket) continue;
+      const data = attachment(socket);
+      if (data?.role === PRESENCE_TAG && data.id) operatingSystems.set(String(data.id), normalizeOsFamily(data.os));
+    }
+    return operatingSystems;
+  }
+
   storedRows() {
     return this.sql
       .exec("SELECT id, region, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes ORDER BY first_seen ASC LIMIT ?", MAX_NODES)
@@ -208,7 +230,11 @@ export class WorldPresence {
     // Recorded rows plus live ephemeral (no stable id) connections. Ephemerals
     // render as online dots but are never persisted, so `total` stays honest:
     // it counts recorded installations only, while `online` counts live sockets.
-    const rows = this.storedRows();
+    const onlineOs = this.onlineOs(excludedSocket);
+    const rows = this.storedRows().map((row) => ({
+      ...row,
+      os: onlineOs.get(String(row.id ?? "")) ?? "Other",
+    }));
     const seen = new Set(rows.map((row) => String(row.id ?? "")));
     for (const socket of this.presenceSockets()) {
       if (socket === excludedSocket) continue;
@@ -261,8 +287,13 @@ export class WorldPresence {
     const [client, server] = Object.values(pair);
     const now = new Date().toISOString();
     if (role === PRESENCE_TAG) {
-      const stableId = sanitizeNodeId(new URL(request.url).searchParams.get("id"));
+      const url = new URL(request.url);
+      const stableId = sanitizeNodeId(url.searchParams.get("id"));
       const id = stableId || randomId();
+      // New clients provide a normalized family explicitly. The user-agent
+      // fallback classifies older releases so the country breakdown works
+      // immediately without exposing browser/version details to viewers.
+      const os = normalizeOsFamily(url.searchParams.get("os") || request.headers.get("User-Agent"));
       const location = coarseLocation({
         country: request.headers.get("X-OWLLM-Country"),
         regionCode: request.headers.get("X-OWLLM-Region"),
@@ -276,9 +307,9 @@ export class WorldPresence {
       // new permanent node and the total would grow without bound.
       const ephemeral = !stableId;
       const row = ephemeral
-        ? { id, region: location.region, latitude: location.latitude, longitude: location.longitude, firstSeen: now, lastSeen: now }
-        : this.recordNode(id, location, now);
-      server.serializeAttachment({ role, id, ephemeral, node: ephemeral ? row : undefined, connectedAt: now });
+        ? { id, region: location.region, os, latitude: location.latitude, longitude: location.longitude, firstSeen: now, lastSeen: now }
+        : { ...this.recordNode(id, location, now), os };
+      server.serializeAttachment({ role, id, os, ephemeral, node: ephemeral ? row : undefined, connectedAt: now });
       this.state.acceptWebSocket(server, [role]);
       this.broadcast({ type: "upsert", node: publicNode(row, true), counts: this.counts(), updatedAt: new Date().toISOString() });
     } else {
@@ -301,7 +332,7 @@ export class WorldPresence {
     if (this.onlineIds(socket).has(id)) return;
     const row = this.storedRow(id);
     const updatedAt = new Date().toISOString();
-    if (row) this.broadcast({ type: "upsert", node: publicNode(row, false), counts: this.counts(socket), updatedAt });
+    if (row) this.broadcast({ type: "upsert", node: publicNode({ ...row, os: data.os }, false), counts: this.counts(socket), updatedAt });
     else this.broadcast({ type: "remove", id: id.slice(0, 96), counts: this.counts(socket), updatedAt });
   }
 

@@ -33,10 +33,12 @@ import {
   type SolarScaleMode,
 } from "./solarSystem";
 import {
+  groupOnlinePresenceByCountry,
   includeSelfDevice,
   readWorldMapMode,
   saveWorldMapMode,
   subscribeWorldPresence,
+  type PresenceOs,
   type PublicPresenceNode,
   type WorldMapMode,
 } from "./worldPresence";
@@ -77,6 +79,7 @@ const FLEET_CAMERA_DISTANCE = 13.2;
 const SYSTEM_OVERVIEW_DISTANCE = 245;
 const WORLD_MIN_DISTANCE = 9.6;
 const FLEET_MIN_DISTANCE = 10.8;
+const OS_DISPLAY_ORDER: PresenceOs[] = ["Windows", "macOS", "Linux", "Other"];
 
 // Direction of the subsolar point (where the sun is directly overhead right now)
 // in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
@@ -525,7 +528,10 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
     scene.add(new THREE.AmbientLight(0xa8c7ef, 0.9));
     // Sun tracks the real subsolar point each frame (see animate loop); this is
     // just the initial placement so the first rendered frame is already correct.
-    const sunLight = new THREE.DirectionalLight(0xffffff, 3.9);
+    // Keep the day side dimensional without bleaching its texture. The former
+    // 3.9 intensity stacked with the solar point light and clipped most surface
+    // detail on the hemisphere facing the Sun.
+    const sunLight = new THREE.DirectionalLight(0xffffff, 1.15);
     const sunLocal = new THREE.Vector3();
     const sunQuat = new THREE.Quaternion();
     sunLight.position.copy(subsolarLocalDir(new Date(), sunLocal)).multiplyScalar(10);
@@ -556,7 +562,7 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       }),
     );
     scene.add(sunGlow);
-    const solarLight = new THREE.PointLight(0xfff2d0, 520, 0, 0.55);
+    const solarLight = new THREE.PointLight(0xfff2d0, 150, 0, 0.55);
     scene.add(solarLight);
 
     // Unit orbit paths are scaled every frame with the same layout math as the
@@ -1022,6 +1028,7 @@ export default function WorldMapPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<GlobeNode | null>(null);
+  const [expandedCountry, setExpandedCountry] = useState<string | null>(null);
   const [fleetError, setFleetError] = useState("");
   // Solar System explorer: which planet the camera is focused on, the imperative
   // focus bridge into the Globe scene, and per-planet texture health for the
@@ -1101,7 +1108,11 @@ export default function WorldMapPage() {
     if (focusedPlanet !== "earth") focusPlanet("earth");
   };
 
-  useEffect(() => { saveWorldMapMode(mode); setSelected(null); }, [mode]);
+  useEffect(() => {
+    saveWorldMapMode(mode);
+    setSelected(null);
+    setExpandedCountry(null);
+  }, [mode]);
 
   useEffect(() => {
     setLoading(true);
@@ -1194,6 +1205,8 @@ export default function WorldMapPage() {
       }), [fleet, mode, publicNodes, selfId, t]);
 
   const onlineCount = nodes.filter((node) => node.online).length;
+  const countries = useMemo(() => groupOnlinePresenceByCountry(publicNodes), [publicNodes]);
+  const nodesById = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
 
   return (
     <div data-ui="WorldMapPage" style={{ height: "100%", minHeight: 0, overflow: "auto", padding: "18px 20px", color: "var(--fg)" }}>
@@ -1369,7 +1382,7 @@ export default function WorldMapPage() {
             {mode === "world" && (
               <div style={{ ...panelStyle(), padding: 13, display: "flex", gap: 9, alignItems: "flex-start", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45 }}>
                 <span aria-hidden style={{ marginTop: 1, color: "var(--accent-ink)" }}>🌐</span>
-                <span>{t("You are counted anonymously — no name, account, device, project, prompt, or exact coordinates are shared.")}</span>
+                <span>{t("Only your OS family and coarse region are shown — no name, account, device identity, project, prompt, or exact coordinates are shared.")}</span>
               </div>
             )}
 
@@ -1379,14 +1392,89 @@ export default function WorldMapPage() {
               </div>
             )}
 
-            <div style={{ ...panelStyle(), padding: 15, flex: 1, minHeight: 140, maxHeight: "56vh", overflowY: "auto" }}>
-              <div style={{ color: "var(--fg-strong)", fontWeight: 750, fontSize: 13, marginBottom: 10 }}>{t("Network signals")}</div>
+            <div style={{ ...panelStyle(), padding: 15, flex: 1, minHeight: 140, maxHeight: "68vh", overflowY: "auto" }}>
+              <div style={{ color: "var(--fg-strong)", fontWeight: 750, fontSize: 13, marginBottom: 10 }}>
+                {mode === "world" ? t("Connected users by country") : t("Network signals")}
+              </div>
               {error && <div style={{ color: "var(--error)", fontSize: 11.5, marginBottom: 10 }}>{error}</div>}
-              {nodes.length === 0 ? (
+              {(mode === "world" ? countries.length === 0 : nodes.length === 0) ? (
                 <div style={{ color: "var(--fg-muted)", fontSize: 12, lineHeight: 1.5 }}>
                   {loading ? t("Scanning the network…") : mode === "world" ? t("No live presence data yet.") : t("No paired devices found.")}
                 </div>
-              ) : [...nodes].sort((a, b) => Number(b.online) - Number(a.online)).map((node) => (
+              ) : mode === "world" ? countries.map((country) => {
+                const countryKey = country.countryCode || "unknown";
+                const expanded = expandedCountry === countryKey;
+                const flag = country.countryCode ? countryCodeToFlag(country.countryCode) : "🌐";
+                return (
+                  <div key={countryKey} style={{ borderBottom: "1px solid var(--border)", padding: "10px 2px" }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "62px minmax(0,1fr)", gap: 12, alignItems: "start" }}>
+                      <button
+                        type="button"
+                        aria-label={`${expanded ? t("Hide") : t("Show")} ${country.countryCode || t("Unknown country")} ${t("connection details")}`}
+                        aria-expanded={expanded}
+                        aria-controls={`world-country-${countryKey}`}
+                        onClick={() => setExpandedCountry((current) => current === countryKey ? null : countryKey)}
+                        title={t("Click the flag for connection details")}
+                        style={{
+                          width: 58, height: 50, padding: 0, borderRadius: 12,
+                          border: expanded ? "1px solid var(--accent-strong)" : "1px solid var(--border)",
+                          background: expanded ? "rgba(var(--accent-rgb),.15)" : "var(--bg-elevated)",
+                          color: "var(--fg-strong)", fontSize: 34, lineHeight: 1,
+                          display: "grid", placeItems: "center",
+                        }}
+                      >
+                        <span aria-hidden>{flag}</span>
+                      </button>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ color: "var(--fg-strong)", fontSize: 13, fontWeight: 800 }}>
+                          {country.nodes.length} {t("users online")}
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 6 }}>
+                          {OS_DISPLAY_ORDER.filter((os) => country.osCounts[os] > 0).map((os) => (
+                            <div key={os} style={{ display: "flex", justifyContent: "space-between", gap: 10, color: "var(--fg-muted)", fontSize: 11.5 }}>
+                              <span>{os === "Other" ? t("Other") : os}</span>
+                              <b style={{ color: "var(--fg-strong)" }}>{country.osCounts[os]}</b>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
+                    {expanded && (
+                      <div
+                        id={`world-country-${countryKey}`}
+                        data-ui="WorldMap:country-details"
+                        style={{
+                          marginTop: 9, maxHeight: 20 * 44, overflowY: "auto", overscrollBehavior: "contain",
+                          border: "1px solid var(--border)", borderRadius: 10, background: "rgba(var(--accent-rgb),.05)",
+                        }}
+                      >
+                        {[...country.nodes].sort((a, b) => a.region.localeCompare(b.region)).map((publicNode) => {
+                          const globeNode = nodesById.get(publicNode.id);
+                          return (
+                            <button
+                              key={publicNode.id}
+                              type="button"
+                              onClick={() => globeNode && handleNodeSelect(globeNode)}
+                              style={{
+                                width: "100%", minHeight: 44, display: "grid", gridTemplateColumns: "9px minmax(0,1fr)", gap: 9,
+                                textAlign: "left", padding: "7px 9px", border: "none", borderBottom: "1px solid var(--border)",
+                                background: selected?.id === publicNode.id ? "rgba(var(--accent-rgb),.12)" : "transparent",
+                                color: "var(--fg)", cursor: "pointer",
+                              }}
+                            >
+                              <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: "var(--accent)", boxShadow: "0 0 9px var(--accent)" }} />
+                              <span style={{ minWidth: 0 }}>
+                                <span style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--fg-strong)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{regionWithFlag(publicNode.region)}</span>
+                                <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t("Approximate server region")} · {publicNode.os === "Other" ? t("Other") : publicNode.os}</span>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              }) : [...nodes].sort((a, b) => Number(b.online) - Number(a.online)).map((node) => (
                 <button key={node.id} onClick={() => handleNodeSelect(node)} style={{ width: "100%", display: "grid", gridTemplateColumns: "9px minmax(0,1fr)", gap: 9, textAlign: "left", padding: "9px 7px", border: "none", borderBottom: "1px solid var(--border)", background: selected?.id === node.id ? "rgba(var(--accent-rgb),.10)" : "transparent", color: "var(--fg)", cursor: "pointer" }}>
                   <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: node.online ? "var(--accent)" : "var(--fg-dim)", boxShadow: node.online ? "0 0 9px var(--accent)" : "none" }} />
                   <span style={{ minWidth: 0 }}>

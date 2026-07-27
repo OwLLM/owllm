@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
 import { Miniflare } from "miniflare";
-import { buildSnapshot, coarseLocation, publicNode, sanitizeNodeId } from "../src/index.js";
+import { buildSnapshot, coarseLocation, normalizeOsFamily, publicNode, sanitizeNodeId } from "../src/index.js";
 
 const KR = { country: "KR", regionCode: "11", latitude: "37.5665", longitude: "126.9780" };
 const IT = { country: "IT", regionCode: "62", latitude: "41.9", longitude: "12.5" };
@@ -59,24 +59,33 @@ test("client node ids are reduced to an opaque, bounded, anonymous token", () =>
   assert.equal(sanitizeNodeId(""), "");
 });
 
+test("operating systems are reduced to coarse anonymous families", () => {
+  assert.equal(normalizeOsFamily("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"), "Windows");
+  assert.equal(normalizeOsFamily("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)"), "macOS");
+  assert.equal(normalizeOsFamily("Mozilla/5.0 (X11; Linux x86_64)"), "Linux");
+  assert.equal(normalizeOsFamily("unrecognized-client"), "Other");
+});
+
 test("snapshots expose only anonymous public fields, mark online, and count them", () => {
   const rows = [
-    { id: "good", region: "KR", latitude: 36, longitude: 128, firstSeen: "t0", lastSeen: "t1", secret: "no" },
+    { id: "good", region: "KR", os: "Windows", latitude: 36, longitude: 128, firstSeen: "t0", lastSeen: "t1", secret: "no" },
     { id: "ghost", region: "IT", latitude: 42, longitude: 12, firstSeen: "t0", lastSeen: "t1" },
     { id: "bad", region: "bad", latitude: 190, longitude: 0, firstSeen: "t0", lastSeen: "t1" },
   ];
   const snapshot = buildSnapshot(rows, new Set(["good"]), Date.parse("2026-07-21T12:00:00Z"));
   assert.equal(snapshot.type, "snapshot");
   assert.equal(snapshot.nodes.length, 2);
-  assert.deepEqual(Object.keys(snapshot.nodes[0]).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "region"]);
+  assert.deepEqual(Object.keys(snapshot.nodes[0]).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
+  assert.equal(snapshot.nodes.find((node) => node.id === "good").os, "Windows");
   assert.equal(snapshot.nodes.find((node) => node.id === "good").online, true);
   assert.equal(snapshot.nodes.find((node) => node.id === "ghost").online, false);
   assert.deepEqual(snapshot.counts, { total: 2, online: 1 });
 });
 
 test("public node shape carries no leaked fields", () => {
-  const node = publicNode({ id: "n", region: "EU", latitude: 48, longitude: 9, first_seen: "a", last_seen: "b", github_login: "leak" }, true);
-  assert.deepEqual(Object.keys(node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "region"]);
+  const node = publicNode({ id: "n", region: "EU", os: "Linux", latitude: 48, longitude: 9, first_seen: "a", last_seen: "b", github_login: "leak" }, true);
+  assert.deepEqual(Object.keys(node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
+  assert.equal(node.os, "Linux");
 });
 
 test("health endpoint identifies the persistent hibernating-WebSocket transport", async () => {
@@ -115,7 +124,7 @@ test("first sighting records the node and broadcasts an online upsert with count
     assert.equal(change.node.region, "KR · 11");
     assert.equal(change.node.online, true);
     assert.notEqual(change.node.latitude, 37.5665);
-    assert.deepEqual(Object.keys(change.node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "region"]);
+    assert.deepEqual(Object.keys(change.node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
     assert.deepEqual(change.counts, { total: 1, online: 1 });
     presence.close(1000, "invisible");
     viewer.close(1000, "done");

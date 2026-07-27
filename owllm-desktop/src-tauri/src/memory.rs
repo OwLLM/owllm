@@ -38,8 +38,7 @@ fn open_db() -> Result<rusqlite::Connection, String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let conn =
-        rusqlite::Connection::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn = crate::projects::open_state_db(&path)?;
     ensure_schema(&conn)?;
     Ok(conn)
 }
@@ -593,10 +592,7 @@ fn rebuild_team_memory_index(conn: &rusqlite::Connection) -> Result<(), String> 
             .collect();
         mapped
     };
-    for id in ids {
-        reindex_team_memory_row(conn, id)?;
-    }
-    Ok(())
+    reindex_ids_atomically(conn, &ids, "owllm_reindex_all")
 }
 
 pub(crate) fn reindex_team_memory_scope(
@@ -615,10 +611,47 @@ pub(crate) fn reindex_team_memory_scope(
             .collect();
         mapped
     };
-    for id in ids {
-        reindex_team_memory_row(conn, id)?;
+    reindex_ids_atomically(conn, &ids, "owllm_reindex_scope")
+}
+
+/// Re-index a batch of rows inside ONE transaction.
+///
+/// `reindex_team_memory_row` issues a DELETE plus one INSERT per term — around
+/// fifty statements for a typical row. In autocommit that is a separate commit,
+/// journal cycle and fsync *per statement*, so re-indexing a project's whole
+/// scope cost tens of thousands of commits. With vault sync doing that for
+/// every project it kept a rollback journal alive almost continuously, and any
+/// concurrent user write failed instantly with "database is locked".
+///
+/// SAVEPOINT rather than BEGIN: callers such as vault import may already hold a
+/// transaction, and a nested BEGIN is an error.
+fn reindex_ids_atomically(
+    conn: &rusqlite::Connection,
+    ids: &[i64],
+    savepoint: &str,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    conn.execute_batch(&format!("SAVEPOINT {savepoint}"))
+        .map_err(|e| format!("begin reindex: {e}"))?;
+    let mut outcome = Ok(());
+    for &id in ids {
+        if let Err(e) = reindex_team_memory_row(conn, id) {
+            outcome = Err(e);
+            break;
+        }
+    }
+    if outcome.is_ok() {
+        conn.execute_batch(&format!("RELEASE {savepoint}"))
+            .map_err(|e| format!("commit reindex: {e}"))?;
+    } else {
+        // Leave the index exactly as it was rather than half-rewritten.
+        let _ = conn.execute_batch(&format!(
+            "ROLLBACK TO {savepoint}; RELEASE {savepoint}"
+        ));
+    }
+    outcome
 }
 
 fn load_index_tokens(

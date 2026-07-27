@@ -312,8 +312,7 @@ fn open_conn() -> Result<rusqlite::Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let conn =
-        rusqlite::Connection::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn = crate::projects::open_state_db(&path)?;
     ensure_schema(&conn)?;
     Ok(conn)
 }

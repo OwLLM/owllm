@@ -89,6 +89,16 @@ export type NotebookState = {
   /// A user may turn auto-feed off before the queue is empty. Keep that
   /// distinct from a naturally completed sequence in the timing display.
   autoFeedStopped?: boolean;
+  /// EXPLICIT one-shot permission to START the chain from a run this queue did
+  /// not itself dispatch. Set only by ▶ Start queue pressed while the agent is
+  /// already busy ("begin as soon as this finishes"), and consumed by the first
+  /// run end that uses it. Without it, `autoFeed` alone was enough for ANY
+  /// clean run to pop a card: a plain chat message on the Coding page ended
+  /// cleanly and silently resumed a queue the user had left switched on days
+  /// earlier, injecting a notebook step as if the user had typed it. The
+  /// checkbox now only governs whether a running chain CONTINUES; starting one
+  /// is always a deliberate click. Device-local: stripped before sync.
+  autoFeedArmed?: boolean;
   /// ADVISORY (unlike the run-lease above, this one DOES sync): the device that
   /// most recently started driving this queue. A peer PC reads it only to SAY
   /// "the queue is running on <name>" — it is never a lock. Device clocks are
@@ -224,6 +234,7 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       autoFeedStartedAt: typeof p.autoFeedStartedAt === "number" ? p.autoFeedStartedAt : undefined,
       autoFeedFinishedAt: typeof p.autoFeedFinishedAt === "number" ? p.autoFeedFinishedAt : undefined,
       autoFeedStopped: p.autoFeedStopped === true,
+      autoFeedArmed: p.autoFeedArmed === true,
       runningOn: p.runningOn && typeof p.runningOn === "object" && typeof p.runningOn.deviceId === "string" && typeof p.runningOn.at === "number"
         ? { deviceId: p.runningOn.deviceId, deviceName: typeof p.runningOn.deviceName === "string" ? p.runningOn.deviceName : p.runningOn.deviceId.slice(0, 8), at: p.runningOn.at }
         : undefined,
@@ -301,6 +312,9 @@ export function takeNextAutoStep(projectId: string | null | undefined, surfaceId
     nb.autoFeedOwner = surfaceId;
     nb.autoFeedHeartbeat = now;
   }
+  // The chain is live from here on: every later card is dispatched by a run
+  // this queue owns, so the one-shot arm has done its job.
+  nb.autoFeedArmed = false;
   nb.runningOn = describeThisDeviceRun(now) ?? nb.runningOn;
   saveNotebook(projectId, nb);
   return next;
@@ -389,6 +403,19 @@ export function markNotebookAutoFeedFinished(projectId: string | null | undefine
 /// continueNotebookAutoFeed alone cannot express.
 export function notebookPendingStepCount(projectId: string | null | undefined): number {
   return loadNotebook(projectId).steps.filter((s) => s.status === "pending").length;
+}
+
+/// Consume the one-shot permission to START the queue from a run the queue did
+/// not dispatch (▶ Start queue pressed while the agent was already busy). True
+/// at most once per press, and only for a surface allowed to drive: a manual
+/// chat turn that ends cleanly must never be able to launch a queue on its own.
+export function consumeAutoFeedArm(projectId: string | null | undefined, surfaceId: string): boolean {
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeedArmed) return false;
+  if (leaseHeldByOtherSurface(nb, surfaceId)) return false;
+  nb.autoFeedArmed = false;
+  saveNotebook(projectId, nb);
+  return true;
 }
 
 /// True when auto-feed is on with pending steps and THIS surface may drive it
@@ -829,8 +856,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     if (running) {
       // Agent is already running — claim auto-feed ownership so the queue
       // starts automatically as soon as the current job finishes, without
-      // steering the live run now.
-      updateNotebook((prev) => ({ ...prev, autoFeed: true, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
+      // steering the live run now. This click is the ONLY thing that lets a
+      // run the queue did not dispatch start one (see autoFeedArmed).
+      updateNotebook((prev) => ({ ...prev, autoFeed: true, autoFeedArmed: true, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
       setQueueNotice("waiting");
       window.setTimeout(() => setQueueNotice(null), 6000);
       return;
@@ -1065,6 +1093,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     : {
                         ...prev,
                         autoFeed: false,
+                        autoFeedArmed: false,
                         autoFeedOwner: undefined,
                         ...(prev.autoFeedStartedAt != null && prev.autoFeedFinishedAt == null
                           ? { autoFeedFinishedAt: stoppedAt, autoFeedStopped: true }

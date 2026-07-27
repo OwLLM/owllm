@@ -66,6 +66,9 @@ const NOTEBOOK_KEY_PREFIX = "owllm:agents:notebook:";
 const NOTEBOOK_EVENT_NAME = "owllm:notebook-changed";
 const NOTEBOOK_RUN_LEASE_FIELDS = [
   "autoFeed", "autoFeedOwner", "autoFeedHeartbeat", "autoFeedStartedAt", "autoFeedFinishedAt", "autoFeedStopped",
+  // One-shot "start the queue when the current run ends", set by a click on THIS
+  // window. Syncing it would let a peer PC start a queue nobody asked it to.
+  "autoFeedArmed",
 ];
 
 /// Return the notebook blob value with its device-local run-lease fields

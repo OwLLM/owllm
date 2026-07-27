@@ -1,8 +1,18 @@
 #!/bin/bash
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-SUDO_PASS="!Farvision."
-_run_sudo() { echo "$SUDO_PASS" | sudo -S "$@"; }
+
+_run_sudo() {
+  if sudo -n true 2>/dev/null; then
+    sudo -n "$@"
+  elif [[ -t 0 ]]; then
+    sudo "$@"
+  else
+    echo "sudo authorization is required; run this setup from an interactive terminal or pre-authorize sudo" >&2
+    return 1
+  fi
+}
+
 cd /home/farisland/OwLLM
 exec > >(tee -a setup-build.log) 2>&1
 

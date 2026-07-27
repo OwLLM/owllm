@@ -8,7 +8,7 @@
 // makes that class impossible to ship silently: it fails the build if any
 // credential material could reach a release artifact or the repository.
 //
-// Three independent checks, all fail-closed:
+// Four independent checks, all fail-closed:
 //   A) CONFIG GUARD  — tauri.conf.json `bundle.resources` may not reference any
 //      credential/runtime path (vault, .owllm state, WebView2 profile, auth
 //      files, secrets, private keys). Blocks the "new glob leaks creds" vector.
@@ -18,6 +18,10 @@
 //   C) TRACKED NAMES — no git-tracked file may have a credential-typed filename
 //      (vault.json, auth.json, *.pem, owllm_agent_secrets.json, .env, …).
 //      Blocks the "a vault got committed and a future glob will ship it" vector.
+//   D) TRACKED VALUES — every git-tracked text file is scanned for real secret
+//      values, plus first-party source is checked for literal credential
+//      assignments and passwords piped to sudo. Blocks secrets in build helpers
+//      and other files outside Tauri's current bundle resource list.
 //
 // Exit 0 = nothing embeddable. Non-zero = a finding + exactly where it is.
 import fs from "node:fs";
@@ -48,6 +52,14 @@ const SECRET_PATTERNS = [
   [/AKIA[0-9A-Z]{16}/, "AWS access key id (AKIA)"],
   [/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/, "private key block"],
 ];
+const CREDENTIAL_ASSIGNMENT_RE =
+  /\b(?:sudo[_-]?pass(?:word)?|password|passwd|passphrase|secret|token|api[_-]?key)\b\s*[:=]\s*(["'])([^\r\n"']{4,})\1/gi;
+const SUDO_STDIN_LITERAL_RE =
+  /\b(?:echo|printf)\s+(["'])([^\r\n"']{4,})\1[^\r\n|]*\|\s*sudo\s+-S\b/gi;
+const PLACEHOLDER_VALUE_RE =
+  /(?:example|sample|dummy|fake|test|mock|redact|mask|placeholder|your[_ -]|change[_ -]?me|password|passphrase|secret|token|api[_ -]?key|x{4,}|\{\{|\$\{|<[^>]+>|\bnone\b|\bnull\b)/i;
+const VENDORED_PATH_RE =
+  /(?:^|\/)(?:node_modules|vendor|third[_-]?party|target|dist|\.tmp_wheels)(?:\/|$)/i;
 
 // ---- credential/runtime paths that must never be bundled or committed --------
 const CRED_PATH_SUBSTRINGS = [
@@ -88,6 +100,32 @@ function scanFileForSecrets(abs, rel) {
   const text = buf.toString("utf8");
   for (const [re, label] of SECRET_PATTERNS) {
     if (re.test(text)) fail("B", rel, `contains ${label}`);
+  }
+}
+
+function scanTrackedTextForSecrets(abs, rel) {
+  let buf;
+  try {
+    buf = fs.readFileSync(abs);
+  } catch {
+    return;
+  }
+  if (buf.length > 5 * 1024 * 1024 || !isProbablyText(buf)) return;
+  const text = buf.toString("utf8");
+  for (const [re, label] of SECRET_PATTERNS) {
+    if (re.test(text)) fail("D", rel, `contains ${label}`);
+  }
+  if (VENDORED_PATH_RE.test(rel)) return;
+
+  for (const match of text.matchAll(CREDENTIAL_ASSIGNMENT_RE)) {
+    const value = match[2];
+    if (PLACEHOLDER_VALUE_RE.test(value) || /[$\\]/.test(value)) continue;
+    fail("D", rel, "contains a literal credential assignment");
+  }
+  for (const match of text.matchAll(SUDO_STDIN_LITERAL_RE)) {
+    const value = match[2];
+    if (PLACEHOLDER_VALUE_RE.test(value) || /[$\\]/.test(value)) continue;
+    fail("D", rel, "pipes a literal credential to sudo");
   }
 }
 
@@ -152,10 +190,13 @@ for (const entry of resources) {
   }
 }
 
-// ---- C) tracked credential-typed filenames ----------------------------------
-const ls = spawnSync("git", ["-C", REPO, "ls-files"], { encoding: "utf8", timeout: 60_000 });
+// ---- C/D) tracked filenames and text values ---------------------------------
+const ls = spawnSync("git", ["-C", REPO, "ls-files", "-z"], {
+  encoding: "utf8",
+  timeout: 60_000,
+});
 if (ls.status === 0 && ls.stdout) {
-  for (const rel of ls.stdout.split(/\r?\n/)) {
+  for (const rel of ls.stdout.split("\0")) {
     if (!rel) continue;
     const base = path.basename(rel).toLowerCase();
     if (base === ".env.example" || base === ".env.sample" || base === ".env.template") continue;
@@ -166,9 +207,19 @@ if (ls.status === 0 && ls.stdout) {
     if (CRED_PATH_SUBSTRINGS.some((s) => rel.toLowerCase().includes(s))) {
       fail("C", rel, "git-tracked runtime/credential path");
     }
+    scanTrackedTextForSecrets(path.join(REPO, rel), rel.replace(/\\/g, "/"));
   }
 } else {
-  console.log("NOTE  git ls-files unavailable — check C (tracked filenames) skipped");
+  fail("C", "repository", "git ls-files unavailable; tracked filenames could not be checked");
+  fail("D", "repository", "git ls-files unavailable; tracked values could not be checked");
+}
+
+// Keep the generic assignment tripwire executable without committing a literal
+// credential fixture that the tracked-value scan would correctly reject.
+const assignmentSelfTest = ["SUDO_", 'PASS="', "not-a-placeholder", '"'].join("");
+CREDENTIAL_ASSIGNMENT_RE.lastIndex = 0;
+if (!CREDENTIAL_ASSIGNMENT_RE.test(assignmentSelfTest)) {
+  fail("D", "credential guard self-test", "literal credential assignment detector is inactive");
 }
 
 // ---- report -----------------------------------------------------------------
@@ -176,8 +227,9 @@ const CHECK_LABEL = {
   A: "config guard (no credential path in bundle.resources)",
   B: "value scan (no secret in a bundled file)",
   C: "tracked names (no credential-typed file committed)",
+  D: "tracked values (no secret in any tracked text file)",
 };
-for (const c of ["A", "B", "C"]) {
+for (const c of ["A", "B", "C", "D"]) {
   const hits = findings.filter((f) => f.check === c);
   if (hits.length === 0) {
     console.log(`PASS ${c}: ${CHECK_LABEL[c]}`);
@@ -192,5 +244,5 @@ if (findings.length > 0) {
   );
   process.exitCode = 1;
 } else {
-  console.log(`credential-embed guard: 3/3 checks clean (${seen.size} bundled files scanned)`);
+  console.log(`credential-embed guard: 4/4 checks clean (${seen.size} bundled files scanned)`);
 }

@@ -1025,11 +1025,6 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   }, [modelId]);
   if (!inline && !open) return null;
 
-  const statusIcon = (s: NotebookStep) => (
-    <ActionIcon name={s.status === "done" ? "check" : s.status === "sent" ? "bolt" : "circle"} size={15} />
-  );
-  const statusColor = (s: NotebookStep) => (s.status === "done" ? "var(--ok)" : s.status === "failed" ? "var(--error)" : s.status === "sent" ? "var(--warn)" : "var(--fg-muted)");
-
   const card: React.CSSProperties = {
     display: "flex", flexDirection: "column", gap: 8,
     background: "var(--bg-card)", border: "1px solid var(--border)", borderRadius: 10,
@@ -1420,18 +1415,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     display: "flex", flexDirection: "column", gap: 8,
                     padding: 10,
                     background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8,
-                    opacity: s.status === "done" ? 0.6 : 1,
+                    opacity: 1,
                   }}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                      <button
-                        onClick={() => setStep(s.id, s.status === "done"
-                          ? { status: "pending", startedAt: undefined, finishedAt: undefined, archivedAt: undefined }
-                          : { status: "done", archivedAt: Date.now() }
-                        )}
-                        title={s.status === "done" ? "Re-open this step" : "Mark done"}
-                        style={{ border: "none", background: "transparent", cursor: "pointer", color: statusColor(s), fontSize: 15, lineHeight: "20px", width: 20, padding: 0, flexShrink: 0 }}
-                      >{statusIcon(s)}</button>
-
                       {editingStepId === s.id ? (
                         <textarea
                           ref={editStepRef}
@@ -1446,7 +1432,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <div
                           onClick={() => startEdit(s)}
                           title="Click to edit"
-                          style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, color: "var(--fg)", textDecoration: s.status === "done" ? "line-through" : "none", whiteSpace: "pre-wrap", wordBreak: "break-word", cursor: "text" }}
+                          style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, color: "var(--fg)", whiteSpace: "pre-wrap", wordBreak: "break-word", cursor: "text" }}
                         >
                           {s.text}
                           {s.status === "sent" && <span style={{ display: "inline-block", marginLeft: 8, fontSize: 10, color: "var(--warn)", border: "1px solid rgba(var(--warn-rgb),0.45)", borderRadius: 999, padding: "1px 7px" }}>fed to team</span>}
@@ -1489,6 +1475,13 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       <button className="ghost-btn" onClick={() => moveStep(s.id, -1)} title="Move up" aria-label="Move up" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="chevron-up" size={14} /></button>
                       <button className="ghost-btn" onClick={() => moveStep(s.id, 1)} title="Move down" aria-label="Move down" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="chevron-down" size={14} /></button>
                       <div style={{ flex: 1 }} />
+                      <button
+                        className="ghost-btn"
+                        onClick={() => setStep(s.id, { status: "done", archivedAt: Date.now() })}
+                        title="Archive this step (moves it to the Archive tab)"
+                        aria-label="Archive step"
+                        style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, flexShrink: 0 }}
+                      ><ActionIcon name="archive" size={12} />Archive</button>
                       <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete step" aria-label="Delete step" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center", color: "var(--error)" }}><ActionIcon name="trash" size={13} /></button>
                     </div>
                   </div>

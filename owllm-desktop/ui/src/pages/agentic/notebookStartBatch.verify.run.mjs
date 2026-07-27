@@ -521,6 +521,34 @@ console.log("case 5d: archive tab sorts newest archived step first");
   act(() => root.unmount());
 }
 
+// ---- 5dd. The Archive button archives an active step without deleting it ----
+console.log("case 5dd: Archive button moves an active step to the Archive tab");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [{ id: "to-archive", text: "step to archive", status: "pending", ts: 1 }],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  check("active step is visible by default", textOf(document.body).includes("step to archive"));
+  const archiveBtn = buttons().find((b) => b.getAttribute("aria-label") === "Archive step");
+  check("Archive button is present with correct aria-label", !!archiveBtn);
+  check("Archive button is visibly labeled", !!archiveBtn && textOf(archiveBtn).includes("Archive"));
+  check("Archive button uses the archive icon", !!archiveBtn && !!archiveBtn.querySelector('svg[data-icon="archive"]'));
+  const trashBtn = buttons().find((b) => b.getAttribute("aria-label") === "Delete step");
+  check("Delete step button remains beside Archive", !!trashBtn);
+  check("no Mark done control remains in the active card", !buttons().some((b) => b.getAttribute("title")?.includes("Mark done")));
+  clickEl(archiveBtn);
+  check("archived step leaves the Active tab", !textOf(document.body).includes("step to archive"));
+  check("step is not deleted from the notebook", blob().steps.some((s) => s.id === "to-archive"));
+  check("step has archivedAt set", typeof blob().steps.find((s) => s.id === "to-archive")?.archivedAt === "number");
+  const archiveTab = buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive"));
+  check("Archive tab shows count 1", !!archiveTab && textOf(archiveTab).includes("(1)"));
+  clickEl(archiveTab);
+  check("archived step appears in the Archive tab", textOf(document.body).includes("step to archive"));
+  act(() => root.unmount());
+}
+
 // ---- 5e. archivedAt survives save/load/restart ----
 console.log("case 5e: archive timestamp persists across save and reload");
 {

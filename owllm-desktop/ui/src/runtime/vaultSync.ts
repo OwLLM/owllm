@@ -110,7 +110,11 @@ function mergeSteps(newer: any[], older: any[], buried: Set<string>): any[] {
   for (const s of newer) {
     if (!s?.id || buried.has(s.id)) continue;
     const prev = byId.get(s.id);
-    byId.set(s.id, !prev || stepProgress(s) >= stepProgress(prev) ? s : prev);
+    const winner = !prev || stepProgress(s) >= stepProgress(prev) ? s : prev;
+    const other = winner === s ? prev : s;
+    const maxArchived = Math.max(winner?.archivedAt ?? 0, other?.archivedAt ?? 0);
+    if (maxArchived > 0) winner.archivedAt = maxArchived;
+    byId.set(s.id, winner);
   }
   const out: any[] = [];
   const emitted = new Set<string>();

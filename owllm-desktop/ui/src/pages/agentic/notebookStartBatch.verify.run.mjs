@@ -496,6 +496,56 @@ console.log("case 5c: a finished (sent + finishedAt) step leaves Active for Arch
   act(() => root.unmount());
 }
 
+// ---- 5d. Archive tab lists archived steps newest-first by persisted timestamp ----
+console.log("case 5d: archive tab sorts newest archived step first");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [
+      { id: "active", text: "active pending step", status: "pending", ts: 1 },
+      { id: "oldest", text: "oldest archived step", status: "done", ts: 2, archivedAt: 1000 },
+      { id: "middle", text: "middle archived step", status: "sent", ts: 3, startedAt: 2000, finishedAt: 2500, archivedAt: 2500 },
+      { id: "newest", text: "newest archived step", status: "done", ts: 4, archivedAt: 5000 },
+    ],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  check("active step is visible by default", textOf(document.body).includes("active pending step"));
+  check("archived steps are hidden by default", !textOf(document.body).includes("oldest archived step"));
+  const archiveTab = buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive"));
+  check("Archive tab shows count 3", !!archiveTab && textOf(archiveTab).includes("(3)"));
+  clickEl(archiveTab);
+  const html = document.body.innerHTML;
+  check("newest archived step appears before middle", html.indexOf("newest archived step") < html.indexOf("middle archived step"));
+  check("middle archived step appears before oldest", html.indexOf("middle archived step") < html.indexOf("oldest archived step"));
+  act(() => root.unmount());
+}
+
+// ---- 5e. archivedAt survives save/load/restart ----
+console.log("case 5e: archive timestamp persists across save and reload");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [
+      { id: "legacy", text: "legacy done step", status: "done", ts: 1 },
+      { id: "dated", text: "dated archived step", status: "done", ts: 2, archivedAt: 9999 },
+    ],
+    autoFeed: false, digest: [],
+  }));
+  const loaded = NB.loadNotebook(PID);
+  check("load preserves explicit archivedAt", loaded.steps.find((s) => s.id === "dated")?.archivedAt === 9999);
+  check("legacy done step falls back to ts", (loaded.steps.find((s) => s.id === "legacy")?.archivedAt ?? loaded.steps.find((s) => s.id === "legacy")?.ts) === 1);
+  NB.saveNotebook(PID, loaded);
+  const reloaded = NB.loadNotebook(PID);
+  check("reloaded keeps archivedAt", reloaded.steps.find((s) => s.id === "dated")?.archivedAt === 9999);
+  check("reloaded keeps fallback ts for legacy", (reloaded.steps.find((s) => s.id === "legacy")?.archivedAt ?? reloaded.steps.find((s) => s.id === "legacy")?.ts) === 1);
+  const { root } = mount({});
+  clickEl(buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive")));
+  const html = document.body.innerHTML;
+  check("newest archived step is first after reload", html.indexOf("dated archived step") < html.indexOf("legacy done step"));
+  act(() => root.unmount());
+}
+
 // ---- 6. auto-feed ownership: only the owning surface pops the queue ----
 console.log("case 6: takeNextAutoStep is gated per surface");
 {

@@ -57,6 +57,9 @@ export type NotebookStep = {
   startedAt?: number;
   /// When the run that processed this step finished.
   finishedAt?: number;
+  /// When the step entered the archive (done, or sent + finished). Persisted so
+  /// restart and sync keep archive ordering independent of creation order.
+  archivedAt?: number;
   /// Concise reason the last run did not complete. Failed steps stay on Active
   /// with a Re-feed action instead of being silently archived.
   failureReason?: string;
@@ -225,6 +228,7 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
               ...s,
               startedAt: typeof s.startedAt === "number" ? s.startedAt : undefined,
               finishedAt: typeof s.finishedAt === "number" ? s.finishedAt : undefined,
+              archivedAt: typeof s.archivedAt === "number" ? s.archivedAt : undefined,
             };
           })
         : [],
@@ -452,7 +456,7 @@ export function markNotebookStepStarted(projectId: string | null | undefined, st
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], status: "sent", startedAt, finishedAt: undefined, failureReason: undefined };
+  nb.steps[idx] = { ...nb.steps[idx], status: "sent", startedAt, finishedAt: undefined, archivedAt: undefined, failureReason: undefined };
   saveNotebook(projectId, nb);
 }
 
@@ -462,7 +466,7 @@ export function markNotebookStepFinished(projectId: string | null | undefined, s
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, failureReason: undefined };
+  nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, archivedAt: finishedAt, failureReason: undefined };
   saveNotebook(projectId, nb);
 }
 
@@ -502,6 +506,7 @@ export function markNotebookStepPending(
     status: "pending",
     startedAt: undefined,
     finishedAt: undefined,
+    archivedAt: undefined,
     failureReason: undefined,
   };
   saveNotebook(projectId, nb);
@@ -536,6 +541,12 @@ export function settleNotebookStep(
 /// step that finished no longer needs a manual check-off to get out of the way.
 export function isStepArchived(s: NotebookStep): boolean {
   return s.status === "done" || (s.status === "sent" && s.finishedAt != null);
+}
+
+/// Deterministic archive timestamp for sorting. Newest records use the explicit
+/// archivedAt; legacy records fall back to finishedAt (sent+finished) or ts.
+function archiveTimestamp(s: NotebookStep): number {
+  return s.archivedAt ?? s.finishedAt ?? s.ts;
 }
 
 /// Format a step's timing line: started → finished, duration, or still running.
@@ -826,7 +837,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     // race React's queued state updater and erase the just-started sequence.
     updateNotebook((prev) => ({
       ...prev,
-      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined, failureReason: undefined } : step),
+      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined, archivedAt: undefined, failureReason: undefined } : step),
       // Claiming the queue makes THIS window its owner even when auto-feed is
       // off: a started queue is driven by one window, and every other open
       // window (another tab here or the app on another PC) ghosts its run
@@ -965,7 +976,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   // The active feed shows only unfinished, actionable cards. Finished steps
   // (checked off OR fed-and-completed) drop out of the feed into the Archive tab.
   const activeSteps = useMemo(() => nb.steps.filter((s) => !isStepArchived(s)), [nb.steps]);
-  const doneSteps = useMemo(() => nb.steps.filter((s) => isStepArchived(s)), [nb.steps]);
+  const doneSteps = useMemo(() => nb.steps.filter((s) => isStepArchived(s)).sort((a, b) => archiveTimestamp(b) - archiveTimestamp(a)), [nb.steps]);
   // ---- Window-owned queue lease (device-local; never synced) --------------
   // Once a window starts the queue (Start queue / auto-feed), it OWNS the run:
   // only that window feeds the team from this list. Every other open window on
@@ -1413,7 +1424,10 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                   }}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                       <button
-                        onClick={() => setStep(s.id, { status: s.status === "done" ? "pending" : "done" })}
+                        onClick={() => setStep(s.id, s.status === "done"
+                          ? { status: "pending", startedAt: undefined, finishedAt: undefined, archivedAt: undefined }
+                          : { status: "done", archivedAt: Date.now() }
+                        )}
                         title={s.status === "done" ? "Re-open this step" : "Mark done"}
                         style={{ border: "none", background: "transparent", cursor: "pointer", color: statusColor(s), fontSize: 15, lineHeight: "20px", width: 20, padding: 0, flexShrink: 0 }}
                       >{statusIcon(s)}</button>
@@ -1496,7 +1510,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                           <ActionIcon name="check" size={13} style={{ color: "var(--ok)", marginTop: 2 }} />
                           <div style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
-                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending", startedAt: undefined, finishedAt: undefined })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
+                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending", startedAt: undefined, finishedAt: undefined, archivedAt: undefined })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
                           <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" aria-label="Delete permanently" style={{ height: 22, width: 22, padding: 0, display: "grid", placeItems: "center", color: "var(--error)", flexShrink: 0 }}><ActionIcon name="trash" size={12} /></button>
                         </div>
                         {formatStepTiming(s) && (

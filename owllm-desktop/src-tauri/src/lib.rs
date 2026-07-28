@@ -485,6 +485,7 @@ pub fn run() {
             browser::browser_status,
             browser::browser_view,
             browser::browser_focus,
+            browser::browser_arrange,
             browser::browser_set_device,
             browser::browser_set_chrome,
             browser_vault::browser_vault_list,

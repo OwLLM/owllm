@@ -24,19 +24,43 @@ check(popupStart !== -1, "the Settings dropdown (HeaderSettingsPopup) exists");
 // The dropdown is the JSX inside `{settingsOpen && ( ... )}`. It closes when the
 // HeaderSettingsPopup </div> is followed by the conditional `)}`. Mode toggles
 // (visibleToggles.map) live later in the same left cluster and must NOT be
-// included, because the global Marketplace button sits between the dropdown and
-// the toggles.
+// included.
 const popupCloseMatch = src.slice(popupStart).match(/<\/div>\s*\n\s*\)\}/);
 check(popupCloseMatch, "the Settings dropdown has a detectable conditional close");
 const popupEnd = popupStart + (popupCloseMatch.index ?? 0) + popupCloseMatch[0].length;
 const popup = src.slice(popupStart, popupEnd);
 
-// --- Marketplace entry: now a global header button, NOT inside the dropdown ---
-// It is intentionally moved to the top-level header cluster (next to Settings / mode
-// toggles) and is validated by openWebUrl.verify.run.mjs. This dropdown must NOT
-// contain a duplicate Marketplace entry.
+// --- Marketplace entry: Settings only, never permanent header chrome ---
 const marketIdx = popup.indexOf('data-ui="MarketplaceButton"');
-check(marketIdx === -1, "MarketplaceButton is no longer inside the Settings dropdown");
+check(marketIdx !== -1, "MarketplaceButton is inside the Settings dropdown");
+check(/MarketplaceButton[\s\S]*?onOpenMarketplace\(\)/.test(popup),
+  "the Settings Marketplace button opens Marketplace");
+check((src.match(/data-ui="MarketplaceButton"/g) ?? []).length === 1,
+  "Marketplace has one entry and is not duplicated in the header");
+
+// --- Dedicated resource/integration navigation row ---
+const navigationIdx = popup.indexOf('data-ui="SettingsNavigationRow"');
+check(navigationIdx !== -1, "the dropdown contains the dedicated resource navigation row");
+for (const [key, label] of [
+  ["assets", "Assets"],
+  ["bridges", "Bridges"],
+  ["mcp", "MCP"],
+  ["accounts", "Accounts"],
+]) {
+  check(popup.includes(`{ key: "${key}"`) && popup.includes(`label: "${label}"`),
+    `${label} is exposed from the dedicated Settings row`);
+}
+const navigationBlock = popup.slice(navigationIdx, popup.indexOf("</div>", navigationIdx));
+check(navigationBlock.includes('gridTemplateColumns: "repeat(4, minmax(0, 1fr))"'),
+  "Assets, Bridges, MCP, and Accounts share one four-column row");
+check(navigationBlock.includes("onOpenSettingsPage(item.key)"),
+  "the dedicated row routes each destination through shell navigation");
+
+const subTabsAt = src.indexOf("function SubTabs(");
+const subTabsEnd = src.indexOf("// PageModal", subTabsAt);
+const subTabs = src.slice(subTabsAt, subTabsEnd);
+check(subTabs.includes("SETTINGS_NAV_KEYS") && subTabs.includes("pages.filter"),
+  "Settings destinations are filtered out of the workspace tab strip");
 
 // --- Label text ---
 const signingIdx = popup.indexOf('data-ui="SettingsSigningRow"');
@@ -67,11 +91,13 @@ const signingBlock = popup.slice(signingIdx, popup.indexOf("</button>", signingI
 check(signingBlock.includes('width: "100%"') && signingBlock.includes("display: \"flex\""),
   "the Signing entry renders on its own separate full-width line");
 
-// --- Ordering: Signing and Onboarding lead, GitHub container stays last ---
+// --- Ordering: destination rows lead, GitHub container stays last ---
 const onboardingIdx = popup.indexOf('data-ui="SettingsOnboardingRow"');
 const accountIdx = popup.indexOf('data-ui="SettingsAccountRow"');
 check(onboardingIdx !== -1, "the dropdown contains the onboarding entry (SettingsOnboardingRow)");
 check(accountIdx !== -1, "the GitHub container (SettingsAccountRow) exists in the dropdown");
+check(marketIdx < navigationIdx && navigationIdx < signingIdx,
+  "Marketplace and the dedicated navigation row precede Signing");
 check(signingIdx < onboardingIdx,
   "the Signing entry is positioned before the Onboarding entry");
 check(onboardingIdx < accountIdx,

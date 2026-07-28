@@ -21,6 +21,12 @@ import TeamMemoryModal from "./TeamMemoryModal";
 import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, markNotebookStepPending, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
+import {
+  environmentPromptBlock,
+  launchProjectEnvironment,
+  parseProjectEnvironment,
+  type ProjectEnvironment,
+} from "./projectEnvironment";
 import RulesEditor from "./RulesEditor";
 import IconPickerDialog, {
   getAgentIconOverride,
@@ -304,8 +310,15 @@ function buildGraphJson(opts: {
   agentVoices: Map<string, VoiceConfig>;
   agentSkills: Map<string, string[]>;
   agentToolExtras: Map<string, string[]>;
+  previousGraphJson?: string | null;
 }): string {
+  let previous: Record<string, unknown> = {};
+  try {
+    const parsed = JSON.parse(opts.previousGraphJson || "{}");
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) previous = parsed;
+  } catch { /* malformed legacy graph — rebuild the known fields */ }
   return JSON.stringify({
+    ...previous,
     edges: opts.edges,
     roster: opts.agents.map(a => ({
       name: a.name,
@@ -6993,6 +7006,8 @@ function buildOrchestratorPrompt(
   perAgentSkills?: Map<string, string[]>,
   /// Absolute project root — so the orchestrator references the real folder.
   projectCwd?: string | null,
+  /// Job-specific workspace/browser recipe saved with the project.
+  projectEnvironment?: ProjectEnvironment | null,
 ): string {
   // Edge-seeded roster (P0-2, §0.4 lockstep with dispatch.ts): with a
   // graph present the orchestrator only sees its edge-wired specialists.
@@ -7139,6 +7154,7 @@ function buildOrchestratorPrompt(
     "5. Dispatch only the agents the task needs (skip it for a trivial question you can answer yourself), and converge — don't re-plan or re-loop the critic once you can dispatch. They run in parallel; you'll be invoked again with their replies to write the final answer.",
     "6. To SHIP, dispatch a coder/operator to EXECUTE the whole sequence in one instruction (fix → commit/push/build/publish) and confirm it from the command output — not a plan-only turn.",
     "",
+    environmentPromptBlock(projectEnvironment),
     projectWorkspaceBlock(projectCwd),
     "  - When a task touches files, put the project root in the specialist's instruction so it doesn't go looking elsewhere.",
     "",
@@ -7165,6 +7181,7 @@ function buildSpecialistPrompt(
   /// Lean profile (solo / ≤3-agent runs): swap the memory tutorial for the short
   /// hint. The snapshot/RAG caps shrink via setLeanRun — set at run start.
   lean?: boolean,
+  projectEnvironment?: ProjectEnvironment | null,
 ): string {
   const role = roleByName.get(spec.base);
   const personal = spec.runtimePersonal;
@@ -7202,6 +7219,8 @@ function buildSpecialistPrompt(
     layers.push(directivesBlock);
   }
   if (personal?.rulesBlock) layers.push(personal.rulesBlock);
+  const environmentBlock = environmentPromptBlock(projectEnvironment);
+  if (environmentBlock) layers.push(environmentBlock);
   layers.push(projectWorkspaceBlock(projectCwd));
   layers.push(TEAM_OPERATING_CONTRACT);
   if (!personal || personal.memoryScope !== "none") {
@@ -9136,7 +9155,11 @@ export function AgentsPage({
   const onNewProject = () => { setSettingsMode("new"); setNewProjOpen(true); };
   const onProjectCreated = async (
     row: ProjectRow,
-    kickoff: { kind: string; action: "brainstorm" | "goal" },
+    kickoff: {
+      kind: string;
+      action: "brainstorm" | "goal";
+      environment: ProjectEnvironment;
+    },
   ) => {
     const rows = await reloadProjects();
     // Select the freshly-created project. Fall back to id from the
@@ -9147,6 +9170,15 @@ export function AgentsPage({
     setProjectHubOpen(false);
     setPickedTeamId(null);
     setTrustWritesOverride(null);
+    // Environment setup is deliberately non-blocking: opening browser tabs or
+    // arranging the preview must never freeze project creation or the main GUI.
+    // Fail visibly, but keep the newly-created project usable.
+    window.setTimeout(() => {
+      void launchProjectEnvironment(kickoff.environment, (command, args) => invoke(command, args))
+        .catch((e: any) => window.alert(
+          `Project created, but its environment could not be opened:\n\n${e?.message ?? e}\n\nYou can retry from ⚙ Project settings.`,
+        ));
+    }, 0);
     if (kickoff.action === "brainstorm") {
       setBrainstormSeed(target.description ?? "");
       // Let the selected project and its workspace propagate before mounting
@@ -9655,6 +9687,7 @@ export function AgentsPage({
           agents: tmpl.agents,
           agentModels: perAgentModel, agentVoices: perAgentVoice,
           agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
+          previousGraphJson: selectedProject.graph_json,
         }),
       },
     });
@@ -9687,6 +9720,7 @@ export function AgentsPage({
             edges: t.edges, agents: t.agents,
             agentModels: new Map(), agentVoices: new Map(),
             agentSkills: new Map(), agentToolExtras: new Map(),
+            previousGraphJson: selectedProject.graph_json,
           }),
         },
       });
@@ -9758,6 +9792,7 @@ export function AgentsPage({
               agents: activeTeam?.agents ?? [],
               agentModels: perAgentModel, agentVoices: perAgentVoice,
               agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
+              previousGraphJson: selectedProject.graph_json,
             }),
           },
         });
@@ -9793,6 +9828,7 @@ export function AgentsPage({
               agents: activeTeam?.agents ?? [],
               agentModels: perAgentModel, agentVoices: perAgentVoice,
               agentSkills: perAgentSkills, agentToolExtras: perAgentToolExtras,
+              previousGraphJson: selectedProject.graph_json,
             }),
           },
         });
@@ -11197,6 +11233,7 @@ export function AgentsPage({
     // against the directory the user picked in the LocationRow, not
     // the desktop app's install dir. Empty / unset → CLI inherits cwd.
     let projectCwd = runCwd;
+    const runEnvironment = parseProjectEnvironment(selectedProject?.graph_json);
     // Host-path reachability fallback. ONLY for non-WSL paths: a WSL isolation
     // path (`\\wsl.localhost\...`) runs via wsl.exe, and Windows can't reliably
     // stat that UNC even when the distro is perfectly healthy — checking it here
@@ -11388,7 +11425,7 @@ export function AgentsPage({
           "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
           "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
         ].join("\n");
-        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, soloCwd, true) + "\n" + SOLO_OVERRIDE;
+        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, soloCwd, true, runEnvironment) + "\n" + SOLO_OVERRIDE;
         const sAllowed = effectiveToolsFor(coder);
         const soloMemKey = runtimeMemoryKey(coder, selectedProjectId);
         const sMem = soloMemKey
@@ -11685,7 +11722,7 @@ export function AgentsPage({
         runtimeSkillIds(orch, orchSkillIds),
         !!orch.runtimePersonal,
       );
-      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd);
+      const orchPrompt = buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd, runEnvironment);
       appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
       const orchModel = effectiveModelFor(orch);
       let orchReply: string;
@@ -12275,7 +12312,7 @@ export function AgentsPage({
             });
           }
           const enrichedInstruction = enrichInstructionWithMemory(taskMem.block, instruction);
-          const sysPrompt = buildSpecialistPrompt(runTeam, spec, roleByName, directives, skillBlock, chainCwd, runTeam.agents.length <= 3);
+          const sysPrompt = buildSpecialistPrompt(runTeam, spec, roleByName, directives, skillBlock, chainCwd, runTeam.agents.length <= 3, runEnvironment);
           // PER-AGENT VERIFY-FIX LOOP (Build Shape slice 1, step 5+6): a coder does
           // not return one-shot. After it edits, the GATE runs the project's check
           // in the coder's own cwd; on a real FAILURE it gets the captured error and
@@ -12402,7 +12439,7 @@ export function AgentsPage({
           const members = wiredDispatchTargets(runTeam, leader.name) ?? new Set<string>();
           const leaderModel = effectiveModelFor(leader);
           const leaderPrompt = buildOrchestratorPrompt(
-            runTeam, roleByName, leader, directives, false, undefined, false, undefined, undefined, perAgentSkills, projectCwd,
+            runTeam, roleByName, leader, directives, false, undefined, false, undefined, undefined, perAgentSkills, projectCwd, runEnvironment,
           );
           // 1. Leader plans + emits @member dispatches.
           addActive(leader.name);
@@ -12610,7 +12647,7 @@ export function AgentsPage({
       try {
         finalReply = await streamChatCompletion(
           port, finalModel, providerFor(finalModel),
-          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd), integrationInput,
+          buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd, runEnvironment), integrationInput,
           tempFor(orch, 0.4), ctrl.signal,
           (delta) => streamLog(orch.name, delta),
           projectCwd,
@@ -12691,7 +12728,7 @@ export function AgentsPage({
           try {
             const revised = await streamChatCompletion(
               port, finalModel, providerFor(finalModel),
-              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd),
+              buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd, runEnvironment),
               [
                 "Your final answer:",
                 finalReply,
@@ -12734,7 +12771,7 @@ export function AgentsPage({
         try {
           const steered = await streamChatCompletion(
             port, finalModel, providerFor(finalModel),
-            buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd),
+            buildOrchestratorPrompt(runTeam, roleByName, orch, directives, directorMode, briefText, parallelMode, parallelGuidance, orchSkillBlock, perAgentSkills, projectCwd, runEnvironment),
             [
               "Your answer so far:",
               finalReply,
@@ -12853,7 +12890,7 @@ export function AgentsPage({
         try {
           await streamChatCompletion(
             port, effectiveModelFor(docSpec), providerFor(effectiveModelFor(docSpec)),
-            buildSpecialistPrompt(runTeam, docSpec, roleByName, directives, docSkillBlock, docCwd, runTeam.agents.length <= 3),
+            buildSpecialistPrompt(runTeam, docSpec, roleByName, directives, docSkillBlock, docCwd, runTeam.agents.length <= 3, runEnvironment),
             docInstruction, tempFor(docSpec, 0.3), ctrl.signal,
             (delta) => streamLog(docSpec.name, delta),
             docCwd,

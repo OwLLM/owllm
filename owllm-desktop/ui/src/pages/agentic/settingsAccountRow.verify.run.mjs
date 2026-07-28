@@ -39,6 +39,27 @@ check(popupAt !== -1 && rowAt > popupAt, "the account row is rendered inside the
 check(row3At !== -1 && rowAt > row3At, "the account row is the final row — after SettingsRow3 (chat text size)");
 
 // ── 2. ABSENT from the Home page ──────────────────────────────────────────
+// Established navigation placement: Marketplace is a full-width Settings
+// entry, and resource/integration destinations share one dedicated row.
+// Keep these assertions in an auto-discovered harness so a stale test cannot
+// silently move them back into permanent header/SubTabs chrome.
+const popupCloseMatch = shell.slice(popupAt).match(/<\/div>\s*\n\s*\)\}/);
+check(popupCloseMatch, "the Settings popup has a detectable conditional close");
+const popupEnd = popupAt + (popupCloseMatch.index ?? 0) + popupCloseMatch[0].length;
+const popup = shell.slice(popupAt, popupEnd);
+const marketplaceAt = popup.indexOf('data-ui="MarketplaceButton"');
+const navigationAt = popup.indexOf('data-ui="SettingsNavigationRow"');
+check(marketplaceAt !== -1 && (shell.match(/data-ui="MarketplaceButton"/g) ?? []).length === 1,
+  "Marketplace exists exactly once, inside the Settings popup");
+check(navigationAt > marketplaceAt && navigationAt < popup.indexOf('data-ui="SettingsSigningRow"'),
+  "the dedicated navigation row follows Marketplace and precedes Signing");
+for (const key of ["assets", "bridges", "mcp", "accounts"]) {
+  check(popup.includes(`{ key: "${key}"`), `${key} is present in the dedicated Settings navigation row`);
+}
+check(shell.includes('const SETTINGS_NAV_KEYS = new Set(["assets", "bridges", "mcp", "accounts"])')
+  && shell.includes("const tabPages = pages.filter(p => !SETTINGS_NAV_KEYS.has(p.key));"),
+  "Settings destinations are excluded from the persistent workspace tab strip");
+
 check(!home.includes('data-ui="SyncAccountBar"'), "the SyncAccountBar is gone from the Home page");
 check(!home.includes("openSyncOnboarding"), "the Home page no longer references openSyncOnboarding");
 check(!home.includes("githubStatus"), "the Home page no longer imports/uses githubStatus");

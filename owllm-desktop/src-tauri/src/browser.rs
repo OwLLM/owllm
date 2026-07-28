@@ -1930,6 +1930,9 @@ pub fn browser_set_device(app: tauri::AppHandle, device: String) -> Result<Strin
     let dev = device_by_name(&device).ok_or_else(|| {
         format!("unknown device {device:?} — use desktop, iphone, android or tablet")
     })?;
+    if current_device().name == dev.name {
+        return Ok(format!("device already set to {}", dev.name));
+    }
     *CURRENT_DEVICE.lock().unwrap_or_else(|p| p.into_inner()) = dev.name;
 
     let Some(_win) = get_window(&app) else {
@@ -2146,6 +2149,45 @@ pub fn browser_focus(app: tauri::AppHandle) -> Result<(), String> {
         let _ = win.set_focus();
     }
     Ok(())
+}
+
+/// Place the browser on the right half of the monitor containing OwLLM.
+///
+/// Deliberately resize only the browser: project setup must never seize or
+/// permanently reshape the user's main app window. The user can still move or
+/// resize either window afterwards. Logical coordinates keep this correct on
+/// mixed-DPI Windows displays as well as macOS/Linux.
+#[tauri::command(async)]
+pub fn browser_arrange(app: tauri::AppHandle, layout: String) -> Result<String, String> {
+    if layout.trim() != "right-half" {
+        return Err(format!("unknown browser layout {layout:?}"));
+    }
+    let _operation = lock_browser_operation();
+    browser_start_inner(&app)?;
+    let browser = get_window(&app).ok_or_else(|| "browser window is unavailable".to_string())?;
+    let monitor = app
+        .get_window("main")
+        .and_then(|window| window.current_monitor().ok().flatten())
+        .or_else(|| app.primary_monitor().ok().flatten())
+        .ok_or_else(|| "could not determine a monitor for the browser".to_string())?;
+    let scale = monitor.scale_factor();
+    let origin = monitor.position().to_logical::<f64>(scale);
+    let size = monitor.size().to_logical::<f64>(scale);
+    let margin = 12.0;
+    let gap = 8.0;
+    let available_width = (size.width - margin * 2.0 - gap).max(320.0);
+    let half = (available_width / 2.0).max(640.0).min(available_width);
+    let height = (size.height - margin * 2.0).max(320.0);
+    let x = origin.x + size.width - margin - half;
+    let y = origin.y + margin;
+    let _ = browser.unmaximize();
+    browser
+        .set_position(LogicalPosition::new(x, y))
+        .map_err(|e| format!("position browser: {e}"))?;
+    browser
+        .set_size(LogicalSize::new(half, height))
+        .map_err(|e| format!("resize browser: {e}"))?;
+    Ok("browser arranged on the right half of the current monitor".to_string())
 }
 
 #[cfg(test)]

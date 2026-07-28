@@ -5,9 +5,8 @@
 // main.py:4284-4297 exactly. The ModeBar toggles (Fine Tuning /
 // Agentic Team / Gamify) are a single-active state machine; only
 // the active mode's pages plus the always-on Core pages render in
-// SubTabs. The ⚙ Advanced toggle is independent and additive — when
-// on, it appends the Advanced module's pages (MCP / Environment /
-// Accounts / Logs) regardless of the active mode.
+// SubTabs. Advanced page components remain globally reachable; compact
+// destinations such as MCP and Accounts live in the Settings dropdown.
 //
 // All page definitions live in core/modules.ts so each mode is a
 // self-contained installable feature. Adding/removing a page does
@@ -613,7 +612,7 @@ const HEADER_TAB_WORKING_ANIMATION = "owllm-tab-working 1.4s ease-in-out infinit
 function ModeBar({
   mode, setMode, installed,
   themeMode, onToggleThemeMode, accentKey, onPickAccent, textColorKey, textColor, onPickTextColor, onOpenServer,
-  onOpenMarketplace, onOpenSigning,
+  onOpenMarketplace, onOpenSigning, onOpenSettingsPage,
   onWatcher, watcherHint, keepFrameVisible, onKeepFrameVisible,
   chatFontStep, onChatFontStep,
   onFrameWatcherEnter, onFrameWatcherLeave,
@@ -631,6 +630,7 @@ function ModeBar({
   onOpenServer: () => void;
   onOpenMarketplace: () => void;
   onOpenSigning: () => void;
+  onOpenSettingsPage: (key: string) => void;
   /// The Watcher (P0-8): in overlay-frame mode the decorative owl window is
   /// click-through, so the centered OWLLM title (directly beneath the owl)
   /// doubles as the summon point.
@@ -979,10 +979,60 @@ function ModeBar({
                 })()}
               </div>
 
-              {/* Signing / credential hub entry — its own separate line,
-                  positioned immediately before the GitHub container so that
-                  container stays the last item of the dropdown in every state.
-                  Opens the Signing hub as a centered popup (PageModal) — it is
+              {/* Marketplace is a Settings destination, not permanent header
+                  chrome. Keep it on a full-width line so the label remains
+                  clear at every supported UI scale. */}
+              <button
+                data-ui="MarketplaceButton"
+                onClick={() => { setSettingsOpen(false); onOpenMarketplace(); }}
+                title="Open OWLLM Marketplace"
+                style={{
+                  display: "flex", alignItems: "center", gap: 10, width: "100%",
+                  marginTop: 10, padding: "10px 14px", borderRadius: 10, boxSizing: "border-box",
+                  background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                  color: "var(--fg)", cursor: "pointer", textAlign: "left",
+                }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 18, flexShrink: 0 }}>🛍️</span>
+                <span style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 13.5 }}>Marketplace</span>
+                <span aria-hidden="true" style={{ fontSize: 12.5, fontWeight: 800, color: "var(--fg-muted)", flexShrink: 0 }}>→</span>
+              </button>
+
+              {/* Project resources and integrations belong together in one
+                  dedicated navigation row instead of consuming workspace tabs. */}
+              <div data-ui="SettingsNavigationRow" style={{
+                display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 6,
+                marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)",
+              }}>
+                {([
+                  { key: "assets", icon: "🖼️", label: "Assets" },
+                  { key: "bridges", icon: "🌉", label: "Bridges" },
+                  { key: "mcp", icon: "🧩", label: "MCP" },
+                  { key: "accounts", icon: "🔐", label: "Accounts" },
+                ] as const).map(item => (
+                  <button
+                    key={item.key}
+                    data-ui={`Settings${item.label}Button`}
+                    onClick={() => { setSettingsOpen(false); onOpenSettingsPage(item.key); }}
+                    title={`Open ${item.label}`}
+                    style={{
+                      minWidth: 0, minHeight: 58, padding: "7px 3px", borderRadius: 8,
+                      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 4,
+                      background: "var(--bg-elevated)", border: "1px solid var(--border-strong)",
+                      color: "var(--fg)", cursor: "pointer",
+                    }}
+                  >
+                    <span aria-hidden="true" style={{ fontSize: 18, lineHeight: 1 }}>{item.icon}</span>
+                    <span style={{
+                      maxWidth: "100%", overflow: "hidden", textOverflow: "ellipsis",
+                      fontSize: 10.5, fontWeight: 700, lineHeight: 1.15,
+                    }}>{item.label}</span>
+                  </button>
+                ))}
+              </div>
+
+              {/* Signing / credential hub entry — its own separate line.
+                  Opens the Signing hub as a centered popup (PageModal); it is
                   no longer a header tab, so this dropdown row is its only entry. */}
               <button
                 data-ui="SettingsSigningRow"
@@ -1069,27 +1119,6 @@ function ModeBar({
             </div>
           )}
         </div>
-
-        <button
-          data-ui="MarketplaceButton"
-          data-no-drag
-          onClick={onOpenMarketplace}
-          title="Open OWLLM Marketplace"
-          style={{
-            ...baseBtn,
-            width: 128,
-            display: "inline-flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: 7,
-          }}
-        >
-          <ActionIcon name="external-link" size={15} />
-          <span>Marketplace</span>
-        </button>
-
-        {/* Advanced toggle removed — MCP/Accounts are always visible in the
-            SubTabs right cluster, and Record moved there too. */}
 
         {/* Mode toggles — single-active. Click toggles back to "home" if
             the same mode is clicked twice. Hidden when the mode isn't
@@ -1268,12 +1297,11 @@ function SysInfoBlock({ onOpenServer }: { onOpenServer: () => void }) {
 // ---------------------------------------------------------------------
 // SubTabs — composed dynamically from the visible page list.
 // ---------------------------------------------------------------------
-// Page keys that should be right-aligned in the SubTabs row: Info
-// (from CORE), Server (a modal trigger the user wants parked on the
-// right next to Info), plus everything contributed by ADVANCED. They're
-// the "utility" pages, visually separated from the work surfaces by a
-// flex spacer.
-const RIGHT_ALIGNED_KEYS = new Set(["info", "server", "mcp", "environment", "accounts", "devices", "logs"]);
+// Page keys that should be right-aligned in the SubTabs row: Info,
+// Server, and remaining utility pages. Settings destinations are kept
+// mounted in the page list but filtered from this workspace tab strip.
+const RIGHT_ALIGNED_KEYS = new Set(["info", "server", "environment", "devices", "logs"]);
+const SETTINGS_NAV_KEYS = new Set(["assets", "bridges", "mcp", "accounts"]);
 
 function SubTabs({
   pages, activeKey, onChange,
@@ -1354,11 +1382,12 @@ function SubTabs({
     );
   };
 
-  const leftTabs  = pages.filter(p => !RIGHT_ALIGNED_KEYS.has(p.key));
-  const rightRaw  = pages.filter(p =>  RIGHT_ALIGNED_KEYS.has(p.key));
-  // Fixed right-cluster order: utilities (MCP, Accounts) first, then
-  // Server, then Info pinned last. Final cluster: ● Record · MCP ·
-  // Accounts · Server · Info.
+  const tabPages = pages.filter(p => !SETTINGS_NAV_KEYS.has(p.key));
+  const leftTabs  = tabPages.filter(p => !RIGHT_ALIGNED_KEYS.has(p.key));
+  const rightRaw  = tabPages.filter(p =>  RIGHT_ALIGNED_KEYS.has(p.key));
+  // Fixed right-cluster order: remaining utilities first, then Server,
+  // then Info pinned last. Assets, Bridges, MCP, and Accounts live in
+  // the dedicated Settings navigation row.
   const rightTabs = [
     ...rightRaw.filter(p => p.key !== "info" && p.key !== "server"),
     ...rightRaw.filter(p => p.key === "server"),
@@ -1762,8 +1791,9 @@ export default function AppShell() {
         out.push(...m.pages);
       }
     }
-    // Advanced pages (MCP / Accounts) are ALWAYS visible now — the old
-    // ⚙ Advanced toggle is gone; they live in the right cluster of SubTabs.
+    // Keep Advanced page components reachable regardless of active mode.
+    // MCP and Accounts are opened from the Settings navigation row rather
+    // than consuming persistent workspace tabs.
     if (installed.includes("advanced")) {
       out.push(...ADVANCED.pages);
     }
@@ -1882,6 +1912,9 @@ export default function AppShell() {
             onOpenMarketplace={() => {
               openWebUrl(MARKETPLACE_URL)
                 .catch((error) => console.error("Could not open OWLLM Marketplace", error));
+            }}
+            onOpenSettingsPage={(key) => {
+              window.dispatchEvent(new CustomEvent("owllm:navigate", { detail: { key } }));
             }}
             onWatcher={openWatcher}
             watcherHint={watcherHint && overlayFrame}

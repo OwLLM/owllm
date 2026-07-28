@@ -4034,7 +4034,7 @@ export default function CodePage() {
                 color: on ? "var(--fg-strong)" : "var(--fg-muted)", fontSize: 12, fontWeight: on ? 700 : 500,
                 // Glow while an agent runs on this page — visible even from
                 // another tab, so you can see WHERE work is happening.
-                animation: working ? "owllm-tab-working 1.4s ease-in-out infinite" : undefined,
+                animation: working ? continuousUiAnimation("owllm-tab-working 1.4s ease-in-out infinite") : undefined,
               }}
             >
               {/* Live rainbow dot while working (matches the agentic aura). */}

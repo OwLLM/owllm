@@ -127,9 +127,10 @@ fn install_crash_log_hook() {
 }
 
 /// WebKitGTK's DMA-BUF renderer has recurring failures with proprietary NVIDIA
-/// drivers, including SIGBUS exits on Jetson/arm64. Apply WebKit's supported
-/// fallback before the GTK/WebKit process tree starts, but only on NVIDIA Linux
-/// and never override an explicit operator choice.
+/// drivers, including SIGBUS exits on Jetson/arm64. Disable only that renderer
+/// before the GTK/WebKit process tree starts. WebKit's compositing mode must
+/// stay enabled: forcing software compositing makes a small CSS animation
+/// continuously repaint the whole window and saturate a CPU core.
 #[cfg(target_os = "linux")]
 fn configure_linux_webkit_renderer() {
     let has_nvidia_driver = std::path::Path::new("/proc/driver/nvidia/version").is_file()
@@ -140,15 +141,7 @@ fn configure_linux_webkit_renderer() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
-    // Jetson's arm64 NVIDIA/WebKitGTK stack can still abort in accelerated
-    // compositing after DMA-BUF is disabled. Keep x86_64 acceleration intact,
-    // but use WebKitGTK's software-compositing fallback on NVIDIA arm64.
-    if cfg!(target_arch = "aarch64")
-        && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none()
-    {
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-    }
-    eprintln!("[owllm] NVIDIA Linux detected; unstable WebKitGTK renderers disabled for stability");
+    eprintln!("[owllm] NVIDIA Linux detected; WebKitGTK DMA-BUF renderer disabled");
 }
 
 #[cfg(not(target_os = "linux"))]

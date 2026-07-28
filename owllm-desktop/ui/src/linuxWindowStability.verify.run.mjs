@@ -36,8 +36,8 @@ check(
   /var_os\("WEBKIT_DISABLE_DMABUF_RENDERER"\)\.is_none\(\)[\s\S]*set_var\("WEBKIT_DISABLE_DMABUF_RENDERER"/.test(rust),
 );
 check(
-  "NVIDIA arm64 also disables unstable accelerated compositing",
-  /cfg!\(target_arch = "aarch64"\)[\s\S]*var_os\("WEBKIT_DISABLE_COMPOSITING_MODE"\)\.is_none\(\)[\s\S]*set_var\("WEBKIT_DISABLE_COMPOSITING_MODE"/.test(rust),
+  "NVIDIA Linux keeps WebKit compositing enabled instead of saturating a CPU core",
+  !rust.includes('set_var("WEBKIT_DISABLE_COMPOSITING_MODE"'),
 );
 check(
   "Linux AppImage autostart uses the persistent image path instead of its temporary mount",

@@ -19,9 +19,6 @@ import { continuousUiMotionEnabled } from "../runtime/renderingPolicy";
 export function useAnimatedPhase(active: boolean): number {
   const [phase, setPhase] = useState(0);
   useEffect(() => {
-    // Linux WebKit's static activity treatment is deliberate: on machines
-    // using its software compositor, this loop caused full heavy-view React
-    // repaints at 30fps on top of the CSS aura repaints.
     if (!active || !continuousUiMotionEnabled()) return;
     let raf = 0;
     let lastEmit = 0;

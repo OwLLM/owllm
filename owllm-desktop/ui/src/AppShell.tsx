@@ -425,16 +425,33 @@ function HybridFrame({ children, outerW, outerH, showWatcherHint, frameVisible }
   const bandBg = FRAME_BG;
   return (
     <div data-ui="hybrid-frame-root" style={{ position:"relative", width:outerW, height:outerH, background:"transparent" }}>
-      <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden" }}>{children}</div>
+      {/* zIndex:0 makes the content panel its OWN stacking context. Without it
+          the panel is `z-index:auto`, so every positioned descendant with a
+          positive z-index (the resize edges at 10000, menus, modals) competes
+          directly with the frame below in the ROOT stacking context and paints
+          OVER it — the frame then reads as sitting *behind* the window. Windows
+          and Linux never hit this because their frame is a separate overlay
+          window stacked by the window manager; macOS is the only platform that
+          renders HybridFrame inline, which is why the frame only sank there. */}
+      <div style={{ position:"absolute", left:parent_x, top:parent_y, width:parent_w, height:parent_h, background:"var(--bg-panel)", overflow:"hidden", zIndex:0 }}>{children}</div>
       <div data-ui="DecorativeWindowFrame" style={{
         position: "absolute", inset: 0, pointerEvents: "none",
+        zIndex: 1,
         opacity: frameVisible ? 1 : 0,
         transition: `opacity ${frameVisible ? 220 : 360}ms ease`,
       }}>
-        <div style={{ position:"absolute", left:topBar.x,   top:topBar.y,   width:topBar.w,   height:topBar.h,   background:bandBg }} />
-        <div style={{ position:"absolute", left:botBar.x,   top:botBar.y,   width:botBar.w,   height:botBar.h,   background:bandBg }} />
-        <div style={{ position:"absolute", left:leftBar.x,  top:leftBar.y,  width:leftBar.w,  height:leftBar.h,  background:bandBg }} />
-        <div style={{ position:"absolute", left:rightBar.x, top:rightBar.y, width:rightBar.w, height:rightBar.h, background:bandBg }} />
+        {/* The four fill bands are plain rectangles, so their corners are square
+            while the outer stroke below is rounded (rx=14) — the opaque fill
+            juts past the border and reads as "solid colour corners". Clip them
+            to the same rounded outer rect so the chrome backing follows the
+            border radius. The bands sit exactly inside this rect by geometry
+            (bottom/right bands end on outerB/outerR), so nothing is cropped. */}
+        <div style={{ position:"absolute", left:outerL, top:outerT, width:outerW2, height:outerH2, borderRadius:14, overflow:"hidden" }}>
+          <div style={{ position:"absolute", left:topBar.x - outerL,   top:topBar.y - outerT,   width:topBar.w,   height:topBar.h,   background:bandBg }} />
+          <div style={{ position:"absolute", left:botBar.x - outerL,   top:botBar.y - outerT,   width:botBar.w,   height:botBar.h,   background:bandBg }} />
+          <div style={{ position:"absolute", left:leftBar.x - outerL,  top:leftBar.y - outerT,  width:leftBar.w,  height:leftBar.h,  background:bandBg }} />
+          <div style={{ position:"absolute", left:rightBar.x - outerL, top:rightBar.y - outerT, width:rightBar.w, height:rightBar.h, background:bandBg }} />
+        </div>
         <svg width={outerW} height={outerH} style={{ position:"absolute", left:0, top:0, pointerEvents:"none" }}>
         <rect x={outerL + 1} y={outerT + 1} width={outerW2 - 2} height={outerH2 - 2} rx={14} ry={14} fill="none" stroke={FRAME_COLOR} strokeWidth={1} />
         <rect x={innerL} y={innerT} width={innerW} height={innerH} rx={10} ry={10} fill="none" stroke={FRAME_ACCENT} strokeWidth={1} />

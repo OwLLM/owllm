@@ -128,13 +128,13 @@ export function presenceCountryCode(region: string): string {
 export type CountryPresenceGroup = {
   countryCode: string;
   nodes: PublicPresenceNode[];
-  osCounts: Record<PresenceOs, number>;
+  onlineCount: number;
+  osCounts: Record<PresenceOs, { total: number; online: number }>;
 };
 
-export function groupOnlinePresenceByCountry(nodes: PublicPresenceNode[]): CountryPresenceGroup[] {
+export function groupPresenceByCountry(nodes: PublicPresenceNode[]): CountryPresenceGroup[] {
   const groups = new Map<string, CountryPresenceGroup>();
   for (const node of nodes) {
-    if (!node.online) continue;
     const countryCode = presenceCountryCode(node.region);
     const key = countryCode || "unknown";
     let group = groups.get(key);
@@ -142,12 +142,22 @@ export function groupOnlinePresenceByCountry(nodes: PublicPresenceNode[]): Count
       group = {
         countryCode,
         nodes: [],
-        osCounts: { Windows: 0, macOS: 0, Linux: 0, Other: 0 },
+        onlineCount: 0,
+        osCounts: {
+          Windows: { total: 0, online: 0 },
+          macOS: { total: 0, online: 0 },
+          Linux: { total: 0, online: 0 },
+          Other: { total: 0, online: 0 },
+        },
       };
       groups.set(key, group);
     }
     group.nodes.push(node);
-    group.osCounts[node.os] += 1;
+    group.osCounts[node.os].total += 1;
+    if (node.online) {
+      group.onlineCount += 1;
+      group.osCounts[node.os].online += 1;
+    }
   }
   return [...groups.values()].sort((a, b) =>
     b.nodes.length - a.nodes.length || a.countryCode.localeCompare(b.countryCode)

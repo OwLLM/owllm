@@ -104,4 +104,39 @@ check(
     && vaultSync.includes("60_000"),
 );
 
+// ---- Everyday-chat layout ------------------------------------------------
+// The thread list used to live in a "🕘 History" popover, so the one control
+// you need to move between conversations disappeared the moment you opened
+// one. It is an ambient LEFT sidebar now, like ChatGPT/Claude: always visible,
+// date-grouped, active row marked. These pin the shape, not the styling.
+check(
+  "Everyday chat keeps its thread list ambient instead of behind a popover",
+  !src.includes("🕘 History")
+    && !src.includes("setShowHistory")
+    && src.includes("<aside")
+    && src.includes("＋ New conversation"),
+);
+check(
+  "Sidebar renders BEFORE the conversation column, so the list is on the left",
+  src.indexOf("<aside") > 0 && src.indexOf("<aside") < src.indexOf('data-ui="ChatThreadMemory"'),
+);
+check(
+  "Threads are date-grouped from the SAME store, not a second copy",
+  /function groupChatsByDate/.test(src)
+    && src.includes("groupChatsByDate(chats)")
+    && /Today[\s\S]{0,200}Yesterday[\s\S]{0,200}Previous 7 days/.test(src)
+    && src.includes('const CHATS_KEY = "owllm:code:chats"'),
+);
+check(
+  "Transcript and composer share one bounded reading column",
+  /const CHAT_COLUMN_MAX = \d+/.test(src)
+    && (src.match(/maxWidth: CHAT_COLUMN_MAX/g) || []).length >= 2,
+);
+check(
+  "An empty conversation greets and offers starters rather than explaining itself",
+  src.includes("What can I help with?")
+    && /const CHAT_STARTERS = \[/.test(src)
+    && src.includes("CHAT_STARTERS.map"),
+);
+
 if (failed) process.exit(1);

@@ -161,6 +161,12 @@ export class WorldPresence {
       "id TEXT PRIMARY KEY, region TEXT NOT NULL, latitude REAL NOT NULL, " +
       "longitude REAL NOT NULL, first_seen TEXT NOT NULL, last_seen TEXT NOT NULL)",
     );
+    const nodeColumns = this.sql.exec("PRAGMA table_info(nodes)").toArray();
+    if (!nodeColumns.some((column) => String(column.name) === "os")) {
+      // Preserve every recorded node while extending the anonymous history.
+      // Older rows remain truthfully "Other" until that installation reconnects.
+      this.sql.exec("ALTER TABLE nodes ADD COLUMN os TEXT NOT NULL DEFAULT 'Other'");
+    }
     this.sql.exec("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
     // v1 recorded a server-random id for every connection that arrived without a
     // stable client id, so each reconnect of a pre-stable-id client became a new
@@ -195,7 +201,7 @@ export class WorldPresence {
     return ids;
   }
 
-  /** Normalized OS family for each live installation; never persisted. */
+  /** Normalized OS family for each live installation. */
   onlineOs(excludedSocket) {
     const operatingSystems = new Map();
     for (const socket of this.presenceSockets()) {
@@ -208,13 +214,13 @@ export class WorldPresence {
 
   storedRows() {
     return this.sql
-      .exec("SELECT id, region, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes ORDER BY first_seen ASC LIMIT ?", MAX_NODES)
+      .exec("SELECT id, region, os, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes ORDER BY first_seen ASC LIMIT ?", MAX_NODES)
       .toArray();
   }
 
   storedRow(id) {
     return this.sql
-      .exec("SELECT id, region, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes WHERE id = ?", id)
+      .exec("SELECT id, region, os, latitude, longitude, first_seen AS firstSeen, last_seen AS lastSeen FROM nodes WHERE id = ?", id)
       .toArray()[0] ?? null;
   }
 
@@ -233,7 +239,7 @@ export class WorldPresence {
     const onlineOs = this.onlineOs(excludedSocket);
     const rows = this.storedRows().map((row) => ({
       ...row,
-      os: onlineOs.get(String(row.id ?? "")) ?? "Other",
+      os: onlineOs.get(String(row.id ?? "")) ?? row.os,
     }));
     const seen = new Set(rows.map((row) => String(row.id ?? "")));
     for (const socket of this.presenceSockets()) {
@@ -253,11 +259,11 @@ export class WorldPresence {
   }
 
   /** Record a first sighting or refresh last_seen; the first position is kept. */
-  recordNode(id, location, now) {
+  recordNode(id, location, os, now) {
     this.sql.exec(
-      "INSERT INTO nodes (id, region, latitude, longitude, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?) " +
-      "ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen",
-      id, location.region, location.latitude, location.longitude, now, now,
+      "INSERT INTO nodes (id, region, os, latitude, longitude, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?) " +
+      "ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, os = excluded.os",
+      id, location.region, os, location.latitude, location.longitude, now, now,
     );
     // Bounded footprint: past the cap, drop the oldest offline nodes.
     const overflow = this.totalCount() - MAX_NODES;
@@ -308,7 +314,7 @@ export class WorldPresence {
       const ephemeral = !stableId;
       const row = ephemeral
         ? { id, region: location.region, os, latitude: location.latitude, longitude: location.longitude, firstSeen: now, lastSeen: now }
-        : { ...this.recordNode(id, location, now), os };
+        : this.recordNode(id, location, os, now);
       server.serializeAttachment({ role, id, os, ephemeral, node: ephemeral ? row : undefined, connectedAt: now });
       this.state.acceptWebSocket(server, [role]);
       this.broadcast({ type: "upsert", node: publicNode(row, true), counts: this.counts(), updatedAt: new Date().toISOString() });
@@ -332,7 +338,7 @@ export class WorldPresence {
     if (this.onlineIds(socket).has(id)) return;
     const row = this.storedRow(id);
     const updatedAt = new Date().toISOString();
-    if (row) this.broadcast({ type: "upsert", node: publicNode({ ...row, os: data.os }, false), counts: this.counts(socket), updatedAt });
+    if (row) this.broadcast({ type: "upsert", node: publicNode(row, false), counts: this.counts(socket), updatedAt });
     else this.broadcast({ type: "remove", id: id.slice(0, 96), counts: this.counts(socket), updatedAt });
   }
 

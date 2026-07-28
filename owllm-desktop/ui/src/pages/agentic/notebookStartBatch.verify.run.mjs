@@ -50,6 +50,7 @@ const codePageSrc = readLF(path.join(HERE, "CodePage.tsx"));
 const agentsPageSrc = readLF(path.join(HERE, "AgentsPage.tsx"));
 const brainstormSrc = readLF(path.join(HERE, "BrainstormPanel.tsx"));
 const watcherSrc = readLF(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"));
+const vaultSyncSrc = readLF(path.join(REPO, "ui/src/runtime/vaultSync.ts"));
 const js = ts.transpileModule(src, {
   compilerOptions: {
     module: ts.ModuleKind.CommonJS,
@@ -154,8 +155,11 @@ function check(name, cond) {
 console.log("case 0: run completion paths cannot depend on a later React render");
 check("Code busy state synchronizes the imperative lock", codePageSrc.includes("const setBusy = (v: boolean) => {\n    // Keep the imperative send gate") && codePageSrc.includes("busySendRef.current = v;"));
 check("Code send gates on the synchronous lock", codePageSrc.includes("if (busySendRef.current) {"));
-check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();"));
-check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();") && agentsPageSrc.includes("else notifyAutoFeedPaused(notebookPauseReason);"));
+// Both Agents exits must still resolve auto-feed — but they now pass the run's
+// PROVENANCE rather than continuing unconditionally, so a goal the user typed
+// by hand cannot resume a queue left switched on days ago.
+check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed(ranFromNotebook);"));
+check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed(ranFromNotebook);") && agentsPageSrc.includes("else if (ranFromNotebook) notifyAutoFeedPaused(notebookPauseReason);"));
 // Both surfaces settle their cards through ONE helper now. Asserting the shared
 // helper (rather than each page's own three-way branch, as this gate used to)
 // is what stops the Coding page silently losing the "preflight → pending" case
@@ -713,6 +717,65 @@ console.log("case 10: Add all + clear notes actually clears the working notes");
   check("working notes are cleared even with a leftover proposedPlan", after.text === "");
   check("orphaned proposedPlan is cleared while the board is hidden", (after.proposedPlan ?? "") === "");
   act(() => root.unmount());
+}
+
+// ---- 11. A run the QUEUE DID NOT DISPATCH must never start the queue. This
+//          reproduces a real incident: auto-feed had been left on days earlier,
+//          the user typed an ordinary Coding-page message, the turn ended
+//          cleanly, and the run-end hook popped a notebook card and sent it as
+//          the next turn — indistinguishable from something the user had asked
+//          for. `autoFeed` is sticky across restarts, so the checkbox alone can
+//          never be the permission to BEGIN a chain. ----
+console.log("case 11: only a queue-driven (or explicitly armed) run advances the queue");
+{
+  const ARM_PID = "verify-arm-project";
+  const ARM_KEY = `owllm:agents:notebook:${ARM_PID}`;
+  const SURFACE = "code:pFRESH";
+  const seedArm = (extra) => localStorage.setItem(ARM_KEY, JSON.stringify({
+    text: "", plan: "", digest: [], proposed: [],
+    autoFeed: true, // left ON from an earlier session — exactly the real state
+    steps: [
+      { id: "s1", text: "build the website package", status: "pending" },
+      { id: "s2", text: "build the homepage", status: "pending" },
+    ],
+    ...extra,
+  }));
+
+  // Assert the export before calling it, so a removed gate reads as a failed
+  // check rather than an unexplained stack trace.
+  check("consumeAutoFeedArm is exported", typeof NB.consumeAutoFeedArm === "function");
+  const consumeArm = typeof NB.consumeAutoFeedArm === "function" ? NB.consumeAutoFeedArm : () => true;
+
+  seedArm();
+  check("an unarmed clean turn cannot start the queue", consumeArm(ARM_PID, SURFACE) === false);
+  check("  ...and leaves every card pending", NB.loadNotebook(ARM_PID).steps.every((s) => s.status === "pending"));
+
+  seedArm({ autoFeedArmed: true });
+  check("▶ Start queue while busy arms exactly one run", consumeArm(ARM_PID, SURFACE) === true);
+  check("  ...and the arm is one-shot", consumeArm(ARM_PID, SURFACE) === false);
+
+  // Once the chain is live it sustains itself from its own dispatches, so the
+  // arm must be spent rather than left able to start a second queue later.
+  seedArm({ autoFeedArmed: true });
+  check("the chain still walks the list", NB.takeNextAutoStep(ARM_PID, SURFACE)?.id === "s1" && NB.takeNextAutoStep(ARM_PID, SURFACE)?.id === "s2");
+  check("dispatching clears the arm", NB.loadNotebook(ARM_PID).autoFeedArmed === false);
+
+  // The arm is a per-window intent: a peer that is genuinely driving still wins.
+  seedArm({ autoFeedArmed: true, autoFeedOwner: "agents:pOTHER", autoFeedHeartbeat: Date.now() });
+  check("a live peer lease still blocks the arm", consumeArm(ARM_PID, SURFACE) === false);
+
+  // ...and it must never travel to another PC, or a peer would start a queue
+  // nobody asked it to. Same rule as the rest of the run lease.
+  check("the arm is stripped before the notebook syncs", vaultSyncSrc.includes('"autoFeedArmed"'));
+
+  // Both pages gate on provenance, and the Coding page labels what it injects
+  // (an unlabelled auto-fed step is why the incident looked like a user turn).
+  check("Coding page gates the chain on run provenance", codePageSrc.includes("if (ok && (ranFromNotebook || consumeAutoFeedArm("));
+  check("Coding page labels an auto-fed step", codePageSrc.includes("📓 Next step from the Notebook (auto-fed):"));
+  check("Agents page arms or refuses inside the shared scheduler", agentsPageSrc.includes("if (!ranFromNotebook && !consumeAutoFeedArm(pid, notebookSurfaceId)) return;"));
+  // The old pause notice told the user a plain message would resume the queue —
+  // the very accident this case exists to prevent. It must not say that again.
+  check("no page still advertises 'send a message' as a way to resume", !codePageSrc.includes("send a message or press ▶ Start queue") && !agentsPageSrc.includes("fix or dispatch the next one (▶ Start queue)"));
 }
 
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");

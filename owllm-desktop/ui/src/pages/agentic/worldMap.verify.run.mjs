@@ -104,11 +104,22 @@ try {
       && presence.normalizePresenceOs("Macintosh") === "macOS"
       && presence.normalizePresenceOs("X11; Linux") === "Linux"
       && presence.normalizePresenceOs("unknown") === "Other");
-  const countries = presence.groupOnlinePresenceByCountry(sanitized);
-  check("Connected users group by country and exclude offline ghosts",
-    countries.length === 1 && countries[0].countryCode === "KR" && countries[0].nodes.length === 2);
-  check("Country summaries split connected users by operating system",
-    countries[0].osCounts.Windows === 1 && countries[0].osCounts.Linux === 1 && countries[0].osCounts.macOS === 0);
+  const countries = presence.groupPresenceByCountry(sanitized);
+  check("Recorded users group by country and retain offline countries",
+    countries.length === 2
+      && countries[0].countryCode === "KR"
+      && countries[0].nodes.length === 2
+      && countries[0].onlineCount === 2
+      && countries[1].countryCode === "IT"
+      && countries[1].nodes.length === 1
+      && countries[1].onlineCount === 0);
+  check("Country summaries split total and online users by operating system",
+    countries[0].osCounts.Windows.total === 1
+      && countries[0].osCounts.Windows.online === 1
+      && countries[0].osCounts.Linux.total === 1
+      && countries[0].osCounts.Linux.online === 1
+      && countries[1].osCounts.macOS.total === 1
+      && countries[1].osCounts.macOS.online === 0);
 
   const stableStore = memory();
   const firstId = presence.readOrCreateNodeId(stableStore);
@@ -277,7 +288,8 @@ try {
       && worker.includes("serializeAttachment")
       && worker.includes("CREATE TABLE IF NOT EXISTS nodes")
       && worker.includes("first_seen")
-      && worker.includes("publicNode({ ...row, os: data.os }, false)"));
+      && worker.includes("publicNode(row, false)")
+      && worker.includes("SELECT id, region, os, latitude"));
   check("Worker never reads the source IP or reintroduces a cron", !/CF-Connecting-IP|x-forwarded-for/i.test(worker) && !/scheduled\s*\(/.test(worker));
   check("Worker broadcasts incremental membership changes with counts", worker.includes('type: "upsert"') && worker.includes('type: "remove"') && worker.includes("counts:"));
   check("Wrangler binds a free SQLite-backed Durable Object without D1", wrangler.includes("new_sqlite_classes") && !wrangler.includes("d1_databases"));
@@ -291,23 +303,28 @@ try {
       && actions.includes("Somente a família do sistema operacional e a região aproximada são mostradas"));
   // Server list shows the nation flag instead of the bare 2-letter code.
   check("Region labels convert the country code to a flag", page.includes("regionWithFlag(node.region)") && page.includes("0x1f1e6 + ch.charCodeAt(0) - 65"));
-  check("World list groups connected users into country summaries with large flag controls",
-    page.includes("groupOnlinePresenceByCountry(publicNodes)")
+  check("World list groups every recorded user into country summaries with large flag controls",
+    page.includes("groupPresenceByCountry(publicNodes)")
       && page.includes('gridTemplateColumns: "62px minmax(0,1fr)"')
       && page.includes("country.nodes.length")
-      && page.includes("country.osCounts[os]"));
+      && page.includes("country.onlineCount")
+      && page.includes("country.osCounts[os].total")
+      && page.includes("country.osCounts[os].online"));
   check("Country flag opens a scrollable detail list capped at twenty rows",
     page.includes('data-ui="WorldMap:country-details"')
       && page.includes("maxHeight: 20 * 44")
       && page.includes('overflowY: "auto"')
       && page.includes("setExpandedCountry"));
-  check("Worker publishes only normalized live OS families without persisting fingerprint data",
+  check("Worker persists only normalized OS families for recorded/offline summaries",
     worker.includes("normalizeOsFamily")
       && worker.includes("request.headers.get(\"User-Agent\")")
       && worker.includes("server.serializeAttachment({ role, id, os")
-      && !/ALTER TABLE nodes|os TEXT/.test(worker));
+      && worker.includes("ALTER TABLE nodes ADD COLUMN os TEXT NOT NULL DEFAULT 'Other'")
+      && worker.includes("os = excluded.os"));
   check("Country summary labels have all eight locales",
-    /\["Connected users by country",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
+    /\["Users by country",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
+      && /\["Total users",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
+      && /\["Online users",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
       && /\["users online",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
       && /\["Click the flag for connection details",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
   check("Flag font is bundled for Windows (no native flag emoji)", fs.statSync(path.join(UI, "../public/fonts/TwemojiCountryFlags.woff2")).size > 50_000);

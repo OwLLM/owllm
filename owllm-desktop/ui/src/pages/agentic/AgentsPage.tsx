@@ -18,7 +18,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepPending, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, markNotebookStepPending, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -8749,8 +8749,15 @@ export function AgentsPage({
   // follow-up), retry for a while instead of silently dropping the chain
   // (the old single-shot check is how a running queue "just stopped").
   const AUTO_FEED_SETTLE_TRIES = 30; // 30 × 800ms = 24s
-  const scheduleNotebookAutoFeed = () => {
+  /// `ranFromNotebook` — did the queue itself dispatch the run that just ended?
+  /// Only such a run may pull the next card. `autoFeed` is sticky and survives
+  /// restarts, so without this any clean turn (including a goal the user typed
+  /// by hand) resumed a queue left switched on days earlier and the step landed
+  /// looking like a request the user had made. ▶ Start queue pressed while the
+  /// team is busy arms one single exception, consumed here.
+  const scheduleNotebookAutoFeed = (ranFromNotebook: boolean) => {
     const pid = selectedProjectId;
+    if (!ranFromNotebook && !consumeAutoFeedArm(pid, notebookSurfaceId)) return;
     let tries = 0;
     const attempt = () => {
       if (supSendBusyRef.current || dispatchInFlightRef.current) {
@@ -8787,7 +8794,7 @@ export function AgentsPage({
   // stopped working".
   const notifyAutoFeedPaused = (reason: string) => {
     if (!autoFeedWouldRun(selectedProjectId, notebookSurfaceId)) return;
-    setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 Auto-feed paused — ${reason}. Pending steps stay in the Notebook queue; fix or dispatch the next one (▶ Start queue) to continue.`, ts: Date.now(), seq: nextSeq() }]);
+    setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 Auto-feed paused — ${reason}. Pending steps stay in the Notebook queue; press ▶ Start queue in the Notebook to continue.`, ts: Date.now(), seq: nextSeq() }]);
   };
   // onSupSend is declared later in this component — reach it via a ref so the
   // notebook helpers above (defined early, next to the steer queue) can call it.
@@ -10583,6 +10590,8 @@ export function AgentsPage({
         supSendAbortRef.current = null;
       }
       const now = Date.now();
+      // Captured before the ref is cleared — it gates the chain below.
+      const ranFromNotebook = notebookStepRef.current != null;
       if (notebookStepRef.current) {
         settleNotebookStep(selectedProjectId, notebookStepRef.current, singleRunCompletedCleanly
           ? { kind: "clean" }
@@ -10593,8 +10602,8 @@ export function AgentsPage({
       // The no-specialist/single-assistant path used to end here, so a Notebook
       // queue could only process its first item. Continue from every clean run
       // path, not only dispatchGoal's team/solo branches.
-      if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();
-      else notifyAutoFeedPaused(singleRunFailureReason);
+      if (singleRunCompletedCleanly) scheduleNotebookAutoFeed(ranFromNotebook);
+      else if (ranFromNotebook) notifyAutoFeedPaused(singleRunFailureReason);
     }
   };
   onSupSendRef.current = onSupSend; // the notebook helpers (declared earlier) dispatch through this
@@ -13017,6 +13026,12 @@ export function AgentsPage({
       const outcome: NotebookRunOutcome = notebookRunCompletedCleanly
         ? { kind: "clean" }
         : notebookRunStoppedAtPreflight ? { kind: "preflight" } : { kind: "failed", reason: notebookPauseReason };
+      // Did this run carry ANY notebook card — as its goal, as a drained steer,
+      // or as one still waiting to drain? Captured before the refs below are
+      // spliced, because it decides whether the chain may advance at all.
+      const ranFromNotebook = notebookStepRef.current != null
+        || notebookSteerInFlightIdsRef.current.length > 0
+        || notebookSteerStepIdsRef.current.length > 0;
       if (notebookStepRef.current) {
         settleNotebookStep(selectedProjectId, notebookStepRef.current, outcome, now);
         notebookStepRef.current = null;
@@ -13048,8 +13063,8 @@ export function AgentsPage({
         if (leftoverSteerText || leftoverSteerAttachments.length > 0) {
           setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 ${strandedSteerIds.length || 1} queued step(s) never reached the team because the run ended early — returned to the Notebook queue as pending.`, ts: Date.now(), seq: nextSeq() }]);
         }
-        if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();
-        else notifyAutoFeedPaused(notebookPauseReason);
+        if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed(ranFromNotebook);
+        else if (ranFromNotebook) notifyAutoFeedPaused(notebookPauseReason);
       }
       clearActive();
       abortRef.current = null;

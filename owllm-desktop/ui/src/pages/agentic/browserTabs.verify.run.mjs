@@ -47,10 +47,19 @@ check(browserRs.includes("fn attach_tab(") && browserRs.includes("fn new_tab(") 
 check(browserRs.includes("PARK_X"),
   "inactive framed tabs are parked offscreen without losing their page state");
 check(browserRs.includes("fn attach_legacy_tab(") &&
-      browserRs.includes("WebviewWindowBuilder::new(app, tab_label(id), WebviewUrl::External(url))") &&
+      browserRs.includes("WebviewWindowBuilder::new(app, tab_label(id), initial_url)") &&
       browserRs.includes(".visible(active)") &&
       /fn activate_tab[\s\S]{0,2500}win\.hide\(\)/.test(browserRs),
   "Linux safety fallback keeps independent top-level WebViews and shows only the selected tab");
+check(browserRs.includes("ProcessModel::MultipleSecondaryProcesses") &&
+      /fn attach_legacy_tab[\s\S]{0,900}about:blank[\s\S]{0,5000}linux_configure_browser_webview/.test(browserRs),
+  "Linux configures browser process isolation before loading an internet page");
+check(/linux_configure_browser_webview[\s\S]{0,3000}connect_web_process_terminated[\s\S]{0,1800}webview\.reload\(\)/.test(browserRs) &&
+      browserRs.includes("browser-webkit.log"),
+  "a failed Linux browser renderer is recovered and logged inside its own tab");
+check(libRs.includes("MAIN_WINDOW_CLOSE_REQUESTED") &&
+      /ExitRequested \{ code, api,[\s\S]{0,350}app\.get_window\("main"\)\.is_some\(\)[\s\S]{0,500}api\.prevent_exit\(\)/.test(libRs),
+  "an auxiliary browser failure cannot request a clean whole-app exit");
 check(/fn destroy_browser_windows[\s\S]{0,900}tabs\.order\.clone\(\)[\s\S]{0,500}window\.destroy\(\)/.test(browserRs),
   "stopping or rebuilding closes every platform-specific tab window");
 check(browserRs.includes("__owllmTabsSet"),

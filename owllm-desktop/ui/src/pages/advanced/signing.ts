@@ -16,6 +16,9 @@ export type AppleStatus = {
   certNotAfterMs: number;
   daysLeft: number | null;
   ready: boolean;
+  /** Not stored here, but another PC on the account holds the certificate
+   *  (secret material never syncs) — sign there. */
+  certOnOtherDevice: boolean;
   updatedMs: number;
 };
 
@@ -26,6 +29,8 @@ export type WindowsStatus = {
   subject: string;
   tsa: string;
   ready: boolean;
+  /** See {@link AppleStatus.certOnOtherDevice}. */
+  certOnOtherDevice: boolean;
   updatedMs: number;
 };
 

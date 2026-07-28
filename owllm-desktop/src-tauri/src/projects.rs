@@ -79,6 +79,37 @@ pub(crate) fn project_db_path() -> Option<PathBuf> {
     paths::state_db_path()
 }
 
+/// How long a contended statement waits before giving up. The state DB is a
+/// single file shared by projects, directives, memory, media, accounts, the
+/// state mirror and vault sync, so brief overlap is normal and should queue.
+const STATE_DB_BUSY_TIMEOUT_SECS: u64 = 15;
+
+/// Open the shared state database with the pragmas every caller needs.
+///
+/// SQLite's defaults are wrong for a file this many subsystems share:
+///   * `busy_timeout = 0` — an overlapping write returns SQLITE_BUSY
+///     ("database is locked") *immediately* instead of waiting. Background
+///     sync timers touch this file continuously, so a user-initiated write
+///     had to win a race it usually lost.
+///   * `journal_mode = DELETE` — a rollback journal makes readers and writers
+///     mutually exclusive. WAL lets them proceed concurrently.
+///
+/// WAL is a persistent property of the file, so the pragma is a no-op after
+/// the first successful call. Both pragmas are best-effort: on a filesystem
+/// without shared memory (a network share) WAL is refused, and the connection
+/// must stay usable on the old journal mode rather than failing the caller.
+pub(crate) fn open_state_db(path: &Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(path)
+        .map_err(|e| format!("open {}: {e}", path.display()))?;
+    // Set the timeout FIRST: the journal-mode switch below needs a lock of its
+    // own, and on a busy file it would otherwise fail instantly too.
+    let _ = conn.busy_timeout(std::time::Duration::from_secs(STATE_DB_BUSY_TIMEOUT_SECS));
+    // `PRAGMA journal_mode` returns the resulting mode, so it must be queried
+    // rather than executed.
+    let _: Result<String, _> = conn.query_row("PRAGMA journal_mode=WAL", [], |r| r.get(0));
+    Ok(conn)
+}
+
 pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
     // Idempotent CREATE TABLE so opening a fresh database doesn't fail
     // when the user creates their first project before the legacy
@@ -222,8 +253,7 @@ fn read_projects(path: &std::path::Path) -> Result<Vec<ProjectRow>, String> {
     // adds chat_json / agent_logs_json to pre-existing databases.
     // Without that, this read would fail on older DBs the moment we
     // SELECT the new columns.
-    let conn =
-        rusqlite::Connection::open(path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn = open_state_db(path)?;
 
     let exists: i64 = conn
         .query_row(
@@ -369,11 +399,11 @@ pub async fn resolve_project_for_location(
         if let Some(parent) = path2.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        let conn = open_state_db(&path2)?;
         ensure_schema(&conn)?;
         let path_key = normalize_path_key(&location);
         let mut found: Option<(String, String)> = None;
+        let mut repo_found: Option<(String, String)> = None;
         {
             let mut stmt = conn
                 .prepare("SELECT id, location, COALESCE(repo_url, '') FROM agent_projects")
@@ -394,11 +424,16 @@ pub async fn resolve_project_for_location(
                     found = Some((id, repo));
                     break;
                 }
-                if !repo_url.is_empty() && repo == repo_url {
-                    found = Some((id, repo));
-                    break;
+                if repo_found.is_none() && !repo_url.is_empty() && repo == repo_url {
+                    repo_found = Some((id, repo));
                 }
             }
+        }
+        // A repository may have duplicate portable rows after older vault
+        // migrations. Never let an earlier repo-only match hide the project
+        // row explicitly bound to this computer's exact folder.
+        if found.is_none() {
+            found = repo_found;
         }
         if let Some((id, existing_repo_url)) = found {
             conn.execute(
@@ -613,8 +648,7 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
         if let Some(parent) = path2.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
         }
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        let conn = open_state_db(&path2)?;
         ensure_schema(&conn)?;
 
         let id = new_id();
@@ -699,8 +733,7 @@ pub async fn update_project(input: UpdateProjectInput) -> Result<(), String> {
     };
     let path2 = path.clone();
     tokio::task::spawn_blocking(move || {
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        let conn = open_state_db(&path2)?;
         ensure_schema(&conn)?;
 
         let now = now_iso();
@@ -782,8 +815,7 @@ pub async fn delete_project(id: String) -> Result<(), String> {
     let path2 = path.clone();
     // Read the location BEFORE deleting so we can auto-clean a sandbox copy.
     let location = tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
-        let conn = rusqlite::Connection::open(&path2)
-            .map_err(|e| format!("open {}: {e}", path2.display()))?;
+        let conn = open_state_db(&path2)?;
         ensure_schema(&conn)?;
         let loc: Option<String> = match conn.query_row(
             "SELECT location FROM agent_projects WHERE id = ?",
@@ -946,6 +978,64 @@ mod tests {
             normalize_path_key(&repo_b.to_string_lossy())
         );
         assert_eq!(row.repo_url, "https://github.com/owllm/shared");
+        std::env::remove_var("OWLLM_PROJECT_DB");
+    }
+
+    #[test]
+    fn resolve_project_for_location_prefers_exact_folder_over_earlier_repo_duplicate() {
+        let _guard = crate::memory::PROJECT_DB_TEST_ENV_LOCK
+            .lock()
+            .expect("project test lock");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db = tmp.path().join("state.db");
+        std::env::set_var("OWLLM_PROJECT_DB", &db);
+        let repo = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git_ok(&repo, &["init", "-q"]);
+        git_ok(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/OwLLM/Shared.git",
+            ],
+        );
+
+        {
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            ensure_schema(&conn).unwrap();
+            // The stale portable duplicate is deliberately inserted first:
+            // the old one-pass resolver returned it before seeing the exact
+            // local-folder binding and Coding opened an empty memory scope.
+            conn.execute(
+                "INSERT INTO agent_projects (id, name, location, repo_url, created_at, updated_at) \
+                 VALUES ('repo-duplicate', 'Duplicate', '', ?1, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')",
+                rusqlite::params![normalize_repo_url(
+                    "https://github.com/OwLLM/Shared.git"
+                )],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO agent_projects (id, name, location, repo_url, created_at, updated_at) \
+                 VALUES ('project-exact', 'Exact', ?1, ?2, '2026-01-02T00:00:00Z', '2026-01-02T00:00:00Z')",
+                rusqlite::params![
+                    repo.to_string_lossy().to_string(),
+                    normalize_repo_url("https://github.com/OwLLM/Shared.git"),
+                ],
+            )
+            .unwrap();
+        }
+
+        let rt = tokio::runtime::Runtime::new().expect("runtime");
+        let row = rt
+            .block_on(resolve_project_for_location(ResolveProjectInput {
+                location: repo.to_string_lossy().to_string(),
+                name: Some("Shared clone".to_string()),
+            }))
+            .expect("resolve project");
+
+        assert_eq!(row.id, "project-exact");
         std::env::remove_var("OWLLM_PROJECT_DB");
     }
 }

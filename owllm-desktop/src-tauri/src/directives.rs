@@ -178,7 +178,7 @@ fn touch_directives(conn: &rusqlite::Connection, project_id: &str) {
 /// new native set. `directives_seeded` doubles as the seed VERSION (0 = never).
 /// On upgrade we replace only untouched builtins — a rule the user edited is
 /// promoted to source='user_typed' (see directives_update) and is kept.
-pub(crate) const CURRENT_SEED_VERSION: i64 = 2;
+pub(crate) const CURRENT_SEED_VERSION: i64 = 3;
 
 /// Native best-practice rules every project starts with, so nobody writes a rule
 /// list from zero. They are NORMAL directives (the user can edit or delete any of
@@ -195,6 +195,7 @@ pub(crate) const DEFAULT_DIRECTIVES: &[(&str, &str)] = &[
     ("must", "Match the existing style, naming, structure, architecture, and conventions."),
     ("must", "Stop and ask when blocked, when ambiguity would materially affect the solution (implementation, safety, data, API, or user-facing behavior), or before any destructive or irreversible action (deleting files, user data, production data, database records, force-pushes, history rewrites, overwriting user content, credential changes, schema migrations, API contract changes, or production-impacting actions)."),
     ("must", "Design for the intended users, deployment environments, and edge cases, not only the current machine or dataset."),
+    ("must", "Never bundle, embed, commit, or ship credentials, secrets, API keys, tokens, private keys, vaults, or user account data in application builds, installers, release artifacts, or version control. Keep all secrets in per-user local runtime storage only — a build or repository must work with zero embedded credentials."),
     ("prefer", "Reuse existing functions, components, tools, and patterns before introducing new ones."),
     ("prefer", "Choose clear names and straightforward implementations over clever or complex solutions."),
     ("prefer", "Surface errors with actionable diagnostics. Never fail silently."),
@@ -311,8 +312,7 @@ fn open_conn() -> Result<rusqlite::Connection, String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
     }
-    let conn =
-        rusqlite::Connection::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn = crate::projects::open_state_db(&path)?;
     ensure_schema(&conn)?;
     Ok(conn)
 }

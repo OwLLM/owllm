@@ -1,0 +1,385 @@
+---
+import { Image } from "astro:assets";
+import { NAV_LINKS } from "../lib/navigation";
+import ThemeToggle from "./ThemeToggle";
+import logoOwl from "../assets/logo-owl.png";
+
+const currentPath = Astro.url.pathname;
+---
+
+<a href="#main-content" class="skip-link">Skip to content</a>
+
+<header class="site-header">
+  <div class="container">
+    <a href="/" class="brand" aria-label="OwLLM home">
+      <Image src={logoOwl} alt="OwLLM owl logo" width={40} height={40} loading="eager" />
+      <span class="brand-name">OwLLM</span>
+    </a>
+
+    <nav class="desktop-nav" aria-label="Primary">
+      <ul class="nav-list">
+        {
+          NAV_LINKS.map((link) => {
+            const isActive =
+              currentPath === link.href || (link.href !== "/" && currentPath.startsWith(link.href));
+            return (
+              <li>
+                <a
+                  href={link.href}
+                  class={isActive ? "active" : ""}
+                  aria-current={isActive ? "page" : undefined}
+                >
+                  {link.label}
+                </a>
+              </li>
+            );
+          })
+        }
+      </ul>
+    </nav>
+
+    <div class="header-actions">
+      <ThemeToggle client:load />
+      <button
+        type="button"
+        class="menu-toggle"
+        aria-expanded="false"
+        aria-controls="mobile-menu"
+        aria-label="Open menu"
+      >
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          <line x1="3" y1="6" x2="21" y2="6"></line>
+          <line x1="3" y1="12" x2="21" y2="12"></line>
+          <line x1="3" y1="18" x2="21" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+  </div>
+
+  <div id="mobile-menu" class="mobile-menu" role="dialog" aria-modal="true" aria-label="Site menu">
+    <div class="mobile-menu-header">
+      <span class="brand-name">OwLLM</span>
+      <button type="button" class="menu-close" aria-label="Close menu">
+        <svg
+          width="24"
+          height="24"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="2"
+          aria-hidden="true"
+        >
+          <line x1="18" y1="6" x2="6" y2="18"></line>
+          <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+      </button>
+    </div>
+    <nav aria-label="Mobile primary">
+      <ul class="mobile-nav-list">
+        {
+          NAV_LINKS.map((link) => {
+            const isActive =
+              currentPath === link.href || (link.href !== "/" && currentPath.startsWith(link.href));
+            return (
+              <li>
+                <a
+                  href={link.href}
+                  class={isActive ? "active" : ""}
+                  aria-current={isActive ? "page" : undefined}
+                >
+                  {link.label}
+                </a>
+              </li>
+            );
+          })
+        }
+      </ul>
+    </nav>
+  </div>
+</header>
+
+<script>
+  (function () {
+    const toggle = document.querySelector(".menu-toggle");
+    const menu = document.getElementById("mobile-menu");
+    const close = menu?.querySelector(".menu-close");
+    const links = menu?.querySelectorAll("a");
+
+    function open() {
+      if (!menu || !toggle) return;
+      menu.classList.add("open");
+      toggle.setAttribute("aria-expanded", "true");
+      toggle.setAttribute("aria-label", "Close menu");
+      document.body.style.overflow = "hidden";
+      (close as HTMLElement | null)?.focus();
+    }
+
+    function closeMenu() {
+      if (!menu || !toggle) return;
+      menu.classList.remove("open");
+      toggle.setAttribute("aria-expanded", "false");
+      toggle.setAttribute("aria-label", "Open menu");
+      document.body.style.overflow = "";
+      (toggle as HTMLElement | null)?.focus();
+    }
+
+    toggle?.addEventListener("click", () => {
+      if (menu?.classList.contains("open")) closeMenu();
+      else open();
+    });
+
+    close?.addEventListener("click", closeMenu);
+
+    links?.forEach((link) => link.addEventListener("click", closeMenu));
+
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && menu?.classList.contains("open")) {
+        closeMenu();
+      }
+    });
+
+    menu?.addEventListener("click", (e) => {
+      if (e.target === menu) closeMenu();
+    });
+  })();
+</script>
+
+<style>
+  .site-header {
+    background-color: var(--bg-header);
+    color: var(--bg-header-fg);
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0.75rem 1rem;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.625rem;
+    color: var(--bg-header-fg);
+    font-weight: 700;
+    font-size: 1.25rem;
+    text-decoration: none;
+  }
+
+  .brand:hover {
+    text-decoration: none;
+  }
+
+  .brand img {
+    border-radius: 8px;
+  }
+
+  .nav-list {
+    display: flex;
+    gap: 0.25rem;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+  }
+
+  .nav-list a {
+    display: block;
+    padding: 0.5rem 0.875rem;
+    border-radius: 8px;
+    color: var(--bg-header-fg);
+    font-weight: 500;
+    text-decoration: none;
+    opacity: 0.85;
+    transition:
+      background-color 0.15s ease,
+      opacity 0.15s ease;
+  }
+
+  .nav-list a:hover,
+  .nav-list a:focus-visible {
+    background-color: rgba(255, 255, 255, 0.1);
+    opacity: 1;
+  }
+
+  .nav-list a.active {
+    background-color: rgba(255, 255, 255, 0.15);
+    opacity: 1;
+    font-weight: 600;
+  }
+
+  .header-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  .menu-toggle,
+  .menu-close {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    background: transparent;
+    color: inherit;
+    border: 1px solid transparent;
+  }
+
+  .menu-toggle:hover,
+  .menu-close:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+  }
+
+  .mobile-menu {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background-color: var(--bg-overlay);
+    z-index: 200;
+  }
+
+  .mobile-menu.open {
+    display: block;
+  }
+
+  .mobile-menu > * {
+    background-color: var(--bg-panel);
+    color: var(--fg);
+    width: min(320px, 85vw);
+    height: 100%;
+    margin-left: auto;
+    padding: 1rem;
+    box-shadow: var(--shadow-lg);
+  }
+
+  .mobile-menu-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .mobile-nav-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+  }
+
+  .mobile-nav-list a {
+    display: block;
+    padding: 0.75rem 1rem;
+    border-radius: 8px;
+    color: var(--fg);
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .mobile-nav-list a:hover,
+  .mobile-nav-list a:focus-visible {
+    background-color: var(--bg-surface-hover);
+  }
+
+  .mobile-nav-list a.active {
+    background-color: var(--accent-soft);
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+
+  @media (min-width: 768px) {
+    .menu-toggle,
+    .mobile-menu {
+      display: none !important;
+    }
+  }
+
+  @media (max-width: 767px) {
+    .desktop-nav {
+      display: none;
+    }
+  }
+</style>
+
+<style is:global>
+  .theme-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .mode-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    background: rgba(255, 255, 255, 0.1);
+    color: inherit;
+    border: 1px solid transparent;
+    transition: background-color 0.15s ease;
+  }
+
+  .mode-button:hover {
+    background: rgba(255, 255, 255, 0.2);
+  }
+
+  .mode-placeholder {
+    display: inline-block;
+    width: 34px;
+    height: 34px;
+  }
+
+  .accent-swatches {
+    display: none;
+    align-items: center;
+    gap: 0.375rem;
+  }
+
+  @media (min-width: 640px) {
+    .accent-swatches {
+      display: inline-flex;
+    }
+  }
+
+  .accent-swatch {
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 2px solid transparent;
+    padding: 0;
+    transition:
+      transform 0.15s ease,
+      border-color 0.15s ease;
+  }
+
+  .accent-swatch:hover {
+    transform: scale(1.15);
+  }
+
+  .accent-swatch.active {
+    border-color: var(--bg-header-fg);
+    transform: scale(1.15);
+  }
+</style>

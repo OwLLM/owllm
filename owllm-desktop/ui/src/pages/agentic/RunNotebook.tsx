@@ -23,8 +23,21 @@
 // AgentsPage reads the same blob at run-end for auto-feed via the exported
 // helpers, and both sides broadcast NOTEBOOK_EVENT so the open surface and
 // the page never go stale against each other.
+//
+// Cross-device: vaultSync mirrors the blob to the user's other PCs. Two rules
+// make that safe, and both live in this file's data model:
+//   • `updatedAt` — stamped on every save. Ordering used to come from the vault
+//     blob's single syncedAt, which covered EVERY localStorage key, so an
+//     unrelated setting change on a stale PC republished its stale notebook as
+//     "newer" and completed steps came back as pending.
+//   • `deletedSteps` — tombstones. Steps merge as a UNION by id (peer progress
+//     is never clobbered), and a union without tombstones resurrects everything
+//     the user deleted.
+// The run-lease (autoFeed* fields) is deliberately device-local and stripped
+// before sync; `runningOn` is the advisory that replaces it across PCs.
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { useAutoResize } from "../../hooks/useAutoResize";
 import LogBox from "../../components/LogBox";
 import { type ModelInfo, streamChatCompletion, providerFor } from "./dispatch";
@@ -36,13 +49,24 @@ import ActionIcon from "../../components/ActionIcon";
 export type NotebookStep = {
   id: string;
   text: string;
-  /// pending = written, not fed yet · sent = fed to the team · done = user checked it off
-  status: "pending" | "sent" | "done";
+  /// pending = not fed · sent = live/successful run · failed = run ended
+  /// unsuccessfully and stays actionable · done = user explicitly checked it.
+  status: "pending" | "sent" | "failed" | "done";
   ts: number;
   /// When this step was fed to the team (started as a job).
   startedAt?: number;
   /// When the run that processed this step finished.
   finishedAt?: number;
+  /// When the step entered the archive (done, or sent + finished). Persisted so
+  /// restart and sync keep archive ordering independent of creation order.
+  archivedAt?: number;
+  /// Last lifecycle transition for this step. Cross-device merge uses this
+  /// instead of a one-way status ratchet so an intentional Reopen (pending)
+  /// cannot be undone by an older archived copy from another PC.
+  stepUpdatedAt?: number;
+  /// Concise reason the last run did not complete. Failed steps stay on Active
+  /// with a Re-feed action instead of being silently archived.
+  failureReason?: string;
 };
 
 export type NotebookState = {
@@ -72,7 +96,34 @@ export type NotebookState = {
   /// A user may turn auto-feed off before the queue is empty. Keep that
   /// distinct from a naturally completed sequence in the timing display.
   autoFeedStopped?: boolean;
+  /// EXPLICIT one-shot permission to START the chain from a run this queue did
+  /// not itself dispatch. Set only by ▶ Start queue pressed while the agent is
+  /// already busy ("begin as soon as this finishes"), and consumed by the first
+  /// run end that uses it. Without it, `autoFeed` alone was enough for ANY
+  /// clean run to pop a card: a plain chat message on the Coding page ended
+  /// cleanly and silently resumed a queue the user had left switched on days
+  /// earlier, injecting a notebook step as if the user had typed it. The
+  /// checkbox now only governs whether a running chain CONTINUES; starting one
+  /// is always a deliberate click. Device-local: stripped before sync.
+  autoFeedArmed?: boolean;
+  /// ADVISORY (unlike the run-lease above, this one DOES sync): the device that
+  /// most recently started driving this queue. A peer PC reads it only to SAY
+  /// "the queue is running on <name>" — it is never a lock. Device clocks are
+  /// not synchronized, so a stale/skewed stamp must never be able to block a
+  /// user from starting their own queue.
+  runningOn?: { deviceId: string; deviceName: string; at: number };
   digest: Array<{ role: "you" | "digest"; text: string }>;
+  /// Content stamp, rewritten by every saveNotebook. This is what lets two PCs
+  /// order their copies of THIS notebook. The vault blob's single `syncedAt`
+  /// covers every localStorage key at once, so without a per-notebook stamp an
+  /// unrelated setting change on a stale PC republished its stale notebook as
+  /// "newer" and archived steps came back. See vaultSync → mergeNotebook.
+  updatedAt?: number;
+  /// Tombstones for steps deleted on ANY device. Steps merge as a union by id
+  /// across PCs (so a peer's completion is never overwritten by our stale
+  /// copy), and a union without tombstones resurrects everything the user
+  /// deliberately removed. Capped and pruned in saveNotebook.
+  deletedSteps?: Array<{ id: string; ts: number }>;
   /// User-picked digest model (per project). Empty/undefined = inherit the
   /// surface's default (team model → server model), same rule as before.
   digestModel?: string;
@@ -83,7 +134,7 @@ export type NotebookState = {
 };
 
 export const NOTEBOOK_EVENT = "owllm:notebook-changed";
-const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [] };
+const EMPTY: NotebookState = { text: "", plan: "", steps: [], autoFeed: false, digest: [], deletedSteps: [] };
 const keyFor = (projectId: string) => `owllm:agents:notebook:${projectId}`;
 // The auto-feed/owner/sequence-clock fields below are the notebook's RUN-LEASE:
 // they live IN this blob so tabs on THIS PC coordinate the queue through it, but
@@ -98,21 +149,104 @@ const newStepId = () => `s${Date.now().toString(36)}${Math.random().toString(36)
 const NOTEBOOK_HEARTBEAT_MS = 8_000;
 const NOTEBOOK_LEASE_TTL_MS = 20_000;
 
+/// True only when ANOTHER surface owns the queue AND is still beating. The
+/// run-end helpers below used to compare owners alone, so a window that owned
+/// the queue and was then closed (or a Coding page that toggled auto-feed on
+/// and was navigated away from) left an owner string nothing could clear:
+/// takeNextAutoStep returned null forever, autoFeedWouldRun suppressed the very
+/// "auto-feed paused" notice meant to explain it, and the queue silently
+/// stopped with the toggle still reading ON. A dead owner now releases, exactly
+/// as the UI's own takeover button already assumed.
+export function leaseHeldByOtherSurface(nb: NotebookState, surfaceId: string): boolean {
+  if (!nb.autoFeedOwner || nb.autoFeedOwner === surfaceId) return false;
+  return nb.autoFeedHeartbeat != null && (Date.now() - nb.autoFeedHeartbeat) < NOTEBOOK_LEASE_TTL_MS;
+}
+
+/// Identity behind the cross-PC "queue is running on <name>" advisory. The
+/// notebook helpers below are SYNCHRONOUS (they run inside run-end finally
+/// blocks), so identity is fetched once in the background and read from this
+/// cache. Until it warms we simply omit the advisory rather than guess.
+let _selfDevice: { deviceId: string; deviceName: string } | null = null;
+let _selfDeviceFetching = false;
+export function warmNotebookDeviceIdentity(): void {
+  if (_selfDevice || _selfDeviceFetching) return;
+  _selfDeviceFetching = true;
+  void invoke<{ device_id: string; name: string }>("device_get_identity")
+    .then((d) => {
+      if (d?.device_id) _selfDevice = { deviceId: d.device_id, deviceName: (d.name || d.device_id.slice(0, 8)).trim() };
+    })
+    .catch(() => { /* advisory only — never block the queue on identity */ })
+    .finally(() => { _selfDeviceFetching = false; });
+}
+function describeThisDeviceRun(at: number): NotebookState["runningOn"] {
+  return _selfDevice ? { ..._selfDevice, at } : undefined;
+}
+
+/// The advisory is informational ONLY — it never disables anything. Device
+/// clocks are not synchronized (this vault's own history shows peers writing
+/// out-of-order timestamps), so treating a peer stamp as a lock could lock the
+/// user out of their own queue. A generous window keeps it from claiming a
+/// long-finished run is still going.
+const RUNNING_ON_STALE_MS = 30 * 60_000;
+export function peerRunningQueue(nb: NotebookState): { deviceName: string; at: number } | null {
+  const r = nb.runningOn;
+  if (!r || !_selfDevice || r.deviceId === _selfDevice.deviceId) return null;
+  if (Date.now() - r.at > RUNNING_ON_STALE_MS) return null;
+  if (!nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null))) return null;
+  return { deviceName: r.deviceName, at: r.at };
+}
+
+export function isLegacyWslRedirectorFalseFailure(step: NotebookStep): boolean {
+  return step.status === "failed"
+    && /project_cwd does not exist:.*(?:\\\\wsl\.localhost\\|\\\\wsl\$\\)/i.test(step.failureReason ?? "");
+}
+
+export function isLegacyCliPreflightFailure(step: NotebookStep): boolean {
+  return step.status === "failed"
+    && /npm ERR!\s+code ENOTEMPTY|write codex prompt to stdin:.*(?:pipe has been ended|os error 109)|Missing optional dependency @openai\/codex-|Could not prepare \w+ in the project environment/i.test(step.failureReason ?? "");
+}
+
 export function loadNotebook(projectId: string | null | undefined): NotebookState {
   if (!projectId) return { ...EMPTY };
   try {
     const raw = localStorage.getItem(keyFor(projectId));
     if (!raw) return { ...EMPTY };
     const p = JSON.parse(raw);
-    return {
+    let repairedLegacyPreflightFailure = false;
+    const repairAt = Date.now();
+    const notebook: NotebookState = {
       text: typeof p.text === "string" ? p.text : "",
       plan: typeof p.plan === "string" ? p.plan : "",
       steps: Array.isArray(p.steps)
-        ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string").map((s: NotebookStep) => ({
-            ...s,
-            startedAt: typeof s.startedAt === "number" ? s.startedAt : undefined,
-            finishedAt: typeof s.finishedAt === "number" ? s.finishedAt : undefined,
-          }))
+        ? p.steps.filter((s: NotebookStep) => s && typeof s.text === "string").map((s: NotebookStep) => {
+            if (isLegacyWslRedirectorFalseFailure(s) || isLegacyCliPreflightFailure(s)) {
+              repairedLegacyPreflightFailure = true;
+              return {
+                ...s,
+                status: "pending" as const,
+                startedAt: undefined,
+                finishedAt: undefined,
+                archivedAt: undefined,
+                stepUpdatedAt: repairAt,
+                failureReason: undefined,
+              };
+            }
+            return {
+              ...s,
+              startedAt: typeof s.startedAt === "number" ? s.startedAt : undefined,
+              finishedAt: typeof s.finishedAt === "number" ? s.finishedAt : undefined,
+              archivedAt: typeof s.archivedAt === "number" ? s.archivedAt : undefined,
+              stepUpdatedAt: typeof s.stepUpdatedAt === "number"
+                ? s.stepUpdatedAt
+                : (typeof s.archivedAt === "number"
+                  ? s.archivedAt
+                  : typeof s.finishedAt === "number"
+                    ? s.finishedAt
+                    : typeof s.startedAt === "number"
+                      ? s.startedAt
+                      : typeof s.ts === "number" ? s.ts : 0),
+            };
+          })
         : [],
       autoFeed: p.autoFeed === true,
       autoFeedOwner: typeof p.autoFeedOwner === "string" && p.autoFeedOwner ? p.autoFeedOwner : undefined,
@@ -120,18 +254,51 @@ export function loadNotebook(projectId: string | null | undefined): NotebookStat
       autoFeedStartedAt: typeof p.autoFeedStartedAt === "number" ? p.autoFeedStartedAt : undefined,
       autoFeedFinishedAt: typeof p.autoFeedFinishedAt === "number" ? p.autoFeedFinishedAt : undefined,
       autoFeedStopped: p.autoFeedStopped === true,
+      autoFeedArmed: p.autoFeedArmed === true,
+      runningOn: p.runningOn && typeof p.runningOn === "object" && typeof p.runningOn.deviceId === "string" && typeof p.runningOn.at === "number"
+        ? { deviceId: p.runningOn.deviceId, deviceName: typeof p.runningOn.deviceName === "string" ? p.runningOn.deviceName : p.runningOn.deviceId.slice(0, 8), at: p.runningOn.at }
+        : undefined,
+      updatedAt: typeof p.updatedAt === "number" ? p.updatedAt : undefined,
+      deletedSteps: Array.isArray(p.deletedSteps)
+        ? p.deletedSteps.filter((d: unknown): d is { id: string; ts: number } =>
+            !!d && typeof (d as any).id === "string" && typeof (d as any).ts === "number")
+        : [],
       digest: Array.isArray(p.digest) ? p.digest.slice(-12) : [],
       digestModel: typeof p.digestModel === "string" && p.digestModel ? p.digestModel : undefined,
       proposed: Array.isArray(p.proposed) ? p.proposed.filter((t: unknown) => typeof t === "string") : [],
       proposedPlan: typeof p.proposedPlan === "string" ? p.proposedPlan : "",
     };
+    // Belt-and-braces against resurrection: a step the user deleted must not
+    // come back just because some path (an older build, a hand-edited blob)
+    // re-introduced it alongside its tombstone.
+    if (notebook.deletedSteps?.length) {
+      const buried = new Set(notebook.deletedSteps.map((d) => d.id));
+      notebook.steps = notebook.steps.filter((s) => !buried.has(s.id));
+    }
+    if (repairedLegacyPreflightFailure) {
+      localStorage.setItem(keyFor(projectId), JSON.stringify(notebook));
+    }
+    return notebook;
   } catch { return { ...EMPTY }; }
 }
+
+/// Newest-first tombstone cap. A tombstone only has to outlive the moment a
+/// peer still holds the deleted step; once every device has converged it is
+/// dead weight, so an unbounded list would grow forever in the synced blob.
+const MAX_STEP_TOMBSTONES = 200;
 
 export function saveNotebook(projectId: string | null | undefined, nb: NotebookState): void {
   if (!projectId) return;
   try {
-    localStorage.setItem(keyFor(projectId), JSON.stringify({ ...nb, digest: nb.digest.slice(-12) }));
+    const deletedSteps = (nb.deletedSteps ?? []).slice().sort((a, b) => b.ts - a.ts).slice(0, MAX_STEP_TOMBSTONES);
+    localStorage.setItem(keyFor(projectId), JSON.stringify({
+      ...nb,
+      digest: nb.digest.slice(-12),
+      deletedSteps,
+      // Stamp EVERY write: this is the only per-notebook ordering signal two
+      // PCs have when deciding whose copy of a field is newer.
+      updatedAt: Date.now(),
+    }));
     window.dispatchEvent(new CustomEvent(NOTEBOOK_EVENT, { detail: { projectId } }));
   } catch { /* best effort */ }
 }
@@ -144,19 +311,33 @@ export function saveNotebook(projectId: string | null | undefined, nb: NotebookS
 export function takeNextAutoStep(projectId: string | null | undefined, surfaceId: string): NotebookStep | null {
   const nb = loadNotebook(projectId);
   if (!nb.autoFeed) return null;
-  if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return null;
+  if (leaseHeldByOtherSurface(nb, surfaceId)) return null;
   const next = nb.steps.find((s) => s.status === "pending");
   if (!next) return null;
   const now = Date.now();
   next.status = "sent";
   next.startedAt = now;
   next.finishedAt = undefined;
+  next.archivedAt = undefined;
+  next.stepUpdatedAt = now;
+  next.failureReason = undefined;
   if (nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) {
     nb.autoFeedStartedAt = now;
     nb.autoFeedFinishedAt = undefined;
     nb.autoFeedStopped = false;
   }
-  if (!nb.autoFeedOwner) nb.autoFeedOwner = surfaceId;
+  // We got here, so the lease is ours, unset, or belonged to a dead surface.
+  // Adopt it outright (with a fresh beat) rather than only filling a blank —
+  // otherwise the released-but-still-named owner keeps winning every later
+  // comparison and the queue re-stalls on the very next card.
+  if (nb.autoFeedOwner !== surfaceId) {
+    nb.autoFeedOwner = surfaceId;
+    nb.autoFeedHeartbeat = now;
+  }
+  // The chain is live from here on: every later card is dispatched by a run
+  // this queue owns, so the one-shot arm has done its job.
+  nb.autoFeedArmed = false;
+  nb.runningOn = describeThisDeviceRun(now) ?? nb.runningOn;
   saveNotebook(projectId, nb);
   return next;
 }
@@ -207,6 +388,7 @@ export function seedNotebookFromBrief(projectId: string | null | undefined, brie
     text,
     status: "pending" as const,
     ts: now + index,
+    stepUpdatedAt: now + index,
   })));
   saveNotebook(projectId, nb);
   return additions.length;
@@ -230,11 +412,31 @@ export function markNotebookAutoFeedStarted(projectId: string | null | undefined
 export function markNotebookAutoFeedFinished(projectId: string | null | undefined, surfaceId: string, finishedAt: number = Date.now()): boolean {
   if (!projectId) return false;
   const nb = loadNotebook(projectId);
-  if (!nb.autoFeed || (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) || nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) return false;
+  if (!nb.autoFeed || leaseHeldByOtherSurface(nb, surfaceId) || nb.autoFeedStartedAt == null || nb.autoFeedFinishedAt != null) return false;
   const stillActive = nb.steps.some((s) => s.status === "pending" || (s.status === "sent" && s.finishedAt == null));
   if (stillActive) return false;
   nb.autoFeedFinishedAt = finishedAt;
   nb.autoFeedStopped = false;
+  saveNotebook(projectId, nb);
+  return true;
+}
+
+/// How many cards are still waiting. Lets a caller tell "nothing left to do"
+/// apart from "something is blocking me", which the tri-state return of
+/// continueNotebookAutoFeed alone cannot express.
+export function notebookPendingStepCount(projectId: string | null | undefined): number {
+  return loadNotebook(projectId).steps.filter((s) => s.status === "pending").length;
+}
+
+/// Consume the one-shot permission to START the queue from a run the queue did
+/// not dispatch (▶ Start queue pressed while the agent was already busy). True
+/// at most once per press, and only for a surface allowed to drive: a manual
+/// chat turn that ends cleanly must never be able to launch a queue on its own.
+export function consumeAutoFeedArm(projectId: string | null | undefined, surfaceId: string): boolean {
+  const nb = loadNotebook(projectId);
+  if (!nb.autoFeedArmed) return false;
+  if (leaseHeldByOtherSurface(nb, surfaceId)) return false;
+  nb.autoFeedArmed = false;
   saveNotebook(projectId, nb);
   return true;
 }
@@ -245,7 +447,7 @@ export function markNotebookAutoFeedFinished(projectId: string | null | undefine
 export function autoFeedWouldRun(projectId: string | null | undefined, surfaceId: string): boolean {
   const nb = loadNotebook(projectId);
   if (!nb.autoFeed) return false;
-  if (nb.autoFeedOwner && nb.autoFeedOwner !== surfaceId) return false;
+  if (leaseHeldByOtherSurface(nb, surfaceId)) return false;
   return nb.steps.some((s) => s.status === "pending");
 }
 
@@ -273,7 +475,7 @@ export function markNotebookStepStarted(projectId: string | null | undefined, st
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], startedAt, finishedAt: undefined };
+  nb.steps[idx] = { ...nb.steps[idx], status: "sent", startedAt, finishedAt: undefined, archivedAt: undefined, stepUpdatedAt: startedAt, failureReason: undefined };
   saveNotebook(projectId, nb);
 }
 
@@ -283,16 +485,90 @@ export function markNotebookStepFinished(projectId: string | null | undefined, s
   const nb = loadNotebook(projectId);
   const idx = nb.steps.findIndex((s) => s.id === stepId);
   if (idx < 0) return;
-  nb.steps[idx] = { ...nb.steps[idx], finishedAt };
+  nb.steps[idx] = { ...nb.steps[idx], status: "sent", finishedAt, archivedAt: finishedAt, stepUpdatedAt: finishedAt, failureReason: undefined };
   saveNotebook(projectId, nb);
+}
+
+/// A stopped/errored run did not complete its notebook card. Keep the card in
+/// Active and make the failed state durable so every page/PC offers Re-feed.
+export function markNotebookStepFailed(
+  projectId: string | null | undefined,
+  stepId: string,
+  reason: string,
+  finishedAt: number = Date.now(),
+): void {
+  if (!projectId || !stepId) return;
+  const nb = loadNotebook(projectId);
+  const idx = nb.steps.findIndex((s) => s.id === stepId);
+  if (idx < 0) return;
+  nb.steps[idx] = {
+    ...nb.steps[idx],
+    status: "failed",
+    finishedAt,
+    archivedAt: undefined,
+    stepUpdatedAt: finishedAt,
+    failureReason: reason.trim() || "The run did not complete.",
+  };
+  saveNotebook(projectId, nb);
+}
+
+/// A filesystem preflight failed before an agent started. The card remains
+/// pending and actionable instead of becoming a misleading failed delivery.
+export function markNotebookStepPending(
+  projectId: string | null | undefined,
+  stepId: string,
+): void {
+  if (!projectId || !stepId) return;
+  const nb = loadNotebook(projectId);
+  const idx = nb.steps.findIndex((s) => s.id === stepId);
+  if (idx < 0) return;
+  nb.steps[idx] = {
+    ...nb.steps[idx],
+    status: "pending",
+    startedAt: undefined,
+    finishedAt: undefined,
+    archivedAt: undefined,
+    stepUpdatedAt: Date.now(),
+    failureReason: undefined,
+  };
+  saveNotebook(projectId, nb);
+}
+
+/// How a run that was carrying notebook cards ended.
+export type NotebookRunOutcome =
+  | { kind: "clean" }
+  /// A preflight refused BEFORE any agent started, so no work was attempted.
+  | { kind: "preflight" }
+  | { kind: "failed"; reason: string };
+
+/// The single place both surfaces settle a notebook card at run end. The two
+/// pages each hand-rolled this three-way branch and drifted: the Coding page
+/// never imported markNotebookStepPending, so a preflight stop — where nothing
+/// ran at all — was recorded as a real failure and the card was buried behind a
+/// Re-feed instead of staying straightforwardly pending.
+export function settleNotebookStep(
+  projectId: string | null | undefined,
+  stepId: string,
+  outcome: NotebookRunOutcome,
+  at: number = Date.now(),
+): void {
+  if (outcome.kind === "clean") markNotebookStepFinished(projectId, stepId, at);
+  else if (outcome.kind === "preflight") markNotebookStepPending(projectId, stepId);
+  else markNotebookStepFailed(projectId, stepId, outcome.reason, at);
 }
 
 /// A step is ARCHIVED once it is finished: the user checked it off ("done"),
 /// or a run it was fed to has completed ("sent" with a finish stamp). Archived
 /// steps leave the Active queue and appear only on the Archive tab — a fed
 /// step that finished no longer needs a manual check-off to get out of the way.
-function isStepArchived(s: NotebookStep): boolean {
+export function isStepArchived(s: NotebookStep): boolean {
   return s.status === "done" || (s.status === "sent" && s.finishedAt != null);
+}
+
+/// Deterministic archive timestamp for sorting. Newest records use the explicit
+/// archivedAt; legacy records fall back to finishedAt (sent+finished) or ts.
+function archiveTimestamp(s: NotebookStep): number {
+  return s.archivedAt ?? s.finishedAt ?? s.ts;
 }
 
 /// Format a step's timing line: started → finished, duration, or still running.
@@ -300,7 +576,8 @@ function formatStepTiming(s: NotebookStep): string | null {
   if (s.startedAt == null) return null;
   const start = formatClock(s.startedAt);
   if (s.finishedAt != null) {
-    return translateUiText(`started ${start} • finished ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`);
+    const outcome = s.status === "failed" ? "incomplete" : "finished";
+    return translateUiText(`started ${start} • ${outcome} ${formatClock(s.finishedAt)} • ${formatDuration(s.finishedAt - s.startedAt)}`);
   }
   return translateUiText(`started ${start} • running ${formatDuration(Date.now() - s.startedAt)}`);
 }
@@ -378,28 +655,38 @@ function parseDigestReply(reply: string): { plan: string; steps: string[] } {
   return { plan: (planLines ?? []).join("\n").trim(), steps };
 }
 
+// The PLAN half of this prompt is only asked for when the board is actually
+// visible. With SHOW_KANBAN off the reply's PLAN block is parsed and then
+// discarded (proposedPlan is never applied), so every digest was paying to
+// generate and refine a board the user can't see. Kept intact behind the flag
+// so restoring the board restores the prompt with it.
 const DIGEST_SYSTEM = [
   "You are the Notebook Digest agent inside OWLLM. An agent team is working on the user's project;",
-  "the user brainstorms alongside it. Your job: turn their raw notes/requests into (1) an updated",
-  "Kanban PLAN and (2) clear, self-contained, implementable NEXT STEPS for that team.",
+  SHOW_KANBAN
+    ? "the user brainstorms alongside it. Your job: turn their raw notes/requests into (1) an updated Kanban PLAN and (2) clear, self-contained, implementable NEXT STEPS for that team."
+    : "the user brainstorms alongside it. Your job: turn their raw notes/requests into clear, self-contained, implementable NEXT STEPS for that team.",
   "Rules:",
-  "- PLAN is a Kanban board, not prose. Use exactly these lanes inside PLAN: NOW, NEXT, LATER.",
-  "- NOW = the coherent implementation batch that should happen first. NEXT = follow-up batch.",
-  "  LATER = optional/parked work. Keep only useful cards; remove duplication and stale wording.",
-  "- You are shown the CURRENT PLAN; refine it (keep what still holds, never silently drop the user's decisions).",
-  "  If the notes add nothing plan-worthy, omit the PLAN section entirely.",
+  ...(SHOW_KANBAN ? [
+    "- PLAN is a Kanban board, not prose. Use exactly these lanes inside PLAN: NOW, NEXT, LATER.",
+    "- NOW = the coherent implementation batch that should happen first. NEXT = follow-up batch.",
+    "  LATER = optional/parked work. Keep only useful cards; remove duplication and stale wording.",
+    "- You are shown the CURRENT PLAN; refine it (keep what still holds, never silently drop the user's decisions).",
+    "  If the notes add nothing plan-worthy, omit the PLAN section entirely.",
+  ] : []),
   "- STEPS are ADDITIVE: never rewrite, merge or remove the existing steps you are shown — only propose NEW ones.",
   "- Each step must stand alone: an agent receives it with no other context, so name the feature/file/behavior explicitly.",
   "- Do NOT create tiny painful micro-steps. Prefer 1-4 larger implementation chunks that a good agent can complete in one run.",
   "- Merge related UI/code/test work into one step when it belongs together. Split only when the work truly needs separate runs.",
   "- Output format, nothing else:",
-  "  PLAN:",
-  "  NOW:",
-  "  - <card>",
-  "  NEXT:",
-  "  - <card>",
-  "  LATER:",
-  "  - <card>",
+  ...(SHOW_KANBAN ? [
+    "  PLAN:",
+    "  NOW:",
+    "  - <card>",
+    "  NEXT:",
+    "  - <card>",
+    "  LATER:",
+    "  - <card>",
+  ] : []),
   "  STEPS:",
   "  - <each proposed larger implementation chunk on its own line starting with '- '>",
 ].join("\n");
@@ -419,9 +706,9 @@ type Props = {
   modelId: string;
   port: number;
   models: ModelInfo[];
-  /// Window event that opens this instance. The Agents pages listen on the
-  /// default; the Code page mounts its own instance on a separate event so
-  /// the two surfaces never open each other's modal.
+  /// Window event that opens this instance as a MODAL. Only the Agents page
+  /// uses it (on the default name); the Code page mounts `inline` in its right
+  /// column and never opens a modal, so it leaves this at the default.
   openEvent?: string;
   /// Needed by the digest-model ModelPicker (which providers are signed in).
   accountsStatus?: AccountsStatusLite | null;
@@ -521,7 +808,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     if (!t) return;
     updateNotebook((prev) => ({
       ...prev,
-      steps: [...prev.steps, { id: newStepId(), text: t, status: "pending", ts: Date.now() }],
+      steps: [...prev.steps, { id: newStepId(), text: t, status: "pending", ts: Date.now(), stepUpdatedAt: Date.now() }],
     }));
   };
   const addSteps = (texts: string[]) => {
@@ -532,13 +819,30 @@ export default function RunNotebook({ projectId, projectName, active = true, run
       ...prev,
       steps: [
         ...prev.steps,
-        ...clean.map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i })),
+        ...clean.map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i, stepUpdatedAt: now + i })),
       ],
     }));
   };
-  const setStep = (id: string, patch: Partial<NotebookStep>) =>
-    updateNotebook((prev) => ({ ...prev, steps: prev.steps.map((s) => (s.id === id ? { ...s, ...patch } : s)) }));
-  const removeStep = (id: string) => updateNotebook((prev) => ({ ...prev, steps: prev.steps.filter((s) => s.id !== id) }));
+  const setStep = (id: string, patch: Partial<NotebookStep>) => {
+    const changesLifecycle = ["status", "startedAt", "finishedAt", "archivedAt", "failureReason"]
+      .some((key) => Object.prototype.hasOwnProperty.call(patch, key));
+    const stepUpdatedAt = changesLifecycle ? Date.now() : undefined;
+    updateNotebook((prev) => ({
+      ...prev,
+      steps: prev.steps.map((s) => (s.id === id
+        ? { ...s, ...patch, ...(stepUpdatedAt != null ? { stepUpdatedAt } : {}) }
+        : s)),
+    }));
+  };
+  /// Deleting records a TOMBSTONE as well as dropping the step. Steps merge
+  /// across PCs as a union by id (so a peer's completion can't be clobbered by
+  /// our stale copy); without the tombstone that union would hand the deleted
+  /// step straight back on the next sync.
+  const removeStep = (id: string) => updateNotebook((prev) => ({
+    ...prev,
+    steps: prev.steps.filter((s) => s.id !== id),
+    deletedSteps: [...(prev.deletedSteps ?? []).filter((d) => d.id !== id), { id, ts: Date.now() }],
+  }));
   // Reorder within the VISIBLE (unfinished) cards only — archived steps are
   // hidden from the feed, so swap the two adjacent visible steps rather than raw
   // array neighbours (a raw swap could silently trade places with a hidden one).
@@ -564,12 +868,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     // race React's queued state updater and erase the just-started sequence.
     updateNotebook((prev) => ({
       ...prev,
-      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined } : step),
+      steps: prev.steps.map((step) => step.id === s.id ? { ...step, status: "sent", startedAt: now, finishedAt: undefined, archivedAt: undefined, stepUpdatedAt: now, failureReason: undefined } : step),
       // Claiming the queue makes THIS window its owner even when auto-feed is
       // off: a started queue is driven by one window, and every other open
       // window (another tab here or the app on another PC) ghosts its run
       // controls until this one finishes or hands the lease over.
-      ...(claimQueue ? { autoFeedOwner: surfaceId, autoFeedHeartbeat: now } : {}),
+      ...(claimQueue ? { autoFeedOwner: surfaceId, autoFeedHeartbeat: now, runningOn: describeThisDeviceRun(now) ?? prev.runningOn } : {}),
       ...(prev.autoFeed && (prev.autoFeedStartedAt == null || prev.autoFeedFinishedAt != null)
         ? { autoFeedStartedAt: now, autoFeedFinishedAt: undefined, autoFeedStopped: false }
         : {}),
@@ -594,8 +898,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     if (running) {
       // Agent is already running — claim auto-feed ownership so the queue
       // starts automatically as soon as the current job finishes, without
-      // steering the live run now.
-      updateNotebook((prev) => ({ ...prev, autoFeed: true, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
+      // steering the live run now. This click is the ONLY thing that lets a
+      // run the queue did not dispatch start one (see autoFeedArmed).
+      updateNotebook((prev) => ({ ...prev, autoFeed: true, autoFeedArmed: true, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
       setQueueNotice("waiting");
       window.setTimeout(() => setQueueNotice(null), 6000);
       return;
@@ -621,7 +926,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     const notes = nb.text.trim();
     const currentPlan = nb.plan.trim();
     if (digestBusy) return;
-    if (!notes && !currentPlan && nb.steps.length === 0) {
+    if (!notes && !(SHOW_KANBAN && currentPlan) && nb.steps.length === 0) {
       setDigestError("Write working notes first, or add an existing plan/step for the digest to refine.");
       return;
     }
@@ -639,7 +944,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     const pid = projRef.current;
     try {
       const user = [
-        currentPlan ? `CURRENT PLAN (extend/refine additively):\n${currentPlan}` : "",
+        SHOW_KANBAN && currentPlan ? `CURRENT PLAN (extend/refine additively):\n${currentPlan}` : "",
         nb.steps.length ? `EXISTING STEPS (do not repeat or rewrite):\n${nb.steps.map((s) => `- ${s.text}`).join("\n")}` : "",
         notes ? `NOTEBOOK NOTES:\n${notes}` : "",
       ].filter(Boolean).join("\n\n");
@@ -677,6 +982,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   };
 
   const pendingCount = useMemo(() => nb.steps.filter((s) => s.status === "pending").length, [nb.steps]);
+  const incompleteCount = useMemo(() => nb.steps.filter((s) => s.status === "failed").length, [nb.steps]);
   // Total queue timing: sum of finished durations plus currently-running time.
   const queueTiming = useMemo(() => {
     const finished = nb.steps.filter((s) => s.startedAt != null && s.finishedAt != null);
@@ -701,7 +1007,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   // The active feed shows only unfinished, actionable cards. Finished steps
   // (checked off OR fed-and-completed) drop out of the feed into the Archive tab.
   const activeSteps = useMemo(() => nb.steps.filter((s) => !isStepArchived(s)), [nb.steps]);
-  const doneSteps = useMemo(() => nb.steps.filter((s) => isStepArchived(s)), [nb.steps]);
+  const doneSteps = useMemo(() => nb.steps.filter((s) => isStepArchived(s)).sort((a, b) => archiveTimestamp(b) - archiveTimestamp(a)), [nb.steps]);
   // ---- Window-owned queue lease (device-local; never synced) --------------
   // Once a window starts the queue (Start queue / auto-feed), it OWNS the run:
   // only that window feeds the team from this list. Every other open window on
@@ -724,6 +1030,14 @@ export default function RunNotebook({ projectId, projectName, active = true, run
   useTick(queueActive && nb.autoFeedOwner !== surfaceId && nb.autoFeedHeartbeat != null);
   const lockedElsewhere = queueActive && nb.autoFeedOwner !== surfaceId && leaseLive;
   const takeOverQueue = () => updateNotebook((prev) => ({ ...prev, autoFeedOwner: surfaceId, autoFeedHeartbeat: Date.now() }));
+  // Cross-PC ADVISORY. The run-lease deliberately never syncs, so until now a
+  // second machine had no way to know a queue was already running and could
+  // start the same steps again. This only informs — it must not disable, since
+  // peer clocks are unsynchronized and a skewed stamp would lock the user out
+  // of their own queue.
+  useEffect(() => { warmNotebookDeviceIdentity(); }, []);
+  useTick(nb.runningOn != null);
+  const peerRun = peerRunningQueue(nb);
   // While THIS window owns an active queue, beat the heartbeat so peers keep
   // seeing the lease held. Stops when the queue ends or ownership moves away.
   useEffect(() => {
@@ -741,11 +1055,6 @@ export default function RunNotebook({ projectId, projectName, active = true, run
     return raw ? (raw.split(/[\\/]/).pop() || raw) : "server model";
   }, [modelId]);
   if (!inline && !open) return null;
-
-  const statusIcon = (s: NotebookStep) => (
-    <ActionIcon name={s.status === "done" ? "check" : s.status === "sent" ? "bolt" : "circle"} size={15} />
-  );
-  const statusColor = (s: NotebookStep) => (s.status === "done" ? "var(--ok)" : s.status === "sent" ? "var(--warn)" : "var(--fg-muted)");
 
   const card: React.CSSProperties = {
     display: "flex", flexDirection: "column", gap: 8,
@@ -781,6 +1090,15 @@ export default function RunNotebook({ projectId, projectName, active = true, run
             {running ? (inline ? "run live — steps steer it" : "team is running — fed steps steer it live") : (inline ? "idle — steps start a run" : "team idle — fed steps start a run")}
           </span>
           <div style={{ flex: 1 }} />
+          {peerRun && !lockedElsewhere && (
+            <span
+              data-ui="NotebookPeerRunning"
+              title={`Another of your PCs started this queue at ${formatClock(peerRun.at)}. This is informational only — you can still run it here, but both machines would work the same steps.`}
+              style={{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, fontWeight: 700, color: "var(--warn)" }}
+            >
+              <ActionIcon name="monitor" size={12} />queue started on {peerRun.deviceName}
+            </span>
+          )}
           {lockedElsewhere ? (
             // This window is a spectator: another window owns the running queue.
             // Ghost the toggle and offer an explicit takeover (for when the
@@ -812,6 +1130,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     : {
                         ...prev,
                         autoFeed: false,
+                        autoFeedArmed: false,
                         autoFeedOwner: undefined,
                         ...(prev.autoFeedStartedAt != null && prev.autoFeedFinishedAt == null
                           ? { autoFeedFinishedAt: stoppedAt, autoFeedStopped: true }
@@ -870,7 +1189,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 disabled={digestBusy}
                 aria-label={digestBusy ? "Digesting..." : "Digest notes"}
                 title="Digest the working notes, current plan, and existing steps"
-                style={{ height: 32, padding: "0 14px", display: "inline-flex", alignItems: "center", gap: 7, border: digestBusy ? "1px solid var(--border)" : "1px solid var(--accent)", borderRadius: 7, background: digestBusy ? "var(--bg-surface)" : "linear-gradient(135deg, color-mix(in srgb, var(--accent) 82%, white), var(--accent))", color: digestBusy ? "var(--fg-muted)" : "var(--accent-fg)", boxShadow: digestBusy ? "none" : "0 2px 10px rgba(var(--accent-rgb),0.3)", fontSize: 12, fontWeight: 800, cursor: digestBusy ? "wait" : "pointer", opacity: digestBusy ? 0.62 : 1, flexShrink: 0 }}
+                style={{ height: 32, padding: "0 14px", display: "inline-flex", alignItems: "center", gap: 7, border: digestBusy ? "1px solid var(--border)" : "1px solid var(--accent)", borderRadius: 7, backgroundColor: digestBusy ? "var(--bg-surface)" : "#667eea", backgroundImage: digestBusy ? "none" : "linear-gradient(135deg, #667eea, #7fd4ff)", color: digestBusy ? "var(--fg-muted)" : "var(--accent-fg)", boxShadow: digestBusy ? "none" : "0 2px 10px rgba(var(--accent-rgb),0.3)", fontSize: 12, fontWeight: 800, cursor: digestBusy ? "wait" : "pointer", opacity: digestBusy ? 0.62 : 1, flexShrink: 0 }}
               ><ActionIcon name={digestBusy ? "loader" : "wand"} size={15} />{digestBusy ? "Digesting..." : "Digest notes"}</button>
               {nb.digest.length > 0 && (
                 <button className="ghost-btn" onClick={() => setDigestLogOpen((v) => !v)} title="Show or hide the raw digest transcript" style={{ height: 28, padding: "0 10px", fontSize: 11 }}>
@@ -929,7 +1248,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <button
                           onClick={() => updateNotebook((prev) => ({
                             ...prev,
-                            steps: [...prev.steps, { id: newStepId(), text: t, status: "pending" as const, ts: Date.now() }],
+                            steps: [...prev.steps, { id: newStepId(), text: t, status: "pending" as const, ts: Date.now(), stepUpdatedAt: Date.now() }],
                             proposed: (prev.proposed ?? []).filter((_, j) => j !== i),
                           }))}
                           title="Add this step to the list"
@@ -947,7 +1266,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                           steps: [
                             ...prev.steps,
                             ...(prev.proposed ?? []).map((t) => t.trim()).filter(Boolean)
-                              .map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i })),
+                              .map((text, i) => ({ id: newStepId(), text, status: "pending" as const, ts: now + i, stepUpdatedAt: now + i })),
                           ],
                           proposed: [],
                           // Accepting the steps CONSUMES the working notes — the
@@ -1033,6 +1352,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                 <span title="Total queue time across started steps" style={{ marginLeft: "auto", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontWeight: 700, color: "var(--accent-ink)", border: "1px solid rgba(var(--accent-rgb),0.35)", borderRadius: 999, padding: "1px 8px" }}><ActionIcon name="clock" size={11} />{queueTimingText}</span>
               )}
               <span style={{ fontSize: 10, fontWeight: 700, color: pendingCount ? "var(--ok)" : "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 999, padding: "1px 8px" }}>{pendingCount} pending</span>
+              {incompleteCount > 0 && (
+                <span style={{ fontSize: 10, fontWeight: 700, color: "var(--error)", border: "1px solid rgba(var(--error-rgb),0.45)", borderRadius: 999, padding: "1px 8px" }}>{incompleteCount} incomplete</span>
+              )}
               {pendingCount > 0 && (
                 <button
                   onClick={startQueue}
@@ -1124,15 +1446,9 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                     display: "flex", flexDirection: "column", gap: 8,
                     padding: 10,
                     background: "var(--bg-surface)", border: "1px solid var(--border)", borderRadius: 8,
-                    opacity: s.status === "done" ? 0.6 : 1,
+                    opacity: 1,
                   }}>
                     <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                      <button
-                        onClick={() => setStep(s.id, { status: s.status === "done" ? "pending" : "done" })}
-                        title={s.status === "done" ? "Re-open this step" : "Mark done"}
-                        style={{ border: "none", background: "transparent", cursor: "pointer", color: statusColor(s), fontSize: 15, lineHeight: "20px", width: 20, padding: 0, flexShrink: 0 }}
-                      >{statusIcon(s)}</button>
-
                       {editingStepId === s.id ? (
                         <textarea
                           ref={editStepRef}
@@ -1147,13 +1463,19 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <div
                           onClick={() => startEdit(s)}
                           title="Click to edit"
-                          style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, color: "var(--fg)", textDecoration: s.status === "done" ? "line-through" : "none", whiteSpace: "pre-wrap", wordBreak: "break-word", cursor: "text" }}
+                          style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, color: "var(--fg)", whiteSpace: "pre-wrap", wordBreak: "break-word", cursor: "text" }}
                         >
                           {s.text}
                           {s.status === "sent" && <span style={{ display: "inline-block", marginLeft: 8, fontSize: 10, color: "var(--warn)", border: "1px solid rgba(var(--warn-rgb),0.45)", borderRadius: 999, padding: "1px 7px" }}>fed to team</span>}
+                          {s.status === "failed" && <span style={{ display: "inline-block", marginLeft: 8, fontSize: 10, color: "var(--error)", border: "1px solid rgba(var(--error-rgb),0.45)", borderRadius: 999, padding: "1px 7px" }}>incomplete</span>}
                         </div>
                       )}
                     </div>
+                    {s.status === "failed" && s.failureReason && (
+                      <div style={{ paddingLeft: 28, fontSize: 10.5, color: "var(--error)", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>
+                        {s.failureReason}
+                      </div>
+                    )}
                     {formatStepTiming(s) && (
                       <div style={{ paddingLeft: 28, fontSize: 10.5, color: "var(--fg-muted)", fontVariantNumeric: "tabular-nums" }}>
                         {formatStepTiming(s)}
@@ -1165,12 +1487,12 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <button
                           onClick={() => feedStep(s)}
                           disabled={lockedElsewhere}
-                          aria-label={s.status === "sent" ? "Re-feed" : "Feed"}
+                          aria-label={s.status === "sent" || s.status === "failed" ? "Re-feed" : "Feed"}
                           title={lockedElsewhere
                             ? "The queue is running in another window on this project — feeding is read-only here. Take over from the header to feed from this window."
                             : running ? "Feed now — steers the running team at its next boundary" : "Feed now — dispatches this step as a new goal"}
                           style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, border: "1px solid rgba(var(--warn-rgb),0.5)", borderRadius: 6, background: "rgba(var(--warn-rgb),0.12)", color: "var(--warn)", fontSize: 11, fontWeight: 700, cursor: lockedElsewhere ? "not-allowed" : "pointer", opacity: lockedElsewhere ? 0.5 : 1 }}
-                        ><ActionIcon name="bolt" size={12} />{s.status === "sent" ? "Re-feed" : "Feed"}</button>
+                        ><ActionIcon name="bolt" size={12} />{s.status === "sent" || s.status === "failed" ? "Re-feed" : "Feed"}</button>
                       )}
                       {feedNotice?.id === s.id && (
                         <span style={{
@@ -1184,6 +1506,20 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                       <button className="ghost-btn" onClick={() => moveStep(s.id, -1)} title="Move up" aria-label="Move up" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="chevron-up" size={14} /></button>
                       <button className="ghost-btn" onClick={() => moveStep(s.id, 1)} title="Move down" aria-label="Move down" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center" }}><ActionIcon name="chevron-down" size={14} /></button>
                       <div style={{ flex: 1 }} />
+                      <button
+                        className="ghost-btn"
+                        onClick={() => {
+                          const archivedAt = Date.now();
+                          setStep(s.id, {
+                            status: "done",
+                            archivedAt,
+                            finishedAt: s.startedAt != null && s.finishedAt == null ? archivedAt : s.finishedAt,
+                          });
+                        }}
+                        title="Archive this step (moves it to the Archive tab)"
+                        aria-label="Archive step"
+                        style={{ height: 24, padding: "0 10px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 700, flexShrink: 0 }}
+                      ><ActionIcon name="archive" size={12} />Archive</button>
                       <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete step" aria-label="Delete step" style={{ height: 24, width: 24, padding: 0, display: "grid", placeItems: "center", color: "var(--error)" }}><ActionIcon name="trash" size={13} /></button>
                     </div>
                   </div>
@@ -1205,7 +1541,7 @@ export default function RunNotebook({ projectId, projectName, active = true, run
                         <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
                           <ActionIcon name="check" size={13} style={{ color: "var(--ok)", marginTop: 2 }} />
                           <div style={{ flex: 1, fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.45, color: "var(--fg-muted)", textDecoration: "line-through", whiteSpace: "pre-wrap", wordBreak: "break-word" }}>{s.text}</div>
-                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending", startedAt: undefined, finishedAt: undefined })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
+                          <button className="ghost-btn" onClick={() => setStep(s.id, { status: "pending", startedAt: undefined, finishedAt: undefined, archivedAt: undefined })} title="Reopen this step (moves it back to the active feed)" aria-label="Reopen" style={{ height: 22, padding: "0 8px", display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10.5, flexShrink: 0 }}><ActionIcon name="rotate" size={12} />Reopen</button>
                           <button className="ghost-btn" onClick={() => removeStep(s.id)} title="Delete permanently" aria-label="Delete permanently" style={{ height: 22, width: 22, padding: 0, display: "grid", placeItems: "center", color: "var(--error)", flexShrink: 0 }}><ActionIcon name="trash" size={12} /></button>
                         </div>
                         {formatStepTiming(s) && (

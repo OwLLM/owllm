@@ -51,8 +51,10 @@ import {
   runtimeSkillIds,
   type RuntimePersonalAgent,
 } from "./personalAgentRuntime";
+import { isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
+import { historyBudgetFor } from "./contextBudget";
 import type { RevisionRef } from "./personalAgentConfig";
-import { resolveInferenceBase } from "./inferenceEndpoint";
+import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoint";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
 import { makeGenMeter } from "../../utils/genStats";
@@ -196,6 +198,10 @@ async function runClaudeCliStream(args: {
   /// or falls back to a "❓ to user" entry in the Thought channel.
   /// Defaults to TRUE — same default as VS Code's Claude Code session.
   briefMode?: boolean;
+  /// Force the read-only sandbox. Normally left unset: `isAgentReadOnly`
+  /// derives it from `allowedTools`, so an orchestrator is confined whether or
+  /// not the caller remembered to ask.
+  readOnly?: boolean;
   /// Called when the agent emits a SendUserMessage tool call. The
   /// caller can show a modal/inline prompt and (later) feed the
   /// answer back through stdin. For now (Phase C v1) we just route
@@ -268,6 +274,7 @@ async function runClaudeCliStream(args: {
       // always ask the user a question mid-turn. Callers can pass false
       // explicitly to disable when truly autonomous behaviour is wanted.
       briefMode: args.briefMode ?? true,
+      readOnly: isAgentReadOnly(args),
       onEvent: ch,
     });
   } finally {
@@ -293,6 +300,12 @@ export async function runCodexCliStream(args: {
   // Per-role allowlist — forwarded so the Rust side can detect the Browser role
   // (its allowlist names browser_*) and wire the MCP browser gateway for it.
   allowedTools?: string[];
+  /// TRUE for a read-only agent (orchestrator / sub-leader). Codex is spawned
+  /// with `--sandbox read-only` so it CANNOT write the shared checkout. The
+  /// prompt saying "you are READ-ONLY" never bound codex's own shell/apply_patch
+  /// tools, so the orchestrator edited the project, left it dirty, and every
+  /// specialist worktree afterwards failed to cut.
+  readOnly?: boolean;
   onDelta: (delta: string) => void;
   onThought: (channel: string, role: string, delta: string) => void;
 }): Promise<string> {
@@ -333,6 +346,69 @@ export async function runCodexCliStream(args: {
       model: args.model ?? null,
       effort: args.effort ?? null,
       allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      readOnly: isAgentReadOnly(args),
+      onEvent: ch,
+    });
+  } finally {
+    await responsive.flush();
+  }
+}
+
+/// Run Kimi Code in its native NDJSON mode so long coding turns expose
+/// thinking/tool progress instead of leaving the UI on a frozen "Thinking"
+/// placeholder until `--final-message-only` exits.
+export async function runKimiCliStream(args: {
+  model?: string | null;
+  systemPrompt: string;
+  userMessage: string;
+  cwd?: string | null;
+  allowedTools?: string[];
+  /// See runClaudeCliStream — normally derived from `allowedTools`.
+  readOnly?: boolean;
+  onDelta: (delta: string) => void;
+  onThought: (channel: string, role: string, delta: string) => void;
+}): Promise<string> {
+  const responsive = makeResponsiveHandlers(args.onDelta, args.onThought);
+  const ch = new Channel<ClaudeStreamEvent>();
+  ch.onmessage = (msg) => {
+    switch (msg.kind) {
+      case "text":
+        responsive.onDelta(msg.delta);
+        break;
+      case "thinking":
+        responsive.onThought?.("thinking", "🧠 Kimi thinking", msg.delta);
+        break;
+      case "toolUse":
+        responsive.onThought?.(
+          `tool:${msg.name}:${msg.toolUseId}`,
+          `🛠 ${msg.name}`,
+          msg.input || "",
+        );
+        break;
+      case "toolResult": {
+        const snippet = msg.content.length > 800
+          ? `${msg.content.slice(0, 800)}\n…(truncated)`
+          : msg.content;
+        responsive.onThought?.(
+          `tool-result:${msg.toolUseId}`,
+          msg.isError ? "↩ error" : "↩ result",
+          snippet,
+        );
+        break;
+      }
+      case "error":
+        responsive.onThought?.("cli-error", "⚠ Kimi CLI", msg.message);
+        break;
+    }
+  };
+  try {
+    return await invoke<string>("kimi_cli_stream", {
+      systemPrompt: args.systemPrompt,
+      userMessage: args.userMessage,
+      cwd: args.cwd ?? null,
+      model: args.model ?? null,
+      allowedTools: args.allowedTools && args.allowedTools.length > 0 ? args.allowedTools : null,
+      readOnly: isAgentReadOnly(args),
       onEvent: ch,
     });
   } finally {
@@ -1415,10 +1491,39 @@ export function chatToHistory(chat: GoalMsg[]): HistoryItem[] {
   return out;
 }
 
-export function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem[]): string {
+/// Budget for prior turns folded into a CLI prompt. Every CLI path (Claude,
+/// Codex) used to inline the ENTIRE project transcript: one measured
+/// orchestrator dispatch was 778,606 characters = 210,669 input tokens against
+/// a 258,400-token window, so the run began 81% full and degraded from there.
+/// Newest turns are kept; older ones are dropped and the drop is stated so the
+/// model never mistakes a truncated transcript for the whole story.
+///
+/// These two constants are now only the FALLBACK, used when the caller cannot
+/// name the model. Pass `modelId` and the budget is sized to that model's real
+/// window instead — see contextBudget.ts for why one fixed number was wrong for
+/// an 8K local GGUF and a 1M-window cloud model simultaneously.
+export const MAX_FOLDED_HISTORY_TURNS = 24;
+export const MAX_FOLDED_HISTORY_CHARS = 60_000;
+
+export function foldHistoryIntoPrompt(
+  userMessage: string,
+  history?: HistoryItem[],
+  modelId?: string | null,
+  liveContextWindow?: number | null,
+): string {
   if (!history || history.length === 0) return userMessage;
+  const budget = modelId
+    ? historyBudgetFor(modelId, liveContextWindow)
+    : { turns: MAX_FOLDED_HISTORY_TURNS, chars: MAX_FOLDED_HISTORY_CHARS };
+  const kept = recentTextHistory(history, budget.turns, budget.chars);
+  if (kept.length === 0) return userMessage;
+  const dropped = history.length - kept.length;
   const lines: string[] = ["--- Previous conversation ---"];
-  for (const h of history) {
+  if (dropped > 0) {
+    lines.push(`(${dropped} older turn(s) omitted to stay inside the model's context window.)`);
+    lines.push("");
+  }
+  for (const h of kept) {
     lines.push(`${h.role === "user" ? "User" : "Assistant"}: ${h.content}`);
     lines.push("");
   }
@@ -1427,7 +1532,7 @@ export function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem
   return lines.join("\n");
 }
 
-function recentTextHistory(history: HistoryItem[] | undefined, maxTurns = 8, maxChars = 12_000): HistoryItem[] {
+export function recentTextHistory(history: HistoryItem[] | undefined, maxTurns = 8, maxChars = 12_000): HistoryItem[] {
   if (!history || history.length === 0) return [];
   const out: HistoryItem[] = [];
   let used = 0;
@@ -1539,6 +1644,17 @@ const _warmCli = new Map<string, WarmEntry>();
 // ~1h expiry. The reactive 401 retry (clearCliWarm + retry) is the backstop.
 const WARM_TTL_MS = 25 * 60 * 1000; // 25 min — comfortably under the ~1h token TTL
 export type CliBackend = "claude_cli" | "codex_cli" | "gemini_cli" | "kimi_cli" | "grok_cli";
+
+/// The selected CLI could not be made runnable before the model received the
+/// task. Notebook callers keep that card pending (rather than recording a
+/// failed implementation) because no agent work actually began.
+export class CliPreflightError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CliPreflightError";
+  }
+}
+
 export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): Promise<void> {
   const now = Date.now();
   let entry = _warmCli.get(backend);
@@ -1552,18 +1668,34 @@ export async function ensureCliWarm(backend: CliBackend, cwd?: string | null): P
       if (cwd && /^\\\\(?:wsl(?:\.localhost)?)[\\/]/i.test(cwd)) {
         _authWaitHandler?.({ kind: "prepare", backend });
       }
-      await invoke<boolean>("accounts_prepare_cli_for_cwd", {
-        backend,
-        cwd: cwd ?? null,
-      });
+      try {
+        await invoke<boolean>("accounts_prepare_cli_for_cwd", {
+          backend,
+          cwd: cwd ?? null,
+        });
+      } catch (error: any) {
+        const detail = error?.message ?? String(error);
+        throw new CliPreflightError(`Could not prepare ${backend.replace(/_cli$/, "")} in the project environment: ${detail}`);
+      }
       // Run the live probe round-trip for EVERY subscription backend — invoking
       // the CLI refreshes its OAuth access token as a side effect on all of
       // them. This was claude/codex-only, which made both the proactive 25-min
       // re-warm AND the reactive 401 clear-and-rewarm a NO-OP for Kimi/Gemini:
       // their token expired mid-run and the retry re-ran the same stale creds
       // until the backoff died — the "inconsistent logouts, worst with Kimi".
-      try { await invoke("accounts_test_probe_live", { backend }); }
-      catch { /* ignore — warm-up is best-effort */ }
+      try {
+        const probe = await invoke<{ ok: boolean; detail: string }>("accounts_test_probe_live", { backend });
+        // A revoked Kimi refresh grant is not a cold-token race: repeating the
+        // same CLI call can never repair it. Stop before the real job and give
+        // the user the one action that can recover the account.
+        if (backend === "kimi_cli" && !probe.ok && isCliReauthRequired(probe.detail)) {
+          throw new Error(kimiReconnectMessage(probe.detail));
+        }
+      } catch (error: any) {
+        if (backend === "kimi_cli" && isCliReauthRequired(error?.message ?? String(error))) throw error;
+        // Other warm-up failures are best-effort: the real call below still
+        // carries the provider's most precise error and normal retry policy.
+      }
       // THE AGENTIC-TEAM 401 FIX: a sandboxed project runs the CLI inside WSL
       // against a COPY of the Windows credentials; warming only refreshes the
       // Windows token, so the in-sandbox copy goes stale → persistent 401. After
@@ -1600,6 +1732,15 @@ export const CLI_AUTH_BACKOFFS_MS = [10_000, 30_000, 120_000]; // 10s, 30s, 2min
 
 export function isCliAuthError(msg: string): boolean {
   return /\b401\b|invalid authentication|failed to authenticate|authentication_error|not logged in|unauthorized/i.test(msg);
+}
+
+export function isCliReauthRequired(msg: string): boolean {
+  return /authorization grant is invalid|invalid[_ ]authentication[_ ]error|api key appears to be invalid|refresh token.*(?:invalid|revoked|expired)|login expired|signed out/i.test(msg);
+}
+
+function kimiReconnectMessage(detail: string): string {
+  const clean = detail.trim().replace(/\s+/g, " ");
+  return `Kimi sign-in expired and cannot be refreshed. Open Accounts → Kimi, choose Disconnect, then Login again.${clean ? ` Kimi reported: ${clean}` : ""}`;
 }
 
 // Transient NETWORK failures the subscription CLI surfaces ("Failed to fetch"
@@ -1687,6 +1828,9 @@ export async function withCliAuthRetry<T>(
       // fast (1.5s/4s/8s).
       const isAuth = isCliAuthError(msg);
       const isNet = !isAuth && isTransientNetError(msg);
+      if (backend === "kimi_cli" && isAuth && isCliReauthRequired(msg)) {
+        throw new Error(kimiReconnectMessage(msg));
+      }
       const schedule = isAuth ? CLI_AUTH_BACKOFFS_MS : CLI_NET_BACKOFFS_MS;
       if ((!isAuth && !isNet) || attempt >= schedule.length) throw e;
       const waitMs = schedule[attempt];
@@ -2342,6 +2486,10 @@ export type LocalToolEvents = {
 export type StreamLocalChatParams = {
   port: number;
   modelId: string;
+  /// Context window llama-server was granted for this model, in tokens
+  /// (`server_status().context`). Sizes the history budget; falls back to a
+  /// conservative guess from the model id when the caller does not know it.
+  contextWindow?: number | null;
   systemPrompt: string;
   /// Pre-built OpenAI user content (string, or multimodal parts array).
   userContent: unknown;
@@ -2397,6 +2545,29 @@ export async function fetchNetRetry(doFetch: () => Promise<Response>, signal: Ab
   throw new Error("unreachable"); // loop always returns or throws
 }
 
+/// The `-c` context size llama-server was actually granted for `modelId`, or
+/// null when it cannot be determined (caller then falls back to a conservative
+/// guess from the model id).
+///
+/// This is the only honest source for a local model's window: the same GGUF is
+/// started at 8K on a 6 GB card and 128K on a 24 GB one, because the KV cache
+/// scales with context — so nothing about the file name predicts it. Cached per
+/// model id; a miss costs one cheap Tauri call, never a stall.
+let _grantedCtx: { modelId: string; window: number } | null = null;
+async function grantedLocalContextWindow(modelId: string): Promise<number | null> {
+  if (_grantedCtx && _grantedCtx.modelId === modelId) return _grantedCtx.window;
+  try {
+    const s = await invoke<{ model_id: string | null; context?: number | null }>("server_status");
+    if (s && s.model_id === modelId && typeof s.context === "number" && s.context > 0) {
+      _grantedCtx = { modelId, window: s.context };
+      return s.context;
+    }
+  } catch {
+    // Status unavailable — the id-based fallback is deliberately conservative.
+  }
+  return null;
+}
+
 export async function streamLocalChat(p: StreamLocalChatParams): Promise<string> {
   const responsive = makeResponsiveHandlers(p.onDelta, p.onThought);
   const emitDelta = responsive.onDelta;
@@ -2413,9 +2584,18 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       openaiTools.map((t: any) => t?.function?.name).filter(Boolean),
     );
   } catch { /* logging must never break the turn */ }
+  // Bounded to the LOCAL model's real window. `p.contextWindow` is the `-c`
+  // llama-server was actually granted (server_status().context) — authoritative,
+  // because the same GGUF runs at 8K on one machine and 128K on another. Without
+  // this the whole transcript went in and llama-server silently truncated the
+  // prompt, cutting the orchestrator's dispatch list with no error anywhere.
+  const localBudget = historyBudgetFor(
+    p.modelId,
+    p.contextWindow ?? await grantedLocalContextWindow(p.modelId),
+  );
   const liveMessages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: p.systemPrompt },
-    ...(p.history ?? []),
+    ...recentTextHistory(p.history, localBudget.turns, localBudget.chars),
     { role: "user", content: p.userContent },
   ];
   // One tool round = one model turn. Models like Qwen call tools ONE
@@ -2440,30 +2620,79 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // llama-server on another host (the Windows-GPU / Linux-agents split).
   // resolveInferenceBase() reads the persisted endpoint; local mode uses the
   // managed port passed in `p.port`, remote uses the configured host:port:key.
-  const infer = resolveInferenceBase(p.port);
-  const inferUrl = `${infer.baseUrl}/v1/chat/completions`;
-  const inferHeaders: Record<string, string> = {
+  let infer = resolveInferenceBase(p.port);
+  let inferUrl = `${infer.baseUrl}/v1/chat/completions`;
+  let inferHeaders: Record<string, string> = {
     "Content-Type": "application/json",
     ...(infer.apiKey ? { Authorization: `Bearer ${infer.apiKey}` } : {}),
+  };
+  let inferenceRouteChecked = !infer.remote || !!infer.device;
+  const recoverLocalInference = (reason: string): boolean => {
+    const local = localInferenceFallback(infer, p.port);
+    if (!local) return false;
+    infer = local;
+    inferUrl = `${local.baseUrl}/v1/chat/completions`;
+    inferHeaders = {
+      "Content-Type": "application/json",
+      ...(local.apiKey ? { Authorization: `Bearer ${local.apiKey}` } : {}),
+    };
+    inferenceRouteChecked = true;
+    try {
+      console.warn(
+        `[streamLocalChat] configured inference route failed (${reason}); ` +
+        `continuing with the managed local model at ${local.baseUrl}`,
+      );
+      window.dispatchEvent(new CustomEvent("owllm:inference:fallback", {
+        detail: { modelId: p.modelId, localPort: p.port, reason },
+      }));
+    } catch { /* diagnostics must never break recovery */ }
+    return true;
+  };
+  const ensureInferenceRoute = async (): Promise<void> => {
+    if (inferenceRouteChecked || !infer.remote || infer.device) return;
+    const probeCtrl = new AbortController();
+    const timeout = setTimeout(() => probeCtrl.abort(), 3_000);
+    const onAbort = () => probeCtrl.abort();
+    p.signal.addEventListener("abort", onAbort);
+    try {
+      // Any HTTP response proves the host is reachable. A server without a
+      // /health route may answer 404, which is fine; the real POST below will
+      // still surface authentication/model errors without a false failover.
+      await fetch(`${infer.baseUrl}/health`, {
+        headers: infer.apiKey ? { Authorization: `Bearer ${infer.apiKey}` } : {},
+        signal: probeCtrl.signal,
+      });
+      inferenceRouteChecked = true;
+    } catch (e: any) {
+      if (p.signal.aborted) throw new DOMException("aborted", "AbortError");
+      if (!recoverLocalInference(`reachability check: ${String(e?.message ?? e)}`)) throw e;
+    } finally {
+      clearTimeout(timeout);
+      p.signal.removeEventListener("abort", onAbort);
+    }
   };
   // 503/502 slot-warmup retry — cold model load is handled by server.rs's
   // /health poller; this only absorbs the few-second slot init after the
   // model is resident.
   const LOAD_RETRY_MS = 120_000;
   const LOAD_RETRY_DELAY = 1500;
-  // Live generation-speed meter: count EVERY generated SSE delta (visible
-  // reply, thinking, AND tool-call args — all are tokens the GPU produced)
-  // over wall-clock and broadcast tok/s so the header badge can show
-  // "⚡ N tok/s". A plan/tool-heavy orchestrator turn emits little visible
-  // text, so counting only the reply made the badge look dead — count the
-  // thinking + tool channels too. Throttled to ~5/s; the badge auto-hides
-  // when the stream stops. Local generation only (where tok/s reflects the
-  // user's own hardware and is the meaningful number).
-  const genTick = makeGenMeter();
-  const countingDelta: StreamHandler = (d) => { genTick(); emitDelta(d); };
-  const countingThought: ThoughtHandler = (channel, role, delta) => {
-    if (delta) genTick();
-    emitThought?.(channel, role, delta);
+  // Meter each actual model response independently. In particular, end the
+  // meter before executing tools so tool latency and next-turn prompt prefill
+  // never dilute the displayed generation rate.
+  const meterStream = async (
+    run: (onDelta: StreamHandler, onThought: ThoughtHandler) => Promise<string>,
+  ): Promise<string> => {
+    const genTick = makeGenMeter();
+    const countingDelta: StreamHandler = (d) => { genTick(); emitDelta(d); };
+    const countingThought: ThoughtHandler = (channel, role, delta) => {
+      if (delta) genTick();
+      emitThought?.(channel, role, delta);
+    };
+    try {
+      return await run(countingDelta, countingThought);
+    } finally {
+      genTick.stop();
+    }
   };
   const maybeYield = makeUiYield();
   for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
@@ -2473,10 +2702,12 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     // route reasoning to onThought, and harvest native tool_calls into nativeCalls.
     const nativeCalls: RawNativeCall[] = [];
     if (infer.device) {
+      const device = infer.device;
       // Paired-device model: one non-streamed round-trip over the sealed
       // channel — no HTTP route to the device required (works via P2P/relay).
-      lastReply = await deviceChatCompletion(
-        infer.device.id,
+      lastReply = await meterStream((countingDelta, countingThought) => deviceChatCompletion(
+        device.id,
+        device.modelId,
         {
           model: p.modelId || "local",
           messages: liveMessages,
@@ -2489,8 +2720,9 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         countingThought,
         nativeCalls,
         p.signal,
-      );
+      ));
     } else {
+    await ensureInferenceRoute();
     let resp: Response | undefined;
     const loadDeadline = Date.now() + LOAD_RETRY_MS;
     while (true) {
@@ -2518,6 +2750,9 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         });
       } catch (e: any) {
         if (p.signal.aborted) throw e;
+        if (recoverLocalInference(String(e?.message ?? e))) {
+          continue;
+        }
         if (Date.now() >= loadDeadline) {
           // Can't reach the server at all. Ask the supervisor WHY before
           // surfacing a generic network error — a crashed llama-server
@@ -2556,7 +2791,10 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
       throw new Error(`llama-server ${resp.status}: ${errBody.slice(0, 500) || "(no body)"}`);
     }
     if (!resp) throw new Error("llama-server never responded — server may have crashed");
-    lastReply = await consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls);
+    lastReply = await meterStream(
+      (countingDelta, countingThought) =>
+        consumeOpenAISse(resp, countingDelta, countingThought, nativeCalls),
+    );
     }
     // No tools available at all → single-shot, done.
     if (openaiTools.length === 0) { answeredWithoutTools = true; break; }
@@ -2618,14 +2856,16 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
     });
     try {
       if (infer.device) {
-        const finalText = await deviceChatCompletion(
-          infer.device.id,
+        const device = infer.device;
+        const finalText = await meterStream((countingDelta, countingThought) => deviceChatCompletion(
+          device.id,
+          device.modelId,
           { model: p.modelId || "local", messages: liveMessages, temperature: p.temperature, ...sampling },
           countingDelta,
           countingThought,
           [],
           p.signal,
-        );
+        ));
         if (finalText.trim()) lastReply = finalText;
       } else {
         const fresp = await fetch(inferUrl, {
@@ -2642,7 +2882,10 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
           signal: p.signal,
         });
         if (fresp.ok) {
-          const finalText = await consumeOpenAISse(fresp, countingDelta, countingThought, []);
+          const finalText = await meterStream(
+            (countingDelta, countingThought) =>
+              consumeOpenAISse(fresp, countingDelta, countingThought, []),
+          );
           if (finalText.trim()) lastReply = finalText;
         }
       }
@@ -2689,9 +2932,13 @@ export async function streamOpenAiApiWithTools(args: {
     "Content-Type": "application/json",
     "Authorization": `Bearer ${key}`,
   };
+  // Bounded — this one function serves every OpenAI-compatible provider
+  // (DeepSeek, Groq, Mistral, Together, Perplexity, Grok API), all of which
+  // reject the request outright once the accumulated transcript overruns.
+  const apiBudget = historyBudgetFor(wireModel);
   const liveMessages: Array<{ role: string; content: unknown }> = [
     { role: "system", content: args.systemPrompt },
-    ...(args.history ?? []),
+    ...recentTextHistory(args.history, apiBudget.turns, apiBudget.chars),
     { role: "user", content: openaiUserContent(args.userMessage, args.images ?? []) },
   ];
   const MAX_TOOL_TURNS = 16;
@@ -2809,7 +3056,7 @@ async function streamAnthropic(
   // images work in EVERY surface, folder or not (#22/#24).
   const claudeCwd = await resolveImageCwd(projectCwd, imgList.length > 0);
   const cliUserMessage = await appendCliImageFiles(userMessage, imgList, claudeCwd);
-  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
+  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history, cliModel);
   // Wrap CLI invocations so a "Session ID already in use" failure
   // (a stale lock from a prior crashed claude process, or the same
   // session being in flight in the desktop UI) gets one automatic
@@ -2855,6 +3102,7 @@ async function streamAnthropic(
     const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
       systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
       autoApprove: autoApprove ?? false,
+      readOnly: isReadOnlyToolAllowlist(allowedTools),
       model: cliModel, effort: claudeEffort, sessionId: sid,
     }));
     if (reply) onDelta(reply);
@@ -2878,6 +3126,7 @@ async function streamAnthropic(
         const reply = await runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
           systemPrompt, userMessage: cliPrompt, cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
+          readOnly: isReadOnlyToolAllowlist(allowedTools),
           model: cliModel, effort: claudeEffort, sessionId: sid,
         }));
         if (reply) onDelta(reply);
@@ -2937,13 +3186,18 @@ function buildAnthropicBody(
   const thinkingOn = budget > 0;
   const maxTokens = thinkingOn ? budget + 4096 : 4096;
   const reqTemp = thinkingOn ? 1 : temperature;
+  const budgetForModel = historyBudgetFor(wireModel);
   return {
     model: wireModel,
     max_tokens: maxTokens,
     ...(thinkingOn ? { thinking: { type: "enabled", budget_tokens: budget } } : {}),
     system: systemPrompt,
     messages: [
-      ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
+      // Bounded to the model's window. The API path used to spread the ENTIRE
+      // history in raw — only the CLI subscription paths were capped — so a long
+      // agentic run grew its own request until Anthropic rejected it.
+      ...recentTextHistory(history, budgetForModel.turns, budgetForModel.chars)
+        .map(h => ({ role: h.role, content: h.content })),
       { role: "user", content: anthropicUserContent(userMessage, imgList) },
     ],
     stream: true,
@@ -3051,11 +3305,9 @@ async function streamOpenAI(
     // Refresh the Codex CLI token once per session (same cold-start 401
     // fix as Claude — see ensureCliWarm).
     await ensureCliWarm("codex_cli", projectCwd);
-    // Fold prior turns into the prompt so the CLI has conversation context.
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${m.content}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Fold prior turns into the prompt so the CLI has conversation context —
+    // budgeted, so a long-lived chat cannot fill the model's window by itself.
+    const prompt = foldHistoryIntoPrompt(userMessage, history, modelId);
     // Pasted images → saved to the working-dir inbox + attached via codex's
     // native -i flag. resolveImageCwd falls back to a scratch dir when there's
     // no project folder, and we run codex in that SAME dir so -i resolves.
@@ -3081,6 +3333,7 @@ async function streamOpenAI(
         model: codexModel,
         effort: codexEffort,
         allowedTools,
+        readOnly: isReadOnlyToolAllowlist(allowedTools),
         onDelta,
         onThought,
       }), codexCwd);
@@ -3151,16 +3404,17 @@ async function streamMoonshot(
     const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], kimiCwd);
     const prompt = buildKimiCliPrompt(cliUserMessage, history);
     const reply = await withCliAuthRetry("kimi_cli", signal, () =>
-      invoke<string>("kimi_cli_complete", {
+      runKimiCliStream({
         systemPrompt,
         userMessage: prompt,
         cwd: kimiCwd ?? null,
         model: modelId,
-        allowedTools: allowedTools ?? null,
+        allowedTools,
+        onDelta,
+        onThought: onThought ?? (() => {}),
       }),
       kimiCwd,
     );
-    if (reply) onDelta(reply);
     return reply;
   }
   return streamOpenAiApiWithTools({
@@ -3206,10 +3460,10 @@ async function streamXai(
     // same way the Claude/Codex/Kimi subscription paths do.
     const grokCwd = await resolveImageCwd(projectCwd, (images ?? []).length > 0);
     const cliUserMessage = await appendCliImageFiles(userMessage, images ?? [], grokCwd);
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${cliUserMessage}` : cliUserMessage;
+    // Same bounded fold as the Claude/Codex/Kimi subscription paths. This used
+    // to join the WHOLE transcript with no cap at all, so a long run shipped
+    // every prior turn to the CLI on every dispatch.
+    const prompt = foldHistoryIntoPrompt(cliUserMessage, history, modelId);
     const reply = await withCliAuthRetry("grok_cli", signal, () =>
       invoke<string>("grok_cli_complete", {
         systemPrompt,
@@ -3283,10 +3537,9 @@ async function streamGemini(
 ): Promise<string> {
   if (route.forceSub === true) {
     await ensureCliWarm("gemini_cli", projectCwd);
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Bounded fold — see streamXai. Unbounded before, on a path that also folds
+    // the system prompt into the same argv/stdin budget.
+    const prompt = foldHistoryIntoPrompt(userMessage, history, modelId);
     const reply = await withCliAuthRetry("gemini_cli", signal, () =>
       invoke<string>("gemini_cli_complete", {
         systemPrompt,
@@ -3302,7 +3555,8 @@ async function streamGemini(
   const key = await invoke<string | null>("accounts_get_secret", { name: "GEMINI_API_KEY" });
   const apiKey = key || await invoke<string | null>("accounts_get_secret", { name: "GOOGLE_API_KEY" });
   if (!apiKey) throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) saved — set it on the Accounts page.");
-  const contents = (history ?? []).map((h) => ({
+  const geminiBudget = historyBudgetFor(modelId);
+  const contents = recentTextHistory(history, geminiBudget.turns, geminiBudget.chars).map((h) => ({
     role: h.role === "assistant" ? "model" : "user",
     parts: [{ text: typeof h.content === "string" ? h.content : "" }],
   }));
@@ -3366,6 +3620,7 @@ async function streamGemini(
 /// the only visible difference is the reply arrives at once, not token-by-token.
 async function deviceChatCompletion(
   deviceId: string,
+  remoteModelId: string | undefined,
   body: Record<string, unknown>,
   onDelta: StreamHandler,
   onThought: ThoughtHandler | undefined,
@@ -3373,7 +3628,11 @@ async function deviceChatCompletion(
   signal: AbortSignal,
 ): Promise<string> {
   if (signal.aborted) throw new DOMException("aborted", "AbortError");
-  const payload = JSON.stringify({ ...body, stream: false });
+  const payload = JSON.stringify({
+    ...body,
+    stream: false,
+    ...(remoteModelId ? { owllm_remote_model: remoteModelId } : {}),
+  });
   const res = await invoke<{ ok: boolean; stdout: string; error: string | null; decision: string }>(
     "device_send",
     { toDevice: deviceId, kind: "inference", command: payload, payload: null, timeoutMs: 300_000 },
@@ -4290,7 +4549,7 @@ export async function runDispatchLoop(opts: DispatchInput, hooks: DispatchHooks)
       hooks.onLog(orch.name, {
         role: "system",
         color: "#ff8c8c",
-        text: `⚠ ${parse.unresolved.length} dispatch line(s) named unknown agents (${names}) and did NOT run — the answer below was produced without specialists.`,
+        text: `⚠ ${parse.unresolved.length} dispatch line(s) did NOT run (${names}) — the answer below was produced without specialists.`,
       });
     }
     hooks.onAgentReply(orch.name, clean);

@@ -28,22 +28,41 @@ try {
     ["coder", "sub/gpt-5.5"],
     ["critical_thinker", "sub/claude-opus-4-7"],
   ]);
-  check("A live team selection immediately wins over every stale per-agent model",
-    model.resolveAgentModel("coder", "sub/kimi-k3", "sub/gpt-5.5", stale, null) === "sub/kimi-k3"
-      && model.resolveAgentModel("critical_thinker", "sub/kimi-k3", "sub/gpt-5.5", stale, null) === "sub/kimi-k3");
-  check("An explicit team fallback ignores stale agent models and uses the server",
-    model.resolveAgentModel("coder", "", "sub/gpt-5.5", stale, "local-model") === "local-model");
-  check("Normal per-agent precedence remains when no live team assignment is pending",
-    model.resolveAgentModel("coder", null, "sub/kimi-k3", stale, null) === "sub/gpt-5.5");
+  check("An explicit per-agent selection wins over live and persisted team choices",
+    model.resolveAgentModel("coder", "sub/kimi-k3", "sub/kimi-k3", stale, null) === "sub/gpt-5.5"
+      && model.resolveAgentModel("critical_thinker", "sub/kimi-k3", "sub/kimi-k3", stale, null) === "sub/claude-opus-4-7");
+  check("A template agent pin remains agent-specific and wins over the team fallback",
+    model.resolveAgentModel("publisher", "sub/kimi-k3", "sub/kimi-k3", new Map(), "local-model", "api/deepseek-chat") === "api/deepseek-chat");
+  check("The team choice is the fallback when an agent has no specific model",
+    model.resolveAgentModel("researcher", "sub/kimi-k3", "sub/gpt-5.5", stale, "local-model") === "sub/kimi-k3"
+      && model.resolveAgentModel("researcher", null, "sub/gpt-5.5", stale, "local-model") === "sub/gpt-5.5");
+  check("The running server is used only when neither agent nor team selected a model",
+    model.resolveAgentModel("researcher", null, "", new Map(), "local-model") === "local-model");
 
-  const graph = model.graphJsonWithoutAgentModels(JSON.stringify({
+  const bulk = model.assignTeamModelToAgents(
+    ["orchestrator", "coder", "researcher", "coder"],
+    "sub/kimi-k3",
+  );
+  check("The Team picker materializes one assignment for every current agent",
+    bulk.size === 3
+      && bulk.get("orchestrator") === "sub/kimi-k3"
+      && bulk.get("coder") === "sub/kimi-k3"
+      && bulk.get("researcher") === "sub/kimi-k3");
+  const selective = new Map(bulk);
+  selective.set("coder", "sub/gpt-5.5");
+  check("An individual selection after a bulk assignment changes only that agent",
+    model.resolveAgentModel("coder", "sub/kimi-k3", "sub/kimi-k3", selective, null) === "sub/gpt-5.5"
+      && model.resolveAgentModel("researcher", "sub/kimi-k3", "sub/kimi-k3", selective, null) === "sub/kimi-k3");
+
+  const graph = model.graphJsonWithAgentModels(JSON.stringify({
     edges: [{ source: "orchestrator", target: "coder" }],
-    agentModels: { coder: "sub/gpt-5.5" },
+    agentModels: { coder: "sub/claude-opus-4-7" },
     agentVoices: { coder: { enabled: true } },
-  }));
+  }), bulk);
   const parsed = JSON.parse(graph);
-  check("Clearing model overrides preserves graph wiring and unrelated agent settings",
-    parsed.agentModels && Object.keys(parsed.agentModels).length === 0
+  check("Bulk assignment persists every model while preserving unrelated graph settings",
+    parsed.agentModels?.coder === "sub/kimi-k3"
+      && parsed.agentModels?.researcher === "sub/kimi-k3"
       && parsed.edges.length === 1
       && parsed.agentVoices.coder.enabled === true);
 
@@ -66,22 +85,55 @@ try {
   const dispatch = read("pages/agentic/dispatch.ts");
   const lib = fs.readFileSync(path.join(ROOT, "owllm-desktop/src-tauri/src/lib.rs"), "utf8");
   const accounts = fs.readFileSync(path.join(ROOT, "owllm-desktop/src-tauri/src/accounts.rs"), "utf8");
-  check("Agent cards and dispatch share the team-first resolver",
+  check("A saved team choice can never short-circuit an explicit agent model",
+    !source.includes("if (savedTeamModel.trim()) return savedTeamModel.trim()")
+      && source.indexOf("const perAgent =") < source.indexOf("liveTeamModel?.trim()"));
+  check("Agent cards and dispatch share the agent-first resolver",
     page.includes("return resolveAgentModel(") && page.includes("teamModelOverride,"));
-  check("Team picker clears local and DB per-agent overrides",
-    page.includes("clearStoredAgentModelOverrides(project.id)")
-      && page.includes("graphJsonWithoutAgentModels(project.graph_json)"));
+  check("Template default_model_id is loaded and participates in dispatch",
+    page.includes("defaultModelId?: string")
+      && page.includes("a.default_model_id")
+      && page.includes("agentTemplateModelFor(agentName)"));
+  check("Agent settings picker shows only explicit overrides, not resolved inherited models",
+    page.includes("agentModelOverrideFor: (agentName: string) => string")
+      && page.includes("value={explicitModel}")
+      && page.includes("(use inherited · ${inheritedModel})"));
+  check("Agent editor does not materialize inherited team/server models as overrides",
+    page.includes("initialModel={agentModelOverrideFor(name) || spec.defaultModelId || \"\"}"));
+  check("Team picker bulk-assigns all agents in local and DB persistence",
+    page.includes("assignTeamModelToAgents(")
+      && page.includes("setPerAgentModel(assignedModels)")
+      && page.includes("graphJsonWithAgentModels(project.graph_json, assignedModels)"));
+  check("Chat persistence cannot reset the live team selection",
+    page.includes("const projectChanged = hydratedProjectIdRef.current !== selectedProject.id")
+      && page.includes("if (projectChanged) {")
+      && page.includes("setTeamModelOverride(null);"));
+  check("All open Agents windows receive both bulk and selective model changes",
+    page.includes('new CustomEvent("owllm:team-model-changed"')
+      && page.includes('window.addEventListener("owllm:team-model-changed"')
+      && page.includes('new CustomEvent("owllm:agent-model-changed"')
+      && page.includes('window.addEventListener("owllm:agent-model-changed"')
+      && page.includes("agentModels: Array.from(assignedModels.entries())"));
   check("Agentic Kimi path runs the execution-environment preflight",
     /if \(route\.forceSub\) \{\s+[\s\S]*?await ensureCliWarm\("kimi_cli", projectCwd\);/.test(page)
       && /\}\), projectCwd\);/.test(page));
   check("Shared CLI warm-up prepares the actual project environment",
     dispatch.includes('"accounts_prepare_cli_for_cwd"')
-      && dispatch.includes('{ kind: "prepare", backend }'));
+      && dispatch.includes('{ kind: "prepare", backend }')
+      && dispatch.includes("throw new CliPreflightError"));
   check("Native command is registered and installs isolated CLIs without blocking the GUI thread",
     lib.includes("accounts::accounts_prepare_cli_for_cwd")
       && accounts.includes("pub async fn accounts_prepare_cli_for_cwd")
       && accounts.includes("tokio::task::spawn_blocking")
       && accounts.includes("uv tool install --force --python 3.13 kimi-cli"));
+  check("WSL CLI provisioning verifies executability and serializes npm mutations",
+    accounts.includes("wsl_cli_provision_lock")
+      && accounts.includes("flock -w 600")
+      && accounts.includes("codex --version")
+      && accounts.includes("NPM_CLEAN_STALE_SNIPPET"));
+  check("Codex startup failure is collected instead of masked by broken stdin",
+    accounts.includes("let stdin_write_error = match child.stdin.take()")
+      && accounts.includes("return Err(match stdin_write_error"));
 
   for (const row of checks) console.log(`  PASS ${row.name}`);
   console.log(`team model selection verification: ${checks.length}/${checks.length} passed`);

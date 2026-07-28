@@ -1,13 +1,10 @@
-// Fleet — per-agent git worktree isolation for parallel dispatches.
+// Fleet — per-agent git worktree isolation for filesystem-capable runs.
 //
-// Today's React dispatch loop runs every specialist in the same cwd
-// (the project location the user picked). When two specialists run
-// concurrently — coder + critic, or coder + docs — their edits race on
-// the same working tree; one write wins, the other is lost, and git
-// state ends up undefined. This module gives each specialist its own
-// `git worktree` on a private branch so the parallel runs are
-// technically isolated, then a serial squash-merge step folds each
-// agent's changes back into the user's project tree with attribution.
+// Every Agentic run that can see a project filesystem receives a private
+// `git worktree`, including solo, single-agent, sequential, parallel, and WSL
+// runs. This prevents model/tool behavior from mutating the user's shared
+// checkout while another page, process, or PC is integrating work. A serial
+// squash-merge step folds successful work back with attribution.
 //
 // Flow per dispatch:
 //   1. fleet_worktree_create(project_cwd, agent, run_id)
@@ -23,9 +20,9 @@
 //          with both sides preserved (never silently prefer one side)
 //   5. fleet_worktree_remove(path, branch, keep_on_failure)
 //
-// Non-git projects: every command returns an `Outcome::NotAGitRepo`
-// status so the frontend can fall back to the old "one shared cwd"
-// behaviour without a hard error.
+// Non-git projects return `Outcome::NotAGitRepo`; filesystem-capable Agentic
+// runs fail closed and ask the user to initialize Git. They never silently
+// downgrade to the shared project directory.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -45,6 +42,176 @@ fn fleet_root() -> Option<PathBuf> {
     } else {
         std::env::var_os("HOME").map(|d| PathBuf::from(d).join(".owllm").join("fleet"))
     }
+}
+
+fn linux_path_to_wsl_unc(distro: &str, linux_path: &str) -> PathBuf {
+    let tail = linux_path.trim_start_matches('/').replace('/', "\\");
+    PathBuf::from(format!(r"\\wsl.localhost\{distro}\{tail}"))
+}
+
+/// Run filesystem operations in the path's owning OS.
+///
+/// A WSL UNC is an address understood by Windows Explorer, not a reliable
+/// Windows filesystem boundary. The redirector may reject `metadata`,
+/// `create_dir_all`, or `rename` while the same path is healthy inside the
+/// distro. Fleet Git commands already run in WSL; all accompanying filesystem
+/// work must do the same or a run can create successfully and then fail during
+/// finalize/merge/cleanup.
+fn wsl_fs(path: &Path, operation: &str) -> Result<Option<String>, String> {
+    let text = path.to_string_lossy();
+    let Some((distro, linux_path)) = crate::wsl::parse_wsl_unc(&text) else {
+        return Ok(None);
+    };
+    crate::wsl::run_in_distro(
+        &distro,
+        &operation.replace("__PATH__", &crate::wsl::sh_quote(&linux_path)),
+    )
+    .map(Some)
+}
+
+fn path_is_dir_native(path: &Path) -> Result<bool, String> {
+    if let Some(out) = wsl_fs(
+        path,
+        "if [ -d __PATH__ ]; then printf '__OWLLM_DIR__=1'; else printf '__OWLLM_DIR__=0'; fi",
+    )? {
+        return Ok(out.contains("__OWLLM_DIR__=1"));
+    }
+    Ok(path.is_dir())
+}
+
+fn path_is_file_native(path: &Path) -> Result<bool, String> {
+    if let Some(out) = wsl_fs(
+        path,
+        "if [ -f __PATH__ ]; then printf '__OWLLM_FILE__=1'; else printf '__OWLLM_FILE__=0'; fi",
+    )? {
+        return Ok(out.contains("__OWLLM_FILE__=1"));
+    }
+    Ok(path.is_file())
+}
+
+fn path_exists_native(path: &Path) -> Result<bool, String> {
+    if let Some(out) = wsl_fs(
+        path,
+        "if [ -e __PATH__ ]; then printf '__OWLLM_EXISTS__=1'; else printf '__OWLLM_EXISTS__=0'; fi",
+    )? {
+        return Ok(out.contains("__OWLLM_EXISTS__=1"));
+    }
+    Ok(path.exists())
+}
+
+fn create_dir_all_native(path: &Path) -> Result<(), String> {
+    if wsl_fs(path, "mkdir -p -- __PATH__")?.is_some() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path).map_err(|e| format!("mkdir {}: {e}", path.display()))
+}
+
+fn remove_file_native(path: &Path) -> Result<(), String> {
+    if wsl_fs(path, "rm -f -- __PATH__")?.is_some() {
+        return Ok(());
+    }
+    std::fs::remove_file(path).map_err(|e| format!("remove {}: {e}", path.display()))
+}
+
+fn remove_dir_all_native(path: &Path) -> Result<(), String> {
+    if wsl_fs(path, "rm -rf -- __PATH__")?.is_some() {
+        return Ok(());
+    }
+    std::fs::remove_dir_all(path).map_err(|e| format!("remove {}: {e}", path.display()))
+}
+
+fn remove_empty_dir_native(path: &Path) -> Result<(), String> {
+    if wsl_fs(path, "rmdir -- __PATH__ 2>/dev/null || true")?.is_some() {
+        return Ok(());
+    }
+    std::fs::remove_dir(path).map_err(|e| format!("remove empty directory {}: {e}", path.display()))
+}
+
+fn two_wsl_paths(from: &Path, to: &Path) -> Option<(String, String, String)> {
+    let (from_distro, from_linux) = crate::wsl::parse_wsl_unc(&from.to_string_lossy())?;
+    let (to_distro, to_linux) = crate::wsl::parse_wsl_unc(&to.to_string_lossy())?;
+    from_distro
+        .eq_ignore_ascii_case(&to_distro)
+        .then_some((from_distro, from_linux, to_linux))
+}
+
+fn rename_native(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some((distro, from_linux, to_linux)) = two_wsl_paths(from, to) {
+        let script = format!(
+            "mv -- {} {}",
+            crate::wsl::sh_quote(&from_linux),
+            crate::wsl::sh_quote(&to_linux)
+        );
+        crate::wsl::run_in_distro(&distro, &script)?;
+        return Ok(());
+    }
+    std::fs::rename(from, to)
+        .map_err(|e| format!("rename {} to {}: {e}", from.display(), to.display()))
+}
+
+fn copy_native(from: &Path, to: &Path) -> Result<(), String> {
+    if let Some((distro, from_linux, to_linux)) = two_wsl_paths(from, to) {
+        let script = format!(
+            "cp -- {} {}",
+            crate::wsl::sh_quote(&from_linux),
+            crate::wsl::sh_quote(&to_linux)
+        );
+        crate::wsl::run_in_distro(&distro, &script)?;
+        return Ok(());
+    }
+    std::fs::copy(from, to)
+        .map(|_| ())
+        .map_err(|e| format!("copy {} to {}: {e}", from.display(), to.display()))
+}
+
+fn repo_name_for_path(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    if let Some((_, linux_path)) = crate::wsl::parse_wsl_unc(&text) {
+        return linux_path
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(|name| !name.is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn fleet_root_for(project_cwd: &str) -> Result<PathBuf, String> {
+    let Some((distro, _)) = crate::wsl::parse_wsl_unc(project_cwd) else {
+        return fleet_root()
+            .ok_or_else(|| "could not resolve a home dir for the fleet scratch root".to_string());
+    };
+    let output =
+        crate::wsl::run_in_distro(&distro, "printf '__OWLLM_FLEET_HOME__=%s\\n' \"$HOME\"")?;
+    let home = output
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("__OWLLM_FLEET_HOME__="))
+        .unwrap_or("")
+        .trim();
+    if home.is_empty() || !home.starts_with('/') {
+        return Err(format!(
+            "could not resolve the Linux home directory in WSL distro {distro}"
+        ));
+    }
+    Ok(linux_path_to_wsl_unc(
+        &distro,
+        &format!("{home}/.owllm/fleet"),
+    ))
+}
+
+fn git_reported_path_for_host(repo: &Path, reported_path: &str) -> PathBuf {
+    let repo_text = repo.to_string_lossy();
+    if reported_path.starts_with('/') {
+        if let Some((distro, _)) = crate::wsl::parse_wsl_unc(&repo_text) {
+            return linux_path_to_wsl_unc(&distro, reported_path);
+        }
+    }
+    PathBuf::from(reported_path)
 }
 
 /// Per-source-repo lock so two Code pages (or a page + a team dispatch) that
@@ -146,61 +313,6 @@ fn drop_staged_app_scratch(cwd: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Bring the checked-out project branch up to its remote tip before cutting or
-/// merging an isolated worktree. The Code page keeps worktrees open for a long
-/// time, so the source checkout can otherwise remain hundreds of commits behind
-/// `origin` while Merge still reports success locally. Only a safe fast-forward
-/// is automatic: local-ahead branches are preserved, and genuine divergence is
-/// surfaced instead of rebasing or overwriting user history.
-fn sync_current_branch_from_origin(cwd: &Path) -> Result<(), String> {
-    let (has_origin, _, _) = git(cwd, &["remote", "get-url", "origin"])?;
-    if !has_origin {
-        return Ok(());
-    }
-
-    let (branch_ok, branch, branch_err) = git(cwd, &["symbolic-ref", "--short", "HEAD"])?;
-    if !branch_ok || branch.trim().is_empty() {
-        return Err(format!(
-            "project checkout is detached; check out its target branch before using an isolated Code page: {}",
-            branch_err.trim()
-        ));
-    }
-    let branch = branch.trim();
-    let remote_ref = format!("origin/{branch}");
-    let (fetch_ok, _, fetch_err) = git(cwd, &["fetch", "origin", "--prune"])?;
-    if !fetch_ok {
-        return Err(format!(
-            "could not refresh {remote_ref} before worktree integration: {}",
-            fetch_err.trim()
-        ));
-    }
-    let (remote_exists, _, _) = git(cwd, &["rev-parse", "--verify", &remote_ref])?;
-    if !remote_exists {
-        return Ok(());
-    }
-
-    let (local_is_behind, _, _) = git(cwd, &["merge-base", "--is-ancestor", "HEAD", &remote_ref])?;
-    if local_is_behind {
-        let (ff_ok, _, ff_err) = git(cwd, &["merge", "--ff-only", &remote_ref])?;
-        if !ff_ok {
-            return Err(format!(
-                "could not fast-forward the project checkout to {remote_ref}: {}",
-                ff_err.trim()
-            ));
-        }
-        return Ok(());
-    }
-
-    let (remote_is_behind, _, _) = git(cwd, &["merge-base", "--is-ancestor", &remote_ref, "HEAD"])?;
-    if remote_is_behind {
-        return Ok(()); // Local commits are waiting to be pushed; preserve them.
-    }
-
-    Err(format!(
-        "the project checkout and {remote_ref} have diverged. Sync that checkout first; OWLLM will not rewrite or silently publish divergent history."
-    ))
-}
-
 /// Identical untracked files can still make `git merge` abort before it starts.
 /// Keep them recoverable outside the checkout while the branch adds the same
 /// blobs. The guard restores them on an early return; a successful merge
@@ -221,19 +333,19 @@ impl UntrackedCollisionBackup {
         for path in &self.preserve_after_merge {
             let from = self.root.join(path);
             let to = self.cwd.join(path);
-            if !from.exists() {
+            if !path_exists_native(&from)? {
                 continue;
             }
-            if to.exists() {
-                std::fs::remove_file(&to)
+            if path_exists_native(&to)? {
+                remove_file_native(&to)
                     .map_err(|e| format!("could not remove merged app state {path}: {e}"))?;
             }
             if let Some(parent) = to.parent() {
-                std::fs::create_dir_all(parent).map_err(|e| {
+                create_dir_all_native(parent).map_err(|e| {
                     format!("could not restore app state directory for {path}: {e}")
                 })?;
             }
-            std::fs::rename(&from, &to)
+            rename_native(&from, &to)
                 .map_err(|e| format!("could not restore app-owned file {path} after merge: {e}"))?;
         }
         self.preserve_after_merge.clear();
@@ -242,7 +354,7 @@ impl UntrackedCollisionBackup {
 
     fn discard(mut self) {
         self.restore_on_drop = false;
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = remove_dir_all_native(&self.root);
     }
 }
 
@@ -254,15 +366,17 @@ impl Drop for UntrackedCollisionBackup {
         for path in &self.paths {
             let from = self.root.join(path);
             let to = self.cwd.join(path);
-            if !from.exists() || to.exists() {
+            if !path_exists_native(&from).unwrap_or(false)
+                || path_exists_native(&to).unwrap_or(true)
+            {
                 continue;
             }
             if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = create_dir_all_native(parent);
             }
-            let _ = std::fs::rename(from, to);
+            let _ = rename_native(&from, &to);
         }
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = remove_dir_all_native(&self.root);
     }
 }
 
@@ -280,7 +394,7 @@ struct IdenticalTrackedBackup {
 impl IdenticalTrackedBackup {
     fn discard(mut self) {
         self.restore_on_drop = false;
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = remove_dir_all_native(&self.root);
     }
 }
 
@@ -292,15 +406,15 @@ impl Drop for IdenticalTrackedBackup {
         for path in &self.paths {
             let from = self.root.join(path);
             let to = self.cwd.join(path);
-            if !from.exists() {
+            if !path_exists_native(&from).unwrap_or(false) {
                 continue;
             }
             if let Some(parent) = to.parent() {
-                let _ = std::fs::create_dir_all(parent);
+                let _ = create_dir_all_native(parent);
             }
-            let _ = std::fs::copy(from, to);
+            let _ = copy_native(&from, &to);
         }
-        let _ = std::fs::remove_dir_all(&self.root);
+        let _ = remove_dir_all_native(&self.root);
     }
 }
 
@@ -335,7 +449,7 @@ fn prepare_untracked_collisions(
     let mut differing = Vec::new();
     for path in added.split('\0').filter(|p| !p.is_empty()) {
         let disk_path = cwd.join(path);
-        if !disk_path.is_file() {
+        if !path_is_file_native(&disk_path)? {
             continue;
         }
         let (tracked, _, _) = git(cwd, &["ls-files", "--error-unmatch", "--", path])?;
@@ -380,7 +494,7 @@ fn prepare_untracked_collisions(
     // Keep the backup under Git metadata: it stays on the repository's own
     // filesystem (so rename remains atomic), is invisible to status/merge, and
     // works for ordinary clones and linked worktrees on every platform.
-    let root = PathBuf::from(git_dir.trim()).join(format!(
+    let root = git_reported_path_for_host(cwd, git_dir.trim()).join(format!(
         "owllm-merge-untracked-{}-{nonce}",
         std::process::id()
     ));
@@ -389,10 +503,10 @@ fn prepare_untracked_collisions(
         let from = cwd.join(path);
         let to = root.join(path);
         if let Some(parent) = to.parent() {
-            std::fs::create_dir_all(parent)
+            create_dir_all_native(parent)
                 .map_err(|e| format!("could not prepare untracked-file backup for {path}: {e}"))?;
         }
-        if let Err(e) = std::fs::rename(&from, &to) {
+        if let Err(e) = rename_native(&from, &to) {
             let guard = UntrackedCollisionBackup {
                 cwd: cwd.to_path_buf(),
                 root,
@@ -453,7 +567,11 @@ fn prepare_identical_tracked_collisions(
         let branch_path = format!("{branch}:{path}");
         let (branch_ok, branch_blob, _) = git(cwd, &["rev-parse", &branch_path])?;
         let (disk_ok, disk_blob, _) = git(cwd, &["hash-object", "--", path])?;
-        if disk_path.is_file() && branch_ok && disk_ok && branch_blob.trim() == disk_blob.trim() {
+        if path_is_file_native(&disk_path)?
+            && branch_ok
+            && disk_ok
+            && branch_blob.trim() == disk_blob.trim()
+        {
             identical.push(path.to_string());
         } else {
             differing.push(path.to_string());
@@ -481,7 +599,7 @@ fn prepare_identical_tracked_collisions(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let root = PathBuf::from(git_dir.trim()).join(format!(
+    let root = git_reported_path_for_host(cwd, git_dir.trim()).join(format!(
         "owllm-merge-tracked-{}-{nonce}",
         std::process::id()
     ));
@@ -490,7 +608,7 @@ fn prepare_identical_tracked_collisions(
         let from = cwd.join(path);
         let to = root.join(path);
         if let Some(parent) = to.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
+            if let Err(e) = create_dir_all_native(parent) {
                 let guard = IdenticalTrackedBackup {
                     cwd: cwd.to_path_buf(),
                     root,
@@ -503,7 +621,7 @@ fn prepare_identical_tracked_collisions(
                 ));
             }
         }
-        if let Err(e) = std::fs::copy(&from, &to) {
+        if let Err(e) = copy_native(&from, &to) {
             let guard = IdenticalTrackedBackup {
                 cwd: cwd.to_path_buf(),
                 root,
@@ -637,21 +755,42 @@ fn git_cmd(dir: &Path) -> Command {
 }
 
 /// Is `dir` the root of a git repo (or inside one)?
-fn is_git_repo(dir: &Path) -> bool {
-    git_cmd(dir)
-        .args(["rev-parse", "--is-inside-work-tree"])
-        .output()
-        .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true")
-        .unwrap_or(false)
+fn is_git_repo(dir: &Path) -> Result<bool, String> {
+    let (ok, out, _) = git_once(dir, &["rev-parse", "--is-inside-work-tree"])?;
+    Ok(ok && out.trim() == "true")
 }
 
 fn git_once(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
-    let out = git_cmd(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("git {} in {}: {}", args.join(" "), dir.display(), e))?;
-    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
-    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    let dir_text = dir.to_string_lossy();
+    let out = if let Some((distro, linux_cwd)) = crate::wsl::parse_wsl_unc(&dir_text) {
+        let mapped_args: Vec<String> = args
+            .iter()
+            .map(|arg| {
+                crate::wsl::parse_wsl_unc(arg)
+                    .filter(|(arg_distro, _)| arg_distro.eq_ignore_ascii_case(&distro))
+                    .map(|(_, linux_path)| linux_path)
+                    .unwrap_or_else(|| (*arg).to_string())
+            })
+            .collect();
+        crate::wsl::wsl_program_command(&distro, &linux_cwd, "git", &mapped_args)
+            .output()
+            .map_err(|e| {
+                format!(
+                    "git {} in WSL {}:{}: {}",
+                    args.join(" "),
+                    distro,
+                    linux_cwd,
+                    e
+                )
+            })?
+    } else {
+        git_cmd(dir)
+            .args(args)
+            .output()
+            .map_err(|e| format!("git {} in {}: {}", args.join(" "), dir.display(), e))?
+    };
+    let stdout = crate::wsl::decode_wsl(&out.stdout);
+    let stderr = crate::wsl::decode_wsl(&out.stderr);
     Ok((out.status.success(), stdout, stderr))
 }
 
@@ -683,7 +822,7 @@ fn git_failure_message(action: &str, stdout: &str, stderr: &str) -> String {
 // 1. CREATE — per-agent worktree on a fresh branch
 // ------------------------------------------------------------------
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, Debug)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum CreateOutcome {
     /// Worktree created and ready.
@@ -696,9 +835,17 @@ pub enum CreateOutcome {
         /// project_cwd at create time). Saved so merge can target
         /// the same point.
         base_sha: String,
+        /// Set when the shared checkout had uncommitted tracked work that was
+        /// saved as a checkpoint commit so this worktree could be cut. Callers
+        /// surface it so the user can see (and undo) what OWLLM committed.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        checkpoint_sha: Option<String>,
+        /// Files captured by that checkpoint commit.
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        checkpoint_files: Vec<String>,
     },
-    /// project_cwd isn't a git repo — caller should fall back to the
-    /// shared-cwd path with no isolation.
+    /// project_cwd isn't a git repo. Filesystem-capable callers must stop;
+    /// there is no safe shared-cwd fallback.
     NotAGitRepo,
     /// Working tree has uncommitted changes — would silently end up in
     /// the agent's branch via the base it's cut from. Caller decides
@@ -714,7 +861,7 @@ pub enum CreateOutcome {
 /// can fall back to the host folder instead of failing every worktree.
 #[tauri::command]
 pub fn path_is_dir(path: String) -> bool {
-    !path.trim().is_empty() && PathBuf::from(&path).is_dir()
+    !path.trim().is_empty() && path_is_dir_native(&PathBuf::from(path)).unwrap_or(false)
 }
 
 /// Create a per-agent worktree from `project_cwd`'s HEAD.
@@ -728,14 +875,27 @@ pub async fn fleet_worktree_create(
     // per-page worktrees — which hold the user's UNMERGED edits — live in their
     // own namespace and are NEVER touched by the team sweep.
     branch_prefix: Option<String>,
+    // TRUE only for an agent RUN the user just started. Uncommitted tracked work
+    // is then checkpointed so the run is not blocked. The Code page cuts its
+    // worktree merely by OPENING a project, which must never commit on the
+    // user's behalf, so it leaves this unset and keeps the dirty-tree stop.
+    checkpoint_dirty: Option<bool>,
 ) -> Result<CreateOutcome, String> {
     let cwd = PathBuf::from(&project_cwd);
-    if !cwd.is_dir() {
+    let cwd_exists = match path_is_dir_native(&cwd) {
+        Ok(exists) => exists,
+        Err(message) => return Ok(CreateOutcome::Error { message }),
+    };
+    if !cwd_exists {
         return Ok(CreateOutcome::Error {
             message: format!("project_cwd does not exist: {}", project_cwd),
         });
     }
-    if !is_git_repo(&cwd) {
+    let is_repo = match is_git_repo(&cwd) {
+        Ok(is_repo) => is_repo,
+        Err(message) => return Ok(CreateOutcome::Error { message }),
+    };
+    if !is_repo {
         return Ok(CreateOutcome::NotAGitRepo);
     }
     // Serialize creates against THIS repo so two pages opening the same project
@@ -756,10 +916,27 @@ pub async fn fleet_worktree_create(
         .lines()
         .filter(|l| !l.trim().is_empty() && !is_app_scratch(porcelain_path(l)))
         .collect();
+    // A dirty checkout used to be a HARD STOP, and that is what deadlocked team
+    // runs: the shared folder picks up uncommitted work (the user's, or an
+    // orchestrator's), every specialist worktree then refuses to cut, the whole
+    // dispatch aborts, and the Notebook queue idles forever with nothing to fix
+    // it. Checkpoint the tracked work instead — nothing is lost, the checkout is
+    // clean, and merge-back (which also refuses to overwrite dirty tracked
+    // files) works. The hard stop remains only if the checkpoint itself fails.
+    let mut checkpoint: Option<Checkpoint> = None;
     if !dirty.is_empty() {
-        return Ok(CreateOutcome::DirtyWorkingTree {
-            details: dirty.into_iter().take(20).collect::<Vec<_>>().join("\n"),
-        });
+        let listing = dirty.iter().take(20).copied().collect::<Vec<_>>().join("\n");
+        if !checkpoint_dirty.unwrap_or(false) {
+            return Ok(CreateOutcome::DirtyWorkingTree { details: listing });
+        }
+        match checkpoint_uncommitted(&cwd) {
+            Ok(saved) => checkpoint = Some(saved),
+            Err(message) => {
+                return Ok(CreateOutcome::DirtyWorkingTree {
+                    details: format!("{}\n\n{}", message, listing),
+                });
+            }
+        }
     }
     // Opening a Coding page is a local operation: its private worktree is cut
     // from the checkout the user actually has on this device. A local branch
@@ -778,24 +955,20 @@ pub async fn fleet_worktree_create(
     }
     let base_sha = base_sha.trim().to_string();
 
-    let Some(fleet_root) = fleet_root() else {
-        return Ok(CreateOutcome::Error {
-            message: "could not resolve a home dir for the fleet scratch root".to_string(),
-        });
+    let fleet_root = match fleet_root_for(&project_cwd) {
+        Ok(root) => root,
+        Err(message) => {
+            return Ok(CreateOutcome::Error { message });
+        }
     };
-    let repo_name = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
+    let repo_name = repo_name_for_path(&cwd);
     let dest = fleet_root
-        .join(safe_seg(repo_name))
+        .join(safe_seg(&repo_name))
         .join(safe_seg(&run_id))
         .join(safe_seg(&agent_name));
     if let Some(parent) = dest.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            return Ok(CreateOutcome::Error {
-                message: format!("mkdir {}: {}", parent.display(), e),
-            });
+        if let Err(e) = create_dir_all_native(parent) {
+            return Ok(CreateOutcome::Error { message: e });
         }
     }
     // Belt-and-braces: if a previous run crashed mid-flight and left a
@@ -805,7 +978,7 @@ pub async fn fleet_worktree_create(
         &cwd,
         &["worktree", "remove", "--force", &dest.to_string_lossy()],
     );
-    let _ = std::fs::remove_dir_all(&dest);
+    let _ = remove_dir_all_native(&dest);
 
     let prefix = branch_prefix
         .as_deref()
@@ -823,10 +996,69 @@ pub async fn fleet_worktree_create(
             message: format!("git worktree add failed: {}", err.trim()),
         });
     }
+    let (checkpoint_sha, checkpoint_files) = match checkpoint {
+        Some(saved) => (Some(saved.sha), saved.files),
+        None => (None, Vec::new()),
+    };
     Ok(CreateOutcome::Ready {
         path: dest_str,
         branch,
         base_sha,
+        checkpoint_sha,
+        checkpoint_files,
+    })
+}
+
+/// Uncommitted tracked work saved so an isolated worktree could be cut.
+struct Checkpoint {
+    sha: String,
+    files: Vec<String>,
+}
+
+/// Commit the shared checkout's uncommitted TRACKED work.
+///
+/// `git add -u` stages modifications, deletions and both halves of a rename
+/// while leaving untracked files alone; OWLLM's own runtime scratch is then
+/// unstaged so it never lands in the user's history. The commit is reversible
+/// with `git reset --soft <sha>^`, and hooks are skipped because a repo-side
+/// pre-commit hook must not be able to wedge an agent run.
+fn checkpoint_uncommitted(cwd: &Path) -> Result<Checkpoint, String> {
+    let (ok, _, err) = git(cwd, &["add", "-u"])?;
+    if !ok {
+        return Err(format!(
+            "could not stage the uncommitted tracked changes: {}",
+            err.trim()
+        ));
+    }
+    unstage_app_scratch(cwd)?;
+    let (_, staged, _) = git(cwd, &["diff", "--cached", "--name-only"])?;
+    let files: Vec<String> = staged
+        .lines()
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string)
+        .collect();
+    if files.is_empty() {
+        return Err("the uncommitted tracked changes could not be staged".to_string());
+    }
+    let message = "checkpoint: save uncommitted work before an isolated agent run\n\n\
+        OWLLM cuts every agent a private git worktree from HEAD, so the shared\n\
+        checkout has to be clean. This commit preserves the work that was open\n\
+        at that moment. Undo it with `git reset --soft HEAD~1`.";
+    let (ok, out, err) = git(cwd, &["commit", "--no-verify", "-m", message])?;
+    if !ok {
+        return Err(git_failure_message("checkpoint commit failed", &out, &err));
+    }
+    let (ok, sha, err) = git(cwd, &["rev-parse", "HEAD"])?;
+    if !ok {
+        return Err(format!(
+            "checkpoint commit could not be resolved: {}",
+            err.trim()
+        ));
+    }
+    Ok(Checkpoint {
+        sha: sha.trim().to_string(),
+        files,
     })
 }
 
@@ -860,7 +1092,7 @@ pub async fn fleet_worktree_finalize(
     summary: String,
 ) -> Result<FinalizeOutcome, String> {
     let wt = PathBuf::from(&worktree_path);
-    if !wt.is_dir() {
+    if !path_is_dir_native(&wt)? {
         return Ok(FinalizeOutcome::Error {
             message: format!("worktree path does not exist: {}", worktree_path),
         });
@@ -932,7 +1164,7 @@ pub async fn fleet_worktree_diff(
     base_sha: String,
 ) -> Result<String, String> {
     let wt = PathBuf::from(&worktree_path);
-    if !wt.is_dir() {
+    if !path_is_dir_native(&wt)? {
         return Err(format!("worktree path does not exist: {}", worktree_path));
     }
     // Use the three-dot form so the diff is "what THIS branch added on
@@ -988,12 +1220,12 @@ fn fleet_worktree_merge_blocking(
     branch: String,
 ) -> Result<MergeOutcome, String> {
     let cwd = PathBuf::from(&project_cwd);
-    if !cwd.is_dir() {
+    if !path_is_dir_native(&cwd)? {
         return Ok(MergeOutcome::Error {
             message: format!("project_cwd does not exist: {}", project_cwd),
         });
     }
-    if !is_git_repo(&cwd) {
+    if !is_git_repo(&cwd)? {
         return Ok(MergeOutcome::Error {
             message: "project_cwd is not a git repo".to_string(),
         });
@@ -1004,9 +1236,10 @@ fn fleet_worktree_merge_blocking(
     // failures or interleaving one page's staged squash with another's.
     let lock = repo_git_lock(&cwd);
     let _merge_guard = lock.lock().unwrap_or_else(|p| p.into_inner());
-    if let Err(message) = sync_current_branch_from_origin(&cwd) {
-        return Ok(MergeOutcome::Error { message });
-    }
+    // Integrate into the user's CURRENT local branch. Cross-PC reconciliation
+    // belongs to the single repo_sync coordinator after local integration.
+    // Fetching here with a fast-forward-only policy made a valid isolated run
+    // impossible to merge whenever another PC had advanced origin/main.
     let mut untracked_backup = match prepare_untracked_collisions(&cwd, &branch) {
         Ok(backup) => backup,
         Err(message) => return Ok(MergeOutcome::Error { message }),
@@ -1119,12 +1352,12 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
         &["worktree", "remove", "--force", &args.worktree_path],
     );
     let _ = git(&cwd, &["branch", "-D", &args.branch]);
-    let _ = std::fs::remove_dir_all(&args.worktree_path);
+    let _ = remove_dir_all_native(&PathBuf::from(&args.worktree_path));
     // Remove the now-empty parent RUN dir (…/<repo>/<run_id>/) so finished runs
     // don't leave a litter of empty folders (remove_dir only succeeds if empty,
     // so a kept sibling worktree is never clobbered).
     if let Some(run_dir) = PathBuf::from(&args.worktree_path).parent() {
-        let _ = std::fs::remove_dir(run_dir);
+        let _ = remove_empty_dir_native(run_dir);
     }
     Ok(())
 }
@@ -1139,7 +1372,7 @@ pub async fn fleet_worktree_remove(args: RemoveArgs) -> Result<(), String> {
 #[tauri::command]
 pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
     let cwd = PathBuf::from(&project_cwd);
-    if !is_git_repo(&cwd) {
+    if !is_git_repo(&cwd)? {
         return Ok(0);
     }
     let _ = git(&cwd, &["worktree", "prune"]); // drop registry entries for already-deleted dirs
@@ -1161,7 +1394,7 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
                 if !branch.starts_with("owllm-fleet/") {
                     continue;
                 } // team only
-                let wt = PathBuf::from(&p);
+                let wt = git_reported_path_for_host(&cwd, &p);
                 let dirty = git(&wt, &["status", "--porcelain", "--untracked-files=no"])
                     .map(|(_, o, _)| !o.trim().is_empty())
                     .unwrap_or(true); // can't tell → assume dirty → keep
@@ -1173,9 +1406,9 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
                 } // has work → KEEP
                 let _ = git(&cwd, &["worktree", "remove", "--force", &p]);
                 let _ = git(&cwd, &["branch", "-D", &branch]);
-                let _ = std::fs::remove_dir_all(&p);
+                let _ = remove_dir_all_native(&wt);
                 if let Some(parent) = wt.parent() {
-                    let _ = std::fs::remove_dir(parent);
+                    let _ = remove_empty_dir_native(parent);
                 } // empty run dir
                 removed += 1;
             }
@@ -1197,7 +1430,7 @@ pub async fn fleet_cleanup_orphans(project_cwd: String) -> Result<u32, String> {
 #[tauri::command]
 pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String> {
     let cwd = PathBuf::from(&project_cwd);
-    if !is_git_repo(&cwd) {
+    if !is_git_repo(&cwd)? {
         return Ok(Vec::new());
     }
     let (_, out, _) = git(&cwd, &["show", "--name-only", "--format=", "HEAD"])?;
@@ -1211,9 +1444,10 @@ pub async fn fleet_head_files(project_cwd: String) -> Result<Vec<String>, String
 #[cfg(test)]
 mod tests {
     use super::{
-        fleet_worktree_finalize, fleet_worktree_merge_blocking, git_failure_message,
-        is_app_scratch, porcelain_path, sync_current_branch_from_origin, unstage_app_scratch,
-        user_conflict_files, FinalizeOutcome, MergeOutcome,
+        fleet_worktree_create, fleet_worktree_finalize, fleet_worktree_merge_blocking,
+        git_failure_message, git_reported_path_for_host, is_app_scratch, linux_path_to_wsl_unc,
+        path_is_dir_native, porcelain_path, unstage_app_scratch, user_conflict_files, CreateOutcome,
+        FinalizeOutcome, MergeOutcome,
     };
     use std::{fs, path::Path, process::Command};
 
@@ -1338,6 +1572,119 @@ mod tests {
         );
     }
 
+    /// The deadlock this fixes: an agent RUN met a dirty checkout, every
+    /// worktree refused to cut, the dispatch aborted, and the Notebook queue
+    /// idled with no way to recover. A run now checkpoints the open work and
+    /// proceeds; nothing is lost and the checkout is clean for merge-back.
+    #[tokio::test]
+    async fn agent_run_checkpoints_uncommitted_work_instead_of_deadlocking() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let before = head_sha(root);
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "user work in progress\n",
+        )
+        .unwrap();
+        // App-managed scratch must stay OUT of the user's checkpoint commit.
+        fs::write(root.join(".owllm-inbox/image_1.png"), b"runtime refresh").unwrap();
+
+        let outcome = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "coder".to_string(),
+            "checkpoint-run".to_string(),
+            None,
+            Some(true),
+        )
+        .await
+        .unwrap();
+
+        let (path, branch, checkpoint_sha, checkpoint_files) = match outcome {
+            CreateOutcome::Ready {
+                path,
+                branch,
+                checkpoint_sha,
+                checkpoint_files,
+                ..
+            } => (path, branch, checkpoint_sha, checkpoint_files),
+            other => panic!("a dirty checkout must not block an agent run: {other:?}"),
+        };
+        assert!(
+            checkpoint_sha.is_some(),
+            "the open work should have been checkpointed"
+        );
+        assert_eq!(
+            checkpoint_files,
+            vec!["owllm-desktop/src-tauri/src/release.rs".to_string()],
+            "only the user's tracked work belongs in the checkpoint"
+        );
+        assert_ne!(before, head_sha(root), "the checkpoint should advance HEAD");
+        // The work is preserved in history, not discarded.
+        let show = Command::new("git")
+            .args(["show", "HEAD:owllm-desktop/src-tauri/src/release.rs"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&show.stdout),
+            "user work in progress\n"
+        );
+        // Tracked files are clean now, so merge-back cannot be blocked either.
+        let status = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=no"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&status.stdout).trim(),
+            "M .owllm-inbox/image_1.png",
+            "only app scratch may remain dirty"
+        );
+        git_ok(root, &["worktree", "remove", "--force", &path]);
+        git_ok(root, &["branch", "-D", &branch]);
+    }
+
+    /// Opening a Code page also cuts a worktree. That is not a user-started run,
+    /// so it must keep the dirty-tree stop rather than commit on their behalf.
+    #[tokio::test]
+    async fn opening_a_page_never_commits_on_the_users_behalf() {
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let before = head_sha(root);
+        fs::write(
+            root.join("owllm-desktop/src-tauri/src/release.rs"),
+            "user work in progress\n",
+        )
+        .unwrap();
+
+        let outcome = fleet_worktree_create(
+            root.to_string_lossy().to_string(),
+            "code".to_string(),
+            "page-open".to_string(),
+            Some("owllm-page".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+        match outcome {
+            CreateOutcome::DirtyWorkingTree { details } => {
+                assert!(details.contains("release.rs"), "details name the file");
+            }
+            other => panic!("page open must not auto-commit: {other:?}"),
+        }
+        assert_eq!(before, head_sha(root), "HEAD must not move");
+    }
+
+    fn head_sha(root: &Path) -> String {
+        let out = Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .current_dir(root)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
     #[test]
     fn git_failure_message_uses_stdout_when_stderr_is_empty() {
         let message = git_failure_message(
@@ -1350,46 +1697,105 @@ mod tests {
     }
 
     #[test]
-    fn project_checkout_fast_forwards_to_remote_source_of_truth() {
-        let source = init_merge_repo();
-        let remote = tempfile::tempdir().unwrap();
-        git_ok(remote.path(), &["init", "--bare"]);
-        git_ok(
-            source.path(),
-            &["remote", "add", "origin", &remote.path().to_string_lossy()],
-        );
-        git_ok(source.path(), &["push", "-u", "origin", "main"]);
-
-        let peer = tempfile::tempdir().unwrap();
-        git_ok(
-            peer.path(),
-            &["clone", &remote.path().to_string_lossy(), "."],
-        );
-        git_ok(peer.path(), &["config", "user.email", "peer@owllm.local"]);
-        git_ok(peer.path(), &["config", "user.name", "OwLLM Peer"]);
-        git_ok(peer.path(), &["checkout", "main"]);
-        fs::write(peer.path().join("remote.txt"), b"published elsewhere").unwrap();
-        git_ok(peer.path(), &["add", "remote.txt"]);
-        git_ok(peer.path(), &["commit", "-m", "remote advance"]);
-        git_ok(peer.path(), &["push", "origin", "main"]);
-
-        sync_current_branch_from_origin(source.path()).unwrap();
-
+    fn wsl_fleet_paths_round_trip_to_the_same_distro() {
+        let unc = linux_path_to_wsl_unc("Ubuntu", "/home/owllm/.owllm/fleet/repo/run/coder");
         assert_eq!(
-            fs::read(source.path().join("remote.txt")).unwrap(),
-            b"published elsewhere"
+            unc.to_string_lossy().replace('/', "\\"),
+            r"\\wsl.localhost\Ubuntu\home\owllm\.owllm\fleet\repo\run\coder"
         );
-        let local = Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(source.path())
+        let repo = Path::new(r"\\wsl.localhost\Ubuntu\home\owllm\repo");
+        let reported = git_reported_path_for_host(repo, "/home/owllm/.owllm/fleet/repo/run/coder");
+        assert_eq!(reported, unc);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn wsl_unc_worktree_lifecycle_uses_the_distro_boundary() {
+        use super::{fleet_worktree_create, fleet_worktree_remove, CreateOutcome, RemoveArgs};
+
+        let distros = Command::new("wsl.exe")
+            .args(["-l", "-q"])
             .output()
-            .unwrap();
-        let remote_head = Command::new("git")
-            .args(["rev-parse", "origin/main"])
-            .current_dir(source.path())
-            .output()
-            .unwrap();
-        assert_eq!(local.stdout, remote_head.stdout);
+            .ok()
+            .map(|out| crate::wsl::decode_wsl(&out.stdout))
+            .unwrap_or_default();
+        let Some(distro) = distros.lines().map(str::trim).find(|line| !line.is_empty()) else {
+            eprintln!("WSL is unavailable; skipping the Windows-to-WSL lifecycle assertion");
+            return;
+        };
+
+        let tmp = init_merge_repo();
+        let root = tmp.path();
+        let windows = root.to_string_lossy().replace('\\', "/");
+        let bytes = windows.as_bytes();
+        if bytes.len() < 3 || bytes[1] != b':' {
+            eprintln!("temporary repository is not on a drive mounted by WSL");
+            return;
+        }
+        let drive = (bytes[0] as char).to_ascii_lowercase();
+        let tail = windows[3..].replace('/', "\\");
+        let project_unc = format!(r"\\wsl.localhost\{distro}\mnt\{drive}\{tail}");
+
+        let created = fleet_worktree_create(
+            project_unc.clone(),
+            "coder".into(),
+            "wsl-lifecycle-test".into(),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let (worktree_path, branch) = match created {
+            CreateOutcome::Ready { path, branch, .. } => (path, branch),
+            CreateOutcome::NotAGitRepo => panic!("WSL saw the initialized repository as non-Git"),
+            CreateOutcome::DirtyWorkingTree { details } => {
+                panic!("new test repository was unexpectedly dirty: {details}")
+            }
+            CreateOutcome::Error { message } => {
+                panic!("WSL worktree creation failed: {message}")
+            }
+        };
+
+        assert!(path_is_dir_native(Path::new(&worktree_path)).unwrap());
+        let (worktree_distro, linux_worktree) =
+            crate::wsl::parse_wsl_unc(&worktree_path).expect("worktree must stay in WSL");
+        assert_eq!(worktree_distro, distro);
+        crate::wsl::run_in_distro(
+            &distro,
+            &format!(
+                "printf 'isolated WSL edit\\n' > {}",
+                crate::wsl::sh_quote(&format!("{linux_worktree}/feature.txt"))
+            ),
+        )
+        .unwrap();
+
+        let finalized = fleet_worktree_finalize(
+            worktree_path.clone(),
+            "coder".into(),
+            "WSL lifecycle".into(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(finalized, FinalizeOutcome::Committed { .. }));
+
+        let merged =
+            fleet_worktree_merge_blocking(project_unc.clone(), "coder".into(), branch.clone())
+                .unwrap();
+        assert!(matches!(merged, MergeOutcome::Merged { .. }));
+        assert_eq!(
+            fs::read_to_string(root.join("feature.txt")).unwrap(),
+            "isolated WSL edit\n"
+        );
+
+        fleet_worktree_remove(RemoveArgs {
+            project_cwd: project_unc,
+            worktree_path: worktree_path.clone(),
+            branch,
+            keep: false,
+        })
+        .await
+        .unwrap();
+        assert!(!path_is_dir_native(Path::new(&worktree_path)).unwrap());
     }
 
     #[test]

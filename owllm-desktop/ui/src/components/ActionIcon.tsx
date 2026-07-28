@@ -1,7 +1,7 @@
 import React from "react";
 
 export type ActionIconName =
-  | "arrow-left" | "bolt" | "bug" | "camera" | "check" | "chevron-down"
+  | "archive" | "arrow-left" | "bolt" | "bug" | "camera" | "check" | "chevron-down"
   | "chevron-right" | "chevron-up" | "circle" | "clipboard" | "clock" | "close"
   | "code" | "copy" | "external-link" | "help" | "link" | "loader" | "monitor"
   | "note" | "play" | "plus" | "rotate" | "send" | "shield-off" | "sliders"
@@ -19,6 +19,7 @@ type ActionIconProps = {
 // platform emoji/font differences while giving every surface one visual system.
 export default function ActionIcon({ name, size = 16, label, className, style }: ActionIconProps) {
   const paths: Record<ActionIconName, React.ReactNode> = {
+    archive: <><path d="M21 8v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8" /><path d="M22 5H2v3h20V5Z" /><path d="M12 12v5" /><path d="m9 14 3 3 3-3" /></>,
     "arrow-left": <><path d="m15 18-6-6 6-6" /><path d="M9 12h10" /></>,
     bolt: <path d="m13 2-8 12h7l-1 8 8-12h-7l1-8Z" />,
     bug: <><path d="M8 9h8a3 3 0 0 1 3 3v2a7 7 0 0 1-14 0v-2a3 3 0 0 1 3-3Z" /><path d="M12 9V4m-3 2 3-2 3 2M5 13H2m20 0h-3M5 17H2m20 0h-3M8 9 6 7m10 2 2-2M12 9v12" /></>,

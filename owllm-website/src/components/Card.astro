@@ -1,0 +1,32 @@
+---
+export interface Props {
+  class?: string;
+  as?: "article" | "div" | "section" | "li";
+  id?: string;
+}
+
+const { class: className = "", as: Tag = "div", id } = Astro.props;
+const combined = ["card", className].filter(Boolean).join(" ");
+---
+
+<Tag class={combined} id={id}>
+  <slot />
+</Tag>
+
+<style>
+  .card {
+    background-color: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    box-shadow: var(--shadow-sm);
+    padding: 1.5rem;
+    transition:
+      transform 0.2s ease,
+      box-shadow 0.2s ease;
+  }
+
+  .card:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+  }
+</style>

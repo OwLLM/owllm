@@ -6,14 +6,31 @@ export function resolveAgentModel(
   savedTeamModel: string,
   perAgentModels: ReadonlyMap<string, string>,
   serverModel: string | null,
+  agentDefaultModel = "",
 ): string {
-  // A live team-picker choice is an explicit "assign to every agent" action.
-  // It must win immediately, even while stale per-agent overrides are being
-  // removed from persistence. An empty live choice explicitly means server.
-  if (liveTeamModel !== null) return liveTeamModel.trim() || serverModel || "local";
+  // Per-agent choices are the most specific user intent and must always win.
+  // The Team picker is a bulk assignment convenience, not a permanent lock:
+  // it materializes one project override per current agent (see
+  // assignTeamModelToAgents), after which the user can change any agent alone.
   const perAgent = perAgentModels.get(agentName)?.trim();
   if (perAgent) return perAgent;
-  return savedTeamModel.trim() || serverModel || "local";
+  // A model pinned on the team template's agent row is also agent-specific.
+  if (agentDefaultModel.trim()) return agentDefaultModel.trim();
+  return liveTeamModel?.trim() || savedTeamModel.trim() || serverModel || "local";
+}
+
+export function assignTeamModelToAgents(
+  agentNames: Iterable<string>,
+  modelId: string,
+): Map<string, string> {
+  const assigned = new Map<string, string>();
+  const selected = modelId.trim();
+  if (!selected) return assigned;
+  for (const rawName of agentNames) {
+    const name = rawName.trim();
+    if (name) assigned.set(name, selected);
+  }
+  return assigned;
 }
 
 export function clearStoredAgentModelOverrides(
@@ -32,7 +49,10 @@ export function clearStoredAgentModelOverrides(
   for (const key of keys) storage.removeItem(key);
 }
 
-export function graphJsonWithoutAgentModels(raw: string | null | undefined): string {
+export function graphJsonWithAgentModels(
+  raw: string | null | undefined,
+  agentModels: ReadonlyMap<string, string>,
+): string {
   let graph: Record<string, unknown> = {};
   if (raw?.trim()) {
     try {
@@ -42,5 +62,5 @@ export function graphJsonWithoutAgentModels(raw: string | null | undefined): str
       // Preserve a usable graph envelope even if an old row is malformed.
     }
   }
-  return JSON.stringify({ ...graph, agentModels: {} });
+  return JSON.stringify({ ...graph, agentModels: Object.fromEntries(agentModels) });
 }

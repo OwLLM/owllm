@@ -19,20 +19,21 @@ import { chatRuntime } from "../../runtime/chatRuntime";
 import { setRunActivity } from "../../runtime/runActivity";
 import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
-import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
+import { WorktreePreflightError } from "./worktreeIsolation";
 import type { ToolCall, ToolExecResult } from "./localTools";
 import { getBrowserStateLine, refreshBrowserState, retrieveScopedTeamMemoryPack, logScopedTeamWork, setTeamMemoryScope, setTeamMemoryGoal, refreshTeamMemorySnapshot, harvestMemoryWrites, stripMemoryDirectives, type TeamMemoryPack } from "./localTools";
 import { enrichInstructionWithMemory } from "./teamMemoryFormat";
 import CodeSidePanel, { type CodeAgentMode } from "./CodeSidePanel";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { RunTimerChip, runTimingFooter } from "./RunTimer";
 import { translateUiText } from "../../localization";
 import { projectAvailability, projectOriginLabel } from "./projectPortability";
-import { savedPageIdsForLocalProject } from "./codeProjectPages";
+import { chooseProjectOpenTarget, savedPageIdsForLocalProject } from "./codeProjectPages";
 import { openWebUrl } from "../../utils/openWebUrl";
 import PtyTerminal from "../advanced/PtyTerminal";
 import BrowserPanel from "./BrowserPanel";
-import TeamMemoryModal from "./TeamMemoryModal";
+import TeamMemoryModal, { fmtAgo } from "./TeamMemoryModal";
 import {
   wslStatus, wslIsolationGet, wslIsolationSet, wslCreateProject, wslListProjects,
   wslToolchainStatus, wslProvision, wslInstall, toolchainReady,
@@ -166,12 +167,18 @@ const DEFAULT_CODE_STATE: CodeState = {
 // footer, the auto-feed pause note) as plain assistant answers, which let them
 // own the Forward button and re-enter the model's history. Stamp them as meta.
 function stampLegacyMetaNotices(s: CodeState | null): CodeState | null {
-  if (!s?.messages?.length) return s;
+  if (!s) return s;
   const fix = (list?: Msg[]) => list?.map((m) =>
     m.role === "assistant" && !m.kind && (m.content.startsWith("⏱ ") || m.content.startsWith("📓 Auto-feed paused"))
       ? { ...m, kind: "meta" as const }
       : m);
-  return { ...s, messages: fix(s.messages) ?? [], secondaryMessages: fix(s.secondaryMessages) };
+  // Publisher results used to be persisted in the composer status. Clear the
+  // exact stale sync-success message during hydration now that PublisherCards
+  // owns it in the left Git container.
+  const status = s.status === "✓ Up to date. Local and origin/main are already the same commit."
+    ? (s.workspace ? `Coding in ${s.workspace}` : DEFAULT_CODE_STATE.status)
+    : s.status;
+  return { ...s, status, messages: fix(s.messages) ?? [], secondaryMessages: fix(s.secondaryMessages) };
 }
 
 // Worktree command outcomes — serde-tagged "status", camelCase. Mirror of the
@@ -193,6 +200,7 @@ type ProjectCatalogRow = {
 };
 type OpenProjectPagesDetail = {
   project: Pick<ProjectCatalogRow, "id" | "name" | "location">;
+  currentPageIsBlank: boolean;
   handled: boolean;
 };
 const OPEN_PROJECT_PAGES_EVENT = "owllm:code:open-project-pages";
@@ -421,10 +429,54 @@ function loadChats(): ChatThread[] {
 function saveChats(chats: ChatThread[]): void {
   try { localStorage.setItem(CHATS_KEY, JSON.stringify(chats.slice(0, CHATS_MAX), dropImages)); } catch { /* private mode / quota */ }
 }
+/// Bucket threads by recency for the conversation sidebar, newest first. A pure
+/// read of the existing thread list — the sidebar is a second VIEW of
+/// `owllm:code:chats`, never a second copy of it.
+function groupChatsByDate(list: ChatThread[]): Array<{ label: string; items: ChatThread[] }> {
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const DAY = 86_400_000;
+  const buckets = [
+    { label: "Today", min: startOfToday },
+    { label: "Yesterday", min: startOfToday - DAY },
+    { label: "Previous 7 days", min: startOfToday - 7 * DAY },
+    { label: "Previous 30 days", min: startOfToday - 30 * DAY },
+    { label: "Older", min: -Infinity },
+  ];
+  const out = buckets.map((b) => ({ label: b.label, items: [] as ChatThread[] }));
+  for (const c of [...list].sort((a, b) => (b.ts || 0) - (a.ts || 0))) {
+    const i = buckets.findIndex((b) => (c.ts || 0) >= b.min);
+    out[i < 0 ? out.length - 1 : i].items.push(c);
+  }
+  return out.filter((g) => g.items.length > 0);
+}
+const CHAT_SIDEBAR_KEY = "owllm:code:chat-sidebar";
+/// Reading-column width for the chat transcript and composer. Full-bleed text
+/// on a wide window is hard to read and left the empty state adrift in a void.
+const CHAT_COLUMN_MAX = 760;
+/// Opening prompts for an empty conversation. Deliberately about what THIS
+/// surface can actually do (no folder, no tools beyond the model's own), so a
+/// starter never promises something the no-project chat can't deliver.
+const CHAT_STARTERS = [
+  "Explain this error message",
+  "Summarise the text I paste next",
+  "Help me draft a message",
+  "Talk me through an idea",
+];
 function newThreadId(): string { return `c${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`; }
 function threadTitle(text: string): string {
   const t = text.trim().replace(/\s+/g, " ");
   return t ? (t.length > 44 ? t.slice(0, 44) + "…" : t) : "New chat";
+}
+// 🧠 Each folderless conversation gets its OWN durable memory scope, so the
+// everyday chat remembers across restarts exactly like a project does. It is
+// the SAME store the project/team RAG uses (team_memory + team_memory_search) —
+// only the scope string differs, so nothing about memory is reimplemented here.
+// Without this a no-folder chat resolved to scope "" and every enrich/log call
+// was a silent no-op: the chat could never remember anything.
+function chatMemoryScope(threadId: string | null | undefined): string {
+  const id = (threadId ?? "").trim();
+  return id ? `chat:${id}` : "";
 }
 
 // Per-recent metadata: a friendly name and a pin flag. Stored separately from
@@ -590,8 +642,10 @@ function CodeWorkspace({ pageId, onTitle }: {
   const notebookSteerInFlightIdsRef = useRef<string[]>([]);
   const drainSteer = () => {
     const q = steerRef.current;
-    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
+    // Guard BEFORE taking the ids: draining an empty text queue must not empty
+    // the id list, or those cards would be silently detached from their text.
     if (!q.length) return "";
+    const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
     if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
     return q.splice(0, q.length).join("\n\n");
   };
@@ -630,7 +684,20 @@ function CodeWorkspace({ pageId, onTitle }: {
   const setChatId = (v: string) => setChatField("chatId", v);
   const setChatDraft = (v: string) => setChatField("draft", v);
   const setChatBusy = (v: boolean) => setChatField("busy", v);
-  const [showHistory, setShowHistory] = useState(false);
+  // Conversation sidebar visibility. The thread list used to hide behind a
+  // popover, so the list you need to switch conversations vanished the moment
+  // you were in one. It is ambient now; this only remembers a deliberate
+  // collapse. Device-local UI (the "owllm:code:" prefix is denied from sync).
+  const [chatSidebarOpen, setChatSidebarOpenState] = useState(() => {
+    try { return localStorage.getItem(CHAT_SIDEBAR_KEY) !== "0"; } catch { return true; }
+  });
+  const setChatSidebarOpen = (v: boolean) => {
+    setChatSidebarOpenState(v);
+    try { localStorage.setItem(CHAT_SIDEBAR_KEY, v ? "1" : "0"); } catch { /* private mode */ }
+  };
+  // How many memory entries the last chat turn actually recalled — shown on the
+  // 🧠 button so "it remembered" is visible rather than something you infer.
+  const [chatMemHits, setChatMemHits] = useState(0);
   const [chatAttachments, setChatAttachments] = useState<Attachment[]>([]);
   const chatFileRef = useRef<HTMLInputElement | null>(null);
   // Project-coding composer image attachments (paste / drag-drop / picker) — the
@@ -705,9 +772,34 @@ function CodeWorkspace({ pageId, onTitle }: {
       createdDeviceId: deviceIdentity.device_id,
       createdDeviceName: deviceIdentity.name,
     }, ...cs]);
-    setChatId(id); setShowHistory(false); setChatAttachments([]); setChatDraft("");
+    setChatId(id); setChatAttachments([]); setChatDraft(""); setChatMemHits(0);
   };
-  const deleteThread = (id: string) => { setChats((cs) => cs.filter((c) => c.id !== id)); if (chatId === id) setChatId(""); };
+  // Switch to an existing conversation. The memory badge counts the LAST turn,
+  // so it belongs to the thread you were in — clear it when you leave.
+  const openThread = (id: string) => { setChatId(id); setChatAttachments([]); setChatMemHits(0); setChatMode(true); };
+  const deleteThread = (id: string) => {
+    setChats((cs) => cs.filter((c) => c.id !== id));
+    if (chatId === id) { setChatId(""); setChatMemHits(0); }
+    // Drop the thread's memory with it. Same store and same commands the memory
+    // viewer uses — a deleted chat must not leave unreachable rows behind in
+    // team_memory (nothing else can ever address a dead chat: scope again).
+    void purgeChatMemory(id);
+  };
+  const purgeChatMemory = async (threadId: string): Promise<void> => {
+    const scope = chatMemoryScope(threadId);
+    if (!scope) return;
+    try {
+      const rows = await invoke<{ id: number }[]>("team_memory_search", { scope, query: "", limit: 500 });
+      for (const r of rows) await invoke<number>("team_memory_delete", { scope, id: r.id });
+    } catch { /* best effort — the thread is gone either way */ }
+  };
+  // 🧠 Open the SHARED memory viewer on this conversation's own scope. Same
+  // modal, same store the project/team memory uses — only the scope differs.
+  const openChatMemory = (): void => {
+    const scope = chatMemoryScope(chatId);
+    if (!scope) { setStatus("Send a message first — the conversation's memory starts with it."); return; }
+    window.dispatchEvent(new CustomEvent("owllm:open-code-memory", { detail: { projectId: scope } }));
+  };
 
   // Paste/drop/pick images and documents. Documents are parsed locally before
   // they enter state, so corrupt/unsupported files surface immediately.
@@ -1121,10 +1213,13 @@ function CodeWorkspace({ pageId, onTitle }: {
     const normPath = (p: string | undefined) =>
       (p || "").replace(/[\\/]+$/, "").replace(/\//g, "\\").toLowerCase();
     const reopeningCurrent = normPath(stx.projectRoot || stx.workspace) === normPath(dir);
+    const openingBlankPage = !hasRecoverablePageState(stx);
     // Prefer the live page when it already owns this project. Otherwise recover
     // the latest project-root copy written by the persister. This is evaluated
     // BEFORE the preparing state so opening a folder can never blank the chat.
-    const recovered = reopeningCurrent ? stx : loadCodeSession(dir);
+    // A deliberately-created blank page must start a fresh conversation and
+    // worktree, even when another page already uses this same project.
+    const recovered = reopeningCurrent ? stx : openingBlankPage ? null : loadCodeSession(dir);
     const base = recovered ?? DEFAULT_CODE_STATE;
     // Switching THIS page to a different project: drop the old worktree in the
     // BACKGROUND so it doesn't block (or leak). Unmerged work is the user's to
@@ -1223,7 +1318,11 @@ function CodeWorkspace({ pageId, onTitle }: {
     setCatalogError("");
     setGhostProjectId(project.id);
     if (project.location.trim()) {
-      const detail: OpenProjectPagesDetail = { project, handled: false };
+      const detail: OpenProjectPagesDetail = {
+        project,
+        currentPageIsBlank: !hasRecoverablePageState(stx),
+        handled: false,
+      };
       window.dispatchEvent(new CustomEvent<OpenProjectPagesDetail>(OPEN_PROJECT_PAGES_EVENT, { detail }));
       if (detail.handled) return;
       await openWorkspace(project.location);
@@ -1515,7 +1614,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     try {
       await githubDisconnect(wslStat?.defaultDistro ?? null);
       setGh({ connected: false, login: null });
-      setGhMsg("Disconnected — token removed and credentials scrubbed.");
+      setGhMsg("Disconnected — remote sync stopped and OWLLM credentials scrubbed. Local projects and chats remain available offline.");
     } catch (e) {
       setGhMsg(`Couldn't disconnect: ${e}`);
     } finally {
@@ -1871,6 +1970,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       return current.id || fallbackProjectScope(folder);
     }
   };
+  const openProjectMemory = async (): Promise<void> => {
+    const scope = await resolveMemoryScope();
+    if (!scope) {
+      setStatus("Open a project before viewing Project Memory.");
+      return;
+    }
+    window.dispatchEvent(new CustomEvent("owllm:open-code-memory", {
+      detail: { projectId: scope },
+    }));
+  };
 
   const memoryLabel = (pack: TeamMemoryPack): string =>
     pack.total > 0 ? `${pack.factCount} fact${pack.factCount === 1 ? "" : "s"} · ${pack.worklogCount} worklog` : "no hits";
@@ -1894,8 +2003,12 @@ function CodeWorkspace({ pageId, onTitle }: {
     });
   };
 
-  const enrichCodePromptWithMemory = async (user: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
-    const scope = await resolveMemoryScope();
+  // `scopeOverride` lets a caller PIN the scope it captured when the turn
+  // started (the just-chat surface pins its thread's chat: scope). The chat
+  // stream outlives the page — resolving the scope again at reply time would
+  // read whatever project the user has since navigated to.
+  const enrichCodePromptWithMemory = async (user: string, scopeOverride?: string): Promise<{ text: string; pack: TeamMemoryPack }> => {
+    const scope = scopeOverride ?? await resolveMemoryScope();
     const empty: TeamMemoryPack = { scope, query: user, block: "", total: 0, factCount: 0, worklogCount: 0 };
     if (!scope || !user.trim()) return { text: user, pack: empty };
     setTeamMemoryScope(scope);
@@ -1905,8 +2018,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     return { text: enrichInstructionWithMemory(pack.block, user), pack };
   };
 
-  const logCodeWork = async (agent: string, instruction: string, result: string) => {
-    const scope = await resolveMemoryScope();
+  const logCodeWork = async (agent: string, instruction: string, result: string, scopeOverride?: string) => {
+    const scope = scopeOverride ?? await resolveMemoryScope();
     if (!scope || !result.trim()) return;
     setTeamMemoryScope(scope);
     setTeamMemoryGoal(instruction);
@@ -2027,7 +2140,7 @@ function CodeWorkspace({ pageId, onTitle }: {
       if (!fromComposer) setMessages((msgs) => [...msgs, { role: "assistant", content: `⚠ ${why}\n\nDropped task:\n${text.length > 400 ? text.slice(0, 400) + "…" : text}`, ts: Date.now() }]);
     };
     if (!workspace) { blockSend(preparing ? "Workspace still preparing — Send unlocks in a moment." : "Pick a workspace folder first (Browse)."); return; }
-    if (!modelId) { blockSend("No model selected — pick one above."); return; }
+    if (!modelId) { blockSend("No model selected — pick one in the Coder header."); return; }
     if (fromComposer) { setDraft(""); setCodeAttachments([]); autoFeedHopsRef.current = 0; }
     setBusy(true);
     const ctrl = new AbortController();
@@ -2046,6 +2159,11 @@ function CodeWorkspace({ pageId, onTitle }: {
     setRunPhase("starting");
     let ok = false;
     let aborted = false;
+    /// A preflight refused before the agent started (no CLI installed, no
+    /// isolated worktree). Nothing ran, so the card must stay pending and
+    /// retryable rather than being recorded as a failed delivery.
+    let stoppedAtPreflight = false;
+    let failureReason = "The run ended with an error.";
     let replyText = "";
     try {
       // Workspace path now lives at the top of the PublishCards rail — no need
@@ -2058,6 +2176,8 @@ function CodeWorkspace({ pageId, onTitle }: {
     } catch (e) {
       const err = e as { name?: string; message?: string };
       aborted = err.name === "AbortError";
+      stoppedAtPreflight = e instanceof CliPreflightError || e instanceof WorktreePreflightError;
+      failureReason = aborted ? "The run was stopped." : (err.message ?? String(e));
       if (!aborted) {
         setMessages((msgs) => {
           const out = msgs.slice();
@@ -2081,12 +2201,23 @@ function CodeWorkspace({ pageId, onTitle }: {
       // after the agent's answer so the user sees start/finish for every run.
       const now = Date.now();
       const payload = chatRuntime.getSnapshot(SID).payload as CodeState | undefined;
+      // One outcome for every card this run carried, decided in the shared
+      // helper so this page and the Agents page cannot diverge again.
+      const outcome: NotebookRunOutcome = ok
+        ? { kind: "clean" }
+        : stoppedAtPreflight ? { kind: "preflight" } : { kind: "failed", reason: failureReason };
+      // Did the QUEUE dispatch this run? Captured before the refs are cleared
+      // below, because it decides whether the chain may advance. A plain typed
+      // message must never pop a card: `autoFeed` is sticky across restarts, so
+      // an unrelated clean turn used to resume a queue switched on days ago and
+      // the step arrived looking exactly like something the user had asked for.
+      const ranFromNotebook = notebookStepRef.current != null || notebookSteerInFlightIdsRef.current.length > 0;
       if (notebookStepRef.current) {
-        markNotebookStepFinished(ruleScopeRef.current.id, notebookStepRef.current, now);
+        settleNotebookStep(ruleScopeRef.current.id, notebookStepRef.current, outcome, now);
         notebookStepRef.current = null;
       }
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
-        markNotebookStepFinished(ruleScopeRef.current.id, sid, now);
+        settleNotebookStep(ruleScopeRef.current.id, sid, outcome, now);
       }
       if (payload?.runStartedAt) {
         setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: runTimingFooter(payload.runStartedAt!, now), ts: now }]);
@@ -2102,13 +2233,36 @@ function CodeWorkspace({ pageId, onTitle }: {
         if (busySendRef.current) return;
         const leftover = drainSteer();
         if (leftover && !aborted) { void sendRef.current?.(leftover); return; }
-        if (ok) {
-          continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId, (st) => {
+        if (leftover) {
+          // Stopped with steers still queued. drainSteer just moved their cards
+          // into the in-flight list, but the run they belonged to is over — left
+          // there they would be stamped with an UNRELATED later run's outcome.
+          // Hand them back to the queue as pending instead.
+          for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
+            settleNotebookStep(ruleScopeRef.current.id, sid, { kind: "preflight" });
+          }
+        }
+        // Advance the chain only from a run the queue itself dispatched, or
+        // from the one run the user explicitly armed with ▶ Start queue while
+        // the agent was busy. Checking the arm second keeps it unconsumed while
+        // the chain is already self-sustaining.
+        if (ok && (ranFromNotebook || consumeAutoFeedArm(ruleScopeRef.current.id, notebookSurfaceId))) {
+          const result = continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId, (st) => {
             notebookStepRef.current = st.id;
-            void sendRef.current?.(st.text);
+            void sendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${st.text}`);
           });
-        } else if (autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
-          setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; send a message or press ▶ Start queue to continue.`, ts: Date.now() }]);
+          // Discarding this result is how a stalled queue stayed silent, and
+          // autoFeedWouldRun can't report it (it is false for exactly this
+          // reason). Say it directly.
+          if (result === "inactive" && notebookPendingStepCount(ruleScopeRef.current.id) > 0) {
+            setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: "📓 Auto-feed idle here — another open window on this project is driving the queue. Use “Take over here” in the Notebook to drive it from this page.", ts: Date.now() }]);
+          }
+        } else if (!ok && ranFromNotebook && autoFeedWouldRun(ruleScopeRef.current.id, notebookSurfaceId)) {
+          // Only a broken QUEUE run is worth reporting. A failed message the
+          // user typed themselves has nothing to do with the notebook, and the
+          // wording no longer offers "send a message" as a way to resume —
+          // that is exactly the accident this gate removes.
+          setMessages((msgs) => [...msgs, { role: "assistant", kind: "meta", content: `📓 Auto-feed paused — the turn ${aborted ? "was stopped" : "ended with an error"}. Pending steps stay in the Notebook queue; press ▶ Start queue in the Notebook to continue.`, ts: Date.now() }]);
         }
       }, 80);
     }
@@ -2199,36 +2353,74 @@ function CodeWorkspace({ pageId, onTitle }: {
   };
   sendSecondaryRef.current = sendSecondary;
 
+  const toggleWorkspaceTerminal = () => {
+    // Hidden shells re-open; visible shells hide. Both agent composers control
+    // the same workspace terminal, so a second shell/process is never created.
+    if (!termOpen) {
+      setTermOpen(true);
+      setTermHidden(false);
+    } else {
+      setTermHidden((hidden) => !hidden);
+    }
+  };
+
+  const renderTerminalButton = (owner: "primary" | "secondary") => (
+    <button
+      data-ui={owner === "primary" ? "CodePrimaryTerminalButton" : "CodeSecondaryTerminalButton"}
+      onClick={toggleWorkspaceTerminal}
+      title="Open the workspace terminal"
+      aria-label={`Open terminal for the ${owner} agent`}
+      style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
+    >Terminal</button>
+  );
+
   // The second agent's composer — ONE definition, rendered in two homes:
   // inside the pane when the panes are STACKED (narrow), or in the divided
   // bottom composer row aligned under its pane when side-by-side (wide) —
   // the fine-tuning-chat layout: columns above, inputs divided below.
   const renderSecondaryComposer = () => (
-    <div style={{ display: "flex", gap: 6, alignItems: "flex-end", flexShrink: 0 }}>
-      <textarea
-        ref={secondaryDraftRef}
-        value={secondaryDraft}
-        onChange={(e) => setSecondaryDraft(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
-        placeholder="Message the second agent… (same workspace, its own conversation & model)"
-        rows={2}
-        disabled={secondaryBusy}
-        style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
-      />
-      {secondaryBusy ? (
-        <button
-          onClick={() => { secondaryAbortRef.current?.abort(); }}
-          title="Stop the second agent"
-          style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
-        >Stop</button>
-      ) : (
-        <button
-          onClick={() => { void sendSecondary(); }}
-          disabled={!secondaryDraft.trim()}
-          title="Send to the second agent"
-          style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
-        >Send</button>
-      )}
+    <div data-ui="CodeSecondaryComposer" style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0, flexShrink: 0 }}>
+      <div data-ui="CodeSecondaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+        <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
+        <div data-ui="CodeSecondaryComposerModelPicker" style={{ flex: 1, minWidth: 0 }}>
+          <ModelPicker
+            value={secondaryModelId}
+            onChange={setSecondaryModelId}
+            models={availableModels}
+            status={accountsStatus}
+            disabled={secondaryBusy}
+            fallbackLabel="Same as 1st agent"
+            placement="top"
+          />
+        </div>
+        {renderTerminalButton("secondary")}
+      </div>
+      <div style={{ display: "flex", gap: 6, alignItems: "flex-end", minWidth: 0 }}>
+        <textarea
+          ref={secondaryDraftRef}
+          value={secondaryDraft}
+          onChange={(e) => setSecondaryDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void sendSecondary(); } }}
+          placeholder="Message the second agent… (same workspace, its own conversation & model)"
+          rows={2}
+          disabled={secondaryBusy}
+          style={{ flex: 1, resize: "vertical", minHeight: 44, maxHeight: 120, padding: 8, background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", lineHeight: 1.5, fontFamily: "inherit", boxSizing: "border-box", opacity: secondaryBusy ? 0.6 : 1 }}
+        />
+        {secondaryBusy ? (
+          <button
+            onClick={() => { secondaryAbortRef.current?.abort(); }}
+            title="Stop the second agent"
+            style={{ ...btn, height: 38, padding: "0 14px", color: "#ff8c8c" }}
+          >Stop</button>
+        ) : (
+          <button
+            onClick={() => { void sendSecondary(); }}
+            disabled={!secondaryDraft.trim()}
+            title="Send to the second agent"
+            style={{ ...btn, height: 38, padding: "0 14px", fontWeight: 700, opacity: secondaryDraft.trim() ? 1 : 0.5 }}
+          >Send</button>
+        )}
+      </div>
     </div>
   );
 
@@ -2268,12 +2460,16 @@ function CodeWorkspace({ pageId, onTitle }: {
       else newChat();
     }
   };
+  // The hub card's primary button. Unlike startChat (which RESUMES the latest
+  // thread) this always opens an empty one — the card lists the recent threads
+  // right below it, so resuming is a click away and "New" can mean new.
+  const startNewChat = () => { newChat(); setChatMode(true); };
   const sendChat = async () => {
     const text = chatDraft.trim();
     const attachments = chatAttachments;
     const images = imageAttachments(attachments);
     if ((!text && attachments.length === 0) || chatBusy) return;
-    if (!modelId) { setStatus("Pick a model above first."); return; }
+    if (!modelId) { setStatus("Pick a model in the Coder header first."); return; }
     setChatDraft("");
     setChatAttachments([]);
     setChatBusy(true);
@@ -2315,13 +2511,18 @@ function CodeWorkspace({ pageId, onTitle }: {
     });
     try {
       const provider = providerFor(modelId, availableModels);
-      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments));
-      showMemoryPack(pack);
+      // 🧠 Pin THIS thread's memory scope for the whole turn. Captured from the
+      // resolved thread id, never re-resolved after the await, so a reply that
+      // lands after the user navigated away still reads and writes the chat it
+      // belongs to instead of whatever project is on screen by then.
+      const chatScope = chatMemoryScope(tid);
+      const { text: enrichedText, pack } = await enrichCodePromptWithMemory(appendDocumentAttachmentText(text, attachments), chatScope);
+      setChatMemHits(pack.total);
       if (provider === "local" || provider === "tuned") {
         const port = await ensureServer(modelId);
         if (!port) throw new Error("Local engine didn't come up — check the Server tab / install Local Inference.");
         const reply = await streamLocalChat({ port, modelId, systemPrompt: "You are a helpful, concise assistant.", userContent: openaiUserContent(enrichedText, images), temperature: 0.4, signal: ctrl.signal, onDelta: onD, onThought: onT, history });
-        await logCodeWork("code_chat", text || "(see attached image)", reply);
+        await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);
       } else {
         // Pass a working dir so pasted images can be saved into it for the model
         // to read (codex -i / claude file-ref). Use the workspace if one is
@@ -2329,7 +2530,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         // ("I can't inspect the image"), which is the bug on a no-folder chat.
         const chatCwd = workspace || chatScratchRef.current || undefined;
         const reply = await streamChatCompletion(0, modelId, provider, "You are a helpful, concise assistant.", enrichedText, 0.4, ctrl.signal, onD, chatCwd, history, false, () => {}, undefined, images);
-        await logCodeWork("code_chat", text || "(see attached image)", reply);
+        await logCodeWork("code_chat", text || "(see attached image)", reply, chatScope);
       }
     } catch (e) {
       const err = e as { name?: string; message?: string };
@@ -2524,60 +2725,95 @@ function CodeWorkspace({ pageId, onTitle }: {
   // ---- Just-chat mode (no folder): the everyday-chat surface --------------
   if (!workspace && chatMode) {
     return (
-      <div style={{ height: "100%", display: "flex", flexDirection: "column", background: "var(--bg-panel)", color: "var(--fg)" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
-          <button onClick={() => setChatMode(false)} title="Back to Start" style={{ ...btn, height: 30, padding: "0 10px" }}>← Start</button>
-          <button onClick={newChat} title="New conversation" style={{ ...btn, height: 30, padding: "0 10px", fontWeight: 700 }}>＋ New</button>
-          <span title="This no-project chat is stored on its creator computer." style={{ fontSize: 10.5, color: "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px" }}>
-            🖥 {chats.find((c) => c.id === chatId)?.createdDeviceName || deviceIdentity.name}
-          </span>
-          {/* History dropdown — past conversations (persisted) */}
-          <div style={{ position: "relative" }}>
-            <button onClick={() => setShowHistory((v) => !v)} title="Past conversations" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg)" }}>🕘 History{chats.length ? ` (${chats.length})` : ""}</button>
-            {showHistory && (
-              <>
-                <div onClick={() => setShowHistory(false)} style={{ position: "fixed", inset: 0, zIndex: 40 }} />
-                <div style={{ position: "absolute", top: 34, left: 0, zIndex: 41, width: 320, maxHeight: 380, overflowY: "auto", background: "var(--bg-panel)", border: "1px solid var(--border-strong)", borderRadius: 10, boxShadow: "var(--shadow-lg)", padding: 6 }}>
-                  {chats.length === 0 && <div style={{ fontSize: 12.5, color: "var(--fg-muted)", padding: "8px 10px" }}>No past chats yet.</div>}
-                  {chats.map((c) => (
-                    <div key={c.id} onClick={() => { setChatId(c.id); setShowHistory(false); }}
-                      onMouseEnter={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
-                      onMouseLeave={(e) => (e.currentTarget.style.background = c.id === chatId ? "var(--bg-input)" : "transparent")}
-                      style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 7, cursor: "pointer", background: c.id === chatId ? "var(--bg-input)" : "transparent" }}>
-                      <span style={{ flex: 1, minWidth: 0, fontSize: 13, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</span>
-                      <span title="Creator PC" style={{ fontSize: 10, color: "var(--fg-subtle)", whiteSpace: "nowrap" }}>🖥 {c.createdDeviceName || "legacy"}</span>
-                      <span style={{ fontSize: 10.5, color: "var(--fg-muted)", whiteSpace: "nowrap" }}>{c.messages.length}</span>
-                      <button onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete" style={{ ...btn, height: 22, padding: "0 6px", color: "var(--fg-muted)", fontSize: 11 }}>✕</button>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
-          <div style={{ flex: 1 }} />
-          <div style={{ width: 260, maxWidth: "45%" }}>
-            <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
-          </div>
-          {chatMsgs.length > 0 && <button onClick={() => chatId && updateThread(chatId, () => [])} title="Clear this conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
-        </div>
-        <div ref={chatSticky.ref} onScroll={chatSticky.onScroll} data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "16px 18px", display: "flex", flexDirection: "column", gap: 12 }}>
-          {chatMsgs.length === 0 && (
-            <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", maxWidth: 440 }}>
-              <div style={{ fontSize: 34, marginBottom: 8 }}>💬</div>
-              <div style={{ fontSize: 15, fontWeight: 700, color: "var(--fg-strong)" }}>Just chat</div>
-              <div style={{ fontSize: 12.5, marginTop: 6, lineHeight: 1.6 }}>
-                Ask anything — no project, no setup. Uses the model picked above (local or cloud). To have the model work inside a folder, go back and pick “New project” or “Open a project folder”.
-              </div>
+      <div style={{ height: "100%", display: "flex", background: "var(--bg-panel)", color: "var(--fg)" }}>
+        {/* ── Conversation sidebar (left, ambient) ─────────────────────────
+            The list lives here rather than behind a popover: switching
+            conversations is the primary action of a chat surface, so it must
+            be permanently visible and one click away. */}
+        {chatSidebarOpen && (
+          <aside style={{ width: 262, flex: "0 0 262px", minWidth: 0, display: "flex", flexDirection: "column", background: "var(--bg-card)", borderRight: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 8px 6px 10px" }}>
+              <button onClick={() => setChatMode(false)} title="Back to Start" style={{ ...btn, height: 28, padding: "0 9px", fontSize: 12 }}>← Start</button>
+              <div style={{ flex: 1 }} />
+              <button onClick={() => setChatSidebarOpen(false)} title="Hide conversation list" aria-label="Hide conversation list" style={{ ...btn, height: 28, width: 28, padding: 0, justifyContent: "center", color: "var(--fg-muted)" }}>⟨</button>
             </div>
-          )}
-          {chatMsgs.map((m, i) => {
-            const isUser = m.role === "user";
-            return (
-              <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} />
-            );
-          })}
-        </div>
-        <div style={{ borderTop: "1px solid var(--border)", padding: "10px 12px", display: "flex", flexDirection: "column", gap: 8 }}>
+            <div style={{ padding: "0 10px 8px" }}>
+              <button onClick={newChat} title="Start a new conversation" style={{ ...btn, width: "100%", height: 36, justifyContent: "center", gap: 7, fontWeight: 700, fontSize: 13, background: "var(--bg-input)", borderColor: "var(--border-strong)", color: "var(--fg-strong)" }}>＋ New conversation</button>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 6px 10px" }}>
+              {chats.length === 0 && (
+                <div style={{ fontSize: 12, color: "var(--fg-subtle)", padding: "10px 8px", lineHeight: 1.6 }}>No conversations yet. Your chats appear here.</div>
+              )}
+              {groupChatsByDate(chats).map((group) => (
+                <div key={group.label} style={{ marginTop: 8 }}>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, letterSpacing: 0.5, textTransform: "uppercase", color: "var(--fg-subtle)", padding: "4px 8px" }}>{group.label}</div>
+                  {group.items.map((c) => {
+                    const active = c.id === chatId;
+                    return (
+                      <div key={c.id} onClick={() => openThread(c.id)} title={c.title || "Chat"}
+                        onMouseEnter={(e) => { e.currentTarget.style.background = "var(--bg-input)"; const x = e.currentTarget.querySelector("[data-del]") as HTMLElement | null; if (x) x.style.opacity = "1"; }}
+                        onMouseLeave={(e) => { e.currentTarget.style.background = active ? "var(--bg-input)" : "transparent"; const x = e.currentTarget.querySelector("[data-del]") as HTMLElement | null; if (x) x.style.opacity = "0"; }}
+                        style={{ display: "flex", alignItems: "center", gap: 6, padding: "7px 8px", borderRadius: 8, cursor: "pointer", background: active ? "var(--bg-input)" : "transparent", borderLeft: `2px solid ${active ? "var(--accent)" : "transparent"}` }}>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 12.5, color: active ? "var(--fg-strong)" : "var(--fg)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</div>
+                          <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginTop: 1 }}>{fmtAgo(c.ts)} · {c.messages.length} msg</div>
+                        </div>
+                        {/* Delete reveals on hover — a permanent ✕ next to every
+                            row invites the misclick it can't undo. */}
+                        <button data-del onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete conversation and its memory" style={{ ...btn, height: 22, width: 22, padding: 0, justifyContent: "center", color: "var(--fg-muted)", fontSize: 11, opacity: 0, transition: "opacity .12s" }}>✕</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              ))}
+            </div>
+          </aside>
+        )}
+        {/* ── Conversation ─────────────────────────────────────────────── */}
+        <div style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid var(--border)" }}>
+            {!chatSidebarOpen && (
+              <button onClick={() => setChatSidebarOpen(true)} title="Show conversation list" aria-label="Show conversation list" style={{ ...btn, height: 30, padding: "0 9px" }}>☰{chats.length ? ` ${chats.length}` : ""}</button>
+            )}
+            <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: 320 }}>{chats.find((c) => c.id === chatId)?.title || "New chat"}</span>
+            <span title="This no-project chat is stored on its creator computer." style={{ fontSize: 10.5, color: "var(--fg-muted)", border: "1px solid var(--border)", borderRadius: 7, padding: "4px 7px", whiteSpace: "nowrap" }}>
+              🖥 {chats.find((c) => c.id === chatId)?.createdDeviceName || deviceIdentity.name}
+            </span>
+            <div style={{ flex: 1 }} />
+            <div style={{ width: 240, maxWidth: "40%" }}>
+              <ModelPicker value={modelId} onChange={setModelId} models={availableModels} status={accountsStatus} fallbackLabel="Pick a model" />
+            </div>
+            {/* 🧠 This conversation's own memory — the SAME viewer and the same
+                team_memory store the projects use, scoped to this thread. */}
+            <button data-ui="ChatThreadMemory" onClick={openChatMemory} title="What this conversation remembers (searchable, editable)" style={{ ...btn, height: 30, padding: "0 10px", color: chatMemHits > 0 ? "var(--accent-ink)" : "var(--fg-muted)" }}>🧠 Memory{chatMemHits > 0 ? ` (${chatMemHits})` : ""}</button>
+            {chatMsgs.length > 0 && <button onClick={() => chatId && updateThread(chatId, () => [])} title="Clear this conversation" style={{ ...btn, height: 30, padding: "0 10px", color: "var(--fg-muted)" }}>Clear</button>}
+          </div>
+          <div ref={chatSticky.ref} onScroll={chatSticky.onScroll} data-selectall-scope style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "20px 18px" }}>
+            {/* Reading column: full-bleed text on a wide window is unreadable,
+                and left the empty state floating in a void. */}
+            <div style={{ maxWidth: CHAT_COLUMN_MAX, margin: "0 auto", display: "flex", flexDirection: "column", gap: 12, minHeight: "100%" }}>
+              {chatMsgs.length === 0 && (
+                <div style={{ margin: "auto 0", paddingBottom: 24 }}>
+                  <div style={{ fontSize: 26, fontWeight: 700, color: "var(--fg-strong)", letterSpacing: -0.3 }}>What can I help with?</div>
+                  <div style={{ fontSize: 13, color: "var(--fg-muted)", marginTop: 8, lineHeight: 1.6 }}>
+                    Ask anything — no project, no setup. Answers come from the model picked above. To have it work inside a folder, use ← Start and open a project.
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 18 }}>
+                    {CHAT_STARTERS.map((s) => (
+                      <button key={s} onClick={() => setChatDraft(s)} style={{ ...btn, height: "auto", minHeight: 34, padding: "8px 12px", fontSize: 12.5, borderRadius: 10, color: "var(--fg)", textAlign: "left", whiteSpace: "normal" }}>{s}</button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {chatMsgs.map((m, i) => {
+                const isUser = m.role === "user";
+                return (
+                  <ChatBubble key={i} avatar={isUser ? "U" : "C"} sender={isUser ? "You" : "Assistant"} accent={isUser ? "#7aa2ff" : "#7ff0c5"} isUser={isUser} isStreaming={chatBusy && i === chatMsgs.length - 1 && !isUser} content={m.content} thinking={m.thinking} images={m.images} />
+                );
+              })}
+            </div>
+          </div>
+          <div style={{ borderTop: "1px solid var(--border)", padding: "10px 18px 12px", display: "flex", flexDirection: "column", gap: 8, maxWidth: CHAT_COLUMN_MAX, width: "100%", margin: "0 auto", boxSizing: "border-box" }}>
           {chatAttachments.length > 0 && (
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {chatAttachments.map((a, i) => (
@@ -2588,9 +2824,11 @@ function CodeWorkspace({ pageId, onTitle }: {
               ))}
             </div>
           )}
-          <div style={{ display: "flex", gap: 8, alignItems: "flex-end" }}>
+          {/* One composer card rather than a bare edge-to-edge row, aligned to
+              the same reading column as the transcript. */}
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-end", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 14, padding: 6 }}>
             <input ref={chatFileRef} type="file" accept={CHAT_ATTACHMENT_ACCEPT} multiple style={{ display: "none" }} onChange={(e) => { if (e.target.files) void addChatFiles(e.target.files); e.target.value = ""; }} />
-            <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 38, width: 38, justifyContent: "center", padding: 0, fontSize: 16 }}>📎</button>
+            <button onClick={() => chatFileRef.current?.click()} title="Attach images or documents" style={{ ...btn, height: 34, width: 34, justifyContent: "center", padding: 0, fontSize: 15, borderRadius: 10, background: "transparent", border: "none", color: "var(--fg-muted)" }}>📎</button>
             <textarea
               value={chatDraft}
               onChange={(e) => setChatDraft(e.target.value)}
@@ -2598,15 +2836,24 @@ function CodeWorkspace({ pageId, onTitle }: {
               onPaste={onChatPaste}
               placeholder="Message…  (paste or attach images/documents, Enter to send)"
               rows={1}
-              style={{ flex: 1, resize: "none", minHeight: 38, maxHeight: 160, background: "var(--bg-input)", border: "1px solid var(--border)", borderRadius: 8, color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "9px 12px", lineHeight: 1.5 }}
+              style={{ flex: 1, resize: "none", minHeight: 34, maxHeight: 200, background: "transparent", border: "none", outline: "none", color: "var(--fg)", fontSize: "var(--chat-font-size, 13px)", padding: "8px 4px", lineHeight: 1.5 }}
             />
             {chatBusy ? (
-              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 38, padding: "0 14px", color: "var(--error)" }}>Stop</button>
+              <button onClick={() => { justChatAbort?.abort(); void invoke("cli_cancel_all").catch(() => { /* best-effort */ }); }} style={{ ...btn, height: 34, padding: "0 14px", borderRadius: 10, color: "var(--error)" }}>Stop</button>
             ) : (
-              <button onClick={sendChat} disabled={!chatDraft.trim() && chatAttachments.length === 0} style={{ ...btn, height: 38, padding: "0 16px", fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatAttachments.length) ? 1 : 0.5 }}>Send</button>
+              <button onClick={sendChat} disabled={!chatDraft.trim() && chatAttachments.length === 0} style={{ ...btn, height: 34, padding: "0 16px", borderRadius: 10, fontWeight: 700, background: "var(--accent)", color: "var(--accent-fg)", border: "none", opacity: (chatDraft.trim() || chatAttachments.length) ? 1 : 0.5 }}>Send</button>
             )}
           </div>
+          </div>
         </div>
+        {/* This branch returns EARLY, so the project-scoped modal further down
+            never mounts here — the chat needs its own instance to answer the
+            same event with this thread's scope. */}
+        <TeamMemoryModal
+          openEvent="owllm:open-code-memory"
+          projectId={chatMemoryScope(chatId) || null}
+          projectName={chats.find((c) => c.id === chatId)?.title || "Chat"}
+        />
       </div>
     );
   }
@@ -2678,19 +2925,70 @@ function CodeWorkspace({ pageId, onTitle }: {
               {/* START — VS Code-style action rows */}
               <div style={{ minWidth: 0, display: "flex", flexDirection: "column" }}>
                 <div style={{ fontSize: 18, fontWeight: 800, color: "var(--fg-strong)", marginBottom: 10 }}>Local actions</div>
-                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, width: "100%" }}>
-                  {([
-                    { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: openNewProject },
-                    { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
-                    { icon: "◌", label: "New chat", detail: "Start a conversation without giving the model access to a project folder.", onClick: startChat },
-                  ]).map((a) => (
-                    <button key={a.label} onClick={a.onClick}
-                      style={{ minHeight: 118, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, minWidth: 0, padding: 14, borderRadius: 14, cursor: "pointer", textAlign: "left", color: "var(--fg)", border: "1px solid rgba(var(--accent-rgb),.28)", background: "radial-gradient(circle at 100% 0%,rgba(var(--accent-rgb),.16),transparent 52%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px rgba(0,0,0,.12)" }}>
-                      <span style={{ fontSize: 20, color: "var(--accent-ink)", textShadow: "0 0 14px rgba(var(--accent-rgb),.8)" }}>{a.icon}</span>
-                      <span style={{ color: "var(--fg-strong)", fontWeight: 800, fontSize: 13.5 }}>{a.label}</span>
-                      <span style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>{a.detail}</span>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(2,minmax(0,1fr))", gap: 10, width: "100%", alignItems: "stretch" }}>
+                  {/* LEFT — the two project actions, stacked. Deliberately the
+                      quieter violet card: opening a folder is the occasional
+                      task, chatting is the daily one. */}
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0 }}>
+                    {([
+                      { icon: "✦", label: "New project", detail: "Create or bind a folder, optionally with isolation and a GitHub repository.", onClick: openNewProject },
+                      { icon: "⌁", label: "Open local folder", detail: "Turn an existing folder into a project binding on this computer.", onClick: pickWorkspace },
+                    ]).map((a) => (
+                      <button key={a.label} onClick={a.onClick}
+                        style={{ flex: 1, minHeight: 118, display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8, minWidth: 0, padding: 14, borderRadius: 14, cursor: "pointer", textAlign: "left", color: "var(--fg)", border: "1px solid rgba(154,140,255,.34)", background: "radial-gradient(circle at 100% 0%,rgba(154,140,255,.15),transparent 52%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 26px rgba(0,0,0,.12)" }}>
+                        <span style={{ fontSize: 20, color: "#b9aeff", textShadow: "0 0 14px rgba(154,140,255,.75)" }}>{a.icon}</span>
+                        <span style={{ color: "var(--fg-strong)", fontWeight: 800, fontSize: 13.5 }}>{a.label}</span>
+                        <span style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>{a.detail}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* RIGHT — the everyday chat. Full height of the left column,
+                      mint (the assistant colour used in every chat bubble) so
+                      the daily-use surface reads as the primary one, with its
+                      recent conversations listed inline the way ChatGPT/Claude
+                      do it — no extra click through a History dropdown. */}
+                  <div data-ui="NormalChatCard" style={{ display: "flex", flexDirection: "column", gap: 10, minWidth: 0, padding: 16, borderRadius: 14, border: "1px solid rgba(127,240,197,.42)", background: "radial-gradient(circle at 100% 0%,rgba(127,240,197,.16),transparent 55%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.05),0 12px 30px rgba(0,0,0,.16)" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                      <span style={{ fontSize: 21, color: "#7ff0c5", textShadow: "0 0 15px rgba(127,240,197,.8)" }}>💬</span>
+                      <b style={{ color: "var(--fg-strong)", fontSize: 15 }}>Normal chat</b>
+                      <span style={{ fontSize: 9.5, fontWeight: 900, letterSpacing: 1, textTransform: "uppercase", color: "#7ff0c5", border: "1px solid rgba(127,240,197,.45)", borderRadius: 999, padding: "2px 7px" }}>Everyday</span>
+                    </div>
+                    <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5 }}>
+                      Ask anything — no folder, no setup. Each conversation keeps its own memory, so it remembers what you told it.
+                    </div>
+                    <button onClick={startNewChat}
+                      style={{ height: 40, display: "flex", alignItems: "center", justifyContent: "center", gap: 8, borderRadius: 10, cursor: "pointer", fontWeight: 800, fontSize: 13, border: "none", background: "linear-gradient(135deg,#7ff0c5,#4de09b)", color: "#04241a", boxShadow: "0 8px 20px rgba(77,224,155,.25)" }}>
+                      ＋ New conversation
                     </button>
-                  ))}
+                    {/* Recent conversations — the SAME persisted thread list the
+                        chat surface uses (owllm:code:chats), so this is a second
+                        view of it, not a second store. */}
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginTop: 2 }}>
+                      <span style={{ fontSize: 10, fontWeight: 900, letterSpacing: 1.2, textTransform: "uppercase", color: "var(--fg-subtle)" }}>Recent conversations</span>
+                      {chats.length > 0 && <span style={{ fontSize: 10.5, color: "var(--fg-subtle)" }}>{chats.length}</span>}
+                    </div>
+                    <div data-ui="RecentChatList" style={{ display: "flex", flexDirection: "column", gap: 5, minHeight: 0, maxHeight: 268, overflowY: "auto", paddingRight: 2 }}>
+                      {chats.length === 0 && (
+                        <div style={{ fontSize: 11.5, color: "var(--fg-muted)", lineHeight: 1.5, padding: "8px 2px" }}>
+                          No conversations yet — start one above and it will be listed here.
+                        </div>
+                      )}
+                      {chats.map((c) => (
+                        <div key={c.id} onClick={() => openThread(c.id)} title={c.title || "Chat"}
+                          onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(127,240,197,.09)")}
+                          onMouseLeave={(e) => (e.currentTarget.style.background = "var(--bg-input)")}
+                          style={{ display: "flex", alignItems: "center", gap: 8, padding: "8px 10px", borderRadius: 9, cursor: "pointer", background: "var(--bg-input)", border: "1px solid var(--border)" }}>
+                          <div style={{ flex: 1, minWidth: 0 }}>
+                            <div style={{ fontSize: 12.5, fontWeight: 650, color: "var(--fg-strong)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.title || "Chat"}</div>
+                            <div style={{ fontSize: 10, color: "var(--fg-subtle)", marginTop: 2 }}>{fmtAgo(c.ts)} · {c.messages.length} message{c.messages.length === 1 ? "" : "s"}</div>
+                          </div>
+                          <button onClick={(e) => { e.stopPropagation(); deleteThread(c.id); }} title="Delete conversation and its memory"
+                            style={{ ...btn, height: 22, padding: "0 6px", color: "var(--fg-muted)", fontSize: 11 }}>✕</button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                   <div data-ui="ImportFromGitHubCard" style={{ gridColumn: "1 / -1", display: "flex", flexDirection: "column", gap: 9, minWidth: 0, padding: 15, borderRadius: 14, border: "1px solid rgba(126,231,255,.38)", background: "radial-gradient(circle at 100% 0%,rgba(126,231,255,.16),transparent 48%),var(--bg-card)", boxShadow: "inset 0 1px 0 rgba(255,255,255,.04),0 10px 28px rgba(0,0,0,.14)" }}>
                     <div style={{ display: "flex", gap: 9, alignItems: "center" }}><span style={{ color: "#7ee7ff", fontSize: 20, textShadow: "0 0 14px rgba(126,231,255,.8)" }}>⇣</span><b style={{ color: "var(--fg-strong)", fontSize: 13.5 }}>Import from GitHub</b></div>
                     <div style={{ color: "var(--fg-muted)", fontSize: 11, lineHeight: 1.45 }}>
@@ -2956,19 +3254,6 @@ function CodeWorkspace({ pageId, onTitle }: {
           🖥 {stx.createdDeviceName || deviceIdentity.name}
         </span>
         {stx.repoUrl && <span title={stx.repoUrl} style={{ fontSize: 10.5, fontWeight: 750, color: "var(--accent-ink)", whiteSpace: "nowrap" }}>🐙 GitHub</span>}
-        {/* Project Memory — same shared surface (TeamMemoryModal) and same
-            project scope both code agents read/write, matching the Agents page's
-            🧠 Memory button. Scoped event so only THIS page's modal opens (the
-            keep-alive Agents modal is mounted+hidden alongside). */}
-        {(projectRoot || workspace) && (
-          <button
-            onClick={() => window.dispatchEvent(new CustomEvent("owllm:open-code-memory"))}
-            title="Project Memory — the shared knowledge base both code agents read and write (build commands, decisions, file maps). Same memory as the Agents page for this project; syncs across your PCs via the vault."
-            style={{ ...btn, height: 26, padding: "0 8px", fontSize: 11, whiteSpace: "nowrap", color: "var(--fg-muted)" }}
-          >
-            🧠 Memory
-          </button>
-        )}
         {/* Per-page rename — tab shows "folder(rename)" so two pages on the
             same project stay tellable apart. Empty = folder name only. */}
         <input
@@ -3042,23 +3327,6 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
         )}
         <div style={{ flex: 1 }} />
-        {/* Model picker + Clear buttons live HERE in the page header, above the
-            chat window (user spec 2026-07-11 — reverts the 07-10 in-pane move). */}
-        <span style={{ fontSize: 11, color: "var(--fg-muted)" }}>Model</span>
-        <div style={{ minWidth: 260, maxWidth: 360 }}>
-          {/* THE shared model picker — same component, same list_models source,
-              and the SAME full set (local + cloud + subscriptions) as AgentsPage.
-              No localOnly: the agentic Code page offers every model the other
-              agentic surfaces do; execution routes by provider below. */}
-          <ModelPicker
-            value={modelId}
-            onChange={setModelId}
-            models={availableModels}
-            status={accountsStatus}
-            disabled={busy}
-            fallbackLabel="(pick a model)"
-          />
-        </div>
         <button onClick={clearWorkspace} disabled={busy || (tasks.length === 0 && draft === "" && secondaryDraft === "" && runStartedAt == null && runEndedAt == null)} title="Clear the current run (tasks, drafts and run state) but keep the chat" style={btn}>Clear</button>
         {/* Clear history is now PER AGENT — each pane's own button lives in that
             pane's header (below), with an independent ↩ Undo. */}
@@ -3089,38 +3357,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         </div>
       )}
 
-      {/* Second-agent pane toggle — a parallel/hand-off agent chat beside the
-          primary one, with its own transcript and its own input area. Shown
-          once a workspace is open. */}
-      {workspace && (
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
-          <button
-            onClick={() => setSecondaryOpen(!secondaryOpen)}
-            title="Show a second, independent agent chat pane beside this one — its own transcript and input, same workspace and model."
-            style={{ ...btn, height: 26 }}
-          >{secondaryOpen ? "◧ Hide 2nd agent" : "◨ Show 2nd agent"}</button>
-          {/* ⇄ selectable last-reply auto-feed, PER DIRECTION. On = the finished
-              reply is handed to the other agent as its next turn (labelled ⇄).
-              Both on = agent-to-agent conversation, capped at 6 automatic
-              exchanges (any manual send resets the cap). */}
-          {secondaryOpen && (
-            <>
-              <label title="When the 1st agent finishes a reply, automatically feed it to the 2nd agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: feedPrimaryToSecondary ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer" }}>
-                <input type="checkbox" checked={feedPrimaryToSecondary} onChange={(e) => setFeedPrimaryToSecondary(e.target.checked)} />
-                ⇄ 1st → 2nd
-              </label>
-              <label title="When the 2nd agent finishes a reply, automatically feed it to the 1st agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 11.5, fontWeight: 600, color: feedSecondaryToPrimary ? "#c7a8ff" : "var(--fg-muted)", cursor: "pointer" }}>
-                <input type="checkbox" checked={feedSecondaryToPrimary} onChange={(e) => setFeedSecondaryToPrimary(e.target.checked)} />
-                ⇄ 2nd → 1st
-              </label>
-              {feedPrimaryToSecondary && feedSecondaryToPrimary && (
-                <span style={{ fontSize: 10.5, color: "#ffd97a" }}>agent↔agent conversation — pauses after {6} automatic exchanges</span>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
       {/* Cold-load banner — mirrors AgentsPage so the user can see WHY the
           run is taking time before any tokens appear. */}
       {llamaLoading && (
@@ -3148,6 +3384,14 @@ function CodeWorkspace({ pageId, onTitle }: {
       <div style={{ flex: 1, minHeight: 0, display: "flex", gap: 8 }}>
         {workspace && (
           <div style={{ width: 220, flexShrink: 0, display: "flex", flexDirection: "column", overflowY: "auto", overflowX: "hidden", background: "var(--bg-input)", border: "1px solid var(--border-strong)", borderRadius: 8, padding: 4 }}>
+            <button
+              data-ui="CodeProjectMemory"
+              onClick={() => { void openProjectMemory(); }}
+              title="Project Memory — the same shared facts and worklog used by this project's Agents page and synced through the vault."
+              style={{ ...btn, width: "100%", height: 30, marginBottom: 4, justifyContent: "flex-start", color: "var(--accent-ink)", borderColor: "rgba(var(--accent-rgb),0.42)" }}
+            >
+              🧠 Project Memory
+            </button>
             <TreeDir path={workspace} name={wsShort} depth={0} defaultOpen onOpenFile={openFile} />
             <PublishCards
               repoDir={projectRoot || workspace}
@@ -3156,7 +3400,6 @@ function CodeWorkspace({ pageId, onTitle }: {
               projectRoot={projectRoot}
               isolated={isolated}
               disabled={busy}
-              onStatus={setStatus}
               // Failed release actions become a coder task; send() queues it
               // as a ⚡ steer when a run is already in flight. Pre-check the
               // guards send() would trip so the card reports the truth instead
@@ -3164,7 +3407,7 @@ function CodeWorkspace({ pageId, onTitle }: {
               onFixIssues={(task) => {
                 if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }
                 if (!workspace) return "no-workspace";
-                if (!modelId) { setStatus("No model selected — pick one above."); return "no-model"; }
+                if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }
                 void sendRef.current?.(task);
                 return "sent";
               }}
@@ -3180,9 +3423,9 @@ function CodeWorkspace({ pageId, onTitle }: {
           pane owns its own scroll. With the second pane closed this wrapper has
           a single child, so the primary fills the width exactly as before. */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: wideView ? "row" : "column", gap: 8 }}>
-        {/* Primary pane — same box anatomy as the second-agent pane: a slim
-            label header over its own scrolling transcript. (Model picker +
-            Clear buttons live in the page header above.) */}
+        {/* Primary pane — same box anatomy as the second-agent pane: each header
+            owns its agent name, wide model picker, feed control and history
+            actions. No separate page-level agent-control row. */}
         <div style={{
           flex: 1, minWidth: 0, minHeight: 0, display: "flex", flexDirection: "column", gap: 8, padding: 12,
           // Solid fill on padding-box keeps the message/input area's background;
@@ -3193,13 +3436,28 @@ function CodeWorkspace({ pageId, onTitle }: {
           boxShadow: primaryAuraActive ? PSYCHEDELIC_AURA_HALO : undefined,
           animation: primaryAuraActive ? PSYCHEDELIC_AURA_ANIMATION : undefined,
         }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+          <div data-ui="code-primary-agent-header" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
             <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Coder</span>
+            {secondaryOpen && (
+              <label title="When the 1st agent finishes a reply, automatically feed it to the 2nd agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: feedPrimaryToSecondary ? "#7ff0c5" : "var(--fg-muted)", cursor: "pointer", whiteSpace: "nowrap" }}>
+                <input type="checkbox" checked={feedPrimaryToSecondary} onChange={(e) => setFeedPrimaryToSecondary(e.target.checked)} />
+                ⇄ to 2nd
+              </label>
+            )}
             <span style={{ flex: 1 }} />
             {primaryUndo && (
               <button onClick={undoPrimaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
             )}
             <button onClick={clearPrimaryHistory} disabled={busy || messages.length === 0} title="Clear this agent's conversation (undoable)" style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)" }}>Clear history</button>
+            {!secondaryOpen && (
+              <button
+                onClick={() => setSecondaryOpen(true)}
+                title="Open a second independent agent chat for this workspace"
+                style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap" }}
+              >
+                + 2nd agent
+              </button>
+            )}
           </div>
       <div
         ref={transcriptSticky.ref}
@@ -3288,17 +3546,12 @@ function CodeWorkspace({ pageId, onTitle }: {
             boxShadow: secondaryBusy ? PSYCHEDELIC_AURA_HALO : undefined,
             animation: secondaryBusy ? PSYCHEDELIC_AURA_ANIMATION : undefined,
           }}>
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+            <div data-ui="code-secondary-agent-header" style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
               <span style={{ fontSize: 12.5, fontWeight: 700, color: "var(--fg-muted)" }}>Second agent</span>
-              {/* The second agent's OWN model — independent of the primary chat.
-                  Empty falls back to the primary model ("Same as 1st agent"). */}
-              <ModelPicker
-                value={secondaryModelId}
-                onChange={setSecondaryModelId}
-                models={availableModels}
-                status={accountsStatus}
-                fallbackLabel="Same as 1st agent"
-              />
+              <label title="When the 2nd agent finishes a reply, automatically feed it to the 1st agent as its next turn." style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, fontWeight: 600, color: feedSecondaryToPrimary ? "#c7a8ff" : "var(--fg-muted)", cursor: "pointer", whiteSpace: "nowrap" }}>
+                <input type="checkbox" checked={feedSecondaryToPrimary} onChange={(e) => setFeedSecondaryToPrimary(e.target.checked)} />
+                ⇄ to 1st
+              </label>
               <span style={{ flex: 1 }} />
               {secondaryUndo && (
                 <button onClick={undoSecondaryHistory} title="Restore the messages you just cleared" style={{ ...btn, height: 24, padding: "0 8px", fontSize: 11, color: "var(--fg-muted)" }}>↩ Undo</button>
@@ -3392,26 +3645,6 @@ function CodeWorkspace({ pageId, onTitle }: {
         </div>
       )}
 
-      {/* Status + Terminal line — sits directly above the composer (the input
-          chatbox). Live status messages on the left; the Terminal toggle
-          is on the top-right of the input area. The workspace path lives at
-          the top of the left PublishCards rail instead of being repeated here. */}
-      <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
-        <div style={status.includes("\n")
-          ? { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
-          : { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
-        <button
-          onClick={() => {
-            // Hidden shells re-open; visible shells hide.
-            if (!termOpen) { setTermOpen(true); setTermHidden(false); }
-            else setTermHidden((hidden) => !hidden);
-          }}
-          title="Open the workspace terminal"
-          aria-label="Open terminal"
-          style={{ ...btn, height: 24, padding: "0 10px", fontSize: 11, ...(termOpen && !termHidden ? { borderColor: "var(--accent)", color: "var(--accent-ink)" } : {}) }}
-        >Terminal</button>
-      </div>
-
       {/* Composer row — lives in the SAME column as the chat panes, so it is
           always exactly as wide as the chat window. DIVIDED (fine-tune-chat
           style) when the second agent is open side-by-side: primary composer
@@ -3425,6 +3658,27 @@ function CodeWorkspace({ pageId, onTitle }: {
         onDrop={(e) => { const files = Array.from(e.dataTransfer?.files ?? []); if (files.length) { e.preventDefault(); void addCodeFiles(files); } }}
         style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}
       >
+        {/* Each agent owns a toolbar immediately above — and exactly aligned
+            with — its own textarea. Both Terminal buttons address the same
+            workspace shell; the model selections remain independent. */}
+        <div data-ui="CodePrimaryComposerToolbar" style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+          <div style={status.includes("\n")
+            ? { flex: 1, minWidth: 0, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }
+            : { flex: 1, minWidth: 0, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{status}</div>
+          <span style={{ fontSize: 11, color: "var(--fg-muted)", flexShrink: 0 }}>Model</span>
+          <div data-ui="CodePrimaryComposerModelPicker" style={{ width: "min(300px, 48%)", minWidth: 180 }}>
+            <ModelPicker
+              value={modelId}
+              onChange={setModelId}
+              models={availableModels}
+              status={accountsStatus}
+              disabled={busy}
+              fallbackLabel="(pick a model)"
+              placement="top"
+            />
+          </div>
+          {renderTerminalButton("primary")}
+        </div>
         {codeAttachments.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
             {codeAttachments.map((attachment, i) => (
@@ -3551,7 +3805,7 @@ function CodeWorkspace({ pageId, onTitle }: {
           Opens on the page-scoped event from the header 🧠 Memory button. */}
       <TeamMemoryModal
         openEvent="owllm:open-code-memory"
-        projectId={ruleScope.id || projectRoot || workspace || null}
+        projectId={ruleScope.id || null}
         projectName={(projectRoot || workspace || "").replace(/^.*[\\/]/, "") || undefined}
       />
 
@@ -3646,13 +3900,14 @@ export default function CodePage() {
       const detail = (event as CustomEvent<OpenProjectPagesDetail>).detail;
       if (!detail?.project?.location) return;
       const saved = savedPageMetasForLocalProject(detail.project);
-      if (saved.length === 0) return;
+      const target = chooseProjectOpenTarget(saved.map((page) => page.id), detail.currentPageIsBlank);
+      if (target.kind === "current") return;
       detail.handled = true;
       setPages((current) => {
         const known = new Set(current.map((page) => page.id));
         return [...current, ...saved.filter((page) => !known.has(page.id))];
       });
-      setActiveId(saved[0].id);
+      setActiveId(target.pageId);
     };
     window.addEventListener(OPEN_PROJECT_PAGES_EVENT, openSavedProjectPages);
     return () => window.removeEventListener(OPEN_PROJECT_PAGES_EVENT, openSavedProjectPages);

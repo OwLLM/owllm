@@ -1,6 +1,8 @@
 {
   "name": "owllm-desktop",
   "private": true,
+  "license": "UNLICENSED",
+  "author": "Far island Corporation Ltd.",
   "version": "0.4.41",
   "type": "module",
   "scripts": {

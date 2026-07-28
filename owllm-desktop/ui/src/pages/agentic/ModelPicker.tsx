@@ -290,7 +290,7 @@ function displayForId(id: string, entries: ModelPickerEntry[]): string {
 
 export default function ModelPicker({
   value, onChange, models, status, placeholder, disabled, fallbackLabel,
-  localOnly,
+  localOnly, placement = "auto",
 }: {
   value: string;
   onChange: (id: string) => void;
@@ -304,6 +304,9 @@ export default function ModelPicker({
   /// cannot meaningfully target Anthropic / OpenAI / auto-routing.
   /// Setting this to true hides everything except the LOCAL section.
   localOnly?: boolean;
+  /// Composer toolbars sit at the bottom of the page and need a deterministic
+  /// drop-up. Other surfaces keep the adaptive behaviour.
+  placement?: "auto" | "top" | "bottom";
 }) {
   const [open, setOpen] = useState(false);
   // Sections start COLLAPSED (lab name + count only) so the popover stays
@@ -392,7 +395,8 @@ export default function ModelPicker({
     const left = Math.max(8, Math.min(rect.left, window.innerWidth - desiredWidth - 8));
     const maxBelow = window.innerHeight - rect.bottom - 16;
     const maxAbove = rect.top - 16;
-    const openUpward = maxBelow < 280 && maxAbove > maxBelow;
+    const openUpward = placement === "top"
+      || (placement === "auto" && maxBelow < 280 && maxAbove > maxBelow);
     const maxHeight = openUpward ? maxAbove : maxBelow;
     popStyle = {
       position: "fixed",

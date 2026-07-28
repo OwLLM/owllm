@@ -47,8 +47,8 @@ anchor("CodePage.tsx", codePage, "blank/default page records do not pollute the 
   "if (!hasRecoverablePageState(state)) continue");
 anchor("CodePage.tsx", codePage, "every page persist also writes a project-root recovery copy",
   "saveCodeSession(state)");
-anchor("CodePage.tsx", codePage, "folder reopen loads its project-root recovery copy before preparing",
-  "const recovered = reopeningCurrent ? stx : loadCodeSession(dir)");
+anchor("CodePage.tsx", codePage, "folder reopen recovers history without cloning it into a blank New page",
+  "const recovered = reopeningCurrent ? stx : openingBlankPage ? null : loadCodeSession(dir)");
 anchor("CodePage.tsx", codePage, "worktree errors preserve the recovered conversation",
   "...((p as CodeState) ?? base)");
 
@@ -79,14 +79,24 @@ anchor("PublishCards.tsx", cards, "Publish keeps its hover explanation",
   "Readiness check running");
 anchor("PublishCards.tsx", cards, "readiness summary renders READY / N issues",
   'readyFails.length === 0 ? "READY" : `${readyFails.length} issue');
+anchor("PublishCards.tsx", cards, "Windows signing status is hidden on Linux/macOS",
+  '{showPublish && HOST_IS_WINDOWS && <span>· {signed ? "Signed" : "Unsigned"}</span>}');
+anchor("PublishCards.tsx", cards, "non-Windows publish confirmation describes platform packages",
+  "builds this platform's packages");
 anchor("PublishCards.tsx", cards, "expanded checklist shows the actionable detail per failing check",
   "{!c.ok && <div style={{ color: \"var(--fg-muted)\", wordBreak: \"break-word\" }}>{c.detail}</div>}");
-// Action feedback: every button acknowledges immediately (inline + shared line)
-// and a not-ready Publish explains itself instead of swallowing the click.
+// Action feedback belongs to the left Publisher card. It must not leak Git
+// results into the composer toolbar beside model/Terminal controls.
 anchor("PublishCards.tsx", cards, "run() gives an immediate inline ⏳ acknowledgement",
   'setActivity({ kind: "run", msg: `${label}…` });');
-anchor("PublishCards.tsx", cards, "run() pushes an immediate ⏳ to the shared status line",
-  "status(`⏳ ${label}…`);");
+anchor("PublishCards.tsx", cards, "Publisher activity has an owned layout marker",
+  'data-ui="PublisherActivity"');
+if (cards.includes("status(`⏳") || cards.includes("status(`✓") || cards.includes("status(`✗")) {
+  failures++;
+  console.error("  ✗ PublishCards.tsx: Publisher results stay out of the composer status line");
+} else {
+  console.log("  ✓ PublishCards.tsx: Publisher results stay out of the composer status line");
+}
 anchor("PublishCards.tsx", cards, "the inline activity row renders in the card",
   '{activity.kind === "run" ? "⏳" : activity.kind === "ok" ? "✓" : "✗"}');
 anchor("PublishCards.tsx", cards, "a not-ready Publish stays clickable and surfaces the reason",
@@ -116,7 +126,7 @@ anchor("PublishCards.tsx", cards, "Finish release button renders next to Fix wit
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the busy guard and steers",
   'if (busySendRef.current) { void sendRef.current?.(task); return "queued"; }');
 anchor("CodePage.tsx", codePage, "onFixIssues pre-checks the model guard",
-  'if (!modelId) { setStatus("No model selected — pick one above."); return "no-model"; }');
+  'if (!modelId) { setStatus("No model selected — pick one in the Coder header."); return "no-model"; }');
 anchor("CodePage.tsx", codePage, "programmatic sends surface guard failures in the transcript",
   "if (!fromComposer) setMessages((msgs) => [...msgs, { role: \"assistant\", content: `⚠ ${why}");
 

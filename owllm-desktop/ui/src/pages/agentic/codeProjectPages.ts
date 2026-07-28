@@ -1,4 +1,7 @@
 export type StorageReader = Pick<Storage, "length" | "key" | "getItem">;
+export type ProjectOpenTarget =
+  | { kind: "current" }
+  | { kind: "saved"; pageId: string };
 
 function normalizedLocalProjectPath(path: unknown): string {
   return typeof path === "string"
@@ -47,4 +50,17 @@ export function savedPageIdsForLocalProject(
     }
   }
   return found.sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * A deliberately-created blank Coding page owns the next project selection,
+ * even when another tab already has a saved page for that checkout. Recovery
+ * is only appropriate when the current page already carries user state.
+ */
+export function chooseProjectOpenTarget(
+  savedPageIds: string[],
+  currentPageIsBlank: boolean,
+): ProjectOpenTarget {
+  if (currentPageIsBlank || savedPageIds.length === 0) return { kind: "current" };
+  return { kind: "saved", pageId: savedPageIds[0] };
 }

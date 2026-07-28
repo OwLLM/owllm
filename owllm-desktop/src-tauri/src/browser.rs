@@ -516,6 +516,71 @@ const BRIDGE_JS: &str = r##"
           fire(f, "input"); fire(f, "change");
           return report(reqId, "filled [" + p.index + "] with " + JSON.stringify(p.text));
         }
+        case "fill_device_code": {
+          // GitHub's Device Flow gives OWLLM the short code before the page is
+          // opened. Fill the provider-owned form without storing the code or
+          // bypassing GitHub's explicit final authorization/approval screen.
+          if (location.hostname !== "github.com" || location.pathname.indexOf("/login/device") !== 0) {
+            return report(reqId, "refused device-code fill outside github.com/login/device");
+          }
+          var code = String(p.code || "").trim();
+          var selectors = [
+            'input[autocomplete="one-time-code"]',
+            'input[name="user_code"]',
+            'input[name="user-code"]',
+            'input[id*="user-code"]',
+            'input[id*="device-code"]',
+            'input[inputmode="text"]'
+          ];
+          var dc = null;
+          for (var ds = 0; ds < selectors.length && !dc; ds++) {
+            var candidates = document.querySelectorAll(selectors[ds]);
+            for (var di = 0; di < candidates.length; di++) {
+              if (visible(candidates[di])) { dc = candidates[di]; break; }
+            }
+          }
+          if (!dc) return report(reqId, "device code field not ready");
+          dc.focus();
+          // React-controlled inputs ignore a plain assignment in some GitHub
+          // builds. Use the native setter, then emit the same events as typing.
+          var setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+          if (setter && setter.set) setter.set.call(dc, code); else dc.value = code;
+          fire(dc, "input"); fire(dc, "change");
+          if (p.submit !== false && dc.form) {
+            setTimeout(function () {
+              try { dc.form.requestSubmit ? dc.form.requestSubmit() : dc.form.submit(); } catch (e) {}
+            }, 120);
+          }
+          return report(reqId, "filled GitHub device code");
+        }
+        case "auth_complete": {
+          // Some provider device-flow pages intentionally finish on an empty
+          // dark document. Keep the provider page/cookies intact, but put a
+          // readable OWLLM-owned completion card above it so the user is never
+          // stranded wondering whether login worked.
+          var provider = String(p.provider || "Account");
+          var old = document.getElementById("owllm-auth-complete");
+          if (old) old.remove();
+          var wrap = document.createElement("div");
+          wrap.id = "owllm-auth-complete";
+          wrap.setAttribute("role", "status");
+          wrap.setAttribute("aria-live", "polite");
+          wrap.style.cssText = "position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:28px;background:#0b0f17;color:#f7f9fc;font-family:system-ui,-apple-system,sans-serif";
+          var card = document.createElement("div");
+          card.style.cssText = "max-width:520px;padding:30px 34px;border-radius:18px;border:1px solid #334155;background:#111827;box-shadow:0 24px 80px rgba(0,0,0,.45);text-align:center";
+          var mark = document.createElement("div");
+          mark.textContent = "✓";
+          mark.style.cssText = "font-size:42px;color:#4ade80;margin-bottom:10px";
+          var title = document.createElement("h1");
+          title.textContent = provider + " connected";
+          title.style.cssText = "font-size:24px;margin:0 0 9px";
+          var body = document.createElement("p");
+          body.textContent = "Authentication completed successfully. You can return to OWLLM and close this tab.";
+          body.style.cssText = "font-size:15px;line-height:1.55;color:#cbd5e1;margin:0";
+          card.appendChild(mark); card.appendChild(title); card.appendChild(body);
+          wrap.appendChild(card); document.documentElement.appendChild(wrap);
+          return report(reqId, "showed " + provider + " authentication completion");
+        }
         case "select": {
           var s = elAt(p.index); var matched = false;
           for (var i = 0; i < s.options.length; i++) {
@@ -575,7 +640,7 @@ const BRIDGE_JS: &str = r##"
     return { origin: location.origin, username: user, password: pw.value };
   }
   function reportCred() {
-    var c = grabCred();
+    var c = grabCred() || window.__owllmProv || null;
     if (!c) return;
     var key = c.origin + "" + c.username + "" + c.password;
     if (key === credSent) return; // same login already reported on this page
@@ -586,6 +651,60 @@ const BRIDGE_JS: &str = r##"
   }
   document.addEventListener("submit", reportCred, true);
   window.addEventListener("pagehide", reportCred);
+  // SPA logins often clear the form without navigating, so submit/pagehide
+  // alone lose the values. Keep a provisional copy of the last complete login
+  // while the user types, and also report on submit-ish clicks, Enter, and
+  // tab-hide — the report itself dedupes via credSent.
+  document.addEventListener("input", function (e) {
+    var t = e.target;
+    if (t && t.tagName === "INPUT") { var c = grabCred(); if (c) window.__owllmProv = c; }
+  }, true);
+  document.addEventListener("click", function (e) {
+    var el = e.target && e.target.closest ? e.target.closest("button, input[type=submit], [role=button]") : null;
+    if (el) setTimeout(reportCred, 0);
+  }, true);
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && e.target && e.target.tagName === "INPUT") setTimeout(reportCred, 0);
+  }, true);
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "hidden") reportCred();
+  });
+  // --- vault autofill (Rust → page) --------------------------------------
+  // Rust evals __owllmAutofill(user, pass) after a page finishes loading when
+  // the vault holds a login for this origin (browser_vault::autofill_eval_for).
+  // Fills ONLY empty fields — never clobbers what the user or the engine's own
+  // password manager already put there — and waits for late-rendered SPA login
+  // forms with a capped MutationObserver. Works identically on WebView2,
+  // WebKitGTK and WKWebView because it is plain injected JS.
+  window.__owllmAutofill = function (user, pass) {
+    if (window.__owllmAutofilled) return;
+    function visible(el) { return !!(el && el.offsetParent !== null && !el.disabled && !el.readOnly); }
+    function tryFill() {
+      var pws = document.querySelectorAll("input[type=password]");
+      var pw = null;
+      for (var i = 0; i < pws.length; i++) if (visible(pws[i])) { pw = pws[i]; break; }
+      if (!pw) return false;
+      window.__owllmAutofilled = true;
+      if (pw.value) return true; // something else filled it first — leave it
+      var userEl = null;
+      var ins = document.querySelectorAll("input");
+      for (var j = 0; j < ins.length; j++) {
+        if (ins[j] === pw) break;
+        var ty = (ins[j].type || "text").toLowerCase();
+        if ((ty === "text" || ty === "email" || ty === "tel") && visible(ins[j])) userEl = ins[j];
+      }
+      if (userEl && !userEl.value && user) { userEl.value = user; fire(userEl, "input"); fire(userEl, "change"); }
+      if (pass) { pw.value = pass; fire(pw, "input"); fire(pw, "change"); }
+      return true;
+    }
+    if (tryFill()) return;
+    var tries = 0;
+    var obs = new MutationObserver(function () {
+      if (window.__owllmAutofilled || ++tries > 400 || tryFill()) { try { obs.disconnect(); } catch (e) {} }
+    });
+    obs.observe(document.documentElement || document, { childList: true, subtree: true });
+    setTimeout(function () { try { obs.disconnect(); } catch (e) {} }, 20000);
+  };
 })();
 "##;
 
@@ -604,6 +723,48 @@ fn browser_data_dir() -> Option<std::path::PathBuf> {
         }
     }
     crate::paths::user_data_root().map(|r| r.join("browser_profile"))
+}
+
+/// Enable WebView2 password autosave + general autofill on an agent-browser
+/// webview. WebView2 disables both by default (unlike a normal Chrome/Edge
+/// profile), so a login typed here would never trigger a "Save password?"
+/// prompt and never be re-filled on return, even though the profile dir keeps
+/// cookies. Called on every agent-browser webview right after creation. The
+/// stored credentials live only in the per-user, per-machine WebView2 profile
+/// (`browser_data_dir()`); nothing is written to the repo or a release.
+#[cfg(windows)]
+fn win_enable_web_credentials(pw: tauri::webview::PlatformWebview) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2Settings4;
+    use windows::core::Interface;
+    unsafe {
+        let core = match pw.controller().CoreWebView2() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let settings = match core.Settings() {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if let Ok(s4) = settings.cast::<ICoreWebView2Settings4>() {
+            let _ = s4.SetIsGeneralAutofillEnabled(true);
+            let _ = s4.SetIsPasswordAutosaveEnabled(true);
+        }
+    }
+}
+
+/// Linux (WebKitGTK) analog of `win_enable_web_credentials`: the engine's
+/// persistent credential storage — HTTP-auth logins saved into the user's
+/// secret service (libsecret) — is also DISABLED by default. Form-password
+/// autosave has no embedder API in WebKitGTK; staying logged in on ordinary
+/// websites comes from the persisted cookie/session profile set via
+/// `data_directory()`. macOS WKWebView exposes neither switch, but its default
+/// persistent data store already keeps cookies/sessions per app.
+#[cfg(target_os = "linux")]
+fn linux_enable_web_credentials(pw: tauri::webview::PlatformWebview) {
+    use webkit2gtk::{WebViewExt, WebsiteDataManagerExt};
+    if let Some(manager) = pw.inner().website_data_manager() {
+        manager.set_persistent_credential_storage_enabled(true);
+    }
 }
 
 fn get_window(app: &tauri::AppHandle) -> Option<Window> {
@@ -729,6 +890,13 @@ enum BrowserUiEvent {
     TypedLogin {
         data: String,
     },
+    /// A content tab finished loading an http(s) page: look the origin up in
+    /// the credential vault and, on a hit, inject the autofill script. Vault
+    /// I/O and the eval stay off the native callback thread.
+    AutofillPage {
+        id: u64,
+        url: String,
+    },
     /// A page requested a separate browsing context (`target=_blank` or
     /// `window.open`). The native callback denies the engine-owned popup and
     /// queues this event so the URL becomes a managed OwLLM tab instead.
@@ -750,6 +918,7 @@ struct BrowserUiBatch {
     tab_titles: HashMap<u64, String>,
     push_tabs: bool,
     creds: Vec<String>,
+    autofills: HashMap<u64, String>,
     open_tabs: Vec<(String, bool)>,
     legacy_closed: Vec<u64>,
 }
@@ -772,6 +941,9 @@ impl BrowserUiBatch {
             }
             BrowserUiEvent::PushTabs => self.push_tabs = true,
             BrowserUiEvent::TypedLogin { data } => self.creds.push(data),
+            BrowserUiEvent::AutofillPage { id, url } => {
+                self.autofills.insert(id, url);
+            }
             BrowserUiEvent::OpenTab { url, activate } => self.open_tabs.push((url, activate)),
             BrowserUiEvent::LegacyTabClosed { id } => self.legacy_closed.push(id),
         }
@@ -821,6 +993,13 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
         for data in batch.creds {
             if let Err(e) = crate::browser_vault::store_typed_login(&data) {
                 eprintln!("[browser] could not save typed login: {e}");
+            }
+        }
+        for (id, url) in batch.autofills {
+            if let Some(script) = crate::browser_vault::autofill_eval_for(&url) {
+                if let Some(wv) = content_webview_for_tab(&app, Some(id)) {
+                    let _ = wv.eval(&script);
+                }
             }
         }
         for (url, activate) in batch.open_tabs {
@@ -923,6 +1102,36 @@ fn handle_chrome_event(app: &tauri::AppHandle, action: &str, data: &str) {
     }
 }
 
+/// OAuth/SSO popups that post the sign-in result back through
+/// `window.opener` and then close themselves. These must stay engine-owned
+/// popups: re-opening them as detached OwLLM tabs severs the opener (and the
+/// per-tab sessionStorage nonce), so the identity provider's callback page
+/// has nowhere to deliver the token and dies black — seen live with Kimi's
+/// "Continue with Google" (kimi.com/google-callback). The engine popup shares
+/// this webview's profile, so the resulting session lands in the opening tab.
+fn is_opener_dependent_popup(url: &tauri::Url) -> bool {
+    if url.scheme() != "https" {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("");
+    let path = url.path();
+    match host {
+        // Google Identity Services popup mode (GSI / "Sign in with Google").
+        "accounts.google.com" => true,
+        // Sign in with Apple popup flow.
+        "appleid.apple.com" => true,
+        // Microsoft MSAL loginPopup flows.
+        "login.microsoftonline.com" | "login.live.com" => true,
+        // GitHub OAuth popup flows only — plain github.com links stay tabs.
+        "github.com" => path.starts_with("/login"),
+        // Facebook Login dialog.
+        "www.facebook.com" | "m.facebook.com" | "facebook.com" => {
+            path.starts_with("/dialog/") || path.starts_with("/login")
+        }
+        _ => false,
+    }
+}
+
 /// Build + attach one content (page) webview as a new tab. Active tabs sit
 /// under the chrome bar; inactive ones are parked offscreen. All tabs share
 /// the same profile data dir, so logins/cookies span tabs.
@@ -939,8 +1148,12 @@ fn attach_tab(
     let mut content = WebviewBuilder::new(tab_label(id), WebviewUrl::External(url))
         .initialization_script(BRIDGE_JS)
         .on_new_window(move |url, _features| {
-            // Never let WebView2/WKWebView/WebKitGTK create an unmanaged popup.
-            // Queue it as a normal OwLLM tab after this native callback returns.
+            // Opener-dependent OAuth popups must stay engine-owned so
+            // `window.opener` / `window.close` keep working; everything else
+            // is queued as a managed OwLLM tab after this callback returns.
+            if is_opener_dependent_popup(&url) {
+                return NewWindowResponse::Allow;
+            }
             queue_browser_ui(
                 &new_window_app,
                 BrowserUiEvent::OpenTab {
@@ -983,6 +1196,15 @@ fn attach_tab(
                     },
                 );
             }
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let url = payload.url().to_string();
+                if url.starts_with("http") {
+                    queue_browser_ui(
+                        &wv.app_handle().clone(),
+                        BrowserUiEvent::AutofillPage { id, url },
+                    );
+                }
+            }
         });
     if let Some(ua) = dev.ua {
         content = content.user_agent(ua);
@@ -1001,12 +1223,21 @@ fn attach_tab(
         .map(|s| s.to_logical::<f64>(scale))
         .unwrap_or_else(|_| LogicalSize::new(dev.width, dev.height + CHROME_H));
     let x = if active { 0.0 } else { PARK_X };
-    win.add_child(
-        content,
-        LogicalPosition::new(x, CHROME_H),
-        LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
-    )
-    .map_err(|e| format!("page webview: {e}"))?;
+    let _webview = win
+        .add_child(
+            content,
+            LogicalPosition::new(x, CHROME_H),
+            LogicalSize::new(ls.width, (ls.height - CHROME_H).max(50.0)),
+        )
+        .map_err(|e| format!("page webview: {e}"))?;
+    #[cfg(windows)]
+    {
+        let _ = _webview.with_webview(win_enable_web_credentials);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = _webview.with_webview(linux_enable_web_credentials);
+    }
     Ok(())
 }
 
@@ -1452,6 +1683,10 @@ fn attach_legacy_tab(
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
         .on_new_window(move |url, _features| {
+            // Same opener-preserving OAuth popup rule as the framed shape.
+            if is_opener_dependent_popup(&url) {
+                return NewWindowResponse::Allow;
+            }
             queue_browser_ui(
                 &new_window_app,
                 BrowserUiEvent::OpenTab {
@@ -1481,6 +1716,18 @@ fn attach_legacy_tab(
                 );
             }
         })
+        .on_page_load(move |win, payload| {
+            // Vault autofill works in this top-level-window shape too.
+            if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
+                let url = payload.url().to_string();
+                if url.starts_with("http") {
+                    queue_browser_ui(
+                        &win.app_handle().clone(),
+                        BrowserUiEvent::AutofillPage { id, url },
+                    );
+                }
+            }
+        })
         .background_color(OWLLM_BG)
         .theme(Some(tauri::Theme::Dark))
         .decorations(true)
@@ -1500,9 +1747,17 @@ fn attach_legacy_tab(
         let _ = std::fs::create_dir_all(&dir);
         builder = builder.data_directory(dir);
     }
-    builder
+    let _ww = builder
         .build()
         .map_err(|e| format!("failed to open agent browser window: {e}"))?;
+    #[cfg(windows)]
+    {
+        let _ = _ww.with_webview(win_enable_web_credentials);
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = _ww.with_webview(linux_enable_web_credentials);
+    }
     if let Some(win) = app.get_window(&tab_label(id)) {
         apply_chrome(&win);
         let handle = app.clone();
@@ -2090,6 +2345,25 @@ mod tests {
             batch.open_tabs[1],
             ("https://two.example/".to_string(), false)
         );
+    }
+
+    #[test]
+    fn oauth_popups_keep_engine_opener_and_plain_links_stay_tabs() {
+        let popup = |u: &str| is_opener_dependent_popup(&tauri::Url::parse(u).unwrap());
+        // Opener-dependent IdP popups → engine-owned (window.opener intact).
+        assert!(popup(
+            "https://accounts.google.com/o/oauth2/v2/auth?client_id=x&nonce=y"
+        ));
+        assert!(popup("https://appleid.apple.com/auth/authorize?x=1"));
+        assert!(popup("https://login.microsoftonline.com/common/oauth2/v2.0/authorize"));
+        assert!(popup("https://github.com/login/oauth/authorize?client_id=x"));
+        assert!(popup("https://www.facebook.com/dialog/oauth?client_id=x"));
+        // Ordinary target=_blank links → managed OwLLM tabs, as before.
+        assert!(!popup("https://github.com/OwLLM/owllm"));
+        assert!(!popup("https://www.kimi.com/code/authorize_device?user_code=x"));
+        assert!(!popup("https://example.com/login"));
+        // Non-https never gets an unmanaged engine popup.
+        assert!(!popup("http://accounts.google.com/o/oauth2/v2/auth"));
     }
 
     #[test]

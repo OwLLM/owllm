@@ -42,16 +42,18 @@ const js = ts.transpileModule(rawSrc, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020, esModuleInterop: true },
 }).outputText
   .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./_tauri.js")')
-  .replace(/require\("\.\.\/pages\/agentic\/github"\)/g, 'require("./_github.js")');
+  .replace(/require\("\.\.\/pages\/agentic\/github"\)/g, 'require("./_github.js")')
+  .replace(/require\("\.\.\/pages\/advanced\/deviceLiveness"\)/g, 'require("./_deviceLiveness.js")');
 
 const TMP = fs.mkdtempSync(path.join(process.env.TEMP || process.env.TMPDIR || "/tmp", "nbsync-"));
 fs.writeFileSync(path.join(TMP, "vaultSync.js"), js);
 fs.writeFileSync(path.join(TMP, "_tauri.js"), "module.exports = { invoke: async () => null };");
 fs.writeFileSync(path.join(TMP, "_github.js"), "module.exports = { vaultEnsure: async () => ({}), vaultStatus: async () => ({ connected: false }) };");
+fs.writeFileSync(path.join(TMP, "_deviceLiveness.js"), "module.exports = { REMOTE_DEVICE_HEARTBEAT_MS: 150000 };");
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 
 const reqTmp = createRequire(path.join(TMP, "vaultSync.js"));
-const { stripNotebookLease, mergeNotebookLease } = reqTmp("./vaultSync.js");
+const { stripNotebookLease, mergeNotebookLease, pullNotebooksNow } = reqTmp("./vaultSync.js");
 
 let failures = 0;
 function check(name, cond) {
@@ -113,6 +115,172 @@ console.log("case 5: source wiring");
   const denyStart = rawSrc.indexOf("const DENY_PREFIX");
   const denyBlock = rawSrc.slice(denyStart, rawSrc.indexOf("]", denyStart));
   check("notebook CONTENT is NOT denied from sync", denyStart >= 0 && !denyBlock.includes("notebook"));
+}
+
+// ---------------------------------------------------------------------------
+// The reported bug: "old steps already implemented and archived keep popping up
+// randomly in the to-do list." Adoption used to take the peer's `steps` array
+// WHOLESALE, so whichever PC pushed last won outright — a step this device had
+// just finished came back as pending, and steps created here since the peer's
+// last push were deleted. The vault's own git history shows that ping-pong
+// running for hours (archived counts alternating 16 ↔ 13 ↔ 20).
+// ---------------------------------------------------------------------------
+const KEY3 = "owllm:agents:notebook:p3";
+const nb = (o) => JSON.stringify(o);
+
+console.log("case 6: a step finished HERE is never dragged back to pending by a stale peer");
+{
+  store.set(KEY3, nb({
+    updatedAt: 100,
+    steps: [{ id: "s1", text: "ship it", status: "sent", ts: 1, startedAt: 5, finishedAt: 9, stepUpdatedAt: 9 }],
+  }));
+  // Peer pushed LATER but still holds the old pending copy of the same step.
+  const merged = JSON.parse(mergeNotebookLease(KEY3, nb({
+    updatedAt: 200,
+    steps: [{ id: "s1", text: "ship it", status: "pending", ts: 1 }],
+  })));
+  check("archived step stays archived", merged.steps.length === 1 && merged.steps[0].status === "sent" && merged.steps[0].finishedAt === 9);
+}
+
+console.log("case 6b: a newer explicit reopen is not undone by an older archived peer");
+{
+  store.set(KEY3, nb({
+    updatedAt: 300,
+    steps: [{ id: "s1", text: "ship it", status: "pending", ts: 1, stepUpdatedAt: 300 }],
+  }));
+  const merged = JSON.parse(mergeNotebookLease(KEY3, nb({
+    updatedAt: 400,
+    steps: [{ id: "s1", text: "ship it", status: "done", ts: 1, archivedAt: 200, stepUpdatedAt: 200 }],
+  })));
+  check("newer reopened lifecycle wins despite the peer's advanced status",
+    merged.steps[0].status === "pending" && merged.steps[0].archivedAt == null);
+}
+
+console.log("case 6c: a repaired legacy preflight failure beats its stale failed copy");
+{
+  store.set(KEY3, nb({
+    updatedAt: 500,
+    steps: [{ id: "s1", text: "retry setup", status: "pending", ts: 1, stepUpdatedAt: 500 }],
+  }));
+  const merged = JSON.parse(mergeNotebookLease(KEY3, nb({
+    updatedAt: 600,
+    steps: [{ id: "s1", text: "retry setup", status: "failed", ts: 1, finishedAt: 200, archivedAt: 200 }],
+  })));
+  check("repair remains pending and does not regain stale archive metadata",
+    merged.steps[0].status === "pending" && merged.steps[0].archivedAt == null);
+}
+
+console.log("case 7: adopting does not delete steps this PC created since the peer's push");
+{
+  store.set(KEY3, nb({
+    updatedAt: 100,
+    steps: [
+      { id: "s1", text: "shared", status: "pending", ts: 1 },
+      { id: "s2", text: "added here", status: "pending", ts: 2 },
+    ],
+  }));
+  const merged = JSON.parse(mergeNotebookLease(KEY3, nb({
+    updatedAt: 200,
+    steps: [
+      { id: "s1", text: "shared", status: "pending", ts: 1 },
+      { id: "s3", text: "added on the peer", status: "pending", ts: 3 },
+    ],
+  })));
+  const ids = merged.steps.map((s) => s.id).sort();
+  check("union keeps every id from both sides", ids.join(",") === "s1,s2,s3");
+}
+
+console.log("case 8: tombstones stop a union from resurrecting deliberate deletions");
+{
+  // Deleted HERE; the peer still has it.
+  store.set(KEY3, nb({ updatedAt: 300, steps: [], deletedSteps: [{ id: "s9", ts: 290 }] }));
+  const a = JSON.parse(mergeNotebookLease(KEY3, nb({
+    updatedAt: 400, steps: [{ id: "s9", text: "deleted", status: "pending", ts: 1 }],
+  })));
+  check("a step deleted here stays deleted", a.steps.length === 0 && a.deletedSteps.some((d) => d.id === "s9"));
+  // Deleted on the PEER; we still have it. A delete on either side is authoritative.
+  store.set(KEY3, nb({ updatedAt: 400, steps: [{ id: "s8", text: "deleted there", status: "pending", ts: 1 }] }));
+  const b = JSON.parse(mergeNotebookLease(KEY3, nb({ updatedAt: 300, steps: [], deletedSteps: [{ id: "s8", ts: 290 }] })));
+  check("a step deleted on the peer is removed here", b.steps.length === 0);
+}
+
+console.log("case 9: scalars order by the NOTEBOOK's own updatedAt, not the vault blob's");
+{
+  store.set(KEY3, nb({ updatedAt: 900, text: "my newer notes", steps: [] }));
+  const older = JSON.parse(mergeNotebookLease(KEY3, nb({ updatedAt: 500, text: "peer stale notes", steps: [] })));
+  check("a stale peer cannot overwrite newer local notes", older.text === "my newer notes");
+  check("merged stamp is the max of both", older.updatedAt === 900);
+  store.set(KEY3, nb({ updatedAt: 100, text: "my stale notes", steps: [] }));
+  const newer = JSON.parse(mergeNotebookLease(KEY3, nb({ updatedAt: 500, text: "peer newer notes", steps: [] })));
+  check("a newer peer does replace older local notes", newer.text === "peer newer notes");
+}
+
+console.log("case 10: merging is idempotent and monotonic (two PCs converge, no ping-pong)");
+{
+  const local = nb({ updatedAt: 100, text: "a", steps: [{ id: "s1", text: "x", status: "sent", ts: 1, finishedAt: 7 }] });
+  const remote = nb({ updatedAt: 200, text: "b", steps: [{ id: "s1", text: "x", status: "pending", ts: 1 }] });
+  store.set(KEY3, local);
+  const once = mergeNotebookLease(KEY3, remote);
+  store.set(KEY3, once);
+  const twice = mergeNotebookLease(KEY3, once);
+  check("re-merging the same pair changes nothing", twice === once);
+}
+
+console.log("case 11: the cross-PC advisory syncs, the run-lease still does not");
+{
+  const stripped = JSON.parse(stripNotebookLease(KEY3, nb({
+    steps: [], runningOn: { deviceId: "d1", deviceName: "DESKTOP-A", at: 42 }, autoFeedOwner: "agents:p1",
+  })));
+  check("runningOn survives the push (it is advisory, not a lease)", stripped.runningOn?.deviceName === "DESKTOP-A");
+  check("autoFeedOwner is still stripped", stripped.autoFeedOwner === undefined);
+  store.set(KEY3, nb({ updatedAt: 1, steps: [], runningOn: { deviceId: "d1", deviceName: "OLD", at: 10 } }));
+  const merged = JSON.parse(mergeNotebookLease(KEY3, nb({
+    updatedAt: 2, steps: [], runningOn: { deviceId: "d2", deviceName: "NEW", at: 99 },
+  })));
+  check("the most recent device to start a queue wins the advisory", merged.runningOn?.deviceName === "NEW");
+}
+
+console.log("case 12: a notebook keyed by a raw folder path never leaves this PC");
+{
+  const before = store.size;
+  store.set("owllm:agents:notebook:code:c:\\0_githome\\owllm", nb({ steps: [] }));
+  store.set("owllm:agents:notebook:19efdfe2adf_9df1464dbca70023", nb({ steps: [] }));
+  const denyStart = rawSrc.indexOf("NOTEBOOK_PATH_FALLBACK_PREFIX");
+  check("the path-scoped fallback prefix is defined", denyStart >= 0);
+  check("isSyncable rejects it", rawSrc.includes("if (key.startsWith(NOTEBOOK_PATH_FALLBACK_PREFIX)) return false;"));
+  check("durable project ids are unaffected", store.size === before + 2);
+}
+
+console.log("case 13: notebooks converge WITHOUT waiting for the next app launch");
+{
+  check("a scoped mid-session pull exists", typeof pullNotebooksNow === "function");
+  check("it is on an interval", rawSrc.includes("window.setInterval(() => { if (_enabled) void pullNotebooksNow(); }"));
+  check("and runs when the window regains focus", rawSrc.includes("else void pullNotebooksNow();"));
+  check("it must NOT claim the whole blob as adopted", rawSrc.slice(rawSrc.indexOf("export async function pullNotebooksNow"), rawSrc.indexOf("export async function pushNow")).includes("NOT setLast()"));
+  check("launch-time full adopt is still there", rawSrc.includes("if (await pullAndAdopt())"));
+}
+
+console.log("case 13b: two idle PCs settle instead of re-writing each other forever");
+{
+  // The merged value is rebuilt from the PEER's object, so its KEY ORDER can
+  // differ from ours while meaning the same thing. A raw string compare would
+  // then see a change on every poll — write, repaint and re-push, forever.
+  const content = { steps: [{ id: "s1", text: "x", status: "pending", ts: 1 }], updatedAt: 5, text: "n" };
+  const reordered = { text: "n", updatedAt: 5, steps: [{ ts: 1, status: "pending", text: "x", id: "s1" }] };
+  check("identical content in a different key order is recognised as unchanged",
+    rawSrc.includes("function sameNotebookJson") && rawSrc.includes("if (sameNotebookJson(current, merged)) continue;"));
+  store.set(KEY3, nb(content));
+  const merged = mergeNotebookLease(KEY3, nb(reordered));
+  check("and the merge itself is content-stable across key order",
+    JSON.stringify(Object.keys(JSON.parse(merged)).sort()) === JSON.stringify(Object.keys(JSON.parse(mergeNotebookLease(KEY3, nb(content)))).sort()));
+}
+
+console.log("case 14: legacy blobs written before updatedAt existed still adopt the peer");
+{
+  store.set(KEY3, nb({ text: "local legacy", steps: [{ id: "s1", text: "x", status: "pending", ts: 1 }] }));
+  const merged = JSON.parse(mergeNotebookLease(KEY3, nb({ text: "peer legacy", steps: [{ id: "s1", text: "x", status: "pending", ts: 1 }] })));
+  check("no-stamp on both sides keeps the previous adopt-the-peer behaviour", merged.text === "peer legacy");
+  check("and still yields exactly one copy of the shared step", merged.steps.length === 1);
 }
 
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");

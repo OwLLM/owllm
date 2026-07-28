@@ -18,7 +18,7 @@ import BrainstormPanel from "./BrainstormPanel";
 import { computeGraphViewportFit } from "./graphViewport";
 import TeamWorkbenchModal from "./TeamWorkbenchModal";
 import TeamMemoryModal from "./TeamMemoryModal";
-import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, markNotebookStepFinished } from "./RunNotebook";
+import RunNotebook, { continueNotebookAutoFeed, autoFeedWouldRun, consumeAutoFeedArm, markNotebookStepPending, notebookPendingStepCount, settleNotebookStep, type NotebookRunOutcome } from "./RunNotebook";
 import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTimer";
 import BrowserPanel from "./BrowserPanel";
 import RulesEditor from "./RulesEditor";
@@ -70,10 +70,14 @@ import {
   appendAgentMemory,
   streamLocalChat,
   streamOpenAiApiWithTools,
+  foldHistoryIntoPrompt,
+  recentTextHistory,
   runCodexCliStream,
+  runKimiCliStream,
   makeResponsiveHandlers,
   makeUiYield,
   ensureCliWarm,
+  CliPreflightError,
   clearCliWarm,
   withCliAuthRetry,
   setCliAuthWaitHandler,
@@ -140,14 +144,25 @@ import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, Thin
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import {
+  assignTeamModelToAgents,
   clearStoredAgentModelOverrides,
-  graphJsonWithoutAgentModels,
+  graphJsonWithAgentModels,
   resolveAgentModel,
 } from "./teamModelSelection";
+import {
+  requiresAgentWorktree,
+  worktreeCheckpointNotice,
+  WorktreePreflightError,
+  worktreePreflightError,
+  type WorktreeCreateState,
+} from "./worktreeIsolation";
+import { READONLY_LOCAL_TOOLS, isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
+import { historyBudgetFor } from "./contextBudget";
 
 // Native tool_call shape harvested by consumeOpenAISse from
 // delta.tool_calls (used by the cloud streaming display path).
 type NativeToolCall = { name: string; args: Record<string, string> };
+type QueuedSteer = { text: string; attachments: Attachment[] };
 
 const ICONS = "/Page_icons";
 
@@ -296,6 +311,7 @@ function buildGraphJson(opts: {
       name: a.name,
       base: a.base,
       ...(a.profileRef ? { profileRef: a.profileRef } : {}),
+      ...(a.defaultModelId ? { defaultModelId: a.defaultModelId } : {}),
     })),
     agentModels: Object.fromEntries(opts.agentModels),
     agentVoices: Object.fromEntries(opts.agentVoices),
@@ -339,6 +355,10 @@ type AgentSpec = {
   // specialist prompt builder can layer them.
   description?: string;
   extraPrompt?: string;
+  /// Optional model pinned on the team template's agent row
+  /// (`default_model_id`). It is inherited by projects using that template and
+  /// must affect dispatch, not just the editor form that writes it.
+  defaultModelId?: string;
   // Per-agent SKILL.md packs equipped on this agent (skill ids). Skills are
   // instruction packs loaded on demand at dispatch (progressive disclosure),
   // distinct from `tool_allowlist` function calls. Kept in sync with the
@@ -670,6 +690,7 @@ function toTeam(t: TeamTemplateBackend): Team {
         // Qt source spells this `extra_prompt`; we expose it camel-case
         // on the React side so usage doesn't pierce snake_case.
         extraPrompt: typeof a.extra_prompt === "string" ? a.extra_prompt : undefined,
+        defaultModelId: typeof a.default_model_id === "string" && a.default_model_id.trim() ? a.default_model_id.trim() : undefined,
         extraSkills: Array.isArray(a.extra_skills) ? a.extra_skills.filter((s: any) => typeof s === "string") : undefined,
         profileRef: a.profile_ref && typeof a.profile_ref.id === "string" && Number.isFinite(a.profile_ref.revision)
           ? { id: a.profile_ref.id, revision: a.profile_ref.revision }
@@ -708,6 +729,7 @@ function projectToTeam(p: ProjectRow): Team {
   // the name-contains rule in orchestratorOf still catches a renamed orchestrator.
   const baseByName = new Map<string, string>();
   const profileByName = new Map<string, RevisionRef>();
+  const defaultModelByName = new Map<string, string>();
   if (p.graph_json && p.graph_json.trim().length > 0) {
     try {
       const parsed = JSON.parse(p.graph_json);
@@ -723,6 +745,9 @@ function projectToTeam(p: ProjectRow): Team {
             if (r.profileRef && typeof r.profileRef.id === "string" && Number.isFinite(r.profileRef.revision)) {
               profileByName.set(r.name, { id: r.profileRef.id, revision: r.profileRef.revision });
             }
+            if (typeof r.defaultModelId === "string" && r.defaultModelId.trim()) {
+              defaultModelByName.set(r.name, r.defaultModelId.trim());
+            }
           }
         }
       }
@@ -735,6 +760,7 @@ function projectToTeam(p: ProjectRow): Team {
       name: n,
       base: baseByName.get(n) ?? n,
       profileRef: profileByName.get(n),
+      defaultModelId: defaultModelByName.get(n),
     })),
   );
   return {
@@ -1170,9 +1196,9 @@ function FlowHeader({
 }
 
 // TeamInfoCard — agent_info_card.py:394-521. Driven by the active team.
-// Now with a "TEAM MODEL" row at the bottom: a single select that
-// assigns the model to EVERY agent on the team at once (clears per-
-// agent overrides so the team genuinely runs on one model again).
+// Now with a "TEAM MODEL" row at the bottom: a bulk setter that
+// assigns the selected model to every current agent. Each agent remains
+// independently editable afterward.
 function TeamInfoCard({
   team, models, teamModel, onChangeTeamModel, serverModelId, accountsStatus,
 }: {
@@ -1243,9 +1269,9 @@ function TeamInfoCard({
         <span style={{ fontSize:11, fontWeight:700, color:"var(--fg-muted)", letterSpacing:0.4, width:86 }}>CONNECTIONS</span>
         <span style={{ flex:1, fontWeight:700 }}>{team.edges.length}</span>
       </div>
-      {/* MODEL row — applies to every agent on the team. */}
+      {/* MODEL row — bulk-assigns now; individual agent choices can override later. */}
       <div style={{ position:"absolute", left:14, top:model_y, width:CARD_W - 28, height:14, display:"flex", alignItems:"center", fontSize:11, fontWeight:700, color:"var(--fg-muted)", fontFamily:"Segoe UI", letterSpacing:0.4 }}>
-        <span style={{ flex:1 }}>TEAM MODEL · assigns to every agent</span>
+        <span style={{ flex:1 }}>TEAM MODEL · set all now · agents remain editable</span>
       </div>
       <div style={{ position:"absolute", left:14, top:model_y + 16, width:CARD_W - 28, display:"flex" }}>
         <ModelPicker
@@ -4881,11 +4907,8 @@ function GraphCanvas({
 
 // Mirror of fleet.rs Tauri command return shapes. The discriminator
 // is the `status` field (serde tag).
-type FleetCreateResult =
-  | { status: "ready"; path: string; branch: string; baseSha: string }
-  | { status: "notAGitRepo" }
-  | { status: "dirtyWorkingTree"; details: string }
-  | { status: "error"; message: string };
+type FleetCreateResult = WorktreeCreateState;
+type WorktreeBinding = { path: string; branch: string; baseSha: string };
 type FleetFinalizeResult =
   | { status: "committed"; commitSha: string; filesChanged: number; files: string[] }
   | { status: "noChanges" }
@@ -6056,6 +6079,7 @@ function RightColumnTabs(props: {
   phase: DispatchPhase;
   models: ModelInfo[];
   modelFor: (agentName: string) => string;
+  agentModelOverrideFor: (agentName: string) => string;
   onPickAgentModel: (agentName: string, modelId: string) => void;
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
@@ -6183,6 +6207,7 @@ function RightColumnTabs(props: {
             activeAgent={props.activeAgent}
             models={props.models}
             modelFor={props.modelFor}
+            agentModelOverrideFor={props.agentModelOverrideFor}
             onPickAgentModel={props.onPickAgentModel}
             accountsStatus={props.accountsStatus}
             effectiveTeamModel={props.effectiveTeamModel}
@@ -6483,7 +6508,7 @@ function OrchestratorSettings({
 // is selected).
 function OrchAgentSettings({
   team, selectedAgent, activeAgent,
-  models, modelFor, onPickAgentModel, accountsStatus,
+  models, modelFor, agentModelOverrideFor, onPickAgentModel, accountsStatus,
   effectiveTeamModel, serverState,
   voiceFor, onPickAgentVoice, voices,
 }: {
@@ -6492,6 +6517,7 @@ function OrchAgentSettings({
   activeAgent: string | null;
   models: ModelInfo[];
   modelFor: (agentName: string) => string;
+  agentModelOverrideFor: (agentName: string) => string;
   onPickAgentModel: (agentName: string, modelId: string) => void;
   accountsStatus: AccountsStatusLite | null;
   effectiveTeamModel: string;
@@ -6502,19 +6528,23 @@ function OrchAgentSettings({
 }) {
   const orchName = team ? (findOrchestratorSpec(team)?.name ?? null) : null;
   const focus = selectedAgent ?? activeAgent ?? orchName ?? "you";
+  const explicitModel = agentModelOverrideFor(focus);
+  const inheritedModel = modelFor(focus);
   const disabled = focus === "you" || focus === "system";
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
         <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Model</span>
         <ModelPicker
-          value={modelFor(focus)}
+          value={explicitModel}
           onChange={(id) => onPickAgentModel(focus, id)}
           models={models}
           status={accountsStatus}
           disabled={disabled}
           fallbackLabel={
-            effectiveTeamModel
+            inheritedModel && inheritedModel !== "local"
+              ? `(use inherited · ${inheritedModel})`
+              : effectiveTeamModel
               ? `(use team model · ${effectiveTeamModel})`
               : serverState.model_id
                 ? `(use team / server model · ${serverState.model_id})`
@@ -6560,7 +6590,7 @@ function TeamSettings({
       </div>
     );
   }
-  // Per user spec 2026-05-29: this panel keeps ONLY the team model
+  // Per user spec 2026-05-29: this panel keeps the team model bulk
   // selection + a team voice selection. Identity header, description,
   // and category/agent/connection counts are dropped (the project strip
   // up top already shows the project name; users objected to the
@@ -6571,7 +6601,10 @@ function TeamSettings({
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:6 }}>
       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-        <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
+        <span
+          title="Set every current agent to this model; you can then override any agent individually"
+          style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}
+        >Team model</span>
         <ModelPicker
           value={effectiveTeamModel}
           onChange={onPickTeamModel}
@@ -6635,7 +6668,10 @@ function TeamPanel({
         borderRadius:10,
       }}>
         <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-          <span style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}>Team model</span>
+          <span
+            title="Set every current agent to this model; you can then override any agent individually"
+            style={{ fontSize:10, color:"var(--fg-muted)", letterSpacing:0.6, textTransform:"uppercase", width:74 }}
+          >Team model</span>
           <ModelPicker
             value={effectiveTeamModel}
             onChange={onPickTeamModel}
@@ -6800,10 +6836,8 @@ const CRITIC_SYNTHETIC_SPEC: AgentSpec = {
 // specialist's job; listing those tools made the orchestrator try to
 // "@web_search:" dispatch them as if they were teammates. Specialists keep
 // the full tool set.
-const READONLY_LOCAL_TOOLS: string[] = [
-  "read_file", "list_dir", "grep", "glob",
-];
-
+// Shared with the CLI layer (agentSandbox.ts) so the process sandbox can be
+// derived from the SAME list the dispatcher narrows the orchestrator to.
 function runtimeReadOnlyTools(
   spec: AgentSpec | undefined,
   roleByName: Map<string, RoleData>,
@@ -7340,6 +7374,7 @@ async function runClaudeCliStream(args: {
     // Per-run, user-consented home-profile access (--add-dir). False unless the
     // user approved the consent prompt this run. See grantHomeThisRun.
     grantHome: grantHomeThisRun,
+    readOnly: isAgentReadOnly(args),
     onEvent: ch,
   });
 }
@@ -7563,21 +7598,10 @@ async function streamChatCompletion(
 /// mode emits the full reply at the end (no token streaming).
 type CloudRoute = { forceSub?: boolean; forceApi?: boolean };
 
-// Embed prior conversation turns into a single user prompt — used by
-// the Claude CLI subscription path because `claude --print` is one-shot
-// and has no native session/history input. Each turn is labelled so
-// the model knows who said what.
-function foldHistoryIntoPrompt(userMessage: string, history?: HistoryItem[]): string {
-  if (!history || history.length === 0) return userMessage;
-  const lines: string[] = ["--- Previous conversation ---"];
-  for (const h of history) {
-    lines.push(`${h.role === "user" ? "User" : "Assistant"}: ${h.content}`);
-    lines.push("");
-  }
-  lines.push("--- Current user message ---");
-  lines.push(userMessage);
-  return lines.join("\n");
-}
+// The Claude CLI subscription path folds prior turns into one prompt because
+// `claude --print` is one-shot with no native history input. It used the same
+// unbounded copy dispatch.ts had, so the shared budgeted version is imported
+// instead — one fold, one budget, every CLI path.
 
 // ── Claude CLI auth-retry (mid-run 401 resilience) ─────────────────────────
 // The Claude Code CLI's OAuth access token has a TTL. A long agentic run can
@@ -7620,7 +7644,7 @@ async function streamAnthropic(
   // Claude CLI's --print mode is one-shot — no inherent memory across
   // calls — so fold the prior conversation into the user prompt the
   // CLI sees. The CLI then has everything it needs to continue.
-  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history);
+  const cliPrompt = foldHistoryIntoPrompt(cliUserMessage, history, cliModel);
   // forceSub: skip the API path entirely and go straight to the CLI.
   if (wantSub) {
     const status = await invoke<{ claude_cli: boolean }>("accounts_status");
@@ -7670,6 +7694,7 @@ async function streamAnthropic(
       runWithSessionRetry((sid) => invoke<string>("claude_cli_complete", {
         systemPrompt, userMessage: cliPrompt, cwd: projectCwd ?? null,
         autoApprove: autoApprove ?? false,
+        readOnly: isReadOnlyToolAllowlist(allowedTools),
         model: cliModel, effort: claudeEffort, sessionId: sid,
         grantHome: grantHomeThisRun,
       })), claudeCwd);
@@ -7697,6 +7722,7 @@ async function streamAnthropic(
           userMessage: cliPrompt,
           cwd: claudeCwd ?? null,
           autoApprove: autoApprove ?? false,
+          readOnly: isReadOnlyToolAllowlist(allowedTools),
           model: cliModel, effort: claudeEffort, sessionId,
           grantHome: grantHomeThisRun,
         }), claudeCwd);
@@ -7757,13 +7783,17 @@ function buildAnthropicBody(
   const thinkingOn = budget > 0;
   const maxTokens = thinkingOn ? budget + 4096 : 4096;
   const reqTemp = thinkingOn ? 1 : temperature;
+  const anthropicBudget = historyBudgetFor(wireModel);
   return {
     model: wireModel,
     max_tokens: maxTokens,
     ...(thinkingOn ? { thinking: { type: "enabled", budget_tokens: budget } } : {}),
     system: systemPrompt,
     messages: [
-      ...(history ?? []).map(h => ({ role: h.role, content: h.content })),
+      // Bounded to the model's window — the API path used to spread the whole
+      // history in raw while only the CLI paths were capped.
+      ...recentTextHistory(history, anthropicBudget.turns, anthropicBudget.chars)
+        .map(h => ({ role: h.role, content: h.content })),
       { role: "user", content: anthropicUserContent(userMessage, imgList) },
     ],
     stream: true,
@@ -7861,10 +7891,9 @@ async function streamOpenAI(
     // Refresh the Codex CLI token once per session (cold-start 401 fix). Pass cwd
     // so an isolated project also re-mirrors creds into its WSL sandbox.
     await ensureCliWarm("codex_cli", projectCwd);
-    const convo = (history ?? [])
-      .map((m) => `${m.role === "assistant" ? "Assistant" : "User"}: ${typeof m.content === "string" ? m.content : ""}`)
-      .join("\n\n");
-    const prompt = convo ? `${convo}\n\nUser: ${userMessage}` : userMessage;
+    // Budgeted fold — an unbounded transcript here is what put 778k characters
+    // (81% of the model's context) into a single orchestrator dispatch.
+    const prompt = foldHistoryIntoPrompt(userMessage, history, modelId);
     // Pasted images → saved to the cwd inbox + attached via codex's native -i
     // flag (verified). Same path the Code page uses — consistent everywhere.
     // A no-folder team chat has no projectCwd; fall back to the shared
@@ -7880,7 +7909,8 @@ async function streamOpenAI(
     // Thought tab when present; fall back to the one-shot blob otherwise.
     if (onThought) {
       return await withCliAuthRetry("codex_cli", signal, () => runCodexCliStream({
-        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools, onDelta, onThought,
+        systemPrompt, userMessage: codexPrompt, cwd: codexCwd ?? null, imagePaths: codexImagePaths, model: codexModel, effort: codexEffort, allowedTools,
+        readOnly: isReadOnlyToolAllowlist(allowedTools), onDelta, onThought,
       }), codexCwd);
     }
     const reply = await withCliAuthRetry("codex_cli", signal, () => invoke<string>("codex_cli_complete", {
@@ -7932,24 +7962,23 @@ async function streamMoonshot(
     // same preflight as Code/Chat so an isolated project gets the Kimi binary
     // and refreshed credentials before the first agent tries to execute it.
     await ensureCliWarm("kimi_cli", projectCwd);
-    const folded = (history ?? [])
-      .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
-      .join("\n\n");
-    const composed = folded ? `${folded}\n\nuser: ${userMessage}` : userMessage;
+    // Bounded fold, same helper as every other CLI path. This joined the WHOLE
+    // transcript before, so a long team run re-sent every prior turn each time.
+    const composed = foldHistoryIntoPrompt(userMessage, history, modelId);
     // Retry transient network blips (and surface a clear auth error) like the
     // Claude/Codex subscription paths — a Rust-side non-zero exit now carries the
     // real auth/network text, so withCliAuthRetry can recognize and retry it.
     // allowedTools gates the browser gateway to the Browser role only (a normal
     // Kimi agent must not wire it — kimi fatally aborts if it can't connect).
-    const reply = await withCliAuthRetry("kimi_cli", signal, () => invoke<string>("kimi_cli_complete", {
+    const reply = await withCliAuthRetry("kimi_cli", signal, () => runKimiCliStream({
       systemPrompt,
       userMessage: composed,
       cwd: projectCwd ?? null,
       model: modelId,
-      allowedTools: allowedTools ?? null,
+      allowedTools,
+      onDelta,
+      onThought: onThought ?? (() => {}),
     }), projectCwd);
-    if (reply) onDelta(reply);
-    // No thought stream for --print mode; CLI emits a single blob.
     return reply;
   }
   // API path — OpenAI-compatible streaming.
@@ -8032,10 +8061,8 @@ async function streamGemini(
   // similar to claude/kimi). Folds history into the prompt since
   // --print is single-turn.
   if (route.forceSub) {
-    const folded = (history ?? [])
-      .map((h) => `${h.role}: ${typeof h.content === "string" ? h.content : ""}`)
-      .join("\n\n");
-    const composed = folded ? `${folded}\n\nuser: ${userMessage}` : userMessage;
+    // Bounded fold — see the Kimi path above.
+    const composed = foldHistoryIntoPrompt(userMessage, history, modelId);
     // Retry transient network blips / surface real auth errors, as for the other
     // subscription CLIs (the Rust non-zero-exit path now carries the auth text).
     const reply = await withCliAuthRetry("gemini_cli", signal, () => invoke<string>("gemini_cli_complete", {
@@ -8053,7 +8080,8 @@ async function streamGemini(
   if (!fallbackKey) throw new Error("No GEMINI_API_KEY (or GOOGLE_API_KEY) saved — set it on the Accounts page.");
   // Translate alternating user/assistant history to Gemini's contents
   // shape. Gemini uses "model" instead of "assistant".
-  const contents = (history ?? []).map((h) => ({
+  const geminiBudget = historyBudgetFor(modelId);
+  const contents = recentTextHistory(history, geminiBudget.turns, geminiBudget.chars).map((h) => ({
     role: h.role === "assistant" ? "model" : (h.role === "user" ? "user" : "model"),
     parts: [{ text: typeof h.content === "string" ? h.content : "" }],
   }));
@@ -8430,6 +8458,7 @@ export function AgentsPage({
   /// null we render the saved value; when non-null we render this and
   /// persist it on a debounce.
   const [teamModelOverride, setTeamModelOverride] = useState<string | null>(null);
+  const hydratedProjectIdRef = useRef<string>("");
   /// Per-agent model picks. Keys are agent names (matching team.agents);
   /// values are the model_id chosen on the OrchestratorPane Model
   /// dropdown. Empty string means "no override" (fall back to the team
@@ -8660,9 +8689,10 @@ export function AgentsPage({
   const supSendBusyRef = useRef(false);
   // Mid-run steering (like Claude Code): a message the user sends WHILE a run is
   // active is queued here instead of dropped, and dispatchGoal drains it at the next
-  // orchestrator boundary and feeds it in as a ⚡ USER (mid-run) turn. steerQueueRef
-  // is the source of truth; pendingSteers just mirrors the count for the UI.
-  const steerQueueRef = useRef<string[]>([]);
+  // orchestrator boundary and feeds it in as a ⚡ USER (mid-run) turn. Keep
+  // attachments beside their text: the old string[] queue silently discarded
+  // every image sent while a run was active.
+  const steerQueueRef = useRef<QueuedSteer[]>([]);
   // 📓 Notebook step timing: which step started the current run, and which steps
   // were queued as mid-run steers. Dispatched steps are marked finished at run end;
   // queued steers are only marked finished once they have been drained (processed).
@@ -8672,12 +8702,25 @@ export function AgentsPage({
   // Drain the queued steers into a single block (empty string when none). Called at
   // safe boundaries in the run loop. The user's feedback that a message was captured
   // is the "⚡ queued to steer the run →" echo pushed into the chat on enqueue.
-  const drainSteers = (): string => {
+  const drainSteers = (): QueuedSteer | null => {
     const q = steerQueueRef.current;
+    // Guard BEFORE taking the ids: draining an empty text queue must not empty
+    // the id list, or those cards would be silently detached from their text.
+    if (!q.length) return null;
     const ids = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
-    if (!q.length) return "";
     if (ids.length) notebookSteerInFlightIdsRef.current.push(...ids);
-    return q.splice(0, q.length).join("\n");
+    const drained = q.splice(0, q.length);
+    return {
+      text: drained.map((item) => item.text).filter(Boolean).join("\n"),
+      attachments: drained.flatMap((item) => item.attachments),
+    };
+  };
+  // Local models can accept text between tool calls, but that callback has no
+  // multimodal channel. If any queued item carries bytes, leave the whole
+  // ordered queue intact for the next real streamChatCompletion boundary.
+  const drainTextOnlySteers = (): string => {
+    if (steerQueueRef.current.some((item) => item.attachments.length > 0)) return "";
+    return drainSteers()?.text ?? "";
   };
   // 📓 Notebook feed: a step goes to the team NOW — as a live steer while a
   // run is active (picked up at the next agent boundary, or between tool
@@ -8686,7 +8729,7 @@ export function AgentsPage({
     const t = text.trim();
     if (!t) return "no-team";
     if (supSendBusyRef.current || dispatchInFlightRef.current) {
-      steerQueueRef.current.push(t);
+      steerQueueRef.current.push({ text: t, attachments: [] });
       if (stepId) notebookSteerStepIdsRef.current.push(stepId);
       setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `📓⚡ notebook step queued to steer the run → ${t}`, ts: Date.now(), seq: nextSeq() }]);
       return "queued";
@@ -8705,18 +8748,43 @@ export function AgentsPage({
   // right after the run's finally — but when they haven't yet (a queued steer
   // follow-up), retry for a while instead of silently dropping the chain
   // (the old single-shot check is how a running queue "just stopped").
-  const scheduleNotebookAutoFeed = () => {
+  const AUTO_FEED_SETTLE_TRIES = 30; // 30 × 800ms = 24s
+  /// `ranFromNotebook` — did the queue itself dispatch the run that just ended?
+  /// Only such a run may pull the next card. `autoFeed` is sticky and survives
+  /// restarts, so without this any clean turn (including a goal the user typed
+  /// by hand) resumed a queue left switched on days earlier and the step landed
+  /// looking like a request the user had made. ▶ Start queue pressed while the
+  /// team is busy arms one single exception, consumed here.
+  const scheduleNotebookAutoFeed = (ranFromNotebook: boolean) => {
     const pid = selectedProjectId;
+    if (!ranFromNotebook && !consumeAutoFeedArm(pid, notebookSurfaceId)) return;
     let tries = 0;
     const attempt = () => {
       if (supSendBusyRef.current || dispatchInFlightRef.current) {
-        if (++tries <= 8) setTimeout(attempt, 800);
+        if (++tries <= AUTO_FEED_SETTLE_TRIES) {
+          setTimeout(attempt, 800);
+          return;
+        }
+        // Giving up used to be a bare `return`: auto-feed stayed ON, the steps
+        // stayed pending, and nothing ever dispatched again. That is the OTHER
+        // way "the queue just stopped" happens, independent of any run failure.
+        // Say so, using the same notice the non-clean endings use.
+        notifyAutoFeedPaused(
+          `the previous run was still busy ${Math.round((AUTO_FEED_SETTLE_TRIES * 800) / 1000)}s after it finished`,
+        );
         return;
       }
-      continueNotebookAutoFeed(pid, notebookSurfaceId, (step) => {
+      const result = continueNotebookAutoFeed(pid, notebookSurfaceId, (step) => {
         notebookStepRef.current = step.id;
         void onSupSendRef.current?.(`📓 Next step from the Notebook (auto-fed):\n${step.text}`);
       });
+      // "inactive" with cards still pending means another LIVE window on this
+      // project holds the queue lease. Discarding that result is how a stalled
+      // queue stayed silent — and notifyAutoFeedPaused can't say it, because
+      // autoFeedWouldRun is false for exactly this reason. Say it directly.
+      if (result === "inactive" && notebookPendingStepCount(pid) > 0) {
+        setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: "📓 Auto-feed idle here — another open window on this project is driving the queue. Use “Take over here” in the Notebook to drive it from this page.", ts: Date.now(), seq: nextSeq() }]);
+      }
     };
     setTimeout(attempt, 800);
   };
@@ -8726,7 +8794,7 @@ export function AgentsPage({
   // stopped working".
   const notifyAutoFeedPaused = (reason: string) => {
     if (!autoFeedWouldRun(selectedProjectId, notebookSurfaceId)) return;
-    setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 Auto-feed paused — ${reason}. Pending steps stay in the Notebook queue; fix or dispatch the next one (▶ Start queue) to continue.`, ts: Date.now(), seq: nextSeq() }]);
+    setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 Auto-feed paused — ${reason}. Pending steps stay in the Notebook queue; press ▶ Start queue in the Notebook to continue.`, ts: Date.now(), seq: nextSeq() }]);
   };
   // onSupSend is declared later in this component — reach it via a ref so the
   // notebook helpers above (defined early, next to the steer queue) can call it.
@@ -9460,20 +9528,21 @@ export function AgentsPage({
   // Sync editable fields when project selection changes.
   useEffect(() => {
     if (selectedProject) {
-      setProjectLocationDraft(selectedProject.location || "", selectedProject.id);
-      setTrustWritesOverride(null);
-      setTeamModelOverride(null);
-      // Restore THIS project's saved per-agent model picks. Primary source is
-      // now the project's DB graph_json (survives app reinstall/update);
-      // localStorage is a legacy fallback. Was wiped to empty on every reboot,
-      // forcing the user to re-pick every agent's model.
-      setPerAgentModel(loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json));
-      // Per-agent voice picks live alongside model picks — same scope, same
-      // DB-first restore.
-      setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id, selectedProject.graph_json));
-      // Per-agent equipped skills + extra tool grants — same DB-first restore.
-      setPerAgentSkills(loadAgentSkillsForProject(selectedProject.graph_json));
-      setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject.graph_json));
+      const projectChanged = hydratedProjectIdRef.current !== selectedProject.id;
+      if (projectChanged) {
+        hydratedProjectIdRef.current = selectedProject.id;
+        setProjectLocationDraft(selectedProject.location || "", selectedProject.id);
+        setTrustWritesOverride(null);
+        setTeamModelOverride(null);
+        // Restore THIS project's saved per-agent model picks. Do this only on a
+        // genuine project switch. chat_json changes after every streamed save;
+        // treating those as project switches used to clear a freshly selected
+        // team model in the middle of its own run.
+        setPerAgentModel(loadAgentModelsForProject(selectedProject.id, selectedProject.graph_json));
+        setPerAgentVoice(loadAgentVoicesForProject(selectedProject.id, selectedProject.graph_json));
+        setPerAgentSkills(loadAgentSkillsForProject(selectedProject.graph_json));
+        setPerAgentToolExtras(loadAgentToolExtrasForProject(selectedProject.graph_json));
+      }
       // Restore saved chat + per-agent transcripts INTO the shared store —
       // but ONLY if this project's session is empty (fresh load / app
       // restart). If a dispatch is still running in the background, or
@@ -9516,7 +9585,7 @@ export function AgentsPage({
       // from the active dispatch) — reset whenever the user switches
       // project so stale @dispatch lines from a previous team don't
       // bleed into the new project's pane.
-      setAgentThoughts(new Map());
+      if (projectChanged) setAgentThoughts(new Map());
     }
   // Re-run when a project reload supplies its preserved DB transcript too.
   // Folder rebinding keeps the same project id, so depending on id alone left
@@ -10077,12 +10146,20 @@ export function AgentsPage({
     if (supSendBusyRef.current) {
       // A run is active → DON'T drop the message. Queue it as a mid-run steer;
       // dispatchGoal drains it at the next orchestrator boundary and feeds it in.
-      // (Images aren't carried mid-run — text only.) Echo it so the user sees it
-      // was captured, not ignored.
+      // Keep the complete attachment payload for the next model-turn boundary.
+      // Echo thumbnails too so the chat accurately shows what was captured.
       const t = appendDocumentAttachmentText(text.trim(), images).trim();
-      if (t) {
-        steerQueueRef.current.push(t);
-        setSupChat(prev => [...prev, { role: "you", color: "#7fd4ff", text: `⚡ queued to steer the run → ${visibleText}`, context: t, ts: Date.now(), seq: nextSeq() }]);
+      if (t || images.length > 0) {
+        steerQueueRef.current.push({ text: t, attachments: images });
+        setSupChat(prev => [...prev, {
+          role: "you",
+          color: "#7fd4ff",
+          text: `⚡ queued to steer the run → ${visibleText || "attached media"}`,
+          context: t,
+          images: visualImages.length > 0 ? attachmentThumbs(visualImages) : undefined,
+          ts: Date.now(),
+          seq: nextSeq(),
+        }]);
       }
       return;
     }
@@ -10177,6 +10254,8 @@ export function AgentsPage({
     });
     const singleRunStartedAt = Date.now();
     let singleRunCompletedCleanly = false;
+    let singleRunStoppedAtPreflight = false;
+    let singleRunFailureReason = "The run ended with an error.";
     supSendBusyRef.current = true;
     setSupSendBusy(true);
     // Fresh abort controller for THIS run. Any owllm:dispatch-abort
@@ -10463,6 +10542,7 @@ export function AgentsPage({
           : "(the model returned an empty response — no answer was produced)";
         setSupChat(curr => [...curr, { role: "system", color: "#ff8c8c", text: emptyMsg, ts: Date.now(), seq: nextSeq() }]);
         appendLog("system", { role: "system", color: "#ff8c8c", text: emptyMsg });
+        singleRunFailureReason = emptyMsg;
       }
       singleRunCompletedCleanly = Boolean(cleanReply || cleanReturned);
     } catch (e: any) {
@@ -10471,8 +10551,10 @@ export function AgentsPage({
       // it never reached the chat. Now both supChat (left/main) AND
       // the agent log (right pane) get the error in red.
       console.error("[onSupSend] streamChatCompletion threw", String(e?.message ?? e));
+      singleRunFailureReason = cleanAgentError(e);
+      singleRunStoppedAtPreflight = e instanceof CliPreflightError;
       const errMsg: GoalMsg = {
-        role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${cleanAgentError(e)}`,
+        role: "system", color: "#ff8c8c", text: `✗ Dispatch failed: ${singleRunFailureReason}`,
         ts: Date.now(), seq: nextSeq(),
         // Attach the one-click WSL-restart recovery when it's a network failure.
         action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
@@ -10508,16 +10590,20 @@ export function AgentsPage({
         supSendAbortRef.current = null;
       }
       const now = Date.now();
+      // Captured before the ref is cleared — it gates the chain below.
+      const ranFromNotebook = notebookStepRef.current != null;
       if (notebookStepRef.current) {
-        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        settleNotebookStep(selectedProjectId, notebookStepRef.current, singleRunCompletedCleanly
+          ? { kind: "clean" }
+          : singleRunStoppedAtPreflight ? { kind: "preflight" } : { kind: "failed", reason: singleRunFailureReason }, now);
         notebookStepRef.current = null;
       }
       setSupChat(prev => [...prev, { role: "system", color: "var(--fg-muted)", text: runTimingFooter(singleRunStartedAt, now), ts: now, seq: nextSeq() }]);
       // The no-specialist/single-assistant path used to end here, so a Notebook
       // queue could only process its first item. Continue from every clean run
       // path, not only dispatchGoal's team/solo branches.
-      if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();
-      else notifyAutoFeedPaused("the run ended with an error");
+      if (singleRunCompletedCleanly) scheduleNotebookAutoFeed(ranFromNotebook);
+      else if (ranFromNotebook) notifyAutoFeedPaused(singleRunFailureReason);
     }
   };
   onSupSendRef.current = onSupSend; // the notebook helpers (declared earlier) dispatch through this
@@ -10529,8 +10615,14 @@ export function AgentsPage({
   const effectiveTeamModel =
     teamModelOverride ?? selectedProject?.team_default_model_id ?? "";
 
+  const agentModelOverrideFor = (agentName: string): string =>
+    perAgentModel.get(agentName)?.trim() ?? "";
+  const agentTemplateModelFor = (agentName: string): string =>
+    activeTeam?.agents.find(a => a.name === agentName)?.defaultModelId?.trim() ?? "";
+
   // Resolve the model id we should send for a given agent. Priority:
-  //   per-agent override > team default > server's running model > "local"
+  //   per-agent override > agent template default > team default >
+  //   server's running model > "local"
   // Empty-string overrides fall through to the next layer. The string
   // we return is the `model` field in /v1/chat/completions; llama-server
   // ignores it today but the multi-server path will use it to route.
@@ -10541,6 +10633,7 @@ export function AgentsPage({
       selectedProject?.team_default_model_id ?? "",
       perAgentModel,
       serverState.model_id,
+      agentTemplateModelFor(agentName),
     );
   };
   const onPickAgentModel = (agentName: string, modelId: string) => {
@@ -10551,7 +10644,15 @@ export function AgentsPage({
       return next;
     });
     // Persist so the pick survives tab switches AND restarts (#17.2).
-    setAgentModelOverride(selectedProject?.id ?? "", agentName, modelId);
+    const projectId = selectedProject?.id ?? "";
+    setAgentModelOverride(projectId, agentName, modelId);
+    // Keep another mounted Agents window on the same project honest. This is
+    // an individual change: update only this agent, never reset the roster.
+    if (projectId) {
+      window.dispatchEvent(new CustomEvent("owllm:agent-model-changed", {
+        detail: { projectId, agentName, modelId },
+      }));
+    }
   };
 
   /// Resolve voice config for an agent. Falls back to DEFAULT_VOICE
@@ -10639,26 +10740,75 @@ export function AgentsPage({
   }, []);
 
   const onPickTeamModel = (modelId: string) => {
-    setTeamModelOverride(modelId);
-    // Picking a team-wide model implies "every agent uses this one" —
-    // wipe per-agent overrides in memory AND both persistence layers. The old
-    // implementation only cleared React state; graph_json/localStorage restored
-    // the old provider badges after reload even though the run used the team
-    // model, so the cards and dispatch visibly disagreed.
-    setPerAgentModel(new Map());
     const project = selectedProject;
     if (!project) return;
+    // "Team model" is a bulk setter, not a permanent precedence layer.
+    // Materialize the choice for every agent that exists now. A later pick on
+    // one agent replaces only that entry and therefore wins for that agent.
+    const assignedModels = assignTeamModelToAgents(
+      (renderTeam?.agents ?? activeTeam?.agents ?? []).map(agent => agent.name),
+      modelId,
+    );
+    setTeamModelOverride(modelId);
+    setPerAgentModel(assignedModels);
+    // Replace this project's synchronous local overlay as one bulk operation.
+    // The DB graph is updated below for cross-device/reinstall persistence.
     clearStoredAgentModelOverrides(project.id);
+    for (const [agentName, selectedModel] of assignedModels) {
+      setAgentModelOverride(project.id, agentName, selectedModel);
+    }
+    // Every mounted Agents window for this project must use the same selection
+    // and the same materialized per-agent assignments immediately.
+    window.dispatchEvent(new CustomEvent("owllm:team-model-changed", {
+      detail: {
+        projectId: project.id,
+        modelId,
+        agentModels: Array.from(assignedModels.entries()),
+      },
+    }));
     void invoke("update_project", {
       input: {
         id: project.id,
         team_default_model_id: modelId,
-        graph_json: graphJsonWithoutAgentModels(project.graph_json),
+        graph_json: graphJsonWithAgentModels(project.graph_json, assignedModels),
       },
     })
       .then(() => reloadProjects())
       .catch((e) => console.error("persist team-wide model selection failed", e));
   };
+
+  useEffect(() => {
+    const onTeamModelChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        projectId?: string;
+        modelId?: string;
+        agentModels?: [string, string][];
+      }>).detail;
+      if (!selectedProject?.id || detail?.projectId !== selectedProject.id) return;
+      setTeamModelOverride(typeof detail.modelId === "string" ? detail.modelId : "");
+      setPerAgentModel(new Map(Array.isArray(detail.agentModels) ? detail.agentModels : []));
+    };
+    const onAgentModelChanged = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        projectId?: string;
+        agentName?: string;
+        modelId?: string;
+      }>).detail;
+      if (!selectedProject?.id || detail?.projectId !== selectedProject.id || !detail.agentName) return;
+      setPerAgentModel(prev => {
+        const next = new Map(prev);
+        if (detail.modelId?.trim()) next.set(detail.agentName!, detail.modelId);
+        else next.delete(detail.agentName!);
+        return next;
+      });
+    };
+    window.addEventListener("owllm:team-model-changed", onTeamModelChanged);
+    window.addEventListener("owllm:agent-model-changed", onAgentModelChanged);
+    return () => {
+      window.removeEventListener("owllm:team-model-changed", onTeamModelChanged);
+      window.removeEventListener("owllm:agent-model-changed", onAgentModelChanged);
+    };
+  }, [selectedProject?.id]);
 
   // Look up the provider for a resolved model id. The ModelPicker
   // encodes routing as prefixes:
@@ -11090,6 +11240,7 @@ export function AgentsPage({
     // the bottom of the happy path those returns silently stranded auto-feed
     // after its first card.
     let notebookRunCompletedCleanly = false;
+    let notebookRunStoppedAtPreflight = false;
     let notebookPauseReason = "the run ended before completing";
     try {
       // ===== Preflight: a referenced file the sandbox can't read → AUTO-INGEST it =====
@@ -11176,6 +11327,36 @@ export function AgentsPage({
           ?? writers[0]
           ?? runTeam.agents.find(a => a.name !== orch.name)
           ?? orch;
+        if (!requiresAgentWorktree(projectCwd)) {
+          throw new Error(
+            "Solo mode needs a Git project directory so OWLLM can isolate its filesystem access. Select or initialize a Git project, then retry.",
+          );
+        }
+        const soloRunId = `${Date.now().toString(36).slice(-6)}-solo`;
+        const soloCreate = await invoke<FleetCreateResult>("fleet_worktree_create", {
+          projectCwd,
+          agentName: coder.name,
+          runId: soloRunId,
+          checkpointDirty: true,
+        });
+        if (soloCreate.status !== "ready") {
+          throw worktreePreflightError(coder.name, projectCwd, soloCreate);
+        }
+        const soloCheckpoint = worktreeCheckpointNotice(soloCreate);
+        if (soloCheckpoint) appendLog("system", { role: "system", color: "#ffd479", text: soloCheckpoint });
+        const soloWt: WorktreeBinding = {
+          path: soloCreate.path,
+          branch: soloCreate.branch,
+          baseSha: soloCreate.baseSha,
+        };
+        const soloCwd = soloWt.path;
+        let keepSoloWorktree = false;
+        appendThought(coder.name, {
+          role: "fleet",
+          color: "#7ff0c5",
+          text: `🗂 ${coder.name} → ${soloWt.branch}\n   ${soloWt.path}`,
+        });
+        try {
         appendLog("you", { role: "you", color: "#9ad9ff", text });
         addActive(coder.name);
         appendThought(coder.name, { role: "system", color: "#7fd4ff", text: "⚡ Solo-loop — one agent, no orchestration" });
@@ -11207,7 +11388,7 @@ export function AgentsPage({
           "decision, a genuinely ambiguous goal) STOP and ask in ONE line prefixed",
           "\"NEEDS USER:\". Otherwise decide the obvious option, state it in one line, proceed.",
         ].join("\n");
-        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, projectCwd, true) + "\n" + SOLO_OVERRIDE;
+        const sPrompt = buildSpecialistPrompt(runTeam, coder, roleByName, directives, sBlock, soloCwd, true) + "\n" + SOLO_OVERRIDE;
         const sAllowed = effectiveToolsFor(coder);
         const soloMemKey = runtimeMemoryKey(coder, selectedProjectId);
         const sMem = soloMemKey
@@ -11240,25 +11421,27 @@ export function AgentsPage({
           // Mid-run steering: fold any message the user queued while the coder
           // worked into this attempt's turn (like Claude Code reading it mid-flight).
           const sSteer = drainSteers();
-          if (sSteer) appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteer}` });
+          const sSteerText = sSteer?.text || (sSteer ? "Review the attached media." : "");
+          if (sSteer) appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteerText}` });
           const sBase = attempt === 1 ? soloTask
             : `Your previous change did NOT pass the project's verification:\n${renderGateLine(sGate!)}\n\nFix it so the check passes. Original task:\n${text}`;
-          const turn = sSteer ? `${sBase}\n\n⚡ The user sent this WHILE you were working — address it too:\n${sSteer}` : sBase;
+          const turn = sSteer ? `${sBase}\n\n⚡ The user sent this WHILE you were working — address it too:\n${sSteerText}` : sBase;
+          const sTurnAttachments = [...attachments, ...(sSteer?.attachments ?? [])];
           try {
             sText = (await streamChatCompletion(
               port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
               sPrompt, turn, tempFor(coder, 0.3), ctrl.signal,
-              (d) => streamLog(coder.name, d), projectCwd,
+              (d) => streamLog(coder.name, d), soloCwd,
               sHist, autoApprove,
               (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
-              attachments.length > 0 ? attachments : undefined,
+              sTurnAttachments.length > 0 ? sTurnAttachments : undefined,
               getClaudeSession(selectedProjectId, coder.name),
               undefined, undefined,
-              drainSteers, // local models drain steers between tool calls (mid-turn)
+              drainTextOnlySteers, // attachment steers wait for a multimodal turn boundary
             )).trim();
           } catch (e: any) { sText = `(error: ${cleanAgentError(e)})`; streamLog(coder.name, "\n\n" + sText); break; }
           if (isAuthError(sText)) break;  // 401 came back as reply text — don't gate/retry; handled below
-          sGate = await runGate(projectCwd, sScope);
+          sGate = await runGate(soloCwd, sScope);
           lastGateRef.current = sGate;
           if (sGate.status !== "failed") break;
           if (attempt >= 3) { appendThought(coder.name, { role: "system", color: "#ff8c8c", text: "⚠ verify still failing after 3 attempts — stopping." }); break; }
@@ -11270,6 +11453,7 @@ export function AgentsPage({
         // AUTH FAILURE: a 401 means the agent did nothing — never report "done".
         // Tell the user plainly to re-login (with the exact step), and stop.
         if (isAuthError(sText)) {
+          keepSoloWorktree = true;
           removeActive(coder.name);
           const m = authReloginMessage(providerFor(effectiveModelFor(coder)));
           appendLog("system", { role: "system", color: "#ff8c8c", text: m });
@@ -11284,19 +11468,21 @@ export function AgentsPage({
         for (let sg = 0; sg < 3 && !ctrl.signal.aborted; sg++) {
           const sSteer = drainSteers();
           if (!sSteer) break;
-          appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteer}` });
+          const sSteerText = sSteer.text || "Review the attached media.";
+          appendThought(coder.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${sSteerText}` });
           addActive(coder.name);
           try {
             sText = (await streamChatCompletion(
               port, effectiveModelFor(coder), providerFor(effectiveModelFor(coder)),
-              sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteer}`,
+              sPrompt, `Original task:\n${text}\n\nThe user sent this WHILE you were working — address it now:\n${sSteerText}`,
               tempFor(coder, 0.3), ctrl.signal,
-              (d) => streamLog(coder.name, d), projectCwd,
+              (d) => streamLog(coder.name, d), soloCwd,
               sHist, autoApprove,
-              (c, r, d) => streamThought(coder.name, c, r, d), sAllowed, undefined,
+              (c, r, d) => streamThought(coder.name, c, r, d), sAllowed,
+              sSteer.attachments.length > 0 ? sSteer.attachments : undefined,
               getClaudeSession(selectedProjectId, coder.name),
             )).trim();
-            sGate = await runGate(projectCwd, sScope); lastGateRef.current = sGate;
+            sGate = await runGate(soloCwd, sScope); lastGateRef.current = sGate;
           } catch (e: any) { if (ctrl.signal.aborted) throw e; }
           finally { removeActive(coder.name); }
         }
@@ -11326,7 +11512,7 @@ export function AgentsPage({
                 "ONLY if it needs a decision the USER must make, say so on a line prefixed 'NEEDS USER:'.",
               ].join("\n"),
               criticTemp, ctrl.signal,
-              (d) => streamLog(CRITIC_NAME, d), projectCwd,
+              (d) => streamLog(CRITIC_NAME, d), soloCwd,
               undefined, undefined,
               (c, r, d) => streamThought(CRITIC_NAME, c, r, d),
               criticToolsForRun(), undefined,
@@ -11346,6 +11532,63 @@ export function AgentsPage({
             appendThought(coder.name, { role: "system", color: "#ff8c8c", text: `⚠ Critical Thinker check skipped (${cleanAgentError(e)}) — shipping as-is.` });
           } finally { removeActive(CRITIC_NAME); }
         }
+        // Integrate only a cleanly completed isolated run. Failed verification,
+        // cancellation, or a pending user decision keeps the private branch and
+        // worktree intact for inspection/re-feed; it never leaks partial edits
+        // into the shared project checkout.
+        let soloIntegrationOk =
+          !ctrl.signal.aborted &&
+          (!sGate || sGate.status !== "failed") &&
+          !needsUserDecision;
+        if (!soloIntegrationOk) {
+          keepSoloWorktree = true;
+          appendThought(coder.name, {
+            role: "fleet",
+            color: "#ffb74d",
+            text: `⏸ isolated work kept at ${soloWt.path}\nBranch: ${soloWt.branch}`,
+          });
+        } else {
+          const soloFinalize = await invoke<FleetFinalizeResult>("fleet_worktree_finalize", {
+            worktreePath: soloWt.path,
+            agentName: coder.name,
+            summary: text,
+          });
+          if (soloFinalize.status === "committed") {
+            const soloMerge = await invoke<FleetMergeResult>("fleet_worktree_merge", {
+              projectCwd,
+              agentName: coder.name,
+              branch: soloWt.branch,
+            });
+            if (soloMerge.status === "merged") {
+              appendThought(coder.name, {
+                role: "fleet",
+                color: "#7ff0c5",
+                text: `🔀 merged ${coder.name} → ${soloMerge.commitSha.slice(0, 7)} · ${soloMerge.filesChanged} file${soloMerge.filesChanged === 1 ? "" : "s"}`,
+              });
+            } else if (soloMerge.status === "noChanges") {
+              appendThought(coder.name, { role: "fleet", color: "var(--fg-muted)", text: "🔀 nothing to merge" });
+            } else {
+              keepSoloWorktree = true;
+              soloIntegrationOk = false;
+              const detail = soloMerge.status === "conflict"
+                ? `conflict in ${soloMerge.files.join(", ")}`
+                : soloMerge.message;
+              appendThought(coder.name, {
+                role: "fleet",
+                color: "#ff8c8c",
+                text: `⚠ isolated work was not merged: ${detail}\nKept at ${soloWt.path}`,
+              });
+            }
+          } else if (soloFinalize.status === "error") {
+            keepSoloWorktree = true;
+            soloIntegrationOk = false;
+            appendThought(coder.name, {
+              role: "fleet",
+              color: "#ff8c8c",
+              text: `⚠ finalize failed: ${soloFinalize.message}\nKept at ${soloWt.path}`,
+            });
+          }
+        }
         // RULE-BASED PUBLISH: host commits+bumps+releases deterministically when asked.
         // The host build/sign/release can run for minutes with no model activity, so
         // KEEP the coder card active (pulsing) and flip the phase to "integrating"
@@ -11353,12 +11596,11 @@ export function AgentsPage({
         // chat stays locked with NO active card, leaving the user with no idea why.
         let sPub = "";
         const wantsPublish = goalRequiresPublish(text);
-        if (wantsPublish && needsUserDecision) {
-          // A user-only decision is pending — hold the release, don't ship blind.
-          appendThought(coder.name, { role: "system", color: "#ffd97a", text: "⏸ Publish held — waiting on your decision above." });
-          setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: "⏸ Publish is on hold until you answer the question above.", ts: Date.now(), seq: nextSeq() }]);
+        if (wantsPublish && !soloIntegrationOk) {
+          appendThought(coder.name, { role: "system", color: "#ffd97a", text: "⏸ Publish held — isolated work was not safely integrated." });
+          setSupChat(prev => [...prev, { role: "system", color: "#ffd97a", text: "⏸ Publish is on hold because the isolated run was not safely integrated.", ts: Date.now(), seq: nextSeq() }]);
         }
-        if (wantsPublish && !needsUserDecision) {
+        if (wantsPublish && soloIntegrationOk) {
           setPhase("integrating");
           appendThought(coder.name, { role: "system", color: "#7ff0c5", text: "📦 rule-based publish — host building / signing / releasing…" });
           // Surface it in the main chat too (the thought buffer alone is easy to miss),
@@ -11395,7 +11637,7 @@ export function AgentsPage({
         // Minimal solo run report.
         const vtxt = sGate ? (sGate.status === "passed" ? "✓ verify passed" : sGate.status === "failed" ? "✗ verify FAILED" : "verify: unverified") : "ran";
         const ptxt = wantsPublish ? (/PUBLISH_OK/.test(sPub) ? " · ✓ published" : " · ✗ publish failed") : "";
-        const okRun = (!sGate || sGate.status !== "failed") && (!wantsPublish || /PUBLISH_OK/.test(sPub));
+        const okRun = soloIntegrationOk && (!sGate || sGate.status !== "failed") && (!wantsPublish || /PUBLISH_OK/.test(sPub));
         const secs = Math.round((Date.now() - (runTraceRef.current?.t0 ?? Date.now())) / 1000);
         setSupChat(prev => [...prev, { role: "system", color: okRun ? "#7ff0c5" : "#ffb74d", text: `⚡ Solo-loop — @${coder.name} · ${vtxt}${ptxt} · ${secs}s`, ts: Date.now(), seq: nextSeq() }]);
         setPhase("done");
@@ -11403,6 +11645,18 @@ export function AgentsPage({
         notebookRunCompletedCleanly = okRun;
         if (!okRun) notebookPauseReason = "the solo run did not finish cleanly";
         return;
+        } finally {
+          try {
+            await invoke("fleet_worktree_remove", {
+              args: {
+                projectCwd,
+                worktreePath: soloWt.path,
+                branch: soloWt.branch,
+                keep: keepSoloWorktree,
+              },
+            });
+          } catch { /* worktree remains recoverable on disk */ }
+        }
       }
 
       // ----- Phase 1: orchestrator plan + dispatches -----
@@ -11701,12 +11955,14 @@ export function AgentsPage({
         for (const u of parse.unresolved) {
           appendThought(orch.name, {
             role: "system", color: "#ff8c8c",
-            text: `⚠ "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""} (line NOT dispatched)`,
+            text: u.reason === "empty-instruction"
+              ? `⚠ "@${u.name}:" was given no instruction (line NOT dispatched)`
+              : `⚠ "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""} (line NOT dispatched)`,
           });
         }
         if (parse.dispatches.length === 0) {
           const correction = unresolvedCorrectionMessage(parse.unresolved, runTeam, orch.name);
-          appendLog("system", { role: "system", color: "#ff8c8c", text: `⚠ Dispatch lines named unknown agents — asking the orchestrator to re-emit with real names.` });
+          appendLog("system", { role: "system", color: "#ff8c8c", text: `⚠ No dispatch line produced a run — asking the orchestrator to re-emit them.` });
           addActive(orch.name);
           appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
           try {
@@ -11839,7 +12095,7 @@ export function AgentsPage({
           // Genuinely no specialist to route to → keep the loud solo notice.
           const clean = stripDispatchDirectives(orchReply).trim();
           const noteText = parse.unresolved.length > 0
-            ? `🚫 0 dispatches ran — the orchestrator named agents that don't exist (${parse.unresolved.map(u => "@" + u.name).join(", ")}) and there's no specialist to fall back to.`
+            ? `🚫 0 dispatches ran — these lines produced no run (${parse.unresolved.map(u => "@" + u.name).join(", ")}) and there's no specialist to fall back to.`
             : "🚫 0 dispatches parsed — orchestrator answered solo, and this team has no specialist to route to. Add a specialist or rephrase the goal.";
           appendThought(orch.name, { role: "system", color: "#ff8c8c", text: noteText });
           appendLog("system", { role: "system", color: "#ff8c8c", text: noteText });
@@ -11893,42 +12149,26 @@ export function AgentsPage({
       const runId = Date.now().toString(36).slice(-6);
 
       // ----- Phase 2a: pre-create one git worktree per specialist -----
-      // Serial loop on purpose — concurrent `git worktree add` from the
-      // same source repo can race on `.git/worktrees/` index. After
-      // this loop every dispatch.agent has either: a per-agent worktree
-      // path to use as cwd (isolated), or null (fall back to projectCwd
-      // — happens when projectCwd isn't a git repo at all, e.g.
-      // research-only teams against a plain folder).
+      // Every run with a project cwd is isolated, including single-agent,
+      // sequential, and WSL runs. We cannot predict whether a model will decide
+      // to write later in its turn, so isolation is based on filesystem access,
+      // not on parallel mode or the initial prompt. Creation is serial because
+      // concurrent `git worktree add` calls race on `.git/worktrees/`.
       setPhase("dispatching");
       if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
-      type WorktreeBinding = { path: string; branch: string; baseSha: string };
       const worktreeBySpec = new Map<string, WorktreeBinding | null>();
-      // Per-agent git worktrees are a Windows-side operation; they can't be
-      // created on a `\\wsl.localhost\...` path (Windows can't reach it). For a
-      // WSL-isolated project the agents already run sealed inside the distro via
-      // wsl.exe — so skip the worktree step entirely and run them shared in the
-      // WSL folder. Isolation is preserved; we just don't sub-isolate per agent.
-      const wslShared = isWslPath(projectCwd);
-      if (wslShared) {
-        appendThought(orch.name, { role: "fleet", color: "#7ff0c5",
-          text: `🗂 WSL-isolated project — agents run sealed inside the distro (shared worktree).` });
-      }
-      // Per-agent worktrees exist ONLY to stop CONCURRENT agents from colliding on
-      // the same files. A sequential run (the default) has no concurrency, so it
-      // needs none — running in the project dir directly avoids cutting a full
-      // working-tree copy per agent on every run (the leftover-folders the user
-      // hit). Only a parallel run with >1 agent actually needs isolation.
-      const needWorktrees = !wslShared && parallelMode && dispatches.length > 1;
+      const needWorktrees = requiresAgentWorktree(projectCwd);
       // Reclaim any worktrees a PAST/crashed run left behind before making new
       // ones — per-run cleanup misses a run that crashed before its finally{}.
-      if (!wslShared) {
+      if (needWorktrees) {
         try {
           const n = await invoke<number>("fleet_cleanup_orphans", { projectCwd });
           if (n > 0) appendThought(orch.name, { role: "fleet", color: "#7ff0c5", text: `🧹 reclaimed ${n} leftover worktree(s) from a previous run.` });
         } catch { /* best-effort */ }
       }
-      // Surface a "🗂 isolated" or "🗂 shared" line in the orchestrator's
-      // Thought tab per dispatch so the user can see what happened.
+      // With no project cwd, agents have no project filesystem to share. With a
+      // project cwd, anything except Ready is a hard stop: never silently
+      // downgrade a filesystem-capable run to the user's shared checkout.
       for (const d of dispatches) {
         if (!needWorktrees) { worktreeBySpec.set(d.agentName, null); continue; }
         const spec = runTeam.agents.find(a => a.name === d.agentName);
@@ -11936,43 +12176,29 @@ export function AgentsPage({
         let res: FleetCreateResult;
         try {
           res = await invoke<FleetCreateResult>("fleet_worktree_create", {
-            projectCwd, agentName: spec.name, runId,
+            projectCwd, agentName: spec.name, runId, checkpointDirty: true,
           });
         } catch (e: any) {
           res = { status: "error", message: String(e?.message ?? e) };
         }
         if (res.status === "ready") {
           worktreeBySpec.set(spec.name, { path: res.path, branch: res.branch, baseSha: res.baseSha });
+          // Only the first create of a run can carry a checkpoint — the rest
+          // find the checkout already clean.
+          const checkpoint = worktreeCheckpointNotice(res);
+          if (checkpoint) appendLog("system", { role: "system", color: "#ffd479", text: checkpoint });
           appendThought(orch.name, {
             role: "fleet", color: "#7ff0c5",
             text: `🗂 ${spec.name} → ${res.branch}\n   ${res.path}`,
           });
-        } else if (res.status === "notAGitRepo") {
-          worktreeBySpec.set(spec.name, null);
-          appendThought(orch.name, {
-            role: "fleet", color: "var(--fg-muted)",
-            text: `🗂 ${spec.name}: project is not a git repo — running shared in ${projectCwd || "(no cwd)"}`,
-          });
-        } else if (res.status === "dirtyWorkingTree") {
-          // Abort the whole run with a clear, fixable error rather than
-          // silently giving the agent a stale base. The user can commit
-          // / stash and re-run.
-          throw new Error(
-            `Project has uncommitted changes — commit or stash before running a multi-agent dispatch so each agent works from a clean base.\n\n${res.details}`
-          );
         } else {
-          worktreeBySpec.set(spec.name, null);
-          appendThought(orch.name, {
-            role: "fleet", color: "#ff8c8c",
-            text: `🗂 ${spec.name}: worktree creation failed — ${res.message}. Falling back to shared cwd.`,
-          });
+          throw worktreePreflightError(spec.name, projectCwd, res);
         }
       }
 
       // ----- Phase 2b: parallel specialist dispatch -----
-      // Each task runs the CLI in its own worktree path (or the shared
-      // projectCwd if none was created), then finalizes (commits) any
-      // edits the agent made before resolving.
+      // Each task runs the CLI in its own worktree path. A null binding exists
+      // only when there is no project cwd at all.
       // Surface a parallel wave in the user thread so concurrency is visible
       // (Stage 1 "surface"). A single dispatch reads as the usual sequential step.
       if (dispatches.length > 1) {
@@ -12071,12 +12297,13 @@ export function AgentsPage({
             // messages are ignored" bug). Deeper still, getSteer below lets a
             // LOCAL model pick it up between tool calls, mid-turn.
             const specSteer = drainSteers();
-            if (specSteer) appendThought(spec.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${specSteer}` });
+            const specSteerText = specSteer?.text || (specSteer ? "Review the attached media." : "");
+            if (specSteer) appendThought(spec.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${specSteerText}` });
             const turnBase = attempt === 1
               ? enrichedInstruction
               : `Your previous change did NOT pass the project's verification:\n${renderGateLine(finalGate!)}\n\nFix it so the check passes — change the approach if needed. Original task:\n${instruction}`;
             const turn = specSteer
-              ? `${turnBase}\n\n⚡ The user sent this WHILE the team was working — it applies to the whole team's goal; address it too:\n${specSteer}`
+              ? `${turnBase}\n\n⚡ The user sent this WHILE the team was working — it applies to the whole team's goal; address it too:\n${specSteerText}`
               : turnBase;
             try {
               specText = (await streamChatCompletion(
@@ -12093,10 +12320,10 @@ export function AgentsPage({
                 autoApprove,
                 (channel, role, delta) => streamThought(spec.name, channel, role, delta),
                 allowed,
-                undefined,
+                specSteer && specSteer.attachments.length > 0 ? specSteer.attachments : undefined,
                 getClaudeSession(selectedProjectId, spec.name),
                 undefined, undefined,
-                drainSteers, // local models drain steers between tool calls (mid-turn)
+                drainTextOnlySteers, // attachment steers wait for a multimodal turn boundary
               )).trim();
             } catch (e: any) {
               specText = `(error: ${cleanAgentError(e)})`;
@@ -12389,7 +12616,7 @@ export function AgentsPage({
           projectCwd,
           priorHistory, undefined,   // history: continuity for the final answer
           (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-          effectiveToolsFor(orch),
+          runtimeReadOnlyTools(orch, roleByName),
           undefined,
           getClaudeSession(selectedProjectId, orch.name),
         );
@@ -12479,7 +12706,7 @@ export function AgentsPage({
               projectCwd,
               priorHistory, undefined,
               (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-              effectiveToolsFor(orch),
+              runtimeReadOnlyTools(orch, roleByName),
               undefined,
               getClaudeSession(selectedProjectId, orch.name),
             );
@@ -12500,7 +12727,8 @@ export function AgentsPage({
       for (let sg = 0; sg < 5 && !ctrl.signal.aborted; sg++) {
         const steer = drainSteers();
         if (!steer) break;
-        appendThought(orch.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${steer}` });
+        const steerText = steer.text || "Review the attached media.";
+        appendThought(orch.name, { role: "system", color: "#7fd4ff", text: `⚡ addressing your mid-run message:\n${steerText}` });
         addActive(orch.name);
         appendLog(orch.name, { role: orch.name, color: "#ffd97a", text: "" });
         try {
@@ -12512,15 +12740,15 @@ export function AgentsPage({
               finalReply,
               "",
               "The user sent this WHILE you were working — address it now, then output the updated final answer only. Dispatch specialists again ONLY if the message genuinely needs it:",
-              steer,
+              steerText,
             ].join("\n"),
             tempFor(orch, 0.4), ctrl.signal,
             (delta) => streamLog(orch.name, delta),
             projectCwd,
             priorHistory, undefined,
             (channel, role, delta) => streamThought(orch.name, channel, role, delta),
-            effectiveToolsFor(orch),
-            undefined,
+            runtimeReadOnlyTools(orch, roleByName),
+            steer.attachments.length > 0 ? steer.attachments : undefined,
             getClaudeSession(selectedProjectId, orch.name),
           );
           if (steered.trim()) { finalReply = steered; speakAgentReply(orch.name, finalReply); }
@@ -12597,14 +12825,25 @@ export function AgentsPage({
         let docWt: WorktreeBinding | null = null;
         try {
           const wtRes = await invoke<FleetCreateResult>("fleet_worktree_create", {
-            projectCwd, agentName: docSpec.name, runId: `${runId}-docs`,
+            projectCwd, agentName: docSpec.name, runId: `${runId}-docs`, checkpointDirty: true,
           });
           if (wtRes.status === "ready") {
             docWt = { path: wtRes.path, branch: wtRes.branch, baseSha: wtRes.baseSha };
             appendThought(docSpec.name, { role: "fleet", color: "#7ff0c5", text: `🗂 ${docSpec.name} → ${wtRes.branch}` });
+          } else {
+            throw worktreePreflightError(docSpec.name, projectCwd, wtRes);
           }
-        } catch { /* fall back to shared cwd */ }
-        const docCwd = docWt ? docWt.path : projectCwd;
+        } catch (e: any) {
+          appendThought(docSpec.name, {
+            role: "fleet",
+            color: "#ff8c8c",
+            text: `📚 auto-doc stopped before dispatch: ${String(e?.message ?? e)}`,
+          });
+          removeActive(docSpec.name);
+          throw e;
+        }
+        if (!docWt) throw new Error(`Required worktree for @${docSpec.name} was not created.`);
+        const docCwd = docWt.path;
         const docAllowed = effectiveToolsFor(docSpec);
         const docSkillIds = [...(roleByName.get(docSpec.base)?.skillAllowlist ?? []), ...(docSpec.extraSkills ?? []), ...(perAgentSkills.get(docSpec.name) ?? [])];
         const docSkillBlock = await buildAgentSkillBlock(
@@ -12762,6 +13001,8 @@ export function AgentsPage({
         appendLog("system", { role: "system", color: "#ff8c8c", text: "⏹ Stopped by user." });
         notebookPauseReason = "the run was stopped";
       } else {
+        notebookRunStoppedAtPreflight =
+          e instanceof WorktreePreflightError || e instanceof CliPreflightError;
         const clean = cleanAgentError(e);
         setRunError(clean);
         // Network failures get the one-click WSL-restart recovery button.
@@ -12769,7 +13010,7 @@ export function AgentsPage({
           role: "system", color: "#ff8c8c", text: `⚠ ${clean}`,
           action: isNetworkAgentError(e) ? "wsl-restart" : undefined,
         });
-        notebookPauseReason = "the run ended with an error";
+        notebookPauseReason = clean;
       }
       setPhase("idle");
     } finally {
@@ -12780,18 +13021,51 @@ export function AgentsPage({
       // 📓 Stamp notebook step timing for the step that started this run and any
       // notebook steps that were drained and processed as mid-run steers.
       const now = Date.now();
+      // One outcome for every card this run carried, decided in the shared
+      // helper so this page and the Coding page cannot diverge again.
+      const outcome: NotebookRunOutcome = notebookRunCompletedCleanly
+        ? { kind: "clean" }
+        : notebookRunStoppedAtPreflight ? { kind: "preflight" } : { kind: "failed", reason: notebookPauseReason };
+      // Did this run carry ANY notebook card — as its goal, as a drained steer,
+      // or as one still waiting to drain? Captured before the refs below are
+      // spliced, because it decides whether the chain may advance at all.
+      const ranFromNotebook = notebookStepRef.current != null
+        || notebookSteerInFlightIdsRef.current.length > 0
+        || notebookSteerStepIdsRef.current.length > 0;
       if (notebookStepRef.current) {
-        markNotebookStepFinished(selectedProjectId, notebookStepRef.current, now);
+        settleNotebookStep(selectedProjectId, notebookStepRef.current, outcome, now);
         notebookStepRef.current = null;
       }
       for (const sid of notebookSteerInFlightIdsRef.current.splice(0, notebookSteerInFlightIdsRef.current.length)) {
-        markNotebookStepFinished(selectedProjectId, sid, now);
+        settleNotebookStep(selectedProjectId, sid, outcome, now);
       }
+      // 📓 Steers queued after the run's LAST drain boundary were never handed
+      // to any agent, yet feedStep already stamped their cards "sent · running".
+      // Nothing here used to reclaim them, so those cards ran forever, the
+      // sequence timer never closed, and their text sat in the queue until it
+      // surfaced inside an unrelated later run. Settle them explicitly — the
+      // Coding page has always done this; the two pages now agree.
+      const strandedSteerIds = notebookSteerStepIdsRef.current.splice(0, notebookSteerStepIdsRef.current.length);
+      const leftoverSteers = steerQueueRef.current.splice(0, steerQueueRef.current.length);
+      const leftoverSteerText = leftoverSteers.map((item) => item.text).filter(Boolean).join("\n");
+      const leftoverSteerAttachments = leftoverSteers.flatMap((item) => item.attachments);
       // Busy/reentrancy flags are clear now, so every exit path makes one
       // deterministic Notebook decision. A clean run advances the next card;
       // any other outcome leaves pending cards untouched and explains the pause.
-      if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();
-      else notifyAutoFeedPaused(notebookPauseReason);
+      if ((leftoverSteerText || leftoverSteerAttachments.length > 0) && notebookRunCompletedCleanly) {
+        // The work is still wanted: re-dispatch it as a follow-up turn and put
+        // the cards back in flight so the next run end stamps them properly.
+        // This takes priority over auto-feed — the user asked for these first.
+        notebookSteerInFlightIdsRef.current.push(...strandedSteerIds);
+        void onSupSendRef.current?.(leftoverSteerText, leftoverSteerAttachments);
+      } else {
+        for (const sid of strandedSteerIds) markNotebookStepPending(selectedProjectId, sid);
+        if (leftoverSteerText || leftoverSteerAttachments.length > 0) {
+          setSupChat(prev => [...prev, { role: "system", color: "#ffb74d", text: `📓 ${strandedSteerIds.length || 1} queued step(s) never reached the team because the run ended early — returned to the Notebook queue as pending.`, ts: Date.now(), seq: nextSeq() }]);
+        }
+        if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed(ranFromNotebook);
+        else if (ranFromNotebook) notifyAutoFeedPaused(notebookPauseReason);
+      }
       clearActive();
       abortRef.current = null;
       agentRunAborts.delete(agentSessId);
@@ -13495,7 +13769,7 @@ export function AgentsPage({
             agentName={name}
             displayName={displayLabel(name)}
             icon={agentIconRef(spec, roleByName, agentIconOverrides)}
-            initialModel={modelFor(name)}
+            initialModel={agentModelOverrideFor(name) || spec.defaultModelId || ""}
             initialColor={spec.color ?? ""}
             initialPrompt={spec.extraPrompt ?? ""}
             initialProfileRef={spec.profileRef}
@@ -13685,6 +13959,7 @@ export function AgentsPage({
             phase={phase}
             models={models}
             modelFor={modelFor}
+            agentModelOverrideFor={agentModelOverrideFor}
             onPickAgentModel={onPickAgentModel}
             accountsStatus={accountsStatus}
             effectiveTeamModel={effectiveTeamModel}

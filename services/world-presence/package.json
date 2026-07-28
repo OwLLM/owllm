@@ -1,6 +1,8 @@
 {
   "name": "@owllm/world-presence",
   "private": true,
+  "license": "UNLICENSED",
+  "author": "Far island Corporation Ltd.",
   "type": "module",
   "scripts": {
     "test": "node --test",

@@ -1,0 +1,55 @@
+---
+import Layout from "../layouts/Layout.astro";
+import Button from "../components/Button.astro";
+---
+
+<Layout
+  title="Page not found"
+  description="The page you are looking for does not exist."
+  noindex={true}
+>
+  <section class="not-found" aria-labelledby="not-found-title">
+    <div class="container">
+      <h1 id="not-found-title">404</h1>
+      <p class="subtitle">This page flew the coop.</p>
+      <p class="description">The page you are looking for does not exist or has moved.</p>
+      <Button href="/" variant="primary" size="lg">Back to home</Button>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .not-found {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 6rem 1rem;
+    flex: 1;
+  }
+
+  .container {
+    max-width: 600px;
+  }
+
+  h1 {
+    font-size: clamp(5rem, 15vw, 10rem);
+    line-height: 1;
+    color: var(--accent);
+    opacity: 0.8;
+    margin-bottom: 0.5rem;
+  }
+
+  .subtitle {
+    font-size: clamp(1.5rem, 4vw, 2.5rem);
+    font-weight: 700;
+    color: var(--fg-strong);
+    margin-bottom: 0.75rem;
+  }
+
+  .description {
+    color: var(--fg-muted);
+    margin-bottom: 2rem;
+    font-size: 1.125rem;
+  }
+</style>

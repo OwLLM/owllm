@@ -159,9 +159,9 @@ case "$HOST_OS" in
     ;;
   linux)
     PLATFORM_KEY="linux-$ARCH"
-    INSTALLER="dist/OwLLM.Desktop.AppImage"
+    INSTALLER="dist/OwLLM.Desktop_${VERSION}_${ARCH}.AppImage"
     UPDATER_ARTIFACT="$INSTALLER"   # Tauri's Linux updater consumes the AppImage
-    URL="https://github.com/$REPO/releases/download/$TAG/OwLLM.Desktop.AppImage"
+    URL="https://github.com/$REPO/releases/download/$TAG/OwLLM.Desktop_${VERSION}_${ARCH}.AppImage"
     ;;
 esac
 
@@ -342,8 +342,8 @@ case "$HOST_OS" in
       cp -f "$AI" "$INSTALLER"
       # Convenience packages for non-AppImage distros (download-only; the
       # updater path is the AppImage).
-      cp -f "$BUNDLE"/deb/*.deb dist/OwLLM.Desktop.deb 2>/dev/null || true
-      cp -f "$BUNDLE"/rpm/*.rpm dist/OwLLM.Desktop.rpm 2>/dev/null || true
+      cp -f "$BUNDLE"/deb/*.deb "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" 2>/dev/null || true
+      cp -f "$BUNDLE"/rpm/*.rpm "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm" 2>/dev/null || true
     fi
     ;;
 esac
@@ -474,7 +474,7 @@ step "4/5 gh release ($TAG, $_chan)"
 LATEST_FLAG="--latest"; [ "$PRERELEASE" = 1 ] && LATEST_FLAG="--prerelease"; [ "$DRAFT" = 1 ] && LATEST_FLAG="--draft"
 UPLOADS=("$INSTALLER" "$LATEST")
 [ "$UPDATER_ARTIFACT" = "$INSTALLER" ] || UPLOADS+=("$UPDATER_ARTIFACT")
-for extra in dist/OwLLM.Desktop.deb dist/OwLLM.Desktop.rpm; do
+for extra in "dist/OwLLM.Desktop_${VERSION}_${ARCH}.deb" "dist/OwLLM.Desktop_${VERSION}_${ARCH}.rpm"; do
   [ -f "$extra" ] && UPLOADS+=("$extra")
 done
 if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then

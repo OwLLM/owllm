@@ -38,8 +38,7 @@ fn open_db() -> Result<rusqlite::Connection, String> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let conn =
-        rusqlite::Connection::open(&path).map_err(|e| format!("open {}: {e}", path.display()))?;
+    let conn = crate::projects::open_state_db(&path)?;
     ensure_schema(&conn)?;
     Ok(conn)
 }
@@ -100,6 +99,30 @@ pub(crate) fn ensure_schema(conn: &rusqlite::Connection) -> Result<(), String> {
         CREATE INDEX IF NOT EXISTS idx_team_memory_index_memory ON team_memory_index(memory_id);",
     )
     .map_err(|e| format!("ensure memory index schema: {e}"))?;
+    // A short-lived UI experiment promoted every successful run summary into
+    // a durable fact tagged `auto-curated`. That duplicated the bounded worklog,
+    // polluted RAG retrieval, and produced a large disconnected graph cluster.
+    // Preserve those generated rows in an internal archive, but remove them
+    // from graph/search/index/vault facts. Explicit memory_write/[REMEMBER]
+    // facts are untouched.
+    let legacy_auto_ids: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM team_memory \
+             WHERE kind = 'fact' AND (',' || lower(tags) || ',') LIKE '%,auto-curated,%'",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| r.get::<_, i64>(0))
+                .map(|rows| rows.filter_map(Result::ok).collect())
+        })
+        .unwrap_or_default();
+    for id in legacy_auto_ids {
+        conn.execute(
+            "UPDATE team_memory SET kind = 'archived' WHERE id = ?1",
+            rusqlite::params![id],
+        )
+        .map_err(|e| format!("archive legacy auto-curated memory: {e}"))?;
+        reindex_team_memory_row(conn, id)?;
+    }
     let indexed: i64 = conn
         .query_row("SELECT count(*) FROM team_memory_index", [], |r| r.get(0))
         .unwrap_or(0);
@@ -514,19 +537,23 @@ pub(crate) fn reindex_team_memory_row(conn: &rusqlite::Connection, id: i64) -> R
     )
     .map_err(|e| format!("clear memory index: {e}"))?;
     let row = conn.query_row(
-        "SELECT mkey, tags, content FROM team_memory WHERE id = ?1",
+        "SELECT mkey, tags, content, kind FROM team_memory WHERE id = ?1",
         rusqlite::params![id],
         |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
             ))
         },
     );
-    let Ok((key, tags, content)) = row else {
+    let Ok((key, tags, content, kind)) = row else {
         return Ok(());
     };
+    if kind == "archived" {
+        return Ok(());
+    }
     let toks = tokens_for_fields(&key, &tags, &content);
     let mut terms = BTreeSet::new();
     terms.extend(toks.key.iter().cloned());
@@ -565,10 +592,7 @@ fn rebuild_team_memory_index(conn: &rusqlite::Connection) -> Result<(), String> 
             .collect();
         mapped
     };
-    for id in ids {
-        reindex_team_memory_row(conn, id)?;
-    }
-    Ok(())
+    reindex_ids_atomically(conn, &ids, "owllm_reindex_all")
 }
 
 pub(crate) fn reindex_team_memory_scope(
@@ -587,10 +611,47 @@ pub(crate) fn reindex_team_memory_scope(
             .collect();
         mapped
     };
-    for id in ids {
-        reindex_team_memory_row(conn, id)?;
+    reindex_ids_atomically(conn, &ids, "owllm_reindex_scope")
+}
+
+/// Re-index a batch of rows inside ONE transaction.
+///
+/// `reindex_team_memory_row` issues a DELETE plus one INSERT per term — around
+/// fifty statements for a typical row. In autocommit that is a separate commit,
+/// journal cycle and fsync *per statement*, so re-indexing a project's whole
+/// scope cost tens of thousands of commits. With vault sync doing that for
+/// every project it kept a rollback journal alive almost continuously, and any
+/// concurrent user write failed instantly with "database is locked".
+///
+/// SAVEPOINT rather than BEGIN: callers such as vault import may already hold a
+/// transaction, and a nested BEGIN is an error.
+fn reindex_ids_atomically(
+    conn: &rusqlite::Connection,
+    ids: &[i64],
+    savepoint: &str,
+) -> Result<(), String> {
+    if ids.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    conn.execute_batch(&format!("SAVEPOINT {savepoint}"))
+        .map_err(|e| format!("begin reindex: {e}"))?;
+    let mut outcome = Ok(());
+    for &id in ids {
+        if let Err(e) = reindex_team_memory_row(conn, id) {
+            outcome = Err(e);
+            break;
+        }
+    }
+    if outcome.is_ok() {
+        conn.execute_batch(&format!("RELEASE {savepoint}"))
+            .map_err(|e| format!("commit reindex: {e}"))?;
+    } else {
+        // Leave the index exactly as it was rather than half-rewritten.
+        let _ = conn.execute_batch(&format!(
+            "ROLLBACK TO {savepoint}; RELEASE {savepoint}"
+        ));
+    }
+    outcome
 }
 
 fn load_index_tokens(
@@ -657,16 +718,49 @@ pub async fn team_memory_search(
     // Up to 500 so the graph view can show the whole brain; the agent-facing
     // memory_search tool still passes small limits (8).
     let lim = limit.unwrap_or(8).clamp(1, 500) as usize;
+    // Restrict to the requested kinds IN SQL, not after the fact. The 500-row
+    // candidate window is applied by the query, so filtering afterwards meant a
+    // `kinds: ["fact"]` search on a busy project scanned the newest 500 rows of
+    // ANY kind and then kept the facts among them — once a project logged 500
+    // worklog rows, every fact became permanently unreachable to search while
+    // still sitting in the database. Now the window is 500 rows OF THAT KIND.
+    // Unknown kind names are dropped rather than passed through, so the query
+    // can never be widened by a caller.
+    let wanted: Vec<String> = match kinds.as_ref() {
+        Some(ks) if !ks.is_empty() => {
+            let known: Vec<String> = ks
+                .iter()
+                .filter(|k| k.as_str() == "fact" || k.as_str() == "worklog")
+                .cloned()
+                .collect();
+            if known.is_empty() {
+                // The caller asked ONLY for kinds this query never serves (e.g.
+                // 'archived'). Answer with nothing rather than silently widening
+                // back to every kind, which would hand back rows nobody asked for.
+                return Ok(Vec::new());
+            }
+            known
+        }
+        _ => vec!["fact".to_string(), "worklog".to_string()],
+    };
     tokio::task::spawn_blocking(move || {
         let conn = open_db()?;
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, mkey, content, tags, author, ts, kind FROM team_memory \
-                 WHERE scope = ?1 ORDER BY id DESC LIMIT 500",
-            )
-            .map_err(|e| format!("prepare: {e}"))?;
+        let placeholders = (0..wanted.len())
+            .map(|i| format!("?{}", i + 2))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "SELECT id, mkey, content, tags, author, ts, kind FROM team_memory \
+             WHERE scope = ?1 AND kind IN ({placeholders}) \
+             ORDER BY id DESC LIMIT 500"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(|e| format!("prepare: {e}"))?;
+        let mut params: Vec<&dyn rusqlite::ToSql> = vec![&sc];
+        for k in &wanted {
+            params.push(k);
+        }
         let rows = stmt
-            .query_map(rusqlite::params![sc], |r| {
+            .query_map(params.as_slice(), |r| {
                 Ok(TeamMemoryEntry {
                     id: r.get(0)?,
                     key: r.get(1)?,
@@ -681,9 +775,6 @@ pub async fn team_memory_search(
         let mut all: Vec<TeamMemoryEntry> = Vec::new();
         for r in rows {
             all.push(r.map_err(|e| format!("row: {e}"))?);
-        }
-        if let Some(ks) = kinds.as_ref().filter(|ks| !ks.is_empty()) {
-            all.retain(|e| ks.iter().any(|k| k == &e.kind));
         }
         let mut terms = tokenize(&query);
         terms.dedup();
@@ -953,6 +1044,56 @@ mod tests {
                 count >= 3,
                 "expected persisted RAG index terms, got {count}"
             );
+        });
+    }
+
+    #[test]
+    fn legacy_auto_curated_facts_are_archived_without_touching_explicit_facts() {
+        with_project_db("auto-curated-demotion", |path| {
+            {
+                let conn = rusqlite::Connection::open(path).expect("open test db");
+                ensure_schema(&conn).expect("create schema");
+                conn.execute(
+                    "INSERT INTO team_memory (scope, mkey, content, tags, author, ts, kind) \
+                     VALUES ('project', 'auto_work_old', 'generated summary', \
+                             'auto-curated,implementation', 'code', 1, 'fact')",
+                    [],
+                )
+                .expect("insert generated fact");
+                conn.execute(
+                    "INSERT INTO team_memory (scope, mkey, content, tags, author, ts, kind) \
+                     VALUES ('project', 'build_command', 'npm run build', \
+                             'build', 'you', 2, 'fact')",
+                    [],
+                )
+                .expect("insert explicit fact");
+            }
+
+            let conn = rusqlite::Connection::open(path).expect("reopen test db");
+            ensure_schema(&conn).expect("run memory migration");
+            let generated: (String, String) = conn
+                .query_row(
+                    "SELECT kind, tags FROM team_memory WHERE mkey = 'auto_work_old'",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .expect("read generated row");
+            let explicit: String = conn
+                .query_row(
+                    "SELECT kind FROM team_memory WHERE mkey = 'build_command'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("read explicit row");
+
+            assert_eq!(
+                generated,
+                (
+                    "archived".to_string(),
+                    "auto-curated,implementation".to_string()
+                )
+            );
+            assert_eq!(explicit, "fact");
         });
     }
 }

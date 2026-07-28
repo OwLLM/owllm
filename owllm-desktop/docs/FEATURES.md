@@ -70,12 +70,20 @@ bridges, sandboxing); React owns all UI via `invoke()`.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are
   injected at the next agent boundary — or **between tool calls** on local
   models (`getSteer` in `dispatch.ts`). Never dropped.
-- **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane + Kanban
-  plan board (NOW/NEXT/LATER) + NEXT-STEPS list + 🪄 Digest agent (rewrites
-  raw notes into implementable steps, additive-only). Steps feed the run
-  (steer or new goal); ⚡ Start batch feeds the whole NOW lane (the board is
-  never consumed); ▶ Start queue feeds the first pending step and auto-feed
-  walks the rest at each clean run end. Also mounted on the Code page.
+- **Run Notebook** (`RunNotebook.tsx`): per-project brainstorm pane +
+  NEXT-STEPS list + 🪄 Digest agent (rewrites raw notes into implementable
+  steps, additive-only). Steps feed the run (steer or new goal); ▶ Start queue
+  feeds the first pending step and auto-feed walks the rest at each clean run
+  end. Mounted inline on the Code page and as a modal on the Agents page —
+  ONE blob per project, so both surfaces are views of the same notebook.
+  The Kanban plan board (NOW/NEXT/LATER) and its ⚡ Start batch action are
+  built but **hidden** behind `SHOW_KANBAN = false`; the digest stops asking
+  for a PLAN block while it is off.
+  Cross-device: content syncs through the vault and merges per step
+  (union by id, most-advanced-status wins, tombstones for deletions) so a
+  step another PC finished can never come back as pending. The run-lease
+  (who drives the queue) stays device-local; a synced `runningOn` field is
+  advisory only and never blocks a second machine.
 - **Memory**: per-agent history + shared **team memory** (`memory.rs`) — FACTS
   (durable, keyed, vault-synced) vs WORKLOG (auto-captured, local, capped 100),
   BM25-lite retrieval, `[REMEMBER]` harvest on every model path, 3D graph

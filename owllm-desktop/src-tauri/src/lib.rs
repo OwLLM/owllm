@@ -54,6 +54,7 @@ mod github;
 mod hardware;
 mod huggingface;
 mod kvm;
+mod linux_updater;
 mod mcp;
 mod mcp_gateway;
 mod media_assets;
@@ -131,17 +132,23 @@ fn install_crash_log_hook() {
 /// and never override an explicit operator choice.
 #[cfg(target_os = "linux")]
 fn configure_linux_webkit_renderer() {
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_some() {
-        return;
-    }
     let has_nvidia_driver = std::path::Path::new("/proc/driver/nvidia/version").is_file()
         || std::path::Path::new("/sys/module/nvidia/version").exists();
-    if has_nvidia_driver {
-        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
-        eprintln!(
-            "[owllm] NVIDIA Linux detected; WebKitGTK DMA-BUF renderer disabled for stability"
-        );
+    if !has_nvidia_driver {
+        return;
     }
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
+        std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+    // Jetson's arm64 NVIDIA/WebKitGTK stack can still abort in accelerated
+    // compositing after DMA-BUF is disabled. Keep x86_64 acceleration intact,
+    // but use WebKitGTK's software-compositing fallback on NVIDIA arm64.
+    if cfg!(target_arch = "aarch64")
+        && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none()
+    {
+        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+    }
+    eprintln!("[owllm] NVIDIA Linux detected; unstable WebKitGTK renderers disabled for stability");
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -190,6 +197,9 @@ fn fit_macos_main_window(_window: &tauri::Window) {}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if linux_updater::handle_startup_mode() {
+        return;
+    }
     install_crash_log_hook();
     configure_linux_webkit_renderer();
     // USB-portable Block 2: detect portable mode (env var or a portable.json
@@ -293,6 +303,7 @@ pub fn run() {
             if webview.label() == "main"
                 && payload.event() == tauri::webview::PageLoadEvent::Finished
             {
+                linux_updater::confirm_successful_boot();
                 let window = webview.window();
                 // Don't force-maximize on first paint — tauri.conf.json
                 // sets width/height (1400x960) which is what the user
@@ -342,6 +353,7 @@ pub fn run() {
             accounts::codex_cli_stream,
             accounts::claude_cli_stream,
             accounts::kimi_cli_complete,
+            accounts::kimi_cli_stream,
             accounts::gemini_cli_complete,
             accounts::grok_cli_complete,
             accounts::cli_cancel_all,
@@ -574,6 +586,7 @@ pub fn run() {
             recommendations::models_recommended,
             paths::shell_open_url,
             paths::update_install_mode,
+            linux_updater::linux_appimage_update_install,
             paths::paths_debug,
             paths::llama_server_path,
             readiness::app_readiness,

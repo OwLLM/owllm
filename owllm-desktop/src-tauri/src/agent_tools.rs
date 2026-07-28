@@ -31,6 +31,72 @@ pub struct ShellResult {
     pub exit_code: i32,
 }
 
+/// Largest stdout/stderr, per stream, a spawned tool command may hand back.
+///
+/// `Command::output()` grows one Vec per stream until the child exits, with no
+/// ceiling. A single runaway command — a build loop, a `find /`, a process
+/// spewing a stack trace — therefore grows the capture until the allocator
+/// fails, and a failed allocation in Rust is an `abort()`: the whole app dies
+/// with no error anyone can see, taking the run with it.
+///
+/// The cap costs nothing, because every consumer of a ShellResult already
+/// truncates to 4,000 chars of stdout / 2,000 of stderr before a model sees it
+/// (`truncate` in localTools.ts). The uncapped bytes were only ever allocated,
+/// copied again by `from_utf8_lossy`, serialised to JSON across the IPC
+/// boundary, and then thrown away.
+const MAX_CAPTURE_BYTES: usize = 1 << 20; // 1 MiB per stream, as in remote_devices::session
+
+/// Run `cmd` to completion and collect its output exactly like
+/// `Command::output()`, except each stream stops GROWING at
+/// `MAX_CAPTURE_BYTES`.
+///
+/// Reading deliberately CONTINUES past the cap — the excess is counted and
+/// dropped rather than left in the pipe — so the child never blocks writing
+/// into a full buffer. The cap must change how much chatter we keep, never
+/// whether the command finishes.
+async fn output_capped(cmd: &mut tokio::process::Command) -> std::io::Result<ShellResult> {
+    use std::process::Stdio;
+    use tokio::io::AsyncReadExt;
+
+    /// Read one pipe to EOF, keeping at most `MAX_CAPTURE_BYTES`.
+    async fn take(pipe: Option<impl AsyncReadExt + Unpin>) -> String {
+        let Some(mut p) = pipe else {
+            return String::new();
+        };
+        let mut kept: Vec<u8> = Vec::new();
+        let mut dropped: u64 = 0;
+        let mut chunk = [0u8; 8192];
+        loop {
+            match p.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let room = MAX_CAPTURE_BYTES.saturating_sub(kept.len()).min(n);
+                    kept.extend_from_slice(&chunk[..room]);
+                    dropped += (n - room) as u64;
+                }
+            }
+        }
+        let mut s = String::from_utf8_lossy(&kept).into_owned();
+        if dropped > 0 {
+            s.push_str(&format!("\n…[truncated, {dropped} more bytes]"));
+        }
+        s
+    }
+
+    // What `output()` sets implicitly, so callers see no behaviour change.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    let (stdout, stderr) = tokio::join!(take(child.stdout.take()), take(child.stderr.take()));
+    let status = child.wait().await?;
+    Ok(ShellResult {
+        stdout,
+        stderr,
+        exit_code: status.code().unwrap_or(-1),
+    })
+}
+
 /// Resolve a tool path against an optional project CWD. If the path
 /// is absolute we accept it as-is; if it's relative the CWD is the
 /// anchor (matches the Python tool runtime's behavior).
@@ -453,15 +519,9 @@ pub async fn tool_shell_exec(command: String, cwd: Option<String>) -> Result<She
             use std::os::windows::process::CommandExt;
             wcmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let output = wcmd
-            .output()
+        return output_capped(&mut wcmd)
             .await
-            .map_err(|e| format!("spawn sandbox shell: {e}"))?;
-        return Ok(ShellResult {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code().unwrap_or(-1),
-        });
+            .map_err(|e| format!("spawn sandbox shell: {e}"));
     }
 
     let cwd_path = cwd.as_deref().filter(|s| !s.is_empty()).map(PathBuf::from);
@@ -503,15 +563,9 @@ pub async fn tool_shell_exec(command: String, cwd: Option<String>) -> Result<She
             cmd.env("PATH", new_path);
         }
     }
-    let output = cmd
-        .output()
+    output_capped(&mut cmd)
         .await
-        .map_err(|e| format!("spawn shell: {e}"))?;
-    Ok(ShellResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(-1),
-    })
+        .map_err(|e| format!("spawn shell: {e}"))
 }
 
 // ----- Remote machines over SSH (agents that operate other devices) -----
@@ -581,15 +635,9 @@ pub async fn tool_ssh_exec(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = cmd
-        .output()
+    output_capped(&mut cmd)
         .await
-        .map_err(|e| format!("spawn ssh (is the OpenSSH client installed + on PATH?): {e}"))?;
-    Ok(ShellResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(-1),
-    })
+        .map_err(|e| format!("spawn ssh (is the OpenSSH client installed + on PATH?): {e}"))
 }
 
 /// Build an scp command shared by upload/download (scp uses -P for the port,
@@ -635,12 +683,9 @@ pub async fn tool_ssh_upload(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = cmd.output().await.map_err(|e| format!("spawn scp: {e}"))?;
-    Ok(ShellResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(-1),
-    })
+    output_capped(&mut cmd)
+        .await
+        .map_err(|e| format!("spawn scp: {e}"))
 }
 
 #[tauri::command]
@@ -664,12 +709,9 @@ pub async fn tool_ssh_download(
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = cmd.output().await.map_err(|e| format!("spawn scp: {e}"))?;
-    Ok(ShellResult {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code().unwrap_or(-1),
-    })
+    output_capped(&mut cmd)
+        .await
+        .map_err(|e| format!("spawn scp: {e}"))
 }
 
 // ----- Filesystem search (Claude Code parity: Grep + Glob) -----

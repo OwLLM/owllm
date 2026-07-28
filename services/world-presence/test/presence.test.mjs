@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import test from "node:test";
 import { Miniflare } from "miniflare";
-import { buildSnapshot, coarseLocation, publicNode, sanitizeNodeId } from "../src/index.js";
+import { buildSnapshot, coarseLocation, normalizeOsFamily, publicNode, sanitizeNodeId } from "../src/index.js";
 
 const KR = { country: "KR", regionCode: "11", latitude: "37.5665", longitude: "126.9780" };
 const IT = { country: "IT", regionCode: "62", latitude: "41.9", longitude: "12.5" };
@@ -28,8 +28,11 @@ async function withService(run) {
   finally { await mf.dispose(); }
 }
 
-async function connect(mf, role, cf = {}, id = "") {
-  const query = id ? `?role=${role}&id=${id}` : `?role=${role}`;
+async function connect(mf, role, cf = {}, id = "", os = "") {
+  const params = new URLSearchParams({ role });
+  if (id) params.set("id", id);
+  if (os) params.set("os", os);
+  const query = `?${params.toString()}`;
   const response = await mf.dispatchFetch(`https://presence.example/v1/presence/connect${query}`, {
     headers: { Upgrade: "websocket" },
     cf,
@@ -59,24 +62,33 @@ test("client node ids are reduced to an opaque, bounded, anonymous token", () =>
   assert.equal(sanitizeNodeId(""), "");
 });
 
+test("operating systems are reduced to coarse anonymous families", () => {
+  assert.equal(normalizeOsFamily("Mozilla/5.0 (Windows NT 10.0; Win64; x64)"), "Windows");
+  assert.equal(normalizeOsFamily("Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5)"), "macOS");
+  assert.equal(normalizeOsFamily("Mozilla/5.0 (X11; Linux x86_64)"), "Linux");
+  assert.equal(normalizeOsFamily("unrecognized-client"), "Other");
+});
+
 test("snapshots expose only anonymous public fields, mark online, and count them", () => {
   const rows = [
-    { id: "good", region: "KR", latitude: 36, longitude: 128, firstSeen: "t0", lastSeen: "t1", secret: "no" },
+    { id: "good", region: "KR", os: "Windows", latitude: 36, longitude: 128, firstSeen: "t0", lastSeen: "t1", secret: "no" },
     { id: "ghost", region: "IT", latitude: 42, longitude: 12, firstSeen: "t0", lastSeen: "t1" },
     { id: "bad", region: "bad", latitude: 190, longitude: 0, firstSeen: "t0", lastSeen: "t1" },
   ];
   const snapshot = buildSnapshot(rows, new Set(["good"]), Date.parse("2026-07-21T12:00:00Z"));
   assert.equal(snapshot.type, "snapshot");
   assert.equal(snapshot.nodes.length, 2);
-  assert.deepEqual(Object.keys(snapshot.nodes[0]).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "region"]);
+  assert.deepEqual(Object.keys(snapshot.nodes[0]).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
+  assert.equal(snapshot.nodes.find((node) => node.id === "good").os, "Windows");
   assert.equal(snapshot.nodes.find((node) => node.id === "good").online, true);
   assert.equal(snapshot.nodes.find((node) => node.id === "ghost").online, false);
   assert.deepEqual(snapshot.counts, { total: 2, online: 1 });
 });
 
 test("public node shape carries no leaked fields", () => {
-  const node = publicNode({ id: "n", region: "EU", latitude: 48, longitude: 9, first_seen: "a", last_seen: "b", github_login: "leak" }, true);
-  assert.deepEqual(Object.keys(node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "region"]);
+  const node = publicNode({ id: "n", region: "EU", os: "Linux", latitude: 48, longitude: 9, first_seen: "a", last_seen: "b", github_login: "leak" }, true);
+  assert.deepEqual(Object.keys(node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
+  assert.equal(node.os, "Linux");
 });
 
 test("health endpoint identifies the persistent hibernating-WebSocket transport", async () => {
@@ -115,7 +127,7 @@ test("first sighting records the node and broadcasts an online upsert with count
     assert.equal(change.node.region, "KR · 11");
     assert.equal(change.node.online, true);
     assert.notEqual(change.node.latitude, 37.5665);
-    assert.deepEqual(Object.keys(change.node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "region"]);
+    assert.deepEqual(Object.keys(change.node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
     assert.deepEqual(change.counts, { total: 1, online: 1 });
     presence.close(1000, "invisible");
     viewer.close(1000, "done");
@@ -143,6 +155,27 @@ test("going offline keeps the node forever and broadcasts a ghost, not a removal
     assert.equal(snapshot.nodes[0].id, "ghostid");
     assert.equal(snapshot.nodes[0].online, false);
     assert.deepEqual(snapshot.counts, { total: 1, online: 0 });
+    later.close(1000, "done");
+    viewer.close(1000, "done");
+  });
+});
+
+test("coarse OS family persists when a recorded installation goes offline", async () => {
+  await withService(async (mf) => {
+    const presence = await connect(mf, "presence", KR, "windows-node", "Windows");
+    const viewer = await connect(mf, "viewer");
+    const online = await nextMessage(viewer);
+    assert.equal(online.nodes[0].os, "Windows");
+    const update = nextMessage(viewer);
+    presence.close(1000, "offline");
+    const change = await update;
+    assert.equal(change.node.online, false);
+    assert.equal(change.node.os, "Windows");
+
+    const later = await connect(mf, "viewer");
+    const snapshot = await nextMessage(later);
+    assert.equal(snapshot.nodes[0].online, false);
+    assert.equal(snapshot.nodes[0].os, "Windows");
     later.close(1000, "done");
     viewer.close(1000, "done");
   });
@@ -240,6 +273,8 @@ test("service keeps privacy invariants while intentionally retaining anonymous n
   // Retention is now intentional: anonymous nodes live in free-tier DO SQLite.
   assert.match(source, /CREATE TABLE IF NOT EXISTS nodes/);
   assert.match(source, /first_seen/);
+  assert.match(source, /ALTER TABLE nodes ADD COLUMN os TEXT NOT NULL DEFAULT 'Other'/);
+  assert.match(source, /os = excluded\.os/);
   assert.match(source, /acceptWebSocket/);
   assert.match(config, /new_sqlite_classes/);
   // Regression pins for the additive-count bug: only stable ids are recorded,

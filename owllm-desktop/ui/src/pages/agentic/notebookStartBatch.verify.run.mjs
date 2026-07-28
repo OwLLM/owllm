@@ -20,8 +20,8 @@ let JSDOM;
 try {
   ({ JSDOM } = req("jsdom"));
 } catch {
-  console.log("SKIP notebookStartBatch: jsdom not installed (run `npm i --no-save jsdom` to exercise this harness).");
-  process.exit(0);
+  console.error("FAIL notebookStartBatch: jsdom is required (run `npm i --no-save jsdom` to exercise this harness).");
+  process.exit(1);
 }
 
 // ---- DOM environment (react-dom needs window/document globals; the notebook
@@ -50,6 +50,7 @@ const codePageSrc = readLF(path.join(HERE, "CodePage.tsx"));
 const agentsPageSrc = readLF(path.join(HERE, "AgentsPage.tsx"));
 const brainstormSrc = readLF(path.join(HERE, "BrainstormPanel.tsx"));
 const watcherSrc = readLF(path.join(REPO, "ui/src/support/WatcherDrawer.tsx"));
+const vaultSyncSrc = readLF(path.join(REPO, "ui/src/runtime/vaultSync.ts"));
 const js = ts.transpileModule(src, {
   compilerOptions: {
     module: ts.ModuleKind.CommonJS,
@@ -92,6 +93,10 @@ fs.writeFileSync(path.join(TMP, "ActionIcon.js"), `
   const React = require("react");
   module.exports = { __esModule: true, default: ({ name }) => React.createElement("svg", { "data-icon": name }) };
 `);
+// device_get_identity backs the cross-PC "queue started on <name>" advisory.
+fs.writeFileSync(path.join(TMP, "tauri.js"), `
+  module.exports = { invoke: async (cmd) => (cmd === "device_get_identity" ? { device_id: "dev-local", name: "This PC" } : null) };
+`);
 // Rewrite relative imports in the transpiled output to the stubs.
 let out = fs.readFileSync(path.join(TMP, "RunNotebook.js"), "utf8");
 out = out
@@ -101,7 +106,8 @@ out = out
   .replace(/require\("\.\/ModelPicker"\)/g, 'require("./ModelPicker.js")')
   .replace(/require\("\.\/RunTimer"\)/g, 'require("./RunTimer.js")')
   .replace(/require\("\.\.\/\.\.\/localization"\)/g, 'require("./localization.js")')
-  .replace(/require\("\.\.\/\.\.\/components\/ActionIcon"\)/g, 'require("./ActionIcon.js")');
+  .replace(/require\("\.\.\/\.\.\/components\/ActionIcon"\)/g, 'require("./ActionIcon.js")')
+  .replace(/require\("@tauri-apps\/api\/core"\)/g, 'require("./tauri.js")');
 fs.writeFileSync(path.join(TMP, "RunNotebook.js"), out);
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 fs.mkdirSync(path.join(TMP, "node_modules"), { recursive: true });
@@ -149,8 +155,26 @@ function check(name, cond) {
 console.log("case 0: run completion paths cannot depend on a later React render");
 check("Code busy state synchronizes the imperative lock", codePageSrc.includes("const setBusy = (v: boolean) => {\n    // Keep the imperative send gate") && codePageSrc.includes("busySendRef.current = v;"));
 check("Code send gates on the synchronous lock", codePageSrc.includes("if (busySendRef.current) {"));
-check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed();"));
-check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed();") && agentsPageSrc.includes("else notifyAutoFeedPaused(notebookPauseReason);"));
+// Both Agents exits must still resolve auto-feed — but they now pass the run's
+// PROVENANCE rather than continuing unconditionally, so a goal the user typed
+// by hand cannot resume a queue left switched on days ago.
+check("Agents single-assistant completion continues auto-feed", agentsPageSrc.includes("if (singleRunCompletedCleanly) scheduleNotebookAutoFeed(ranFromNotebook);"));
+check("Agents resolves auto-feed from every dispatch exit", agentsPageSrc.includes("if (notebookRunCompletedCleanly) scheduleNotebookAutoFeed(ranFromNotebook);") && agentsPageSrc.includes("else if (ranFromNotebook) notifyAutoFeedPaused(notebookPauseReason);"));
+// Both surfaces settle their cards through ONE helper now. Asserting the shared
+// helper (rather than each page's own three-way branch, as this gate used to)
+// is what stops the Coding page silently losing the "preflight → pending" case
+// again: it never imported markNotebookStepPending at all.
+check("Recoverable worktree preflight leaves the notebook card pending",
+  agentsPageSrc.includes("e instanceof WorktreePreflightError || e instanceof CliPreflightError")
+    && agentsPageSrc.includes('notebookRunStoppedAtPreflight ? { kind: "preflight" }'));
+check("Recoverable CLI preflight leaves team and single-agent notebook cards pending",
+  agentsPageSrc.includes("singleRunStoppedAtPreflight = e instanceof CliPreflightError")
+    && agentsPageSrc.includes('singleRunStoppedAtPreflight ? { kind: "preflight" }'));
+check("Coding page recognises a preflight stop too (it used to record it as a real failure)",
+  codePageSrc.includes("stoppedAtPreflight = e instanceof CliPreflightError || e instanceof WorktreePreflightError")
+    && codePageSrc.includes('stoppedAtPreflight ? { kind: "preflight" }'));
+check("both surfaces settle cards through the one shared helper",
+  agentsPageSrc.includes("settleNotebookStep(selectedProjectId") && codePageSrc.includes("settleNotebookStep(ruleScopeRef.current.id"));
 check("Code uses the shared auto-feed continuation", codePageSrc.includes("continueNotebookAutoFeed(ruleScopeRef.current.id, notebookSurfaceId"));
 check("Agents uses the shared auto-feed continuation", agentsPageSrc.includes("continueNotebookAutoFeed(pid, notebookSurfaceId"));
 check("Watcher help and bug actions have accessible names", watcherSrc.includes('aria-label="Help using the app"') && watcherSrc.includes('aria-label="Report a bug"'));
@@ -160,6 +184,73 @@ check("Existing-project brainstorm does not offer another team", brainstormSrc.i
 check("Agents wires brainstorm completion to the Notebook", agentsPageSrc.includes('hasTeam={!!activeTeam?.agents.length}') && agentsPageSrc.includes('new CustomEvent("owllm:open-run-notebook")'));
 check("Graph fills its parent instead of retaining a stale pixel width", agentsPageSrc.includes('data-ui="GraphFitViewport"') && agentsPageSrc.includes('position:"relative", width:"100%", height:"100%"'));
 check("Graph reframes saved positions when its viewport changes", agentsPageSrc.includes("const fitGraphToViewport = () =>") && agentsPageSrc.includes("positionMembershipKey"));
+
+console.log("case 0a: false WSL redirector failures are repaired to pending");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN, autoFeed: true, digest: [],
+    steps: [{
+      id: "wsl-false-failure",
+      text: "implement the queued website step",
+      status: "failed",
+      ts: 1,
+      startedAt: 10,
+      finishedAt: 20,
+      archivedAt: 20,
+      failureReason: "Could not create the required isolated worktree: project_cwd does not exist: \\\\wsl.localhost\\Ubuntu\\mnt\\c\\repo",
+    }],
+  }));
+  const repaired = NB.loadNotebook(PID);
+  check("known false WSL failure returns to pending", repaired.steps[0]?.status === "pending");
+  check("false-failure timing and reason are cleared",
+    repaired.steps[0]?.startedAt == null
+      && repaired.steps[0]?.finishedAt == null
+      && repaired.steps[0]?.archivedAt == null
+      && repaired.steps[0]?.failureReason == null);
+  check("repair is durable in the notebook blob", blob().steps[0]?.status === "pending");
+}
+
+console.log("case 0aa: known CLI provisioning failures are repaired without hiding real agent failures");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN, autoFeed: true, digest: [],
+    steps: [
+      {
+        id: "npm-staging-collision",
+        text: "retry Codex after provisioning",
+        status: "failed",
+        ts: 1,
+        startedAt: 10,
+        finishedAt: 20,
+        failureReason: "wsl exited 217: npm ERR! code ENOTEMPTY rename '/usr/local/lib/node_modules/@openai/codex'",
+      },
+      {
+        id: "closed-stdin",
+        text: "retry Codex after startup repair",
+        status: "failed",
+        ts: 2,
+        startedAt: 30,
+        finishedAt: 40,
+        failureReason: "write codex prompt to stdin: The pipe has been ended. (os error 109)",
+      },
+      {
+        id: "real-agent-failure",
+        text: "preserve genuine task failures",
+        status: "failed",
+        ts: 3,
+        startedAt: 50,
+        finishedAt: 60,
+        failureReason: "The implementation tests failed.",
+      },
+    ],
+  }));
+  const repaired = NB.loadNotebook(PID);
+  check("npm ENOTEMPTY preflight returns to pending", repaired.steps[0]?.status === "pending");
+  check("closed stdin preflight returns to pending", repaired.steps[1]?.status === "pending");
+  check("genuine agent failure remains failed", repaired.steps[2]?.status === "failed");
+  check("CLI repair is durable in the notebook blob",
+    blob().steps[0]?.status === "pending" && blob().steps[1]?.status === "pending");
+}
 
 function mount(props) {
   const container = document.getElementById("root");
@@ -180,7 +271,7 @@ console.log("case 0b: Digest Notes is visibly enabled whenever clickable");
   const btn = buttons().find((b) => textOf(b).includes("Digest notes"));
   check("Digest Notes is clickable", !!btn && !btn.disabled);
   check("Digest Notes uses the bundled wand icon", !!btn?.querySelector('svg[data-icon="wand"]'));
-  check("Digest Notes has a strong enabled fill", (btn?.getAttribute("style") ?? "").includes("linear-gradient"));
+  check("Digest Notes has a strong enabled fill", /backgroundImage:\s*digestBusy \? "none" : "linear-gradient/.test(src));
   act(() => root.unmount());
 }
 
@@ -253,7 +344,26 @@ console.log("case 3b: markNotebookStepStarted / markNotebookStepFinished update 
   check("startedAt is stamped", blob().steps.find((s) => s.id === "s1")?.startedAt === 1000);
   markNotebookStepFinished(PID, "s1", 5000);
   check("finishedAt is stamped", blob().steps.find((s) => s.id === "s1")?.finishedAt === 5000);
-  check("status is untouched by timing helpers", blob().steps.find((s) => s.id === "s1")?.status === "pending");
+  check("successful completion is archived", blob().steps.find((s) => s.id === "s1")?.status === "sent"
+    && NB.isStepArchived(blob().steps.find((s) => s.id === "s1")));
+}
+
+console.log("case 3c: failed runs remain active and can be re-fed");
+{
+  seed();
+  NB.markNotebookStepStarted(PID, "s1", 1000);
+  NB.markNotebookStepFailed(PID, "s1", "Kimi login expired", 5000);
+  const failed = blob().steps.find((s) => s.id === "s1");
+  check("failed card stores its incomplete result", failed?.status === "failed"
+    && failed?.finishedAt === 5000
+    && failed?.failureReason === "Kimi login expired");
+  check("failed card is not archived", NB.isStepArchived(failed) === false);
+  NB.markNotebookStepStarted(PID, "s1", 6000);
+  const refeed = blob().steps.find((s) => s.id === "s1");
+  check("re-feed clears failure and starts the card again", refeed?.status === "sent"
+    && refeed?.startedAt === 6000
+    && refeed?.finishedAt == null
+    && refeed?.failureReason == null);
 }
 
 console.log("case 0c: a completed project brainstorm prepares its Notebook queue");
@@ -388,6 +498,103 @@ console.log("case 5c: a finished (sent + finishedAt) step leaves Active for Arch
   act(() => root.unmount());
 }
 
+// ---- 5d. Archive tab lists archived steps newest-first by persisted timestamp ----
+console.log("case 5d: archive tab sorts newest archived step first");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [
+      { id: "active", text: "active pending step", status: "pending", ts: 1 },
+      { id: "oldest", text: "oldest archived step", status: "done", ts: 2, archivedAt: 1000 },
+      { id: "middle", text: "middle archived step", status: "sent", ts: 3, startedAt: 2000, finishedAt: 2500, archivedAt: 2500 },
+      { id: "newest", text: "newest archived step", status: "done", ts: 4, archivedAt: 5000 },
+    ],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  check("active step is visible by default", textOf(document.body).includes("active pending step"));
+  check("archived steps are hidden by default", !textOf(document.body).includes("oldest archived step"));
+  const archiveTab = buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive"));
+  check("Archive tab shows count 3", !!archiveTab && textOf(archiveTab).includes("(3)"));
+  clickEl(archiveTab);
+  const html = document.body.innerHTML;
+  check("newest archived step appears before middle", html.indexOf("newest archived step") < html.indexOf("middle archived step"));
+  check("middle archived step appears before oldest", html.indexOf("middle archived step") < html.indexOf("oldest archived step"));
+  act(() => root.unmount());
+}
+
+// ---- 5dd. The Archive button archives an active step without deleting it ----
+console.log("case 5dd: Archive button moves an active step to the Archive tab");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [{ id: "to-archive", text: "step to archive", status: "pending", ts: 1 }],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  check("active step is visible by default", textOf(document.body).includes("step to archive"));
+  const archiveBtn = buttons().find((b) => b.getAttribute("aria-label") === "Archive step");
+  check("Archive button is present with correct aria-label", !!archiveBtn);
+  check("Archive button is visibly labeled", !!archiveBtn && textOf(archiveBtn).includes("Archive"));
+  check("Archive button uses the archive icon", !!archiveBtn && !!archiveBtn.querySelector('svg[data-icon="archive"]'));
+  const trashBtn = buttons().find((b) => b.getAttribute("aria-label") === "Delete step");
+  check("Delete step button remains beside Archive", !!trashBtn);
+  check("no Mark done control remains in the active card", !buttons().some((b) => b.getAttribute("title")?.includes("Mark done")));
+  clickEl(archiveBtn);
+  check("archived step leaves the Active tab", !textOf(document.body).includes("step to archive"));
+  check("step is not deleted from the notebook", blob().steps.some((s) => s.id === "to-archive"));
+  check("step has archivedAt set", typeof blob().steps.find((s) => s.id === "to-archive")?.archivedAt === "number");
+  const archiveTab = buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive"));
+  check("Archive tab shows count 1", !!archiveTab && textOf(archiveTab).includes("(1)"));
+  clickEl(archiveTab);
+  check("archived step appears in the Archive tab", textOf(document.body).includes("step to archive"));
+  check("archive lifecycle timestamp is persisted", typeof blob().steps.find((s) => s.id === "to-archive")?.stepUpdatedAt === "number");
+  act(() => root.unmount());
+}
+
+// ---- 5de. Archiving an in-flight card closes its visible timing instead of
+//            leaving a completed card labelled "running" forever. ----
+console.log("case 5de: manually archiving an in-flight card stamps completion");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [{ id: "in-flight", text: "manual completion", status: "sent", ts: 1, startedAt: 1000 }],
+    autoFeed: false, digest: [],
+  }));
+  const { root } = mount({});
+  clickEl(buttons().find((b) => b.getAttribute("aria-label") === "Archive step"));
+  const archived = blob().steps.find((s) => s.id === "in-flight");
+  check("manual archive stamps a finish time", typeof archived?.finishedAt === "number");
+  clickEl(buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive")));
+  check("archived timing no longer says running", !textOf(document.body).includes("running"));
+  act(() => root.unmount());
+}
+
+// ---- 5e. archivedAt survives save/load/restart ----
+console.log("case 5e: archive timestamp persists across save and reload");
+{
+  localStorage.setItem(KEY, JSON.stringify({
+    text: "", plan: PLAN,
+    steps: [
+      { id: "legacy", text: "legacy done step", status: "done", ts: 1 },
+      { id: "dated", text: "dated archived step", status: "done", ts: 2, archivedAt: 9999 },
+    ],
+    autoFeed: false, digest: [],
+  }));
+  const loaded = NB.loadNotebook(PID);
+  check("load preserves explicit archivedAt", loaded.steps.find((s) => s.id === "dated")?.archivedAt === 9999);
+  check("legacy done step falls back to ts", (loaded.steps.find((s) => s.id === "legacy")?.archivedAt ?? loaded.steps.find((s) => s.id === "legacy")?.ts) === 1);
+  NB.saveNotebook(PID, loaded);
+  const reloaded = NB.loadNotebook(PID);
+  check("reloaded keeps archivedAt", reloaded.steps.find((s) => s.id === "dated")?.archivedAt === 9999);
+  check("reloaded keeps fallback ts for legacy", (reloaded.steps.find((s) => s.id === "legacy")?.archivedAt ?? reloaded.steps.find((s) => s.id === "legacy")?.ts) === 1);
+  const { root } = mount({});
+  clickEl(buttons().find((b) => b.getAttribute("role") === "tab" && textOf(b).includes("Archive")));
+  const html = document.body.innerHTML;
+  check("newest archived step is first after reload", html.indexOf("dated archived step") < html.indexOf("legacy done step"));
+  act(() => root.unmount());
+}
+
 // ---- 6. auto-feed ownership: only the owning surface pops the queue ----
 console.log("case 6: takeNextAutoStep is gated per surface");
 {
@@ -423,7 +630,13 @@ console.log("case 7: autoFeedWouldRun respects owner + pending");
   localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "agents:main" }));
   const { autoFeedWouldRun } = NB;
   check("true for the owning surface", autoFeedWouldRun(PID, "agents:main") === true);
-  check("false for another surface", autoFeedWouldRun(PID, "code:p2") === false);
+  // A named owner with NO live heartbeat is a window that closed mid-queue.
+  // This gate used to require `false` here — certifying the exact stall the
+  // user hit: no dispatch, and no "auto-feed paused" notice either, because
+  // this very function suppressed it. A dead owner must release.
+  check("a dead owner releases to another surface", autoFeedWouldRun(PID, "code:p2") === true);
+  localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeedOwner: "agents:main", autoFeedHeartbeat: Date.now() }));
+  check("a LIVE owner still locks another surface out", autoFeedWouldRun(PID, "code:p2") === false);
   localStorage.setItem(KEY, JSON.stringify({ ...blob(), autoFeed: false }));
   check("false when the toggle is off", autoFeedWouldRun(PID, "agents:main") === false);
 }
@@ -603,6 +816,65 @@ console.log("case 10: Add all + clear notes actually clears the working notes");
   check("working notes are cleared even with a leftover proposedPlan", after.text === "");
   check("orphaned proposedPlan is cleared while the board is hidden", (after.proposedPlan ?? "") === "");
   act(() => root.unmount());
+}
+
+// ---- 11. A run the QUEUE DID NOT DISPATCH must never start the queue. This
+//          reproduces a real incident: auto-feed had been left on days earlier,
+//          the user typed an ordinary Coding-page message, the turn ended
+//          cleanly, and the run-end hook popped a notebook card and sent it as
+//          the next turn — indistinguishable from something the user had asked
+//          for. `autoFeed` is sticky across restarts, so the checkbox alone can
+//          never be the permission to BEGIN a chain. ----
+console.log("case 11: only a queue-driven (or explicitly armed) run advances the queue");
+{
+  const ARM_PID = "verify-arm-project";
+  const ARM_KEY = `owllm:agents:notebook:${ARM_PID}`;
+  const SURFACE = "code:pFRESH";
+  const seedArm = (extra) => localStorage.setItem(ARM_KEY, JSON.stringify({
+    text: "", plan: "", digest: [], proposed: [],
+    autoFeed: true, // left ON from an earlier session — exactly the real state
+    steps: [
+      { id: "s1", text: "build the website package", status: "pending" },
+      { id: "s2", text: "build the homepage", status: "pending" },
+    ],
+    ...extra,
+  }));
+
+  // Assert the export before calling it, so a removed gate reads as a failed
+  // check rather than an unexplained stack trace.
+  check("consumeAutoFeedArm is exported", typeof NB.consumeAutoFeedArm === "function");
+  const consumeArm = typeof NB.consumeAutoFeedArm === "function" ? NB.consumeAutoFeedArm : () => true;
+
+  seedArm();
+  check("an unarmed clean turn cannot start the queue", consumeArm(ARM_PID, SURFACE) === false);
+  check("  ...and leaves every card pending", NB.loadNotebook(ARM_PID).steps.every((s) => s.status === "pending"));
+
+  seedArm({ autoFeedArmed: true });
+  check("▶ Start queue while busy arms exactly one run", consumeArm(ARM_PID, SURFACE) === true);
+  check("  ...and the arm is one-shot", consumeArm(ARM_PID, SURFACE) === false);
+
+  // Once the chain is live it sustains itself from its own dispatches, so the
+  // arm must be spent rather than left able to start a second queue later.
+  seedArm({ autoFeedArmed: true });
+  check("the chain still walks the list", NB.takeNextAutoStep(ARM_PID, SURFACE)?.id === "s1" && NB.takeNextAutoStep(ARM_PID, SURFACE)?.id === "s2");
+  check("dispatching clears the arm", NB.loadNotebook(ARM_PID).autoFeedArmed === false);
+
+  // The arm is a per-window intent: a peer that is genuinely driving still wins.
+  seedArm({ autoFeedArmed: true, autoFeedOwner: "agents:pOTHER", autoFeedHeartbeat: Date.now() });
+  check("a live peer lease still blocks the arm", consumeArm(ARM_PID, SURFACE) === false);
+
+  // ...and it must never travel to another PC, or a peer would start a queue
+  // nobody asked it to. Same rule as the rest of the run lease.
+  check("the arm is stripped before the notebook syncs", vaultSyncSrc.includes('"autoFeedArmed"'));
+
+  // Both pages gate on provenance, and the Coding page labels what it injects
+  // (an unlabelled auto-fed step is why the incident looked like a user turn).
+  check("Coding page gates the chain on run provenance", codePageSrc.includes("if (ok && (ranFromNotebook || consumeAutoFeedArm("));
+  check("Coding page labels an auto-fed step", codePageSrc.includes("📓 Next step from the Notebook (auto-fed):"));
+  check("Agents page arms or refuses inside the shared scheduler", agentsPageSrc.includes("if (!ranFromNotebook && !consumeAutoFeedArm(pid, notebookSurfaceId)) return;"));
+  // The old pause notice told the user a plain message would resume the queue —
+  // the very accident this case exists to prevent. It must not say that again.
+  check("no page still advertises 'send a message' as a way to resume", !codePageSrc.includes("send a message or press ▶ Start queue") && !agentsPageSrc.includes("fix or dispatch the next one (▶ Start queue)"));
 }
 
 console.log(failures ? `\n${failures} FAILURES` : "\nall checks passed");

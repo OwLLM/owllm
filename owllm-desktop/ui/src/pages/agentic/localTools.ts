@@ -127,12 +127,54 @@ export type TeamMemoryPack = {
 
 const MEMORY_INVOKE_TIMEOUT_MS = 2500;
 
-function withMemoryTimeout<T>(p: Promise<T>, fallback: T): Promise<T> {
+/// Memory calls that timed out or failed this session.
+///
+/// Memory must never break a run, so a failed call still falls back to "no
+/// memory". But falling back SILENTLY is how the app came to look like it was
+/// forgetting things: under a parallel fan-out several agents contend on the one
+/// SQLite file, a search times out, the agent builds its prompt with an empty
+/// fact list and runs memory-blind — and nothing anywhere said so. Worse on the
+/// write path, where a `[REMEMBER …]` fact is reported saved and never lands.
+/// Degradation is now counted, logged, and broadcast so the UI can say it.
+let _memoryDegraded: { count: number; last: string } | null = null;
+
+export function memoryDegradation(): { count: number; last: string } | null {
+  return _memoryDegraded;
+}
+
+export function clearMemoryDegradation(): void {
+  _memoryDegraded = null;
+}
+
+function noteMemoryDegraded(label: string, reason: string): void {
+  _memoryDegraded = { count: (_memoryDegraded?.count ?? 0) + 1, last: `${label}: ${reason}` };
+  console.warn(`[owllm memory] ${label} degraded — ${reason}; this turn runs without it.`);
+  try {
+    window.dispatchEvent(new CustomEvent("owllm:memory:degraded", { detail: { label, reason } }));
+  } catch { /* non-browser/test */ }
+}
+
+/// Resolve to `fallback` if the backend call is slow OR fails, reporting either
+/// way. `label` names the call in the warning, so a degraded run says WHICH part
+/// of memory was lost rather than just going quiet.
+function withMemoryTimeout<T>(p: Promise<T>, fallback: T, label: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
   const timeout = new Promise<T>((resolve) => {
-    timer = setTimeout(() => resolve(fallback), MEMORY_INVOKE_TIMEOUT_MS);
+    timer = setTimeout(() => {
+      if (!settled) noteMemoryDegraded(label, `no response in ${MEMORY_INVOKE_TIMEOUT_MS}ms`);
+      resolve(fallback);
+    }, MEMORY_INVOKE_TIMEOUT_MS);
   });
-  return Promise.race([p, timeout]).finally(() => {
+  const reported = p.then(
+    (value) => { settled = true; return value; },
+    (error) => {
+      settled = true;
+      noteMemoryDegraded(label, error instanceof Error ? error.message : String(error));
+      return fallback;
+    },
+  );
+  return Promise.race([reported, timeout]).finally(() => {
     if (timer) clearTimeout(timer);
   });
 }
@@ -183,10 +225,10 @@ export async function refreshTeamMemorySnapshot(limit = 12): Promise<void> {
     const empty: RawTeamMemEntry[] = [];
     const [relevant, recent, worklog] = await Promise.all([
       _teamMemoryGoal
-        ? withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: _teamMemoryGoal, limit: factLim, kinds: ["fact"] }), empty)
+        ? withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: _teamMemoryGoal, limit: factLim, kinds: ["fact"] }), empty, "goal-relevant facts")
         : Promise.resolve([] as RawTeamMemEntry[]),
-      withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: factLim, kinds: ["fact"] }), empty),
-      withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: logLim, kinds: ["worklog"] }), empty),
+      withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: factLim, kinds: ["fact"] }), empty, "recent facts"),
+      withMemoryTimeout(invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: "", limit: logLim, kinds: ["worklog"] }), empty, "worklog"),
     ]);
     // STALE-SCOPE GUARD — the queries above are async; if the user switched
     // projects while they were in flight, this result belongs to the OLD
@@ -326,6 +368,7 @@ export async function refreshDeviceGroundTruth(): Promise<void> {
     const id = await withMemoryTimeout<SelfDeviceId | null>(
       invoke<SelfDeviceId>("device_get_identity"),
       null,
+      "device identity",
     );
     if (!id || !id.device_id) return;
     const label = (id.name || "this device").trim();
@@ -369,6 +412,7 @@ export async function retrieveScopedTeamMemoryPack(
     const entries = await withMemoryTimeout(
       invoke<RawTeamMemEntry[]>("team_memory_search", { scope, query: task, limit: eff + 12 }),
       [] as RawTeamMemEntry[],
+      "per-task retrieval",
     );
     const fresh = entries.filter((e) => !excludeSnapshot || !_snapshotIds.has(e.id)).slice(0, eff);
     const worklogCount = fresh.filter((e) => e.tags === "worklog").length;
@@ -405,51 +449,6 @@ function notifySharedMemoryChanged(): void {
   try { window.dispatchEvent(new CustomEvent("owllm:memory:changed")); } catch { /* non-browser/test */ }
 }
 
-function stableMemoryKey(text: string): string {
-  let hash = 0x811c9dc5;
-  for (const ch of text) {
-    hash ^= ch.charCodeAt(0);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return `auto_work_${(hash >>> 0).toString(36)}`;
-}
-
-function redactMemorySecrets(text: string): string {
-  return text
-    .replace(/\b(?:ghp|github_pat|glpat|sk)-[A-Za-z0-9_-]{12,}\b/g, "[REDACTED_TOKEN]")
-    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]{12,}/gi, "$1[REDACTED_TOKEN]")
-    .replace(/\b(password|passwd|secret|api[_ -]?key|token)\s*[:=]\s*[^\s,;]+/gi, "$1=[REDACTED]");
-}
-
-// Promote a successful implementation summary into the durable, synced fact
-// store. Previously only an exact `[REMEMBER]` line or a memory_write tool call
-// could grow the fact count, so ordinary completed features remained local
-// worklog forever. Keep this conservative and clearly tagged: questions,
-// errors, chats, and vague/short replies remain worklog-only.
-export async function autoCurateScopedTeamFact(scope: string, agent: string, instruction: string, result: string): Promise<boolean> {
-  if (!scope || /chat/i.test(agent) || /^\(error:/i.test(result.trim())) return false;
-  const implementation = /\b(implemented|fixed|added|updated|changed|created|removed|refactored|migrated|published|shipped|verified|tests? pass(?:ed)?|build pass(?:ed)?|completed)\b/i;
-  if (result.trim().length < 80 || !implementation.test(result)) return false;
-  const task = instruction.replace(/\s+/g, " ").trim().slice(0, 260);
-  const outcome = redactMemorySecrets(stripMemoryDirectives(result))
-    .replace(/\s+/g, " ").trim().slice(0, 1000);
-  if (!task || !outcome) return false;
-  try {
-    const id = await withMemoryTimeout(invoke<number>("team_memory_write", {
-      scope,
-      content: `TASK: ${task}\nOUTCOME: ${outcome}`,
-      key: stableMemoryKey(`${agent}\0${task.toLowerCase()}`),
-      tags: "auto-curated,implementation",
-      author: agent,
-    }), 0);
-    if (id <= 0) return false;
-    notifySharedMemoryChanged();
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export async function logScopedTeamWork(scope: string, agent: string, instruction: string, result: string): Promise<void> {
   if (!result || !result.trim()) return;
   // Don't record FAILED turns into the shared work-state. The loop research is
@@ -462,8 +461,8 @@ export async function logScopedTeamWork(scope: string, agent: string, instructio
     await withMemoryTimeout(
       invoke<number>("team_memory_log", { scope, agent, content: formatWorkLogEntry(agent, instruction, result) }),
       0,
+      "worklog write",
     );
-    await autoCurateScopedTeamFact(scope, agent, instruction, result);
     if (scope === (_teamMemoryScope || "")) await refreshTeamMemorySnapshot();
   } catch { /* memory must never break a run */ }
 }

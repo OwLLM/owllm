@@ -23,7 +23,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { openWebUrl } from "../../utils/openWebUrl";
+import { firstCompleteAuthUrl } from "./authUrlCapture";
 
 type PtyEvent =
   | { kind: "data"; data: number[] }
@@ -53,9 +53,14 @@ export type PtyTerminalProps = {
   /// Leave unset for general-purpose terminals — any command that prints a
   /// URL (git, npm, curl…) would otherwise hijack the browser.
   autoOpenAuthUrls?: boolean;
+  onOutputText?: (text: string) => void;
+  onAuthTabOpened?: (tabId: number) => void;
 };
 
-export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSend, autoOpenAuthUrls }: PtyTerminalProps) {
+export default function PtyTerminal({
+  cli, args, cwd, onSpawned, onExit, autoSend, autoOpenAuthUrls,
+  onOutputText, onAuthTabOpened,
+}: PtyTerminalProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
@@ -64,6 +69,10 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSen
   onExitRef.current = onExit;
   const autoSendRef = useRef(autoSend);
   autoSendRef.current = autoSend;
+  const onOutputTextRef = useRef(onOutputText);
+  onOutputTextRef.current = onOutputText;
+  const onAuthTabOpenedRef = useRef(onAuthTabOpened);
+  onAuthTabOpenedRef.current = onAuthTabOpened;
 
   useEffect(() => {
     const host = hostRef.current;
@@ -115,26 +124,24 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSen
     let authUrlOpened = false;
     const decoder = new TextDecoder();
     let outputText = "";
-    const openAuthUrlFrom = (bytes: Uint8Array) => {
+    const openAuthUrlFrom = (decoded: string) => {
       if (!autoOpenAuthUrls || authUrlOpened) return;
-      outputText = (outputText + decoder.decode(bytes, { stream: true })).slice(-16_384);
-      // Device-login URLs are sometimes wrapped in OSC-8 hyperlinks. Strip
-      // terminal control sequences before matching, while preserving chunks so
-      // a URL split across two PTY reads is still found.
-      const plain = outputText
-        .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
-        .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
-      const matches = plain.match(/https?:\/\/[^\s"'<>\\]+/g) ?? [];
-      for (const raw of matches) {
-        const url = raw.replace(/[),.;\]}]+$/, "");
-        authUrlOpened = true;
-        openWebUrl(url).catch((error) => {
+      outputText = (outputText + decoded).slice(-16_384);
+      const url = firstCompleteAuthUrl(outputText);
+      if (!url) return;
+      authUrlOpened = true;
+      invoke<string>("browser_open_tab", { url, activate: true })
+        .then((opened) => {
+          try {
+            const parsed = JSON.parse(opened) as { tab_id?: number };
+            if (typeof parsed.tab_id === "number") onAuthTabOpenedRef.current?.(parsed.tab_id);
+          } catch { /* older browser response; completion falls back to active tab */ }
+        })
+        .catch((error) => {
           term.write(`\r\n\x1b[31m[OwLLM browser error] ${String(error)}\x1b[0m\r\n`);
         });
-        // A login command can later print help/fallback links. Keep the browser
-        // on the first authorization page instead of navigating it away.
-        return;
-      }
+      // A login command can later print help/fallback links. Keep the browser
+      // on the first authorization page instead of navigating it away.
     };
     const armAutoSend = () => {
       const payload = autoSendRef.current;
@@ -158,7 +165,12 @@ export default function PtyTerminal({ cli, args, cwd, onSpawned, onExit, autoSen
         // survive (xterm decodes UTF-8 internally).
         const bytes = new Uint8Array(evt.data);
         term.write(bytes);
-        openAuthUrlFrom(bytes);
+        const decoded = decoder.decode(bytes, { stream: true });
+        const plain = decoded
+          .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+          .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "");
+        onOutputTextRef.current?.(plain);
+        openAuthUrlFrom(decoded);
         armAutoSend();
       } else if (evt.kind === "exit") {
         // Soft visual hint at exit; the parent decides whether to

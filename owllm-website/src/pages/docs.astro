@@ -1,0 +1,126 @@
+---
+import Layout from "../layouts/Layout.astro";
+import Card from "../components/Card.astro";
+
+const docs = [
+  {
+    title: "Getting Started",
+    href: "https://github.com/OwLLM/owllm/blob/main/docs/GETTING_STARTED.md",
+    description: "Download, install, and run your first model and agentic team.",
+  },
+  {
+    title: "Architecture",
+    href: "https://github.com/OwLLM/owllm/blob/main/docs/ARCHITECTURE.md",
+    description:
+      "Deep-dive into the split, safety tiers, native tool-calling, and runtime modules.",
+  },
+  {
+    title: "Cross-Platform",
+    href: "https://github.com/OwLLM/owllm/blob/main/docs/CROSS_PLATFORM.md",
+    description: "Windows, Linux, and macOS support matrix plus sandbox engines.",
+  },
+  {
+    title: "Build Plan",
+    href: "https://github.com/OwLLM/owllm/blob/main/docs/BUILD_PLAN_FOR_FABLE5.md",
+    description: "Current roadmap and build milestones for the OwLLM stack.",
+  },
+  {
+    title: "Android OwLLM",
+    href: "https://github.com/OwLLM/owllm/blob/main/docs/ANDROID_OWLLM.md",
+    description: "Mobile companion architecture and constraints.",
+  },
+  {
+    title: "OwLLM Node",
+    href: "https://github.com/OwLLM/owllm/blob/main/docs/OWLLM_NODE.md",
+    description: "Headless node setup for remote inference and agent backends.",
+  },
+];
+---
+
+<Layout
+  title="Docs"
+  description="OwLLM documentation and roadmap: getting started, architecture, cross-platform support, and more."
+>
+  <section class="page-header" aria-labelledby="docs-title">
+    <div class="container">
+      <h1 id="docs-title">Documentation</h1>
+      <p class="subtitle">
+        Learn how OwLLM works and how to get the most out of your local AI workstation.
+      </p>
+    </div>
+  </section>
+
+  <section class="section" aria-label="Documentation links">
+    <div class="container">
+      <div class="docs-grid">
+        {
+          docs.map((doc) => (
+            <Card as="article" class="doc-card">
+              <h2>
+                <a href={doc.href} target="_blank" rel="noopener noreferrer">
+                  {doc.title}
+                </a>
+              </h2>
+              <p>{doc.description}</p>
+            </Card>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+</Layout>
+
+<style>
+  .container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 1rem;
+  }
+
+  .page-header {
+    padding: 4rem 0 2rem;
+    background: linear-gradient(180deg, var(--bg) 0%, var(--bg-panel) 100%);
+    text-align: center;
+  }
+
+  .page-header h1 {
+    font-size: clamp(2rem, 5vw, 3rem);
+    margin-bottom: 0.75rem;
+  }
+
+  .subtitle {
+    color: var(--fg-muted);
+    font-size: 1.125rem;
+    max-width: 60ch;
+    margin: 0 auto;
+  }
+
+  .section {
+    padding: 3rem 0 5rem;
+  }
+
+  .docs-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem;
+  }
+
+  .doc-card h2 {
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+  }
+
+  .doc-card a {
+    color: var(--accent-ink);
+    text-decoration: none;
+  }
+
+  .doc-card a:hover {
+    text-decoration: underline;
+  }
+
+  .doc-card p {
+    color: var(--fg-muted);
+    margin: 0;
+  }
+</style>

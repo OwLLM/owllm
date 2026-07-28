@@ -12,6 +12,8 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use once_cell::sync::Lazy;
+use serde::Serialize;
+use tauri::Manager;
 use tokio::io::AsyncReadExt;
 use tokio::sync::watch;
 
@@ -99,6 +101,18 @@ fn refused(
     }
 }
 
+fn finish_ok(req: &CommandRequest, started: Instant, stdout: String) -> CommandResult {
+    CommandResult {
+        request_id: req.request_id.clone(),
+        ok: true,
+        stdout,
+        exit_code: Some(0),
+        decision: "allowed".into(),
+        duration_ms: started.elapsed().as_millis() as u64,
+        ..Default::default()
+    }
+}
+
 /// Execute `req` under `policy`. This is the single execution entry point; it
 /// authorizes first and never runs a denied/approval-gated command.
 pub async fn execute(req: &CommandRequest, policy: &PermissionPolicy) -> CommandResult {
@@ -126,6 +140,8 @@ pub async fn execute(req: &CommandRequest, policy: &PermissionPolicy) -> Command
         CommandKind::Wsl => run_wsl(req, timeout_ms, started).await,
         CommandKind::Screenshot => take_screenshot(req, started).await,
         CommandKind::Inference => run_inference(req, started).await,
+        CommandKind::ModelCatalog => model_catalog(req, started).await,
+        CommandKind::ModelStart => model_start(req, started).await,
         // Unreachable: authorize() never returns Allowed for these.
         CommandKind::FileWrite | CommandKind::Admin => {
             refused(req, Authorization::Denied, "not executable", started)
@@ -195,9 +211,25 @@ async fn run_inference(req: &CommandRequest, started: Instant) -> CommandResult 
     // `command`; we forward it to THIS device's own 127.0.0.1 model server and
     // hand the whole response body back. Non-streaming: the sealed channel is
     // request/response, so the target buffers the full completion.
-    let body = req.command.clone();
+    let mut body = req.command.clone();
     if body.trim().is_empty() {
         return finish_err(req, started, "inference: empty request body");
+    }
+    // A controller can pin inference to one of this device's advertised
+    // models. Remove the OwLLM-only field before forwarding to llama-server.
+    // This makes a persisted paired-device selection self-healing after the
+    // target app/server restarts instead of silently using another model.
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) {
+        let requested = value
+            .as_object_mut()
+            .and_then(|obj| obj.remove("owllm_remote_model"))
+            .and_then(|v| v.as_str().map(str::to_owned));
+        if let Some(model_id) = requested.filter(|id| !id.trim().is_empty()) {
+            if let Err(e) = ensure_model_running(&model_id).await {
+                return finish_err(req, started, &e);
+            }
+        }
+        body = serde_json::to_string(&value).unwrap_or(body);
     }
     let (port, key) = match crate::remote_devices::local_inference_endpoint().await {
         Some(v) => v,
@@ -247,6 +279,88 @@ async fn run_inference(req: &CommandRequest, started: Instant) -> CommandResult 
         }
         Err(e) => finish_err(req, started, &format!("inference request failed: {e}")),
     }
+}
+
+#[derive(Serialize)]
+struct RemoteModelCatalog {
+    models: Vec<crate::models::ModelInfo>,
+    active_model_id: Option<String>,
+    running: bool,
+    status: String,
+}
+
+/// Return only models that the target can actually serve. Cloud/API catalogue
+/// entries belong to the target's account and must never be exported as if
+/// they were P2P compute.
+async fn model_catalog(req: &CommandRequest, started: Instant) -> CommandResult {
+    let models = match crate::models::list_models().await {
+        Ok(items) => items
+            .into_iter()
+            .filter(|m| (m.provider == "local" || m.provider == "tuned") && m.port.is_some())
+            .collect(),
+        Err(e) => return finish_err(req, started, &format!("model catalogue failed: {e}")),
+    };
+    let status = match local_server_status().await {
+        Ok(status) => status,
+        Err(e) => return finish_err(req, started, &e),
+    };
+    let catalog = RemoteModelCatalog {
+        models,
+        active_model_id: status.model_id,
+        running: status.running,
+        status: status.message,
+    };
+    match serde_json::to_string(&catalog) {
+        Ok(stdout) => finish_ok(req, started, stdout),
+        Err(e) => finish_err(req, started, &format!("serialize model catalogue: {e}")),
+    }
+}
+
+async fn model_start(req: &CommandRequest, started: Instant) -> CommandResult {
+    let model_id = req.command.trim();
+    if model_id.is_empty() {
+        return finish_err(req, started, "model_start: model id is required");
+    }
+    if let Err(e) = ensure_model_running(model_id).await {
+        return finish_err(req, started, &e);
+    }
+    let status = match local_server_status().await {
+        Ok(status) => status,
+        Err(e) => return finish_err(req, started, &e),
+    };
+    match serde_json::to_string(&status) {
+        Ok(stdout) => finish_ok(req, started, stdout),
+        Err(e) => finish_err(req, started, &format!("serialize model status: {e}")),
+    }
+}
+
+async fn local_server_status() -> Result<crate::server::ServerStatus, String> {
+    let app = super::APP
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "OwLLM application handle is not ready".to_string())?;
+    crate::server::server_status(app.state::<crate::server::ServerState>()).await
+}
+
+async fn ensure_model_running(model_id: &str) -> Result<(), String> {
+    let app = super::APP
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or_else(|| "OwLLM application handle is not ready".to_string())?;
+    let current = crate::server::server_status(app.state::<crate::server::ServerState>()).await?;
+    if current.running && current.model_id.as_deref() == Some(model_id) {
+        return Ok(());
+    }
+    crate::server::server_start(
+        app.clone(),
+        model_id.to_string(),
+        None,
+        app.state::<crate::server::ServerState>(),
+    )
+    .await
+    .map_err(|e| format!("could not start remote model '{model_id}': {e}"))
 }
 
 fn run_file_write(req: &CommandRequest, started: Instant) -> CommandResult {
@@ -379,6 +493,10 @@ async fn run_process(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    #[cfg(target_os = "linux")]
+    for key in crate::paths::APPIMAGE_RUNTIME_ENV_KEYS {
+        cmd.env_remove(key);
+    }
     #[cfg(windows)]
     {
         // tokio::process::Command provides creation_flags inherently on Windows.
@@ -438,12 +556,45 @@ async fn run_process(
     }
 }
 
+/// Largest stdout/stderr, per stream, a remote command may return.
+///
+/// An uncapped `read_to_end` is not merely wasteful here. It grows this Vec
+/// until the allocator fails, and a failed allocation in Rust is an `abort()` —
+/// the whole app dies with no error anyone can see. It is also unsendable: the
+/// reply has to fit in ONE sealed frame, which the p2p reader refuses past
+/// MAX_FRAME, so an uncapped capture builds a result the caller could never
+/// receive. Consumers truncate to a few KB before a model sees it anyway
+/// (`truncate` in localTools.ts).
+const MAX_CAPTURE_BYTES: usize = 1 << 20; // 1 MiB per stream, as in session.rs
+
+/// Read `pipe` to EOF, keeping at most `MAX_CAPTURE_BYTES`.
+///
+/// Reading deliberately CONTINUES past the cap — the excess is counted and
+/// dropped rather than left in the pipe — so the child never blocks writing
+/// into a full buffer. The cap must change how much chatter we keep, never
+/// whether the command finishes.
 async fn drain(pipe: Option<&mut (impl AsyncReadExt + Unpin)>) -> String {
-    let mut buf = Vec::new();
-    if let Some(p) = pipe {
-        let _ = p.read_to_end(&mut buf).await;
+    let Some(p) = pipe else {
+        return String::new();
+    };
+    let mut kept: Vec<u8> = Vec::new();
+    let mut dropped: u64 = 0;
+    let mut chunk = [0u8; 8192];
+    loop {
+        match p.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                let room = MAX_CAPTURE_BYTES.saturating_sub(kept.len()).min(n);
+                kept.extend_from_slice(&chunk[..room]);
+                dropped += (n - room) as u64;
+            }
+        }
     }
-    String::from_utf8_lossy(&buf).to_string()
+    let mut s = String::from_utf8_lossy(&kept).into_owned();
+    if dropped > 0 {
+        s.push_str(&format!("\n…[truncated, {dropped} more bytes]"));
+    }
+    s
 }
 
 fn finish_err(req: &CommandRequest, started: Instant, msg: &str) -> CommandResult {

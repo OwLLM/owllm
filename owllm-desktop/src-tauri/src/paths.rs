@@ -28,6 +28,21 @@
 
 use std::path::{Path, PathBuf};
 
+/// AppImage runtime variables that must not leak into external commands.
+///
+/// They point into the image's temporary `/tmp/.mount_*` tree. A system Python,
+/// Node, or native utility launched with them can load OwLLM's bundled runtime
+/// instead of its own installation and fail or crash after the mount changes.
+#[cfg(target_os = "linux")]
+pub(crate) const APPIMAGE_RUNTIME_ENV_KEYS: &[&str] = &[
+    "APPDIR",
+    "APPIMAGE",
+    "ARGV0",
+    "LD_LIBRARY_PATH",
+    "PYTHONHOME",
+    "PYTHONPATH",
+];
+
 #[cfg(windows)]
 use sha2::{Digest, Sha256};
 
@@ -39,8 +54,10 @@ pub fn shell_open_url(app: tauri::AppHandle, url: String) -> Result<String, Stri
 }
 
 /// How this install can take updates.
-///   "auto"   — tauri-plugin-updater can swap the binary in place
-///              (Windows NSIS, macOS .app bundle, Linux AppImage).
+///   "auto"   — tauri-plugin-updater can install this platform directly.
+///   "linux-appimage" — use OwLLM's deferred atomic AppImage handoff so the
+///              running WebKitGTK processes never observe rewritten backing
+///              data.
 ///   "manual" — package-managed install (deb/rpm): the updater plugin
 ///              cannot replace it (it fails with "invalid updater binary
 ///              format"), so the UI must send the user to the download
@@ -52,7 +69,7 @@ pub fn update_install_mode() -> &'static str {
         // Tauri's Linux updater only handles AppImage, detected via the
         // APPIMAGE env var the AppImage runtime sets. Absent → deb/rpm.
         if std::env::var_os("APPIMAGE").is_some() {
-            "auto"
+            "linux-appimage"
         } else {
             "manual"
         }
@@ -273,7 +290,81 @@ pub fn module_node_exe() -> Option<PathBuf> {
 /// resolve via the bundled runtime even when the host doesn't have
 /// Node installed system-wide.
 pub fn module_node_dir() -> Option<PathBuf> {
-    module_node_exe().and_then(|p| p.parent().map(PathBuf::from))
+    let dir = module_node_exe().and_then(|p| p.parent().map(PathBuf::from))?;
+    repair_posix_node_shims(&dir);
+    Some(dir)
+}
+
+/// Node's macOS/Linux archives ship `bin/npm` and `bin/npx` as symlinks into
+/// `lib/node_modules/npm/bin`. Some zip/tar extraction paths materialize the
+/// symlink payload as a regular 54-byte script instead. From `bin/`, that copied
+/// script resolves `../lib/cli.js` to the wrong directory and every GUI install
+/// exits 1. Restore the archive's intended relative links in the app-managed
+/// module directory. This is idempotent and never touches a system Node install.
+#[cfg(unix)]
+fn repair_posix_node_shims(bin_dir: &Path) {
+    use std::os::unix::fs::symlink;
+
+    for (name, relative_target) in [
+        ("npm", "../lib/node_modules/npm/bin/npm-cli.js"),
+        ("npx", "../lib/node_modules/npm/bin/npx-cli.js"),
+    ] {
+        let target = bin_dir.join(relative_target);
+        if !target.is_file() {
+            continue;
+        }
+        let shim = bin_dir.join(name);
+        let already_correct = std::fs::read_link(&shim)
+            .ok()
+            .map(|link| link == PathBuf::from(relative_target))
+            .unwrap_or(false);
+        if already_correct {
+            continue;
+        }
+        let temp = bin_dir.join(format!(".{name}.owllm-link"));
+        let _ = std::fs::remove_file(&temp);
+        if symlink(relative_target, &temp).is_ok() {
+            let _ = std::fs::rename(&temp, &shim);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn repair_posix_node_shims(_bin_dir: &Path) {}
+
+#[cfg(all(test, unix))]
+mod node_shim_tests {
+    use super::repair_posix_node_shims;
+
+    #[test]
+    fn copied_npm_scripts_are_restored_to_relative_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let bin = temp.path().join("bin");
+        let npm_bin = temp.path().join("lib/node_modules/npm/bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(&npm_bin).unwrap();
+        for (name, body) in [
+            ("npm-cli.js", "#!/usr/bin/env node\n"),
+            ("npx-cli.js", "#!/usr/bin/env node\n"),
+        ] {
+            std::fs::write(npm_bin.join(name), body).unwrap();
+        }
+        // Reproduce the broken extractor result seen on the live Mac: the
+        // symlink payload was copied into bin/npm and resolves ../lib wrongly.
+        std::fs::write(bin.join("npm"), "require('../lib/cli.js')(process)\n").unwrap();
+        std::fs::write(bin.join("npx"), "require('../lib/cli.js')(process)\n").unwrap();
+
+        repair_posix_node_shims(&bin);
+
+        assert_eq!(
+            std::fs::read_link(bin.join("npm")).unwrap(),
+            std::path::PathBuf::from("../lib/node_modules/npm/bin/npm-cli.js")
+        );
+        assert_eq!(
+            std::fs::read_link(bin.join("npx")).unwrap(),
+            std::path::PathBuf::from("../lib/node_modules/npm/bin/npx-cli.js")
+        );
+    }
 }
 
 fn appdata_root() -> Option<PathBuf> {

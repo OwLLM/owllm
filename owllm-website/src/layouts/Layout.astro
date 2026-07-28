@@ -1,0 +1,115 @@
+---
+import "../styles/global.css";
+import Nav from "../components/Nav.astro";
+import Footer from "../components/Footer.astro";
+
+export interface Props {
+  title: string;
+  description: string;
+  image?: string;
+  type?: "website" | "article";
+  noindex?: boolean;
+}
+
+const {
+  title,
+  description,
+  image = "/favicon.svg",
+  type = "website",
+  noindex = false,
+} = Astro.props;
+
+const site = Astro.site?.toString().replace(/\/$/, "") || "https://owllm.com";
+const canonical = new URL(Astro.url.pathname, site);
+const ogImage = image.startsWith("http") ? image : new URL(image, site).toString();
+const fullTitle = title === "OwLLM" ? title : `${title} | OwLLM`;
+
+const jsonLd = {
+  "@context": "https://schema.org",
+  "@type": type === "article" ? "Article" : "WebSite",
+  name: fullTitle,
+  description,
+  url: canonical.toString(),
+  image: ogImage,
+};
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    {noindex && <meta name="robots" content="noindex, nofollow" />}
+
+    <link rel="canonical" href={canonical.toString()} />
+    <link rel="sitemap" href={`${site}/sitemap-index.xml`} type="application/xml" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="theme-color" content="#667eea" />
+
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <meta property="og:type" content={type} />
+    <meta property="og:url" content={canonical.toString()} />
+    <meta property="og:image" content={ogImage} />
+
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={fullTitle} />
+    <meta name="twitter:description" content={description} />
+    <meta name="twitter:image" content={ogImage} />
+
+    <script
+      is:inline
+      set:html={`
+        (function () {
+          try {
+            const mode = localStorage.getItem('owllm:site:theme:mode');
+            const accent = localStorage.getItem('owllm:site:theme:accent');
+            if (mode === 'dark' || mode === 'light') {
+              document.documentElement.setAttribute('data-theme', mode);
+            } else if (window.matchMedia('(prefers-color-scheme: light)').matches) {
+              document.documentElement.setAttribute('data-theme', 'light');
+            } else {
+              document.documentElement.setAttribute('data-theme', 'dark');
+            }
+            if (accent && /^#([0-9a-f]{6})$/i.test(accent)) {
+              document.documentElement.style.setProperty('--accent', accent);
+              const hex = accent.replace('#', '');
+              document.documentElement.style.setProperty('--accent-rgb',
+                parseInt(hex.slice(0, 2), 16) + ', ' +
+                parseInt(hex.slice(2, 4), 16) + ', ' +
+                parseInt(hex.slice(4, 6), 16));
+            }
+          } catch (e) {
+            document.documentElement.setAttribute('data-theme', 'dark');
+          }
+        })();
+      `}
+    />
+
+    <script is:inline type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
+    <slot name="head" />
+  </head>
+  <body>
+    <Nav />
+    <main id="main-content" tabindex="-1">
+      <slot />
+    </main>
+    <Footer />
+  </body>
+</html>
+
+<style>
+  body {
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+  }
+
+  main {
+    flex: 1;
+    outline: none;
+  }
+</style>

@@ -73,6 +73,16 @@ fs.writeFileSync(
     "  vaultEnsure: async () => globalThis.__vaultEnsure(),\n" +
     "};\n",
 );
+// The real (dependency-free) liveness module — vaultSync imports the
+// heartbeat cadence constant from it.
+const advancedDir = path.join(temp, "pages", "advanced");
+fs.mkdirSync(advancedDir, { recursive: true });
+fs.writeFileSync(
+  path.join(advancedDir, "deviceLiveness.js"),
+  ts.transpileModule(read(path.join(SRC, "pages", "advanced", "deviceLiveness.ts")), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText,
+);
 fs.writeFileSync(path.join(runtimeDir, "vaultSync.js"), output);
 
 function storage() {

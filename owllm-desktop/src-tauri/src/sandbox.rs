@@ -1848,11 +1848,17 @@ fn linux_provision() -> Result<String, String> {
     } else {
         return Err("No supported package manager (apt/dnf/pacman). Install bubblewrap, node, git manually.".into());
     };
+    // Same npm ENOTEMPTY self-heal as the WSL paths (accounts::NPM_CLEAN_STALE_SNIPPET):
+    // an interrupted global install leaves a hidden `.<pkg>-<rand>` staging dir that
+    // makes every later `npm install -g` fail permanently. Clear it first — Linux hits
+    // this exactly like WSL does.
     let script = format!(
         "set -e; {inst}; export UV_INSTALL_DIR=/usr/local/bin; \
          (curl -LsSf https://astral.sh/uv/install.sh | sh) || true; \
+         {clean} \
          npm install -g @anthropic-ai/claude-code @openai/codex @google/gemini-cli || true; \
-         echo PROVISION_DONE"
+         echo PROVISION_DONE",
+        clean = crate::accounts::NPM_CLEAN_STALE_SNIPPET,
     );
     if which("pkexec") {
         run_capture("pkexec", &["bash", "-lc", &script])

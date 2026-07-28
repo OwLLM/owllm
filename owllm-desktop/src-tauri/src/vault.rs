@@ -50,6 +50,15 @@ fn token_and_login() -> Option<(String, String)> {
     Some((token, login))
 }
 
+/// Remote vault operations must be authorized by OWLLM's CURRENT GitHub
+/// session, not merely by whatever Git Credential Manager/gh credentials happen
+/// to exist on the machine. The local clone remains after logout for offline
+/// access, but no fetch/push command may use it until the app reconnects.
+fn connected_vault_dir() -> Result<PathBuf, String> {
+    token_and_login().ok_or_else(|| "GitHub is disconnected — vault sync is disabled.".to_string())?;
+    vault_dir().ok_or_else(|| "no vault dir".to_string())
+}
+
 /// GET an authenticated GitHub API URL; return the parsed JSON body.
 fn curl_get(token: &str, url: &str) -> Result<serde_json::Value, String> {
     let mut cmd = std::process::Command::new("curl");
@@ -454,7 +463,7 @@ fn commit_push(dir: &std::path::Path, branch: &str) -> Result<(), String> {
 /// Publish this machine as a usable GPU/inference server in the vault.
 #[tauri::command]
 pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Err("vault not set up on this device yet".to_string());
     }
@@ -482,7 +491,7 @@ pub async fn vault_publish_server(port: u16, api_key: String) -> Result<(), Stri
 /// Stop advertising this machine as a server (deletes the record).
 #[tauri::command]
 pub async fn vault_unpublish_server() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }
@@ -502,7 +511,7 @@ pub async fn vault_unpublish_server() -> Result<(), String> {
 /// THIS device's own record). Used to offer a one-click "Use my GPU box".
 #[tauri::command]
 pub async fn vault_read_server() -> Result<Option<GpuServer>, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(None);
     }
@@ -558,7 +567,7 @@ fn copy_dir_files(from: &std::path::Path, to: &std::path::Path, overwrite: bool)
 /// vault: pull teams from other devices (add-missing) and publish ours.
 #[tauri::command]
 pub async fn vault_sync_teams() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }
@@ -778,7 +787,7 @@ fn is_worklog(kind: &str, tags: &str) -> bool {
 fn export_team_memory(conn: &rusqlite::Connection, project_id: &str) -> Vec<VaultMemEntry> {
     let mut stmt = match conn.prepare(
         "SELECT mkey, content, tags, author, ts, kind FROM team_memory \
-         WHERE scope = ?1 AND kind != 'worklog' ORDER BY id ASC",
+         WHERE scope = ?1 AND kind = 'fact' ORDER BY id ASC",
     ) {
         Ok(s) => s,
         Err(_) => return Vec::new(),
@@ -897,7 +906,7 @@ fn export_projects(db: &std::path::Path) -> Result<Vec<VaultProject>, String> {
     if !db.is_file() {
         return Ok(Vec::new());
     }
-    let conn = rusqlite::Connection::open(db).map_err(|e| format!("open db: {e}"))?;
+    let conn = crate::projects::open_state_db(db)?;
     let exists: i64 = conn
         .query_row(
             "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='agent_projects'",
@@ -1151,8 +1160,16 @@ fn import_project(
     if !p.team_memory_json.trim().is_empty() {
         if let Ok(entries) = serde_json::from_str::<Vec<VaultMemEntry>>(&p.team_memory_json) {
             let _ = crate::memory::ensure_schema(conn);
+            // Re-indexing rewrites every term row for every memory in the
+            // scope, so only pay for it when the merge actually wrote
+            // something. On a converged fleet the 60-second sync merges
+            // nothing, and re-indexing unconditionally meant the app never
+            // stopped writing to the shared state DB.
+            let before = conn.total_changes();
             merge_team_memory(conn, &p.id, &entries);
-            let _ = crate::memory::reindex_team_memory_scope(conn, &p.id);
+            if conn.total_changes() != before {
+                let _ = crate::memory::reindex_team_memory_scope(conn, &p.id);
+            }
         }
     }
     // 3) Merge the rule set — unit last-writer-wins by directives_updated_at
@@ -1180,7 +1197,7 @@ fn import_project(
 /// ours. Returns true when the local DB changed (so the UI can reload).
 #[tauri::command]
 pub async fn vault_sync_projects() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1209,7 +1226,7 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
             if let Some(parent) = db.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let conn = rusqlite::Connection::open(&db).map_err(|e| format!("open db: {e}"))?;
+            let conn = crate::projects::open_state_db(&db)?;
             crate::projects::ensure_schema(&conn)?;
             if let Ok(rd) = std::fs::read_dir(&proj_dir) {
                 for e in rd.flatten() {
@@ -1274,7 +1291,7 @@ pub async fn vault_sync_projects() -> Result<bool, String> {
 /// when a peer record changed locally.
 #[tauri::command]
 pub async fn vault_sync_devices() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1328,7 +1345,7 @@ pub async fn vault_sync_devices() -> Result<bool, String> {
 /// material never enters the git repo. Returns true when local metadata changed.
 #[tauri::command]
 pub async fn vault_sync_signing() -> Result<bool, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(false);
     }
@@ -1378,7 +1395,7 @@ fn current_branch(dir: &std::path::Path) -> String {
 /// decides whether to adopt it (last-write-wins by timestamp).
 #[tauri::command]
 pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(None);
     }
@@ -1401,7 +1418,7 @@ pub async fn vault_read_remote_state() -> Result<Option<String>, String> {
 /// JS layer already resolved which side is newer), and push.
 #[tauri::command]
 pub async fn vault_write_state(json: String) -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Err("vault not set up on this device yet".to_string());
     }
@@ -1439,7 +1456,7 @@ pub async fn vault_write_state(json: String) -> Result<(), String> {
 /// remote blob into localStorage — keeps future commits clean/linear.
 #[tauri::command]
 pub async fn vault_align() -> Result<(), String> {
-    let dir = vault_dir().ok_or_else(|| "no vault dir".to_string())?;
+    let dir = connected_vault_dir()?;
     if !is_cloned(&dir) {
         return Ok(());
     }

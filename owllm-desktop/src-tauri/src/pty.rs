@@ -26,7 +26,6 @@ use once_cell::sync::Lazy;
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use std::collections::HashMap;
-use std::ffi::OsString;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -110,36 +109,6 @@ struct Slot {
 
 static SESSIONS: Lazy<Mutex<HashMap<String, Slot>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
-/// PATH inherited by account-login PTYs.
-///
-/// Desktop launches on Linux/macOS get a deliberately small PATH, while the
-/// subscription CLIs can live in OwLLM's bundled Node module, ~/.local/bin, or
-/// ~/.grok/bin. `resolve_cli_command` can find the top-level shim in those
-/// locations, but a Node shebang such as `#!/usr/bin/env node` performs a
-/// second PATH lookup after spawn.
-fn pty_child_path() -> Option<OsString> {
-    let mut dirs: Vec<PathBuf> = Vec::new();
-    if let Some(node_dir) = crate::paths::module_node_dir() {
-        dirs.push(node_dir);
-    }
-    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        let home = PathBuf::from(home);
-        dirs.push(home.join(".local").join("bin"));
-        dirs.push(home.join(".grok").join("bin"));
-    }
-    if let Some(existing) = std::env::var_os("PATH") {
-        dirs.extend(std::env::split_paths(&existing));
-    }
-    dirs.retain(|dir| dir.is_dir());
-    // AppImage prepends executables from its temporary mount. Those are for
-    // OwLLM itself, not external CLIs, and disappear when the app exits.
-    if let Some(app_dir) = std::env::var_os("APPDIR").map(PathBuf::from) {
-        dirs.retain(|dir| !dir.starts_with(&app_dir));
-    }
-    dirs.dedup();
-    std::env::join_paths(dirs).ok()
-}
-
 /// Spawn `cli` with `args` inside a fresh PTY. Returns the session
 /// id the React side passes back to pty_write / pty_resize / pty_kill.
 #[tauri::command]
@@ -186,7 +155,7 @@ pub fn pty_spawn(
     // The resolved executable may itself be a Node/Python shim. Give that
     // second-stage interpreter lookup the same bundled/user tool directories
     // that resolve_cli_command searches.
-    if let Some(path) = pty_child_path() {
+    if let Some(path) = crate::accounts::cli_child_path() {
         cmd.env("PATH", path);
     }
     #[cfg(target_os = "linux")]
@@ -205,12 +174,13 @@ pub fn pty_spawn(
     }
     // The UI captures login URLs from PTY output and opens them in OwLLM's
     // persistent browser. Give Python's webbrowser module (Kimi) a real
-    // successful no-op: an invalid command makes it fall through to xdg-open,
-    // which can hand an HTTPS URL to LibreOffice on Linux.
+    // successful no-op. `%s` is essential on Windows: without it Python treats
+    // the whole spaced value as an executable name, fails to spawn it, then
+    // falls through to the user's external default browser.
     #[cfg(windows)]
-    cmd.env("BROWSER", "cmd.exe /c exit 0");
+    cmd.env("BROWSER", "cmd.exe /c exit 0 %s");
     #[cfg(not(windows))]
-    cmd.env("BROWSER", "/usr/bin/true");
+    cmd.env("BROWSER", "/usr/bin/true %s");
 
     let mut child = pair
         .slave

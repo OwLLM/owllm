@@ -11,6 +11,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -21,6 +22,19 @@ use tauri::ipc::Channel;
 /// the claude / codex CLIs. 0x08000000 = CREATE_NO_WINDOW.
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+/// Global installation/upgrade gate for CLIs inside WSL.
+///
+/// A team can warm several agents in parallel, and separate Agents windows can
+/// do the same. npm's global installer is not concurrency-safe: two overlapping
+/// Codex installs race the same rename into `.codex-*` and one fails with
+/// ENOTEMPTY. Serialize the Rust-side operation; the WSL script also takes a
+/// process-wide flock so a second OwLLM process cannot race this one.
+#[cfg(windows)]
+fn wsl_cli_provision_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
 
 /// One-shot subscription CLI calls must eventually return a final blob. If they
 /// loop internally (Kimi can repeatedly call Shell in --print mode without ever
@@ -34,26 +48,40 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const CLI_CHILD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const CLI_CHILD_ABS_TIMEOUT: Duration = Duration::from_secs(2 * 60 * 60);
 
-/// AppImage environment variables that must never leak into a child CLI.
-/// AppRun exports them for OwLLM's bundled runtime; passing them to a user's
-/// Python/native CLI makes it load modules and libraries from OwLLM's
-/// temporary AppImage mount instead of its own installation, causing launch
-/// failures or hard crashes.
-#[cfg(target_os = "linux")]
-const APPIMAGE_ENV_KEYS: &[&str] = &[
-    "APPDIR",
-    "APPIMAGE",
-    "ARGV0",
-    "LD_LIBRARY_PATH",
-    "PYTHONHOME",
-    "PYTHONPATH",
-];
-
-/// Strip AppImage-specific environment variables from a Command before spawn.
-/// No-op on non-Linux platforms.
-fn sanitize_appimage_env(cmd: &mut Command) {
+/// PATH inherited by subscription-CLI installers, probes and real runs.
+///
+/// Finder-launched macOS apps inherit only `/usr/bin:/bin:/usr/sbin:/sbin`.
+/// `which_extended` can still locate `/opt/homebrew/bin/codex`, but its
+/// `#!/usr/bin/env node` shebang performs a second PATH lookup and exits 127
+/// unless Homebrew's directory is also present in the child environment.
+/// Build one shared PATH from the same locations used for CLI discovery so
+/// install, login, Test and actual execution cannot disagree.
+pub(crate) fn cli_child_path() -> Option<OsString> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Some(node_dir) = crate::paths::module_node_dir() {
+        dirs.push(node_dir);
+    }
+    dirs.extend(extra_search_dirs());
+    if let Some(existing) = std::env::var_os("PATH") {
+        dirs.extend(std::env::split_paths(&existing));
+    }
     #[cfg(target_os = "linux")]
-    for key in APPIMAGE_ENV_KEYS {
+    if let Some(app_dir) = std::env::var_os("APPDIR").map(PathBuf::from) {
+        dirs.retain(|dir| !dir.starts_with(&app_dir));
+    }
+    dirs.retain(|dir| dir.is_dir());
+    dirs.dedup();
+    std::env::join_paths(dirs).ok()
+}
+
+/// Prepare an external CLI command before spawn: give it the complete
+/// cross-platform CLI PATH and strip AppImage-only runtime variables on Linux.
+fn sanitize_appimage_env(cmd: &mut Command) {
+    if let Some(path) = cli_child_path() {
+        cmd.env("PATH", path);
+    }
+    #[cfg(target_os = "linux")]
+    for key in crate::paths::APPIMAGE_RUNTIME_ENV_KEYS {
         cmd.env_remove(key);
     }
 }
@@ -245,6 +273,126 @@ fn wait_cli_child(
             ));
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+/// Streaming counterpart of `wait_cli_child`. Stdout is drained line-by-line
+/// so subscription CLIs with NDJSON output can update the UI while they work;
+/// stderr is drained concurrently so neither pipe can deadlock. The returned
+/// Output still contains both complete streams for normal exit/auth diagnosis.
+fn wait_cli_child_lines<F>(
+    mut child: std::process::Child,
+    pid: u32,
+    mut on_stdout_line: F,
+) -> std::io::Result<std::process::Output>
+where
+    F: FnMut(&str),
+{
+    use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::{Arc, Mutex};
+
+    let started = Instant::now();
+    let last_activity = Arc::new(AtomicU64::new(0));
+    let stdout_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let (line_tx, line_rx) = std::sync::mpsc::channel::<String>();
+    let mut readers = Vec::new();
+
+    if let Some(stdout) = child.stdout.take() {
+        let buf = Arc::clone(&stdout_buf);
+        let act = Arc::clone(&last_activity);
+        readers.push(std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if let Ok(mut b) = buf.lock() {
+                            b.extend_from_slice(line.as_bytes());
+                        }
+                        act.store(
+                            started.elapsed().as_millis() as u64,
+                            AtomicOrdering::Relaxed,
+                        );
+                        let clean = line.trim_end_matches(['\r', '\n']).to_string();
+                        if line_tx.send(clean).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        }));
+    }
+    if let Some(mut stderr) = child.stderr.take() {
+        let buf = Arc::clone(&stderr_buf);
+        let act = Arc::clone(&last_activity);
+        readers.push(std::thread::spawn(move || {
+            let mut chunk = [0u8; 8192];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        if let Ok(mut b) = buf.lock() {
+                            b.extend_from_slice(&chunk[..n]);
+                        }
+                        act.store(
+                            started.elapsed().as_millis() as u64,
+                            AtomicOrdering::Relaxed,
+                        );
+                    }
+                }
+            }
+        }));
+    }
+
+    let take = |b: &Arc<Mutex<Vec<u8>>>| {
+        b.lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    };
+    loop {
+        while let Ok(line) = line_rx.try_recv() {
+            on_stdout_line(&line);
+        }
+        if let Some(status) = child.try_wait()? {
+            for t in readers {
+                let _ = t.join();
+            }
+            while let Ok(line) = line_rx.try_recv() {
+                on_stdout_line(&line);
+            }
+            unregister_cli_child(pid);
+            return Ok(std::process::Output {
+                status,
+                stdout: take(&stdout_buf),
+                stderr: take(&stderr_buf),
+            });
+        }
+        let idle = started.elapsed().saturating_sub(Duration::from_millis(
+            last_activity.load(AtomicOrdering::Relaxed),
+        ));
+        if idle >= CLI_CHILD_TIMEOUT || started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+            let _ = child.kill();
+            let _ = child.wait();
+            for t in readers {
+                let _ = t.join();
+            }
+            unregister_cli_child(pid);
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "CLI child timed out ({}) and was killed",
+                    if started.elapsed() >= CLI_CHILD_ABS_TIMEOUT {
+                        format!("absolute ceiling {}s", CLI_CHILD_ABS_TIMEOUT.as_secs())
+                    } else {
+                        format!("{}s with no output", CLI_CHILD_TIMEOUT.as_secs())
+                    }
+                ),
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(40));
     }
 }
 
@@ -441,16 +589,25 @@ pub struct AccountsStatus {
     pub hf_token: bool,
     /// Claude Code CLI is installed AND has logged-in credentials.
     pub claude_cli: bool,
+    pub claude_cli_installed: bool,
     /// OpenAI Codex CLI is installed AND has logged-in credentials.
     pub codex_cli: bool,
+    pub codex_cli_installed: bool,
     /// Kimi Code CLI (MoonshotAI/kimi-cli) is installed AND logged in.
     pub kimi_cli: bool,
+    pub kimi_cli_installed: bool,
+    /// Kimi credentials exist, but a live CLI call proved the OAuth refresh
+    /// grant is no longer usable. Kept separate from `kimi_cli` so the UI can
+    /// offer Reconnect instead of claiming that a stale file is a valid login.
+    pub kimi_cli_reauth_required: bool,
     /// Google Gemini CLI (google-gemini/gemini-cli) is installed AND
     /// logged in (~/.gemini/ contains OAuth cache).
     pub gemini_cli: bool,
+    pub gemini_cli_installed: bool,
     /// xAI Grok Build CLI (`grok`) is installed AND logged in
     /// (~/.grok/ carries the sign-in state).
     pub grok_cli: bool,
+    pub grok_cli_installed: bool,
 }
 
 /// Probe what's connected right now. Cheap — runs on the AccountsPage
@@ -472,6 +629,7 @@ pub async fn accounts_status() -> AccountsStatus {
 
 fn accounts_status_blocking() -> AccountsStatus {
     let map = load_secrets();
+    let kimi_reauth_required = kimi_reauth_required();
     AccountsStatus {
         host_os: std::env::consts::OS.to_string(),
         anthropic_api_key: map
@@ -491,14 +649,20 @@ fn accounts_status_blocking() -> AccountsStatus {
         together_api_key: nonempty(&map, "TOGETHER_API_KEY"),
         gemini_api_key: nonempty(&map, "GEMINI_API_KEY") || nonempty(&map, "GOOGLE_API_KEY"),
         gemini_cli: gemini_cli_logged_in(),
+        gemini_cli_installed: find_gemini_cli().is_some(),
         hf_token: map
             .get("HF_TOKEN")
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false),
         claude_cli: claude_cli_logged_in(),
+        claude_cli_installed: find_claude_cli().is_some(),
         codex_cli: codex_cli_logged_in(),
+        codex_cli_installed: find_codex_cli().is_some(),
         kimi_cli: kimi_cli_logged_in(),
+        kimi_cli_installed: find_kimi_cli().is_some(),
+        kimi_cli_reauth_required: kimi_reauth_required,
         grok_cli: grok_cli_logged_in(),
+        grok_cli_installed: find_grok_cli().is_some(),
     }
 }
 
@@ -560,7 +724,7 @@ fn usage_db() -> Option<rusqlite::Connection> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let conn = rusqlite::Connection::open(&path).ok()?;
+    let conn = crate::projects::open_state_db(&path).ok()?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS usage_tally (\
             id INTEGER PRIMARY KEY AUTOINCREMENT,\
@@ -1737,6 +1901,15 @@ async fn probe_cli_subscription(
     let combined = format!("{stdout}\n{stderr}");
     let lower = combined.to_ascii_lowercase();
 
+    if name == "Kimi" && kimi_output_auth_failed(&combined) {
+        mark_kimi_reauth_required();
+        return (
+            false,
+            "Kimi sign-in expired and cannot be refreshed. Reconnect Kimi to continue."
+                .to_string(),
+        );
+    }
+
     // Subscription / quota error patterns. Each CLI phrases these
     // differently; cast a wide net.
     let sub_errors: &[&str] = &[
@@ -2093,14 +2266,30 @@ fn npm_global_bin_dirs() -> Vec<PathBuf> {
             push_arg(&mut cmd, batch, "config");
             push_arg(&mut cmd, batch, "get");
             push_arg(&mut cmd, batch, "prefix");
-            // Bundled Node on PATH so npm can resolve `node` if needed.
+            // npm itself is commonly a `#!/usr/bin/env node` script. Finder-
+            // launched macOS apps omit Homebrew from PATH, so include the
+            // resolved npm directory before asking npm for its global prefix.
+            let mut npm_path: Vec<PathBuf> = Vec::new();
+            if let Some(parent) = npm.parent() {
+                npm_path.push(parent.to_path_buf());
+            }
             if let Some(node_dir) = crate::paths::module_node_dir() {
-                let existing = std::env::var("PATH").unwrap_or_default();
-                #[cfg(windows)]
-                let sep = ";";
-                #[cfg(not(windows))]
-                let sep = ":";
-                cmd.env("PATH", format!("{}{sep}{}", node_dir.display(), existing));
+                npm_path.push(node_dir);
+            }
+            #[cfg(not(windows))]
+            for dir in ["/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin"] {
+                let dir = PathBuf::from(dir);
+                if dir.is_dir() {
+                    npm_path.push(dir);
+                }
+            }
+            if let Some(existing) = std::env::var_os("PATH") {
+                npm_path.extend(std::env::split_paths(&existing));
+            }
+            npm_path.retain(|dir| dir.is_dir());
+            npm_path.dedup();
+            if let Ok(path) = std::env::join_paths(npm_path) {
+                cmd.env("PATH", path);
             }
             cmd.stdin(Stdio::null());
             cmd.stdout(Stdio::piped());
@@ -2223,6 +2412,9 @@ pub async fn claude_cli_complete(
     // the "grant home for this run" prompt — never silently. See
     // sandbox::extra_allowed_dirs.
     grant_home: Option<bool>,
+    // TRUE for a read-only agent — see claude_cli_stream. This one-shot path is
+    // what a bridge run (no Thought pane) takes, so it needs the same boundary.
+    read_only: Option<bool>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
         // Collect args once → run as the Windows CLI or inside WSL (isolated).
@@ -2244,7 +2436,17 @@ pub async fn claude_cli_complete(
             args.push("--session-id".into());
             args.push(sid.to_string());
         }
-        if auto_approve.unwrap_or(false) {
+        // Read-only agent: strip the write tools from the session outright. That
+        // disallow list — not the permission mode — is the boundary, so the agent
+        // still needs an explicit mode or `-p` hard-denies every tool outside
+        // `--allowedTools` with nobody able to answer the prompt. Mirrors
+        // claude_cli_stream; see the full rationale there.
+        let agent_read_only = read_only.unwrap_or(false);
+        if agent_read_only {
+            args.push("--disallowedTools".into());
+            args.push("Edit Write NotebookEdit Bash".into());
+        }
+        if agent_read_only || auto_approve.unwrap_or(false) {
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
@@ -2429,6 +2631,11 @@ fn looks_like_cli_auth_error(text: &str) -> bool {
         || low.contains("authentication_error")
         || low.contains("401 unauthorized")
         || low.contains("oauth token has expired")
+        || low.contains("invalid_authentication_error")
+        || low.contains("api key appears to be invalid")
+        || low.contains("authorization grant is invalid")
+        || low.contains("refresh token is invalid")
+        || low.contains("refresh token has been revoked")
         || low.contains("please run /login")
         || low.contains("please log in")
         // Kimi/Gemini phrasings — this is the ONE shared vocabulary for every
@@ -2674,6 +2881,28 @@ pub async fn codex_cli_complete(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+/// Shell snippet that clears npm's interrupted-install debris BEFORE a global
+/// install, so a half-finished upgrade can't wedge every later one.
+///
+/// npm stages a global package by renaming the old directory to a hidden sibling
+/// (`@openai/.codex-vdnmINeK`). If the install dies midway — app closed, run
+/// cancelled, WSL stopped, network drop — that temp directory survives, and every
+/// subsequent `npm install -g` fails **permanently** with:
+///   `ENOTEMPTY: directory not empty, rename '.../@openai/codex' -> '.../@openai/.codex-XXXXXX'`
+/// (reported live: `wsl exited 217`, which paused the agentic Notebook queue). npm
+/// never self-heals this; the user had to know to delete the folder by hand.
+///
+/// We remove only npm's own staging leftovers: hidden `.<name>-<random>` dirs
+/// directly inside the global node_modules root or a scope dir. Real packages are
+/// never dot-prefixed, so published CLIs cannot match. `_cacache` and `.package-lock.json`
+/// are explicitly preserved. Best-effort — failures never abort the install.
+pub(crate) const NPM_CLEAN_STALE_SNIPPET: &str = "\
+for _r in /usr/local/lib/node_modules /usr/lib/node_modules; do \
+  [ -d \"$_r\" ] || continue; \
+  find \"$_r\" -mindepth 1 -maxdepth 2 -type d -name '.*-*' \
+    ! -name '_cacache' ! -name '.package-lock.json' -exec rm -rf {} + 2>/dev/null; \
+done; true; ";
+
 /// Ensure the selected subscription CLI exists where a project will execute.
 ///
 /// A Windows Accounts card verifies the host binary, while an isolated project
@@ -2690,24 +2919,30 @@ pub async fn accounts_prepare_cli_for_cwd(
         let Some((distro, _)) = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc) else {
             return Ok(false);
         };
-        let (binary, install) = match backend.as_str() {
+        let (binary, probe, install) = match backend.as_str() {
+            // NPM_CLEAN_STALE_SNIPPET runs first so a previously interrupted
+            // install can't wedge this one with ENOTEMPTY (see the const's docs).
             "claude_cli" => (
                 "claude",
+                "claude --version",
                 "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
                  npm install -g --prefix /usr/local @anthropic-ai/claude-code@latest",
             ),
             "codex_cli" => (
                 "codex",
+                "codex --version",
                 "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
                  npm install -g --prefix /usr/local @openai/codex@latest",
             ),
             "gemini_cli" => (
                 "gemini",
+                "gemini --version",
                 "apt-get update -y; apt-get install -y nodejs npm ca-certificates; \
                  npm install -g --prefix /usr/local @google/gemini-cli@latest",
             ),
             "kimi_cli" => (
                 "kimi",
+                "kimi --version",
                 "apt-get update -y; apt-get install -y curl ca-certificates python3-pip; \
                  export UV_INSTALL_DIR=/usr/local/bin; \
                  if ! command -v uv >/dev/null 2>&1; then curl -LsSf https://astral.sh/uv/install.sh | sh; fi; \
@@ -2719,6 +2954,7 @@ pub async fn accounts_prepare_cli_for_cwd(
             ),
             "grok_cli" => (
                 "grok",
+                "grok --version",
                 "apt-get update -y; apt-get install -y curl ca-certificates; \
                  curl -fsSL https://x.ai/cli/install.sh | bash; \
                  test -x /root/.grok/bin/grok && install -m 755 /root/.grok/bin/grok /usr/local/bin/grok",
@@ -2728,12 +2964,24 @@ pub async fn accounts_prepare_cli_for_cwd(
         let script = format!(
             "set -e; export DEBIAN_FRONTEND=noninteractive; \
              export PATH=/usr/local/bin:/usr/bin:/bin; \
-             if command -v {binary} >/dev/null 2>&1; then echo OWLLM_CLI_READY; exit 0; fi; \
+             exec 9>/tmp/owllm-cli-provision.lock; \
+             if command -v flock >/dev/null 2>&1; then \
+               flock -w 600 9 || {{ echo 'Timed out waiting for another CLI installation' >&2; exit 1; }}; \
+             fi; \
+             if command -v {binary} >/dev/null 2>&1 && {probe} >/dev/null 2>&1; then \
+               echo OWLLM_CLI_READY; exit 0; \
+             fi; \
+             {clean} \
              {install}; \
              command -v {binary} >/dev/null 2>&1 || {{ echo '{binary} install did not produce an executable' >&2; exit 1; }}; \
-             echo OWLLM_CLI_INSTALLED"
+             {probe} >/dev/null 2>&1 || {{ echo '{binary} was installed but cannot start' >&2; exit 1; }}; \
+             echo OWLLM_CLI_INSTALLED",
+            clean = NPM_CLEAN_STALE_SNIPPET,
         );
         let out = tokio::task::spawn_blocking(move || {
+            let _guard = wsl_cli_provision_lock()
+                .lock()
+                .map_err(|_| "WSL CLI provision lock is poisoned".to_string())?;
             crate::wsl::run_in_distro_script_user(&distro, Some("root"), &script)
         })
         .await
@@ -2762,14 +3010,27 @@ pub async fn accounts_prepare_cli_for_cwd(
 pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, String> {
     #[cfg(windows)]
     if let Some((distro, _)) = cwd.as_deref().and_then(crate::wsl::parse_wsl_unc) {
+        // Clear npm's interrupted-install debris first: this exact command was the
+        // one reported failing with `wsl exited 217 … ENOTEMPTY: rename
+        // '@openai/codex' -> '@openai/.codex-XXXXXX'`, which paused the agentic
+        // Notebook queue and stayed broken until the folder was deleted by hand.
+        let script = format!(
+            "set -e; export PATH=/usr/local/bin:/usr/bin:/bin; \
+             exec 9>/tmp/owllm-cli-provision.lock; \
+             if command -v flock >/dev/null 2>&1; then \
+               flock -w 600 9 || {{ echo 'Timed out waiting for another CLI installation' >&2; exit 1; }}; \
+             fi; \
+             command -v npm >/dev/null 2>&1 || {{ echo 'npm is missing in WSL'; exit 1; }}; \
+             {clean} \
+             npm install -g --prefix /usr/local @openai/codex@latest; \
+             PATH=/usr/local/bin:/usr/bin:/bin codex --version",
+            clean = NPM_CLEAN_STALE_SNIPPET,
+        );
         return tokio::task::spawn_blocking(move || {
-            crate::wsl::run_in_distro_script_user(
-                &distro,
-                Some("root"),
-                "set -e; command -v npm >/dev/null 2>&1 || { echo 'npm is missing in WSL'; exit 1; }; \
-                 npm install -g --prefix /usr/local @openai/codex@latest; \
-                 PATH=/usr/local/bin:/usr/bin:/bin codex --version",
-            )
+            let _guard = wsl_cli_provision_lock()
+                .lock()
+                .map_err(|_| "WSL CLI provision lock is poisoned".to_string())?;
+            crate::wsl::run_in_distro_script_user(&distro, Some("root"), &script)
         })
         .await
         .map_err(|e| format!("join error: {e}"))?;
@@ -2798,6 +3059,7 @@ pub async fn codex_cli_upgrade_for_cwd(cwd: Option<String>) -> Result<String, St
             use std::os::windows::process::CommandExt;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        sanitize_appimage_env(&mut cmd);
         let out = cmd.output().map_err(|e| format!("start npm: {e}"))?;
         let stdout = String::from_utf8_lossy(&out.stdout);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -2962,6 +3224,13 @@ pub async fn claude_cli_stream(
     // true ONLY after the user approves the consent prompt. See
     // sandbox::extra_allowed_dirs.
     grant_home: Option<bool>,
+    // TRUE for a read-only agent (orchestrator / sub-leader), mirroring
+    // codex_cli_stream. Claude Code owns its own Edit/Write/Bash tools, which
+    // `allowed_tools` does NOT gate — so "You are READ-ONLY" in the prompt was
+    // advice, not a boundary: the orchestrator could edit the shared checkout,
+    // whose open work then gets swept into a checkpoint commit instead of into
+    // the specialist worktree that was supposed to make the change.
+    read_only: Option<bool>,
     on_event: Channel<ClaudeStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -3070,7 +3339,30 @@ pub async fn claude_cli_stream(
         args.push("--output-format".into());
         args.push("stream-json".into());
         args.push("--verbose".into());
-        if auto_approve.unwrap_or(false) {
+        // A read-only agent's write tools are removed from the session outright.
+        // `--disallowedTools` outranks BOTH `--allowedTools` and the permission
+        // mode, so this holds even though the MCP browser tools are appended to
+        // the allowlist below (they stay available — browser is a read-side
+        // capability the orchestrator legitimately needs).
+        let agent_read_only = read_only.unwrap_or(false);
+        if agent_read_only {
+            args.push("--disallowedTools".into());
+            args.push("Edit Write NotebookEdit Bash".into());
+        }
+        // Every mode except bypass HARD-DENIES any tool outside `--allowedTools`:
+        // `-p` is non-interactive, so the permission prompt it wants to show can
+        // never be answered and the call fails with "Claude requested permissions
+        // to use X, but you haven't granted it yet". Read-only agents used to fall
+        // into that hole — they took the branch above and were left in `default`
+        // mode — which is why an orchestrator could not WebSearch even though
+        // orchestrator.yaml grants it.
+        //
+        // Bypass is safe for a read-only agent because the disallow list above is
+        // the real boundary, not the mode: verified against Claude Code 2.1.197
+        // that `--permission-mode bypassPermissions --disallowedTools "… Write …"`
+        // removes Write from the session entirely ("No such tool available:
+        // Write"), and no file is created.
+        if agent_read_only || auto_approve.unwrap_or(false) {
             args.push("--permission-mode".into());
             args.push("bypassPermissions".into());
         }
@@ -3101,9 +3393,18 @@ pub async fn claude_cli_stream(
         // dirs guard blocks the Read/`cat` even when every TOOL permission is
         // granted — the allowlist and the filesystem jail are separate axes. This
         // is empty (a no-op) for a bwrap-jailed run, preserving confinement there.
-        for dir in crate::sandbox::extra_allowed_dirs(cwd.as_deref()) {
-            args.push("--add-dir".into());
-            args.push(dir);
+        //
+        // ONLY when the user has consented for this run. This loop used to run
+        // unconditionally while `grant_home` was accepted and never read, so the
+        // STREAMING path — the one the desktop UI actually takes — handed the CLI
+        // the entire %USERPROFILE% on every dispatch and the consent modal
+        // (FileAccessConsentModal → consentGrantHome) decided nothing. Mirrors the
+        // gate claude_cli_complete already had.
+        if grant_home.unwrap_or(false) {
+            for dir in crate::sandbox::extra_allowed_dirs(cwd.as_deref()) {
+                args.push("--add-dir".into());
+                args.push(dir);
+            }
         }
         // See claude_cli_complete: a large agentic system prompt passed via
         // `--append-system-prompt <arg>` overflows the Windows ~32 KB command line
@@ -3530,6 +3831,13 @@ pub async fn codex_cli_stream(
     // that owns the shared browser; ordinary coders should dispatch browser
     // work to @browser instead of receiving host-browser privileges.
     allowed_tools: Option<Vec<String>>,
+    // TRUE for a read-only agent (orchestrator / sub-leader). `codex exec` owns
+    // its own shell + apply_patch tools, which `allowed_tools` does NOT gate, so
+    // "You are READ-ONLY" in the prompt was advice, not a boundary: the
+    // orchestrator edited the shared checkout, left it dirty, and every
+    // specialist worktree afterwards failed to cut — deadlocking the whole run.
+    // The sandbox is the boundary.
+    read_only: Option<bool>,
     on_event: Channel<CodexStreamEvent>,
 ) -> Result<String, String> {
     tokio::task::spawn_blocking(move || {
@@ -3603,7 +3911,13 @@ pub async fn codex_cli_stream(
         // Escalate the sandbox only when we actually wired the gateway (see the
         // codex-quirk note above). `never` stops the non-interactive auto-cancel
         // of MCP tool calls; `danger-full-access` is what lets them execute.
-        let sandbox_mode = if gateway_wired {
+        // A read-only agent NEVER gets a writable workspace, gateway or not: an
+        // orchestrator that can write the shared checkout breaks its own
+        // specialists' isolation. It keeps read tools and MCP browser tools.
+        let agent_read_only = read_only.unwrap_or(false);
+        let sandbox_mode = if agent_read_only {
+            "read-only"
+        } else if gateway_wired {
             "danger-full-access"
         } else {
             "workspace-write"
@@ -3757,15 +4071,14 @@ pub async fn codex_cli_stream(
                 std::thread::sleep(Duration::from_millis(250));
             }
         });
-        let mut stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| "codex stdin pipe missing".to_string())?;
-        stdin
-            .write_all(prompt.as_bytes())
-            .map_err(|e| format!("write codex prompt to stdin: {e}"))?;
+        let stdin_write_error = match child.stdin.take() {
+            Some(mut stdin) => stdin
+                .write_all(prompt.as_bytes())
+                .err()
+                .map(|e| format!("write codex prompt to stdin: {e}")),
+            None => Some("codex stdin pipe missing".to_string()),
+        };
         // Drop closes the pipe (EOF) so the stdin-style Codex proceeds.
-        drop(stdin);
         let stdout = child
             .stdout
             .take()
@@ -3960,12 +4273,25 @@ pub async fn codex_cli_stream(
                 .lock()
                 .map(|buf| String::from_utf8_lossy(&buf).into_owned())
                 .unwrap_or_default();
-            return Err(cli_exit_err(
+            let child_error = cli_exit_err(
                 "codex",
                 status.code().unwrap_or(-1),
                 &stream_errors.join("\n"),
                 &stderr_buf,
-            ));
+            );
+            // A CLI that fails during startup can close stdin before OwLLM
+            // writes the prompt. The old early `?` returned only Windows error
+            // 109 and abandoned the child/watchdog, hiding the actionable
+            // startup diagnostic (for example a missing Codex dependency).
+            return Err(match stdin_write_error {
+                Some(write_error) => format!("{child_error}\n{write_error}"),
+                None => child_error,
+            });
+        }
+        if asm.is_empty() {
+            if let Some(write_error) = stdin_write_error {
+                return Err(write_error);
+            }
         }
         // Belt-and-suspenders (same 401-as-reply hazard as Claude): codex can print
         // "API Error: 401 …" / "Failed to authenticate" as its ONLY message and exit
@@ -4033,6 +4359,81 @@ fn kimi_home_dir() -> Option<PathBuf> {
     kimi_home_candidates().into_iter().find(|p| p.is_dir())
 }
 
+fn kimi_credential_path() -> Option<PathBuf> {
+    kimi_home_candidates()
+        .into_iter()
+        .map(|kimi| kimi.join("credentials").join("kimi-code.json"))
+        .find(|path| path.is_file())
+}
+
+/// A non-secret identity for the current Kimi credential file. When a fresh
+/// login rewrites the file, its metadata changes and an older revocation marker
+/// stops applying automatically. Tokens are never copied into the marker.
+fn kimi_credential_fingerprint(path: &std::path::Path) -> Option<String> {
+    let metadata = std::fs::metadata(path).ok()?;
+    let modified = metadata
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos();
+    Some(format!("{}\n{}\n{}", path.display(), metadata.len(), modified))
+}
+
+fn kimi_reauth_marker_path() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".owllm")
+            .join("kimi_reauth_required"),
+    )
+}
+
+fn kimi_reauth_required() -> bool {
+    let Some(credential) = kimi_credential_path() else {
+        clear_kimi_reauth_required();
+        return false;
+    };
+    let Some(fingerprint) = kimi_credential_fingerprint(&credential) else {
+        return false;
+    };
+    let Some(marker_path) = kimi_reauth_marker_path() else {
+        return false;
+    };
+    match std::fs::read_to_string(&marker_path) {
+        Ok(marker) if marker == fingerprint => true,
+        Ok(_) => {
+            // A successful fresh login replaced the credential file. The old
+            // failure no longer applies.
+            let _ = std::fs::remove_file(marker_path);
+            false
+        }
+        Err(_) => false,
+    }
+}
+
+fn mark_kimi_reauth_required() {
+    let Some(credential) = kimi_credential_path() else {
+        return;
+    };
+    let Some(fingerprint) = kimi_credential_fingerprint(&credential) else {
+        return;
+    };
+    let Some(marker_path) = kimi_reauth_marker_path() else {
+        return;
+    };
+    if let Some(parent) = marker_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(marker_path, fingerprint);
+}
+
+fn clear_kimi_reauth_required() {
+    if let Some(path) = kimi_reauth_marker_path() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// Best guess at whether the installed `kimi` binary is the new `kimi-code`
 /// (true) or the legacy `kimi-cli` (false). The safest signal is the home
 /// directory the CLI has already created on disk.
@@ -4045,9 +4446,7 @@ fn kimi_is_new_flavor() -> bool {
 /// Kimi Code CLI stores OAuth tokens in `credentials/kimi-code.json`.
 /// config.toml exists before login and must never count as authentication.
 fn kimi_cli_logged_in() -> bool {
-    kimi_home_candidates()
-        .iter()
-        .any(|kimi| kimi.join("credentials").join("kimi-code.json").is_file())
+    kimi_credential_path().is_some() && !kimi_reauth_required()
 }
 
 /// Raw text of the active Kimi config.toml (None when absent/unreadable).
@@ -4400,11 +4799,17 @@ pub fn subscription_cli_logout(backend: String) -> Result<String, String> {
                     &mut removed,
                 );
             }
+            clear_kimi_reauth_required();
         }
         "gemini_cli" => {
             for path in gemini_credential_paths(&home) {
                 try_remove(&path, &mut removed);
             }
+        }
+        "grok_cli" => {
+            let grok = home.join(".grok");
+            try_remove(&grok.join("auth.json"), &mut removed);
+            try_remove(&grok.join("credentials.json"), &mut removed);
         }
         other => return Err(format!("unknown subscription backend: {other}")),
     }
@@ -4838,6 +5243,7 @@ pub fn cli_install(backend: String) -> Result<(), String> {
         let args: Vec<&str> = parts.collect();
         let mut cmd = Command::new(head);
         cmd.args(&args);
+        sanitize_appimage_env(&mut cmd);
         cmd.spawn().map_err(|e| format!("spawn {head}: {e}"))?;
     }
 
@@ -5070,14 +5476,154 @@ pub async fn grok_cli_complete(
 ///     flag, so we inject the system prompt via a temporary `KIMI_CODE_HOME`
 ///     containing `AGENTS.md`, copy the user's config/credentials, and wire the
 ///     browser gateway through `mcp.json` + `OWLLM_GW_TOKEN`.
-#[tauri::command]
-pub async fn kimi_cli_complete(
+fn kimi_content_text(value: &serde_json::Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    let Some(parts) = value.as_array() else {
+        return String::new();
+    };
+    parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .or_else(|| part.get("content"))
+                .and_then(|v| v.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Parse one Kimi `--output-format stream-json` line. Kimi emits OpenAI-style
+/// Message objects: assistant content contains `text`/`think` parts and
+/// `tool_calls`; tool results are role=tool messages. Keep the parser tolerant
+/// of older field spellings so upgrading kimi-cli cannot make the UI silent.
+fn parse_kimi_stream_line(line: &str, assembled: &mut String) -> Vec<ClaudeStreamEvent> {
+    let mut events = Vec::new();
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+        return events;
+    };
+    let role = v.get("role").and_then(|r| r.as_str()).unwrap_or("");
+    if role == "assistant" {
+        if let Some(parts) = v.get("content").and_then(|c| c.as_array()) {
+            for part in parts {
+                let kind = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                let text = part
+                    .get("text")
+                    .or_else(|| part.get("think"))
+                    .or_else(|| part.get("thinking"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                if text.is_empty() {
+                    continue;
+                }
+                if matches!(kind, "think" | "thinking" | "reasoning") {
+                    events.push(ClaudeStreamEvent::Thinking {
+                        delta: text.to_string(),
+                    });
+                } else {
+                    assembled.push_str(text);
+                    events.push(ClaudeStreamEvent::Text {
+                        delta: text.to_string(),
+                    });
+                }
+            }
+        } else if let Some(text) = v.get("content").and_then(|c| c.as_str()) {
+            assembled.push_str(text);
+            events.push(ClaudeStreamEvent::Text {
+                delta: text.to_string(),
+            });
+        }
+        if let Some(calls) = v.get("tool_calls").and_then(|c| c.as_array()) {
+            for call in calls {
+                let id = call
+                    .get("id")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let function = call.get("function").unwrap_or(call);
+                let name = function
+                    .get("name")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let input = function
+                    .get("arguments")
+                    .map(|x| {
+                        x.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| serde_json::to_string_pretty(x).unwrap_or_default())
+                    })
+                    .unwrap_or_default();
+                events.push(ClaudeStreamEvent::ToolUse {
+                    tool_use_id: id,
+                    name,
+                    input,
+                });
+            }
+        }
+        return events;
+    }
+    if role == "tool" {
+        let content = v
+            .get("content")
+            .map(kimi_content_text)
+            .unwrap_or_default();
+        let id = v
+            .get("tool_call_id")
+            .or_else(|| v.get("toolCallId"))
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string();
+        let is_error = v
+            .get("is_error")
+            .or_else(|| v.get("isError"))
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        events.push(ClaudeStreamEvent::ToolResult {
+            tool_use_id: id,
+            content,
+            is_error,
+        });
+        return events;
+    }
+    if let Some(title) = v.get("title").and_then(|x| x.as_str()) {
+        let body = v.get("body").and_then(|x| x.as_str()).unwrap_or("");
+        events.push(ClaudeStreamEvent::Thinking {
+            delta: format!("{title}{}\n", if body.is_empty() { String::new() } else { format!(": {body}") }),
+        });
+    } else if let Some(plan) = v.get("content").and_then(|x| x.as_str()) {
+        if v.get("file_path").is_some() || v.get("filePath").is_some() {
+            events.push(ClaudeStreamEvent::Thinking {
+                delta: format!("Plan updated:\n{plan}\n"),
+            });
+        }
+    }
+    events
+}
+
+fn handle_kimi_stream_line(
+    line: &str,
+    on_event: &Channel<ClaudeStreamEvent>,
+    assembled: &mut String,
+) {
+    for event in parse_kimi_stream_line(line, assembled) {
+        let _ = on_event.send(event);
+    }
+}
+
+async fn kimi_cli_run(
     app: tauri::AppHandle,
     system_prompt: String,
     user_message: String,
     cwd: Option<String>,
     model: Option<String>,
     _allowed_tools: Option<Vec<String>>,
+    // TRUE for a read-only agent — see codex_cli_stream. `--print` mode
+    // auto-approves every tool call, so without this a Kimi orchestrator had no
+    // write boundary at all; `--plan` is kimi's read-only mode.
+    read_only: Option<bool>,
+    on_event: Option<Channel<ClaudeStreamEvent>>,
 ) -> Result<String, String> {
     // Browser tools are a CROSS-CUTTING capability: every host-run Kimi agent
     // gets the in-app browser gateway, not just the Browser role. kimi-cli
@@ -5174,12 +5720,21 @@ pub async fn kimi_cli_complete(
 
             // Both legacy kimi-cli and current kimi-code support --print
             // non-interactive mode; --output-format only works in that mode.
+            let stream_live = on_event.is_some();
             let mut args: Vec<String> = vec![
                 "--print".into(),
                 "--output-format".into(),
-                "text".into(),
-                "--final-message-only".into(),
+                if stream_live { "stream-json".into() } else { "text".into() },
             ];
+            if !stream_live {
+                args.push("--final-message-only".into());
+            }
+            // Read-only agent: kimi's plan mode. `--print` auto-approves tool
+            // calls, so this is the only boundary stopping an orchestrator from
+            // editing the shared checkout out from under its own specialists.
+            if read_only.unwrap_or(false) {
+                args.push("--plan".into());
+            }
             if with_model {
                 args.extend(model_args.iter().cloned());
             }
@@ -5265,8 +5820,15 @@ pub async fn kimi_cli_complete(
                     let _ = stdin.write_all(prompt_value.as_bytes());
                 }
             }
-            let output = wait_cli_child(child, pid)
-                .map_err(|e| format!("wait kimi: {e}"))?;
+            let mut streamed_reply = String::new();
+            let output = if let Some(channel) = on_event.as_ref() {
+                wait_cli_child_lines(child, pid, |line| {
+                    handle_kimi_stream_line(line, channel, &mut streamed_reply);
+                })
+            } else {
+                wait_cli_child(child, pid)
+            }
+            .map_err(|e| format!("wait kimi: {e}"))?;
 
             // Clean up the temporary injection files now that the child is done.
             match injection {
@@ -5292,6 +5854,7 @@ pub async fn kimi_cli_complete(
                     return Err("kimi: LLM not set".to_string());
                 }
                 if kimi_output_auth_failed(&stdout) || kimi_output_auth_failed(&stderr) {
+                    mark_kimi_reauth_required();
                     let detail = if kimi_output_auth_failed(&stdout) {
                         stdout.trim()
                     } else {
@@ -5319,7 +5882,12 @@ pub async fn kimi_cli_complete(
             // kimi exits 0 even on a fatal MCP-load failure; the error is only in
             // the output. Detect it so we can retry without the gateway.
             let mcp_failed = kimi_output_mcp_failed(&stdout) || kimi_output_mcp_failed(&stderr);
-            Ok((stdout.trim().to_string(), mcp_failed))
+            let reply = if stream_live {
+                streamed_reply.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            Ok((reply, mcp_failed))
         };
 
         let wired = old_mcp_config.is_some()
@@ -5355,6 +5923,7 @@ pub async fn kimi_cli_complete(
             return Err("kimi: browser gateway unreachable and the retry without it also failed".to_string());
         }
         if kimi_output_auth_failed(&reply) {
+            mark_kimi_reauth_required();
             return Err("kimi: authentication failed (401 / login expired / signed out)".to_string());
         }
 
@@ -5370,14 +5939,99 @@ pub async fn kimi_cli_complete(
     .map_err(|e| format!("join error: {e}"))?
 }
 
+#[tauri::command]
+pub async fn kimi_cli_complete(
+    app: tauri::AppHandle,
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    read_only: Option<bool>,
+) -> Result<String, String> {
+    kimi_cli_run(
+        app,
+        system_prompt,
+        user_message,
+        cwd,
+        model,
+        allowed_tools,
+        read_only,
+        None,
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn kimi_cli_stream(
+    app: tauri::AppHandle,
+    system_prompt: String,
+    user_message: String,
+    cwd: Option<String>,
+    model: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    read_only: Option<bool>,
+    on_event: Channel<ClaudeStreamEvent>,
+) -> Result<String, String> {
+    kimi_cli_run(
+        app,
+        system_prompt,
+        user_message,
+        cwd,
+        model,
+        allowed_tools,
+        read_only,
+        Some(on_event),
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        append_codex_input_args, cli_exit_err, codex_should_grant_browser,
+        append_codex_input_args, cli_child_path, cli_exit_err, codex_should_grant_browser,
         is_browser_role_allowlist, kimi_agent_yaml, kimi_config_has_default,
         kimi_config_model_keys, kimi_output_auth_failed, kimi_output_llm_unset,
-        kimi_output_mcp_failed,
+        kimi_output_mcp_failed, parse_kimi_stream_line, sanitize_appimage_env,
+        ClaudeStreamEvent,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn gui_cli_path_includes_homebrew_interpreters() {
+        let homebrew = std::path::PathBuf::from("/opt/homebrew/bin");
+        if !homebrew.join("node").is_file() {
+            return;
+        }
+        let path = cli_child_path().expect("CLI child PATH");
+        let dirs: Vec<_> = std::env::split_paths(&path).collect();
+        assert!(
+            dirs.contains(&homebrew),
+            "Finder-launched CLI child PATH must include /opt/homebrew/bin"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn finder_environment_can_launch_homebrew_node_cli() {
+        let codex = std::path::PathBuf::from("/opt/homebrew/bin/codex");
+        if !codex.is_file() {
+            return;
+        }
+        let mut command = std::process::Command::new(codex);
+        command.arg("--version");
+        command.env_clear();
+        if let Some(home) = std::env::var_os("HOME") {
+            command.env("HOME", home);
+        }
+        sanitize_appimage_env(&mut command);
+        let output = command.output().expect("launch Homebrew Codex");
+        assert!(
+            output.status.success(),
+            "GUI child environment must not fail /usr/bin/env node with exit 127: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     #[test]
     fn codex_images_are_terminated_by_the_stdin_prompt_marker() {
@@ -5449,8 +6103,45 @@ mod tests {
         assert!(kimi_output_auth_failed(
             "You are not logged in. Run `kimi login`."
         ));
+        assert!(kimi_output_auth_failed(
+            "Error code: 401 - {'error': {'message': 'The API Key appears to be invalid or may have expired.', 'type': 'invalid_authentication_error'}}"
+        ));
+        assert!(kimi_output_auth_failed(
+            "kimi_cli.auth.oauth.OAuthError: The provided authorization grant is invalid"
+        ));
         assert!(!kimi_output_auth_failed(
             "The server responded with a 200 OK."
+        ));
+    }
+
+    #[test]
+    fn kimi_stream_json_emits_thinking_text_tools_and_results() {
+        let mut assembled = String::new();
+        let assistant = r#"{"role":"assistant","content":[{"type":"think","think":"Checking files"},{"type":"text","text":"I found it."}],"tool_calls":[{"id":"call-1","function":{"name":"read_file","arguments":"{\"path\":\"README.md\"}"}}]}"#;
+        let events = parse_kimi_stream_line(assistant, &mut assembled);
+        assert_eq!(assembled, "I found it.");
+        assert!(matches!(
+            &events[0],
+            ClaudeStreamEvent::Thinking { delta } if delta == "Checking files"
+        ));
+        assert!(matches!(
+            &events[1],
+            ClaudeStreamEvent::Text { delta } if delta == "I found it."
+        ));
+        assert!(matches!(
+            &events[2],
+            ClaudeStreamEvent::ToolUse { tool_use_id, name, input }
+                if tool_use_id == "call-1"
+                    && name == "read_file"
+                    && input.contains("README.md")
+        ));
+
+        let tool = r#"{"role":"tool","tool_call_id":"call-1","content":[{"type":"text","text":"file contents"}],"is_error":false}"#;
+        let events = parse_kimi_stream_line(tool, &mut assembled);
+        assert!(matches!(
+            &events[0],
+            ClaudeStreamEvent::ToolResult { tool_use_id, content, is_error }
+                if tool_use_id == "call-1" && content == "file contents" && !is_error
         ));
     }
 

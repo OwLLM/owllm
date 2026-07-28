@@ -166,8 +166,7 @@ fn project_location(project_id: &str) -> Result<String, String> {
     };
     let project_id = project_id.to_string();
     let loc: String = std::thread::spawn(move || -> Result<String, String> {
-        let conn = rusqlite::Connection::open(&path)
-            .map_err(|e| format!("open {}: {e}", path.display()))?;
+        let conn = crate::projects::open_state_db(&path)?;
         crate::projects::ensure_schema(&conn).map_err(|e| format!("schema: {e}"))?;
         let loc: Option<String> = conn
             .query_row(

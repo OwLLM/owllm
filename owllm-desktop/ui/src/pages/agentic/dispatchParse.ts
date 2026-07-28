@@ -6,10 +6,20 @@
 
 export type Dispatch = { agentName: string; instruction: string };
 
-/// A dispatch line whose @name resolved to NO team member, with the nearest
-/// real name as a suggestion. Surfaced to the user AND fed back to the
-/// orchestrator (P1-3: fail loud, never silently drop a specialist).
-export type UnresolvedDispatch = { name: string; instruction: string; suggestion: string | null };
+/// A dispatch line that produced NO specialist run, with the nearest real name
+/// as a suggestion. Surfaced to the user AND fed back to the orchestrator
+/// (P1-3: fail loud, never silently drop a specialist).
+///
+/// `reason` distinguishes the two ways that happens. "empty-instruction" used to
+/// be dropped by a bare `continue` — the agent existed, but the orchestrator gave
+/// it no body, so it simply never ran and nothing anywhere said so.
+export type UnresolvedReason = "unknown-agent" | "empty-instruction";
+export type UnresolvedDispatch = {
+  name: string;
+  instruction: string;
+  suggestion: string | null;
+  reason: UnresolvedReason;
+};
 
 export type DispatchParse = { dispatches: Dispatch[]; unresolved: UnresolvedDispatch[] };
 
@@ -111,16 +121,28 @@ export function parseDispatchesDetailed(text: string, team: TeamLike, exclude: s
     const end = h + 1 < hits.length ? hits[h + 1].idx : lines.length;
     const instruction = [hit.head, ...lines.slice(hit.idx + 1, end)]
       .join("\n").replace(/^[\s*]+/, "").trim();
-    if (!instruction) continue;
     const name = hit.name;
     // critical_thinker is a synthetic agent (not in team.agents); it's
     // routed via extractUserInputRequest's CRITIC_DISPATCH_RE branch
     // instead. Skip here so we don't fall through to the unknown-agent
     // path.
     if (/^critical[_\s-]?thinker$/i.test(name)) continue;
+    // `@coder:` with nothing after it. Dispatching an empty instruction is
+    // pointless, but silently dropping it is worse: the user watched a named
+    // specialist never run and got no reason. Report it like any other dispatch
+    // that produced no run, so the orchestrator is asked to re-emit it.
+    if (!instruction) {
+      unresolved.push({ name, instruction: "", suggestion: null, reason: "empty-instruction" });
+      continue;
+    }
     const resolved = resolveAgentName(name, teamNames);
     if (resolved === null) {
-      unresolved.push({ name, instruction, suggestion: nearestAgentName(name, teamNames) });
+      unresolved.push({
+        name,
+        instruction,
+        suggestion: nearestAgentName(name, teamNames),
+        reason: "unknown-agent",
+      });
       continue;
     }
     if (resolved === exclude) continue; // orchestrator never self-dispatches
@@ -138,10 +160,12 @@ export function parseDispatches(text: string, team: TeamLike, exclude: string): 
 export function unresolvedCorrectionMessage(unresolved: UnresolvedDispatch[], team: TeamLike, exclude: string): string {
   const roster = team.agents.map(a => a.name).filter(n => n !== exclude).join(", ");
   const lines = unresolved.map(u =>
-    `- "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""}`);
+    u.reason === "empty-instruction"
+      ? `- "@${u.name}:" was given no instruction, so there was nothing to dispatch`
+      : `- "@${u.name}:" names no agent on this team${u.suggestion ? ` — did you mean '@${u.suggestion}:'?` : ""}`);
   return [
     "[dispatch error — fix and re-emit]",
-    "These dispatch lines named agents that do not exist, so NOTHING was dispatched for them:",
+    "These dispatch lines produced NO specialist run:",
     ...lines,
     `Your team is exactly: ${roster}.`,
     "Re-emit the dispatch lines now, one per line, as `@<exact-agent-name>: <instruction>`. Do not apologize or explain.",

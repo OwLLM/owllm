@@ -85,6 +85,18 @@ const hasLocalSettings = (repoDir: string) => {
 // The shared status line below the chatbox is a single ambient line — send it a
 // one-line summary; the full multi-line output lives in the output modal.
 const firstLine = (s: string) => { const i = s.indexOf("\n"); return i === -1 ? s : s.slice(0, i); };
+// Backend release errors open with a CONSTANT header ("finish_and_publish did
+// not complete:") and carry the real cause on the lines below it. Summarising
+// those with firstLine() made every failed release render the same reasonless
+// line — and Publish deliberately does not auto-open the output modal, so the
+// cause was invisible unless the user went looking for it. Prefer the script's
+// own PUBLISH_FAILED line, else the first line that actually says something.
+const errorSummary = (s: string) => {
+  const lines = s.split("\n").map((l) => l.trim()).filter(Boolean);
+  return lines.find((l) => l.includes("PUBLISH_FAILED:"))
+    ?? lines.find((l) => !/did not complete:?$/.test(l))
+    ?? firstLine(s);
+};
 const elapsedClock = (seconds: number) => {
   const minutes = Math.floor(seconds / 60);
   return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
@@ -298,8 +310,13 @@ export default function PublishCards({
       refresh();
     } catch (e) {
       const msg = String((e as Error).message ?? e);
-      setActivity({ kind: "err", msg: firstLine(msg) });
+      setActivity({ kind: "err", msg: errorSummary(msg) });
       setOutput({ kind: "err", title: label, body: msg });
+      // A FAILED action has nothing left to run, so the reason why we keep the
+      // modal closed during a release (minutes of build behind a full-screen
+      // overlay) no longer applies. Show the full output instead of leaving the
+      // user with a one-line card and no way to know what broke.
+      setOutputOpen(true);
     } finally {
       runningRef.current = false;
       setLoading(false);

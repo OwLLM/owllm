@@ -30,9 +30,20 @@ if (!cards.includes("}, { openOutput: false })") ||
     !cards.includes("setOutputOpen(openOutput)")) {
   fail("host publish automatically opens a blocking full-screen output modal");
 }
+// Unchanged intent: the rail carries a ONE-LINE summary, never the full log.
+// The failure path now derives that single line with errorSummary() because the
+// backend's first line is a constant header, so firstLine() rendered every
+// broken release as a reasonless "finish_and_publish did not complete:".
 if (!cards.includes('setActivity({ kind: "ok", msg: firstLine(msg) })') ||
-    !cards.includes('setActivity({ kind: "err", msg: firstLine(msg) })')) {
+    !cards.includes('setActivity({ kind: "err", msg: errorSummary(msg) })')) {
   fail("full publish logs can still expand the inline rail and capture the layout");
+}
+if (!cards.includes('lines.find((l) => l.includes("PUBLISH_FAILED:"))') ||
+    !cards.includes("lines.find((l) => !/did not complete:?$/.test(l))")) {
+  fail("a failed release still summarises as the constant backend header instead of its cause");
+}
+if (!/catch \(e\) \{[\s\S]*?setOutputOpen\(true\);/.test(cards)) {
+  fail("a failed release leaves its output hidden behind a modal the user must find");
 }
 if (!cards.includes("elapsedClock(elapsedSeconds)") ||
     !cards.includes("Date.now() - startedAt")) {
@@ -62,6 +73,10 @@ for (const releaseFile of [
   "owllm-desktop/src-tauri/Cargo.toml text eol=lf",
   "owllm-desktop/src-tauri/Cargo.lock text eol=lf",
   "owllm-desktop/src-tauri/tauri.conf.json text eol=lf",
+  // Tauri regenerates these with LF on every build; they were committed CRLF,
+  // so each `cargo check` left an EOL-only 4882-line diff under the stage path
+  // and the preflight below blocked EVERY publish until cleaned by hand.
+  "owllm-desktop/src-tauri/gen/schemas/*.json text eol=lf",
 ]) {
   if (!attributes.includes(releaseFile)) {
     fail(`release metadata is not pinned to LF: ${releaseFile}`);
@@ -106,6 +121,35 @@ try {
   git(["update-index", "-q", "--really-refresh"], true);
   if (!git(["status", "--porcelain", "--", "Cargo.toml"]).stdout.trim()) {
     fail("the refresh hid a genuine release metadata edit");
+  }
+
+  // Generated-schema treadmill, end to end: a file committed with CRLF that its
+  // generator rewrites with LF is dirty forever on an autocrlf host, which is
+  // what made the preflight above reject every release. Prove the block exists
+  // WITHOUT the pin, and that `text eol=lf` + renormalize actually clears it.
+  git(["config", "core.autocrlf", "true"]);
+  const attrFile = path.join(fixture, ".gitattributes");
+  const generated = path.join(fixture, "gen.json");
+  const generatorOutput = '{\n  "acl": true\n}\n';           // build emits LF
+  fs.writeFileSync(attrFile, "gen.json -text\n");             // how it got committed
+  fs.writeFileSync(generated, generatorOutput.replace(/\n/g, "\r\n"));
+  git(["add", ".gitattributes", "gen.json"]);
+  git(["commit", "-qm", "generated schema committed with CRLF"]);
+
+  fs.writeFileSync(generated, generatorOutput);
+  git(["update-index", "-q", "--really-refresh"], true);
+  if (!git(["status", "--porcelain", "--", "gen.json"]).stdout.trim()) {
+    fail("fixture did not reproduce the EOL-only churn the pin is meant to fix");
+  }
+
+  fs.writeFileSync(attrFile, "gen.json text eol=lf\n");
+  git(["add", "--renormalize", "--", "gen.json"]);
+  git(["add", ".gitattributes"]);
+  git(["commit", "-qm", "pin generated schema to LF"]);
+  fs.writeFileSync(generated, generatorOutput);               // build runs again
+  git(["update-index", "-q", "--really-refresh"], true);
+  if (git(["status", "--porcelain", "--", "gen.json"]).stdout.trim()) {
+    fail("pinning the generated schema to LF does not stop it re-dirtying the stage path");
   }
 } finally {
   fs.rmSync(fixture, { recursive: true, force: true });

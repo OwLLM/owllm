@@ -27,3 +27,11 @@ services/world-presence/** text eol=lf
 owllm-desktop/src-tauri/Cargo.toml text eol=lf
 owllm-desktop/src-tauri/Cargo.lock text eol=lf
 owllm-desktop/src-tauri/tauri.conf.json text eol=lf
+
+# Tauri REGENERATES these ACL/capability schemas with LF on every build, but they
+# were committed with CRLF — so any `cargo check`/build left a 4882-line
+# EOL-only phantom diff under the stage path, and the Publish preflight
+# ("uncommitted release changes under 'owllm-desktop'") blocked EVERY release
+# until someone hand-cleaned them. Pin LF so the generator's output matches the
+# committed bytes on all three platforms and the treadmill cannot restart.
+owllm-desktop/src-tauri/gen/schemas/*.json text eol=lf

@@ -1,10 +1,12 @@
 // Account / Sync onboarding popup.
 //
 // First-run (and reopenable via the `owllm:open-sync` event) modal laid out
-// as THREE side-by-side step columns so the whole journey is visible at once:
+// as side-by-side step columns so the whole journey is visible at once:
 //   ① Your GitHub identity — why to have it, sign in / sign up.
-//   ② Your AI access — subscription, API keys, or local models.
-//   ③ Start creating — jump straight into the Coding page or the Agentic Team.
+//   ② Where your projects live — the folder they already sync with GitHub, or
+//      OwLLM's own `~/OwLLM/Projects`. Device-local; see projectsRoot.ts.
+//   ③ Your AI access — subscription, API keys, or local models.
+//   ④ Start creating — jump straight into the Coding page or the Agentic Team.
 // Everything behind the buttons is automatic: the private vault is created and
 // cloned on sign-in, the provider is pre-highlighted on the Accounts page, and
 // the local-runtime wizard is skipped when it would be redundant.
@@ -22,6 +24,7 @@
 import React from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openWebUrl } from "../../utils/openWebUrl";
+import { projectsRootGet, projectsRootSet } from "../agentic/projectsRoot";
 import {
   githubStatus,
   githubConnect,
@@ -92,6 +95,10 @@ export default function AccountSyncModal() {
   const [err, setErr] = React.useState<string | null>(null);
   const [vault, setVault] = React.useState<VaultStatus | null>(null);
   const [vaultMsg, setVaultMsg] = React.useState<string>("");
+  // Step ② — where new projects get created. Either the folder the user
+  // already syncs with GitHub, or OwLLM's own default. Device-local.
+  const [projectsRoot, setProjectsRoot] = React.useState<{ path: string; configured: boolean } | null>(null);
+  const [rootBusy, setRootBusy] = React.useState(false);
   // Device Flow ("Sign in with GitHub" — no token paste).
   const [device, setDevice] = React.useState<{ userCode: string; verificationUri: string } | null>(null);
   const [showTokenFallback, setShowTokenFallback] = React.useState(false);
@@ -120,6 +127,7 @@ export default function AccountSyncModal() {
     // Fresh open → clear any stale state so a previous interrupted attempt
     // can't leave the button stuck on "Starting…".
     setBusy(false); setErr(null); setDevice(null); pollAlive.current = false;
+    projectsRootGet().then(setProjectsRoot).catch(() => setProjectsRoot(null));
     githubStatus().then((s) => {
       setStatus(s);
       // Already connected on a prior session → make sure the vault exists
@@ -173,6 +181,32 @@ export default function AccountSyncModal() {
     try { localStorage.setItem("owllm.wizard.completed", "1"); } catch { /* ignore */ }
     window.dispatchEvent(new CustomEvent("owllm:skip-module-wizard"));
     close();
+  };
+
+  // Accept OwLLM's default (`path: null`) or the folder the user already syncs
+  // with GitHub. Either way the folder is created now, so the first project
+  // needs no second prompt.
+  const chooseProjectsRoot = async (path: string | null) => {
+    setRootBusy(true); setErr(null);
+    try {
+      setProjectsRoot(await projectsRootSet(path));
+    } catch (e) {
+      setErr(`Could not use that projects folder: ${String(e)}`);
+    } finally {
+      setRootBusy(false);
+    }
+  };
+
+  const browseProjectsRoot = async () => {
+    try {
+      const picked = await invoke<string | null>("pick_folder", {
+        title: "Pick the folder where your projects live",
+        startDir: projectsRoot?.path || null,
+      });
+      if (picked) await chooseProjectsRoot(picked);
+    } catch (e) {
+      setErr(`Folder pick failed: ${String(e)}`);
+    }
   };
 
   const openAccountSetup = (provider: string) => {
@@ -321,7 +355,7 @@ export default function AccountSyncModal() {
               Welcome to OwLLM
             </div>
             <div style={{ fontSize: 12.5, opacity: 0.85, marginTop: 2 }}>
-              Three steps and you’re creating — everything behind them is set up automatically.
+              A few steps and you’re creating — everything behind them is set up automatically.
             </div>
           </div>
           <div style={{ flex: 1 }} />
@@ -488,9 +522,53 @@ export default function AccountSyncModal() {
             )}
           </StepColumn>
 
-          {/* ── ② AI access ───────────────────────────────────────────── */}
+          {/* ── ② Where your projects live ────────────────────────────── */}
           <StepColumn
-            n={2}
+            n={2} done={!!projectsRoot?.configured}
+            dataUi="OnboardingProjectsRoot"
+            title="Where your projects live"
+            subtitle={projectsRoot?.configured
+              ? "New projects are created here automatically."
+              : "Point OwLLM at the folder you already sync with GitHub, or use ours."}
+          >
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "10px 12px",
+              borderRadius: 10, background: "var(--bg-input)", border: "1px solid var(--border-strong)",
+            }}>
+              <span aria-hidden="true" style={{ fontSize: 16 }}>📁</span>
+              <code style={{
+                fontSize: 12, color: "var(--fg-strong)", wordBreak: "break-all", lineHeight: 1.4,
+              }}>{projectsRoot?.path || "…"}</code>
+            </div>
+            <button onClick={browseProjectsRoot} disabled={rootBusy} style={launchCard}>
+              <span aria-hidden="true" style={{ ...choiceIcon, width: 44, height: 44, fontSize: 23 }}>🔗</span>
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 15, fontWeight: 850 }}>Use my own folder</span>
+                <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 3 }}>
+                  Already keep your repos somewhere — the folder you sync with GitHub? Point OwLLM at it.
+                </span>
+              </span>
+              <span aria-hidden="true" style={{ marginLeft: "auto", color: "var(--accent)", fontWeight: 900, fontSize: 17 }}>→</span>
+            </button>
+            <button onClick={() => chooseProjectsRoot(null)} disabled={rootBusy} style={launchCard}>
+              <span aria-hidden="true" style={{ ...choiceIcon, width: 44, height: 44, fontSize: 23 }}>✨</span>
+              <span style={{ minWidth: 0 }}>
+                <span style={{ display: "block", color: "var(--fg-strong)", fontSize: 15, fontWeight: 850 }}>Use OwLLM’s folder</span>
+                <span style={{ display: "block", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 3 }}>
+                  We create <code>~/OwLLM/Projects</code> for you — nothing to decide.
+                </span>
+              </span>
+              <span aria-hidden="true" style={{ marginLeft: "auto", color: "var(--accent)", fontWeight: 900, fontSize: 17 }}>→</span>
+            </button>
+            <div style={{ fontSize: 10.5, color: "var(--fg-muted)", lineHeight: 1.45 }}>
+              This folder stays on this device — OwLLM never syncs paths between machines.
+              You can change it later from Settings.
+            </div>
+          </StepColumn>
+
+          {/* ── ③ AI access ───────────────────────────────────────────── */}
+          <StepColumn
+            n={3}
             title="Connect your AI"
             subtitle="Pick what you already pay for — or go fully local. OwLLM opens the existing Accounts page with that provider highlighted, so sign-in is one click away."
             dataUi="OnboardingAccountLoginPanel"
@@ -529,11 +607,11 @@ export default function AccountSyncModal() {
             </div>
           </StepColumn>
 
-          {/* ── ③ Start creating ──────────────────────────────────────── */}
+          {/* ── ④ Start creating ──────────────────────────────────────── */}
           <StepColumn
-            n={3}
+            n={4}
             title="Start creating"
-            subtitle="Jump straight into a workspace — you can always finish steps ① and ② later from Settings."
+            subtitle="Jump straight into a workspace — you can always finish the earlier steps later from Settings."
           >
             <button onClick={() => startCreating("code")} style={launchCard}>
               <span aria-hidden="true" style={{ ...choiceIcon, width: 44, height: 44, fontSize: 23 }}>💻</span>

@@ -69,6 +69,92 @@ pub async fn list_projects() -> Result<Vec<ProjectRow>, String> {
         .map_err(|e| format!("join error: {e}"))?
 }
 
+// ---- Projects root --------------------------------------------------------
+//
+// Where new projects get created. Chosen once during onboarding — either the
+// folder the user already syncs with GitHub, or OwLLM's own default — and
+// stored PER DEVICE, because a folder path is never portable across machines
+// (the vault deliberately never syncs project locations; see vaultSync.ts's
+// `owllm:code:` deny prefix and the per-device `location_device_id` column).
+
+/// Resolved projects root plus whether the user has actually chosen it.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ProjectsRoot {
+    /// Absolute folder new projects are created under.
+    pub path: String,
+    /// False while OwLLM is still falling back to its own default, so
+    /// onboarding can tell "never asked" from "user accepted the default".
+    pub configured: bool,
+}
+
+fn projects_root_config_path() -> Option<PathBuf> {
+    // Honors portable mode via the shared resolver (USB-portable Block 1).
+    Some(paths::owllm_config_home()?.join("projects_root.json"))
+}
+
+/// OwLLM's own default: `~/OwLLM/Projects`. Reuses the `~/OwLLM` home the chat
+/// scratch dir already lives under, which `agent_tools::write_allowed_roots`
+/// already permits — so projects created here need no new write-jail surface.
+pub fn default_projects_root() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(PathBuf::from(home).join("OwLLM").join("Projects"))
+}
+
+/// Read-only resolve: the configured root, else OwLLM's default. Never touches
+/// the disk, so the UI can call it freely.
+#[tauri::command]
+pub fn projects_root_get() -> ProjectsRoot {
+    let stored = projects_root_config_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<ProjectsRoot>(&s).ok())
+        .filter(|r| !r.path.trim().is_empty());
+    match stored {
+        Some(r) => ProjectsRoot { path: r.path, configured: true },
+        None => ProjectsRoot {
+            path: default_projects_root()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            configured: false,
+        },
+    }
+}
+
+/// Persist the user's choice. `path: None` means "accept OwLLM's default".
+/// Creates the folder so the very next project needs no second prompt.
+#[tauri::command]
+pub fn projects_root_set(path: Option<String>) -> Result<ProjectsRoot, String> {
+    let chosen = match path.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(p) => PathBuf::from(p),
+        None => default_projects_root().ok_or_else(|| "no home directory".to_string())?,
+    };
+    if chosen.exists() && !chosen.is_dir() {
+        return Err(format!("Not a folder: {}", chosen.display()));
+    }
+    std::fs::create_dir_all(&chosen)
+        .map_err(|e| format!("create projects folder {}: {e}", chosen.display()))?;
+    let cfg = ProjectsRoot {
+        path: chosen.to_string_lossy().into_owned(),
+        configured: true,
+    };
+    let p = projects_root_config_path().ok_or_else(|| "no home directory".to_string())?;
+    if let Some(parent) = p.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    let json = serde_json::to_string_pretty(&cfg).map_err(|e| e.to_string())?;
+    std::fs::write(&p, json).map_err(|e| format!("write {}: {e}", p.display()))?;
+    Ok(cfg)
+}
+
+/// Startup: make sure the resolved projects root exists on disk, so a fresh
+/// install always has somewhere to put a project even if the user closes
+/// onboarding without answering. Best-effort — never blocks launch.
+pub fn ensure_projects_root() {
+    let root = projects_root_get();
+    if !root.path.is_empty() {
+        let _ = std::fs::create_dir_all(&root.path);
+    }
+}
+
 pub(crate) fn project_db_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("OWLLM_PROJECT_DB") {
         return Some(PathBuf::from(p));
@@ -645,6 +731,12 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
                 std::fs::write(&card_path, format!("{body}\n"))
                     .map_err(|e| format!("write {}: {e}", card_path.display()))?;
             }
+            // Agent isolation cuts a per-agent worktree from the project's HEAD,
+            // so a folder OWLLM creates without a repository is a folder OWLLM
+            // then refuses to run in. This is local git only — no remote, no
+            // GitHub — so it works offline and signed out. Non-fatal: the run
+            // path retries and surfaces the real git error where it matters.
+            let _ = crate::fleet::ensure_owned_git_repo(&workspace);
         } else if managed_onboarding && !workspace.is_dir() {
             return Err(format!(
                 "This workflow needs an existing folder: {}",

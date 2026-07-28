@@ -34,6 +34,46 @@ try {
     policy.requiresAgentWorktree("\\\\wsl.localhost\\Ubuntu\\home\\user\\repo") === true);
   check("A run with no project filesystem needs no worktree",
     policy.requiresAgentWorktree("  ") === false);
+  check("Browser-first environments are not gated on code isolation",
+    policy.requiresAgentWorktree("C:\\assistant", { presetId: "personal-operations" }) === false
+      && policy.requiresAgentWorktree("C:\\research", { presetId: "research-desk" }) === false);
+  check("Code environments still isolate",
+    policy.requiresAgentWorktree("C:\\repo", { presetId: "web-live" }) === true
+      && policy.requiresAgentWorktree("C:\\repo", { presetId: "software-workbench" }) === true);
+
+  // Self-heal: OWLLM must not create a folder it then refuses to run in.
+  const callsFor = (initResult) => {
+    const calls = [];
+    let created = false;
+    const invoker = async (command, args) => {
+      calls.push({ command, args });
+      if (command === "fleet_repo_init") {
+        if (initResult instanceof Error) throw initResult;
+        created = initResult;
+        return initResult;
+      }
+      return created ? { status: "ready", path: "C:\\wt", branch: "b", baseSha: "s" } : { status: "notAGitRepo" };
+    };
+    return { calls, invoker };
+  };
+  const healed = callsFor(true);
+  const healedResult = await policy.createAgentWorktree(healed.invoker,
+    { projectCwd: "C:\\owllm-made", agentName: "triager", runId: "r1" });
+  check("An OWLLM-created folder is initialized and the worktree retried",
+    healedResult.status === "ready"
+      && healed.calls.map(c => c.command).join(",")
+        === "fleet_worktree_create,fleet_repo_init,fleet_worktree_create");
+  const userFolder = callsFor(false);
+  const userResult = await policy.createAgentWorktree(userFolder.invoker,
+    { projectCwd: "C:\\user-picked", agentName: "triager", runId: "r2" });
+  check("A folder the user chose is never silently turned into a repository",
+    userResult.status === "notAGitRepo"
+      && userFolder.calls.filter(c => c.command === "fleet_worktree_create").length === 1);
+  const failedInit = callsFor(new Error("git init: permission denied"));
+  const failedResult = await policy.createAgentWorktree(failedInit.invoker,
+    { projectCwd: "C:\\owllm-made", agentName: "triager", runId: "r3" });
+  check("A failed initialization surfaces the real git error",
+    failedResult.status === "error" && failedResult.message.includes("permission denied"));
 
   const creation = policy.worktreeCreationFailure("coder", "C:\\repo", {
     status: "error",
@@ -61,8 +101,11 @@ try {
 
   const page = read("pages/agentic/AgentsPage.tsx");
   check("Isolation no longer depends on parallel mode or agent count",
-    page.includes("const needWorktrees = requiresAgentWorktree(projectCwd)")
+    page.includes("const needWorktrees = requiresAgentWorktree(projectCwd, runEnvironment)")
       && !page.includes("parallelMode && dispatches.length > 1"));
+  check("Every worktree create goes through the self-healing helper",
+    page.match(/await createAgentWorktree\(invoke, \{/g)?.length === 3
+      && !page.includes('invoke<FleetCreateResult>("fleet_worktree_create"'));
   check("Agent worktree failure is fail-closed",
     page.includes("throw worktreePreflightError(spec.name, projectCwd, res)")
       && !page.includes("Falling back to shared cwd"));
@@ -98,6 +141,14 @@ try {
   check("The native suite covers the full WSL worktree lifecycle",
     fleet.includes("wsl_unc_worktree_lifecycle_uses_the_distro_boundary")
       && fleet.includes("fleet_worktree_merge_blocking(project_unc.clone()"));
+  check("Repository init is guarded by the card OWLLM writes for folders it creates",
+    fleet.includes("pub fn ensure_owned_git_repo(")
+      && fleet.includes('path_is_dir_native(&dir.join(".owllm"))')
+      && fleet.includes("pub async fn fleet_repo_init("));
+  const projects = fs.readFileSync(path.join(APP, "src-tauri/src/projects.rs"), "utf8").replace(/\r\n/g, "\n");
+  check("A project folder OWLLM creates is a repository agents can run in",
+    projects.includes("crate::fleet::ensure_owned_git_repo(&workspace)"));
+
   check("Notebook worktree preflight failures remain pending and retryable",
     page.includes("e instanceof WorktreePreflightError")
       && page.includes("markNotebookStepPending(selectedProjectId"));
@@ -119,6 +170,24 @@ try {
       && fs.readFileSync(path.join(worktree, "feature.txt"), "utf8") === "isolated agent edit\n");
   git(repo, "worktree", "remove", "--force", worktree);
   git(repo, "branch", "-D", "owllm-fleet/test/single");
+
+  // Isolation is pure LOCAL git: a folder OWLLM creates, initialized offline
+  // with no remote at all, supports the full per-agent worktree cut.
+  const offline = path.join(temp, "owllm-made");
+  fs.mkdirSync(path.join(offline, ".owllm"), { recursive: true });
+  fs.writeFileSync(path.join(offline, ".owllm", "project.json"), "{}\n");
+  git(offline, "init", "-q", "-b", "main");
+  git(offline, "config", "user.email", "agent@owllm.local");
+  git(offline, "config", "user.name", "OWLLM");
+  git(offline, "add", "-A");
+  git(offline, "commit", "-q", "--allow-empty", "-m", "OWLLM project init");
+  const offlineWt = path.join(temp, "offline-agent");
+  git(offline, "worktree", "add", "-b", "owllm-fleet/test/offline", offlineWt, "HEAD");
+  check("An offline, remote-less OWLLM project still isolates agents",
+    execFileSync("git", ["remote"], { cwd: offline, encoding: "utf8" }).trim() === ""
+      && fs.existsSync(path.join(offlineWt, ".owllm", "project.json")));
+  git(offline, "worktree", "remove", "--force", offlineWt);
+  git(offline, "branch", "-D", "owllm-fleet/test/offline");
 
   console.log(`PASS mandatory agent worktree isolation (${checks.length}/${checks.length})`);
 } finally {

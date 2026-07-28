@@ -55,8 +55,12 @@ check(/fn destroy_browser_windows[\s\S]{0,900}tabs\.order\.clone\(\)[\s\S]{0,500
   "stopping or rebuilding closes every platform-specific tab window");
 check(browserRs.includes("__owllmTabsSet"),
   "Rust pushes the live tab list into the chrome strip");
-check(browserRs.includes("const CHROME_H: f64 = 66.0"),
-  "chrome bar is two rows (28px tab strip + 38px nav)");
+// 28px tab strip + a 68px identity/nav row — 30px taller than the original
+// toolbar so the open site's real logo is recognisable at a glance (user spec
+// 2026-07-28). Unchanged intent: the height Rust reserves for the chrome
+// webview must match the bar the HTML actually draws.
+check(browserRs.includes("const CHROME_H: f64 = 96.0"),
+  "chrome bar is two rows (28px tab strip + 68px identity/nav row)");
 check(/fn content_webview_for_tab[\s\S]{0,500}tab_id\.or_else\(active_tab_id\)[\s\S]{0,300}tab_label\(id\)/.test(browserRs),
   "agent commands resolve an explicit tab id before falling back to the active tab");
 check(/pub fn browser_cmd[\s\S]{0,500}tab_id_from_params[\s\S]{0,250}content_webview_for_tab/.test(browserRs),

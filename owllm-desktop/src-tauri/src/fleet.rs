@@ -760,6 +760,68 @@ fn is_git_repo(dir: &Path) -> Result<bool, String> {
     Ok(ok && out.trim() == "true")
 }
 
+/// Give a project folder OWLLM created the local repository agent isolation
+/// needs. Worktrees are pure LOCAL git — `git worktree add` from HEAD, no
+/// remote, no fetch, no token — so `git init` plus one commit is the whole
+/// requirement and it works offline and signed out of GitHub.
+///
+/// Refuses folders OWLLM does not own: without the `.owllm` card directory it
+/// returns `Ok(false)` instead of silently turning a directory the user picked
+/// into a repository. Returns `Ok(true)` only when this call created it.
+pub fn ensure_owned_git_repo(dir: &Path) -> Result<bool, String> {
+    if is_git_repo(dir)? {
+        return Ok(false);
+    }
+    if !path_is_dir_native(&dir.join(".owllm"))? {
+        return Ok(false);
+    }
+    let (ok, _, err) = git_once(dir, &["init", "-q"])?;
+    if !ok {
+        return Err(format!("git init in {}: {err}", dir.display()));
+    }
+    git_once(dir, &["add", "-A"])?;
+    const MSG: &str = "OWLLM project init";
+    let (committed, _, commit_err) = git_once(dir, &["commit", "-q", "--allow-empty", "-m", MSG])?;
+    if !committed {
+        // A machine with no configured git identity cannot commit, which would
+        // leave a repo with no HEAD for `git worktree add` to branch from.
+        let (ok, _, err) = git_once(
+            dir,
+            &[
+                "-c",
+                "user.email=agent@owllm.local",
+                "-c",
+                "user.name=OWLLM",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                MSG,
+            ],
+        )?;
+        if !ok {
+            let detail = if err.trim().is_empty() { commit_err } else { err };
+            return Err(format!("git commit in {}: {detail}", dir.display()));
+        }
+    }
+    Ok(true)
+}
+
+/// Self-heal for a run that hit `NotAGitRepo`: initialize the repository when
+/// the folder is one OWLLM created. Errors are surfaced, never swallowed.
+#[tauri::command]
+pub async fn fleet_repo_init(project_cwd: String) -> Result<bool, String> {
+    tokio::task::spawn_blocking(move || {
+        let dir = PathBuf::from(&project_cwd);
+        if !path_is_dir_native(&dir)? {
+            return Err(format!("project folder does not exist: {project_cwd}"));
+        }
+        ensure_owned_git_repo(&dir)
+    })
+    .await
+    .map_err(|e| format!("repo init task failed: {e}"))?
+}
+
 fn git_once(dir: &Path, args: &[&str]) -> Result<(bool, String, String), String> {
     let dir_text = dir.to_string_lossy();
     let out = if let Some((distro, linux_cwd)) = crate::wsl::parse_wsl_unc(&dir_text) {

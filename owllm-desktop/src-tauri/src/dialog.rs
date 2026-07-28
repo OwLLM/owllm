@@ -7,12 +7,25 @@
 // cancel. The Tauri command surface uses `Result<Option<String>, …>`
 // so the React side can `await invoke<string | null>(…)`.
 
+/// `start_dir` opens the picker where the caller expects the answer to live
+/// (normally the projects root) instead of the OS's last-used folder. Ignored
+/// when it doesn't exist, so a stale or not-yet-created path can never stop the
+/// dialog from opening.
 #[tauri::command]
-pub async fn pick_folder(title: Option<String>) -> Result<Option<String>, String> {
+pub async fn pick_folder(
+    title: Option<String>,
+    start_dir: Option<String>,
+) -> Result<Option<String>, String> {
     tokio::task::spawn_blocking(move || {
         let mut dialog = rfd::FileDialog::new();
         if let Some(t) = title.as_deref() {
             dialog = dialog.set_title(t);
+        }
+        if let Some(d) = start_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let p = std::path::Path::new(d);
+            if p.is_dir() {
+                dialog = dialog.set_directory(p);
+            }
         }
         let picked = dialog.pick_folder();
         picked.map(|p| p.to_string_lossy().into_owned())

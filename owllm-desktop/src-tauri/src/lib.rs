@@ -11,7 +11,14 @@
 // Each command lives in its own module so this file stays a wiring
 // manifest and nothing more.
 
-use tauri::Emitter;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Emitter, Manager};
+
+/// Distinguish a deliberate close of the main window from a native engine
+/// tearing down an auxiliary browser window. On Linux, WebKitGTK can emit an
+/// application-level exit request after a failing top-level browser WebView is
+/// destroyed even though the main OwLLM window is still alive.
+static MAIN_WINDOW_CLOSE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 /// The app's REAL version. Releases bump tauri.conf.json only (Cargo.toml sat
 /// at 0.4.7 for ~40 releases), so anything user-visible must read the config —
@@ -127,9 +134,10 @@ fn install_crash_log_hook() {
 }
 
 /// WebKitGTK's DMA-BUF renderer has recurring failures with proprietary NVIDIA
-/// drivers, including SIGBUS exits on Jetson/arm64. Apply WebKit's supported
-/// fallback before the GTK/WebKit process tree starts, but only on NVIDIA Linux
-/// and never override an explicit operator choice.
+/// drivers, including SIGBUS exits on Jetson/arm64. Disable only that renderer
+/// before the GTK/WebKit process tree starts. WebKit's compositing mode must
+/// stay enabled: forcing software compositing makes a small CSS animation
+/// continuously repaint the whole window and saturate a CPU core.
 #[cfg(target_os = "linux")]
 fn configure_linux_webkit_renderer() {
     let has_nvidia_driver = std::path::Path::new("/proc/driver/nvidia/version").is_file()
@@ -140,15 +148,7 @@ fn configure_linux_webkit_renderer() {
     if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
         std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
     }
-    // Jetson's arm64 NVIDIA/WebKitGTK stack can still abort in accelerated
-    // compositing after DMA-BUF is disabled. Keep x86_64 acceleration intact,
-    // but use WebKitGTK's software-compositing fallback on NVIDIA arm64.
-    if cfg!(target_arch = "aarch64")
-        && std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").is_none()
-    {
-        std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
-    }
-    eprintln!("[owllm] NVIDIA Linux detected; unstable WebKitGTK renderers disabled for stability");
+    eprintln!("[owllm] NVIDIA Linux detected; WebKitGTK DMA-BUF renderer disabled");
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -795,6 +795,7 @@ pub fn run() {
                     event: tauri::WindowEvent::CloseRequested { .. },
                     ..
                 } if label == "main" => {
+                    MAIN_WINDOW_CLOSE_REQUESTED.store(true, Ordering::SeqCst);
                     overlay_frame::close_if_present(app);
                     // Reap llama-server HERE too, not only on ExitRequested —
                     // Tauri 2 doesn't guarantee ExitRequested fires on the X.
@@ -807,6 +808,18 @@ pub fn run() {
                     if server::other_live_windows() == 0 {
                         server::kill_all_llama_servers("last-window-close");
                     }
+                }
+                tauri::RunEvent::ExitRequested { code, api, .. }
+                    if code.is_none()
+                        && !MAIN_WINDOW_CLOSE_REQUESTED.load(Ordering::SeqCst)
+                        && app.get_window("main").is_some() =>
+                {
+                    // An auxiliary window or its renderer disappeared. The
+                    // main window is still registered and the user did not
+                    // close it, so accepting this request would turn a tab
+                    // failure into a clean whole-app exit.
+                    eprintln!("[owllm] prevented auxiliary-window failure from exiting the app");
+                    api.prevent_exit();
                 }
                 tauri::RunEvent::ExitRequested { .. } => {
                     overlay_frame::close_if_present(app);

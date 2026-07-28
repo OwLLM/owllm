@@ -1,6 +1,7 @@
 // Focused regression checks for Linux WebKit stability. The real policy module
 // is transpiled and exercised with representative user agents; source checks
-// keep every expensive aura/pulse path and native crash recovery wired to it.
+// keep activity motion, the safe native renderer choice, and crash recovery
+// wired together.
 import fs from "node:fs";
 import path from "node:path";
 import vm from "node:vm";
@@ -40,10 +41,10 @@ const linuxWebKit = loadPolicy(
   "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15",
 );
 check(linuxWebKit.isLinuxWebKit(), "WebKitGTK on Linux is detected");
-check(linuxWebKit.continuousUiAnimation("spin") === undefined,
-  "Linux WebKit keeps activity indicators static instead of repainting continuously");
-check(linuxWebKit.continuousUiMotionEnabled() === false,
-  "Linux WebKit disables the React 30-fps pulse loops");
+check(linuxWebKit.continuousUiAnimation("spin") === "spin",
+  "Linux WebKit preserves animated activity indicators");
+check(linuxWebKit.continuousUiMotionEnabled() === true,
+  "Linux WebKit preserves active graph motion");
 
 const linuxChromium = loadPolicy(
   "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
@@ -72,8 +73,13 @@ check((agents.match(/continuousUiAnimation\("owllm-aura-spin 4s linear infinite"
   "agent tiles and graph cards use the rendering policy");
 check(code.includes('continuousUiAnimation("owllm-aura-spin 4s linear infinite")'),
   "coding panes use the rendering policy");
+check(code.includes('continuousUiAnimation("owllm-tab-working 1.4s ease-in-out infinite")'),
+  "coding-tab glow uses the same reduced-motion policy");
 
 const rust = fs.readFileSync(path.join(DESKTOP, "src-tauri/src/lib.rs"), "utf8").replace(/\r\n/g, "\n");
+check(rust.includes('set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1")')
+    && !rust.includes('set_var("WEBKIT_DISABLE_COMPOSITING_MODE"'),
+  "NVIDIA Linux disables unsafe DMA-BUF without forcing CPU compositing");
 check(rust.includes("connect_web_process_terminated")
     && rust.includes("WebProcessTerminationReason::Crashed")
     && rust.includes("WebProcessTerminationReason::ExceededMemoryLimit")

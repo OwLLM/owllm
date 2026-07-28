@@ -6,9 +6,9 @@ The service uses one hibernating WebSocket Durable Object. Every OWLLM
 installation holds one `presence` socket; an open World Map holds one `viewer`
 socket. The socket itself is the online signal. Each stable anonymous
 installation is retained in Durable Object SQLite so the map can show recorded
-and online totals by country, including a coarse OS-family breakdown.
+and online totals by country, including city and a coarse OS-family breakdown.
 
-Cloudflare request metadata is reduced to a coarse, jittered region before the
+Cloudflare request metadata is reduced to a city and coarse, jittered map point before the
 socket reaches the Durable Object. The service never reads or stores account
 details, device names, projects, prompts, files, source IP headers, or precise
 coordinates. Closing the socket marks the retained anonymous node offline.

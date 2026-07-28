@@ -148,6 +148,7 @@ import { bundleOffsets } from "./edgeRouter";
 import { worldEmit } from "../world/worldBus";
 import { clearRunActivity, setRunActivity } from "../../runtime/runActivity";
 import { ChatBubble, ChatMarkdown, SmartImage, ToolEventCard, ToolCallLine, ThinkingBlock, fmtTime, type ToolStatus } from "../../components/ChatBubble";
+import { useStreamWindow, EarlierBanner } from "../../components/StreamWindow";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import {
@@ -5643,6 +5644,16 @@ function OrchestratorPane({
       .sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0))
   );
 
+  // BOUNDED RENDERING (WebView2 "Out of Memory" fix, 2026-07-29). These streams
+  // grow for the whole life of a run; rendering all of them kept the DOM growing
+  // monotonically until the renderer process hit its own allocation ceiling and
+  // Chromium killed it. Only the tail is materialised — nothing is dropped from
+  // state, and older entries are one click away. See components/StreamWindow.tsx.
+  // Keyed on `focus` so switching agents snaps back to a bounded tail.
+  const thoughtWin = useStreamWindow(thoughts.length, focus);
+  const toolsWin = useStreamWindow(toolCalls.length, focus);
+  const fullWin = useStreamWindow(fullChat.length, focus);
+
   // Autoscroll-to-bottom — one ref per tab. Triggered on:
   //   1. tab switch (scroll the freshly-shown tab to bottom)
   //   2. content change (new entry OR last entry's text grew during a
@@ -5988,7 +5999,10 @@ function OrchestratorPane({
               No reasoning yet — the model's thinking blocks land here
               while the team runs.
             </div>
-          ) : thoughts.map((t, i) => renderUnifiedEntry(t, i, orchName))}
+          ) : (<>
+            <EarlierBanner state={thoughtWin} noun="reasoning entries" />
+            {thoughts.slice(thoughtWin.start).map((t, i) => renderUnifiedEntry(t, thoughtWin.start + i, orchName))}
+          </>)}
         </div>
         {/* Tool Calls — every command the agent ran + its result. */}
         <div ref={toolsRef} data-ui="OrchestratorToolsView" data-selectall-scope style={{ flex:1, display: effTab ==="tools" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:6, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Consolas, 'JetBrains Mono', monospace", fontSize:13, lineHeight:1.45, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
@@ -5998,7 +6012,10 @@ function OrchestratorPane({
               Read, Write, Edit, etc.) appears here with its arguments
               and the result it returned.
             </div>
-          ) : toolCalls.map((t, i) => renderUnifiedEntry(t, i, orchName))}
+          ) : (<>
+            <EarlierBanner state={toolsWin} noun="tool calls" />
+            {toolCalls.slice(toolsWin.start).map((t, i) => renderUnifiedEntry(t, toolsWin.start + i, orchName))}
+          </>)}
         </div>
         {/* Full Chat — replies + thoughts + tools, interleaved by arrival. */}
         <div ref={fullRef} data-ui="OrchestratorFullView" data-selectall-scope style={{ flex:1, display: effTab ==="full" ? "flex" : "none", flexDirection:"column", margin:"8px 10px 0", padding:10, gap:8, background:"var(--bg-panel)", border:"1px solid var(--border)", borderRadius:8, overflow:"auto", fontFamily:"Segoe UI, sans-serif", fontSize:13, lineHeight:1.5, color:"var(--fg)", userSelect:"text", WebkitUserSelect:"text", cursor:"text" }}>
@@ -6007,12 +6024,17 @@ function OrchestratorPane({
               Empty — replies, reasoning, and tool calls will all appear
               here in chronological order once the team runs.
             </div>
-          ) : fullChat.map((m, i) =>
-            // ONE shared renderer for every entry — thinking → 💭 ThinkingBlock,
-            // tool → ToolEventCard, reply → ChatBubble — identical to the
-            // fine-tuning ChatPage. No fork. (Same chrono order via `seq`.)
-            renderUnifiedEntry(m, i, orchName, supSendBusy && i === fullChat.length - 1)
-          )}
+          ) : (<>
+            <EarlierBanner state={fullWin} noun="entries" />
+            {fullChat.slice(fullWin.start).map((m, i) =>
+              // ONE shared renderer for every entry — thinking → 💭 ThinkingBlock,
+              // tool → ToolEventCard, reply → ChatBubble — identical to the
+              // fine-tuning ChatPage. No fork. (Same chrono order via `seq`.)
+              // Absolute index preserved so the streaming flag still targets the
+              // real last entry after the window slice.
+              renderUnifiedEntry(m, fullWin.start + i, orchName, supSendBusy && fullWin.start + i === fullChat.length - 1)
+            )}
+          </>)}
         </div>
       </div>
       {/* Super User is settings-only — no chat composer there (user spec #4).

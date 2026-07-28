@@ -4,8 +4,8 @@ import test from "node:test";
 import { Miniflare } from "miniflare";
 import { buildSnapshot, coarseLocation, normalizeOsFamily, publicNode, sanitizeNodeId } from "../src/index.js";
 
-const KR = { country: "KR", regionCode: "11", latitude: "37.5665", longitude: "126.9780" };
-const IT = { country: "IT", regionCode: "62", latitude: "41.9", longitude: "12.5" };
+const KR = { country: "KR", city: "Seoul", regionCode: "11", latitude: "37.5665", longitude: "126.9780" };
+const IT = { country: "IT", city: "Rome", regionCode: "62", latitude: "41.9", longitude: "12.5" };
 
 function nextMessage(socket) {
   return new Promise((resolve, reject) => {
@@ -44,11 +44,11 @@ async function connect(mf, role, cf = {}, id = "", os = "") {
 }
 
 test("coarse location is stable, bounded, and never exposes exact coordinates", () => {
-  const input = { country: "KR", regionCode: "11", latitude: 37.5665, longitude: 126.978 };
+  const input = { country: "KR", city: "Seoul", regionCode: "11", latitude: 37.5665, longitude: 126.978 };
   const first = coarseLocation(input, "node-a");
   const second = coarseLocation(input, "node-a");
   assert.deepEqual(first, second);
-  assert.equal(first.region, "KR · 11");
+  assert.equal(first.region, "KR · Seoul");
   assert.notEqual(first.latitude, input.latitude);
   assert.notEqual(first.longitude, input.longitude);
   assert.ok(first.latitude >= -85 && first.latitude <= 85);
@@ -124,7 +124,7 @@ test("first sighting records the node and broadcasts an online upsert with count
     const change = await update;
     assert.equal(change.type, "upsert");
     assert.equal(change.node.id, "installa");
-    assert.equal(change.node.region, "KR · 11");
+    assert.equal(change.node.region, "KR · Seoul");
     assert.equal(change.node.online, true);
     assert.notEqual(change.node.latitude, 37.5665);
     assert.deepEqual(Object.keys(change.node).sort(), ["firstSeen", "id", "lastSeen", "latitude", "longitude", "online", "os", "region"]);
@@ -185,12 +185,13 @@ test("the same installation reconnecting stays one recorded node", async () => {
   await withService(async (mf) => {
     const first = await connect(mf, "presence", KR, "stable");
     first.close(1000, "invisible");
-    const second = await connect(mf, "presence", KR, "stable");
+    const second = await connect(mf, "presence", { ...KR, city: "Busan", latitude: "35.1796", longitude: "129.0756" }, "stable");
     const viewer = await connect(mf, "viewer");
     const snapshot = await nextMessage(viewer);
     assert.equal(snapshot.counts.total, 1);
     assert.equal(snapshot.nodes.length, 1);
     assert.equal(snapshot.nodes[0].id, "stable");
+    assert.equal(snapshot.nodes[0].region, "KR · Busan");
     assert.equal(snapshot.nodes[0].online, true);
     second.close(1000, "done");
     viewer.close(1000, "done");

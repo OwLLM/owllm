@@ -82,6 +82,15 @@ const TRIPWIRES = [
   ["ui/src/pages/agentic/localTools.ts", /MEMORY_INVOKE_TIMEOUT_MS/, "memory context is bounded and cannot stall agent startup for minutes (v0.8.20)"],
   ["ui/src/pages/agentic/localTools.ts", /NO ToolSearch/i, "codex chased Claude-only ToolSearch → 'Found 0 tools' (v0.7.74)"],
   ["resources/agents/roles/browser.yaml", /browser_snapshot/, "Browser role allowlist keys the jail exception (v0.7.69)"],
+  // Bounded rendering — the WebView2 "Out of Memory" renderer crash (v0.9.60).
+  // Run views append forever; rendering every entry grew the DOM monotonically
+  // until the renderer hit its per-process ceiling. If any of these render sites
+  // goes back to mapping the FULL array, the crash returns.
+  ["ui/src/pages/agentic/AgentsPage.tsx", /fullChat\.slice\(fullWin\.start\)/, "Full Chat renders a bounded tail, not every entry (v0.9.60 OOM fix)"],
+  ["ui/src/pages/agentic/AgentsPage.tsx", /thoughts\.slice\(thoughtWin\.start\)/, "Thought view renders a bounded tail (v0.9.60 OOM fix)"],
+  ["ui/src/pages/agentic/AgentsPage.tsx", /toolCalls\.slice\(toolsWin\.start\)/, "Tool Calls view renders a bounded tail (v0.9.60 OOM fix)"],
+  ["ui/src/pages/agentic/CodePage.tsx", /messages\.slice\(transcriptWin\.start\)/, "Code transcript renders a bounded tail (v0.9.60 OOM fix)"],
+  ["ui/src/components/LogBox.tsx", /INLINE_TAIL_CHARS/, "LogBox lays out only the log tail inline; full text stays in the modal (v0.9.60 OOM fix)"],
 ];
 
 function runStatic() {

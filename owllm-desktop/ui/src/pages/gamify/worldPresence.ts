@@ -125,6 +125,11 @@ export function presenceCountryCode(region: string): string {
   return match?.[1]?.toUpperCase() ?? "";
 }
 
+export function presenceCity(region: string): string {
+  const match = /^[A-Za-z]{2}\s*\u00b7\s*(.+)$/.exec(region.trim());
+  return match?.[1]?.trim() ?? "";
+}
+
 export type CountryPresenceGroup = {
   countryCode: string;
   nodes: PublicPresenceNode[];
@@ -160,7 +165,9 @@ export function groupPresenceByCountry(nodes: PublicPresenceNode[]): CountryPres
     }
   }
   return [...groups.values()].sort((a, b) =>
-    b.nodes.length - a.nodes.length || a.countryCode.localeCompare(b.countryCode)
+    b.onlineCount - a.onlineCount
+      || b.nodes.length - a.nodes.length
+      || a.countryCode.localeCompare(b.countryCode)
   );
 }
 

@@ -763,11 +763,74 @@ fn win_enable_web_credentials(pw: tauri::webview::PlatformWebview) {
 /// `data_directory()`. macOS WKWebView exposes neither switch, but its default
 /// persistent data store already keeps cookies/sessions per app.
 #[cfg(target_os = "linux")]
-fn linux_enable_web_credentials(pw: tauri::webview::PlatformWebview) {
+fn linux_enable_web_credentials(pw: &tauri::webview::PlatformWebview) {
     use webkit2gtk::{WebViewExt, WebsiteDataManagerExt};
     if let Some(manager) = pw.inner().website_data_manager() {
         manager.set_persistent_credential_storage_enabled(true);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_configure_browser_webview(pw: tauri::webview::PlatformWebview, requested_url: String) {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    use webkit2gtk::{WebContextExt, WebViewExt};
+
+    // Keep arbitrary internet pages out of the process used by the main app.
+    // WebKitGTK defaults to one shared secondary process per WebContext; one
+    // fatal page load can therefore blank every view in that context. The
+    // browser has its own persistent WebContext/data directory, and this model
+    // gives each site a secondary process inside it as well.
+    if let Some(context) = pw.inner().context() {
+        #[allow(deprecated)]
+        context.set_process_model(webkit2gtk::ProcessModel::MultipleSecondaryProcesses);
+    }
+    linux_enable_web_credentials(&pw);
+
+    // A browser-page failure is recoverable and must remain local to that tab.
+    // Retry once for a transient WebKit/network-process failure; if the same
+    // page immediately kills its renderer again, stop the loop on a safe local
+    // error surface instead of repeatedly destabilising the desktop.
+    let recoveries = Rc::new(Cell::new(0_u8));
+    pw.inner().connect_web_process_terminated({
+        let recoveries = Rc::clone(&recoveries);
+        move |webview, reason| {
+            let entry = format!(
+                "[{}] agent browser WebKit process terminated: {reason:?}\n",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            );
+            if let Some(root) = crate::paths::user_data_root() {
+                use std::io::Write;
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(root.join("browser-webkit.log"))
+                    .and_then(|mut file| file.write_all(entry.as_bytes()));
+            }
+            eprint!("[browser] {entry}");
+            if !matches!(
+                reason,
+                webkit2gtk::WebProcessTerminationReason::Crashed
+                    | webkit2gtk::WebProcessTerminationReason::ExceededMemoryLimit
+            ) {
+                return;
+            }
+            let attempts = recoveries.get();
+            recoveries.set(attempts.saturating_add(1));
+            if attempts == 0 {
+                webview.reload();
+            } else {
+                webview.load_html(
+                    r#"<!doctype html><meta charset="utf-8"><meta name="color-scheme" content="dark"><style>body{margin:0;background:#0e1117;color:#e7eaf0;font:16px system-ui;display:grid;place-items:center;min-height:100vh}main{max-width:40rem;padding:2rem}h1{font-size:1.2rem}p{color:#aeb6c5;line-height:1.5}</style><main><h1>This page’s browser process stopped</h1><p>OwLLM kept the app and your other work running. Reload the tab to try the page again.</p></main>"#,
+                    Some("about:blank"),
+                );
+            }
+        }
+    });
+
+    // The Linux builder starts at about:blank so the process model and crash
+    // callback above are installed before any untrusted page begins loading.
+    pw.inner().load_uri(&requested_url);
 }
 
 fn get_window(app: &tauri::AppHandle) -> Option<Window> {
@@ -1399,7 +1462,7 @@ fn attach_tab(
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = _webview.with_webview(linux_enable_web_credentials);
+        let _ = _webview.with_webview(|platform| linux_enable_web_credentials(&platform));
     }
     Ok(())
 }
@@ -1843,8 +1906,18 @@ fn attach_legacy_tab(
 ) -> Result<(), String> {
     let dev = current_device();
     let new_window_app = app.clone();
+    #[cfg(target_os = "linux")]
+    let requested_url = url.to_string();
+    #[cfg(target_os = "linux")]
+    let initial_url = WebviewUrl::External(
+        "about:blank"
+            .parse()
+            .expect("about:blank is always a valid URL"),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let initial_url = WebviewUrl::External(url);
     #[allow(unused_mut)]
-    let mut builder = WebviewWindowBuilder::new(app, tab_label(id), WebviewUrl::External(url))
+    let mut builder = WebviewWindowBuilder::new(app, tab_label(id), initial_url)
         .title("OwLLM — Agent Browser")
         .inner_size(dev.width, dev.height)
         .initialization_script(BRIDGE_JS)
@@ -1922,7 +1995,8 @@ fn attach_legacy_tab(
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = _ww.with_webview(linux_enable_web_credentials);
+        let _ = _ww
+            .with_webview(move |platform| linux_configure_browser_webview(platform, requested_url));
     }
     if let Some(win) = app.get_window(&tab_label(id)) {
         apply_chrome(&win);

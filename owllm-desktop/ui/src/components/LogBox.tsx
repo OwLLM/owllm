@@ -78,11 +78,21 @@ function scopedSelectAll(ref: React.RefObject<HTMLElement | null>) {
   };
 }
 
+/** Max characters rendered in the INLINE box. A run's log can reach many MB;
+ *  laying all of it out as pre-wrap text costs the renderer far more than the
+ *  string itself and contributed to the WebView2 out-of-memory crash. The tail is
+ *  what anyone reads in the inline box — the full text is always one click away
+ *  in the modal (and `content` itself is never truncated for Copy). */
+const INLINE_TAIL_CHARS = 120_000;
+
 export function LogBox({
   text, lines, title = "Log", height = 160,
   placeholder = "(no output yet)", style, noExpand, header, fill,
 }: LogBoxProps) {
   const content = (lines ? lines.join("\n") : (text ?? "")).replace(/\s+$/, "");
+  // Inline view renders only the tail; the modal below still gets `content` whole.
+  const overflow = Math.max(0, content.length - INLINE_TAIL_CHARS);
+  const inlineContent = overflow > 0 ? content.slice(-INLINE_TAIL_CHARS) : content;
   const [open, setOpen] = useState(false);
   const sticky = useStickyScroll<HTMLDivElement>(content.length);
 
@@ -109,7 +119,12 @@ export function LogBox({
         ...(header == null ? style : {}),
       }}
     >
-      {content || <span style={{ color: "var(--fg-subtle)", fontStyle: "italic" }}>{placeholder}</span>}
+      {overflow > 0 && (
+        <div style={{ color: "var(--fg-subtle)", fontStyle: "italic", marginBottom: 6 }}>
+          … {overflow.toLocaleString()} earlier characters not shown here — click to open the full log …
+        </div>
+      )}
+      {inlineContent || <span style={{ color: "var(--fg-subtle)", fontStyle: "italic" }}>{placeholder}</span>}
     </div>
   );
 

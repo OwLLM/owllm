@@ -1,9 +1,7 @@
-// WebKitGTK on Linux can run OwLLM with software compositing (in particular
-// NVIDIA arm64, where Rust disables the unstable accelerated renderers).
-// Continuously rotating large conic gradients and 30-fps React pulse loops
-// then repaint most of the window on the CPU. Keep the activity aura visible,
-// but static, on Linux WebKit; Chromium-based development/test browsers and
-// the accelerated Windows/macOS webviews retain the motion.
+// Keep continuous UI motion available on every supported platform. Platform
+// renderer defects belong in the native renderer configuration; silently
+// deleting the Linux activity glow hides the symptom without fixing its cause.
+// The user's explicit reduced-motion preference remains authoritative.
 
 export function isLinuxWebKit(): boolean {
   if (typeof navigator === "undefined") return false;
@@ -14,7 +12,6 @@ export function isLinuxWebKit(): boolean {
 }
 
 export function continuousUiAnimation(animation: string): string | undefined {
-  if (isLinuxWebKit()) return undefined;
   if (typeof window !== "undefined"
       && typeof window.matchMedia === "function"
       && window.matchMedia("(prefers-reduced-motion: reduce)").matches) {

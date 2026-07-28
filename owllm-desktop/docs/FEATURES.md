@@ -443,6 +443,18 @@ core (`useBridgeDispatch()`), per-platform transport only. In-chat commands
 
 ## Support & UX
 
+- **Bounded stream rendering** (`components/StreamWindow.tsx`, v0.9.60): the run
+  views append forever, so rendering every entry grew the DOM monotonically with
+  run length until the WebView2 renderer hit its own per-process allocation
+  ceiling and Chromium killed it ("This page is having a problem · Error code:
+  Out of Memory" — with GBs of system RAM still free). Agents Full Chat / Thought
+  / Tool Calls and the Code transcript now materialise only a tail window
+  (`STREAM_WINDOW`, 200) with an "N earlier entries hidden · Show more / Show all"
+  banner; `LogBox` lays out only the last `INLINE_TAIL_CHARS` (120k) inline and
+  keeps the full text in the expand modal + Copy. Nothing leaves state or the DB —
+  only how much is in the DOM at once is capped, so memory is flat in run length
+  instead of linear. Pinned by five smoke-matrix tripwires.
+
 - **Application-wide localization**: Settings switches English, Simplified
   Chinese, Korean, Japanese, Arabic, Italian, Hindi, or Portuguese (pt-BR)
   live and persists the choice; the selector is a 4×2 grid of flag icons

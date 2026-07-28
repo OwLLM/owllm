@@ -267,9 +267,16 @@ try {
     page.includes("focusApiRef.current?.focus(id)")
     && page.includes("focusDistanceFor(spec, earthDistance, requestedScale)")
     && page.includes("focusBoundsFor(spec, { min: earthMin, max: 17 }, earthDistance, requestedScale)"));
+  // Pins the GUARANTEE (a lit Sun at the centre), not one lighting implementation.
+  // The previous form required `new THREE.PointLight(0xfff2d0` — that exact light
+  // was removed when the scene moved to an Ambient + Directional lighting model
+  // with named intensity constants, which left this cell red on a Sun that still
+  // renders perfectly (MeshBasicMaterial is self-lit, plus glow shells). Assert
+  // the sun body, a self-lit material, and scene lighting instead.
   check("Canvas renders a visible Sun at the system center",
     page.includes('sun.userData.solarBody = "sun"')
-    && page.includes("new THREE.PointLight(0xfff2d0")
+    && /new THREE\.Mesh\(\s*new THREE\.SphereGeometry\([\s\S]{0,80}new THREE\.MeshBasicMaterial/.test(page)
+    && /new THREE\.(AmbientLight|PointLight|DirectionalLight)\(/.test(page)
     && page.includes("const solarOrbitLines: { spec: PlanetSpec; line: THREE.LineLoop }[] = []"));
   check("Every planet anchor advances from the shared orbital clock",
     page.includes("orbitClock = advanceOrbitClock(orbitClock, now, orbitRunningRef.current)")

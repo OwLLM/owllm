@@ -11,6 +11,7 @@ import { useEffect, useRef, useState, type CSSProperties, type ClipboardEvent, t
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ChatBubble, ToolEventCard } from "../../components/ChatBubble";
+import { useStreamWindow, EarlierBanner } from "../../components/StreamWindow";
 import PublishCards from "./PublishCards";
 import ModelPicker, { type AccountsStatusLite } from "./ModelPicker";
 import { getSetting, setSetting, scope, SettingKey } from "../../state/pageSettings";
@@ -887,6 +888,11 @@ function CodeWorkspace({ pageId, onTitle }: {
   const chatMode: boolean = stx.chatMode ?? false;
   const secondaryOpen: boolean = stx.secondaryOpen ?? false;
   const secondaryMessages: Msg[] = stx.secondaryMessages ?? [];
+  // BOUNDED RENDERING (WebView2 "Out of Memory" fix) — see components/StreamWindow.tsx.
+  // Long Code-page runs appended transcript entries forever; only the tail is put
+  // in the DOM now. Nothing leaves state; older entries are one click away.
+  const transcriptWin = useStreamWindow(messages.length, SID);
+  const secondaryWin = useStreamWindow(secondaryMessages.length, SID);
   const secondaryDraft: string = stx.secondaryDraft ?? "";
   const secondaryModelId: string = stx.secondaryModelId ?? "";
   const feedPrimaryToSecondary: boolean = stx.feedPrimaryToSecondary ?? false;
@@ -3467,6 +3473,7 @@ function CodeWorkspace({ pageId, onTitle }: {
         data-selectall-scope
         style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}
       >
+        {messages.length > 0 && <EarlierBanner state={transcriptWin} noun="messages" />}
         {messages.length === 0 ? (
           preparing ? (
             <div style={{ margin: "auto", textAlign: "center", color: "var(--fg-muted)", fontSize: 13, maxWidth: 480, lineHeight: 1.6 }}>
@@ -3483,7 +3490,10 @@ function CodeWorkspace({ pageId, onTitle }: {
           </div>
           )
         ) : (
-          messages.map((m, i) => {
+          messages.slice(transcriptWin.start).map((m, i0) => {
+            // Absolute index preserved so keys + "is last (streaming)" checks in
+            // the body still refer to the real position in the full transcript.
+            const i = transcriptWin.start + i0;
             // Page-generated notices (timing footer, auto-feed pause) are not
             // agent answers: muted line, no bubble, no Forward button.
             if (m.kind === "meta") {
@@ -3568,7 +3578,8 @@ function CodeWorkspace({ pageId, onTitle }: {
                 Second agent — a parallel coder on the same workspace, with its own conversation and its own model (pick one above, or it uses the primary chat's model).
               </div>
             ) : (
-              secondaryMessages.map((m, i) => {
+              secondaryMessages.slice(secondaryWin.start).map((m, i0) => {
+                const i = secondaryWin.start + i0; // absolute index (keys/streaming checks)
                 if (m.kind === "meta") {
                   return (
                     <div key={i} style={{ alignSelf: "center", textAlign: "center", color: "var(--fg-muted)", fontSize: 11.5, padding: "2px 8px" }}>

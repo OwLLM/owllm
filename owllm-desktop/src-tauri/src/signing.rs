@@ -1328,6 +1328,7 @@ mod tests {
             cert_not_after_ms: 123,
             cert_subject: "CN=x".into(),
             private_key_pem: "KEYPEM".into(),
+            peer_has_certificate: true,
             updated_ms: 1,
         };
         // Edit only the non-secret metadata; leave secret fields blank.
@@ -1350,6 +1351,8 @@ mod tests {
         // …parsed metadata preserved…
         assert_eq!(merged.cert_not_after_ms, 123);
         assert_eq!(merged.cert_subject, "CN=x");
+        // …the peer-presence flag is vault-owned, so an edit here never clears it…
+        assert!(merged.peer_has_certificate);
         // …and the metadata fields updated.
         assert_eq!(merged.signing_identity, "new identity");
         assert_eq!(merged.apple_id, "new@x.com");

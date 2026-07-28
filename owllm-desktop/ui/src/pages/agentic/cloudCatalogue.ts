@@ -46,6 +46,9 @@ export const BUNDLED_CLOUD_CATALOGUE: CloudCatalogue = {
     // agentic coding + long-horizon work, at 4.8's pricing. Default-on so
     // fresh installs get it without an override.
     { id: "claude-opus-5",     display: "Claude Opus 5",     effort: ["low", "medium", "high", "extra_high"] },
+    // Sonnet 5 — the balanced gen-5 tier: near-flagship quality at a fraction of
+    // Opus pricing, so it's the sensible default for high-volume agent work.
+    { id: "claude-sonnet-5",   display: "Claude Sonnet 5",   effort: ["low", "medium", "high", "extra_high"] },
     { id: "claude-opus-4-8",   display: "Claude Opus 4.8",   effort: ["low", "medium", "high", "extra_high"] },
     { id: "claude-opus-4-7",   display: "Claude Opus 4.7",   effort: ["low", "medium", "high", "extra_high"] },
     { id: "claude-sonnet-4-6", display: "Claude Sonnet 4.6", effort: ["low", "medium", "high", "extra_high"] },

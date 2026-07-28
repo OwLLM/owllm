@@ -17,6 +17,7 @@ import { getSetting, setSetting, scope, SettingKey } from "../../state/pageSetti
 import { getServerCtx } from "../core/serverContext";
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { setRunActivity } from "../../runtime/runActivity";
+import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import { useChatSession } from "../../runtime/useChatSession";
 import { useStickyScroll } from "../../hooks/useStickyScroll";
 import { streamLocalChat, streamChatCompletion, providerFor, openaiUserContent, imageAttachments, fileToChatAttachment, appendDocumentAttachmentText, CHAT_ATTACHMENT_ACCEPT, formatDirectivesBlock, CliPreflightError, type Directive, type Attachment, type ModelInfo, type ServerStatus, type HistoryItem } from "./dispatch";
@@ -302,7 +303,7 @@ const PSYCHEDELIC_AURA_FILL = "linear-gradient(var(--bg-input), var(--bg-input))
 const PSYCHEDELIC_AURA_BACKGROUND = `${PSYCHEDELIC_AURA_FILL}, ${PSYCHEDELIC_AURA_RING}`;
 // Colour-cycling spin only — the halo itself is a constant soft box-shadow
 // (no breathe pulse), so the aura reads as a subtle shifting glow.
-const PSYCHEDELIC_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
+const PSYCHEDELIC_AURA_ANIMATION = continuousUiAnimation("owllm-aura-spin 4s linear infinite");
 const PSYCHEDELIC_AURA_HALO = "0 0 12px rgba(176,124,255,.22), 0 0 20px rgba(127,212,255,.14)";
 
 // ---- Cross-page activity signal (tab-strip glow + "done" badge) -------------

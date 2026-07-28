@@ -24,7 +24,10 @@ import { LogBox } from "../../components/LogBox";
 import { listen } from "@tauri-apps/api/event";
 import ModelPicker, { type ModelInfo as PickerModelInfo, type AccountsStatusLite } from "../agentic/ModelPicker";
 import { getInferenceEndpoint, setInferenceEndpoint, setLocalServerKey, type InferenceEndpoint } from "../agentic/inferenceEndpoint";
-import { getServerCtx, setServerCtx, SERVER_CTX_PRESETS, fmtCtx, approxKvGb } from "./serverContext";
+import {
+  getServerCtx, setServerCtx, getServerModel, setServerModel,
+  SERVER_CTX_PRESETS, fmtCtx, approxKvGb,
+} from "./serverContext";
 import { listRemoteModels, startRemoteModel, type RemoteModelCatalog } from "../advanced/remoteDevices";
 
 // Real Page_icons PNG served by vite.config.ts middleware
@@ -1385,7 +1388,11 @@ function ServeOnNetworkCard() {
 
 export default function ServerPage() {
   const [logs, setLogs] = useState<string[]>(() => SERVER_LOG_HUB.snapshot());
-  const [modelId, setModelId] = useState<string>("");
+  const [modelId, setModelIdState] = useState<string>(() => getServerModel());
+  const setModelId = (id: string) => {
+    setModelIdState(id);
+    setServerModel(id);
+  };
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string>("");
   const [models, setModels] = useState<ModelInfo[]>([]);
@@ -1426,20 +1433,16 @@ export default function ServerPage() {
       setModels(next);
       const st = await serverStatus();
       setServerState(JSON.stringify(st, null, 2));
-      // Default the picker to the model that's ACTUALLY running (the header
-      // already shows it) so the user doesn't have to wait for a status probe
-      // to find out what's loaded. Otherwise seed the first SERVABLE local
-      // model — the picker is localOnly and llama-server can't load a cloud
-      // entry, so the registry's first row (often a cloud model) is invalid
-      // here. Only seeds when the user hasn't picked yet.
-      if (!modelId) {
-        if (st.running && st.model_id) setModelId(st.model_id);
-        else {
-          const servable = next.find(
-            m => (m.provider === "local" || m.provider === "tuned") && m.port != null
-          );
-          if (servable) setModelId(servable.model_id);
-        }
+      // A running server is authoritative. Otherwise preserve the user's
+      // device-local saved pick when it is still servable; only fall back when
+      // that model was removed or this is the first launch.
+      const servable = next.filter(
+        m => (m.provider === "local" || m.provider === "tuned") && m.port != null
+      );
+      if (st.running && st.model_id) {
+        if (modelId !== st.model_id) setModelId(st.model_id);
+      } else if (!servable.some(m => m.model_id === modelId)) {
+        setModelId(servable[0]?.model_id ?? "");
       }
     } catch (e) {
       setError(String(e));

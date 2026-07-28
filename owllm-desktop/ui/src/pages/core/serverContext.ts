@@ -8,6 +8,7 @@
 // when the weights fit (see server.rs). 8192 is the safe default that loads on
 // most GPUs; a bigger card can push it higher — that's what this controls.
 const KEY = "owllm:server:ctx";
+const MODEL_KEY = "owllm:server:model";
 export const SERVER_CTX_PRESETS = [4096, 8192, 16384, 32768, 65536, 131072];
 const MIN = 512;
 const MAX = 1_048_576;
@@ -29,6 +30,21 @@ export function getServerCtx(): number | null {
 export function setServerCtx(n: number | null): void {
   try {
     localStorage.setItem(KEY, n == null ? "auto" : String(Math.max(MIN, Math.min(MAX, Math.round(n)))));
+  } catch { /* ignore */ }
+}
+
+/// The model deliberately selected in the local inference-server picker.
+/// This is device-local: another machine may not have the same model registry.
+export function getServerModel(): string {
+  try { return localStorage.getItem(MODEL_KEY)?.trim() ?? ""; }
+  catch { return ""; }
+}
+
+export function setServerModel(modelId: string): void {
+  try {
+    const value = modelId.trim();
+    if (value) localStorage.setItem(MODEL_KEY, value);
+    else localStorage.removeItem(MODEL_KEY);
   } catch { /* ignore */ }
 }
 

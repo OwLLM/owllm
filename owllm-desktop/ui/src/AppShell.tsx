@@ -47,6 +47,7 @@ import { bumpActivity } from "./support/activityStats";
 import { APP_LANGUAGES, useLocalization } from "./localization";
 import { readKeepFrameVisible, saveKeepFrameVisible } from "./framePreferences";
 import { isRunActive, isRunActiveMatching, getRunActivityVersion, subscribeRunActivity } from "./runtime/runActivity";
+import { continuousUiAnimation } from "./runtime/renderingPolicy";
 import {
   initTabActivity, isWorkflowAwarePage, runPrefixesForPage, showFinishedBadge, stepTabActivity,
 } from "./runtime/headerTabActivity";
@@ -599,7 +600,7 @@ function useRunActivityVersion(): number {
 const HEADER_AURA_GRADIENT =
   `conic-gradient(from var(--owllm-aura-angle),`
   + ` var(--accent), #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, var(--accent))`;
-const HEADER_AURA_ANIMATION = "owllm-aura-spin 4s linear infinite";
+const HEADER_AURA_ANIMATION = continuousUiAnimation("owllm-aura-spin 4s linear infinite");
 
 // The per-button "working" dot and finished "✓" check reuse the page tab-strip's
 // psychedelic rainbow (CodePage PSYCHEDELIC_AURA_DOT / owllm-tab-working pulse)

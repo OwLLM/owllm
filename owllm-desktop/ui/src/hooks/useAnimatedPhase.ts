@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { continuousUiMotionEnabled } from "../runtime/renderingPolicy";
 
 /**
  * Drives a monotonically-increasing animation phase (degrees, 36°/s) at ~30fps
@@ -18,7 +19,10 @@ import { useEffect, useState } from "react";
 export function useAnimatedPhase(active: boolean): number {
   const [phase, setPhase] = useState(0);
   useEffect(() => {
-    if (!active) return; // idle → freeze the phase, no rAF, no re-renders
+    // Linux WebKit's static activity treatment is deliberate: on machines
+    // using its software compositor, this loop caused full heavy-view React
+    // repaints at 30fps on top of the CSS aura repaints.
+    if (!active || !continuousUiMotionEnabled()) return;
     let raf = 0;
     let lastEmit = 0;
     let running = false;

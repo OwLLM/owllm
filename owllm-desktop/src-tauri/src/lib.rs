@@ -154,6 +154,60 @@ fn configure_linux_webkit_renderer() {
 #[cfg(not(target_os = "linux"))]
 fn configure_linux_webkit_renderer() {}
 
+/// WebKitGTK runs the page in a separate process. If that process is killed by
+/// the renderer or its memory limit, keeping the native Tauri process alive
+/// with a dead webview looks exactly like a random app crash. Record the native
+/// reason and reload the page process; durable state is restored by main.tsx.
+#[cfg(target_os = "linux")]
+fn install_linux_webview_recovery(app: &tauri::App) {
+    use tauri::Manager;
+    use webkit2gtk::WebViewExt;
+
+    let Some(main) = app.get_webview("main") else {
+        eprintln!("[owllm] main WebKit view is unavailable; crash recovery was not installed");
+        return;
+    };
+    if let Err(error) = main.with_webview(|platform| {
+        platform
+            .inner()
+            .connect_web_process_terminated(|webview, reason| {
+                let entry = format!(
+                    "[{}] main WebKit process terminated: {reason:?}; reloading\n",
+                    chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+                );
+                let mut targets = paths::user_data_root()
+                    .map(|root| vec![root.join("linux-webkit.log")])
+                    .unwrap_or_default();
+                targets.push(std::env::temp_dir().join("owllm-linux-webkit.log"));
+                for target in targets {
+                    use std::io::Write;
+                    if std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&target)
+                        .and_then(|mut file| file.write_all(entry.as_bytes()))
+                        .is_ok()
+                    {
+                        break;
+                    }
+                }
+                eprint!("[owllm] {entry}");
+                if matches!(
+                    reason,
+                    webkit2gtk::WebProcessTerminationReason::Crashed
+                        | webkit2gtk::WebProcessTerminationReason::ExceededMemoryLimit
+                ) {
+                    webview.reload();
+                }
+            });
+    }) {
+        eprintln!("[owllm] could not install WebKit process recovery: {error}");
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn install_linux_webview_recovery(_app: &tauri::App) {}
+
 /// Fit the initial macOS window inside the usable laptop desktop. The default
 /// 1400x960 window is taller than several Retina workspaces, so a centered,
 /// undecorated window starts under both the menu bar and Dock. Keep it windowed
@@ -228,6 +282,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            install_linux_webview_recovery(app);
             // Kill Windows' "ghost window" so a brief main-thread stall never
             // pops a stray "(Not Responding)" frame over the overlay chrome.
             overlay_frame::disable_window_ghosting();

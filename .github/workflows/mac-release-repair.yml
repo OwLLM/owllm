@@ -55,8 +55,29 @@ jobs:
           printf '%s' "$APPLE_CERTIFICATE" | base64 -d > "$RUNNER_TEMP/cert.p12"
           security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN_PATH" \
             -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
-          security list-keychains -d user -s "$KEYCHAIN_PATH" \
-            $(security list-keychains -d user | tr -d '"')
+          # This runner is self-hosted, so `-d user` edits the real login
+          # session's search list — it outlives the job. Remember the list we
+          # found so the cleanup step can put it back, and drop entries whose
+          # keychain file is gone (earlier runs of this job leaked those, and a
+          # dangling entry makes every later codesign raise an unanswerable
+          # "unlock keychain" prompt on the machine's desktop).
+          PREV_LIST=""
+          while IFS= read -r k; do
+            k="$(printf '%s' "$k" | tr -d '"' | sed 's/^ *//;s/ *$//')"
+            [ -n "$k" ] || continue
+            [ -e "$k" ] || continue
+            PREV_LIST="${PREV_LIST}${PREV_LIST:+:}${k}"
+          done <<EOF
+          $(security list-keychains -d user)
+          EOF
+          echo "OWLLM_PREV_KEYCHAINS=$PREV_LIST" >> "$GITHUB_ENV"
+          echo "OWLLM_KEYCHAIN_PATH=$KEYCHAIN_PATH" >> "$GITHUB_ENV"
+          if [ -n "$PREV_LIST" ]; then
+            IFS=':' read -r -a prev_keychains <<< "$PREV_LIST"
+            security list-keychains -d user -s "$KEYCHAIN_PATH" "${prev_keychains[@]}"
+          else
+            security list-keychains -d user -s "$KEYCHAIN_PATH"
+          fi
           security set-key-partition-list \
             -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
 
@@ -189,3 +210,22 @@ jobs:
           curl -fsSI \
             "https://github.com/$RELEASE_REPO/releases/download/$TAG/OwLLM.Desktop_aarch64.app.tar.gz" \
             >/dev/null
+
+      # Self-hosted runner: undo the search-list edit and destroy the signing
+      # keychain even when an earlier step failed. Without this the job leaves
+      # a keychain entry behind that outlives $RUNNER_TEMP, and every later
+      # codesign on this machine prompts for a password nobody knows.
+      - name: Restore keychain search list
+        if: always()
+        shell: bash
+        run: |
+          set -uo pipefail
+          if [ -n "${OWLLM_PREV_KEYCHAINS:-}" ]; then
+            IFS=':' read -r -a prev_keychains <<< "$OWLLM_PREV_KEYCHAINS"
+            security list-keychains -d user -s "${prev_keychains[@]}"
+          fi
+          if [ -n "${OWLLM_KEYCHAIN_PATH:-}" ] && [ -f "$OWLLM_KEYCHAIN_PATH" ]; then
+            security delete-keychain "$OWLLM_KEYCHAIN_PATH"
+          fi
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security list-keychains -d user

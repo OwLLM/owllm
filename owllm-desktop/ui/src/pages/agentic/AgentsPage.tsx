@@ -24,8 +24,8 @@ import { formatDuration, useTick, RunTimerChip, runTimingFooter } from "./RunTim
 import BrowserPanel from "./BrowserPanel";
 import {
   environmentPromptBlock,
-  launchProjectEnvironment,
   parseProjectEnvironment,
+  restoreProjectBrowser,
   type ProjectEnvironment,
 } from "./projectEnvironment";
 import RulesEditor from "./RulesEditor";
@@ -9116,6 +9116,12 @@ export function AgentsPage({
   const [projectHubOpen, setProjectHubOpen] = useState(false);
   const [projectMaterializing, setProjectMaterializing] = useState(false);
   const [projectMaterializeError, setProjectMaterializeError] = useState("");
+  // Browser-session restore bookkeeping: which projects this page has already
+  // tried to reopen, whether we are still on the app-start pass, and the
+  // project whose environment onProjectCreated is launching right now.
+  const browserRestoredRef = useRef<Set<string>>(new Set());
+  const browserRestoreBootRef = useRef(true);
+  const justCreatedProjectRef = useRef("");
   // The project popup is ONE dialog in two modes: "new" (create) and "edit"
   // (⚙ settings for the current project). Both open the same ProjectSettingsDialog.
   const [settingsMode, setSettingsMode] = useState<"new" | "edit">("edit");
@@ -9171,6 +9177,9 @@ export function AgentsPage({
     // Select the freshly-created project. Fall back to id from the
     // returned row if list_projects raced.
     const target = rows.find(p => p.id === row.id) ?? row;
+    // Claim the environment launch below, so the restore effect that fires on
+    // selection doesn't open the same recipe a second time.
+    justCreatedProjectRef.current = target.id;
     setSelectedProjectId(target.id);
     setProjectLocationDraft(target.location, target.id);
     setProjectHubOpen(false);
@@ -9179,11 +9188,17 @@ export function AgentsPage({
     // Environment setup is deliberately non-blocking: opening browser tabs or
     // arranging the preview must never freeze project creation or the main GUI.
     // Fail visibly, but keep the newly-created project usable.
+    // This goes through the restore path so the new project also CLAIMS the
+    // browser session — otherwise its very first tabs would not be remembered.
     window.setTimeout(() => {
-      void launchProjectEnvironment(kickoff.environment, (command, args) => invoke(command, args))
-        .catch((e: any) => window.alert(
-          `Project created, but its environment could not be opened:\n\n${e?.message ?? e}\n\nYou can retry from ⚙ Project settings.`,
-        ));
+      void restoreProjectBrowser(
+        target.id,
+        kickoff.environment,
+        (command, args) => invoke(command, args),
+        { boot: false },
+      ).catch((e: any) => window.alert(
+        `Project created, but its environment could not be opened:\n\n${e?.message ?? e}\n\nYou can retry from ⚙ Project settings.`,
+      ));
     }, 0);
     if (kickoff.action === "brainstorm") {
       setBrainstormSeed(target.description ?? "");
@@ -9477,6 +9492,39 @@ export function AgentsPage({
     try { localStorage.setItem(pageProjKey, selectedProjectId); } catch { /* ignore */ }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedProjectId]);
+
+  // A project's browser is part of the project: reopen the pages it had, so an
+  // accidental ✕ or an app restart doesn't cost the user their whole desk.
+  // The first pass after mount is the app-start pass — it honours a browser the
+  // user had deliberately closed; later passes are explicit project switches.
+  useEffect(() => {
+    const projectId = selectedProjectId;
+    const row = projects.find(p => p.id === projectId);
+    // Wait for the row: its recipe is what seeds a project's first session.
+    if (!projectId || !row || browserRestoredRef.current.has(projectId)) return;
+    browserRestoredRef.current.add(projectId);
+    const boot = browserRestoreBootRef.current;
+    browserRestoreBootRef.current = false;
+    if (justCreatedProjectRef.current === projectId) {
+      // onProjectCreated already launches this project's environment.
+      justCreatedProjectRef.current = "";
+      return;
+    }
+    // Browser work must never hold up opening a project or block the GUI.
+    window.setTimeout(() => {
+      void restoreProjectBrowser(
+        projectId,
+        parseProjectEnvironment(row.graph_json),
+        (command, args) => invoke(command, args),
+        { boot },
+      ).catch((e: any) => {
+        // Never fail silently, but never block the page on it either.
+        console.error("restoreProjectBrowser failed", e);
+        setProjectMaterializeError(`Couldn't reopen this project's browser pages: ${e?.message ?? e}`);
+      });
+    }, 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedProjectId, projects]);
   useEffect(() => {
     onTitle?.(selectedProject?.name || "Agents");
     // eslint-disable-next-line react-hooks/exhaustive-deps

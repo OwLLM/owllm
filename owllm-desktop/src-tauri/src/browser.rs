@@ -31,7 +31,7 @@
 // the (now free) main thread. Window creation is also thread-safe: the runtime
 // routes it through Message::CreateWindow to the event loop.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -860,6 +860,166 @@ fn list_tabs(app: &tauri::AppHandle) -> Vec<BrowserTabInfo> {
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// Per-project browser session
+//
+// The tab strip itself only ever lived in memory (`TABS`), so closing the
+// browser window — or restarting the app — lost every page the user had open,
+// even though the logins behind them survive in the stable profile dir. A
+// project's browser IS part of the project, so the live tab set is mirrored to
+// disk per project and replayed when that project is opened again.
+//
+// Only the owning project is ever written, and an empty tab set is never
+// written over a good one: a teardown must not erase the session it is tearing
+// down. Restoring is driven by the UI (it re-uses browser_open_tab), so there
+// is no second, divergent copy of the tab-opening logic down here.
+// ---------------------------------------------------------------------------
+
+/// Project whose session the live tab set belongs to. `None` = tabs opened
+/// outside any project (agent one-offs), which are deliberately not persisted.
+static SESSION_OWNER: Mutex<Option<String>> = Mutex::new(None);
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct BrowserSession {
+    /// Tab urls in strip order.
+    #[serde(default)]
+    pub tabs: Vec<String>,
+    /// Index into `tabs` of the tab that was in front.
+    #[serde(default)]
+    pub active: usize,
+    /// False once the user deliberately closed the browser, so an app restart
+    /// does not resurrect a window they had put away on purpose.
+    #[serde(default)]
+    pub open: bool,
+}
+
+/// Project ids come from our own database, but the session file name is still
+/// built defensively — a stray separator must not escape the sessions dir.
+fn session_file_stem(project_id: &str) -> String {
+    let stem: String = project_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    stem.trim_matches('_').chars().take(120).collect()
+}
+
+fn session_path(project_id: &str) -> Option<std::path::PathBuf> {
+    let stem = session_file_stem(project_id);
+    if stem.is_empty() {
+        return None;
+    }
+    let dir = crate::paths::user_data_root()?.join("browser_sessions");
+    std::fs::create_dir_all(&dir).ok()?;
+    Some(dir.join(format!("{stem}.json")))
+}
+
+fn read_session(project_id: &str) -> BrowserSession {
+    session_path(project_id)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|raw| serde_json::from_str::<BrowserSession>(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_session(project_id: &str, session: &BrowserSession) {
+    if let (Some(path), Ok(raw)) = (session_path(project_id), serde_json::to_string(session)) {
+        let _ = std::fs::write(path, raw);
+    }
+}
+
+/// Mirror the live tab set into the owning project's session file. Called
+/// wherever the strip changes (open/close/activate/title, i.e. navigation).
+fn persist_session(app: &tauri::AppHandle) {
+    let Some(owner) = SESSION_OWNER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+    else {
+        return;
+    };
+    let live = list_tabs(app);
+    let tabs: Vec<String> = live
+        .iter()
+        .map(|tab| tab.url.clone())
+        .filter(|url| !url.is_empty() && url != "about:blank")
+        .collect();
+    if tabs.is_empty() {
+        // A window being destroyed reports no tabs. Keeping the previous
+        // session is the whole point: an accidental close must be undoable.
+        return;
+    }
+    let active = live
+        .iter()
+        .position(|tab| tab.active)
+        .filter(|index| *index < tabs.len())
+        .unwrap_or(0);
+    write_session(
+        &owner,
+        &BrowserSession {
+            tabs,
+            active,
+            open: true,
+        },
+    );
+}
+
+/// The user put the browser away on purpose (✕ / browser_stop / last tab
+/// closed). Keep the pages, but do not reopen the window by itself next boot.
+fn mark_session_closed() {
+    let Some(owner) = SESSION_OWNER
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .clone()
+    else {
+        return;
+    };
+    let mut session = read_session(&owner);
+    if session.tabs.is_empty() {
+        return;
+    }
+    session.open = false;
+    write_session(&owner, &session);
+}
+
+/// Push the strip to the chrome bar and mirror it to disk. Every tab mutation
+/// goes through here so the two never drift.
+fn sync_tabs(app: &tauri::AppHandle) {
+    push_tabs(app);
+    persist_session(app);
+}
+
+/// Claim the live browser for `project_id` and hand back its saved session.
+///
+/// `busy` means another project's tabs are on screen: the caller must not
+/// restore over them, and ownership is left alone so the running project keeps
+/// mirroring to its own file. `live` means this project's tabs are already
+/// open, so there is nothing to restore.
+#[tauri::command(async)]
+pub fn browser_session_bind(app: tauri::AppHandle, project_id: String) -> Result<String, String> {
+    let id = project_id.trim().to_string();
+    if id.is_empty() {
+        return Err("browser_session_bind requires a project id".to_string());
+    }
+    let has_tabs = !list_tabs(&app).is_empty();
+    let mut owner = SESSION_OWNER.lock().unwrap_or_else(|p| p.into_inner());
+    let owned_by_other = has_tabs && owner.as_deref().is_some_and(|current| current != id);
+    if !owned_by_other {
+        *owner = Some(id.clone());
+    }
+    drop(owner);
+    Ok(json!({
+        "busy": owned_by_other,
+        "live": has_tabs && !owned_by_other,
+        "session": read_session(&id),
+    })
+    .to_string())
+}
+
 /// Native WebView callbacks run on the application's shared UI event thread on
 /// Windows (WebView2), macOS (WKWebView), and Linux (WebKitGTK). Calling any
 /// other Window/Webview method from inside one of those callbacks can re-enter
@@ -1020,7 +1180,7 @@ fn browser_ui_worker(app: tauri::AppHandle, rx: mpsc::Receiver<BrowserUiEvent>) 
             on_tab_title(&app, id, &title);
         }
         if batch.push_tabs {
-            push_tabs(&app);
+            sync_tabs(&app);
         }
         if batch.url.is_some() || batch.title.is_some() {
             update_chrome_bar(&app, batch.url.as_deref(), batch.title.as_deref());
@@ -1294,7 +1454,7 @@ fn new_tab(app: &tauri::AppHandle, url: &str, activate: bool) -> Result<u64, Str
     if activate {
         update_chrome_bar(app, Some(""), Some(""));
     }
-    push_tabs(app);
+    sync_tabs(app);
     Ok(id)
 }
 
@@ -1343,7 +1503,7 @@ fn activate_tab(app: &tauri::AppHandle, id: u64) {
         .and_then(|t| t.titles.get(&id).cloned())
         .unwrap_or_default();
     update_chrome_bar(app, Some(&url), Some(&title));
-    push_tabs(app);
+    sync_tabs(app);
 }
 
 /// Close one tab; closing the last tab closes the whole window.
@@ -1360,6 +1520,9 @@ fn close_tab(app: &tauri::AppHandle, id: u64) {
         let Some(next) = next_active_after_close(&tabs.order, id, tabs.active) else {
             *guard = None;
             drop(guard);
+            // Closing the last tab is a deliberate "put the browser away": keep
+            // the pages for the next project open, but don't self-reopen.
+            mark_session_closed();
             if let Some(win) = target_window {
                 let _ = win.destroy();
             }
@@ -1418,7 +1581,7 @@ fn on_tab_title(app: &tauri::AppHandle, id: u64, title: &str) {
             .unwrap_or_default();
         update_chrome_bar(app, Some(&url), Some(title));
     }
-    push_tabs(app);
+    sync_tabs(app);
 }
 
 /// Push the live tab list into the chrome bar's tab strip.
@@ -1617,7 +1780,7 @@ fn build_framed(app: &tauri::AppHandle, url: tauri::Url) -> Result<(), String> {
 
     apply_chrome(&win);
     update_chrome_bar(app, Some(&start_url), None);
-    push_tabs(app);
+    sync_tabs(app);
     Ok(())
 }
 
@@ -2126,6 +2289,10 @@ fn eval_until_reply(
 pub fn browser_stop(app: tauri::AppHandle) -> Result<String, String> {
     match get_window(&app) {
         Some(_) => {
+            // Record the pages BEFORE the teardown: once the windows are gone
+            // there is nothing left to read them from.
+            persist_session(&app);
+            mark_session_closed();
             // destroy() tears the window down unconditionally — close() asks
             // the page politely, and an unresponsive page could refuse.
             destroy_browser_windows(&app)?;

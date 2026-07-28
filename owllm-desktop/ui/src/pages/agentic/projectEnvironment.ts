@@ -294,6 +294,43 @@ export type ProjectEnvironmentInvoker = (
   args?: Record<string, unknown>,
 ) => Promise<unknown>;
 
+/// The one tab-opening implementation, shared by the first-time recipe launch
+/// and by the session restore so the two can never drift apart.
+async function openTabSet(
+  urls: string[],
+  activeIndex: number,
+  device: ProjectEnvironment["browser"]["device"],
+  layout: ProjectEnvironment["browser"]["layout"],
+  invokeCommand: ProjectEnvironmentInvoker,
+  focus: boolean,
+): Promise<void> {
+  await invokeCommand("browser_ensure");
+  await invokeCommand("browser_set_device", { device });
+
+  let activeTabId: number | null = null;
+  for (const [index, url] of urls.entries()) {
+    const raw = await invokeCommand("browser_open_tab", { url, activate: index === activeIndex });
+    if (index === activeIndex && typeof raw === "string") {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Number.isFinite(parsed?.tab_id)) activeTabId = parsed.tab_id;
+      } catch { /* the tab is still open; selection is best-effort */ }
+    }
+  }
+  if (urls.length === 0) {
+    await invokeCommand("browser_start");
+  }
+  if (activeTabId !== null) {
+    await invokeCommand("browser_select_tab", { tabId: activeTabId });
+  }
+  if (layout === "right-half") {
+    await invokeCommand("browser_arrange", { layout: "right-half" });
+  }
+  if (focus) {
+    await invokeCommand("browser_focus");
+  }
+}
+
 export async function launchProjectEnvironment(
   environment: ProjectEnvironment,
   invokeCommand: ProjectEnvironmentInvoker,
@@ -301,37 +338,109 @@ export async function launchProjectEnvironment(
   if (!environment.browser.openOnCreate && environment.browser.tabs.length === 0) {
     return { openedTabs: 0, message: `${environment.title} is ready. This recipe does not need a browser.` };
   }
-
-  await invokeCommand("browser_ensure");
-  await invokeCommand("browser_set_device", { device: environment.browser.device });
-
-  let firstTabId: number | null = null;
-  for (const [index, tab] of environment.browser.tabs.entries()) {
-    const raw = await invokeCommand("browser_open_tab", {
-      url: tab.url,
-      activate: index === 0,
-    });
-    if (index === 0 && typeof raw === "string") {
-      try {
-        const parsed = JSON.parse(raw);
-        if (Number.isFinite(parsed?.tab_id)) firstTabId = parsed.tab_id;
-      } catch { /* the tab is still open; selection is best-effort */ }
-    }
-  }
-  if (environment.browser.tabs.length === 0) {
-    await invokeCommand("browser_start");
-  }
-  if (firstTabId !== null) {
-    await invokeCommand("browser_select_tab", { tabId: firstTabId });
-  }
-  if (environment.browser.layout === "right-half") {
-    await invokeCommand("browser_arrange", { layout: "right-half" });
-  }
-  await invokeCommand("browser_focus");
+  await openTabSet(
+    environment.browser.tabs.map(tab => tab.url),
+    0,
+    environment.browser.device,
+    environment.browser.layout,
+    invokeCommand,
+    true,
+  );
   return {
     openedTabs: environment.browser.tabs.length,
     message: environment.browser.tabs.length
       ? `${environment.title} opened ${environment.browser.tabs.length} browser tab${environment.browser.tabs.length === 1 ? "" : "s"}.`
       : `${environment.title} browser opened.`,
+  };
+}
+
+// A project's browser is part of the project. The pages it had open are
+// mirrored per project by the Rust side (browser_session_bind), so closing the
+// window by accident — or restarting the app — no longer throws them away.
+// Cookies already live in the stable browser profile, so a restore lands back
+// on live, logged-in sessions rather than a wall of sign-in screens.
+
+export type BrowserSessionState = {
+  /// Tab urls in strip order.
+  tabs: string[];
+  /// Index into `tabs` of the tab that was in front.
+  active: number;
+  /// False once the browser was deliberately closed.
+  open: boolean;
+};
+
+export type BrowserSessionBind = {
+  /// Another project's tabs are on screen — do not restore over them.
+  busy: boolean;
+  /// This project's tabs are already open — nothing to restore.
+  live: boolean;
+  session: BrowserSessionState;
+};
+
+export function parseBrowserSessionBind(raw: unknown): BrowserSessionBind {
+  let value: any = raw;
+  if (typeof raw === "string") {
+    try { value = JSON.parse(raw); } catch { value = null; }
+  }
+  const session = value?.session;
+  const tabs = Array.isArray(session?.tabs)
+    ? session.tabs.filter((url: unknown): url is string => typeof url === "string" && !!url.trim())
+    : [];
+  const active = Number.isInteger(session?.active) && session.active >= 0 && session.active < tabs.length
+    ? session.active
+    : 0;
+  return {
+    busy: value?.busy === true,
+    live: value?.live === true,
+    session: { tabs, active, open: session?.open === true },
+  };
+}
+
+/// Reopen `projectId`'s browser pages. Falls back to the project's configured
+/// environment the first time it is opened, so recipe tabs seed the session
+/// rather than cap it.
+///
+/// `boot` marks the app-startup pass: a browser the user had deliberately
+/// closed stays closed then, while explicitly opening the project always
+/// restores it (an accidental ✕ is not an instruction to discard the pages).
+export async function restoreProjectBrowser(
+  projectId: string,
+  environment: ProjectEnvironment | null,
+  invokeCommand: ProjectEnvironmentInvoker,
+  options: { boot: boolean },
+): Promise<{ restoredTabs: number; message: string }> {
+  if (!projectId.trim()) return { restoredTabs: 0, message: "No project selected." };
+
+  const bind = parseBrowserSessionBind(await invokeCommand("browser_session_bind", { projectId }));
+  if (bind.busy) {
+    return { restoredTabs: 0, message: "Another project's browser is open — left it as it was." };
+  }
+  if (bind.live) {
+    return { restoredTabs: 0, message: "The browser is already showing this project." };
+  }
+
+  if (bind.session.tabs.length === 0) {
+    // Never opened before: seed the session from the project's own recipe.
+    if (!environment) return { restoredTabs: 0, message: "This project has no saved browser session." };
+    const launched = await launchProjectEnvironment(environment, invokeCommand);
+    return { restoredTabs: launched.openedTabs, message: launched.message };
+  }
+  if (options.boot && !bind.session.open) {
+    return { restoredTabs: 0, message: "The browser was closed on purpose last time — leaving it closed." };
+  }
+
+  // Restoring must never yank focus away from what the user is doing, least of
+  // all at startup: the window comes back, it does not jump in front.
+  await openTabSet(
+    bind.session.tabs,
+    bind.session.active,
+    environment?.browser.device ?? "desktop",
+    environment?.browser.layout ?? "none",
+    invokeCommand,
+    false,
+  );
+  return {
+    restoredTabs: bind.session.tabs.length,
+    message: `Reopened ${bind.session.tabs.length} browser tab${bind.session.tabs.length === 1 ? "" : "s"} for this project.`,
   };
 }

@@ -536,6 +536,7 @@ pub fn run() {
             browser::browser_open_url,
             browser::browser_open_tab,
             browser::browser_list_tabs,
+            browser::browser_session_bind,
             browser::browser_select_tab,
             browser::browser_close_tab,
             browser::browser_cmd,

@@ -90,11 +90,11 @@ try {
   check("Fleet liveness rejects stale records with no dial path", liveness.isDeviceOnline({ is_self: false, last_seen: "2026-07-22T05:01:35.000Z", endpoint: null, endpoints: [], p2p_node_id: null }, now) === false);
 
   const sanitized = presence.sanitizePresenceNodes([
-    { id: "ok", region: "KR · 11", os: "Windows", latitude: 48, longitude: 9, firstSeen: "t0", lastSeen: "now", online: true, github_login: "must-not-leak" },
+    { id: "ok", region: "KR · Seoul", os: "Windows", latitude: 48, longitude: 9, firstSeen: "t0", lastSeen: "now", online: true, github_login: "must-not-leak" },
     { id: "bad-lat", latitude: 200, longitude: 9 },
     { id: "ok", latitude: 1, longitude: 2 },
-    { id: "linux", region: "KR · 41", os: "Linux", latitude: 2, longitude: 3, online: true },
-    { id: "ghost", region: "IT · 62", os: "macOS", latitude: 1, longitude: 2, online: false },
+    { id: "linux", region: "KR · Busan", os: "Linux", latitude: 2, longitude: 3, online: true },
+    { id: "ghost", region: "IT · Rome", os: "macOS", latitude: 1, longitude: 2, online: false },
   ]);
   check("Presence payload validates and deduplicates coordinates", sanitized.length === 3 && sanitized[0].id === "ok");
   check("Public nodes expose no account/device identity fields", !Object.hasOwn(sanitized[0], "github_login") && Object.keys(sanitized[0]).length === 8);
@@ -104,6 +104,10 @@ try {
       && presence.normalizePresenceOs("Macintosh") === "macOS"
       && presence.normalizePresenceOs("X11; Linux") === "Linux"
       && presence.normalizePresenceOs("unknown") === "Other");
+  check("Presence rows expose the city separately from the country code",
+    presence.presenceCountryCode("KR · Seoul") === "KR"
+      && presence.presenceCity("KR · Seoul") === "Seoul"
+      && presence.presenceCity("KR") === "");
   const countries = presence.groupPresenceByCountry(sanitized);
   check("Recorded users group by country and retain offline countries",
     countries.length === 2
@@ -120,6 +124,13 @@ try {
       && countries[0].osCounts.Linux.online === 1
       && countries[1].osCounts.macOS.total === 1
       && countries[1].osCounts.macOS.online === 0);
+  const onlineFirstCountries = presence.groupPresenceByCountry([
+    { id: "offline-a", region: "US · Boston", os: "Windows", latitude: 1, longitude: 1, online: false },
+    { id: "offline-b", region: "US · Seattle", os: "Linux", latitude: 2, longitude: 2, online: false },
+    { id: "online", region: "KR · Seoul", os: "Windows", latitude: 3, longitude: 3, online: true },
+  ]);
+  check("Countries are ordered by online users before recorded totals",
+    onlineFirstCountries.map((country) => country.countryCode).join(",") === "KR,US");
 
   const stableStore = memory();
   const firstId = presence.readOrCreateNodeId(stableStore);
@@ -243,20 +254,26 @@ try {
   check("Globe ignores drag gestures on pointerup (no select on orbit)",
     page.includes("pointerDown") && /if \(!isClickGesture\(event\.clientX - downX, event\.clientY - downY\)\) return;/.test(page));
   check("Globe bundles photographic Earth texture layers", page.includes("EARTH_TEXTURES.day") && page.includes("EARTH_TEXTURES.normal") && page.includes("EARTH_TEXTURES.specular") && page.includes("EARTH_TEXTURES.clouds"));
-  check("Globe uses calibrated color and tone mapping", page.includes("THREE.SRGBColorSpace") && page.includes("THREE.ACESFilmicToneMapping") && page.includes("THREE.HemisphereLight"));
+  check("Globe uses calibrated color and tone mapping", page.includes("THREE.SRGBColorSpace") && page.includes("THREE.ACESFilmicToneMapping") && page.includes("THREE.AmbientLight"));
   // The day/night terminator must follow the real UTC clock: the sun is aimed at
   // the computed subsolar point every frame, not pinned to a fixed position.
   check("Sun tracks the real subsolar point from the UTC clock",
-    page.includes("subsolarLocalDir(new Date(), sunLocal)") && /sunLight\.position\.copy\(sunLocal\)/.test(page) && !/sunLight\.position\.set\(5\.8/.test(page));
-  check("Sun-facing planet exposure is reduced without lowering night fill",
-    /new THREE\.DirectionalLight\(0xffffff,\s*1\.15\)/.test(page)
-      && /new THREE\.PointLight\(0xfff2d0,\s*150,/.test(page)
-      && /new THREE\.AmbientLight\(0xa8c7ef,\s*0\.9\)/.test(page));
-  // The shadowed hemisphere must stay dimly visible (twilight), not pure black.
-  check("Night hemisphere is softly lit, not pitch black",
-    page.includes("emissiveMap: earthMap")
-      && /emissiveIntensity:\s*0\.72/.test(page)
-      && /new THREE\.AmbientLight\(0xa8c7ef,\s*0\.9\)/.test(page));
+    page.includes("subsolarLocalDir(new Date(), sunLocal)")
+      && page.includes("light.position.copy(anchor.position).addScaledVector(sunLocal, 10)")
+      && !page.includes("sunLight.position.set(5.8"));
+  check("Every planet's sun-facing peak is exactly 15 percent above its baseline",
+    page.includes("const PLANET_BASE_LIGHT_INTENSITY = 1")
+      && page.includes("const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15")
+      && page.includes("const planetSunLights = planetMeshes.map")
+      && page.includes("light.layers.set(layer)")
+      && page.includes("new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY)")
+      && !page.includes("new THREE.PointLight(0xfff2d0"));
+  // The shadowed hemisphere stays fully texture-readable through the neutral
+  // baseline; no emissive/specular term can push the bright face past 15%.
+  check("Night hemisphere stays readable without extra highlight terms",
+    page.includes("new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY)")
+      && /specular:\s*new THREE\.Color\(0x000000\)/.test(page)
+      && !page.includes("emissiveIntensity"));
   check("Earth retains its readable focus distance while orbital mode starts in system overview",
     page.includes("const WORLD_CAMERA_DISTANCE = 11.8")
       && page.includes("const WORLD_MIN_DISTANCE = 9.6")
@@ -278,7 +295,7 @@ try {
   // instead shows a passive note that counting is anonymous.
   check("Public mode has no presence opt-in checkbox or consent toggle", !page.includes('type="checkbox"') && !page.includes("savePresenceEnabled") && !page.includes("presenceEnabled"));
   check("Public mode discloses anonymous coarse-region and OS counting without a consent control",
-    page.includes("Only your OS family and coarse region are shown"));
+    page.includes("Only your OS family and approximate city are shown"));
   check("World Map consumes live WebSocket snapshots", page.includes("subscribeWorldPresence") && !page.includes("loadWorldPresence"));
   check("World Map ghosts recorded-but-offline nodes and shows both counts", page.includes("online: node.online") && page.includes('t("recorded")') && page.includes('t("online now")'));
   check("Presence runs application-wide, always on", appShell.includes("<WorldPresenceRunner />") && appShell.includes("installWorldPresenceConnection()"));
@@ -298,9 +315,9 @@ try {
   check("New recorded/online-count labels have all eight locales", /\["recorded",(?:[^\]]*,){6}[^\]]*\]/.test(actions) && /\["online now",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
   // The anonymous-counting note contains commas in its text, so verify locale
   // coverage by its English key plus the last-column (pt) translation.
-  check("Anonymous OS/coarse-region disclosure is translated (en + pt endpoints present)",
-    actions.includes("Only your OS family and coarse region are shown")
-      && actions.includes("Somente a família do sistema operacional e a região aproximada são mostradas"));
+  check("Anonymous OS/city disclosure is translated (en + pt endpoints present)",
+    actions.includes("Only your OS family and approximate city are shown")
+      && actions.includes("Somente a família do sistema operacional e a cidade aproximada são mostradas"));
   // Server list shows the nation flag instead of the bare 2-letter code.
   check("Region labels convert the country code to a flag", page.includes("regionWithFlag(node.region)") && page.includes("0x1f1e6 + ch.charCodeAt(0) - 65"));
   check("World list groups every recorded user into country summaries with large flag controls",
@@ -310,23 +327,37 @@ try {
       && page.includes("country.onlineCount")
       && page.includes("country.osCounts[os].total")
       && page.includes("country.osCounts[os].online"));
+  check("Country and OS summaries are online-first and show online/total",
+    source.includes("b.onlineCount - a.onlineCount")
+      && page.includes("country.osCounts[b].online - country.osCounts[a].online")
+      && page.includes("{country.onlineCount}/{country.nodes.length} {t(\"online now\")}")
+      && page.includes("{country.osCounts[os].online}/{country.osCounts[os].total}"));
   check("Country flag opens a scrollable detail list capped at twenty rows",
     page.includes('data-ui="WorldMap:country-details"')
       && page.includes("maxHeight: 20 * 44")
       && page.includes('overflowY: "auto"')
       && page.includes("setExpandedCountry"));
+  check("Expanded country rows show full country, server number, city, OS, and status without repeating the flag",
+    page.includes("countryDisplayName(country.countryCode, language)")
+      && page.includes('const city = presenceCity(publicNode.region) || t("Unknown city")')
+      && page.includes('{countryName} · {t("Server")} {index + 1}')
+      && page.includes('{city} · {publicNode.os === "Other" ? t("Other") : publicNode.os}')
+      && !page.includes(">{regionWithFlag(publicNode.region)}</span>"));
   check("Worker persists only normalized OS families for recorded/offline summaries",
     worker.includes("normalizeOsFamily")
       && worker.includes("request.headers.get(\"User-Agent\")")
       && worker.includes("server.serializeAttachment({ role, id, os")
+      && worker.includes('headers.set("X-OWLLM-City"')
       && worker.includes("ALTER TABLE nodes ADD COLUMN os TEXT NOT NULL DEFAULT 'Other'")
-      && worker.includes("os = excluded.os"));
+      && worker.includes("region = excluded.region, os = excluded.os"));
   check("Country summary labels have all eight locales",
     /\["Users by country",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
       && /\["Total users",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
       && /\["Online users",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
       && /\["users online",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
-      && /\["Click the flag for connection details",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
+      && /\["Click the flag for connection details",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
+      && /\["Unknown city",(?:[^\]]*,){6}[^\]]*\]/.test(actions)
+      && /\["Server",(?:[^\]]*,){6}[^\]]*\]/.test(actions));
   check("Flag font is bundled for Windows (no native flag emoji)", fs.statSync(path.join(UI, "../public/fonts/TwemojiCountryFlags.woff2")).size > 50_000);
   const styles = read("styles.css");
   check("Flag font is registered flag-codepoints-only and first in the stack", styles.includes('font-family: "Twemoji Country Flags"') && styles.includes("unicode-range: U+1F1E6-1F1FF") && styles.includes('font-family: "Twemoji Country Flags", "Segoe UI"'));

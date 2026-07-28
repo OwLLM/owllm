@@ -71,7 +71,7 @@ export function normalizeOsFamily(raw) {
 }
 
 /**
- * Reduce Cloudflare edge metadata to a deliberately coarse map point.
+ * Reduce Cloudflare edge metadata to a deliberately coarse map point and city.
  * Source IP and exact request coordinates are never read, returned, or stored.
  */
 export function coarseLocation(cf, publicId) {
@@ -84,10 +84,10 @@ export function coarseLocation(cf, publicId) {
   const jitterLatitude = (stableFraction(publicId, "lat") - 0.5) * 3;
   const jitterLongitude = (stableFraction(publicId, "lon") - 0.5) * 3;
   const country = String(cf?.country ?? "").trim().slice(0, 2).toUpperCase();
-  const region = String(cf?.regionCode ?? cf?.region ?? "").trim().slice(0, 24);
+  const city = String(cf?.city || cf?.region || "").trim().slice(0, 64);
 
   return {
-    region: [country, region].filter(Boolean).join(" · ") || "Cloudflare edge",
+    region: [country, city].filter(Boolean).join(" · ") || "Cloudflare edge",
     latitude: Number(clamp(roundedLatitude + jitterLatitude, -85, 85).toFixed(2)),
     longitude: Number(clamp(roundedLongitude + jitterLongitude, -180, 180).toFixed(2)),
   };
@@ -258,11 +258,12 @@ export class WorldPresence {
     for (const viewer of this.viewerSockets()) safeSend(viewer, payload);
   }
 
-  /** Record a first sighting or refresh last_seen; the first position is kept. */
+  /** Record a first sighting or refresh its anonymous city, OS, and map point. */
   recordNode(id, location, os, now) {
     this.sql.exec(
       "INSERT INTO nodes (id, region, os, latitude, longitude, first_seen, last_seen) VALUES (?, ?, ?, ?, ?, ?, ?) " +
-      "ON CONFLICT(id) DO UPDATE SET last_seen = excluded.last_seen, os = excluded.os",
+      "ON CONFLICT(id) DO UPDATE SET region = excluded.region, os = excluded.os, " +
+      "latitude = excluded.latitude, longitude = excluded.longitude, last_seen = excluded.last_seen",
       id, location.region, os, location.latitude, location.longitude, now, now,
     );
     // Bounded footprint: past the cap, drop the oldest offline nodes.
@@ -302,7 +303,8 @@ export class WorldPresence {
       const os = normalizeOsFamily(url.searchParams.get("os") || request.headers.get("User-Agent"));
       const location = coarseLocation({
         country: request.headers.get("X-OWLLM-Country"),
-        regionCode: request.headers.get("X-OWLLM-Region"),
+        city: request.headers.get("X-OWLLM-City"),
+        region: request.headers.get("X-OWLLM-Region"),
         latitude: request.headers.get("X-OWLLM-Latitude"),
         longitude: request.headers.get("X-OWLLM-Longitude"),
       }, id);
@@ -369,6 +371,7 @@ export default {
 
     const headers = new Headers(request.headers);
     headers.set("X-OWLLM-Country", String(request.cf?.country ?? ""));
+    headers.set("X-OWLLM-City", String(request.cf?.city ?? ""));
     headers.set("X-OWLLM-Region", String(request.cf?.regionCode ?? request.cf?.region ?? ""));
     headers.set("X-OWLLM-Latitude", String(request.cf?.latitude ?? ""));
     headers.set("X-OWLLM-Longitude", String(request.cf?.longitude ?? ""));

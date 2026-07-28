@@ -35,6 +35,7 @@ import {
 import {
   groupPresenceByCountry,
   includeSelfDevice,
+  presenceCity,
   readWorldMapMode,
   saveWorldMapMode,
   subscribeWorldPresence,
@@ -80,6 +81,8 @@ const SYSTEM_OVERVIEW_DISTANCE = 245;
 const WORLD_MIN_DISTANCE = 9.6;
 const FLEET_MIN_DISTANCE = 10.8;
 const OS_DISPLAY_ORDER: PresenceOs[] = ["Windows", "macOS", "Linux", "Other"];
+const PLANET_BASE_LIGHT_INTENSITY = 1;
+const PLANET_SUNLIGHT_INTENSITY = PLANET_BASE_LIGHT_INTENSITY * 0.15;
 
 // Direction of the subsolar point (where the sun is directly overhead right now)
 // in the globe mesh's LOCAL texture frame, so the day/night terminator tracks the
@@ -110,11 +113,20 @@ function hashNumber(value: string): number {
   return hash >>> 0;
 }
 
-// Presence regions arrive as "US · CA" (ISO country code + coarse region).
+// Presence locations arrive as "US · Boston" (ISO country code + city).
 // Render the country as its flag; the flag glyphs come from the bundled
 // Twemoji Country Flags font because Windows has no native flag emoji.
 function countryCodeToFlag(code: string): string {
   return String.fromCodePoint(...[...code.toUpperCase()].map((ch) => 0x1f1e6 + ch.charCodeAt(0) - 65));
+}
+
+function countryDisplayName(code: string, locale: string): string {
+  if (!code) return "";
+  try {
+    return new Intl.DisplayNames([locale], { type: "region" }).of(code.toUpperCase()) || code.toUpperCase();
+  } catch {
+    return code.toUpperCase();
+  }
 }
 
 function regionWithFlag(region: string): string {
@@ -463,14 +475,10 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
         normalMap: earthNormal,
         normalScale: new THREE.Vector2(0.48, 0.48),
         specularMap: earthSpecular,
-        specular: new THREE.Color(0x557799),
-        shininess: 18,
-        // Faint self-illumination of the land/ocean so the night hemisphere reads
-        // as a dim twilit Earth rather than pure black. The day map modulates it,
-        // so continents glow softly; on the sunlit side it is negligible.
-        emissive: new THREE.Color(0x58759d),
-        emissiveMap: earthMap,
-        emissiveIntensity: 0.72,
+        // Disable additive specular/emissive peaks: the shared 1.0 baseline and
+        // 0.15 sun term below are the complete surface-lighting budget.
+        specular: new THREE.Color(0x000000),
+        shininess: 0,
       }),
     );
     earthGroup.add(globe);
@@ -522,23 +530,12 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       sizeAttenuation: true,
     })));
 
-    // Ground color lifted from near-black so the shadowed hemisphere keeps a dim
-    // blue twilight fill instead of collapsing to black.
-    scene.add(new THREE.HemisphereLight(0xb5d3ff, 0x385476, 1.55));
-    scene.add(new THREE.AmbientLight(0xa8c7ef, 0.9));
-    // Sun tracks the real subsolar point each frame (see animate loop); this is
-    // just the initial placement so the first rendered frame is already correct.
-    // Keep the day side dimensional without bleaching its texture. The former
-    // 3.9 intensity stacked with the solar point light and clipped most surface
-    // detail on the hemisphere facing the Sun.
-    const sunLight = new THREE.DirectionalLight(0xffffff, 1.15);
+    // Every planet receives one neutral baseline. Direct sunlight adds at most
+    // 15% at the subsolar point, so textures remain readable on both sides
+    // without the sun-facing hemisphere washing out.
+    scene.add(new THREE.AmbientLight(0xffffff, PLANET_BASE_LIGHT_INTENSITY));
     const sunLocal = new THREE.Vector3();
     const sunQuat = new THREE.Quaternion();
-    sunLight.position.copy(subsolarLocalDir(new Date(), sunLocal)).multiplyScalar(10);
-    scene.add(sunLight);
-    const rimLight = new THREE.PointLight(new THREE.Color(accent), 1.6, 20);
-    rimLight.position.set(-6, -1.5, -5);
-    scene.add(rimLight);
 
     // ---- Solar System bodies ----------------------------------------------
     // The Sun is the visual and orbital center. Its emissive surface and two
@@ -562,9 +559,6 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       }),
     );
     scene.add(sunGlow);
-    const solarLight = new THREE.PointLight(0xfff2d0, 150, 0, 0.55);
-    scene.add(solarLight);
-
     // Unit orbit paths are scaled every frame with the same layout math as the
     // planets. This lets the graphic and true astronomical representations
     // morph smoothly without rebuilding any WebGL geometry.
@@ -601,12 +595,8 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       const fallbackTexture = paintPlanetFallback(spec);
       const material = new THREE.MeshPhongMaterial({
         map: fallbackTexture,
-        shininess: 8,
-        specular: new THREE.Color(0x222933),
-        // Same twilight treatment as Earth: the far side stays dimly readable.
-        emissive: new THREE.Color(0x55636f),
-        emissiveMap: fallbackTexture,
-        emissiveIntensity: 0.5,
+        shininess: 0,
+        specular: new THREE.Color(0x000000),
       });
       const mesh = new THREE.Mesh(new THREE.SphereGeometry(spec.radius, 96, 48), material);
       mesh.userData.planetId = spec.id;
@@ -650,7 +640,6 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
         texture.colorSpace = THREE.SRGBColorSpace;
         texture.anisotropy = maxAnisotropy;
         material.map = texture;
-        material.emissiveMap = texture;
         material.needsUpdate = true;
         planetTextures.push(texture);
         onTextureStatusRef.current?.(spec.id, "ready");
@@ -660,6 +649,21 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
         onTextureStatusRef.current?.(spec.id, "fallback");
       });
     }
+
+    // One layer-scoped light per planet prevents the eight directions from
+    // stacking. Each surface therefore receives exactly one 15% sun term above
+    // the shared baseline. Earth retains its real-UTC terminator; every other
+    // planet is lit from the rendered Sun at the system origin.
+    const planetSunLights = planetMeshes.map(({ spec, anchor, mesh }, index) => {
+      const layer = index + 1;
+      mesh.layers.enable(layer);
+      if (spec.id === "earth") clouds.layers.enable(layer);
+      const light = new THREE.DirectionalLight(0xffffff, PLANET_SUNLIGHT_INTENSITY);
+      light.layers.set(layer);
+      light.target = anchor;
+      scene.add(light);
+      return { spec, anchor, light };
+    });
 
     // Focus/zoom: reuses the Earth behavior (OrbitControls + calibrated
     // distance clamps) for every planet. A focus request tweens the controls
@@ -907,11 +911,16 @@ function Globe({ nodes, accent, selectedId, onSelect, focusApiRef, onPlanetFocus
       atmosphere.rotation.y = elapsed * 0.018;
       outerGlow.rotation.y = -elapsed * 0.006;
 
-      // Real-clock sun: aim the light at the current subsolar point, expressed in
-      // the globe's live world orientation so the lit hemisphere stays over the
-      // true daylit geography as the globe rotates.
-      subsolarLocalDir(new Date(), sunLocal).applyQuaternion(globe.getWorldQuaternion(sunQuat));
-      sunLight.position.copy(sunLocal).multiplyScalar(10);
+      planetSunLights.forEach(({ spec, anchor, light }) => {
+        if (spec.id === "earth") {
+          // Real-clock Earth: express the subsolar point in the globe's current
+          // world orientation, then offset from Earth's live orbital position.
+          subsolarLocalDir(new Date(), sunLocal).applyQuaternion(globe.getWorldQuaternion(sunQuat));
+          light.position.copy(anchor.position).addScaledVector(sunLocal, 10);
+        } else {
+          light.position.set(0, 0, 0);
+        }
+      });
 
       // Planets spin on their own axes (Venus/Uranus retrograde via sign).
       planetMeshes.forEach(({ spec, mesh }) => {
@@ -1018,7 +1027,7 @@ function panelStyle(): CSSProperties {
 }
 
 export default function WorldMapPage() {
-  const { t } = useLocalization();
+  const { language, t } = useLocalization();
   const colors = useThemeColors();
   const [mode, setMode] = useState<WorldMapMode>(readWorldMapMode);
   const [publicNodes, setPublicNodes] = useState<PublicPresenceNode[]>([]);
@@ -1186,7 +1195,7 @@ export default function WorldMapPage() {
     ? publicNodes.map((node) => ({
         id: node.id,
         label: node.region ? regionWithFlag(node.region) : t("Anonymous OWLLM node"),
-        detail: node.online ? t("Approximate server region") : t("Recorded · offline"),
+        detail: `${node.os === "Other" ? t("Other") : node.os} · ${node.online ? t("Online") : t("Offline")}`,
         latitude: node.latitude,
         longitude: node.longitude,
         online: node.online,
@@ -1382,7 +1391,7 @@ export default function WorldMapPage() {
             {mode === "world" && (
               <div style={{ ...panelStyle(), padding: 13, display: "flex", gap: 9, alignItems: "flex-start", color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45 }}>
                 <span aria-hidden style={{ marginTop: 1, color: "var(--accent-ink)" }}>🌐</span>
-                <span>{t("Only your OS family and coarse region are shown — no name, account, device identity, project, prompt, or exact coordinates are shared.")}</span>
+                <span>{t("Only your OS family and approximate city are shown — no name, account, device identity, project, prompt, or exact coordinates are shared.")}</span>
               </div>
             )}
 
@@ -1405,12 +1414,13 @@ export default function WorldMapPage() {
                 const countryKey = country.countryCode || "unknown";
                 const expanded = expandedCountry === countryKey;
                 const flag = country.countryCode ? countryCodeToFlag(country.countryCode) : "🌐";
+                const countryName = countryDisplayName(country.countryCode, language) || t("Unknown country");
                 return (
                   <div key={countryKey} style={{ borderBottom: "1px solid var(--border)", padding: "10px 2px" }}>
                     <div style={{ display: "grid", gridTemplateColumns: "62px minmax(0,1fr)", gap: 12, alignItems: "start" }}>
                       <button
                         type="button"
-                        aria-label={`${expanded ? t("Hide") : t("Show")} ${country.countryCode || t("Unknown country")} ${t("connection details")}`}
+                        aria-label={`${expanded ? t("Hide") : t("Show")} ${countryName} ${t("connection details")}`}
                         aria-expanded={expanded}
                         aria-controls={`world-country-${countryKey}`}
                         onClick={() => setExpandedCountry((current) => current === countryKey ? null : countryKey)}
@@ -1427,22 +1437,29 @@ export default function WorldMapPage() {
                       </button>
                       <div style={{ minWidth: 0 }}>
                         <div style={{ color: "var(--fg-strong)", fontSize: 13, fontWeight: 800 }}>
-                          {t("Total users")}: {country.nodes.length}
+                          {countryName}
                         </div>
                         <div style={{ marginTop: 2, color: "var(--accent-ink)", fontSize: 11.5, fontWeight: 750 }}>
-                          {t("Online users")}: {country.onlineCount}
+                          {country.onlineCount}/{country.nodes.length} {t("online now")}
                         </div>
                         <div style={{ display: "flex", flexDirection: "column", gap: 3, marginTop: 6 }}>
-                          {OS_DISPLAY_ORDER.filter((os) => country.osCounts[os].total > 0).map((os) => (
-                            <div key={os} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", gap: 10, color: "var(--fg-muted)", fontSize: 11.5 }}>
-                              <span>{os === "Other" ? t("Other") : os}</span>
-                              <span style={{ whiteSpace: "nowrap" }}>
-                                <b style={{ color: "var(--fg-strong)" }}>{country.osCounts[os].total}</b>
-                                {" · "}
-                                <b style={{ color: country.osCounts[os].online > 0 ? "var(--accent-ink)" : "var(--fg-muted)" }}>{country.osCounts[os].online}</b> {t("online now")}
-                              </span>
-                            </div>
-                          ))}
+                          {OS_DISPLAY_ORDER
+                            .filter((os) => country.osCounts[os].total > 0)
+                            .sort((a, b) =>
+                              country.osCounts[b].online - country.osCounts[a].online
+                                || country.osCounts[b].total - country.osCounts[a].total
+                                || OS_DISPLAY_ORDER.indexOf(a) - OS_DISPLAY_ORDER.indexOf(b)
+                            )
+                            .map((os) => (
+                              <div key={os} style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) auto", gap: 10, color: "var(--fg-muted)", fontSize: 11.5 }}>
+                                <span>{os === "Other" ? t("Other") : os}</span>
+                                <span style={{ whiteSpace: "nowrap" }}>
+                                  <b style={{ color: country.osCounts[os].online > 0 ? "var(--accent-ink)" : "var(--fg-muted)" }}>
+                                    {country.osCounts[os].online}/{country.osCounts[os].total}
+                                  </b> {t("online now")}
+                                </span>
+                              </div>
+                            ))}
                         </div>
                       </div>
                     </div>
@@ -1455,8 +1472,9 @@ export default function WorldMapPage() {
                           border: "1px solid var(--border)", borderRadius: 10, background: "rgba(var(--accent-rgb),.05)",
                         }}
                       >
-                        {[...country.nodes].sort((a, b) => Number(b.online) - Number(a.online) || a.region.localeCompare(b.region)).map((publicNode) => {
+                        {[...country.nodes].sort((a, b) => Number(b.online) - Number(a.online) || a.region.localeCompare(b.region)).map((publicNode, index) => {
                           const globeNode = nodesById.get(publicNode.id);
+                          const city = presenceCity(publicNode.region) || t("Unknown city");
                           return (
                             <button
                               key={publicNode.id}
@@ -1471,9 +1489,11 @@ export default function WorldMapPage() {
                             >
                               <span style={{ width: 7, height: 7, borderRadius: "50%", marginTop: 5, background: publicNode.online ? "var(--accent)" : "var(--fg-dim)", boxShadow: publicNode.online ? "0 0 9px var(--accent)" : "none" }} />
                               <span style={{ minWidth: 0 }}>
-                                <span style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--fg-strong)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{regionWithFlag(publicNode.region)}</span>
+                                <span style={{ display: "block", fontSize: 12, fontWeight: 700, color: "var(--fg-strong)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  {countryName} · {t("Server")} {index + 1}
+                                </span>
                                 <span style={{ display: "block", marginTop: 2, fontSize: 10.5, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                                  {t("Approximate server region")} · {publicNode.os === "Other" ? t("Other") : publicNode.os} · {publicNode.online ? t("Online") : t("Offline")}
+                                  {city} · {publicNode.os === "Other" ? t("Other") : publicNode.os} · {publicNode.online ? t("Online") : t("Offline")}
                                 </span>
                               </span>
                             </button>
@@ -1498,7 +1518,7 @@ export default function WorldMapPage() {
               <div style={{ ...panelStyle(), padding: 15, borderColor: "var(--accent-strong)" }}>
                 <div style={{ color: "var(--fg-strong)", fontWeight: 800 }}>{selected.label}</div>
                 <div style={{ marginTop: 4, color: "var(--fg-muted)", fontSize: 11.5 }}>{selected.detail}</div>
-                <div style={{ marginTop: 9, color: "var(--accent-ink)", fontSize: 10.5, fontWeight: 700 }}>{selected.kind === "fleet" ? t("Private fleet orbit · not a location") : t("Coarse server region only")}</div>
+                <div style={{ marginTop: 9, color: "var(--accent-ink)", fontSize: 10.5, fontWeight: 700 }}>{selected.kind === "fleet" ? t("Private fleet orbit · not a location") : t("Approximate city only")}</div>
               </div>
             )}
           </aside>

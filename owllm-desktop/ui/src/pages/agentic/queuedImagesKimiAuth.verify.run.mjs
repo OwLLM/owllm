@@ -34,6 +34,19 @@ try {
   check("PTY chunk ending mid-Kimi URL is not opened", firstCompleteAuthUrl(partial) === null);
   check("completed Kimi device URL opens with the full user_code",
     firstCompleteAuthUrl(complete) === "https://www.kimi.com/code/authorize_device?user_code=ABCD-1234");
+  const hardWrapped = [
+    '{"type":"verification_url","message":"Verification URL: https://www.kimi.com/code/authorize_device?user_cod',
+    'e=ZJFH-EQQ0","data":{"verification_url":"https://www.kimi.com/code/authorize_device?user_cod',
+    'e=ZJFH-EQQ0","user_code":"ZJFH-EQQ0"}}',
+  ].join("\r\n");
+  check("PTY hard-wrap inside Kimi user_code is rejoined before opening",
+    firstCompleteAuthUrl(hardWrapped)
+      === "https://www.kimi.com/code/authorize_device?user_code=ZJFH-EQQ0");
+  check("hard-wrapped Kimi URL without a complete user_code is not opened",
+    firstCompleteAuthUrl(
+      '{"type":"verification_url","url":"https://www.kimi.com/code/authorize_device?user_cod\r\n'
+        + 'still-incomplete"}\r\n',
+    ) === null);
   check("OSC-8 wrapped authorization URL is normalized",
     firstCompleteAuthUrl('\x1b]8;;https://example.com/auth?code=ok\x07https://example.com/auth?code=ok\x1b]8;;\x07\r\n')
       === "https://example.com/auth?code=ok");

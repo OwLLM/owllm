@@ -56,6 +56,18 @@ fs.writeFileSync(path.join(TMP, "cloudCatalogue.js"), `
   };
   module.exports = { getCloudCatalogue: () => CAT, subscribeCloudCatalogue: () => () => {} };
 `);
+// No paired devices in this fixture — the collapse behaviour under test is
+// about the cloud sections. Peer-model listing has its own guard
+// (peerCatalogue.verify.run.mjs).
+fs.writeFileSync(path.join(TMP, "peerCatalogue.js"), `
+  module.exports = {
+    DEVICE_PREFIX: "device/",
+    encodeDeviceModel: (d, m) => "device/" + d + "/" + m,
+    getPeerCatalogue: () => [],
+    refreshPeerCatalogue: async () => {},
+    subscribePeerCatalogue: () => () => {},
+  };
+`);
 // Route the transpiled module's react/react-dom requires to the repo copy.
 fs.writeFileSync(path.join(TMP, "package.json"), "{}");
 fs.mkdirSync(path.join(TMP, "node_modules"), { recursive: true });

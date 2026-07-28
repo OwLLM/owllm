@@ -55,6 +55,7 @@ import { isAgentReadOnly, isReadOnlyToolAllowlist } from "./agentSandbox";
 import { historyBudgetFor } from "./contextBudget";
 import type { RevisionRef } from "./personalAgentConfig";
 import { localInferenceFallback, resolveInferenceBase } from "./inferenceEndpoint";
+import { DEVICE_PREFIX, parseDeviceModel, peerNameFor } from "./peerCatalogue";
 // Auto routing (P0-4) resolves against the SAME catalogue the picker shows.
 import { buildEntries } from "./ModelPicker";
 import { makeGenMeter } from "../../utils/genStats";
@@ -1572,6 +1573,11 @@ function buildKimiCliPrompt(userMessage: string, history?: HistoryItem[]): strin
 
 // ---------- Model routing ----------
 export function stripModelPrefix(id: string): string {
+  // A paired-device model carries its route in the id
+  // (`device/<deviceId>/<modelId>`); the bare id is what the peer's own
+  // llama-server knows it as.
+  const peer = parseDeviceModel(id);
+  if (peer) return peer.modelId;
   for (const p of ["sub/", "api/", "auto/"]) {
     if (id.startsWith(p)) return id.slice(p.length);
   }
@@ -1581,6 +1587,9 @@ export function stripModelPrefix(id: string): string {
 export function providerFor(modelId: string, models: ModelInfo[]): string {
   if (!modelId) return "local";
   if (modelId.startsWith("auto/")) return "auto";
+  // Paired-device models are served by a llama-server (on the peer), so they
+  // take the same local/GGUF dispatch path — streamLocalChat swaps the route.
+  if (modelId.startsWith(DEVICE_PREFIX)) return "local";
   const bare = stripModelPrefix(modelId);
   // Pure cloud/subscription entries — resolve provider by id prefix. This MUST
   // cover every provider the dispatch switch handles; a `sub/`/`api/` model that
@@ -2621,6 +2630,23 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
   // resolveInferenceBase() reads the persisted endpoint; local mode uses the
   // managed port passed in `p.port`, remote uses the configured host:port:key.
   let infer = resolveInferenceBase(p.port);
+  // A `device/<id>/<model>` selection pins THIS call to a paired device,
+  // overriding the globally-persisted endpoint: the model picker is per-agent,
+  // so choosing PC B's model must not require switching the whole app's
+  // inference source on the Server page.
+  const pinnedPeer = parseDeviceModel(p.modelId);
+  if (pinnedPeer) {
+    infer = {
+      baseUrl: "",
+      apiKey: null,
+      remote: true,
+      device: {
+        id: pinnedPeer.deviceId,
+        name: peerNameFor(pinnedPeer.deviceId),
+        modelId: pinnedPeer.modelId,
+      },
+    };
+  }
   let inferUrl = `${infer.baseUrl}/v1/chat/completions`;
   let inferHeaders: Record<string, string> = {
     "Content-Type": "application/json",
@@ -2709,7 +2735,9 @@ export async function streamLocalChat(p: StreamLocalChatParams): Promise<string>
         device.id,
         device.modelId,
         {
-          model: p.modelId || "local",
+          // The peer's llama-server knows the model by its BARE id — sending
+          // the routed `device/<id>/<model>` form would be an unknown model.
+          model: stripModelPrefix(p.modelId) || "local",
           messages: liveMessages,
           temperature: p.temperature,
           ...sampling,

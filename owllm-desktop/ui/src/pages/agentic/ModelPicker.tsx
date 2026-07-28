@@ -22,6 +22,10 @@
 //   "auto/cheapest" etc       — Auto routing
 import { useEffect, useReducer, useRef, useState } from "react";
 import { getCloudCatalogue, subscribeCloudCatalogue, type CloudModelDef } from "./cloudCatalogue";
+import {
+  DEVICE_PREFIX, encodeDeviceModel, getPeerCatalogue,
+  refreshPeerCatalogue, subscribePeerCatalogue,
+} from "./peerCatalogue";
 
 export type ModelInfo = {
   model_id: string;
@@ -50,11 +54,11 @@ export type AccountsStatusLite = {
 };
 
 type Section =
-  | "local" | "tuned"
+  | "local" | "tuned" | "remote"
   | "anthropic" | "openai" | "kimi" | "gemini"
   | "deepseek" | "xai" | "groq" | "perplexity" | "mistral" | "together"
   | "other";
-type Variant = "local" | "tuned" | "sub" | "api" | "auto";
+type Variant = "local" | "tuned" | "sub" | "api" | "auto" | "device";
 
 export type ModelPickerEntry = {
   id: string;
@@ -68,6 +72,7 @@ export type ModelPickerEntry = {
 const SECTION_META: Record<Section, { label: string; color: string }> = {
   local:      { label: "LOCAL",         color: "#7fdfff" },
   tuned:      { label: "TUNED (LOCAL)", color: "#ffd166" },
+  remote:     { label: "PAIRED DEVICES", color: "#5ee6a8" },
   anthropic:  { label: "ANTHROPIC",     color: "#ff9a3a" },
   openai:     { label: "OPENAI",        color: "#10a37f" },
   kimi:       { label: "KIMI",          color: "#d36bff" },
@@ -267,6 +272,40 @@ export function buildEntries(models: ModelInfo[], status: AccountsStatusLite | n
     }
   }
 
+  // PAIRED DEVICES — GGUFs advertised by another OwLLM PC on this account.
+  // Pairing already carried a full inference transport (the sealed device
+  // channel); until now nothing outside the Server page ever listed what the
+  // peer had, so pairing surfaced no extra models. Read from the module cache
+  // so this stays synchronous — refreshPeerCatalogue() repopulates in the
+  // background and the picker re-renders via subscribePeerCatalogue().
+  for (const peer of getPeerCatalogue()) {
+    for (const m of peer.models) {
+      const parts: string[] = [peer.deviceName];
+      if (m.size_mib != null) parts.push(`${(m.size_mib / 1024).toFixed(1)} GiB`);
+      if (m.model_id === peer.activeModelId) parts.push("loaded");
+      out.push({
+        id: encodeDeviceModel(peer.deviceId, m.model_id),
+        label: `${m.model_id} · ${peer.deviceName}`,
+        hint: parts.join(" · "),
+        section: "remote",
+        variant: "device",
+        // A peer model with no port can't be served by the peer's
+        // llama-server either (transformers dir) — dim it like a local one.
+        available: m.port != null,
+      });
+    }
+    if (peer.error) {
+      out.push({
+        id: `${DEVICE_PREFIX}${peer.deviceId}/`,
+        label: `${peer.deviceName} — unreachable`,
+        hint: peer.error,
+        section: "remote",
+        variant: "device",
+        available: false,
+      });
+    }
+  }
+
   for (const a of AUTO_OPTIONS) {
     out.push({
       id: a.id,
@@ -318,6 +357,11 @@ export default function ModelPicker({
   // without an app restart.
   const [, forceCat] = useReducer((x: number) => x + 1, 0);
   useEffect(() => subscribeCloudCatalogue(() => forceCat()), []);
+  // Same for paired-device models. Probing a peer crosses the network, so it
+  // only runs when the popover is actually opened (and is cache-served for a
+  // minute after) — never on every mount of every picker on the page.
+  useEffect(() => subscribePeerCatalogue(() => forceCat()), []);
+  useEffect(() => { if (open && !localOnly) void refreshPeerCatalogue(); }, [open, localOnly]);
   /// Trigger bounding rect captured at open time so the popover can
   /// render with position:fixed and ESCAPE any parent overflow:hidden
   /// (TeamInfoCard clips otherwise — that's the bug the user hit).
@@ -362,7 +406,7 @@ export default function ModelPicker({
   const sections: Section[] = localOnly
     ? ["local", "tuned"]
     : [
-        "local", "tuned",
+        "local", "tuned", "remote",
         "anthropic", "openai", "kimi", "gemini",
         "deepseek", "xai", "groq", "perplexity", "mistral", "together",
         "other",

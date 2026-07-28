@@ -22,8 +22,10 @@ const ts = (await import(pathToFileURL(path.join(REPO, "node_modules/typescript/
 const ROOT = fs.mkdtempSync(path.join(process.env.TMPDIR || process.env.TEMP || "/tmp", "askuser-verify-"));
 const AGENTIC = path.join(ROOT, "ui/src/pages/agentic");
 const UTILS = path.join(ROOT, "ui/src/utils");
+const ADVANCED = path.join(ROOT, "ui/src/pages/advanced");
 fs.mkdirSync(AGENTIC, { recursive: true });
 fs.mkdirSync(UTILS, { recursive: true });
+fs.mkdirSync(ADVANCED, { recursive: true });
 
 function transpile(file, outDir, outName) {
   const code = fs.readFileSync(path.join(HERE, file), "utf8");
@@ -34,6 +36,9 @@ function transpile(file, outDir, outName) {
 }
 transpile("dispatch.ts", AGENTIC, "dispatch.js");
 transpile("askUserBubble.verify.ts", AGENTIC, "verify.js");
+// Real (not stubbed): dispatch's model routing calls these peer-id helpers on
+// EVERY model id, so a stub would silently change which branch is taken.
+transpile("peerCatalogue.ts", AGENTIC, "peerCatalogue.js");
 
 // Heavy imports of dispatch.ts that the pure helpers under test never call.
 const STUB = "module.exports = new Proxy({}, { get: () => () => {} });";
@@ -41,6 +46,7 @@ for (const m of ["localTools", "toolNormalizer", "modelProfiles", "inferenceEndp
   fs.writeFileSync(path.join(AGENTIC, m + ".js"), STUB);
 }
 fs.writeFileSync(path.join(UTILS, "genStats.js"), STUB);                // ../../utils/genStats
+fs.writeFileSync(path.join(ADVANCED, "remoteDevices.js"), STUB);        // peerCatalogue's device channel
 const TNM = path.join(ROOT, "node_modules/@tauri-apps/api");            // bare specifier
 fs.mkdirSync(TNM, { recursive: true });
 fs.writeFileSync(path.join(TNM, "package.json"),

@@ -18,7 +18,9 @@ const sourcePath = path.join(HERE, "serverContext.ts");
 const js = ts.transpileModule(fs.readFileSync(sourcePath, "utf8"), {
   compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
 }).outputText;
-const temp = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "server-pref-"));
+// TEMP is what Windows sets; TMPDIR is the POSIX name. Same fallback order the
+// sibling verify runners use — without it this gate only runs on Linux/macOS.
+const temp = fs.mkdtempSync(path.join(process.env.TMPDIR || process.env.TEMP || "/tmp", "server-pref-"));
 const modulePath = path.join(temp, "serverContext.mjs");
 fs.writeFileSync(modulePath, js);
 const prefs = await import(pathToFileURL(modulePath).href);

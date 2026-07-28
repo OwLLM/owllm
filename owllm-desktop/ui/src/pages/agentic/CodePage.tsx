@@ -2166,7 +2166,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     let failureReason = "The run ended with an error.";
     let replyText = "";
     try {
-      setStatus(`Coding in ${workspace}`);
+      // Workspace path now lives at the top of the PublishCards rail — no need
+      // to echo it in the composer status line every turn.
+      setStatus("Coding…");
       const reply = await runTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
       await logCodeWork("code", text || "(read the attached file)", reply);
       replyText = reply;
@@ -2323,7 +2325,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     let aborted = false;
     let replyText = "";
     try {
-      setStatus(`Second agent working in ${workspace}`);
+      setStatus("Second agent working…");
       replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
       await logCodeWork("code_second", text, replyText);
     } catch (e) {

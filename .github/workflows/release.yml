@@ -266,6 +266,31 @@ jobs:
           echo "Bundled voice runtime:"
           ls -lh "$DEST"
 
+      # Tauri seals the .app but never re-signs binaries it merely COPIES out of
+      # resources/. whisper.cpp is compiled by the step above, so it lands
+      # ad-hoc-signed with no hardened runtime and no secure timestamp, and
+      # notarisation rejects the whole archive ("The binary is not signed with a
+      # valid Developer ID certificate"). That is why every macOS DMG we have
+      # shipped is signed but NOT notarised, so Gatekeeper refuses to open it.
+      # Sign every nested Mach-O before the bundler runs.
+      - name: Sign nested macOS binaries (hardened runtime + timestamp)
+        if: startsWith(matrix.os, 'macos') && env.APPLE_SIGNING_IDENTITY != ''
+        working-directory: owllm-desktop
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          signed=0
+          while IFS= read -r f; do
+            file "$f" | grep -q 'Mach-O' || continue
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$f"
+            echo "  signed: $f"
+            signed=$((signed + 1))
+          done < <(find resources -type f)
+          echo "nested Mach-O signed: $signed"
+
       # ---------------------------------------------------------------
       # The actual Tauri build. Signing env vars are passed through
       # unconditionally — tauri-cli ignores empty values. The runner's

@@ -109,6 +109,29 @@ jobs:
             \( -name whisper-cli -o -name main \) -exec cp {} "$DEST/" \;
           chmod +x "$DEST"/whisper-cli "$DEST"/main 2>/dev/null || true
 
+      # Tauri seals the .app but never re-signs binaries it merely COPIES out of
+      # resources/. whisper.cpp is compiled by the step above, so it lands
+      # ad-hoc-signed with no hardened runtime and no secure timestamp, and
+      # notarisation then rejects the whole archive. Sign every nested Mach-O
+      # before the bundler runs.
+      - name: Sign nested macOS binaries (hardened runtime + timestamp)
+        working-directory: owllm-desktop
+        shell: bash
+        env:
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+        run: |
+          set -euo pipefail
+          test -n "$APPLE_SIGNING_IDENTITY"
+          signed=0
+          while IFS= read -r f; do
+            file "$f" | grep -q 'Mach-O' || continue
+            codesign --force --options runtime --timestamp \
+              --sign "$APPLE_SIGNING_IDENTITY" "$f"
+            echo "  signed: $f"
+            signed=$((signed + 1))
+          done < <(find resources -type f)
+          echo "nested Mach-O signed: $signed"
+
       - name: Run desktop ship gate
         working-directory: owllm-desktop
         run: node scripts/smoke-matrix.mjs

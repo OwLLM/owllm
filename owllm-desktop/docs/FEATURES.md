@@ -65,6 +65,20 @@ bridges, sandboxing); React owns all UI via `invoke()`.
   verify command(s), release config, solo/team default. Steward role lints it
   (rule-based, `cardLint.ts`). Releases run **deterministically on the host**
   (bump → commit → tag → build → sign → publish → verify updater).
+- **Job-specific project environments** (`projectEnvironment.ts`): new-project
+  intent cards now persist a versioned workspace recipe, not only a team name.
+  Web/React work opens a localhost preview beside OwLLM; responsive work uses a
+  phone viewport; web/mobile/software also trim the template to a focused
+  four-agent roster instead of starting every specialist. Debug, review,
+  writing and data jobs expose deliberately different working surfaces.
+  Personal-assistant onboarding has a
+  visual picker for any combination of mail, messaging, calendar, documents and
+  custom web apps, then opens those tabs in OwLLM's agent browser and adds a
+  routed Browser specialist (browser access is role-gated). Recipes store
+  labels/URLs only in `graph_json` + the Project Card; cookies, passwords and
+  tokens stay in the device-local browser profile/vault. The recipe is injected
+  into orchestrator/specialist prompts, including an approval boundary for
+  sending, publishing, deleting and other consequential browser actions.
 - **Multi-page**: tab strip opens several Agents pages at once, each with its
   own project + run; tabs stay alive (runs keep going), green ● = running.
 - **Mid-run steering**: chat messages during a run queue as ⚡ steers and are

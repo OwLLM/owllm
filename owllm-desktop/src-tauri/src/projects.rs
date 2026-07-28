@@ -494,6 +494,11 @@ pub struct CreateProjectInput {
     /// Stable onboarding recipe id written into the initial Project Card.
     #[serde(default)]
     pub project_kind: String,
+    /// Portable, non-secret workspace recipe (surfaces, browser URLs/layout).
+    /// Website credentials are deliberately absent and stay in the local
+    /// browser profile/vault.
+    #[serde(default)]
+    pub project_environment: serde_json::Value,
     /// List of agent names (matches `agent_projects.team_json`).
     #[serde(default)]
     pub team: Vec<String>,
@@ -632,7 +637,8 @@ pub async fn create_project(input: CreateProjectInput) -> Result<ProjectRow, Str
                     "name": input.name.clone(),
                     "kind": input.project_kind.clone(),
                     "goal": input.description.clone(),
-                    "mode": "team"
+                    "mode": "team",
+                    "environment": input.project_environment.clone()
                 });
                 let body = serde_json::to_string_pretty(&card)
                     .map_err(|e| format!("encode project card: {e}"))?;

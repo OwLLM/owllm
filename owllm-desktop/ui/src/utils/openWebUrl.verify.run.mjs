@@ -47,9 +47,9 @@ check(appShell.includes('import { openWebUrl } from "./utils/openWebUrl";')
   && appShell.includes('const MARKETPLACE_URL = "https://marketplace.owllm.com/";'),
   "the global shell routes the canonical marketplace URL through openWebUrl");
 check(appShell.includes('data-ui="MarketplaceButton"')
-  && appShell.includes('<span>Marketplace</span>')
-  && appShell.includes('onClick={onOpenMarketplace}'),
-  "the app header exposes a clearly labelled global Marketplace button");
+  && appShell.includes('>Marketplace</span>')
+  && appShell.includes('onClick={() => { setSettingsOpen(false); onOpenMarketplace(); }}'),
+  "Settings exposes a clearly labelled Marketplace button");
 const marketplaceHandler = appShell.match(/onOpenMarketplace=\{\(\) => \{([\s\S]*?)\n\s*\}\}/)?.[1] ?? "";
 check(marketplaceHandler.includes("openWebUrl(MARKETPLACE_URL)")
   && !marketplaceHandler.includes("setActiveKey")

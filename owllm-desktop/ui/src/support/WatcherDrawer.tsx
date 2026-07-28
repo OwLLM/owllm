@@ -115,6 +115,7 @@ const PAGE_DOCS: Record<string, string> = {
     "• Three launcher tiles (Fine Tuning, Agentic Team, Gamify) reveal quick actions on hover.\n" +
     "Note: the Sandbox-disk maintenance panel moved to the Info page.",
   agents:
+    "PROJECT ENVIRONMENTS: a new project prepares job-specific working surfaces, not just a team. Web/React opens localhost in a browser on the right half of the monitor; responsive apps open a phone viewport; debugging, review, writing and data each show their own useful tools. Personal assistant setup visually selects any combination of mail, messaging, calendar, document and custom sites. Website sessions stay local; project data contains only labels/URLs, never passwords, cookies or tokens. Reopen the recipe later from Project settings -> Open environment.\n" +
     "AGENTIC TEAM — an orchestrator + specialist agents that fan out on your goal.\n" +
     "• MULTIPLE PAGES: a tab strip at the very top (like the Code page) lets you open several Agents pages at once — '＋ New page'. Each tab picks its OWN project (same or different) and runs its own team in parallel; a green ● on a tab = that page has a run in progress. Tabs stay alive when you switch, so runs keep going; closing a busy tab asks first (closing stops its run).\n" +
     "• The top of each page is ONE line: a 📁 project dropdown + ⚙ (Project settings) + '+ New' + the goal/Run row.\n" +

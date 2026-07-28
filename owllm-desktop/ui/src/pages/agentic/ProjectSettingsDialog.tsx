@@ -17,6 +17,14 @@ import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isola
 import { parseVerifyConfig } from "./gate";
 import { parseProjectCard, renderCardFindings, type CardFinding, type ProjectCard } from "./cardLint";
 import { runCardLint } from "./localTools";
+import {
+  ASSISTANT_SERVICES,
+  createProjectEnvironment,
+  launchProjectEnvironment,
+  parseProjectEnvironment,
+  type EnvironmentService,
+  type ProjectEnvironment,
+} from "./projectEnvironment";
 
 type Team = {
   id: string; name: string; display: string; category: string;
@@ -47,7 +55,11 @@ export type ProjectSettingsDialogProps = {
   resolvedTeamLabel?: string | null;
   // NEW mode
   defaultTeamName?: string | null;
-  onCreated: (row: ProjectRow, kickoff: { kind: string; action: "brainstorm" | "goal" }) => void;
+  onCreated: (row: ProjectRow, kickoff: {
+    kind: string;
+    action: "brainstorm" | "goal";
+    environment: ProjectEnvironment;
+  }) => void;
   // EDIT mode — the live project + the parent callbacks that already persist.
   project: ProjectRow | null;
   location: string;
@@ -83,20 +95,24 @@ type ProjectKind = {
   kickoff: "brainstorm" | "goal";
   /// Preferred team template `name`s, in order; first available wins.
   teams: string[];
+  /// A deliberately small roster for this job, selected from the template by
+  /// agent name. Missing names are ignored; an unusable subset falls back to
+  /// the full template so custom/user templates remain compatible.
+  agentNames?: string[];
   namePh: string;
   /// Seeds the (editable) description — one line of context the team starts with.
   descSeed: string;
 };
 const PROJECT_KINDS: ProjectKind[] = [
   { key: "product", icon: "🚀", title: "New product", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create the workspace, then start a model-selectable product brainstorm and design-to-build flow.", teams: ["product_studio"], namePh: "e.g. saas-idea", descSeed: "" },
-  { key: "web", icon: "🌐", title: "Website / Web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a real web workspace, scope it, then build and verify it in the live browser.", teams: ["dev_squad"], namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website or web application for " },
-  { key: "mobile", icon: "📱", title: "Responsive web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "A touch-friendly web/PWA workflow with phone viewports. Native mobile scaffolding is not claimed here.", teams: ["dev_squad"], namePh: "e.g. fitness-pwa", descSeed: "Build a responsive, touch-friendly web application for " },
-  { key: "software", icon: "🛠", title: "Software / tool", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a workspace for a CLI, backend, library or desktop tool, then scope and build it.", teams: ["owllm_team", "dev_squad"], namePh: "e.g. esp-flash, csv-tool", descSeed: "Build a software tool that " },
-  { key: "bugfix", icon: "🐛", title: "Fix bugs", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository; reproduce, root-cause, patch and add a regression test.", teams: ["bug_hunter"], namePh: "e.g. fix-login, crash-hunt", descSeed: "Bug to reproduce and fix: " },
+  { key: "web", icon: "🌐", title: "Website / Web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a real web workspace, scope it, then build and verify it in the live browser.", teams: ["dev_squad"], agentNames: ["orchestrator", "coder", "critic", "browser"], namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website or web application for " },
+  { key: "mobile", icon: "📱", title: "Responsive web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "A touch-friendly web/PWA workflow with phone viewports. Native mobile scaffolding is not claimed here.", teams: ["dev_squad"], agentNames: ["orchestrator", "coder", "critic", "browser"], namePh: "e.g. fitness-pwa", descSeed: "Build a responsive, touch-friendly web application for " },
+  { key: "software", icon: "🛠", title: "Software / tool", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a workspace for a CLI, backend, library or desktop tool, then scope and build it.", teams: ["dev_squad", "owllm_team"], agentNames: ["orchestrator", "coder", "critic", "devops"], namePh: "e.g. esp-flash, csv-tool", descSeed: "Build a software tool that " },
+  { key: "bugfix", icon: "🐛", title: "Fix bugs", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository; reproduce, root-cause, patch and add a regression test.", teams: ["bug_hunter"], agentNames: ["orchestrator", "reproducer", "root_cause", "patcher", "regression_test_author"], namePh: "e.g. fix-login, crash-hunt", descSeed: "Bug to reproduce and fix: " },
   { key: "review", icon: "🧐", title: "Code review", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository or checkout; reports concrete findings with file and line evidence.", teams: ["code_reviewer"], namePh: "e.g. review-pr42", descSeed: "Review this codebase for " },
-  { key: "assistant", icon: "🤖", title: "Personal assistant", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a durable workspace for notes, plans, drafts, reminders and follow-ups.", teams: ["secretary", "concierge"], namePh: "e.g. my-desk, daily-ops", descSeed: "Help me organize and manage " },
-  { key: "research", icon: "🔬", title: "Research", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a sourced research workspace, clarify the question and define the deliverable.", teams: ["research_lab"], namePh: "e.g. market-scan, paper-notes", descSeed: "Research and produce a sourced report about " },
-  { key: "writing", icon: "✍️", title: "Writing & content", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a writing workspace, establish audience and voice, then outline and draft.", teams: ["writers_room"], namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content for " },
+  { key: "assistant", icon: "🤖", title: "Personal assistant", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a durable workspace for notes, plans, drafts, reminders and follow-ups.", teams: ["secretary", "concierge"], agentNames: ["orchestrator", "triager", "responder", "scheduler"], namePh: "e.g. my-desk, daily-ops", descSeed: "Help me organize and manage " },
+  { key: "research", icon: "🔬", title: "Research", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a sourced research workspace, clarify the question and define the deliverable.", teams: ["research_lab"], agentNames: ["orchestrator", "librarian", "synthesizer", "fact_checker", "citer"], namePh: "e.g. market-scan, paper-notes", descSeed: "Research and produce a sourced report about " },
+  { key: "writing", icon: "✍️", title: "Writing & content", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a writing workspace, establish audience and voice, then outline and draft.", teams: ["writers_room"], agentNames: ["orchestrator", "outliner", "drafter", "editor"], namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content for " },
   { key: "data", icon: "📊", title: "Data analysis", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create an analysis workspace for datasets, notebooks, charts and findings.", teams: ["data_analyst"], namePh: "e.g. sales-analysis", descSeed: "Analyze data to answer " },
   { key: "social", icon: "📣", title: "Social campaign", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a campaign workspace for drafts and approvals; publishing still requires configured connectors.", teams: ["social_desk"], namePh: "e.g. launch-campaign", descSeed: "Plan a draft-first social campaign for " },
   { key: "custom", icon: "⚙️", title: "Existing folder / Custom…", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Open an existing folder and choose any team and permissions yourself.", teams: [], namePh: "e.g. cleanup-pr, paper-draft", descSeed: "" },
@@ -105,6 +121,25 @@ const PROJECT_KINDS: ProjectKind[] = [
 function kindTeam(kind: ProjectKind, teams: Team[]): Team | null {
   for (const n of kind.teams) { const t = teams.find(x => x.name === n); if (t) return t; }
   return null;
+}
+function kindAgents(kind: ProjectKind | undefined, team: Team): Team["agents"] {
+  let selected = team.agents;
+  if (kind?.agentNames?.length) {
+    const wanted = new Set(kind.agentNames);
+    const focused = team.agents.filter(agent => wanted.has(agent.name));
+    if (focused.some(agent => agent.name === "orchestrator") && focused.length >= 2) {
+      selected = focused;
+    }
+  }
+  // Browser access is role-gated in the Rust gateway. An assistant without a
+  // browser specialist could see the configured service names but could never
+  // actually read or operate their authenticated tabs.
+  if (kind?.key === "assistant" && !selected.some(agent => agent.base === "browser")) {
+    return [...selected, { name: "browser", base: "browser", icon: "owl:owl_webapp" }];
+  }
+  return selected.some(agent => agent.name === "orchestrator") && selected.length >= 2
+    ? selected
+    : team.agents;
 }
 
 export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
@@ -134,6 +169,9 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [step, setStep] = useState<"kind" | "form">("kind");
   const [kindKey, setKindKey] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [environmentServices, setEnvironmentServices] = useState<EnvironmentService[]>([]);
+  const [customServiceLabel, setCustomServiceLabel] = useState("");
+  const [customServiceUrl, setCustomServiceUrl] = useState("");
   // Backdrop-dismiss guard: remember whether a mouse press BEGAN on the overlay.
   // Without this, selecting text in a field and releasing the mouse outside the
   // dialog bubbles a click to the backdrop and nukes the whole half-filled form.
@@ -196,6 +234,9 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
       } else {
         setTeamId(teams[0]?.id ?? ""); setKindKey(""); setStep("kind"); setShowAdvanced(false);
       }
+      setEnvironmentServices([]);
+      setCustomServiceLabel("");
+      setCustomServiceUrl("");
     } else {
       setRenameVal(project?.name ?? "");
     }
@@ -287,6 +328,21 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     if (!name.trim()) { setErr("Project name is required."); return; }
     if (!team) { setErr("Pick a team template."); return; }
     const kind = PROJECT_KINDS.find(k => k.key === kindKey);
+    const environment = createProjectEnvironment(kind?.key ?? "custom", environmentServices);
+    const projectAgents = kindAgents(kind, team);
+    const projectAgentNames = new Set(projectAgents.map(agent => agent.name));
+    const projectEdges = team.edges.filter(edge =>
+      projectAgentNames.has(edge.source) && projectAgentNames.has(edge.target));
+    if (kind?.key === "assistant"
+        && projectAgentNames.has("orchestrator")
+        && projectAgentNames.has("browser")
+        && !projectEdges.some(edge => edge.source === "orchestrator" && edge.target === "browser")) {
+      projectEdges.push({ source: "orchestrator", target: "browser" });
+    }
+    if (kind?.key === "assistant" && environment.browser.tabs.length === 0) {
+      setErr("Choose at least one mail, messaging, calendar or document service for this assistant.");
+      return;
+    }
     if (!newLocation.trim()) {
       setErr(kind?.folderMode === "existing"
         ? "Select the existing project folder this workflow will work on."
@@ -301,13 +357,15 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
           repo_url: "",
           create_location: kind?.folderMode === "create",
           project_kind: kind?.key ?? "custom",
-          team: team.agents.map(a => a.name),
+          team: projectAgents.map(a => a.name),
           // Persist the roster's roles (base) alongside the edges so a renamed
           // agent keeps its role on reload (the `team` field is names only).
           graph_json: JSON.stringify({
-            edges: team.edges,
-            roster: team.agents.map(a => ({ name: a.name, base: a.base })),
+            edges: projectEdges,
+            roster: projectAgents.map(a => ({ name: a.name, base: a.base })),
+            environment,
           }),
+          project_environment: environment,
           team_default_model_id: "", trust_writes: newTrust, auto_approve_all: false,
         },
       });
@@ -342,7 +400,11 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
           repoSetupError = String(e?.message ?? e);
         }
       }
-      onCreated(row, { kind: kind?.key ?? "custom", action: kind?.kickoff ?? "goal" }); onClose();
+      onCreated(row, {
+        kind: kind?.key ?? "custom",
+        action: kind?.kickoff ?? "goal",
+        environment,
+      }); onClose();
       if (repoSetupError) window.setTimeout(() => {
         window.alert(`Project created locally, but GitHub setup failed:\n\n${repoSetupError}\n\nIt will remain tied to this PC until a repository is connected.`);
       }, 0);
@@ -541,17 +603,21 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(168px, 1fr))", gap: 10 }}>
                 {PROJECT_KINDS.map(k => {
                   const t = k.key === "custom" ? null : kindTeam(k, teams);
+                  const agents = t ? kindAgents(k, t) : [];
                   const disabled = k.key !== "custom" && !t;
                   return (
                     <button
                       key={k.key}
                       type="button"
                       disabled={disabled}
-                      title={disabled ? "Template not installed" : (t ? `Team: ${t.display} (${t.agents.length} agents)` : "Configure everything yourself")}
+                      title={disabled ? "Template not installed" : (t ? `Team: ${t.display} (${agents.length} focused agents)` : "Configure everything yourself")}
                       onClick={() => {
                         setKindKey(k.key);
                         if (t) setTeamId(t.id);
                         setDescription(k.descSeed);
+                        setEnvironmentServices([]);
+                        setCustomServiceLabel("");
+                        setCustomServiceUrl("");
                         setShowAdvanced(k.key === "custom");
                         setStep("form");
                       }}
@@ -570,7 +636,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                       <span style={{ fontSize: 13, fontWeight: 700, color: "var(--fg-strong)" }}>{k.title}</span>
                       <span style={{ fontSize: 10.5, color: "var(--fg-muted)", lineHeight: 1.45, flex: 1 }}>{k.blurb}</span>
                       <span style={{ fontSize: 10, color: t ? "rgba(var(--accent-rgb),0.9)" : "var(--fg-subtle)", fontWeight: 700 }}>
-                        {t ? `👥 ${t.display} · ${t.agents.length} agents` : (k.key === "custom" ? "all templates" : "not installed")}
+                        {t ? `👥 ${t.display} · ${agents.length} focused agents` : (k.key === "custom" ? "all templates" : "not installed")}
                       </span>
                     </button>
                   );
@@ -667,14 +733,116 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                 <label style={LBL}>Goal / starting idea <span style={{ opacity: 0.6, textTransform: "none", letterSpacing: 0 }}>— this becomes the first real workflow input</span></label>
                 <textarea value={description} onChange={e => setDescription(e.target.value)} placeholder="What must this project accomplish?" rows={3} style={{ ...INPUT, height: "auto", padding: "8px 12px", resize: "vertical", minHeight: 58 }} />
               </div>
+              {/* A project kind now defines a real environment, not merely a
+                  team suggestion. Personal assistants additionally record the
+                  exact browser services the user wants this project to operate. */}
+              {(() => {
+                const environment = createProjectEnvironment(kindKey || "custom", environmentServices);
+                const isAssistant = kindKey === "assistant";
+                const toggleService = (service: EnvironmentService) => {
+                  setEnvironmentServices(current => current.some(item => item.id === service.id)
+                    ? current.filter(item => item.id !== service.id)
+                    : [...current, service]);
+                };
+                const addCustomService = () => {
+                  const label = customServiceLabel.trim();
+                  let url = customServiceUrl.trim();
+                  if (!label || !url) { setErr("Give the custom web app a name and URL."); return; }
+                  if (!/^https?:\/\//i.test(url)) url = `https://${url}`;
+                  try {
+                    const parsed = new URL(url);
+                    if (!["http:", "https:"].includes(parsed.protocol)) throw new Error("unsupported protocol");
+                    setEnvironmentServices(current => [...current, {
+                      id: `custom-${Date.now()}`,
+                      icon: "🌐",
+                      label,
+                      url: parsed.toString(),
+                      category: "custom",
+                    }]);
+                    setCustomServiceLabel("");
+                    setCustomServiceUrl("");
+                    setErr(null);
+                  } catch {
+                    setErr("Enter a valid http(s) URL for the custom web app.");
+                  }
+                };
+                return (
+                  <div data-ui="ProjectEnvironmentDesigner" style={{ display: "flex", flexDirection: "column", gap: 10, padding: 13, borderRadius: 12, background: "linear-gradient(145deg, rgba(var(--accent-rgb),0.12), var(--bg-elevated))", border: "1px solid rgba(var(--accent-rgb),0.42)" }}>
+                    <div style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                      <span style={{ fontSize: 24 }}>🧰</span>
+                      <div style={{ flex: 1 }}>
+                        <label style={LBL}>Project environment</label>
+                        <div style={{ color: "var(--fg-strong)", fontSize: 14, fontWeight: 800, marginTop: 2 }}>{environment.title}</div>
+                        <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.45, marginTop: 2 }}>{environment.description}</div>
+                      </div>
+                      {environment.browser.layout !== "none" && (
+                        <span style={{ padding: "4px 8px", borderRadius: 999, background: "rgba(var(--accent-rgb),0.14)", color: "var(--accent-ink)", fontSize: 10.5, fontWeight: 700, whiteSpace: "nowrap" }}>
+                          {environment.browser.layout === "right-half" ? "◧ browser beside app" : "📱 device preview"}
+                        </span>
+                      )}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(125px, 1fr))", gap: 7 }}>
+                      {environment.surfaces.map(surface => (
+                        <div key={surface.id} style={{ minWidth: 0, padding: "8px 9px", borderRadius: 9, background: "var(--bg-surface)", border: "1px solid var(--border)" }}>
+                          <div style={{ color: "var(--fg-strong)", fontSize: 11.5, fontWeight: 750 }}>{surface.icon} {surface.label}</div>
+                          <div style={{ color: "var(--fg-muted)", fontSize: 9.5, lineHeight: 1.35, marginTop: 3 }}>{surface.detail}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {isAssistant && (
+                      <>
+                        <div style={{ color: "var(--fg)", fontSize: 12, fontWeight: 750, marginTop: 2 }}>
+                          Choose the accounts this assistant should work with
+                          <span style={{ color: "var(--fg-muted)", fontWeight: 400 }}> — select any number</span>
+                        </div>
+                        <div data-ui="AssistantServicePicker" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(126px, 1fr))", gap: 7 }}>
+                          {ASSISTANT_SERVICES.map(service => {
+                            const selected = environmentServices.some(item => item.id === service.id);
+                            return (
+                              <button key={service.id} type="button" onClick={() => toggleService(service)}
+                                style={{
+                                  display: "flex", alignItems: "center", gap: 8, padding: "8px 9px",
+                                  borderRadius: 9, cursor: "pointer", textAlign: "left",
+                                  background: selected ? "rgba(var(--accent-rgb),0.18)" : "var(--bg-surface)",
+                                  border: `1px solid ${selected ? "rgba(var(--accent-rgb),0.72)" : "var(--border)"}`,
+                                  color: selected ? "var(--fg-strong)" : "var(--fg-muted)",
+                                }}>
+                                <span style={{ fontSize: 17 }}>{service.icon}</span>
+                                <span style={{ flex: 1, fontSize: 11.5, fontWeight: 700 }}>{service.label}</span>
+                                <span style={{ fontSize: 12 }}>{selected ? "✓" : "+"}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {environmentServices.filter(service => service.category === "custom").map(service => (
+                          <div key={service.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 9px", borderRadius: 8, background: "var(--bg-surface)", border: "1px solid var(--border)", fontSize: 11.5 }}>
+                            <span>{service.icon}</span>
+                            <b>{service.label}</b>
+                            <span title={service.url} style={{ flex: 1, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{service.url}</span>
+                            <button type="button" className="ghost-btn" onClick={() => setEnvironmentServices(current => current.filter(item => item.id !== service.id))} style={{ height: 23, padding: "0 7px", color: "#ff8c8c" }}>Remove</button>
+                          </div>
+                        ))}
+                        <div style={{ display: "grid", gridTemplateColumns: "minmax(100px,.7fr) minmax(160px,1.3fr) auto", gap: 7 }}>
+                          <input value={customServiceLabel} onChange={e => setCustomServiceLabel(e.target.value)} placeholder="Other app name" style={{ ...INPUT, height: 34, fontSize: 12 }} />
+                          <input value={customServiceUrl} onChange={e => setCustomServiceUrl(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); addCustomService(); } }} placeholder="https://your-work-app.example" style={{ ...INPUT, height: 34, fontSize: 12 }} />
+                          <button type="button" className="ghost-btn" onClick={addCustomService} style={{ height: 34, padding: "0 11px" }}>+ Add</button>
+                        </div>
+                        <div style={{ color: "var(--fg-muted)", fontSize: 10.5, lineHeight: 1.45 }}>
+                          OwLLM opens these sites as tabs in its own browser. Sign in normally once; the browser keeps that website session locally on this device. The project stores only the site names and URLs — never cookies, passwords or tokens.
+                        </div>
+                      </>
+                    )}
+                  </div>
+                );
+              })()}
               {/* What you get — the precooked setup, stated honestly. */}
               {team && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, borderRadius: 10, background: "var(--bg-elevated)", border: "1px solid var(--border)" }}>
                   <label style={LBL}>What you get</label>
-                  <div style={{ fontSize: 12.5, color: "var(--fg-strong)", fontWeight: 700 }}>👥 {team.display} <span style={{ color: "var(--fg-muted)", fontWeight: 400 }}>— {team.agents.length} agents, wired and ready</span></div>
+                  <div style={{ fontSize: 12.5, color: "var(--fg-strong)", fontWeight: 700 }}>👥 {team.display} <span style={{ color: "var(--fg-muted)", fontWeight: 400 }}>— {kindAgents(PROJECT_KINDS.find(k => k.key === kindKey), team).length} focused agents, wired and ready</span></div>
                   <div style={{ color: "var(--fg-muted)", fontSize: 11.5, lineHeight: 1.5 }}>{team.description}</div>
                   <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                    {team.agents.map(a => (
+                    {kindAgents(PROJECT_KINDS.find(k => k.key === kindKey), team).map(a => (
                       <span key={a.name} style={{ background: "var(--bg-surface)", color: "var(--fg-muted)", fontSize: 10, fontFamily: "Consolas, monospace", borderRadius: 4, padding: "2px 6px" }}>{a.name}</span>
                     ))}
                   </div>
@@ -861,6 +1029,54 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                 </div>
               )}
             </div>
+            {(() => {
+              const environment = parseProjectEnvironment(project?.graph_json);
+              if (!environment) return null;
+              return (
+                <div data-ui="SavedProjectEnvironment" style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: 10, background: "linear-gradient(145deg, rgba(var(--accent-rgb),0.10), var(--bg-elevated))", border: "1px solid rgba(var(--accent-rgb),0.38)" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                    <span style={{ fontSize: 22 }}>🧰</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <label style={LBL}>Project environment</label>
+                      <div style={{ color: "var(--fg-strong)", fontSize: 13.5, fontWeight: 800 }}>{environment.title}</div>
+                      <div style={{ color: "var(--fg-muted)", fontSize: 10.5, marginTop: 2 }}>{environment.description}</div>
+                    </div>
+                    {(environment.browser.openOnCreate || environment.browser.tabs.length > 0) && (
+                      <button type="button" className="ghost-btn" disabled={!!actBusy}
+                        onClick={async () => {
+                          setActBusy("environment"); setActMsg(null);
+                          try {
+                            const result = await launchProjectEnvironment(environment, (command, args) => invoke(command, args));
+                            setActMsg(`✓ ${result.message}`);
+                          } catch (e: any) {
+                            setActMsg(`Environment failed to open: ${e?.message ?? e}`);
+                          } finally {
+                            setActBusy(null);
+                          }
+                        }}
+                        style={{ height: 32, padding: "0 12px", fontWeight: 750 }}>
+                        {actBusy === "environment" ? "Opening…" : "Open environment"}
+                      </button>
+                    )}
+                  </div>
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 5 }}>
+                    {environment.surfaces.map(surface => (
+                      <span key={surface.id} title={surface.detail} style={{ padding: "4px 7px", borderRadius: 7, background: "var(--bg-surface)", border: "1px solid var(--border)", color: "var(--fg-muted)", fontSize: 10.5 }}>
+                        {surface.icon} {surface.label}
+                      </span>
+                    ))}
+                    {environment.browser.tabs.map(tab => (
+                      <span key={tab.id} title={tab.url} style={{ padding: "4px 7px", borderRadius: 7, background: "rgba(var(--accent-rgb),0.10)", border: "1px solid rgba(var(--accent-rgb),0.32)", color: "var(--accent-ink)", fontSize: 10.5 }}>
+                        {tab.icon} {tab.label}
+                      </span>
+                    ))}
+                  </div>
+                  <div style={{ color: "var(--fg-muted)", fontSize: 10 }}>
+                    Website sessions are device-local. Opening this environment on another computer will ask you to sign in there; credentials never travel in the project.
+                  </div>
+                </div>
+              );
+            })()}
             {/* Team template (canvas) + Bridge */}
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               <label style={LBL}>Team</label>

@@ -2048,7 +2048,9 @@ function CodeWorkspace({ pageId, onTitle }: {
     let aborted = false;
     let replyText = "";
     try {
-      setStatus(`Coding in ${workspace}`);
+      // Workspace path now lives at the top of the PublishCards rail — no need
+      // to echo it in the composer status line every turn.
+      setStatus("Coding…");
       const reply = await runTurn(CODING_SYSTEM(workspace), text || "(read the attached file)", history, ctrl.signal, { withEvents: true, attachments });
       await logCodeWork("code", text || "(read the attached file)", reply);
       replyText = reply;
@@ -2169,7 +2171,7 @@ function CodeWorkspace({ pageId, onTitle }: {
     let aborted = false;
     let replyText = "";
     try {
-      setStatus(`Second agent working in ${workspace}`);
+      setStatus("Second agent working…");
       replyText = await runSecondaryTurn(CODING_SYSTEM(workspace), text, history, ctrl.signal, { withEvents: true });
       await logCodeWork("code_second", text, replyText);
     } catch (e) {
@@ -3391,8 +3393,9 @@ function CodeWorkspace({ pageId, onTitle }: {
       )}
 
       {/* Status + Terminal line — sits directly above the composer (the input
-          chatbox). The "Coding in …" info is on the left; the Terminal toggle
-          is on the top-right of the input area, full text. */}
+          chatbox). Live status messages on the left; the Terminal toggle
+          is on the top-right of the input area. The workspace path lives at
+          the top of the left PublishCards rail instead of being repeated here. */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
         <div style={status.includes("\n")
           ? { flex: 1, fontSize: 11, color: "var(--fg-muted)", whiteSpace: "pre-line", lineHeight: 1.6 }

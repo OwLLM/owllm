@@ -513,6 +513,31 @@ export default function PublishCards({
             gap: 6,
           }}
         >
+          {/* Workspace path — the "Coding in <folder>" identity. Lives here
+              (top of the release container, above the branch line) so the
+              composer's status row can stay focused on live run messages
+              instead of repeating the workspace path every turn. */}
+          {gitDir && (
+            <div
+              title={gitDir}
+              style={{
+                fontSize: 10.5,
+                color: "var(--fg-muted)",
+                padding: "0 2px",
+                minWidth: 0,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+                direction: "rtl",
+                textAlign: "left",
+              }}
+            >
+              {/* direction:rtl keeps the tail of the path visible when it
+                  overflows the 220px rail — the folder name stays readable,
+                  the drive/prefix truncates instead. */}
+              <bdi style={{ direction: "ltr", unicodeBidi: "plaintext" }}>📁 Coding in {gitDir}</bdi>
+            </div>
+          )}
           {/* Live repo facts — branch, ahead/behind upstream, uncommitted count */}
           {git?.isRepo && (
             <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--fg-muted)", padding: "0 2px", minWidth: 0 }}>

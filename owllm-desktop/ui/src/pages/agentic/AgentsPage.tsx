@@ -12,6 +12,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import MarkdownLink from "../../components/MarkdownLink";
 import { useAnimatedPhase } from "../../hooks/useAnimatedPhase";
+import { continuousUiAnimation } from "../../runtime/renderingPolicy";
 import ProjectSettingsDialog from "./ProjectSettingsDialog";
 import { projectAvailability, projectCanRun, projectOriginLabel } from "./projectPortability";
 import BrainstormPanel from "./BrainstormPanel";
@@ -2438,7 +2439,7 @@ function AgentChatTile({
           : isSelected
             ? `0 0 0 2px rgba(${rgb},0.45), 0 4px 14px rgba(0,0,0,0.5)`
             : "0 2px 6px rgba(0,0,0,0.4)",
-        animation: isActive ? "owllm-aura-spin 4s linear infinite" : undefined,
+        animation: isActive ? continuousUiAnimation("owllm-aura-spin 4s linear infinite") : undefined,
         display: "flex", flexDirection: "column",
         overflow: "hidden",
         cursor: "pointer",
@@ -4752,7 +4753,7 @@ function GraphCanvas({
                     + ` #3cf26b, #ffd93c, #ff9a3c, #ff5c8a, #b07cff, #7fd4ff, #3cf26b) border-box`
                   : baseBg,
                 border: isActive ? "2px solid transparent" : `1.8px solid ${borderColor}`,
-                animation: isActive ? "owllm-aura-spin 4s linear infinite" : undefined,
+                animation: isActive ? continuousUiAnimation("owllm-aura-spin 4s linear infinite") : undefined,
                 boxShadow: isActive
                   ? `0 0 0 1px rgba(255,255,255,${0.18 * activeAlphaA}), 0 0 ${12 + activeOuterPx}px rgba(176,124,255,${activeAlphaB}), 0 0 ${22 + activeOuterPx}px rgba(127,212,255,${activeAlphaB * 0.6}), 0 6px 22px rgba(0,0,0,0.6)`
                   : sel

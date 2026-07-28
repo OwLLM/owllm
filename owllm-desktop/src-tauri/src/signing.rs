@@ -72,6 +72,11 @@ pub struct AppleSigning {
     /// it to build the .p12). Secret; never leaves Rust.
     #[serde(default)]
     pub private_key_pem: String,
+    /// NON-SECRET: the newest peer blob said some device on this account holds
+    /// the actual .p12. Lets an agent on a cert-less machine know signing is
+    /// configured *somewhere* instead of concluding it is unconfigured.
+    #[serde(default)]
+    pub peer_has_certificate: bool,
     /// Last time this set was written (epoch-ms).
     #[serde(default)]
     pub updated_ms: i64,
@@ -99,6 +104,9 @@ pub struct WindowsSigning {
     /// RFC3161 timestamp authority URL. → OWLLM_SIGN_TSA.
     #[serde(default)]
     pub tsa: String,
+    /// NON-SECRET peer presence flag — see `AppleSigning::peer_has_certificate`.
+    #[serde(default)]
+    pub peer_has_certificate: bool,
     #[serde(default)]
     pub updated_ms: i64,
 }
@@ -173,6 +181,9 @@ pub struct AppleStatus {
     pub days_left: Option<i64>,
     /// True when every field a signed+notarized release needs is present.
     pub ready: bool,
+    /// The certificate is NOT on this machine but another PC on the account
+    /// holds it — sign there rather than treating signing as unconfigured.
+    pub cert_on_other_device: bool,
     pub updated_ms: i64,
 }
 
@@ -186,6 +197,8 @@ pub struct WindowsStatus {
     pub tsa: String,
     /// A selector (thumbprint or subject) OR a .pfx is present.
     pub ready: bool,
+    /// See `AppleStatus::cert_on_other_device`.
+    pub cert_on_other_device: bool,
     pub updated_ms: i64,
 }
 
@@ -226,6 +239,7 @@ fn apple_status(a: &AppleSigning) -> AppleStatus {
         cert_not_after_ms: a.cert_not_after_ms,
         days_left: days_left(a.cert_not_after_ms),
         ready,
+        cert_on_other_device: a.peer_has_certificate && !nonempty(&a.certificate_p12_b64),
         updated_ms: a.updated_ms,
     }
 }
@@ -239,6 +253,7 @@ fn windows_status(w: &WindowsSigning) -> WindowsStatus {
         subject: w.subject.clone(),
         tsa: w.tsa.clone(),
         ready,
+        cert_on_other_device: w.peer_has_certificate && !nonempty(&w.certificate_pfx_b64),
         updated_ms: w.updated_ms,
     }
 }
@@ -307,6 +322,8 @@ pub fn apply_apple(prev: Option<AppleSigning>, input: AppleSaveInput) -> AppleSi
         cert_subject: prev.cert_subject,
         // Only gen-csr/import write the key — a metadata save never drops it.
         private_key_pem: prev.private_key_pem,
+        // Peer presence is learned from the vault, never from a local edit.
+        peer_has_certificate: prev.peer_has_certificate,
         updated_ms: now_ms(),
     }
 }
@@ -600,6 +617,7 @@ pub fn signing_windows_save(
         thumbprint: thumbprint.trim().to_string(),
         subject: subject.trim().to_string(),
         tsa: tsa.trim().to_string(),
+        peer_has_certificate: prev.peer_has_certificate,
         updated_ms: now_ms(),
     });
     save(&v)?;
@@ -1054,7 +1072,11 @@ struct SigningMeta {
 /// The non-secret metadata blob to publish to the vault, or None when nothing
 /// is stored.
 pub fn vault_meta_json() -> Option<String> {
-    let v = load();
+    meta_of(&load())
+}
+
+/// Pure core of [`vault_meta_json`] — the publishable blob for a given vault.
+fn meta_of(v: &SigningVault) -> Option<String> {
     if v.apple.is_none() && v.windows.is_none() {
         return None;
     }
@@ -1065,14 +1087,17 @@ pub fn vault_meta_json() -> Option<String> {
             team_id: a.team_id.clone(),
             cert_subject: a.cert_subject.clone(),
             cert_not_after_ms: a.cert_not_after_ms,
-            has_certificate: nonempty(&a.certificate_p12_b64),
+            // "Some device on this account holds it" — OR in what a peer already
+            // told us, so relaying the blob from a cert-less PC cannot flip the
+            // flag back to false for everyone else.
+            has_certificate: nonempty(&a.certificate_p12_b64) || a.peer_has_certificate,
             updated_ms: a.updated_ms,
         }),
         windows: v.windows.as_ref().map(|w| WindowsMeta {
             thumbprint: w.thumbprint.clone(),
             subject: w.subject.clone(),
             tsa: w.tsa.clone(),
-            has_certificate: nonempty(&w.certificate_pfx_b64),
+            has_certificate: nonempty(&w.certificate_pfx_b64) || w.peer_has_certificate,
             updated_ms: w.updated_ms,
         }),
     };
@@ -1097,6 +1122,7 @@ pub fn ingest_vault_meta(json: &str) -> Result<bool, String> {
             a.team_id = ra.team_id;
             a.cert_subject = ra.cert_subject;
             a.cert_not_after_ms = ra.cert_not_after_ms;
+            a.peer_has_certificate = ra.has_certificate;
             a.updated_ms = ra.updated_ms;
             v.apple = Some(a); // secret fields (if any) preserved via take()+default merge
             changed = true;
@@ -1109,6 +1135,7 @@ pub fn ingest_vault_meta(json: &str) -> Result<bool, String> {
             w.thumbprint = rw.thumbprint;
             w.subject = rw.subject;
             w.tsa = rw.tsa;
+            w.peer_has_certificate = rw.has_certificate;
             w.updated_ms = rw.updated_ms;
             v.windows = Some(w);
             changed = true;
@@ -1301,6 +1328,7 @@ mod tests {
             cert_not_after_ms: 123,
             cert_subject: "CN=x".into(),
             private_key_pem: "KEYPEM".into(),
+            peer_has_certificate: true,
             updated_ms: 1,
         };
         // Edit only the non-secret metadata; leave secret fields blank.
@@ -1323,6 +1351,8 @@ mod tests {
         // …parsed metadata preserved…
         assert_eq!(merged.cert_not_after_ms, 123);
         assert_eq!(merged.cert_subject, "CN=x");
+        // …the peer-presence flag is vault-owned, so an edit here never clears it…
+        assert!(merged.peer_has_certificate);
         // …and the metadata fields updated.
         assert_eq!(merged.signing_identity, "new identity");
         assert_eq!(merged.apple_id, "new@x.com");
@@ -1357,6 +1387,7 @@ mod tests {
             cert_not_after_ms: 0,
             cert_subject: String::new(),
             private_key_pem: "KEYPEM".into(),
+            peer_has_certificate: false,
             updated_ms: 5,
         };
         let s = apple_status(&a);
@@ -1382,6 +1413,39 @@ mod tests {
             ..Default::default()
         };
         assert!(!apple_status(&a).ready); // no certificate/password
+    }
+
+    /// A cert-less PC must be able to tell "signing is configured on another of
+    /// my machines" apart from "signing is not set up" — otherwise an agent
+    /// here concludes the latter and asks the user for credentials that already
+    /// exist. The peer flag rides the vault blob but used to be dropped on read.
+    #[test]
+    fn peer_certificate_presence_survives_vault_ingest() {
+        let a = AppleSigning {
+            signing_identity: "Developer ID Application: X (TEAM)".into(),
+            peer_has_certificate: true,
+            ..Default::default()
+        };
+        let s = apple_status(&a);
+        assert!(!s.has_certificate, "the bytes stay on the other machine");
+        assert!(s.cert_on_other_device);
+        assert!(!s.ready, "cannot sign here without the certificate");
+
+        // Holding it locally is not "on another device".
+        let local = AppleSigning {
+            certificate_p12_b64: "CERTBYTES".into(),
+            peer_has_certificate: true,
+            ..Default::default()
+        };
+        assert!(!apple_status(&local).cert_on_other_device);
+
+        // Relaying from a cert-less PC must not clear the flag for everyone.
+        let meta = meta_of(&SigningVault {
+            apple: Some(a),
+            windows: None,
+        })
+        .expect("apple set is present");
+        assert!(meta.contains("\"has_certificate\": true"), "{meta}");
     }
 
     #[test]

@@ -46,6 +46,7 @@ const DENY_EXACT = new Set<string>([
   "owllm:agents:pages",
   "owllm:agents:activePage",
   "owllm:assets:selectedProject",
+  "owllm:server:model",       // local model registry differs on every device
 ]);
 // Prefixes for machine-specific state that shouldn't follow the user (paths
 // to WSL workspaces differ per device).

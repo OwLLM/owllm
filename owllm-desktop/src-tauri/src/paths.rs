@@ -840,18 +840,15 @@ pub fn finetune_script() -> Option<PathBuf> {
 /// `../scripts/` (tauri.conf.json), which the installer lands at `_up_/scripts/`
 /// next to the exe; the dev fallback is the source checkout's scripts dir.
 pub fn publish_finish_script() -> Option<PathBuf> {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            for cand in [
-                parent
-                    .join("_up_")
-                    .join("scripts")
-                    .join("finish-and-publish.sh"),
-                parent.join("scripts").join("finish-and-publish.sh"),
-            ] {
-                if cand.is_file() {
-                    return Some(cand);
-                }
+    for base in bundle_asset_dirs() {
+        for cand in [
+            base.join("_up_")
+                .join("scripts")
+                .join("finish-and-publish.sh"),
+            base.join("scripts").join("finish-and-publish.sh"),
+        ] {
+            if cand.is_file() {
+                return Some(cand);
             }
         }
     }
@@ -892,6 +889,30 @@ pub fn abliterate_script() -> Option<PathBuf> {
 // user state (models, fine_tuned, .envs, data/owllm_state.db).
 // =====================================================================
 
+/// Directories that can hold bundler-installed assets, relative to the
+/// running exe, in priority order.
+///
+/// On Windows and Linux the bundler lands assets next to the exe. Inside a
+/// macOS `.app` the exe is at `Contents/MacOS/` while bundled resources go
+/// to `Contents/Resources/` — so probing only the exe's own directory finds
+/// nothing there, and every resources-backed feature silently degrades.
+fn bundle_asset_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.to_path_buf());
+            // macOS .app: <bundle>/Contents/MacOS/<exe> → Contents/Resources/
+            if let Some(contents) = parent.parent() {
+                let res = contents.join("Resources");
+                if res.is_dir() {
+                    dirs.push(res);
+                }
+            }
+        }
+    }
+    dirs
+}
+
 /// Root of the shippable resources tree. Located by:
 ///   1. OWLLM_RESOURCES env override
 ///   2. Walking up from the running exe (or CARGO_MANIFEST_DIR) looking
@@ -909,23 +930,22 @@ pub fn resources_root() -> Option<PathBuf> {
             return Some(pb);
         }
     }
-    // Installed-app layout: resources/ sits next to the exe…
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let cand = parent.join("resources");
-            if cand.join("agents").join("roles").is_dir() {
-                return Some(cand);
-            }
-            // …but Tauri's bundler appends `_up_/` to any resource path
-            // that contains `..` in tauri.conf.json (`../resources/...`
-            // gets installed as `$INSTDIR\_up_\resources\...`). The
-            // alternative is to move resources/ inside src-tauri/ which
-            // would churn every other path the app relies on. Checking
-            // both locations is the smaller fix.
-            let up_cand = parent.join("_up_").join("resources");
-            if up_cand.join("agents").join("roles").is_dir() {
-                return Some(up_cand);
-            }
+    // Installed-app layout: resources/ sits in one of the bundler's asset
+    // dirs…
+    for base in bundle_asset_dirs() {
+        let cand = base.join("resources");
+        if cand.join("agents").join("roles").is_dir() {
+            return Some(cand);
+        }
+        // …but Tauri's bundler appends `_up_/` to any resource path
+        // that contains `..` in tauri.conf.json (`../resources/...`
+        // gets installed as `$INSTDIR\_up_\resources\...`). The
+        // alternative is to move resources/ inside src-tauri/ which
+        // would churn every other path the app relies on. Checking
+        // both locations is the smaller fix.
+        let up_cand = base.join("_up_").join("resources");
+        if up_cand.join("agents").join("roles").is_dir() {
+            return Some(up_cand);
         }
     }
     let seeds: Vec<PathBuf> = [

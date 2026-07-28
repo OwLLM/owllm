@@ -47,6 +47,28 @@ try {
       '{"type":"verification_url","url":"https://www.kimi.com/code/authorize_device?user_cod\r\n'
         + 'still-incomplete"}\r\n',
     ) === null);
+  // A wrap inside the host still parses as a URL (`https://www`), so the
+  // extractor must rebuild it instead of opening `https://www/`.
+  const hostWrapped = [
+    '{"type": "verification_url", "message": "Verification U',
+    'RL: https://www.kimi.com/code/authorize_device?user_cod',
+    'e=02NI-TFN3", "data": {"verification_url": "https://www',
+    '.kimi.com/code/authorize_device?user_code=02NI-TFN3", "',
+    'user_code": "02NI-TFN3"}}',
+    "",
+  ].join("\r\n");
+  check("PTY hard-wrap inside the URL host never opens a truncated host",
+    firstCompleteAuthUrl(hostWrapped)
+      === "https://www.kimi.com/code/authorize_device?user_code=02NI-TFN3");
+  check("a wrapped host with no continuation yet is not opened",
+    firstCompleteAuthUrl('{"verification_url": "https://www\r\n') === null);
+  check("dotless hosts are refused for every provider, not just Kimi",
+    firstCompleteAuthUrl('visit https://www "\r\n') === null
+      && firstCompleteAuthUrl("visit http://localhost:8080/auth \r\n")
+        === "http://localhost:8080/auth");
+  check("a complete URL is never glued onto the next log line",
+    firstCompleteAuthUrl('{"url":"https://example.com/auth?code=ok"}\r\nnext-line-token\r\n')
+      === "https://example.com/auth?code=ok");
   check("OSC-8 wrapped authorization URL is normalized",
     firstCompleteAuthUrl('\x1b]8;;https://example.com/auth?code=ok\x07https://example.com/auth?code=ok\x1b]8;;\x07\r\n')
       === "https://example.com/auth?code=ok");

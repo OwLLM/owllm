@@ -16,9 +16,17 @@ function check(name, ok) {
   if (!ok) failures++;
 }
 
-// Colour-cycling spin still present and used by both panes.
-const animMatch = src.match(/const PSYCHEDELIC_AURA_ANIMATION = "([^"]+)"/);
+// Colour-cycling spin still present and used by both panes. The animation is
+// routed through continuousUiAnimation() so Linux WebKit / prefers-reduced-
+// motion get a static aura instead of a CPU-bound repaint loop (9751a8ad), so
+// accept the wrapped call as well as a bare literal.
+const animMatch = src.match(/const PSYCHEDELIC_AURA_ANIMATION = (?:continuousUiAnimation\()?"([^"]+)"/);
 check("aura animation constant exists", !!animMatch);
+check(
+  "aura animation goes through the reduced-motion policy",
+  /const PSYCHEDELIC_AURA_ANIMATION = continuousUiAnimation\("/.test(src)
+    && /import \{[^}]*\bcontinuousUiAnimation\b[^}]*\} from "[^"]*renderingPolicy"/.test(src),
+);
 check("aura animation keeps the colour-cycling spin", !!animMatch && animMatch[1].includes("owllm-aura-spin"));
 check("aura animation has no breathe pulse", !!animMatch && !animMatch[1].includes("breathe"));
 check("breathe keyframes removed", !src.includes("owllm-code-aura-breathe"));

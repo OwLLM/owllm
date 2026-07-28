@@ -1,4 +1,4 @@
-import { writeFile, readFile } from "node:fs/promises";
+import { writeFile, readFile, mkdir } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
@@ -47,6 +47,9 @@ async function main() {
     console.warn("Failed to fetch latest release; using local fallback.", error.message || error);
     meta = await loadFallback();
   }
+  // src/data/ is gitignored, so it is absent on a fresh checkout — create it or
+  // the write below fails with ENOENT and takes the whole site build with it.
+  await mkdir(dirname(OUT_PATH), { recursive: true });
   await writeFile(OUT_PATH, JSON.stringify(meta, null, 2) + "\n", "utf8");
   console.log(`Wrote ${OUT_PATH}`);
 }

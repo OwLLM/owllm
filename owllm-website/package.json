@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "astro dev",
+    "predev": "npm run sync:release",
+    "prebuild": "npm run sync:release",
     "build": "astro build",
     "preview": "astro preview",
     "lint": "astro check",

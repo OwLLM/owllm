@@ -75,6 +75,11 @@ wandb/
 
 # Dataset caches and large data files
 data/
+# ...but the website keeps page CONTENT in src/data/, which the rule above
+# silently swallowed — the site could never build from a clean checkout.
+# release.json stays ignored: `npm run sync:release` regenerates it per build.
+!owllm-website/src/data/
+owllm-website/src/data/release.json
 dataset/
 *.jsonl
 .cache/

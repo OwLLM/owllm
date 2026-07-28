@@ -157,6 +157,7 @@ import {
   resolveAgentModel,
 } from "./teamModelSelection";
 import {
+  createAgentWorktree,
   requiresAgentWorktree,
   worktreeCheckpointNotice,
   WorktreePreflightError,
@@ -9119,6 +9120,10 @@ export function AgentsPage({
   // (⚙ settings for the current project). Both open the same ProjectSettingsDialog.
   const [settingsMode, setSettingsMode] = useState<"new" | "edit">("edit");
   const onOpenSettings = () => { setSettingsMode("edit"); setNewProjOpen(true); };
+  // Feeds the new-project dialog's automatic "<kind> N" name. Memoised so the
+  // naming effect doesn't re-run on every AgentsPage render.
+  const existingProjectNames = useMemo(() => projects.map(p => p.name), [projects]);
+
   const reloadProjects = async () => {
     try {
       const rows = await invoke<ProjectRow[]>("list_projects");
@@ -11371,7 +11376,7 @@ export function AgentsPage({
           );
         }
         const soloRunId = `${Date.now().toString(36).slice(-6)}-solo`;
-        const soloCreate = await invoke<FleetCreateResult>("fleet_worktree_create", {
+        const soloCreate = await createAgentWorktree(invoke, {
           projectCwd,
           agentName: coder.name,
           runId: soloRunId,
@@ -12195,7 +12200,7 @@ export function AgentsPage({
       setPhase("dispatching");
       if (ctrl.signal.aborted) throw new DOMException("aborted", "AbortError");
       const worktreeBySpec = new Map<string, WorktreeBinding | null>();
-      const needWorktrees = requiresAgentWorktree(projectCwd);
+      const needWorktrees = requiresAgentWorktree(projectCwd, runEnvironment);
       // Reclaim any worktrees a PAST/crashed run left behind before making new
       // ones — per-run cleanup misses a run that crashed before its finally{}.
       if (needWorktrees) {
@@ -12213,7 +12218,7 @@ export function AgentsPage({
         if (!spec) continue;
         let res: FleetCreateResult;
         try {
-          res = await invoke<FleetCreateResult>("fleet_worktree_create", {
+          res = await createAgentWorktree(invoke, {
             projectCwd, agentName: spec.name, runId, checkpointDirty: true,
           });
         } catch (e: any) {
@@ -12862,7 +12867,7 @@ export function AgentsPage({
         // commit-and-merge attribution as the code specialists.
         let docWt: WorktreeBinding | null = null;
         try {
-          const wtRes = await invoke<FleetCreateResult>("fleet_worktree_create", {
+          const wtRes = await createAgentWorktree(invoke, {
             projectCwd, agentName: docSpec.name, runId: `${runId}-docs`, checkpointDirty: true,
           });
           if (wtRes.status === "ready") {
@@ -13423,6 +13428,7 @@ export function AgentsPage({
           resolvedTeamLabel={activeTeamTemplate?.display ?? null}
           onResetTeam={resetTeamToTemplate}
           defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+          existingNames={existingProjectNames}
           onCreated={onProjectCreated}
           project={selectedProject}
           location={locationDraft}
@@ -13552,6 +13558,7 @@ export function AgentsPage({
         resolvedTeamLabel={activeTeamTemplate?.display ?? null}
         onResetTeam={resetTeamToTemplate}
         defaultTeamName={pickedTeamId ? teams.find(t => t.id === pickedTeamId)?.name : undefined}
+        existingNames={existingProjectNames}
         onCreated={onProjectCreated}
         project={selectedProject}
         location={locationDraft}

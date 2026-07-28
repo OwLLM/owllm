@@ -21,8 +21,53 @@ export class WorktreePreflightError extends Error {
   }
 }
 
-export function requiresAgentWorktree(projectCwd: string): boolean {
-  return projectCwd.trim().length > 0;
+/// Environments whose work happens in the browser and in documents rather than
+/// in a source tree. Worktrees isolate concurrent edits to code; requiring one
+/// here gated browser-only assistant work on repository isolation it never
+/// needed, and stopped the run before the CLI even started.
+const BROWSER_FIRST_PRESETS = new Set([
+  "personal-operations",
+  "research-desk",
+  "writing-room",
+  "campaign-desk",
+]);
+
+export function requiresAgentWorktree(
+  projectCwd: string,
+  environment?: { presetId?: string } | null,
+): boolean {
+  if (projectCwd.trim().length === 0) return false;
+  return !BROWSER_FIRST_PRESETS.has(environment?.presetId ?? "");
+}
+
+export type WorktreeInvoker = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+/// Create a per-agent worktree, self-healing the one broken state OWLLM causes
+/// itself: a project folder it created and never initialized as a repository.
+/// `fleet_repo_init` is local git only — no remote, no GitHub — and refuses a
+/// folder the user chose, so those keep the explicit "initialize Git" stop.
+export async function createAgentWorktree(
+  invokeCommand: WorktreeInvoker,
+  args: { projectCwd: string; agentName: string; runId: string; checkpointDirty?: boolean },
+): Promise<WorktreeCreateState> {
+  const create = async () =>
+    (await invokeCommand("fleet_worktree_create", args)) as WorktreeCreateState;
+  const result = await create();
+  if (result.status !== "notAGitRepo") return result;
+  let initialized: unknown;
+  try {
+    initialized = await invokeCommand("fleet_repo_init", { projectCwd: args.projectCwd });
+  } catch (e: any) {
+    return {
+      status: "error",
+      message: `could not initialize Git in "${args.projectCwd}": ${String(e?.message ?? e)}`,
+    };
+  }
+  if (initialized !== true) return result;
+  return await create();
 }
 
 /// Human-readable note for a create that had to check in the user's open work

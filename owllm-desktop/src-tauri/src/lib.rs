@@ -296,6 +296,9 @@ pub fn run() {
             // user skills dir if absent, so they're visible + editable in Studio
             // and equippable. Never clobbers a user-edited copy.
             bootstrap::seed_builtin_skills();
+            // A fresh install must always have somewhere to put a project, even
+            // if the user closes onboarding without answering. Idempotent.
+            projects::ensure_projects_root();
             // First run only: auto-download the curated skill libraries
             // (Anthropic + obra/superpowers) in the background so a fresh
             // install ships with a rich, equippable skill set. Gated by a
@@ -575,6 +578,7 @@ pub fn run() {
             fleet::fleet_worktree_merge,
             fleet::fleet_worktree_remove,
             fleet::fleet_cleanup_orphans,
+            fleet::fleet_repo_init,
             fleet::fleet_head_files,
             hardware::hardware_info,
             hardware::vram_status,
@@ -584,6 +588,8 @@ pub fn run() {
             overlay_frame::overlay_frame_set_visible,
             overlay_frame::overlay_frame_capture_geometry,
             projects::list_projects,
+            projects::projects_root_get,
+            projects::projects_root_set,
             projects::create_project,
             projects::resolve_project_for_location,
             projects::update_project,

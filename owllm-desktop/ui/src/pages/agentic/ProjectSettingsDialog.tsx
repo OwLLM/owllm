@@ -17,6 +17,8 @@ import { sandboxSyncLogins, sandboxConvertProject, sandboxHarden } from "./isola
 import { parseVerifyConfig } from "./gate";
 import { parseProjectCard, renderCardFindings, type CardFinding, type ProjectCard } from "./cardLint";
 import { runCardLint } from "./localTools";
+import { projectsRootGet, projectPathUnder, nextProjectName } from "./projectsRoot";
+import { SiteLogo } from "../../components/SiteLogo";
 import {
   ASSISTANT_SERVICES,
   createProjectEnvironment,
@@ -55,6 +57,9 @@ export type ProjectSettingsDialogProps = {
   resolvedTeamLabel?: string | null;
   // NEW mode
   defaultTeamName?: string | null;
+  /// Names of the projects that already exist — the automatic "<kind> N" name
+  /// numbers off these so it never collides with one the user already has.
+  existingNames?: readonly string[];
   onCreated: (row: ProjectRow, kickoff: {
     kind: string;
     action: "brainstorm" | "goal";
@@ -99,23 +104,27 @@ type ProjectKind = {
   /// agent name. Missing names are ignored; an unusable subset falls back to
   /// the full template so custom/user templates remain compatible.
   agentNames?: string[];
+  /// Base of the automatic project name ("Personal Assistant" → "Personal
+  /// Assistant 1", "… 2"). Kept separate from `title` so the derived folder
+  /// stays clean ("Web App 1", not "Website / Web app 1").
+  nameSeed: string;
   namePh: string;
   /// Seeds the (editable) description — one line of context the team starts with.
   descSeed: string;
 };
 const PROJECT_KINDS: ProjectKind[] = [
-  { key: "product", icon: "🚀", title: "New product", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create the workspace, then start a model-selectable product brainstorm and design-to-build flow.", teams: ["product_studio"], namePh: "e.g. saas-idea", descSeed: "" },
-  { key: "web", icon: "🌐", title: "Website / Web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a real web workspace, scope it, then build and verify it in the live browser.", teams: ["dev_squad"], agentNames: ["orchestrator", "coder", "critic", "browser"], namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website or web application for " },
-  { key: "mobile", icon: "📱", title: "Responsive web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "A touch-friendly web/PWA workflow with phone viewports. Native mobile scaffolding is not claimed here.", teams: ["dev_squad"], agentNames: ["orchestrator", "coder", "critic", "browser"], namePh: "e.g. fitness-pwa", descSeed: "Build a responsive, touch-friendly web application for " },
-  { key: "software", icon: "🛠", title: "Software / tool", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a workspace for a CLI, backend, library or desktop tool, then scope and build it.", teams: ["dev_squad", "owllm_team"], agentNames: ["orchestrator", "coder", "critic", "devops"], namePh: "e.g. esp-flash, csv-tool", descSeed: "Build a software tool that " },
-  { key: "bugfix", icon: "🐛", title: "Fix bugs", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository; reproduce, root-cause, patch and add a regression test.", teams: ["bug_hunter"], agentNames: ["orchestrator", "reproducer", "root_cause", "patcher", "regression_test_author"], namePh: "e.g. fix-login, crash-hunt", descSeed: "Bug to reproduce and fix: " },
-  { key: "review", icon: "🧐", title: "Code review", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository or checkout; reports concrete findings with file and line evidence.", teams: ["code_reviewer"], namePh: "e.g. review-pr42", descSeed: "Review this codebase for " },
-  { key: "assistant", icon: "🤖", title: "Personal assistant", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a durable workspace for notes, plans, drafts, reminders and follow-ups.", teams: ["secretary", "concierge"], agentNames: ["orchestrator", "triager", "responder", "scheduler"], namePh: "e.g. my-desk, daily-ops", descSeed: "Help me organize and manage " },
-  { key: "research", icon: "🔬", title: "Research", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a sourced research workspace, clarify the question and define the deliverable.", teams: ["research_lab"], agentNames: ["orchestrator", "librarian", "synthesizer", "fact_checker", "citer"], namePh: "e.g. market-scan, paper-notes", descSeed: "Research and produce a sourced report about " },
-  { key: "writing", icon: "✍️", title: "Writing & content", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a writing workspace, establish audience and voice, then outline and draft.", teams: ["writers_room"], agentNames: ["orchestrator", "outliner", "drafter", "editor"], namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content for " },
-  { key: "data", icon: "📊", title: "Data analysis", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create an analysis workspace for datasets, notebooks, charts and findings.", teams: ["data_analyst"], namePh: "e.g. sales-analysis", descSeed: "Analyze data to answer " },
-  { key: "social", icon: "📣", title: "Social campaign", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a campaign workspace for drafts and approvals; publishing still requires configured connectors.", teams: ["social_desk"], namePh: "e.g. launch-campaign", descSeed: "Plan a draft-first social campaign for " },
-  { key: "custom", icon: "⚙️", title: "Existing folder / Custom…", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Open an existing folder and choose any team and permissions yourself.", teams: [], namePh: "e.g. cleanup-pr, paper-draft", descSeed: "" },
+  { key: "product", icon: "🚀", title: "New product", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create the workspace, then start a model-selectable product brainstorm and design-to-build flow.", teams: ["product_studio"], nameSeed: "Product", namePh: "e.g. saas-idea", descSeed: "" },
+  { key: "web", icon: "🌐", title: "Website / Web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a real web workspace, scope it, then build and verify it in the live browser.", teams: ["dev_squad"], agentNames: ["orchestrator", "coder", "critic", "browser"], nameSeed: "Web App", namePh: "e.g. my-site, shop-frontend", descSeed: "Build a website or web application for " },
+  { key: "mobile", icon: "📱", title: "Responsive web app", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "A touch-friendly web/PWA workflow with phone viewports. Native mobile scaffolding is not claimed here.", teams: ["dev_squad"], agentNames: ["orchestrator", "coder", "critic", "browser"], nameSeed: "Responsive App", namePh: "e.g. fitness-pwa", descSeed: "Build a responsive, touch-friendly web application for " },
+  { key: "software", icon: "🛠", title: "Software / tool", lane: "new", folderMode: "create", kickoff: "brainstorm", blurb: "Create a workspace for a CLI, backend, library or desktop tool, then scope and build it.", teams: ["dev_squad", "owllm_team"], agentNames: ["orchestrator", "coder", "critic", "devops"], nameSeed: "Software Tool", namePh: "e.g. esp-flash, csv-tool", descSeed: "Build a software tool that " },
+  { key: "bugfix", icon: "🐛", title: "Fix bugs", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository; reproduce, root-cause, patch and add a regression test.", teams: ["bug_hunter"], agentNames: ["orchestrator", "reproducer", "root_cause", "patcher", "regression_test_author"], nameSeed: "Bug Fix", namePh: "e.g. fix-login, crash-hunt", descSeed: "Bug to reproduce and fix: " },
+  { key: "review", icon: "🧐", title: "Code review", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Requires an existing repository or checkout; reports concrete findings with file and line evidence.", teams: ["code_reviewer"], nameSeed: "Code Review", namePh: "e.g. review-pr42", descSeed: "Review this codebase for " },
+  { key: "assistant", icon: "🤖", title: "Personal assistant", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a durable workspace for notes, plans, drafts, reminders and follow-ups.", teams: ["secretary", "concierge"], agentNames: ["orchestrator", "triager", "responder", "scheduler"], nameSeed: "Personal Assistant", namePh: "e.g. my-desk, daily-ops", descSeed: "Help me organize and manage " },
+  { key: "research", icon: "🔬", title: "Research", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a sourced research workspace, clarify the question and define the deliverable.", teams: ["research_lab"], agentNames: ["orchestrator", "librarian", "synthesizer", "fact_checker", "citer"], nameSeed: "Research", namePh: "e.g. market-scan, paper-notes", descSeed: "Research and produce a sourced report about " },
+  { key: "writing", icon: "✍️", title: "Writing & content", lane: "workspace", folderMode: "create", kickoff: "brainstorm", blurb: "Create a writing workspace, establish audience and voice, then outline and draft.", teams: ["writers_room"], agentNames: ["orchestrator", "outliner", "drafter", "editor"], nameSeed: "Writing", namePh: "e.g. blog-q3, user-guide", descSeed: "Write and refine content for " },
+  { key: "data", icon: "📊", title: "Data analysis", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create an analysis workspace for datasets, notebooks, charts and findings.", teams: ["data_analyst"], nameSeed: "Data Analysis", namePh: "e.g. sales-analysis", descSeed: "Analyze data to answer " },
+  { key: "social", icon: "📣", title: "Social campaign", lane: "workspace", folderMode: "create", kickoff: "goal", blurb: "Create a campaign workspace for drafts and approvals; publishing still requires configured connectors.", teams: ["social_desk"], nameSeed: "Social Campaign", namePh: "e.g. launch-campaign", descSeed: "Plan a draft-first social campaign for " },
+  { key: "custom", icon: "⚙️", title: "Existing folder / Custom…", lane: "existing", folderMode: "existing", kickoff: "goal", blurb: "Open an existing folder and choose any team and permissions yourself.", teams: [], nameSeed: "Project", namePh: "e.g. cleanup-pr, paper-draft", descSeed: "" },
 ];
 /// First bundled template (by `name`) this kind prefers that actually exists.
 function kindTeam(kind: ProjectKind, teams: Team[]): Team | null {
@@ -142,10 +151,14 @@ function kindAgents(kind: ProjectKind | undefined, team: Team): Team["agents"] {
     : team.agents;
 }
 
+/// Stable empty default — a fresh [] per render would re-run the naming effect
+/// on every render.
+const NO_EXISTING_NAMES: readonly string[] = [];
+
 export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps) {
   const {
     open, mode, onClose, teams, pickedTeamId, onPickTeam, onResetTeam,
-    resolvedTeamLabel, defaultTeamName, onCreated,
+    resolvedTeamLabel, defaultTeamName, existingNames = NO_EXISTING_NAMES, onCreated,
     project, location, effectiveCwd, onChangeLocation,
     trustWrites, onToggleTrustWrites, fullAccess, onToggleFullAccess,
     bridgeOn, isolationRequested, onAfterRename, onAfterDelete,
@@ -155,6 +168,15 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [newLocation, setNewLocation] = useState("");
+  // Onboarding's answer to "where do your projects live". New workspaces are
+  // created under it automatically, so the user stops hand-typing a path for
+  // every project. Set once (Settings → onboarding), read here.
+  const [projectsRoot, setProjectsRoot] = useState("");
+  // True once the user types or browses a location themselves — from then on
+  // the automatic prefill must never overwrite their choice.
+  const locationTouched = useRef(false);
+  // Same contract for the auto-generated project name.
+  const nameTouched = useRef(false);
   // Selected team by ID (NOT name) — two teams can share a display/name, and
   // resolving the create by name returned the FIRST match ("always the first
   // team"). The <select> options carry the id; create resolves the id.
@@ -222,7 +244,12 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
     setErr(null); setActMsg(null); setActBusy(null); setConfirmDelete(false);
     if (mode === "new") {
       setName(""); setDescription(""); setNewLocation(""); setNewTrust(false);
+      locationTouched.current = false;
+      nameTouched.current = false;
       setCreateGithubRepo(true);
+      void projectsRootGet()
+        .then(r => setProjectsRoot(r.path))
+        .catch(() => setProjectsRoot(""));
       void invoke<{ connected: boolean; login?: string | null }>("github_status")
         .then(setGithubAccount)
         .catch(() => setGithubAccount({ connected: false }));
@@ -248,6 +275,27 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
   // runs on the open transition, when they already hold their current value.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, mode, project?.id]);
+
+  // Auto-place a NEW workspace under the projects root chosen at onboarding, so
+  // the folder field is already correct by the time the user reaches it. Only
+  // for recipes that CREATE a folder — "existing folder" recipes must still be
+  // pointed at a real repo — and never once the user has picked a path
+  // themselves.
+  // Name the workspace for the user: "<kind> N", numbered off the projects they
+  // already have. With the folder prefill below keying off it, creating a
+  // project is picking the card and pressing Create — both fields stay fully
+  // editable, and a name the user typed is never overwritten.
+  useEffect(() => {
+    if (!open || mode !== "new" || nameTouched.current || !kindKey) return;
+    const seed = PROJECT_KINDS.find(k => k.key === kindKey)?.nameSeed ?? "Project";
+    setName(nextProjectName(seed, existingNames));
+  }, [open, mode, kindKey, existingNames]);
+
+  useEffect(() => {
+    if (!open || mode !== "new" || locationTouched.current) return;
+    const creates = PROJECT_KINDS.find(k => k.key === kindKey)?.folderMode === "create";
+    setNewLocation(creates ? projectPathUnder(projectsRoot, name) : "");
+  }, [open, mode, kindKey, name, projectsRoot]);
 
   // Load the Project Card (.owllm/project.json) into the editor fields. Falls back
   // to a legacy .owllm/verify.json for the verify command (and flags it, since that
@@ -310,17 +358,18 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
 
   const browseNewLocation = async () => {
     try {
+      const kind = PROJECT_KINDS.find(k => k.key === kindKey);
       const picked = await invoke<string | null>("pick_folder", {
-        title: PROJECT_KINDS.find(k => k.key === kindKey)?.folderMode === "create"
+        title: kind?.folderMode === "create"
           ? "Pick the parent folder for the new workspace"
           : "Pick the existing project folder",
+        // Open where this user keeps their projects rather than wherever the OS
+        // was last used.
+        startDir: projectsRoot || null,
       });
       if (!picked) return;
-      const kind = PROJECT_KINDS.find(k => k.key === kindKey);
-      if (kind?.folderMode !== "create") { setNewLocation(picked); return; }
-      const leaf = name.trim().replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "new-project";
-      const sep = picked.includes("\\") ? "\\" : "/";
-      setNewLocation(`${picked.replace(/[\\/]+$/, "")}${sep}${leaf}`);
+      locationTouched.current = true;
+      setNewLocation(kind?.folderMode === "create" ? projectPathUnder(picked, name) : picked);
     } catch (e: any) { setErr(`Folder pick failed: ${e?.message ?? e}`); }
   };
 
@@ -649,8 +698,8 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
               <div style={{ display: "flex", flexDirection: "column", gap: 6, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
                 <label style={LBL}>Or start from a local folder <span style={{ opacity: 0.6, textTransform: "none", letterSpacing: 0 }}>— any project folder, e.g. a repo on GitHub</span></label>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <input value={newLocation} onChange={e => setNewLocation(e.target.value)} placeholder="/path/to/repo · github.com/me/x" style={{ ...INPUT, flex: 1 }} />
-                  <button onClick={() => browse(setNewLocation)} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
+                  <input value={newLocation} onChange={e => { locationTouched.current = true; setNewLocation(e.target.value); }} placeholder="/path/to/repo · github.com/me/x" style={{ ...INPUT, flex: 1 }} />
+                  <button onClick={() => browse(v => { locationTouched.current = true; setNewLocation(v); })} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
                   <button
                     type="button"
                     disabled={!newLocation.trim()}
@@ -683,13 +732,13 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
               })()}
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <label style={LBL}>Name</label>
-                <input autoFocus value={name} onChange={e => setName(e.target.value)}
+                <input autoFocus value={name} onChange={e => { nameTouched.current = true; setName(e.target.value); }}
                   placeholder={(PROJECT_KINDS.find(k => k.key === kindKey)?.namePh) ?? "e.g. esp-flash, cleanup-pr, paper-draft"} style={INPUT} />
               </div>
               <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                 <label style={LBL}>{PROJECT_KINDS.find(k => k.key === kindKey)?.folderMode === "create" ? "New workspace folder" : "Existing project folder"}</label>
                 <div style={{ display: "flex", gap: 8 }}>
-                  <input value={newLocation} onChange={e => setNewLocation(e.target.value)}
+                  <input value={newLocation} onChange={e => { locationTouched.current = true; setNewLocation(e.target.value); }}
                     placeholder={PROJECT_KINDS.find(k => k.key === kindKey)?.folderMode === "create" ? "C:\\Projects\\new-project — created when you continue" : "C:\\path\\to\\existing-repo"}
                     style={{ ...INPUT, flex: 1 }} />
                   <button onClick={browseNewLocation} className="ghost-btn" style={{ height: 38, padding: "0 14px" }}>Browse…</button>
@@ -807,7 +856,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                                   border: `1px solid ${selected ? "rgba(var(--accent-rgb),0.72)" : "var(--border)"}`,
                                   color: selected ? "var(--fg-strong)" : "var(--fg-muted)",
                                 }}>
-                                <span style={{ fontSize: 17 }}>{service.icon}</span>
+                                <SiteLogo id={service.id} url={service.url} label={service.label} size={18} />
                                 <span style={{ flex: 1, fontSize: 11.5, fontWeight: 700 }}>{service.label}</span>
                                 <span style={{ fontSize: 12 }}>{selected ? "✓" : "+"}</span>
                               </button>
@@ -816,7 +865,7 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                         </div>
                         {environmentServices.filter(service => service.category === "custom").map(service => (
                           <div key={service.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 9px", borderRadius: 8, background: "var(--bg-surface)", border: "1px solid var(--border)", fontSize: 11.5 }}>
-                            <span>{service.icon}</span>
+                            <SiteLogo id={service.id} url={service.url} label={service.label} size={16} />
                             <b>{service.label}</b>
                             <span title={service.url} style={{ flex: 1, color: "var(--fg-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{service.url}</span>
                             <button type="button" className="ghost-btn" onClick={() => setEnvironmentServices(current => current.filter(item => item.id !== service.id))} style={{ height: 23, padding: "0 7px", color: "#ff8c8c" }}>Remove</button>
@@ -1066,8 +1115,8 @@ export default function ProjectSettingsDialog(props: ProjectSettingsDialogProps)
                       </span>
                     ))}
                     {environment.browser.tabs.map(tab => (
-                      <span key={tab.id} title={tab.url} style={{ padding: "4px 7px", borderRadius: 7, background: "rgba(var(--accent-rgb),0.10)", border: "1px solid rgba(var(--accent-rgb),0.32)", color: "var(--accent-ink)", fontSize: 10.5 }}>
-                        {tab.icon} {tab.label}
+                      <span key={tab.id} title={tab.url} style={{ display: "inline-flex", alignItems: "center", gap: 5, padding: "4px 7px", borderRadius: 7, background: "rgba(var(--accent-rgb),0.10)", border: "1px solid rgba(var(--accent-rgb),0.32)", color: "var(--accent-ink)", fontSize: 10.5 }}>
+                        <SiteLogo id={tab.id} url={tab.url} label={tab.label} size={13} /> {tab.label}
                       </span>
                     ))}
                   </div>

@@ -55,6 +55,7 @@ import { streamChatCompletion, providerFor, fileToChatAttachment, imageAttachmen
 import { chatRuntime } from "../../runtime/chatRuntime";
 import { useChatSession } from "../../runtime/useChatSession";
 import { makeGenMeter } from "../../utils/genStats";
+import { readHotBlob, writeHotBlob } from "../../runtime/stateMirror";
 
 // Session id for a column's chat stream in the ChatRuntime store. The
 // store lives above the router, so an in-flight stream survives this
@@ -196,15 +197,18 @@ type Persisted = {
   maxTurns: number;
 };
 
+// LS_KEY is a hot blob: the whole transcript of every column is rewritten on
+// the chatRuntime 250 ms debounce, and localStorage replicates each write into
+// every same-origin renderer (see HOT_BLOB_PREFIXES). It lives in SQLite only.
 function loadState(): Partial<Persisted> {
   try {
-    const raw = localStorage.getItem(LS_KEY);
+    const raw = readHotBlob(LS_KEY);
     if (!raw) return {};
     return JSON.parse(raw);
   } catch { return {}; }
 }
 function saveState(s: Persisted) {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
+  try { writeHotBlob(LS_KEY, JSON.stringify(s)); } catch { /* ignore */ }
 }
 
 function statusColor(status?: ChatMsg["status"]) {

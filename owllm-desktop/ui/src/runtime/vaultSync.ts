@@ -21,6 +21,7 @@
 // regenerable caches, machine-specific workspace paths) are denied below.
 
 import { invoke } from "@tauri-apps/api/core";
+import { hotBlobKeys, readHotBlob, writeHotBlob, isHotBlobKey } from "./stateMirror";
 import { vaultEnsure, vaultStatus } from "../pages/agentic/github";
 import { REMOTE_DEVICE_HEARTBEAT_MS } from "../pages/advanced/deviceLiveness";
 
@@ -257,6 +258,15 @@ function snapshot(): Record<string, string> {
       if (v != null) out[k] = stripNotebookLease(k, v);
     }
   } catch { /* private mode */ }
+  // Hot blobs are durable user state that deliberately never touches
+  // localStorage (see HOT_BLOB_PREFIXES), so the loop above cannot see them.
+  // The fine-tuning chat is one, and it has always synced across devices —
+  // enumerating only localStorage here would have silently ended that.
+  for (const k of hotBlobKeys()) {
+    if (!isSyncable(k)) continue;
+    const v = readHotBlob(k);
+    if (v != null) out[k] = stripNotebookLease(k, v);
+  }
   return out;
 }
 
@@ -309,7 +319,11 @@ async function pullAndAdopt(): Promise<boolean> {
     // before the deny-list was corrected. Never re-import them.
     if (!isSyncable(k)) continue;
     // Keep this device's live queue lease; adopt only the peer's content.
-    try { localStorage.setItem(k, mergeNotebookLease(k, v)); } catch { /* quota */ }
+    // A hot blob must go back to its own store — writing it to localStorage
+    // would both re-open the broadcast hazard and be invisible to its reader.
+    const merged = mergeNotebookLease(k, v);
+    if (isHotBlobKey(k)) writeHotBlob(k, merged);
+    else try { localStorage.setItem(k, merged); } catch { /* quota */ }
     if (k.startsWith(NOTEBOOK_KEY_PREFIX)) adoptedNotebookPids.push(k.slice(NOTEBOOK_KEY_PREFIX.length));
   }
   setLast(blob.syncedAt);

@@ -47,9 +47,20 @@ const mirrorCode = stripComments(mirror);
 
 check(/export const HOT_BLOB_PREFIXES/.test(mirrorCode),
   "stateMirror declares HOT_BLOB_PREFIXES (the keys banned from localStorage)");
-for (const prefix of ["owllm:code:page:", "owllm:code:session:", "owllm:code:chats"]) {
-  check(new RegExp(`HOT_BLOB_PREFIXES[\\s\\S]*?"${prefix}"`).test(mirrorCode),
-    `${prefix} is a hot-blob prefix (~1 MB, rewritten on a 250ms debounce)`);
+
+// Parse the real list out of the source. Every downstream check below is
+// derived from it, so adding a prefix automatically extends the ban — the
+// first version hardcoded the Code keys here and that is precisely how the
+// fine-tuning chat kept writing ~1 MB transcripts to localStorage unnoticed.
+const HOT_PREFIXES = [
+  ...(mirrorCode.split("export const HOT_BLOB_PREFIXES")[1] ?? "")
+    .split("]")[0].matchAll(/"([^"]+)"/g),
+].map((m) => m[1]);
+check(HOT_PREFIXES.length >= 4,
+  `HOT_BLOB_PREFIXES parsed from source (${HOT_PREFIXES.length}): ${HOT_PREFIXES.join(", ")}`);
+for (const prefix of ["owllm:code:page:", "owllm:code:session:", "owllm:code:chats", "owllm:chat:v3"]) {
+  check(HOT_PREFIXES.includes(prefix),
+    `${prefix} is a hot-blob prefix (~1 MB, rewritten on the shared 250ms debounce)`);
 }
 for (const fn of ["readHotBlob", "writeHotBlob", "deleteHotBlob", "flushHotBlobs"]) {
   check(new RegExp(`export (async )?function ${fn}`).test(mirrorCode),
@@ -99,26 +110,59 @@ function walk(dir) {
   return out;
 }
 
+// Key-builder helpers whose return value is a hot key by construction.
 const HOT_KEY_EXPRS = [
   "pageSessionKey", "codeSessionKey",
   "PAGE_SESSION_PREFIX", "CODE_SESSION_PREFIX",
   "CHATS_KEY", "CHAT_ACTIVE_KEY",
 ];
+const isHotLiteral = (s) => HOT_PREFIXES.some((p) => s.includes(p));
+
 const offenders = [];
 for (const file of walk(UI_SRC)) {
   if (file.endsWith("stateMirror.ts")) continue; // owns the migration
   const src = stripComments(fs.readFileSync(file, "utf8"));
+  // A hot key is usually reached through a local alias (`const LS_KEY =
+  // "owllm:chat:v3"`), so scanning for the literal at the call site alone
+  // misses it. Resolve single-literal consts in this file first.
+  const aliases = [...src.matchAll(/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*"([^"]+)"/g)]
+    .filter((m) => isHotLiteral(m[2]))
+    .map((m) => m[1]);
   for (const m of src.matchAll(/localStorage\.(setItem|getItem|removeItem)\(\s*([^,)]+)/g)) {
-    const arg = m[2];
-    if (HOT_KEY_EXPRS.some((k) => arg.includes(k)) ||
-        /owllm:code:(page|session):/.test(arg)) {
-      offenders.push(`${path.relative(UI_SRC, file)}: localStorage.${m[1]}(${arg.trim()})`);
-    }
+    const arg = m[2].trim();
+    const hit = HOT_KEY_EXPRS.some((k) => arg.includes(k)) ||
+                aliases.some((a) => new RegExp(`\\b${a}\\b`).test(arg)) ||
+                isHotLiteral(arg);
+    if (hit) offenders.push(`${path.relative(UI_SRC, file)}: localStorage.${m[1]}(${arg})`);
   }
 }
 check(offenders.length === 0,
-  `no source outside stateMirror touches a Code session blob via localStorage${
+  `no source outside stateMirror routes a hot-blob key through localStorage${
     offenders.length ? `\n    ${offenders.join("\n    ")}` : ""}`);
+
+// --- anti-recurrence: every transcript persister must be classified --------
+// The bug class is "a chat page persists its transcript on the shared 250 ms
+// chatRuntime debounce, through localStorage". Enumerating pages is what
+// failed last time, so instead: any file registering a chatRuntime persister
+// must be in this list, and each must persist to SQLite (hot blob for the
+// localStorage-shaped pages, update_project for the agent pages). A NEW chat
+// page trips this until someone states which path it uses.
+const PERSISTER_PAGES = {
+  "pages/agentic/AgentsPage.tsx": /invoke\(\s*"update_project"/,
+  "pages/agentic/CodePage.tsx": /writeHotBlob\(/,
+  "pages/finetuning/ChatPage.tsx": /writeHotBlob\(/,
+};
+const registrars = walk(UI_SRC)
+  .filter((f) => /registerPersister\(/.test(stripComments(fs.readFileSync(f, "utf8"))))
+  .map((f) => path.relative(UI_SRC, f).replace(/\\/g, "/"))
+  .filter((f) => f !== "runtime/chatRuntime.ts"); // declares the API
+check(registrars.every((f) => f in PERSISTER_PAGES),
+  `every chatRuntime persister page is classified (found: ${registrars.join(", ")})`);
+for (const [rel, pattern] of Object.entries(PERSISTER_PAGES)) {
+  const src = stripComments(read(UI_SRC, ...rel.split("/")));
+  check(pattern.test(src),
+    `${rel} persists its transcript to SQLite (${pattern.source})`);
+}
 
 // --- the Code page actually uses the store ---------------------------------
 const codePage = stripComments(read(UI_SRC, "pages", "agentic", "CodePage.tsx"));
@@ -139,9 +183,32 @@ const pageSettings = stripComments(read(UI_SRC, "state", "pageSettings.ts"));
 check(/hotBlobKeys\(\)/.test(pageSettings) && /readHotBlob\(/.test(pageSettings),
   "pageSettings' codeModel migration scans the hot-blob store too");
 
+// --- the fine-tuning chat actually uses the store --------------------------
+// It streams tokens through the SAME chatRuntime 250 ms persister as the Code
+// page, rewriting all three columns' transcripts each time. The first fix
+// moved only the Code page and dismissed this one as "small today" — it is the
+// same write pattern, so it gets the same treatment.
+const ftChat = stripComments(read(UI_SRC, "pages", "finetuning", "ChatPage.tsx"));
+check(/writeHotBlob\(LS_KEY/.test(ftChat),
+  "fine-tuning ChatPage persists its transcript through the hot-blob store");
+check(/readHotBlob\(LS_KEY/.test(ftChat),
+  "fine-tuning ChatPage reads its transcript through the hot-blob store");
+check(!/localStorage\.(setItem|getItem)\(\s*LS_KEY/.test(ftChat),
+  "fine-tuning ChatPage never routes LS_KEY through localStorage");
+
+// --- moving a key out of localStorage must not drop it from vault sync -----
+// vaultSync's snapshot enumerates localStorage, so a hot blob is invisible to
+// it. owllm:chat:v3 syncs across devices (it is not in the deny-list), and
+// migrating it silently would have ended that — cross-PC history just stops.
+const vault = stripComments(read(UI_SRC, "runtime", "vaultSync.ts"));
+check(/hotBlobKeys\(\)/.test(vault) && /readHotBlob\(/.test(vault),
+  "vaultSync's snapshot includes hot blobs (else migrating a key kills its cross-device sync)");
+check(/isHotBlobKey\(k\)\s*\)?\s*writeHotBlob\(|isHotBlobKey\([\s\S]{0,40}writeHotBlob\(/.test(vault),
+  "vaultSync adopts a hot blob through writeHotBlob, not localStorage");
+
 // --- a future oversized key must announce itself ---------------------------
-// Keys that are small today (the vault-synced fine-tuning chat, notebooks) can
-// grow. Enumerating them is not a defence; a runtime tripwire is.
+// Keys that are small today (notebooks, per-page settings) can grow.
+// Enumerating them is not a defence; a runtime tripwire is.
 check(/BROADCAST_HAZARD_BYTES/.test(mirrorCode) &&
       /warnOversizedLocalStorage\(live\)/.test(mirrorCode),
   "the sweep warns, by key name, about any oversized localStorage value left on the broadcast path");

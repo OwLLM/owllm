@@ -82,15 +82,19 @@ globalThis.__invokeStub = async (cmd) => {
 };
 localStorage.setItem("owllm:code:pages", "[live]");
 const restored = await mirror.restoreStateMirror();
-// 3, not 4: owllm:code:page:p1 is a HOT BLOB, hydrated into the synchronous
-// cache instead of localStorage (see HOT_BLOB_PREFIXES in stateMirror.ts).
-check(restored === 3, "restore fills exactly the missing durable keys");
+// 2, not 4: owllm:code:page:p1 AND owllm:chat:v3 are HOT BLOBS, hydrated into
+// the synchronous cache instead of localStorage (see HOT_BLOB_PREFIXES).
+check(restored === 2, "restore fills exactly the missing durable keys");
 check(localStorage.getItem("owllm:code:pages") === "[live]",
   "restore NEVER overwrites a key the live profile already has");
 check(mirror.readHotBlob("owllm:code:page:p1") === "{restored}",
   "a missing Coding session comes back from the DB");
 check(localStorage.getItem("owllm:code:page:p1") === null,
   "a Coding session is never put BACK into localStorage (every write there is replicated into every same-origin renderer)");
+check(mirror.readHotBlob("owllm:chat:v3") === "{chat}",
+  "the fine-tuning chat transcript comes back from the DB");
+check(localStorage.getItem("owllm:chat:v3") === null,
+  "the fine-tuning chat transcript is never put BACK into localStorage (same 250ms persister, same broadcast hazard as the Coding session)");
 check(localStorage.getItem("owllm:agents:notebook:proj1") === "{nb}",
   "a missing notebook blob comes back from the DB");
 check(localStorage.getItem("owllm:settings:v1") === "{settings}",

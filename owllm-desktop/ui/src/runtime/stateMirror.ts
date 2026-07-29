@@ -56,6 +56,11 @@ export const HOT_BLOB_PREFIXES = [
   // The Code page's chat threads (and their active-thread pointer) are written
   // by the same 250 ms persister and grow with use — the identical pattern.
   "owllm:code:chats",
+  // The fine-tuning chat persists all three columns' full transcripts through
+  // the SAME chatRuntime 250 ms persister. It was missed when the Code page was
+  // moved here, which is how the hazard survived the first fix: the rule is per
+  // WRITE PATTERN, not per page. Any chat that streams tokens belongs here.
+  "owllm:chat:v3",
 ];
 
 export function isHotBlobKey(key: string): boolean {

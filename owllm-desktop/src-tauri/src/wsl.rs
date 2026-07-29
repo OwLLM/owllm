@@ -143,8 +143,12 @@ pub fn sh_quote(s: &str) -> String {
 /// caller writes the prompt to stdin and parses stdout exactly as before).
 /// The CLI must be installed + logged-in inside the distro (Phase-2 provision
 /// installs it; the user logs in once with `wsl -d <distro> -- <cli> login`).
-/// Caller still configures stdin/stdout/stderr + creation_flags.
-#[allow(dead_code)] // superseded by crate::sandbox::program_argv; kept for reference/tests
+///
+/// CREATE_NO_WINDOW is baked in here so no caller can reintroduce the flashing
+/// console bug: `git_once` in fleet.rs polled git status inside WSL every few
+/// seconds during a personal-assistant run and flashed a cmd window each tick
+/// because the flag lived at the call site, not the helper. Callers still own
+/// stdin/stdout/stderr wiring.
 pub fn wsl_program_command(
     distro: &str,
     linux_cwd: &str,
@@ -163,6 +167,11 @@ pub fn wsl_program_command(
         .arg("bash")
         .arg("-lc")
         .arg(script);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
     cmd
 }
 

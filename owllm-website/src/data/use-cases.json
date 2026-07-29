@@ -1,0 +1,397 @@
+{
+  "scenarios": [
+    {
+      "id": "security-defence-analysis",
+      "title": "Security & defence analysis",
+      "domain": "Security operations",
+      "goal": "Continuously review logs, threat-intel feeds, and vulnerability reports to surface risks, correlate indicators, and produce actionable briefings without giving the agent blanket access to production systems.",
+      "setup": [
+        "Agent is scoped to read-only log directories or SIEM export buckets inside the sandbox.",
+        "Threat-intel feeds are fetched via signed, public APIs or locally mirrored datasets.",
+        "Vulnerability scans are imported as files or via a read-only API token with no write permissions."
+      ],
+      "workflow": [
+        "Ingest the last 24 hours of firewall, endpoint, and authentication logs.",
+        "Extract IPs, hashes, and domains and cross-reference them against threat-intel feeds.",
+        "Cluster related events into potential incidents and score each by severity.",
+        "Draft a briefing with IOCs, affected assets, and recommended next steps.",
+        "Queue the briefing for analyst review."
+      ],
+      "autonomy": {
+        "autonomous": [
+          "Ingest and parse logs",
+          "Correlate IOCs",
+          "Score and cluster events",
+          "Draft briefing"
+        ],
+        "humanApproved": [
+          "Block an IP or isolate a host",
+          "Share findings outside the team",
+          "Run remediation scripts"
+        ]
+      },
+      "safeguards": [
+        "All file system and network access is confined to the Linux sandbox.",
+        "Write access to security tools is disabled; the agent cannot modify firewall or EDR rules.",
+        "Sensitive log paths are explicitly allow-listed rather than granting home-directory access.",
+        "Output is marked as a draft until a human analyst approves it."
+      ],
+      "outcomes": [
+        "Reduce mean time to triage by 40–60% for routine alert queues.",
+        "Standardize briefing format across shifts.",
+        "Catch low-signal correlations that manual review often misses."
+      ]
+    },
+    {
+      "id": "incident-response",
+      "title": "Incident response",
+      "domain": "Operations",
+      "goal": "Accelerate containment and communication during a security or operational incident by automating evidence collection and runbook drafting while keeping containment actions behind explicit human approval.",
+      "setup": [
+        "Incident channel or ticket system is accessible via a read-only API or webhook.",
+        "Runbook templates are stored as project memory.",
+        "Sandbox has network access only to internal observability endpoints, not customer data stores."
+      ],
+      "workflow": [
+        "Receive incident trigger from monitoring webhook or ticket label.",
+        "Collect recent logs, metrics, and deployment events around the affected window.",
+        "Identify likely root causes and affected services from the evidence.",
+        "Draft a timeline and a containment runbook with rollback options.",
+        "Notify the on-call engineer and present one-click approval actions."
+      ],
+      "autonomy": {
+        "autonomous": ["Collect evidence", "Build timeline", "Draft runbook", "Notify on-call"],
+        "humanApproved": [
+          "Execute containment actions",
+          "Restart services",
+          "Communicate to customers",
+          "Initiate failover"
+        ]
+      },
+      "safeguards": [
+        "Containment tools are gated behind per-tool approval toggles.",
+        "All commands run inside the sandbox first; destructive commands require explicit confirmation.",
+        "Customer-facing messages must be reviewed before sending.",
+        "Audit trail of every command and decision is written to project memory."
+      ],
+      "outcomes": [
+        "Cut initial evidence-gathering time from tens of minutes to under two minutes.",
+        "Reduce miscommunication during handoffs with a consistent incident timeline.",
+        "Maintain an auditable record for post-incident reviews."
+      ]
+    },
+    {
+      "id": "management-reporting",
+      "title": "Management reporting",
+      "domain": "Business intelligence",
+      "goal": "Turn scattered project signals into concise, decision-ready reports for leadership, automating data gathering and narrative drafting while leaving publication and interpretation to humans.",
+      "setup": [
+        "Read-only access to project trackers, code repositories, and CI/CD dashboards.",
+        "Report template and KPI definitions stored in project memory.",
+        "Optional connection to a spreadsheet or BI tool via a user-supplied API key."
+      ],
+      "workflow": [
+        "Query tickets, pull requests, CI runs, and release notes for the reporting period.",
+        "Calculate velocity, defect rates, deployment frequency, and open risks.",
+        "Generate charts and a plain-language narrative with highlights and caveats.",
+        "Format the report into the chosen template.",
+        "Present the draft to the report owner for review and distribution."
+      ],
+      "autonomy": {
+        "autonomous": ["Pull metrics", "Calculate KPIs", "Generate charts", "Draft narrative"],
+        "humanApproved": [
+          "Publish or email report",
+          "Adjust interpretations",
+          "Share with executives"
+        ]
+      },
+      "safeguards": [
+        "Data sources are read-only; the agent cannot create or delete records.",
+        "Aggregated metrics are preferred over individual employee surveillance.",
+        "Draft language includes confidence labels and data-source footnotes.",
+        "No report leaves the local environment until a human approves it."
+      ],
+      "outcomes": [
+        "Reduce report-assembly time from hours to minutes.",
+        "Improve consistency of KPI definitions across teams.",
+        "Free managers to focus on interpretation instead of spreadsheet wrangling."
+      ]
+    },
+    {
+      "id": "marketing-operations",
+      "title": "Marketing operations",
+      "domain": "Growth",
+      "goal": "Draft, localize, and schedule campaign content across channels while keeping every public publish action behind human approval and avoiding claims of built-in platform access.",
+      "setup": [
+        "Brand voice, audience segments, and campaign calendar stored in project memory.",
+        "User provides API keys or export credentials for each marketing platform locally.",
+        "Asset library is mounted read-only inside the sandbox."
+      ],
+      "workflow": [
+        "Read campaign brief and target audience from project memory.",
+        "Draft copy variants, subject lines, and social snippets.",
+        "Localize content for each region using approved terminology glossaries.",
+        "Generate a scheduling proposal aligned with the campaign calendar.",
+        "Queue drafts for marketer review and one-click publish/schedule."
+      ],
+      "autonomy": {
+        "autonomous": ["Draft copy variants", "Localize terminology", "Propose schedule"],
+        "humanApproved": [
+          "Publish posts",
+          "Send emails",
+          "Update ad spend",
+          "Approve final creative"
+        ]
+      },
+      "safeguards": [
+        "Platform credentials are stored in local runtime storage, never in the repository or build artifacts.",
+        "Publish actions require explicit confirmation and are logged.",
+        "Generated claims are flagged for fact-checking before approval.",
+        "Tone and compliance checks run against a stored brand policy."
+      ],
+      "outcomes": [
+        "Reduce time to first draft by 50–70%.",
+        "Improve brand consistency across channels.",
+        "Catch scheduling conflicts before content goes live."
+      ]
+    },
+    {
+      "id": "daily-assistance",
+      "title": "Daily assistance",
+      "domain": "Personal productivity",
+      "goal": "Help a knowledge worker summarize meetings, manage notes, draft routine messages, and surface reminders without accessing private accounts the user has not explicitly connected.",
+      "setup": [
+        "User selects which local files, calendars, or note exports the agent may read.",
+        "Sandbox is limited to an isolated workspace folder, not the full home directory.",
+        "Any outbound sending uses a user-supplied mail or chat bridge configured locally."
+      ],
+      "workflow": [
+        "Read exported meeting transcripts and notes from the workspace folder.",
+        "Extract action items, decisions, and open questions.",
+        "Draft follow-up messages and calendar holds.",
+        "Suggest prioritization based on deadlines and participants.",
+        "Present drafts for user approval before sending or creating events."
+      ],
+      "autonomy": {
+        "autonomous": [
+          "Summarize notes",
+          "Extract action items",
+          "Draft messages",
+          "Suggest priorities"
+        ],
+        "humanApproved": ["Send messages", "Create calendar events", "Share notes with others"]
+      },
+      "safeguards": [
+        "The agent only reads files the user has copied into the workspace.",
+        "No cloud account credentials are requested unless the user opts in.",
+        "Drafts are surfaced in the UI, not sent automatically.",
+        "Sensitive content can be excluded via filename or folder patterns."
+      ],
+      "outcomes": [
+        "Recover 30–60 minutes per day on note-taking and follow-ups.",
+        "Reduce missed action items from meetings.",
+        "Keep personal data inside the local sandbox."
+      ]
+    },
+    {
+      "id": "browser-research",
+      "title": "Browser research",
+      "domain": "Research",
+      "goal": "Conduct structured web research, synthesize multiple sources, and produce cited summaries while avoiding unauthorized data collection and clearly separating autonomous browsing from human decisions.",
+      "setup": [
+        "User defines search queries, trusted source allow-lists, and depth limits.",
+        "Browser tool or MCP server runs inside the sandbox with no access to the host browser profile.",
+        "Ad-block and rate-limit policies are enforced at the sandbox network layer."
+      ],
+      "workflow": [
+        "Run targeted searches against public search engines or APIs.",
+        "Fetch pages from the allow-listed domains.",
+        "Extract claims, quotes, and citations into a structured note.",
+        "Cross-check facts across sources and flag contradictions.",
+        "Produce a sourced summary with confidence labels."
+      ],
+      "autonomy": {
+        "autonomous": [
+          "Run searches",
+          "Fetch allow-listed pages",
+          "Extract and compare claims",
+          "Draft summary"
+        ],
+        "humanApproved": [
+          "Submit forms",
+          "Purchase or sign up",
+          "Download untrusted files",
+          "Publish findings"
+        ]
+      },
+      "safeguards": [
+        "Only public, allow-listed sites are reachable.",
+        "Rate limits prevent aggressive crawling.",
+        "Personal browser sessions and cookies stay outside the sandbox.",
+        "All citations are preserved so humans can verify claims."
+      ],
+      "outcomes": [
+        "Reduce research time by 50% for literature and competitive reviews.",
+        "Improve citation traceability.",
+        "Surface contradictions between sources early."
+      ]
+    },
+    {
+      "id": "whatsapp-communication",
+      "title": "WhatsApp communication",
+      "domain": "Messaging",
+      "goal": "Assist with WhatsApp-based support, coordination, or outreach by reading and drafting messages through a user-controlled local bridge, with sending always requiring explicit approval.",
+      "setup": [
+        "User installs and runs a local WhatsApp Web bridge or official Business API client in the sandbox.",
+        "Authentication is performed by the user via QR code or token; OWLLM never stores WhatsApp credentials.",
+        "Only approved chat identifiers are reachable; broadcast lists are disabled by default."
+      ],
+      "workflow": [
+        "Poll the local bridge for incoming messages within the approved scope.",
+        "Classify messages by intent and urgency.",
+        "Draft replies using project memory templates.",
+        "Surface high-priority threads to the user.",
+        "Send only after the user clicks approve for each message."
+      ],
+      "autonomy": {
+        "autonomous": [
+          "Read incoming messages",
+          "Classify intent",
+          "Draft replies",
+          "Surface priority threads"
+        ],
+        "humanApproved": ["Send any message", "Add contacts", "Join groups", "Delete messages"]
+      },
+      "safeguards": [
+        "OWLLM has no native WhatsApp integration; all access flows through a user-managed bridge.",
+        "Outgoing messages require per-message or per-thread approval.",
+        "No message content is retained beyond what the user configures in project memory.",
+        "Blocklist prevents replies to unknown or unauthorized contacts."
+      ],
+      "outcomes": [
+        "Cut response latency for routine support questions.",
+        "Maintain a human-in-the-loop for all outbound communication.",
+        "Keep WhatsApp credentials outside the application repository."
+      ]
+    },
+    {
+      "id": "email-triage",
+      "title": "Email triage",
+      "domain": "Communication",
+      "goal": "Reduce email overload by categorizing messages, drafting replies, and surfacing urgent threads while treating the mailbox as a user-connected service that OWLLM does not natively host.",
+      "setup": [
+        "User provides IMAP/SMTP credentials or app-passwords through local runtime storage.",
+        "Mailbox access is read-only by default; send permission is granted per draft.",
+        "Folder allow-lists and sender blocklists are configured up front."
+      ],
+      "workflow": [
+        "Connect to the user's mail server over TLS.",
+        "Categorize unread mail by urgency, sender, and topic.",
+        "Draft contextual replies for routine categories.",
+        "Flag messages that need immediate human attention.",
+        "Queue approved drafts for sending via SMTP."
+      ],
+      "autonomy": {
+        "autonomous": [
+          "Fetch and categorize mail",
+          "Draft replies",
+          "Flag urgent threads",
+          "Suggest labels"
+        ],
+        "humanApproved": [
+          "Send emails",
+          "Delete or archive messages",
+          "Update filters",
+          "Reply to sensitive threads"
+        ]
+      },
+      "safeguards": [
+        "Credentials are never committed or bundled in builds.",
+        "The agent cannot delete, forward, or move messages without explicit permission.",
+        "Drafts include a clear indication that they were generated.",
+        "All send actions are logged and require user confirmation."
+      ],
+      "outcomes": [
+        "Reduce inbox review time by 30–50%.",
+        "Speed up replies to routine inquiries.",
+        "Lower the risk of missing critical emails in high-volume periods."
+      ]
+    },
+    {
+      "id": "crm-maintenance",
+      "title": "CRM maintenance",
+      "domain": "Sales operations",
+      "goal": "Keep customer records clean and up to date by reading CRM data, flagging duplicates and gaps, and proposing updates that a human approves before writing back.",
+      "setup": [
+        "User supplies a read-only or scoped CRM API key through local runtime storage.",
+        "Record types and fields the agent may inspect are explicitly allow-listed.",
+        "Write operations are disabled until the user enables them per-session."
+      ],
+      "workflow": [
+        "Pull records for the configured objects and date range.",
+        "Detect duplicates using fuzzy matching on name, email, and company.",
+        "Flag missing or stale fields against validation rules.",
+        "Propose merges, updates, and enrichment sources.",
+        "Present a human-approved change list for review and apply only selected items."
+      ],
+      "autonomy": {
+        "autonomous": [
+          "Read records",
+          "Detect duplicates",
+          "Identify stale fields",
+          "Propose changes"
+        ],
+        "humanApproved": ["Merge records", "Update fields", "Create contacts", "Delete records"]
+      },
+      "safeguards": [
+        "API scope is read-only by default.",
+        "Write actions are batched and require explicit approval.",
+        "A dry-run preview shows exactly what would change.",
+        "All changes are logged with before/after values."
+      ],
+      "outcomes": [
+        "Improve CRM data quality without risky bulk automation.",
+        "Reduce manual duplicate cleanup by 60%.",
+        "Give sales teams confidence that records stay accurate."
+      ]
+    },
+    {
+      "id": "multi-agent-software-delivery",
+      "title": "Multi-agent software delivery",
+      "domain": "Engineering",
+      "goal": "Deliver software features using a team of specialized agents for planning, coding, review, and testing, with final commit, merge, and deployment decisions reserved for humans.",
+      "setup": [
+        "Project is opened in a Code page with per-project persistence.",
+        "Agents operate in the Linux sandbox with access only to the project working directory.",
+        "Repository remotes are configured by the user; the agent does not hold Git credentials."
+      ],
+      "workflow": [
+        "Planner agent breaks the feature into tasks and acceptance criteria.",
+        "Coder agent implements changes in the sandboxed working directory.",
+        "Reviewer agent checks style, tests, and security patterns.",
+        "Tester agent runs the test suite and reports failures.",
+        "Human lead reviews the diff, approves, and commits or merges."
+      ],
+      "autonomy": {
+        "autonomous": ["Plan tasks", "Write code", "Run tests", "Review diffs", "Summarize status"],
+        "humanApproved": [
+          "Commit to repository",
+          "Merge pull request",
+          "Deploy to production",
+          "Change CI/CD pipelines"
+        ]
+      },
+      "safeguards": [
+        "All code changes are confined to the sandbox and visible in the working directory.",
+        "Tests must pass before the human is prompted to commit.",
+        "Git credentials remain under user control; the agent cannot push without approval.",
+        "Destructive commands require explicit confirmation and are audited."
+      ],
+      "outcomes": [
+        "Accelerate feature prototyping by 2–3x for well-scoped tasks.",
+        "Keep a tight review loop so quality does not degrade.",
+        "Preserve developer accountability for every commit and release."
+      ]
+    }
+  ]
+}

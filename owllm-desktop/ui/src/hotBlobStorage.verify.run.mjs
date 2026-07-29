@@ -23,10 +23,12 @@
 // Source-level checks; no browser required.
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const UI_SRC = HERE;
+const REPO_ROOT = path.resolve(UI_SRC, "..", "..");
 
 const read = (...p) => fs.readFileSync(path.join(...p), "utf8");
 
@@ -110,6 +112,24 @@ function walk(dir) {
   return out;
 }
 
+function trackedSourceFiles() {
+  try {
+    const raw = execFileSync("git", ["-C", REPO_ROOT, "ls-files", "--", "ui/src"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    const files = raw
+      .split(/\r?\n/)
+      .filter((f) => /\.(ts|tsx)$/.test(f))
+      .map((f) => path.join(REPO_ROOT, f))
+      .filter((f) => fs.existsSync(f));
+    if (files.length) return files;
+  } catch {
+    // Keep this verifier runnable from source archives without .git metadata.
+  }
+  return walk(UI_SRC);
+}
+
 // Key-builder helpers whose return value is a hot key by construction.
 const HOT_KEY_EXPRS = [
   "pageSessionKey", "codeSessionKey",
@@ -119,7 +139,7 @@ const HOT_KEY_EXPRS = [
 const isHotLiteral = (s) => HOT_PREFIXES.some((p) => s.includes(p));
 
 const offenders = [];
-for (const file of walk(UI_SRC)) {
+for (const file of trackedSourceFiles()) {
   if (file.endsWith("stateMirror.ts")) continue; // owns the migration
   const src = stripComments(fs.readFileSync(file, "utf8"));
   // A hot key is usually reached through a local alias (`const LS_KEY =
@@ -152,7 +172,7 @@ const PERSISTER_PAGES = {
   "pages/agentic/CodePage.tsx": /writeHotBlob\(/,
   "pages/finetuning/ChatPage.tsx": /writeHotBlob\(/,
 };
-const registrars = walk(UI_SRC)
+const registrars = trackedSourceFiles()
   .filter((f) => /registerPersister\(/.test(stripComments(fs.readFileSync(f, "utf8"))))
   .map((f) => path.relative(UI_SRC, f).replace(/\\/g, "/"))
   .filter((f) => f !== "runtime/chatRuntime.ts"); // declares the API

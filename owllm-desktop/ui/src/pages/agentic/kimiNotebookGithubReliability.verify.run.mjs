@@ -41,6 +41,14 @@ check(
     && accounts.includes("kimi_stream_json_emits_thinking_text_tools_and_results"),
 );
 check(
+  "legacy Kimi streams prompts over stdin so WSL base64 cannot overflow CreateProcessW",
+  accounts.includes("let use_prompt_flag = new_flavor;")
+    && accounts.includes('"--input-format".into()')
+    && accounts.includes('"text".into()')
+    && accounts.includes("cmd.stdin(if use_prompt_flag { Stdio::null() } else { Stdio::piped() })")
+    && accounts.includes("stdin.write_all(prompt_value.as_bytes())"),
+);
+check(
   "Kimi stream command is registered and consumed by both agent routes",
   libRs.includes("accounts::kimi_cli_stream")
     && dispatch.includes('invoke<string>("kimi_cli_stream"')

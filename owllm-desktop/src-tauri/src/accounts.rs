@@ -5709,23 +5709,33 @@ async fn kimi_cli_run(
                 user_message.clone()
             };
 
-            // New kimi-code has no stdin prompt path; legacy does. Keep a safe
-            // argv budget on Windows to avoid CreateProcess ENAMETOOLONG.
+            // Keep legacy/current Python Kimi prompts off argv entirely. This
+            // is required even below Windows' nominal command-line limit:
+            // sandbox::program_argv base64-encodes the whole WSL command, so a
+            // 28 KB folded team prompt expands to ~37 KB and CreateProcessW
+            // fails with os error 206 before Kimi starts. Modern kimi-code has
+            // no stdin prompt path, so retain its bounded --prompt transport.
             const ARGV_BUDGET: usize = 28_000;
             let prompt_fits = prompt_value.len() <= ARGV_BUDGET;
             if new_flavor && !prompt_fits {
                 return Err("kimi prompt exceeds the safe Windows argv budget; shorten the request".to_string());
             }
-            let use_prompt_flag = prompt_fits;
+            let use_prompt_flag = new_flavor;
 
             // Both legacy kimi-cli and current kimi-code support --print
             // non-interactive mode; --output-format only works in that mode.
             let stream_live = on_event.is_some();
-            let mut args: Vec<String> = vec![
-                "--print".into(),
-                "--output-format".into(),
-                if stream_live { "stream-json".into() } else { "text".into() },
-            ];
+            let mut args: Vec<String> = vec!["--print".into()];
+            if !use_prompt_flag {
+                args.push("--input-format".into());
+                args.push("text".into());
+            }
+            args.push("--output-format".into());
+            args.push(if stream_live {
+                "stream-json".into()
+            } else {
+                "text".into()
+            });
             if !stream_live {
                 args.push("--final-message-only".into());
             }
